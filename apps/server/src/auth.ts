@@ -17,7 +17,9 @@ declare global {
 }
 
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  req.user = sessionUser(req.cookies?.[SESSION_COOKIE]);
+  const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
+  // ADMIN_EMAILS makes people who sign in with Google or GitHub administrators of the deployment.
+  req.user = user?.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
   next();
 }
 

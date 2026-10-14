@@ -10,5 +10,10 @@
     "start": "pnpm --filter @concord/server start"
   },
   "packageManager": "pnpm@10.0.0",
-  "engines": { "node": ">=22.13" }
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@vercel/functions": "3.10.1"
+  }
 }

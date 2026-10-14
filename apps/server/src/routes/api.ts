@@ -427,7 +427,7 @@ export function apiRouter(): Router {
   });
   r.post('/simulation/reset', async (req, res) => {
     demoOnly();
-    if (!req.user?.isPlatformAdmin && process.env.ALLOW_PUBLIC_RESET !== '1') throw new HttpError(403, 'Only an administrator can reset the shared demo');
+    if (!req.user?.isPlatformAdmin && !['1', 'true'].includes(process.env.ALLOW_PUBLIC_RESET ?? '')) throw new HttpError(403, 'Only an administrator can reset the shared demo');
     await resetAll();
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });

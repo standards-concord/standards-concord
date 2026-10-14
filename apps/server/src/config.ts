@@ -25,6 +25,8 @@ export const config = {
   webDist: path.join(repoRoot, 'apps/web/dist'),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',
   demoMode: bool(process.env.DEMO_MODE, true),
+  /** Comma-separated emails of deployment administrators (reset the demo, read all feedback). */
+  adminEmails: (process.env.ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
 
   llm: {
     /** 'anthropic' when a key is configured, otherwise a deterministic simulator. */

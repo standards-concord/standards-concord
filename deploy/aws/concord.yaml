@@ -1,0 +1,385 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: >-
+  Concord backend: one small EC2 instance running the Concord API, governance clock,
+  MCP endpoint and live meeting streams, a Community Solid Server for private data,
+  and Caddy for automatic HTTPS. The web app itself is served by Vercel, which
+  forwards /api, /auth, /mcp and /people here (set BACKEND_URL in Vercel to the
+  BackendUrl output). About $20 a month on t3.small.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Required }
+        Parameters: [PublicUrl, GhcrToken]
+      - Label: { default: AI }
+        Parameters: [AnthropicApiKey]
+      - Label: { default: Administrators }
+        Parameters: [AdminEmails]
+      - Label: { default: Sign-in (optional; demo sign-in works without these) }
+        Parameters: [GoogleClientId, GoogleClientSecret, GithubClientId, GithubClientSecret]
+      - Label: { default: Optional integrations }
+        Parameters: [GithubPublishToken, GithubPublishOwner, RecallApiKey, OpenAiApiKey]
+      - Label: { default: Server }
+        Parameters: [InstanceType, Image, GhcrUser, DomainName, DemoMode, AllowPublicReset]
+
+Parameters:
+  PublicUrl:
+    Type: String
+    Description: The Vercel URL people will use, e.g. https://standards-concord.vercel.app (no trailing slash). Sign-in callbacks and links point here.
+    AllowedPattern: ^https://[^/]+$
+  GhcrToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: GitHub token with read:packages, needed while the repository (and so its container image) is private. Leave blank if the image is public.
+  GhcrUser:
+    Type: String
+    Default: jeswr
+    Description: GitHub username that owns GhcrToken.
+  Image:
+    Type: String
+    Default: ghcr.io/jeswr/standards-concord:latest
+    Description: Container image built by the GitHub Actions workflow. The server checks for a new image every five minutes.
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Claude API key. Without it every AI step uses the offline stand-in.
+  AdminEmails:
+    Type: String
+    Default: ''
+    Description: Comma-separated emails of people who sign in with Google or GitHub and can reset the demo and read all feedback.
+  GoogleClientId: { Type: String, Default: '' }
+  GoogleClientSecret: { Type: String, Default: '', NoEcho: true }
+  GithubClientId: { Type: String, Default: '' }
+  GithubClientSecret: { Type: String, Default: '', NoEcho: true }
+  GithubPublishToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Token with repo scope for pushing released ontologies to GitHub.
+  GithubPublishOwner:
+    Type: String
+    Default: ''
+    Description: GitHub user or organisation released ontologies are published under, e.g. theodi.
+  RecallApiKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Recall.ai key for the live Google Meet co-facilitator bot.
+  OpenAiApiKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Optional, for voice feedback in browsers without built-in speech recognition (Firefox).
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3a.small, t3.medium, t3a.medium]
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Optional hostname you point at the Elastic IP yourself. Blank uses <elastic-ip>.sslip.io, which needs no DNS setup.
+  DemoMode:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Demo sign-in, the simulated working group and the governance clock controls used by the alpha walkthrough.
+  AllowPublicReset:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Let any signed-in tester reset the shared demo.
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref InternetGateway }
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties: { RouteTableId: !Ref RouteTable, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref InternetGateway }
+  SubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref Subnet, RouteTableId: !Ref RouteTable }
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS for Concord (Caddy). No SSH; use Session Manager.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: ACME challenge and redirect }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties: { AllocationId: !GetAtt ElasticIp.AllocationId, InstanceId: !Ref Instance }
+
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Concord environment. Edit the JSON to add or rotate keys; the server picks up changes within five minutes.
+      SecretString:
+        Fn::ToJsonString:
+          GHCR_USER: !Ref GhcrUser
+          GHCR_TOKEN: !Ref GhcrToken
+          ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+          GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          GOOGLE_CLIENT_SECRET: !Ref GoogleClientSecret
+          GITHUB_CLIENT_ID: !Ref GithubClientId
+          GITHUB_CLIENT_SECRET: !Ref GithubClientSecret
+          GITHUB_PUBLISH_TOKEN: !Ref GithubPublishToken
+          GITHUB_PUBLISH_OWNER: !Ref GithubPublishOwner
+          RECALL_API_KEY: !Ref RecallApiKey
+          STT_PROVIDER: ''
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          ADMIN_EMAILS: !Ref AdminEmails
+          DEMO_MODE: !Ref DemoMode
+          ALLOW_PUBLIC_RESET: !Ref AllowPublicReset
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore]
+      Policies:
+        - PolicyName: read-app-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement: [{ Effect: Allow, Action: secretsmanager:GetSecretValue, Resource: !Ref AppSecret }]
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref InstanceRole] }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DefaultRoute
+    Properties:
+      ImageId: !Ref LatestAmi
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref Subnet
+      SecurityGroupIds: [!Ref WebSecurityGroup]
+      PropagateTagsToVolumeOnCreation: true
+      MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 2 }
+      CreditSpecification: { CPUCredits: unlimited }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      Tags:
+        - { Key: Name, Value: !Ref AWS::StackName }
+        - { Key: concord-backup, Value: daily }
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            mkdir -p /opt/concord
+            cat > /opt/concord/stack.env <<EOT
+            HOST=${Host}
+            IMAGE=${Image}
+            PUBLIC_URL=${PublicUrl}
+            REGION=${AWS::Region}
+            SECRET_ID=${AppSecret}
+            EOT
+
+            # 2 GB swap: HermiT (Java), Node and the Solid server share 2 GB of RAM.
+            if [ ! -f /swapfile ]; then
+              dd if=/dev/zero of=/swapfile bs=1M count=2048 && chmod 600 /swapfile && mkswap /swapfile
+              echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+            fi
+            swapon -a || true
+
+            dnf install -y docker
+            systemctl enable --now docker
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+            [ -f /opt/concord/session.secret ] || openssl rand -hex 32 > /opt/concord/session.secret
+            chmod 600 /opt/concord/session.secret
+
+            cat > /opt/concord/Caddyfile <<'EOT'
+            {$HOST} {
+              encode gzip
+              reverse_proxy concord:8787 {
+                flush_interval -1
+              }
+            }
+            pods.{$HOST} {
+              reverse_proxy solid:3000
+            }
+            EOT
+
+            cat > /opt/concord/compose.yaml <<'EOT'
+            services:
+              concord:
+                image: ${!IMAGE}
+                restart: unless-stopped
+                env_file: [app.env]
+                volumes: [concord-data:/data]
+                depends_on: [solid]
+                healthcheck:
+                  test: ["CMD", "node", "-e", "fetch('http://localhost:8787/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 5
+              solid:
+                image: solidproject/community-server:7
+                restart: unless-stopped
+                command: ["-c", "@css:config/file.json", "-f", "/data", "-b", "https://pods.${!HOST}/"]
+                volumes: [solid-data:/data]
+              caddy:
+                image: caddy:2
+                restart: unless-stopped
+                ports: ["80:80", "443:443"]
+                environment: ["HOST=${!HOST}"]
+                volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
+            volumes:
+              concord-data:
+              solid-data:
+              caddy-data:
+              caddy-config:
+            EOT
+
+            # Reads the app secret, writes app.env, pulls a newer image if there is one and
+            # (re)starts the stack. Runs at boot and every five minutes: that is the deploy.
+            cat > /opt/concord/refresh.sh <<'EOT'
+            #!/bin/bash
+            set -euo pipefail
+            cd /opt/concord
+            set -a; . ./stack.env; set +a
+            aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_ID" \
+              --query SecretString --output text > secret.json.tmp
+            chmod 600 secret.json.tmp
+            python3 - <<'PY'
+            import json, os
+            s = json.load(open('/opt/concord/secret.json.tmp'))
+            env = {
+                'PUBLIC_URL': os.environ['PUBLIC_URL'],
+                'WEB_URL': os.environ['PUBLIC_URL'],
+                'SOLID_SERVER_URL': 'https://pods.' + os.environ['HOST'],
+                'SESSION_SECRET': open('/opt/concord/session.secret').read().strip(),
+            }
+            for k, v in s.items():
+                if k.startswith('GHCR_') or v in (None, ''):
+                    continue
+                env[k] = str(v)
+            with open('/opt/concord/app.env.tmp', 'w') as f:
+                for k, v in env.items():
+                    f.write(k + '=' + v.replace('\n', ' ') + '\n')
+            PY
+            chmod 600 app.env.tmp && mv app.env.tmp app.env
+            token=$(python3 -c "import json;print(json.load(open('secret.json.tmp')).get('GHCR_TOKEN',''))")
+            user=$(python3 -c "import json;print(json.load(open('secret.json.tmp')).get('GHCR_USER','') or 'x')")
+            rm -f secret.json.tmp
+            if [ -n "$token" ]; then echo "$token" | docker login ghcr.io -u "$user" --password-stdin >/dev/null; fi
+            docker compose --env-file stack.env pull -q
+            docker compose --env-file stack.env up -d --remove-orphans
+            docker image prune -f >/dev/null
+            EOT
+            chmod 700 /opt/concord/refresh.sh
+
+            cat > /etc/systemd/system/concord-refresh.service <<'EOT'
+            [Unit]
+            Description=Pull the latest Concord image and configuration
+            After=docker.service network-online.target
+            Wants=network-online.target
+            [Service]
+            Type=oneshot
+            ExecStart=/opt/concord/refresh.sh
+            EOT
+            cat > /etc/systemd/system/concord-refresh.timer <<'EOT'
+            [Unit]
+            Description=Check for Concord updates every five minutes
+            [Timer]
+            OnBootSec=30s
+            OnUnitActiveSec=5min
+            [Install]
+            WantedBy=timers.target
+            EOT
+            systemctl daemon-reload
+            systemctl enable concord-refresh.timer
+            /opt/concord/refresh.sh
+            systemctl start concord-refresh.timer
+          - Host: !If [HasDomain, !Ref DomainName, !Sub '${ElasticIp}.sslip.io']
+
+  # Daily snapshots of the server's disk (ontology git history, the database and pods), kept for 14 days.
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: dlm.amazonaws.com }, Action: sts:AssumeRole }]
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole]
+  Backups:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: Concord daily snapshots
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt BackupRole.Arn
+      PolicyDetails:
+        ResourceTypes: [VOLUME]
+        TargetTags: [{ Key: concord-backup, Value: daily }]
+        Schedules:
+          - Name: daily
+            CreateRule: { Interval: 24, IntervalUnit: HOURS, Times: ['03:00'] }
+            RetainRule: { Count: 14 }
+            CopyTags: true
+
+Outputs:
+  BackendUrl:
+    Description: Set this as BACKEND_URL in the Vercel project, then redeploy.
+    Value: !Sub
+      - https://${Host}
+      - Host: !If [HasDomain, !Ref DomainName, !Sub '${ElasticIp}.sslip.io']
+  SolidServerUrl:
+    Description: Community Solid Server holding private data (interview transcripts, feedback).
+    Value: !Sub
+      - https://pods.${Host}
+      - Host: !If [HasDomain, !Ref DomainName, !Sub '${ElasticIp}.sslip.io']
+  OAuthCallbacks:
+    Description: Redirect URIs to register for Google and GitHub sign-in.
+    Value: !Sub '${PublicUrl}/auth/google/callback and ${PublicUrl}/auth/github/callback'
+  SecretToEdit:
+    Description: Secrets Manager secret holding the API keys; edit it to add keys later.
+    Value: !Ref AppSecret
+  ShellAccess:
+    Description: Open a shell on the server (no SSH needed).
+    Value: !Sub 'aws ssm start-session --region ${AWS::Region} --target ${Instance}'
