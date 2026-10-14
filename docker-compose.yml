@@ -1,0 +1,21 @@
+# docker compose up --build
+# Concord on :8787 and a Community Solid Server on :3000 for private data.
+services:
+  concord:
+    build: .
+    ports: ["8787:8787"]
+    env_file: [.env]
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8787}
+      WEB_URL: ${PUBLIC_URL:-http://localhost:8787}
+      SOLID_SERVER_URL: http://solid:3000
+    volumes: [concord-data:/data]
+    depends_on: [solid]
+  solid:
+    image: solidproject/community-server:7
+    command: ["-c", "@css:config/file.json", "-f", "/data", "-b", "http://solid:3000/"]
+    ports: ["3000:3000"]
+    volumes: [solid-data:/data]
+volumes:
+  concord-data:
+  solid-data:

@@ -1,0 +1,33 @@
+{
+  "name": "@concord/server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "@concord/core": "workspace:*",
+    "@concord/shared": "workspace:*",
+    "@inrupt/solid-client-authn-node": "^5.0.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "arctic": "^3.7.0",
+    "cookie-parser": "^1.4.7",
+    "express": "5",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  }
+}

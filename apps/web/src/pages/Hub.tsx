@@ -1,0 +1,186 @@
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router';
+import type { GovernanceTemplateId } from '@concord/shared';
+import { BookOpen, Compass, Plus } from 'lucide-react';
+import { api } from '../api';
+import { useAction, useAsync } from '../lib/hooks';
+import { useOntologies } from '../lib/ontologies';
+import { useSession } from '../lib/session';
+import { relativeTime, titleCase } from '../lib/format';
+import { Page } from '../components/Shell';
+import { HealthBadges } from '../components/badges';
+import { ActivityFeed } from '../components/ActivityFeed';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea } from '../components/ui';
+
+function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const nav = useNavigate();
+  const ontologies = useOntologies();
+  const templates = useAsync(() => api.governanceTemplates(), []);
+  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '' });
+  const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const create = useAction(async () => {
+    const o = await api.createOntology({
+      title: form.title.trim(),
+      prefix: form.prefix.trim(),
+      description: form.description.trim(),
+      domain: form.domain.trim() || undefined,
+      governanceTemplate: form.governanceTemplate || undefined,
+    });
+    await ontologies.reload();
+    onClose();
+    nav(`/o/${o.id}`);
+  });
+  const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
+  const autoPrefix = (title: string) =>
+    title
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w[0])
+      .join('')
+      .toLowerCase()
+      .slice(0, 6);
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="New ontology"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" loading={create.pending} disabled={!form.title.trim() || !form.prefix.trim()} onClick={() => void create.run()}>
+            Create ontology
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field label="Title">
+          <Input
+            value={form.title}
+            onChange={(e) => setForm((f) => ({ ...f, title: e.target.value, prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(e.target.value) }))}
+            placeholder="e.g. Volunteering Data Standard"
+          />
+        </Field>
+        <Field label="Prefix" hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
+          <Input value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
+        </Field>
+        <Field label="Description">
+          <Textarea value={form.description} onChange={set('description')} placeholder="What is this ontology for, and who will use it?" />
+        </Field>
+        <Field label="Domain" hint="Helps the AI interviewer ask relevant questions.">
+          <Input value={form.domain} onChange={set('domain')} placeholder="e.g. charity volunteering, energy networks" />
+        </Field>
+        <Field label="Governance policy" hint="You can change this later from the Governance tab.">
+          <Select value={form.governanceTemplate} onChange={set('governanceTemplate')} disabled={!templates.data}>
+            <option value="">Default</option>
+            {templates.data?.map((t) => (
+              <option key={t.templateId} value={t.templateId}>
+                {t.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {templates.error ? <InlineError error={templates.error} /> : null}
+        {chosen && <p className="rounded-lg bg-surface-2 p-3 text-xs text-muted">{chosen.description}</p>}
+        <InlineError error={create.error} />
+      </div>
+    </Dialog>
+  );
+}
+
+export function HubPage() {
+  const ontologies = useOntologies();
+  const { now, isDemo } = useSession();
+  const [open, setOpen] = useState(false);
+  return (
+    <Page wide>
+      <PageHeader
+        eyebrow="Open Data Institute"
+        title="Ontologies"
+        subtitle="Shared vocabularies designed in the open: use cases first, every change validated, classified and governed."
+        actions={
+          <Button variant="primary" icon={Plus} onClick={() => setOpen(true)}>
+            New ontology
+          </Button>
+        }
+      />
+      {isDemo && (
+        <Card className="mb-6 flex flex-wrap items-center justify-between gap-3 border-accent/30 bg-accent-soft/60 px-5 py-4">
+          <div className="text-sm">
+            <strong>Alpha tester?</strong> The guided walkthrough helps you pick a role and try the main flows in about 5 minutes.
+          </div>
+          <Link to="/alpha">
+            <Button size="sm" variant="primary" icon={Compass}>
+              Open walkthrough
+            </Button>
+          </Link>
+        </Card>
+      )}
+      <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
+        <div>
+          {ontologies.error && !ontologies.data ? (
+            <ErrorCard error={ontologies.error} onRetry={ontologies.reload} />
+          ) : !ontologies.data ? (
+            <Loading />
+          ) : !ontologies.data.length ? (
+            <EmptyState
+              icon={BookOpen}
+              title="No ontologies yet"
+              action={
+                <Button variant="primary" icon={Plus} onClick={() => setOpen(true)}>
+                  Create the first one
+                </Button>
+              }
+            >
+              Start an ontology, then describe use cases to the interviewer or upload a meeting transcript — Concord drafts the terms for you.
+            </EmptyState>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {ontologies.data.map((o) => (
+                <Link key={o.id} to={`/o/${o.id}`} className="group">
+                  <Card className="flex h-full flex-col p-5 transition-shadow group-hover:border-line-strong group-hover:shadow-md">
+                    <div className="flex items-start justify-between gap-2">
+                      <h2 className="font-semibold group-hover:text-accent">{o.title}</h2>
+                      <div className="flex gap-1">
+                        {o.demo && <Badge tone="warn">Demo</Badge>}
+                        <Badge tone="outline">{titleCase(o.stage)}</Badge>
+                      </div>
+                    </div>
+                    <p className="mt-0.5 font-mono text-xs text-subtle">{o.prefix}:</p>
+                    <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
+                    <div className="mt-4 grid grid-cols-4 gap-2 border-t border-line pt-3 text-center">
+                      {[
+                        ['Classes', o.stats.classes],
+                        ['Properties', o.stats.properties],
+                        ['Use cases', o.stats.useCases],
+                        ['Members', o.stats.members],
+                      ].map(([l, v]) => (
+                        <div key={l}>
+                          <div className="text-base font-semibold tabular-nums">{v}</div>
+                          <div className="text-[0.7rem] text-muted">{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <HealthBadges o={o} />
+                      <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
+                    </div>
+                  </Card>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+        <aside>
+          <h2 className="mb-2 text-sm font-semibold">Recent activity</h2>
+          <Card className="p-2">
+            <ActivityFeed limit={10} compact />
+          </Card>
+        </aside>
+      </div>
+      <NewOntologyDialog open={open} onClose={() => setOpen(false)} />
+    </Page>
+  );
+}

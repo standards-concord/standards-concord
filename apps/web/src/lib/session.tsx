@@ -1,0 +1,65 @@
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { SessionInfo } from '@concord/shared';
+import { api } from '../api';
+
+interface SessionCtx {
+  session?: SessionInfo;
+  loading: boolean;
+  error: unknown;
+  refresh: () => Promise<SessionInfo | undefined>;
+  setSession: (s: SessionInfo) => void;
+  /** Simulated "now" in ms (server clock incl. fast-forward offset). */
+  now: () => number;
+  isDemo: boolean;
+}
+
+const Ctx = createContext<SessionCtx | null>(null);
+
+export function SessionProvider({ children }: { children: ReactNode }) {
+  const [session, setSessionState] = useState<SessionInfo>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>();
+  const fetchedAt = useRef(Date.now());
+
+  const setSession = useCallback((s: SessionInfo) => {
+    fetchedAt.current = Date.now();
+    setSessionState(s);
+    setError(undefined);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const s = await api.session();
+      setSession(s);
+      return s;
+    } catch (e) {
+      setError(e);
+      return undefined;
+    } finally {
+      setLoading(false);
+    }
+  }, [setSession]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const now = useCallback(() => {
+    if (!session) return Date.now();
+    const base = Date.parse(session.now);
+    if (Number.isNaN(base)) return Date.now() + (session.clockOffsetMs ?? 0);
+    return base + (Date.now() - fetchedAt.current);
+  }, [session]);
+
+  const isDemo = !!session?.user && (session.user.simulated || session.user.providers?.some((p) => p.provider === 'demo'));
+
+  const value = useMemo(() => ({ session, loading, error, refresh, setSession, now, isDemo: !!isDemo }), [session, loading, error, refresh, setSession, now, isDemo]);
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+export function useSession() {
+  const c = useContext(Ctx);
+  if (!c) throw new Error('useSession outside SessionProvider');
+  return c;
+}

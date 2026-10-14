@@ -1,0 +1,121 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { config } from './config.js';
+
+/**
+ * A small JSON document store on SQLite. Platform metadata (users, roles,
+ * change requests, votes) lives here; ontologies themselves live in git, and
+ * people's private data (interview transcripts) lives in their Solid pods.
+ */
+export type Collection =
+  | 'users'
+  | 'sessions'
+  | 'ontologies'
+  | 'memberships'
+  | 'useCases'
+  | 'interviews'
+  | 'meetings'
+  | 'changeRequests'
+  | 'reviews'
+  | 'votes'
+  | 'releases'
+  | 'agentTokens'
+  | 'agentReports'
+  | 'feedback'
+  | 'activity'
+  | 'kv';
+
+let db: DatabaseSync | undefined;
+
+export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): DatabaseSync {
+  if (db) return db;
+  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
+  db = new DatabaseSync(file);
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS docs (
+      collection TEXT NOT NULL,
+      id TEXT NOT NULL,
+      parent TEXT,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (collection, id)
+    );
+    CREATE INDEX IF NOT EXISTS docs_parent ON docs (collection, parent);
+  `);
+  return db;
+}
+
+export function closeDb() {
+  db?.close();
+  db = undefined;
+}
+
+function conn() {
+  return db ?? openDb();
+}
+
+/** `parent` is the indexed foreign key used for listing (usually an ontology id). */
+export function put<T extends { id: string }>(collection: Collection, doc: T, parent?: string): T {
+  const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
+  conn()
+    .prepare(
+      `INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(collection, id) DO UPDATE SET parent = excluded.parent, data = excluded.data`,
+    )
+    .run(collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt);
+  return doc;
+}
+
+export function get<T>(collection: Collection, id: string): T | undefined {
+  const row = conn().prepare('SELECT data FROM docs WHERE collection = ? AND id = ?').get(collection, id) as
+    | { data: string }
+    | undefined;
+  return row ? (JSON.parse(row.data) as T) : undefined;
+}
+
+export function mustGet<T>(collection: Collection, id: string): T {
+  const doc = get<T>(collection, id);
+  if (!doc) throw new HttpError(404, `${collection.replace(/s$/, '')} ${id} not found`);
+  return doc;
+}
+
+export function list<T>(collection: Collection, parent?: string): T[] {
+  const rows = (
+    parent === undefined
+      ? conn().prepare('SELECT data FROM docs WHERE collection = ? ORDER BY created_at').all(collection)
+      : conn().prepare('SELECT data FROM docs WHERE collection = ? AND parent = ? ORDER BY created_at').all(collection, parent)
+  ) as { data: string }[];
+  return rows.map((r) => JSON.parse(r.data) as T);
+}
+
+export function remove(collection: Collection, id: string) {
+  conn().prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(collection, id);
+}
+
+export function clearAll() {
+  conn().exec('DELETE FROM docs');
+}
+
+export function transaction<T>(fn: () => T): T {
+  const c = conn();
+  c.exec('BEGIN');
+  try {
+    const out = fn();
+    c.exec('COMMIT');
+    return out;
+  } catch (e) {
+    c.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+export class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}

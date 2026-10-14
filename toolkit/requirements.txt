@@ -1,0 +1,2 @@
+# Python toolkit for @concord/core (OWL DL reasoning via HermiT / Pellet).
+owlready2>=0.47

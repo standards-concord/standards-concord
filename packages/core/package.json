@@ -1,0 +1,28 @@
+{
+  "name": "@concord/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jsonld": "^9.0.0",
+    "n3": "^2.13.12",
+    "oxigraph": "^0.5.11",
+    "rdfxml-streaming-parser": "^3.3.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/jsonld": "^1.5.15",
+    "@types/n3": "^1.26.4",
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  }
+}
