@@ -9,12 +9,17 @@ function bool(v: string | undefined, dflt: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 }
 
+/** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly). */
+const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : (process.env.RENDER_EXTERNAL_URL ?? (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : undefined));
+
 /** All configuration comes from the environment so the same build runs locally and deployed. */
 export const config = {
   port: Number(process.env.PORT ?? 8787),
-  publicUrl: (process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 8787}`).replace(/\/$/, ''),
+  publicUrl: (process.env.PUBLIC_URL ?? platformUrl ?? `http://localhost:${process.env.PORT ?? 8787}`).replace(/\/$/, ''),
   /** Where the web app is served from in development (OAuth redirects back here). */
-  webUrl: (process.env.WEB_URL ?? process.env.PUBLIC_URL ?? 'http://localhost:5173').replace(/\/$/, ''),
+  webUrl: (process.env.WEB_URL ?? process.env.PUBLIC_URL ?? platformUrl ?? 'http://localhost:5173').replace(/\/$/, ''),
   dataDir: path.resolve(process.env.CONCORD_DATA_DIR ?? path.join(repoRoot, '.data')),
   repoRoot,
   webDist: path.join(repoRoot, 'apps/web/dist'),

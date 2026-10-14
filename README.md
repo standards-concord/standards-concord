@@ -32,6 +32,15 @@ cp .env.example .env
 docker compose up --build   # Concord on :8787, Community Solid Server on :3000
 ```
 
+### Deploy (Railway)
+
+1. In Railway, create a project from the GitHub repo. It builds the `Dockerfile` using `railway.json`.
+2. Add a volume mounted at `/data`, so ontologies, accounts and feedback survive restarts.
+3. Under Networking, generate a public domain. Concord picks it up from `RAILWAY_PUBLIC_DOMAIN`.
+4. Optionally set `ANTHROPIC_API_KEY` and the sign-in variables from `.env.example`.
+
+The demo ontology is seeded on first start; testers open `https://<domain>/alpha`.
+
 ### Connect a coding agent
 
 Create a token under *Agents* in any ontology, then:
