@@ -32,6 +32,7 @@ const TABS: [string, string][] = [
   ['', 'Overview'],
   ['browse', 'Browse'],
   ['source', 'Formats'],
+  ['query', 'Query'],
   ['use-cases', 'Use cases'],
   ['meetings', 'Meetings'],
   ['changes', 'Change requests'],
