@@ -1,0 +1,193 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
+import { ChevronDown, Clock, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass } from 'lucide-react';
+import { api } from '../api';
+import { useSession } from '../lib/session';
+import { useOntologies } from '../lib/ontologies';
+import { useWalkthrough } from '../lib/walkthrough';
+import { useAction, useTick } from '../lib/hooks';
+import { formatDate, roleLabel } from '../lib/format';
+import { Logo } from './badges';
+import { Avatar, Button, cx } from './ui';
+import { WalkthroughDock } from './Walkthrough';
+
+function OntologySwitcher() {
+  const { data } = useOntologies();
+  const params = useParams();
+  const loc = useLocation();
+  const nav = useNavigate();
+  const currentId = params.id ?? loc.pathname.match(/^\/o\/([^/]+)/)?.[1];
+  if (!data?.length) return null;
+  return (
+    <div className="relative hidden min-w-0 md:block">
+      <select
+        aria-label="Switch ontology"
+        value={currentId ?? ''}
+        onChange={(e) => nav(e.target.value ? `/o/${e.target.value}` : '/')}
+        className="h-8 max-w-56 appearance-none truncate rounded-lg border border-line bg-surface py-0 pr-8 pl-3 text-sm hover:border-line-strong focus:border-accent focus:outline-none"
+      >
+        <option value="">All ontologies</option>
+        {data.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.title}
+          </option>
+        ))}
+      </select>
+      <ChevronDown className="pointer-events-none absolute top-2 right-2.5 size-4 text-muted" />
+    </div>
+  );
+}
+
+function UserMenu() {
+  const { session, setSession, refresh } = useSession();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const nav = useNavigate();
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+  const user = session?.user;
+  if (!user)
+    return (
+      <Link to="/login">
+        <Button size="sm" variant="primary">
+          Sign in
+        </Button>
+      </Link>
+    );
+  const logout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* ignore */
+    }
+    const s = await refresh();
+    if (s) setSession(s);
+    nav('/login');
+  };
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 rounded-full p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
+        <Avatar name={user.name} src={user.avatarUrl} size={30} />
+        <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
+        <ChevronDown className="hidden size-3.5 text-muted lg:inline" />
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-xl" onClick={() => setOpen(false)}>
+          <div className="border-b border-line px-4 py-3">
+            <div className="truncate text-sm font-medium">{user.name}</div>
+            {user.email && <div className="truncate text-xs text-muted">{user.email}</div>}
+            {user.organisation && <div className="truncate text-xs text-muted">{user.organisation}</div>}
+          </div>
+          <MenuLink to="/settings" icon={<UserRound className="size-4" />}>
+            Profile & your WebID
+          </MenuLink>
+          <MenuLink to="/settings#tokens" icon={<Settings className="size-4" />}>
+            Agent tokens
+          </MenuLink>
+          <MenuLink to="/alpha" icon={<Compass className="size-4" />}>
+            Alpha walkthrough
+          </MenuLink>
+          <MenuLink to="/admin/feedback" icon={<Shield className="size-4" />}>
+            Feedback admin
+          </MenuLink>
+          <button onClick={() => void logout()} className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-2">
+            <LogOut className="size-4" /> Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuLink({ to, icon, children }: { to: string; icon: ReactNode; children: ReactNode }) {
+  return (
+    <Link to={to} className="flex items-center gap-2.5 px-4 py-2 text-sm hover:bg-surface-2">
+      {icon}
+      {children}
+    </Link>
+  );
+}
+
+function DemoBanner() {
+  const { session, setSession, now, isDemo } = useSession();
+  const w = useWalkthrough();
+  const nav = useNavigate();
+  useTick(30_000);
+  const clock = useAction(async (days: number) => setSession(await api.advanceClock(days)));
+  if (!isDemo || !session?.user) return null;
+  const roles = w.myRoles.length ? w.myRoles.map(roleLabel).join(', ') : 'participant';
+  const offsetDays = Math.round((session.clockOffsetMs ?? 0) / 86400e3);
+  return (
+    <div className="border-b border-accent/20 bg-accent-soft text-sm">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-4 gap-y-1.5 px-4 py-1.5 sm:px-6">
+        <div className="min-w-0">
+          Viewing as <strong>{session.user.name}</strong> <span className="text-muted">({roles})</span> —{' '}
+          <button
+            className="font-medium text-accent hover:underline"
+            onClick={() => {
+              w.setStep(1);
+              nav('/alpha');
+            }}
+          >
+            switch role
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 text-muted" title="Simulated governance clock">
+            <Clock className="size-3.5" />
+            {formatDate(new Date(now()).toISOString(), true)}
+            {offsetDays > 0 && <span className="text-xs">(+{offsetDays}d)</span>}
+          </span>
+          <Button size="sm" variant="ghost" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(1)} className="h-7" title="Fast-forward the simulated clock by one day">
+            1 day
+          </Button>
+          <Button size="sm" variant="ghost" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(7)} className="h-7" title="Fast-forward the simulated clock by seven days">
+            7 days
+          </Button>
+          {clock.error ? <span className="text-xs text-danger">Couldn’t change the clock</span> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function Shell({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur">
+        <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
+          <Link to="/" className="flex min-w-0 items-center gap-2.5">
+            <Logo />
+            <span className="truncate text-sm font-semibold tracking-tight">
+              Concord<span className="hidden text-muted sm:inline"></span>
+            </span>
+            <span className="rounded bg-warn-soft px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide text-warn uppercase">alpha</span>
+          </Link>
+          <div className="flex-1" />
+          <OntologySwitcher />
+          <NavLink to="/feedback" className={({ isActive }) => cx(isActive && 'pointer-events-none opacity-60')}>
+            <Button size="sm" variant="subtle" icon={MessageSquareHeart}>
+              <span className="hidden sm:inline">Give feedback</span>
+              <span className="sm:hidden">Feedback</span>
+            </Button>
+          </NavLink>
+          <UserMenu />
+        </div>
+      </header>
+      <DemoBanner />
+      <main className="flex-1">{children}</main>
+      <footer className="border-t border-line py-6 text-center text-xs text-subtle">
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data lives in your own Solid pod.
+      </footer>
+      <WalkthroughDock />
+    </div>
+  );
+}
+
+export function Page({ children, className, wide }: { children: ReactNode; className?: string; wide?: boolean }) {
+  return <div className={cx('mx-auto w-full px-4 py-8 sm:px-6', wide ? 'max-w-7xl' : 'max-w-5xl', className)}>{children}</div>;
+}
