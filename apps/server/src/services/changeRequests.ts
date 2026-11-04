@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -208,16 +208,21 @@ function validationPassed(v: ValidationReport | undefined) {
 export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  const timeline = [...cr.timeline];
   // Validation runs the use cases' competency questions over their example data. If a use case
   // stops being public while it runs (or while the analysis is written), the results may include
-  // its questions, so the whole thing runs again from what is public now.
+  // its questions, and the record being worked on may hold its title, so the whole thing runs
+  // again from what is stored and public now. Each attempt starts from the stored record, which a
+  // withdrawal has already redacted, and only the fields triage owns are written back.
+  const fresh = () => get<ChangeRequest>('changeRequests', cr.id);
+  let last: Pick<ChangeRequest, 'diff' | 'classification' | 'validation' | 'kgcl'> | undefined;
   for (let attempt = 0; attempt < 3; attempt++) {
     const epoch = consentEpoch(cr.ontologyId);
-    cr.timeline = [...timeline];
-    // Tests a withdrawal has scrubbed from the stored change request stay scrubbed.
-    const stored = get<ChangeRequest>('changeRequests', cr.id);
-    if (stored) cr.tests = stored.tests;
+    const base = fresh();
+    if (base) {
+      for (const k of Object.keys(cr) as (keyof ChangeRequest)[]) if (!(k in base)) delete cr[k];
+      Object.assign(cr, structuredClone(base));
+    }
+    let event: ReturnType<typeof ev>;
     try {
       const p = await preview(project, cr.ops, cr.tests, author);
       cr.diff = trimDiff(p.diff);
@@ -225,15 +230,13 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
       cr.validation = p.validation;
       cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
       cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
-      cr.timeline.push(
-        ev(
-          'triaged',
-          `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
-            .filter((r) => r.level === p.classification.level)
-            .map((r) => r.rule)
-            .slice(0, 3)
-            .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
-        ),
+      event = ev(
+        'triaged',
+        `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
+          .filter((r) => r.level === p.classification.level)
+          .map((r) => r.rule)
+          .slice(0, 3)
+          .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
       );
       if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
     } catch (err) {
@@ -245,13 +248,40 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
         competencyQuestions: [],
         passed: false,
       };
-      cr.timeline.push(ev('validated', message));
+      event = ev('validated', message);
     }
-    if (consentEpoch(cr.ontologyId) === epoch) return save(cr);
+    last = { diff: cr.diff, classification: cr.classification, validation: cr.validation, kgcl: cr.kgcl };
+    if (consentEpoch(cr.ontologyId) === epoch) {
+      // Nothing was withdrawn meanwhile. Write triage's results onto the record as it is now.
+      const owned = { ...last, warnings: cr.warnings, analysis: cr.analysis };
+      const latest = fresh();
+      if (latest) Object.assign(cr, latest, owned, { timeline: [...latest.timeline, event] });
+      else cr.timeline.push(event);
+      return save(cr);
+    }
   }
-  // Use cases kept changing: keep the checks, but no competency question results.
-  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: [] };
+  // Use cases kept changing. Keep the stored (redacted) record and the structural checks, with no
+  // competency question results, no analysis and no warnings from these runs: any of them may quote
+  // what was withdrawn.
+  const latest = fresh();
+  if (latest) Object.assign(cr, latest);
+  if (last) Object.assign(cr, { diff: last.diff, classification: last.classification, kgcl: last.kgcl });
+  if (last?.validation) cr.validation = { ...last.validation, competencyQuestions: [] };
+  cr.timeline = [...cr.timeline, ev('validated', 'Use cases changed while the checks ran, so competency questions were left out. Run triage again to include them.')];
   return save(cr);
+}
+
+/**
+ * Delete a change request that was just created, with everything recorded about it, when the
+ * request that created it fails (for example, a cited use case was withdrawn meanwhile).
+ */
+export function discardChangeRequest(id: string) {
+  const cr = get<ChangeRequest>('changeRequests', id);
+  if (!cr) return;
+  for (const c of ['reviews', 'votes'] as const) for (const d of list<{ id: string }>(c, id)) remove(c, d.id);
+  const link = `/o/${cr.ontologyId}/changes/${id}`;
+  for (const a of list<{ id: string; link?: string }>('activity', cr.ontologyId)) if (a.link === link) remove('activity', a.id);
+  remove('changeRequests', id);
 }
 
 function trimDiff(d: ChangeRequest['diff']) {

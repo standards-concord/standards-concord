@@ -363,6 +363,8 @@ export interface UseCase {
   withdrawnAt?: string;
   /** Every competency question this use case has had while public, so withdrawal can remove each from saved results and tests. Never shown to others. */
   publicQuestions?: string[];
+  /** Every title it has had while public, so withdrawal can take each out of change requests, votes, releases and activity. Never shown to others. */
+  publicTitles?: string[];
   /**
    * Demo only: the content a simulated persona's use case was seeded with. Testers
    * can sign in as personas and edit their use cases, so public pages show this

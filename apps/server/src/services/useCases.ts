@@ -95,34 +95,65 @@ export const consentEpoch = (ontologyId: string) => consentEpochs.get(ontologyId
 
 const questionKey = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
 
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const WITHDRAWN_PHRASE = 'a use case that is no longer public';
+
+/** Replace matches of `re` in every string inside `value` (ids left alone). Returns the new value and whether anything changed. */
+function redactDeep<T>(value: T, re: RegExp): [T, boolean] {
+  let changed = false;
+  const walk = (v: unknown, key?: string): unknown => {
+    if (typeof v === 'string') {
+      if (key && /(^id$|Id$|Ids$|^iri$|Iri$)/.test(key)) return v;
+      const out = v.replace(re, WITHDRAWN_PHRASE);
+      if (out !== v) changed = true;
+      return out;
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
+    return v;
+  };
+  const out = walk(value) as T;
+  return [out, changed];
+}
+
 /**
- * Remove every question the use case has had while public (including ones since
- * edited) from validation results saved on change requests, and from the SPARQL
- * tests drafted from them, which carry its example data and run again on retriage.
+ * When a use case stops being public, take out what was copied from it:
+ * - every question it had while public (including ones since edited) from
+ *   validation results saved on change requests, and from the SPARQL tests
+ *   drafted from them, which carry its example data and run again on retriage;
+ * - every title it had while public, wherever it was quoted: change requests
+ *   (title, description, analysis, warnings, timeline, edits), their reviews and
+ *   votes, releases and their votes, and the activity feed.
+ * Content already merged into the ontology itself is not changed here.
  */
 onNoLongerPublic((u) => {
   const questions = new Set([...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)].map(questionKey));
-  if (!questions.size) return;
   const gone = (r: { question: string }) => questions.has(questionKey(r.question));
-  // Change requests drafted from it quote its title in their own: replaced with a neutral phrase.
-  const title = u.sections.name?.trim();
-  const titleRe = title && title.length >= 4 ? new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : undefined;
-  const redact = (text?: string) => (text && titleRe ? text.replace(titleRe, 'a use case that is no longer public') : text);
-  for (const cr of list<ChangeRequest>('changeRequests', u.ontologyId)) {
+  const titles = [...new Set([...(u.publicTitles ?? []), u.sections.name ?? ''].map((t) => t.trim()).filter((t) => t.length >= 2))].sort((x, y) => y.length - x.length);
+  // Whole words only, so ordinary text that happens to contain a short title isn't mangled.
+  const titleRe = titles.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${titles.map(escapeRe).join('|')})(?![\\p{L}\\p{N}])`, 'giu') : undefined;
+  const redact = <T extends { id: string }>(collection: 'changeRequests' | 'reviews' | 'votes' | 'releases' | 'activity', doc: T, parent: string) => {
+    if (!titleRe) return doc;
+    const [out, changed] = redactDeep(doc, titleRe);
+    if (changed) put(collection, out, parent);
+    return out;
+  };
+  for (const stored of list<ChangeRequest>('changeRequests', u.ontologyId)) {
+    let cr = stored;
     const cqs = cr.validation?.competencyQuestions;
-    const inResults = !!cqs?.some(gone);
-    const inTests = !!cr.tests?.some(gone);
-    const fromIt = !!titleRe && [cr.title, cr.description, cr.analysis?.summary, cr.analysis?.rationale].some((t) => !!t && t.toLowerCase().includes(title!.toLowerCase()));
-    if (!inResults && !inTests && !fromIt) continue;
-    if (inResults) cr.validation = { ...cr.validation!, competencyQuestions: cqs!.filter((r) => !gone(r)) };
-    if (inTests) cr.tests = cr.tests!.filter((t) => !gone(t));
-    if (fromIt) {
-      cr.title = redact(cr.title)!;
-      cr.description = redact(cr.description) ?? '';
-      if (cr.analysis) cr.analysis = { ...cr.analysis, summary: redact(cr.analysis.summary)!, rationale: redact(cr.analysis.rationale)! };
+    if (questions.size && (cqs?.some(gone) || cr.tests?.some(gone))) {
+      cr = { ...cr, ...(cqs ? { validation: { ...cr.validation!, competencyQuestions: cqs.filter((r) => !gone(r)) } } : {}), ...(cr.tests ? { tests: cr.tests.filter((t) => !gone(t)) } : {}) };
+      put('changeRequests', cr, cr.ontologyId);
     }
-    put('changeRequests', cr, cr.ontologyId);
+    redact('changeRequests', cr, cr.ontologyId);
+    for (const r of list<{ id: string }>('reviews', cr.id)) redact('reviews', r, cr.id);
+    for (const v of list<{ id: string }>('votes', cr.id)) redact('votes', v, cr.id);
   }
+  for (const rel of list<{ id: string }>('releases', u.ontologyId)) {
+    redact('releases', rel, u.ontologyId);
+    for (const v of list<{ id: string }>('votes', rel.id)) redact('votes', v, rel.id);
+  }
+  for (const a of list<{ id: string }>('activity', u.ontologyId)) redact('activity', a, u.ontologyId);
 });
 
 /** Bring documents written before sharing modes existed up to date. */
@@ -289,7 +320,10 @@ function saveUseCase(u: UseCase) {
   const before = get<UseCase>('useCases', u.id);
   // A withdrawal is final: a save from work that started earlier (an interview turn, drafting) never undoes it.
   if (before?.withdrawnAt && !u.withdrawnAt) Object.assign(u, { withdrawnAt: before.withdrawnAt, visibility: before.visibility, status: before.status });
-  if (isPublic(u)) u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)])];
+  if (isPublic(u)) {
+    u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)])];
+    u.publicTitles = [...new Set([...(before?.publicTitles ?? []), ...(u.publicTitles ?? []), ...(u.sections.name ? [u.sections.name] : [])])];
+  }
   if (u.visibility === 'public' && !u.number) u.number = nextNumber(u.ontologyId);
   else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = nextNumber(u.ontologyId, 'groupNumber');
   u.completeness = completeness(u);
@@ -461,7 +495,8 @@ const interviewDone = (u: UseCase) =>
 
 /** The author submits a draft for triage. Private ones must be shared (or anonymised) first. */
 export function submitUseCase(u: UseCase, actor: User, save = true) {
-  if (!isAuthor(u, actor) && !canTriage(u.ontologyId, actor)) throw new HttpError(403, 'Only the author can submit this use case');
+  // Submitting is the author's consent to share a draft: nobody else can give it.
+  if (!isAuthor(u, actor)) throw new HttpError(403, 'Only the author can submit this use case');
   if (u.visibility === 'private') throw new HttpError(409, 'Private use cases are not triaged. Share it with the working group, make it public, or publish an anonymised version.');
   if (u.status !== 'draft' && u.status !== 'archived' && u.status !== 'deferred') return u;
   u.status = 'triage';
@@ -474,6 +509,8 @@ export function submitUseCase(u: UseCase, actor: User, save = true) {
 export function triageUseCase(u: UseCase, actor: User, status: UseCaseStatus, note?: string) {
   if (!canTriage(u.ontologyId, actor)) throw new HttpError(403, 'Only editors, stewards and owners triage use cases');
   if (u.visibility === 'private') throw new HttpError(409, 'Private use cases are not triaged');
+  // A draft (or one its author archived) isn't ready to share yet. Triaging it would publish it without the author.
+  if (u.status === 'draft' || u.status === 'archived') throw new HttpError(409, `This use case is ${u.status === 'draft' ? "a draft the author hasn't submitted" : 'archived by its author'}, so it can't be triaged until they submit it`);
   if (!['accepted', 'deferred', 'out-of-scope', 'closed', 'triage'].includes(status)) throw new HttpError(400, 'status must be accepted, deferred, out-of-scope, closed or triage');
   const project = getProject(u.ontologyId);
   u.status = status;
@@ -520,10 +557,16 @@ export function removeLink(u: UseCase, actor: User, target: string) {
 }
 
 /** Record that a change request addresses some use cases (both directions), and move them along. */
-export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor: User) {
-  const ucs = useCaseIds.map((id) => getUseCaseFor(id, actor)).filter((u) => u.ontologyId === cr.ontologyId);
-  // Change requests are public records: they may only cite public use cases.
+/** Change requests are public records: they may only cite use cases that are public now (not drafts, archived or withdrawn). */
+export function assertCitable(useCaseIds: string[], actor: User, ontologyId: string) {
+  const ucs = useCaseIds.map((id) => getUseCaseFor(id, actor)).filter((u) => u.ontologyId === ontologyId);
   if (ucs.some((u) => !isPublic(u))) throw new HttpError(409, NOT_PUBLIC);
+  return ucs;
+}
+
+export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor: User) {
+  const ucs = assertCitable(useCaseIds, actor, cr.ontologyId);
+  cr = { ...(get<ChangeRequest>('changeRequests', cr.id) ?? cr) };
   cr.useCaseIds = [...new Set([...(cr.useCaseIds ?? []), ...ucs.map((u) => u.id)])];
   put('changeRequests', cr, cr.ontologyId);
   for (const u of ucs) {

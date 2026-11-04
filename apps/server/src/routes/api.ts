@@ -460,11 +460,10 @@ export function apiRouter(): Router {
     const b = req.body ?? {};
     const kind: ChangeRequestKind = ['feature', 'bug', 'gap', 'editorial', 'deprecation'].includes(b.kind) ? b.kind : 'feature';
     if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
-    // Check cited use cases before creating anything.
-    for (const ucId of Array.isArray(b.useCaseIds) ? b.useCaseIds : []) {
-      const u = useCases.getUseCaseFor(String(ucId), user);
-      if (u.visibility !== 'public' || u.withdrawnAt) throw new HttpError(409, 'Change requests are public, so they can only cite public use cases. Make it public, or publish an anonymised version of a private one, and cite that.');
-    }
+    // Check cited use cases before creating anything: the same rule linking applies, so a draft,
+    // archived or withdrawn use case is refused here rather than after the change request exists.
+    const useCaseIds: string[] = Array.isArray(b.useCaseIds) ? b.useCaseIds.map(String) : [];
+    useCases.assertCitable(useCaseIds, user, p.id);
     const cr = await crs.createChangeRequest(p, user, {
       title: optStr(b.title) ?? '',
       description: optStr(b.description) ?? '',
@@ -474,7 +473,17 @@ export function apiRouter(): Router {
       naturalLanguage: Array.isArray(b.ops) ? undefined : (optStr(b.naturalLanguage) ?? [optStr(b.title), optStr(b.description)].filter(Boolean).join('\n\n')),
       submit: !!b.submit,
     });
-    if (Array.isArray(b.useCaseIds) && b.useCaseIds.length) useCases.linkChangeRequest(cr, b.useCaseIds.map(String), user);
+    if (useCaseIds.length) {
+      // The author may have withdrawn a cited use case while the request was drafted. Then nothing is kept.
+      await useCases.withConsentLock(p.id, async () => {
+        try {
+          useCases.linkChangeRequest(cr, useCaseIds, user);
+        } catch (err) {
+          crs.discardChangeRequest(cr.id);
+          throw err;
+        }
+      });
+    }
     res.status(201).json(crOut(crs.getCR(cr.id), req));
   });
 

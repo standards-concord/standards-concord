@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 /**
  * Concord runs as one server process per data directory. Consent checks rely
@@ -7,46 +8,30 @@ import path from 'node:path';
  * same use case are serialised in memory (withConsentLock in
  * services/useCases.ts), which only holds within one process. A second server
  * on the same data refuses to start rather than silently break that.
+ *
+ * The lock is an exclusive SQLite lock on `concord.lock`, held for the life of
+ * the process. The operating system takes it atomically and drops it when the
+ * process ends, however it ends, so there is no stale lock to clear and no
+ * window in which two servers can both take it.
  */
-export function acquireProcessLock(dataDir: string) {
-  const file = path.join(dataDir, 'concord.pid');
-  fs.mkdirSync(dataDir, { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = fs.openSync(file, 'wx');
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      const release = () => {
-        try {
-          if (fs.readFileSync(file, 'utf8').trim() === String(process.pid)) fs.rmSync(file);
-        } catch {
-          /* already gone */
-        }
-      };
-      process.once('exit', release);
-      for (const signal of ['SIGINT', 'SIGTERM'] as const)
-        process.once(signal, () => {
-          release();
-          process.exit(0);
-        });
-      return;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const pid = Number(fs.readFileSync(file, 'utf8').trim());
-      if (pid && pid !== process.pid && alive(pid))
-        throw new Error(`Another Concord server (pid ${pid}) is using ${dataDir}. Run one server per data directory: consent checks depend on it.`);
-      // Left behind by a server that has stopped (or by this process before a restart).
-      fs.rmSync(file, { force: true });
-    }
-  }
-  throw new Error(`Could not take the server lock in ${dataDir}`);
-}
+let held: DatabaseSync | undefined;
 
-function alive(pid: number) {
+export function acquireProcessLock(dataDir: string): () => void {
+  fs.mkdirSync(dataDir, { recursive: true });
+  const db = new DatabaseSync(path.join(dataDir, 'concord.lock'));
   try {
-    process.kill(pid, 0);
-    return true;
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE;');
+    // The first write takes the exclusive lock, and EXCLUSIVE mode never gives it back.
+    db.exec('BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner (pid INTEGER); DELETE FROM owner; INSERT INTO owner VALUES (' + process.pid + '); COMMIT;');
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
+    db.close();
+    if (/locked|busy/i.test(String((err as Error).message)))
+      throw new Error(`Another Concord server is using ${dataDir}. Run one server per data directory: consent checks depend on it.`);
+    throw err;
   }
+  held = db;
+  return () => {
+    if (held === db) held = undefined;
+    db.close();
+  };
 }
