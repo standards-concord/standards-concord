@@ -277,10 +277,12 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
 function registeredClient(clientId: string): ClientDoc | undefined {
   const doc = get<ClientDoc>('oauthClients', clientId);
   if (!doc || !needsUpgrade(doc)) return doc;
-  return transaction(() => {
+  const upgraded = transaction(() => {
     const fresh = get<ClientDoc>('oauthClients', clientId);
     return fresh && needsUpgrade(fresh) ? upgradeLegacy(fresh) : fresh;
   });
+  scheduleScrub();
+  return upgraded;
 }
 
 /** Records older versions wrote: a plain-text secret, or a confidential client with no method recorded (RFC 7591 default). */
@@ -288,8 +290,8 @@ const needsUpgrade = (doc: ClientDoc) => doc.info.client_secret !== undefined ||
 
 /**
  * Hash a plain-text secret, and record the method Concord actually checks (client_secret_post) for a
- * confidential client that registered without one. Hashing marks the scrub of old copies as owed, in the
- * same write, so it can't be skipped; the scrub itself is tried straight after. Call inside a transaction.
+ * confidential client that registered without one. Hashing raises the owed scrub generation in the same
+ * write, so the scrub can't be skipped. Call inside a transaction.
  */
 function upgradeLegacy(doc: ClientDoc): ClientDoc {
   const { client_secret, ...info } = doc.info;
@@ -298,26 +300,69 @@ function upgradeLegacy(doc: ClientDoc): ClientDoc {
   const upgraded = { ...doc, info: info as OAuthClientInformationFull, secretHash };
   put<ClientDoc>('oauthClients', upgraded);
   if (client_secret !== undefined) {
-    put('kv', { id: SCRUB, done: false });
-    setImmediate(() => void scrubIfOwed());
+    const state = scrubState();
+    put<ScrubState>('kv', { ...state, owed: state.owed + 1 });
   }
   return upgraded;
 }
 
-const SCRUB = 'oauth-secret-scrub';
+/**
+ * Scrub bookkeeping, by generation: every secret hashed raises `owed`; a scrub that succeeds records the
+ * generation it started from as `scrubbed` (never lowering it). Work owed after a scrub started, by this
+ * process or another, stays owed. With no record yet, one scrub is owed (old versions' leftovers).
+ */
+interface ScrubState {
+  id: string;
+  owed: number;
+  scrubbed: number;
+}
+const SCRUB = 'oauth-secret-scrub-v2';
+const scrubState = (): ScrubState => get<ScrubState>('kv', SCRUB) ?? { id: SCRUB, owed: 1, scrubbed: 0 };
 
-/** Scrub old copies of secrets from the database files if that is owed (or has never been done). True once done. */
-export function scrubIfOwed(): boolean {
-  if (get<{ done: boolean }>('kv', SCRUB)?.done) return true;
-  if (!scrubFreeSpace()) return false;
-  put('kv', { id: SCRUB, done: true });
-  return true;
+/** Scrub old copies of secrets from the database files if that is owed. True once nothing is owed. */
+export function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): boolean {
+  const before = scrubState();
+  if (before.scrubbed >= before.owed) return true;
+  const generation = before.owed;
+  if (!scrub()) return false;
+  transaction(() => {
+    const now = scrubState();
+    put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
+  });
+  return scrubState().scrubbed >= scrubState().owed;
+}
+
+/**
+ * One scrub attempt at a time, off the request: the first soon, then backing off (30 s doubling to an
+ * hour) while another connection keeps blocking it. Further calls while one is scheduled do nothing.
+ */
+let scrubTimer: NodeJS.Timeout | undefined;
+let scrubBackoff = 0;
+export function scheduleScrub(delayMs = 0) {
+  if (scrubTimer) return;
+  scrubTimer = setTimeout(() => {
+    scrubTimer = undefined;
+    if (scrubIfOwed()) {
+      scrubBackoff = 0;
+      return;
+    }
+    scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
+    scheduleScrub(scrubBackoff);
+  }, delayMs);
+  scrubTimer.unref();
+}
+/** Tests only: whether a scrub attempt is waiting, and cancel it. */
+export const scrubRetryPending = () => scrubTimer !== undefined;
+export function cancelScrubRetry() {
+  if (scrubTimer) clearTimeout(scrubTimer);
+  scrubTimer = undefined;
+  scrubBackoff = 0;
 }
 
 /**
  * Run at startup: upgrade every record older code wrote (hashing plain-text secrets), then scrub the
- * database file and its write-ahead log of old copies. The scrub runs once, and again whenever more secrets
- * are hashed, and only counts as done once SQLite confirms it; a blocked one is retried at the next start.
+ * database file and its write-ahead log of old copies. A blocked scrub stays owed and is retried in the
+ * background with backoff, and at the next start.
  */
 export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
   const hashed = transaction(() => {
@@ -325,7 +370,9 @@ export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
     for (const d of legacy) upgradeLegacy(d);
     return legacy.filter((d) => d.info.client_secret !== undefined).length;
   });
-  return { hashed, scrubbed: scrubIfOwed() };
+  const scrubbed = scrubIfOwed();
+  if (!scrubbed) scheduleScrub(30_000);
+  return { hashed, scrubbed };
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -724,18 +771,19 @@ const CANONICAL_OAUTH_PATHS = new Set(['/.well-known/oauth-authorization-server'
  * empty or dot segments. Used only to recognise near-misses of the OAuth endpoints and refuse them.
  */
 function looseOAuthPath(path: string): boolean {
+  // Decode %XX byte by byte, without ever failing on malformed sequences, until nothing changes (catches
+  // any depth of encoding). Then drop what isn't printable ASCII: overlong UTF-8, NULs and other bytes
+  // that some decoder somewhere might turn into a slash or nothing.
   let p = path;
-  // Decode a few times over, so double-encoded near-misses (/token%252f, /%2574oken) are caught too.
-  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(p); i++) {
-    try {
-      p = decodeURIComponent(p);
-    } catch {
-      break;
-    }
+  for (let i = 0; i < 32; i++) {
+    const next = p.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+    if (next === p) break;
+    p = next;
   }
+  p = p.replace(/[^\x20-\x7e]/g, '').replace(/\\/g, '/').toLowerCase();
   const segments: string[] = [];
-  for (const s of p.toLowerCase().replace(/\\/g, '/').split('/')) {
-    const seg = s.split(';')[0];
+  for (const s of p.split('/')) {
+    const seg = s.split(';')[0].trim();
     if (!seg || seg === '.') continue;
     if (seg === '..') segments.pop();
     else segments.push(seg);

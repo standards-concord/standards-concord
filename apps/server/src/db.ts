@@ -62,12 +62,17 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
  */
 export function scrubFreeSpace(): boolean {
   const c = conn();
+  // Don't wait for other connections: this runs on the request thread, so a blocked attempt gives up at
+  // once and is retried later instead of stalling the server for busy_timeout.
+  c.exec('PRAGMA busy_timeout = 0');
   try {
     c.exec('VACUUM');
     const r = c.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number };
     return r.busy === 0 && r.log === r.checkpointed;
   } catch {
     return false;
+  } finally {
+    c.exec('PRAGMA busy_timeout = 5000');
   }
 }
 

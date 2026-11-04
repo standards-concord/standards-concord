@@ -741,7 +741,7 @@ describe('client metadata documents and redirect safety', () => {
   });
 
   it('answers only on the exact OAuth paths: near-misses are not found, never the web app', async () => {
-    const variants = ['/token/', '/token//', '/TOKEN', '/token%2f', '/token;x', '/./token', '//token', '/%2e/token', '/%2ftoken', '/x/../token', '/Revoke', '/register/', '/AUTHORIZE', '/.well-known/OAUTH-authorization-server', '//.well-known/oauth-protected-resource', '/token%252f', '/%2574oken', '/%5ctoken', '/token%5c'];
+    const variants = ['/token/', '/token//', '/TOKEN', '/token%2f', '/token;x', '/./token', '//token', '/%2e/token', '/%2ftoken', '/x/../token', '/Revoke', '/register/', '/AUTHORIZE', '/.well-known/OAUTH-authorization-server', '//.well-known/oauth-protected-resource', '/token%252f', '/%2574oken', '/%5ctoken', '/token%5c', '/%25252574oken', '/token%2525252f', '/%74oken%ff', '/token%c0%af', '/token%e0%80%af', '/token%f0%80%80%af', '/token%00', '/token%2500'];
     for (const path of variants) {
       for (const method of ['get', 'post', 'head', 'options'] as const) {
         const res = await request(base)[method](path);
