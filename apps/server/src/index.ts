@@ -1,8 +1,10 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
-import { openDb } from './db.js';
+import type { OntologyProject } from '@concord/shared';
+import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
+import { ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
@@ -12,6 +14,8 @@ if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of clien
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
+// A process that stopped mid-update may have left a checkout behind HEAD (only people browsing the repository see it).
+for (const p of list<OntologyProject>('ontologies')) ontologyStore.syncCheckout(p);
 // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
 await refreshReleasePages().catch((err) => console.error('[public] refresh failed', err));
 

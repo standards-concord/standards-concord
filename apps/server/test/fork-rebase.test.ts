@@ -1,6 +1,7 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
 import type { OntologyFork } from '@concord/shared';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import nodePath from 'node:path';
 import request from 'supertest';
@@ -1005,4 +1006,55 @@ describe('eighth review', () => {
     expect(check.steps.join(' ')).not.toMatch(/propose_fork|sync_fork/);
     expect((await dev.post(`${path}/close`).send({})).status).toBe(200);
   });
+});
+
+describe('ninth review', () => {
+  const p = () => findProject('volunteering')!;
+  const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
+  const dir = () => ontologyStore.dir(p());
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir(), encoding: 'utf8' }).trim();
+
+  it('a checkout left behind by a stopped merge cannot erase the merge when release pages are refreshed', async () => {
+    // Used to: a merge killed after moving the branch left the old checkout and index; the startup
+    // page refresh committed that index and silently removed the merged term.
+    const before = ontologyStore.head(p());
+    await upstream([addClass('SurvivesRefresh', 'survives refresh')]);
+    git('read-tree', '-u', '--reset', before);
+    const version = ontologyStore.versions(p())[0];
+    ontologyStore.updateReleaseFiles(p(), { [version]: { 'refresh-note.txt': `refreshed ${Date.now()}\n` } }, 'Refresh a release page');
+    expect(await has('SurvivesRefresh')).toBe(true);
+    expect(ontologyStore.releaseFile(p(), version, 'refresh-note.txt')).toMatch(/^refreshed/);
+    // ...and the refresh brought the checkout back up to HEAD.
+    expect(fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8').trim()).toBe(ontologyStore.readAt(p(), 'HEAD'));
+  });
+
+  it('a release whose draft moved while it was being written publishes nothing and keeps the merge', async () => {
+    // Used to: the release checked HEAD, then committed the checkout unconditionally, so a merge
+    // landing in between (its lock taken over by age) was overwritten.
+    const project = p();
+    const head = ontologyStore.head(project);
+    const graph = await ontologyStore.working(project);
+    const slow = Object.create(graph) as typeof graph;
+    slow.toTurtle = async () => {
+      await upstream([addClass('LandedDuringRelease', 'landed during release')]);
+      return graph.toTurtle();
+    };
+    await expect(ontologyStore.writeRelease(project, '99.0.0', slow, {}, 'Should not publish', { name: 'Steward' }, head)).rejects.toThrow(/changed while this release/);
+    expect(await has('LandedDuringRelease')).toBe(true);
+    expect(ontologyStore.versions(project)).not.toContain('99.0.0');
+    expect(git('tag', '--list', 'v99.0.0')).toBe('');
+  });
+
+  it("a live process's checkout lock is never taken over because of its age, a dead one's is", () => {
+    const lock = nodePath.join(dir(), '.git', 'concord-checkout.lock');
+    const old = new Date(Date.now() - 60_000);
+    fs.mkdirSync(lock);
+    fs.writeFileSync(nodePath.join(lock, 'owner'), `${process.pid}:held-by-a-live-process`);
+    fs.utimesSync(lock, old, old);
+    ontologyStore.syncCheckout(p());
+    expect(fs.readFileSync(nodePath.join(lock, 'owner'), 'utf8')).toBe(`${process.pid}:held-by-a-live-process`);
+    fs.writeFileSync(nodePath.join(lock, 'owner'), '2147483646:held-by-a-dead-process');
+    ontologyStore.syncCheckout(p());
+    expect(fs.existsSync(lock)).toBe(false);
+  }, 30_000);
 });

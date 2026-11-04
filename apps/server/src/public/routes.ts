@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
@@ -161,9 +159,9 @@ export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 
 /** The public use cases and requirements stored with a release, if it has a readable copy. */
 function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
-  const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
+  const text = ontologyStore.releaseFile(project, version, REQUIREMENTS_SNAPSHOT);
   try {
-    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as PublishedRequirements) : undefined;
+    return text === undefined ? undefined : (JSON.parse(text) as PublishedRequirements);
   } catch {
     return undefined;
   }
@@ -202,9 +200,7 @@ export async function refreshReleasePages(): Promise<void> {
       const versions = new Set(ontologyStore.versions(project));
       const changed: Record<string, Record<string, string>> = {};
       for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
-        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
-        const page = path.join(dir, 'index.html');
-        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
+        const current = !!ontologyStore.releaseFile(project, release.version, 'index.html')?.includes(PAGE_GENERATOR);
         const snapshot = requirementsSnapshot(project, release.version);
         if (current && snapshot) continue;
         const requirements = snapshot && Array.isArray(snapshot.useCases) ? snapshot : releaseRequirements(project, release.version);

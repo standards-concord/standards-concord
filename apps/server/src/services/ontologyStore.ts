@@ -40,31 +40,88 @@ function git(dir: string, args: string[], env: Record<string, string> = {}, inpu
 const FORK_PREFIX = 'forks/';
 const forkBranch = (forkSlug: string) => `${FORK_PREFIX}${forkSlug}`;
 
+/** A file's content at a commit, exactly (untrimmed), or undefined if it isn't there. */
+function show(dir: string, spec: string): string | undefined {
+  try {
+    return execFileSync('git', ['show', spec], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 });
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Everything that moves main or writes its checkout runs under one lock per
- * repository (a lock directory, so it holds across server processes), and
- * leaves the checkout and index matching HEAD. Readers never use the checkout:
- * they read the commit HEAD points at.
+ * Write a commit whose tree is `parent`'s with `files` (path → content)
+ * replaced, without touching the checkout, the index or any branch. Returns
+ * undefined when nothing would change, unless `allowEmpty`.
  */
-const LOCK_STALE_MS = 30_000;
+function commitFiles(dir: string, parent: string, files: Record<string, string>, message: string, author: CommitAuthor, allowEmpty = false): string | undefined {
+  const index = path.join(dir, '.git', `concord-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
+  try {
+    const env = { GIT_INDEX_FILE: index };
+    git(dir, ['read-tree', parent], env);
+    for (const [file, content] of Object.entries(files)) {
+      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, content);
+      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${file}`], env);
+    }
+    const tree = git(dir, ['write-tree'], env);
+    if (!allowEmpty && tree === git(dir, ['rev-parse', `${parent}^{tree}`])) return undefined;
+    return git(dir, ['commit-tree', tree, '-p', parent, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
+  } finally {
+    fs.rmSync(index, { force: true });
+  }
+}
+
+/** Move main from `from` to `commit` only if it is still at `from` (atomic across processes). */
+function casMain(dir: string, commit: string, from: string): boolean {
+  try {
+    git(dir, ['update-ref', git(dir, ['symbolic-ref', 'HEAD']), commit, from]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/*
+ * Nothing commits from the checkout or its index: every commit on main is
+ * built from an exact parent commit and lands with a compare-and-swap on the
+ * branch, and readers read commits, not files. The checkout is only kept up
+ * to date for people browsing the repository. Bringing it up to date runs
+ * under a lock (a directory, so it holds across processes) so the newest
+ * HEAD always wins; a lock whose holder has died, or that is far older than
+ * any update takes, is taken over.
+ */
+const LOCK_STALE_MS = 5 * 60_000;
 const LOCK_WAIT_MS = 15_000;
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
+function lockAbandoned(lock: string): boolean {
+  try {
+    if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) return true;
+    const pid = Number(fs.readFileSync(path.join(lock, 'owner'), 'utf8').split(':')[0]);
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ESRCH';
+    }
+  } catch {
+    return false; // Released meanwhile, or the holder hasn't written its name yet.
+  }
+}
+
 function withCheckoutLock<T>(dir: string, fn: () => T): T {
   const lock = path.join(dir, '.git', 'concord-checkout.lock');
+  const owner = path.join(lock, 'owner');
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
       fs.mkdirSync(lock);
+      fs.writeFileSync(owner, token);
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      try {
-        // A process that stopped while holding the lock stops blocking others after a while.
-        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { recursive: true, force: true });
-      } catch {
-        // Released meanwhile.
-      }
+      if (lockAbandoned(lock)) fs.rmSync(lock, { recursive: true, force: true });
       if (Date.now() > deadline) throw new HttpError(503, 'The ontology is busy saving another change. Try again in a moment.');
       Atomics.wait(sleeper, 0, 0, 10);
     }
@@ -72,13 +129,23 @@ function withCheckoutLock<T>(dir: string, fn: () => T): T {
   try {
     return fn();
   } finally {
-    fs.rmSync(lock, { recursive: true, force: true });
+    // Only give back our own lock (it may have been taken over).
+    try {
+      if (fs.readFileSync(owner, 'utf8') === token) fs.rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // Already gone.
+    }
   }
 }
 
-/** Make the checkout's ontology.ttl (file and index) match HEAD. Call with the lock held. */
+/** Make the checkout (files and index) match whatever HEAD is now. */
 function syncCheckout(dir: string) {
-  git(dir, ['checkout', '-f', 'HEAD', '--', FILE]);
+  try {
+    withCheckoutLock(dir, () => git(dir, ['read-tree', '-u', '--reset', git(dir, ['rev-parse', 'HEAD'])]));
+  } catch (err) {
+    // Only people browsing the repository see the checkout; the next update catches it up.
+    console.warn(`[ontology] could not update the checkout in ${dir}: ${(err as Error).message}`);
+  }
 }
 
 const graphCache = new Map<string, OntologyGraph>();
@@ -122,9 +189,9 @@ export const ontologyStore = {
     const key = `${project.slug}@v${ref}`;
     let g = graphCache.get(key);
     if (!g) {
-      const file = path.join(repoDir(project), 'releases', ref, FILE);
-      if (!fs.existsSync(file)) throw new HttpError(404, `Version ${ref} not found`);
-      g = await OntologyGraph.fromTurtle(fs.readFileSync(file, 'utf8'));
+      const turtle = this.releaseFile(project, ref, FILE);
+      if (turtle === undefined) throw new HttpError(404, `Version ${ref} not found`);
+      g = await OntologyGraph.fromTurtle(turtle);
       graphCache.set(key, g);
     }
     return g;
@@ -142,37 +209,20 @@ export const ontologyStore = {
    * before making it (and anyone can finish or recognise it after a crash).
    */
   async prepareWorkingCommit(project: Pick<OntologyProject, 'slug'>, graph: OntologyGraph, message: string, author: CommitAuthor, parent: string): Promise<string> {
-    const dir = repoDir(project);
-    const turtle = await graph.toTurtle();
-    const index = path.join(dir, '.git', `concord-merge-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
-    try {
-      const env = { GIT_INDEX_FILE: index };
-      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, turtle);
-      git(dir, ['read-tree', parent], env);
-      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], env);
-      const tree = git(dir, ['write-tree'], env);
-      return git(dir, ['commit-tree', tree, '-p', parent, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
-    } finally {
-      fs.rmSync(index, { force: true });
-    }
+    return commitFiles(repoDir(project), parent, { [FILE]: await graph.toTurtle() }, message, author, true)!;
   },
 
-  /**
-   * Move the draft from `from` to `commit`, only if it is still at `from` (a
-   * compare-and-swap on the branch, atomic across processes), and bring the
-   * checkout up to date in the same locked step. Returns whether it moved.
-   */
+  /** Move the draft from `from` to `commit`, only if it is still at `from`. Returns whether it moved. */
   advanceWorking(project: Pick<OntologyProject, 'slug'>, commit: string, from: string): boolean {
     const dir = repoDir(project);
-    return withCheckoutLock(dir, () => {
-      try {
-        git(dir, ['update-ref', git(dir, ['symbolic-ref', 'HEAD']), commit, from]);
-      } catch {
-        return false;
-      }
-      syncCheckout(dir);
-      return true;
-    });
+    if (!casMain(dir, commit, from)) return false;
+    syncCheckout(dir);
+    return true;
+  },
+
+  /** Bring the checkout up to HEAD (after a crash, for instance). Nothing depends on it but people browsing the repository. */
+  syncCheckout(project: Pick<OntologyProject, 'slug'>): void {
+    syncCheckout(repoDir(project));
   },
 
   /** Is `commit` part of the working draft's history? (A merge that already happened.) */
@@ -196,9 +246,9 @@ export const ontologyStore = {
   },
 
   /**
-   * Commit a release. `expectedHead` is the draft the release was made from:
-   * if anything was merged since, nothing is written (409), so a release can
-   * never undo a merge it didn't include.
+   * Commit a release on top of `expectedHead` (the draft the release was made
+   * from; the current head if not given) and tag it. If anything was merged
+   * since, nothing is written (409), so a release can never undo a merge.
    */
   async writeRelease(
     project: OntologyProject,
@@ -210,42 +260,50 @@ export const ontologyStore = {
     expectedHead?: string,
   ): Promise<string> {
     const dir = repoDir(project);
+    const parent = expectedHead ?? this.head(project);
     const turtle = await graph.toTurtle();
-    return withCheckoutLock(dir, () => {
-      if (expectedHead && this.head(project) !== expectedHead)
-        throw new HttpError(409, 'The working draft changed while this release was being prepared. Nothing was published; try again.');
-      const relDir = path.join(dir, 'releases', version);
-      fs.mkdirSync(relDir, { recursive: true });
+    const prev = (show(dir, `${parent}:CHANGELOG.md`) ?? '').replace(/^# Changelog\n+/, '');
+    const entries: Record<string, string> = {
       // The released file and the working draft are identical at release time.
-      fs.writeFileSync(path.join(dir, FILE), turtle);
-      fs.writeFileSync(path.join(relDir, FILE), turtle);
-      for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(relDir, name), content);
-      const changelog = path.join(dir, 'CHANGELOG.md');
-      const prev = fs.existsSync(changelog) ? fs.readFileSync(changelog, 'utf8').replace(/^# Changelog\n+/, '') : '';
-      fs.writeFileSync(changelog, `# Changelog\n\n## ${version} — ${new Date().toISOString().slice(0, 10)}\n\n${notes.trim()}\n\n${prev}`);
-      git(dir, ['add', '-A']);
-      git(dir, ['commit', '-q', '-m', `Release ${version}`], { name: author.name, email: author.email ?? 'steward@concord' });
-      git(dir, ['tag', '-a', `v${version}`, '-m', `Release ${version}`]);
-      return this.head(project);
-    });
+      [FILE]: turtle,
+      [`releases/${version}/${FILE}`]: turtle,
+      'CHANGELOG.md': `# Changelog\n\n## ${version} — ${new Date().toISOString().slice(0, 10)}\n\n${notes.trim()}\n\n${prev}`,
+    };
+    for (const [name, content] of Object.entries(files)) entries[`releases/${version}/${name}`] = content;
+    const commit = commitFiles(dir, parent, entries, `Release ${version}`, { name: author.name, email: author.email ?? 'steward@concord' }, true)!;
+    if (!this.advanceWorking(project, commit, parent))
+      throw new HttpError(409, 'The working draft changed while this release was being prepared. Nothing was published; try again.');
+    git(dir, ['tag', '-a', `v${version}`, commit, '-m', `Release ${version}`]);
+    return commit;
   },
 
-  /** Rewrites files beside released versions (releases/<version>/<name>) in one commit; tags stay where they were. */
+  /** Rewrites files beside released versions (releases/<version>/<name>) in one commit on top of the latest draft; tags stay where they were. */
   updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string>>, message: string): string {
     const dir = repoDir(project);
-    return withCheckoutLock(dir, () => {
-      for (const [version, named] of Object.entries(files))
-        for (const [name, content] of Object.entries(named)) fs.writeFileSync(path.join(dir, 'releases', version, name), content);
-      git(dir, ['add', 'releases']);
-      if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
-      return this.head(project);
-    });
+    const entries: Record<string, string> = {};
+    for (const [version, named] of Object.entries(files)) for (const [name, content] of Object.entries(named)) entries[`releases/${version}/${name}`] = content;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const parent = this.head(project);
+      const commit = commitFiles(dir, parent, entries, message, { name: 'Concord', email: 'steward@concord' });
+      if (!commit) return parent;
+      // Built on the head it read, so a merge landing meanwhile makes this try again on top of it.
+      if (this.advanceWorking(project, commit, parent)) return commit;
+    }
+    throw new HttpError(409, 'The ontology kept changing while its release pages were being updated. Try again.');
+  },
+
+  /** A file stored beside a released version (releases/<version>/<name>), as committed. */
+  releaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): string | undefined {
+    if (!/^[\w.+-]+$/.test(version) || !/^[\w.+-]+$/.test(name)) return undefined;
+    return show(repoDir(project), `HEAD:releases/${version}/${name}`);
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
-    const relRoot = path.join(repoDir(project), 'releases');
-    if (!fs.existsSync(relRoot)) return [];
-    return fs.readdirSync(relRoot).filter((v) => fs.existsSync(path.join(relRoot, v, FILE)));
+    const files = git(repoDir(project), ['ls-tree', '-r', '--name-only', 'HEAD', '--', 'releases']);
+    return files
+      .split('\n')
+      .map((f) => /^releases\/([^/]+)\/ontology\.ttl$/.exec(f)?.[1])
+      .filter((v): v is string => !!v);
   },
 
   log(project: Pick<OntologyProject, 'slug'>, limit = 50) {

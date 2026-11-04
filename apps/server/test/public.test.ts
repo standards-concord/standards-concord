@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
@@ -21,6 +22,24 @@ beforeAll(async () => {
   openDb();
   await seedDemo();
 });
+
+/**
+ * Store files beside a release, as if it had been published with them (null
+ * removes one). The app reads them from the repository's commits, so they
+ * are committed, not just written to the checkout.
+ */
+function storeReleaseFiles(version: string, files: Record<string, string | null>) {
+  const dir = ontologyStore.dir(findProject('volunteering')!);
+  for (const [name, content] of Object.entries(files)) {
+    const file = path.join(dir, 'releases', version, name);
+    if (content === null) fs.rmSync(file, { force: true });
+    else fs.writeFileSync(file, content);
+  }
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.org', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.org' };
+  execFileSync('git', ['add', '-A', 'releases'], { cwd: dir, env });
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'Test: store release files'], { cwd: dir, env });
+}
+const stored = (version: string, name: string) => ontologyStore.releaseFile(findProject('volunteering')!, version, name);
 
 describe('public ontology pages', () => {
   it('serves the HTML page at the ontology IRI path with the latest release', async () => {
@@ -345,20 +364,19 @@ describe('review fixes', () => {
   });
 
   it('renders a release from the snapshot stored with it, not from today\'s data', async () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
-    expect(fs.existsSync(file)).toBe(true);
-    const original = fs.readFileSync(file, 'utf8');
-    const snap = JSON.parse(original);
+    const original = stored('1.0.0', 'requirements.json');
+    expect(original).toBeDefined();
+    const snap = JSON.parse(original!);
     expect(snap.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
     try {
       snap.useCases[0].title = 'As it was at release time';
-      fs.writeFileSync(file, JSON.stringify(snap));
+      storeReleaseFiles('1.0.0', { 'requirements.json': JSON.stringify(snap) });
       const res = await request(app).get('/def/volunteering/1.0.0');
       expect(res.text).toContain('As it was at release time');
       const draft = await request(app).get('/def/volunteering/draft');
       expect(draft.text).not.toContain('As it was at release time');
     } finally {
-      fs.writeFileSync(file, original);
+      storeReleaseFiles('1.0.0', { 'requirements.json': original! });
     }
   });
 });
@@ -406,54 +424,48 @@ describe('re-review fixes', () => {
   });
 
   it('says so when a release has no use case snapshot, instead of showing current data', async () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
-    const original = fs.readFileSync(file, 'utf8');
+    const original = stored('1.0.0', 'requirements.json')!;
     try {
-      for (const broken of [undefined, '{not json', '{"useCases": "nope"}']) {
-        if (broken === undefined) fs.rmSync(file);
-        else fs.writeFileSync(file, broken);
+      for (const broken of [null, '{not json', '{"useCases": "nope"}']) {
+        storeReleaseFiles('1.0.0', { 'requirements.json': broken });
         const res = await request(app).get('/def/volunteering/1.0.0');
         expect(res.text).toContain('were not recorded when it was published');
         expect(res.text).not.toContain('Aggregate volunteering opportunities across platforms');
       }
     } finally {
-      fs.writeFileSync(file, original);
+      storeReleaseFiles('1.0.0', { 'requirements.json': original });
     }
   });
 
   it('regenerates release pages written by an older renderer and backfills missing snapshots', async () => {
     const project = findProject('volunteering')!;
-    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
-    const page = path.join(dir, 'index.html');
-    const snap = path.join(dir, 'requirements.json');
-    const original = { page: fs.readFileSync(page, 'utf8'), snap: fs.readFileSync(snap, 'utf8') };
+    const original = { page: stored('1.0.0', 'index.html')!, snap: stored('1.0.0', 'requirements.json')! };
     try {
       expect(original.page).toContain(PAGE_GENERATOR);
       // A page from before the fixes, with no snapshot beside it.
-      fs.writeFileSync(page, '<html><meta name="generator" content="Concord"><img src=x onerror=alert(1)></html>');
-      fs.rmSync(snap);
+      storeReleaseFiles('1.0.0', { 'index.html': '<html><meta name="generator" content="Concord"><img src=x onerror=alert(1)></html>', 'requirements.json': null });
       await refreshReleasePages();
-      expect(fs.readFileSync(page, 'utf8')).toContain(PAGE_GENERATOR);
-      expect(fs.readFileSync(page, 'utf8')).not.toContain('onerror');
-      const backfilled = JSON.parse(fs.readFileSync(snap, 'utf8'));
+      expect(stored('1.0.0', 'index.html')).toContain(PAGE_GENERATOR);
+      expect(stored('1.0.0', 'index.html')).not.toContain('onerror');
+      const backfilled = JSON.parse(stored('1.0.0', 'requirements.json')!);
       expect(backfilled.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
 
       // An existing snapshot is history: only the page is re-rendered from it.
-      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'k', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
-      fs.writeFileSync(page, 'stale');
+      storeReleaseFiles('1.0.0', { 'requirements.json': JSON.stringify({ useCases: [{ id: 'k', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }), 'index.html': 'stale' });
       await refreshReleasePages();
-      expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases[0].title).toBe('Kept as released');
-      expect(fs.readFileSync(page, 'utf8')).toContain('Kept as released');
+      expect(JSON.parse(stored('1.0.0', 'requirements.json')!).useCases[0].title).toBe('Kept as released');
+      expect(stored('1.0.0', 'index.html')).toContain('Kept as released');
       // Committed to the ontology's repository, so the fix goes out with its next push.
       expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
+      // ...and the checkout follows.
+      expect(fs.readFileSync(path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'index.html'), 'utf8')).toContain('Kept as released');
 
       // Up-to-date pages are left alone (no commit).
       const head = ontologyStore.head(project);
       await refreshReleasePages();
       expect(ontologyStore.head(project)).toBe(head);
     } finally {
-      fs.writeFileSync(page, original.page);
-      fs.writeFileSync(snap, original.snap);
+      storeReleaseFiles('1.0.0', { 'index.html': original.page, 'requirements.json': original.snap });
     }
   });
 });

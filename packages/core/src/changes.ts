@@ -171,9 +171,9 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
 
   switch (op.op) {
     case 'addClass': {
-      const supers = (op.subClassOf ?? []).map(ex).map(requireClass);
-      const eqs = (op.equivalentTo ?? []).map(ex).map(requireClass);
-      const disj = (op.disjointWith ?? []).map(ex).map(requireClass);
+      const supers = (op.subClassOf ?? []).map(ex).map(notRecorded).map(requireClass);
+      const eqs = (op.equivalentTo ?? []).map(ex).map(notRecorded).map(requireClass);
+      const disj = (op.disjointWith ?? []).map(ex).map(notRecorded).map(requireClass);
       const restrictions = (op.restrictions ?? []).map((r) => normaliseRestriction(g, r, ex, requireKnown));
       const iri = newTerm(op.localName, 'class', T.Class, op);
       for (const sc of supers) add(iri, P.subClassOf, nn(sc));
@@ -305,6 +305,8 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
         const members = objects(s, ax, P.members).flatMap((h) => readList(s, h) ?? []).map((t) => t.value);
         const hit = members.filter((m) => inSet.has(m));
         if (hit.length < 2) continue;
+        // Rewriting the axiom restates every member, so none of them may be a recorded property.
+        members.forEach(notRecorded);
         // Drop the axiom and re-assert the pairs that are not being removed.
         for (const q of s.getQuads(ax, null, null, null)) {
           s.removeQuad(q);

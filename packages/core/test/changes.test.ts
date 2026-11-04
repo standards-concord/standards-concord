@@ -332,3 +332,32 @@ describe('recorded provenance cannot be reached indirectly', () => {
     expect(() => applyChangeOps(baseOntology(), [{ op, classes: [X('Person'), DCT + 'created'] }])).toThrow(/recorded by Concord/);
   });
 });
+
+describe('recorded provenance in disjointness written another way', () => {
+  // Ninth review: addClass's own disjointWith skipped the guard, and removing two classes from a
+  // three-member axiom that also listed a recorded property restated that property as a subject.
+  const PROV = 'http://purl.org/dc/terms/provenance';
+
+  it('refuses a new class declared disjoint with a recorded property', () => {
+    expect(() => applyChangeOps(baseOntology(), [{ op: 'addClass', localName: 'Forged', label: 'forged', definition: 'A class used to test the guard.', disjointWith: [PROV] }])).toThrow(/recorded by Concord/);
+  });
+
+  it('refuses to rewrite a disjointness axiom that lists a recorded property', () => {
+    const g = baseOntology();
+    const { namedNode, blankNode } = DataFactory;
+    const list = (items: string[]) => {
+      let head: ReturnType<typeof blankNode> | ReturnType<typeof namedNode> = namedNode(NS.rdf + 'nil');
+      for (const item of [...items].reverse()) {
+        const cell = blankNode();
+        g.store.addQuad(cell, namedNode(NS.rdf + 'first'), namedNode(item));
+        g.store.addQuad(cell, namedNode(NS.rdf + 'rest'), head);
+        head = cell;
+      }
+      return head;
+    };
+    const ax = blankNode();
+    g.store.addQuad(ax, namedNode(NS.rdf + 'type'), namedNode(NS.owl + 'AllDisjointClasses'));
+    g.store.addQuad(ax, namedNode(NS.owl + 'members'), list([X('Place'), X('Employee'), PROV]));
+    expect(() => applyChangeOps(g, [{ op: 'removeDisjointness', classes: [X('Place'), X('Employee')] }])).toThrow(/recorded by Concord/);
+  });
+});

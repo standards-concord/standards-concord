@@ -519,6 +519,8 @@ function settleMerge(cr: ChangeRequest): 'merged' | 'released' {
   const project = getProject(cr.ontologyId);
   if (!ontologyStore.inWorking(project, m.commit) && ontologyStore.head(project) === m.base) ontologyStore.advanceWorking(project, m.commit, m.base);
   const merged = ontologyStore.inWorking(project, m.commit);
+  // A merge that stopped right after moving the branch never caught the checkout up.
+  if (merged) ontologyStore.syncCheckout(project);
   const actorId = m.by;
   delete cr.merging;
   if (merged) {
