@@ -8,3 +8,5 @@ __pycache__
 test-results
 playwright-report
 e2e/.auth
+walkthrough/out
+walkthrough/.cache
