@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
-import { ChevronDown, Clock, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass, Palette } from 'lucide-react';
+import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass, Palette } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
@@ -86,8 +86,11 @@ function UserMenu() {
           <MenuLink to="/settings" icon={<UserRound className="size-4" />}>
             Profile & your WebID
           </MenuLink>
-          <MenuLink to="/settings#tokens" icon={<Settings className="size-4" />}>
-            Agent tokens
+          <MenuLink to="/connect" icon={<Plug className="size-4" />}>
+            Connect an agent
+          </MenuLink>
+          <MenuLink to="/settings#agents" icon={<Settings className="size-4" />}>
+            Connected agents
           </MenuLink>
           <MenuLink to="/settings#appearance" icon={<Palette className="size-4" />}>
             Appearance

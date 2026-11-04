@@ -31,7 +31,7 @@ Suggested tasks, shown as a checklist in the walkthrough panel:
 - **Editor or member**: open change request *Say whether an opportunity reimburses expenses* (minor). Read the AI triage, the validation report and the classification, then approve it or request changes.
 - **Member**: open *Allow only one location per session* (major). Gareth objects because it breaks multi-site data. Add your review; when it goes to a vote, vote.
 - **Steward**: open *Releases*, draft a release from the merged changes and see the version number it gets (patch, minor or major), then publish it.
-- **Implementer**: open *Agents*, create a token and connect Claude Code or Codex with the command shown, then ask your agent to build something with the ontology and report anything missing.
+- **Implementer**: open *Agents* (or `/connect`), add Concord to Claude, Claude Code or Codex and sign in when it asks, then ask your agent to build something with the ontology and report anything missing.
 
 ## 4. Simulate the others (2 minutes)
 
