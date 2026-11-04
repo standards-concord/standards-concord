@@ -62,7 +62,7 @@ Feedback is readable at `/admin/feedback` by the deployment's administrators (`A
 
 Testers are told this on the feedback page, before they start, beside the submit button and after they send:
 
-> **Who can read your feedback:** the Concord alpha team (this site's administrators) can read everything you send, including your name and email if you give them. Other testers can't. When you're signed in, we also save a copy in your Solid pod (in concord/feedback/) and share that folder read-only with the team's WebID, so they can read it there too.
+> **Who can read your feedback:** the Concord alpha team (this site's administrators) can read everything you send, including your name and email if you give them. Other testers can't. When you're signed in, we also save a copy in your Solid pod (in concord/feedback/) and share that folder read-only with the team's WebID, so they can read it there too. [When Claude is switched on:] While you chat, what you type or say is sent to Anthropic's Claude, which runs the interviewer, before you press submit. If you use the microphone, your browser's own speech recognition may send the audio to its maker (Google in Chrome, Apple in Safari).
 
 with the WebIDs listed underneath.
 

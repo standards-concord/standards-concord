@@ -6,7 +6,8 @@ import { createApp } from '../src/app.js';
 import { isAdmin } from '../src/auth.js';
 import { config } from '../src/config.js';
 import { openDb } from '../src/db.js';
-import { acpDocument, parseLinks, wacDocument } from '../src/services/solid.js';
+import { acpMerge, parseLinks, wacMerge } from '../src/services/solid.js';
+import { feedbackMembers } from '../src/services/feedback.js';
 import { clientIdDocument, issuerListed, nameFromWebId, parseProfile, resolveIssuer, sameIssuer, SolidLoginError } from '../src/solidOidc.js';
 
 const app = createApp();
@@ -115,36 +116,122 @@ describe('administrators by WebID', () => {
 
 describe('sharing a pod folder with the admins', () => {
   const folder = 'https://pods.example/t1/concord/feedback/';
+  const acl = `${folder}.acl`;
   const owner = 'https://pods.example/t1/profile/card#me';
   const admins = ['https://jesse.example/profile/card#me', 'https://kim.example/#me'];
-  const triples = (ttl: string, base: string) => new Parser({ baseIRI: base }).parse(ttl).map((q) => [q.subject.termType === 'BlankNode' ? '_' : q.subject.value, q.predicate.value.replace(/.*[#/]/, ''), q.object.termType === 'BlankNode' ? '_' : q.object.value]);
+  const parse = (ttl: string, base: string) => new Parser({ baseIRI: base }).parse(ttl);
+  /** Authorization subject → its "predicate object" pairs (local names for predicates). */
+  const auths = (ttl: string, base = acl) => {
+    const out = new Map<string, string[]>();
+    for (const q of parse(ttl, base)) {
+      const k = q.subject.value;
+      out.set(k, [...(out.get(k) ?? []), `${q.predicate.value.replace(/.*[#/]/, '')} ${q.object.value}`]);
+    }
+    return out;
+  };
+  const A = 'http://www.w3.org/ns/auth/acl#';
 
-  it('WAC: the owner keeps control; admins may read the folder and what’s in it', () => {
-    const t = triples(wacDocument(folder, owner, admins), `${folder}.acl`);
-    const auth = (name: string) => t.filter(([s]) => s === `${folder}.acl#${name}`).map(([, p, o]) => `${p} ${o}`);
-    expect(auth('owner')).toEqual(expect.arrayContaining([`agent ${owner}`, `accessTo ${folder}`, `default ${folder}`, 'mode http://www.w3.org/ns/auth/acl#Control']));
-    expect(auth('concord-admins')).toEqual(expect.arrayContaining([...admins.map((a) => `agent ${a}`), `accessTo ${folder}`, `default ${folder}`, 'mode http://www.w3.org/ns/auth/acl#Read']));
-    expect(auth('concord-admins')).not.toContain('mode http://www.w3.org/ns/auth/acl#Write');
-    // No admins listed: only the owner.
-    expect(wacDocument(folder, owner, [])).not.toContain('concord-admins');
+  it('WAC, no ACL yet: carries over the inherited default rules, then adds read for the admins', async () => {
+    const root = 'https://pods.example/t1/';
+    const inherited = parse(
+      `@prefix acl: <${A}> .
+<#owner> a acl:Authorization ; acl:agent <${owner}>, <https://owner-elsewhere.example/#me> ; acl:accessTo <./> ; acl:default <./> ; acl:mode acl:Read, acl:Write, acl:Control .
+<#public-root> a acl:Authorization ; acl:agentClass <http://xmlns.com/foaf/0.1/Agent> ; acl:accessTo <./> ; acl:mode acl:Read .`,
+      `${root}.acl`,
+    );
+    const out = auths(await wacMerge(folder, acl, undefined, { container: root, quads: inherited }, owner, admins));
+    const copy = out.get(`${acl}#inherited-1`)!;
+    expect(copy).toEqual(expect.arrayContaining([`agent ${owner}`, 'agent https://owner-elsewhere.example/#me', `accessTo ${folder}`, `default ${folder}`, `mode ${A}Control`]));
+    // A rule that applied to the root only (no acl:default) is not inherited, so it isn't copied.
+    expect([...out.keys()].some((k) => k.includes('inherited-2'))).toBe(false);
+    expect(out.get(`${acl}#concord-admins`)).toEqual(expect.arrayContaining([...admins.map((a) => `agent ${a}`), `accessTo ${folder}`, `default ${folder}`, `mode ${A}Read`]));
+    expect(out.get(`${acl}#concord-admins`)!.filter((x) => x.startsWith('mode'))).toEqual([`mode ${A}Read`]);
+    // The owner's Control came over with the inherited rule, so no extra owner rule is added.
+    expect(out.has(`${acl}#concord-owner`)).toBe(false);
   });
 
-  it('ACP: the same policy for servers that use Access Control Policies', () => {
-    const ttl = acpDocument(folder, owner, admins);
-    const t = triples(ttl, `${folder}.acr`);
-    expect(t).toEqual(expect.arrayContaining([[`${folder}.acr`, 'resource', folder], [`${folder}.acr`, 'memberAccessControl', `${folder}.acr#admin-access`]]));
-    expect(t.filter(([, p]) => p === 'agent').map(([, , o]) => o)).toEqual([owner, ...admins]);
+  it('WAC, existing ACL: keeps every other rule and replaces only Concord’s', async () => {
+    const existing = parse(
+      `@prefix acl: <${A}> .
+<#owner> a acl:Authorization ; acl:agent <${owner}> ; acl:accessTo <./> ; acl:default <./> ; acl:mode acl:Read, acl:Write, acl:Control .
+<#their-app> a acl:Authorization ; acl:agent <https://someone.example/#me> ; acl:accessTo <./> ; acl:mode acl:Read, acl:Control .
+<#concord-admins> a acl:Authorization ; acl:agent <https://removed-admin.example/#me> ; acl:accessTo <./> ; acl:default <./> ; acl:mode acl:Read .`,
+      acl,
+    );
+    const out = auths(await wacMerge(folder, acl, existing, undefined, owner, [admins[0]!]));
+    expect(out.get(`${acl}#their-app`)).toEqual(expect.arrayContaining(['agent https://someone.example/#me', `mode ${A}Control`]));
+    expect(out.get(`${acl}#owner`)).toEqual(expect.arrayContaining([`agent ${owner}`, `mode ${A}Control`]));
+    expect(out.get(`${acl}#concord-admins`)).toContain(`agent ${admins[0]}`);
+    expect(out.get(`${acl}#concord-admins`)).not.toContain('agent https://removed-admin.example/#me');
+
+    // No admins any more: Concord's rule goes, the rest stays.
+    const none = auths(await wacMerge(folder, acl, existing, undefined, owner, []));
+    expect(none.has(`${acl}#concord-admins`)).toBe(false);
+    expect(none.has(`${acl}#their-app`)).toBe(true);
   });
 
-  it('won’t write an IRI that could break out of the document', () => {
-    expect(() => wacDocument(folder, owner, ['https://x.example/> ; acl:mode acl:Write . <#a'])).toThrow(/Not a usable IRI/);
-    expect(() => wacDocument(folder, owner, ['javascript:alert(1)'])).toThrow(/Not a usable IRI/);
+  it('WAC: the pod owner always keeps control of the folder', async () => {
+    const out = auths(await wacMerge(folder, acl, [], undefined, owner, admins));
+    expect(out.get(`${acl}#concord-owner`)).toEqual(expect.arrayContaining([`agent ${owner}`, `accessTo ${folder}`, `mode ${A}Control`, `mode ${A}Write`]));
+  });
+
+  it('ACP: adds Concord’s access control and policy, keeping the rest', async () => {
+    const acr = `${folder}.acr`;
+    const P = 'http://www.w3.org/ns/solid/acp#';
+    const existing = parse(
+      `@prefix acp: <${P}> . @prefix acl: <${A}> .
+<> a acp:AccessControlResource ; acp:resource <./> ; acp:accessControl <#theirs>, <#concord-admins-access> .
+<#theirs> a acp:AccessControl ; acp:apply <#their-policy> .
+<#their-policy> a acp:Policy ; acp:allow acl:Write ; acp:anyOf <#their-matcher> .
+<#their-matcher> a acp:Matcher ; acp:agent <https://someone.example/#me> .
+<#concord-admins-matcher> a acp:Matcher ; acp:agent <https://removed-admin.example/#me> .`,
+      acr,
+    );
+    const ttl = await acpMerge(folder, acr, existing, admins);
+    const out = auths(ttl, acr);
+    expect(out.get(acr)).toEqual(expect.arrayContaining([`resource ${folder}`, `accessControl ${acr}#theirs`, `accessControl ${acr}#concord-admins-access`, `memberAccessControl ${acr}#concord-admins-access`]));
+    expect(out.get(`${acr}#their-matcher`)).toContain('agent https://someone.example/#me');
+    expect(out.get(`${acr}#concord-admins-policy`)).toEqual(expect.arrayContaining([`allow ${A}Read`, `anyOf ${acr}#concord-admins-matcher`]));
+    expect(out.get(`${acr}#concord-admins-matcher`)).toEqual(expect.arrayContaining(admins.map((a) => `agent ${a}`)));
+    expect(out.get(`${acr}#concord-admins-matcher`)).not.toContain('agent https://removed-admin.example/#me');
+  });
+
+  it('serialises with an RDF writer: an odd WebID stays one IRI and grants nothing more', async () => {
+    const odd = 'https://x.example/> ; acl:mode acl:Write . <#a';
+    const ttl = await wacMerge(folder, acl, [], undefined, owner, [odd]);
+    const out = auths(ttl);
+    expect(out.get(`${acl}#concord-admins`)!.filter((x) => x.startsWith('mode'))).toEqual([`mode ${A}Read`]);
+    expect(out.get(`${acl}#concord-admins`)!.filter((x) => x.startsWith('agent'))).toHaveLength(1);
+    await expect(wacMerge(folder, acl, [], undefined, owner, ['javascript:alert(1)'])).rejects.toThrow(/Not a usable IRI/);
   });
 
   it('finds the access control resource in Link headers, however they are combined', () => {
     const links = parseLinks('<http://www.w3.org/ns/ldp#Container>; rel="type", <.acl>; rel="acl", <http://x/.meta>; rel=describedby', folder);
     expect(links.find((l) => l.rel === 'acl')?.url).toBe(`${folder}.acl`);
     expect(links.find((l) => l.rel === 'describedby')?.url).toBe('http://x/.meta');
+  });
+});
+
+describe('reading a feedback folder listing', () => {
+  const folder = 'https://pods.example/t1/concord/feedback/';
+  const listing = (body: string) => `@prefix ldp: <http://www.w3.org/ns/ldp#> .\n<${folder}> ${body} .`;
+
+  it('takes only Concord’s own documents directly in the folder', () => {
+    expect(feedbackMembers(folder, listing(`ldp:contains <fb_1.json>, <${folder}fb_2.json>`))).toEqual([`${folder}fb_1.json`, `${folder}fb_2.json`]);
+  });
+
+  it('ignores traversal, encoded slashes, other places, literals, other subjects and query strings', () => {
+    const bad = [
+      `ldp:contains <${folder}%2e%2e/private.json>`,
+      `ldp:contains <${folder}..%2Fprivate.json>`,
+      `ldp:contains <${folder}sub/fb.json>`,
+      'ldp:contains <https://elsewhere.example/fb.json>',
+      `ldp:contains "${folder}fb_1.json"`,
+      `ldp:contains <${folder}fb_1.json?x=1>`,
+      `ldp:contains <${folder}notes.txt>`,
+    ];
+    for (const b of bad) expect(feedbackMembers(folder, listing(b)), b).toEqual([]);
+    expect(feedbackMembers(folder, `@prefix ldp: <http://www.w3.org/ns/ldp#> . <https://pods.example/other/> ldp:contains <${folder}fb_1.json> .`)).toEqual([]);
   });
 });
 

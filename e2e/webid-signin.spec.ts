@@ -31,6 +31,23 @@ test('the feedback page tells testers the alpha team can read what they send', a
   // No Solid server here: the copy is kept in private storage.
   await expect(notice).toContainText('we also keep a copy in your private storage');
 
+  await expect(notice).toContainText('If you use the microphone, your browser’s own speech recognition may send the audio to its maker');
+  // The offline stand-in runs the interview here, so no outside AI service is named.
+  await expect(notice).not.toContainText('Anthropic');
+
   await page.getByRole('button', { name: /Just tell us something/ }).click();
   await expect(page.getByTestId('feedback-privacy')).toBeVisible();
+});
+
+test('when Claude runs the interview, the notice says Anthropic receives the conversation before submitting', async ({ page }) => {
+  await signIn(page, { name: 'AI Notice Reader' });
+  // Pretend this server has Claude switched on (the suite runs offline).
+  await page.route('**/api/session', async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({ response: res, json: { ...body, llm: { ...body.llm, provider: 'anthropic' } } });
+  });
+  await page.goto('/feedback');
+  await settle(page);
+  await expect(page.getByTestId('feedback-privacy')).toContainText('While you chat, what you type or say is sent to Anthropic’s Claude, which runs the interviewer, before you press submit.');
 });

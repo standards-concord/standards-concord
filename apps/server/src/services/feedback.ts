@@ -2,7 +2,8 @@ import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, t
 import { Parser } from 'n3';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put } from '../db.js';
+import { get as get_, HttpError, list, put } from '../db.js';
+import * as oauth from 'oauth4webapi';
 import { newId } from '../ids.js';
 import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
@@ -296,28 +297,54 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
   return out;
 }
 
-async function readFolder(as: typeof fetch, testerId: string, url: string): Promise<PodFeedbackFolder> {
-  const testerName = get<User>('users', testerId)?.name ?? testerId;
+type PodGet = (url: string, accept: string) => Promise<Response>;
+
+/**
+ * The feedback documents a folder listing may name: direct children of the
+ * folder, named by Concord (<id>.json), after URL normalisation. A listing is
+ * read over the network, so `..`, encoded slashes and anything else are ignored.
+ */
+export function feedbackMembers(folder: string, turtle: string): string[] {
+  const quads = new Parser({ baseIRI: folder, format: 'text/turtle' }).parse(turtle);
+  const out = new Set<string>();
+  for (const q of quads) {
+    if (q.predicate.value !== LDP_CONTAINS || q.subject.termType !== 'NamedNode' || q.subject.value !== folder || q.object.termType !== 'NamedNode') continue;
+    let url: URL;
+    try {
+      url = new URL(q.object.value);
+    } catch {
+      continue;
+    }
+    if (url.search || url.hash || !url.href.startsWith(folder)) continue;
+    if (!/^[\w-]{1,64}\.json$/.test(url.href.slice(folder.length))) continue;
+    out.add(url.href);
+  }
+  return [...out];
+}
+
+async function readFolder(get: PodGet, testerId: string, url: string): Promise<PodFeedbackFolder> {
+  const testerName = get_<User>('users', testerId)?.name ?? testerId;
   const base = { testerId, testerName, url, items: [] as FeedbackSubmission[] };
   let res: Response;
   try {
-    res = await as(url, { headers: { accept: 'text/turtle' } });
-  } catch {
-    return { ...base, status: 'error' };
+    res = await get(url, 'text/turtle');
+  } catch (err) {
+    // oauth4webapi raises the pod's 401 challenge as an error.
+    return { ...base, status: err instanceof oauth.WWWAuthenticateChallengeError ? 'forbidden' : 'error' };
   }
   if (res.status === 401 || res.status === 403) return { ...base, status: 'forbidden' };
   if (res.status === 404) return { ...base, status: 'missing' };
+  // Redirects are never followed (they could point outside the folder).
   if (!res.ok) return { ...base, status: 'error' };
   let members: string[];
   try {
-    const quads = new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await res.text());
-    members = [...new Set(quads.filter((q) => q.predicate.value === LDP_CONTAINS && q.object.value.startsWith(url) && q.object.value.endsWith('.json')).map((q) => q.object.value))];
+    members = feedbackMembers(url, await res.text());
   } catch {
     return { ...base, status: 'error' };
   }
   const items = await pool(members.slice(0, MAX_POD_ITEMS), 4, async (m) => {
     try {
-      const r = await as(m, { headers: { accept: 'application/json' } });
+      const r = await get(m, 'application/json');
       return r.ok ? asSubmission(await r.json()) : undefined;
     } catch {
       return undefined;
@@ -331,11 +358,11 @@ async function readFolder(as: typeof fetch, testerId: string, url: string): Prom
  * administrator's own WebID (their DPoP-bound Solid login). What comes back is
  * exactly what the pods' access control lets that WebID read.
  */
-export async function readPodFeedback(as: { fetch: typeof fetch; webId: string }): Promise<PodFeedbackReport> {
+export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
   if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
-  const pods = solid.pods().filter((p) => !get<User>('users', p.userId)?.simulated);
+  const pods = solid.pods().filter((p) => !get_<User>('users', p.userId)?.simulated);
   const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
-  const read = await pool(folders, 4, (f) => readFolder(as.fetch, f.testerId, f.url));
+  const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
   // Testers who never sent feedback have no folder: leave them out.
   return { readAs: as.webId, readers: config.adminWebIds, folders: read.filter((f) => f.status !== 'missing') };
 }

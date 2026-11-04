@@ -136,23 +136,38 @@ export function ipLiteral(url: URL): string | undefined {
   return isIP(host) ? host : undefined;
 }
 
+export interface SafeRequestOptions extends SafeFetchOptions {
+  method?: 'GET' | 'POST' | 'HEAD';
+  headers?: Record<string, string>;
+  body?: string;
+  /** Refuse a status before its body is read (the connection is dropped at once). */
+  refuseStatus?: (status: number) => FetchError | undefined;
+}
+
+export interface SafeResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
 /**
- * GET an https URL as text with the protections above. Throws FetchError:
- * 'not-found' for 404/410, 'bad-response' for other non-2xx or odd responses,
- * 'too-large', 'busy' when too many fetches are in flight, and 'unavailable'
- * for network errors and timeouts.
+ * Make one request with the protections above, whatever the status (redirects
+ * are returned, never followed). Throws FetchError 'too-large', 'busy',
+ * 'bad-response' (refused address, scheme or encoding) or 'unavailable'
+ * (network errors and the deadline, which covers the whole body).
  */
-export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<string> {
+export function safeRequest(url: URL, opts: SafeRequestOptions = {}): Promise<SafeResponse> {
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   const timeoutMs = opts.timeoutMs ?? 5000;
   if (url.protocol !== 'https:' && !(opts.allowHttp && url.protocol === 'http:')) return Promise.reject(new FetchError('bad-response', 'Only https URLs can be fetched'));
+  if (url.username || url.password) return Promise.reject(new FetchError('bad-response', 'URLs with credentials are not fetched'));
   const literal = ipLiteral(url);
   if (literal && !opts.allowPrivate && !isPublicAddress(literal)) return Promise.reject(new FetchError('bad-response', `Refusing to connect to ${literal}: not a public address`));
-  if (active >= MAX_CONCURRENT) return Promise.reject(new FetchError('busy', 'Too many metadata fetches in progress'));
+  if (active >= MAX_CONCURRENT) return Promise.reject(new FetchError('busy', 'Too many fetches in progress'));
   active++;
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<SafeResponse>((resolve, reject) => {
     let settled = false;
-    const done = (err: Error | undefined, value?: string) => {
+    const done = (err: Error | undefined, value?: SafeResponse) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -162,11 +177,13 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       if (err) reject(err instanceof FetchError ? err : new FetchError('unavailable', err.message));
       else resolve(value!);
     };
+    const headers: Record<string, string> = { Accept: opts.accept ?? 'application/json', 'User-Agent': 'Concord', ...opts.headers, 'Accept-Encoding': 'identity' };
+    if (opts.body !== undefined) headers['Content-Length'] = String(Buffer.byteLength(opts.body));
     const req = (url.protocol === 'http:' ? http : https).request(
       url,
       {
-        method: 'GET',
-        headers: { Accept: opts.accept ?? 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': 'Concord' },
+        method: opts.method ?? 'GET',
+        headers,
         // A fresh connection each time: no pooled socket outlives the fetch.
         agent: false,
         ...(opts.ca ? { ca: opts.ca } : {}),
@@ -175,15 +192,17 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       (res) => {
         const status = res.statusCode ?? 0;
         // Refused responses are never read: done() destroys the connection.
-        if (status === 404 || status === 410) return done(new FetchError('not-found', `HTTP ${status}`, status));
-        if (status >= 500) return done(new FetchError('unavailable', `HTTP ${status}`, status));
-        if (status < 200 || status >= 300) return done(new FetchError('bad-response', `HTTP ${status}`, status));
+        const refused = opts.refuseStatus?.(status);
+        if (refused) return done(refused);
         const encoding = res.headers['content-encoding'];
         if (encoding && encoding !== 'identity') return done(new FetchError('bad-response', `Unexpected content encoding ${encoding}`));
         const length = Number(res.headers['content-length']);
         if (Number.isFinite(length) && length > maxBytes) return done(new FetchError('too-large', `Response is ${length} bytes`));
+        const flat: Record<string, string> = {};
+        for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) flat[k] = Array.isArray(v) ? v.join(', ') : v;
+        if (opts.method === 'HEAD') return done(undefined, { status, headers: flat, body: '' });
         readCapped(res, maxBytes).then(
-          (text) => done(undefined, text),
+          (body) => done(undefined, { status, headers: flat, body }),
           (e: Error) => done(e),
         );
       },
@@ -191,6 +210,25 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
     // One deadline for DNS, connecting, TLS and the whole body.
     const timer = setTimeout(() => done(new FetchError('unavailable', `Timed out after ${timeoutMs} ms`)), timeoutMs);
     req.on('error', (e) => done(e));
-    req.end();
+    req.end(opts.body);
   });
+}
+
+/**
+ * GET an https URL as text with the protections above. Throws FetchError:
+ * 'not-found' for 404/410, 'bad-response' for other non-2xx or odd responses,
+ * 'too-large', 'busy' when too many fetches are in flight, and 'unavailable'
+ * for network errors and timeouts.
+ */
+export async function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<string> {
+  const res = await safeRequest(url, {
+    ...opts,
+    refuseStatus: (status) => {
+      if (status === 404 || status === 410) return new FetchError('not-found', `HTTP ${status}`, status);
+      if (status >= 500) return new FetchError('unavailable', `HTTP ${status}`, status);
+      if (status < 200 || status >= 300) return new FetchError('bad-response', `HTTP ${status}`, status);
+      return undefined;
+    },
+  });
+  return res.body;
 }

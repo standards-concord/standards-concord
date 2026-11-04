@@ -58,6 +58,10 @@ test('a tester’s feedback goes to their pod, and they are told the admin WebID
   expect(sub.savedTo?.url.startsWith(`${SOLID.css}/`)).toBeTruthy();
   feedbackUrl = sub.savedTo!.url;
 
+  // Sharing only added Concord's rule: the tester's own account can still write to the folder.
+  const again = await page.request.post('/api/feedback', { data: { pathway: 'general', answers: { general: 'And another thing' }, transcript: [] } });
+  expect(((await again.json()) as { savedTo?: { kind: string } }).savedTo?.kind).toBe('solid');
+
   // Nobody else gets in without a WebID the pod's access control lets read.
   const anon = await playwright.request.newContext();
   expect((await anon.get(feedbackUrl)).status()).toBe(401);
@@ -65,7 +69,7 @@ test('a tester’s feedback goes to their pod, and they are told the admin WebID
   await anon.dispose();
 });
 
-test('the admin signs in with their WebID and reads testers’ feedback from their pods as that WebID', async ({ page }) => {
+test('the admin signs in with their WebID and reads testers’ feedback from their pods as that WebID', async ({ page, browser }) => {
   expect(feedbackUrl, 'the tester test ran first').toBeTruthy();
   await solidSignIn(page, SOLID.admin, { next: '/admin/feedback' });
 
@@ -82,8 +86,18 @@ test('the admin signs in with their WebID and reads testers’ feedback from the
   await expect(card).toContainText(`Read as ${SOLID.admin.webId}`);
   const folder = card.getByTestId('pod-folder').filter({ hasText: 'Pod Tester' });
   await expect(folder).toContainText('Readable');
-  await expect(folder).toContainText('1 submission');
+  await expect(folder).toContainText('2 submissions');
   await expect(folder.getByRole('link')).toHaveAttribute('href', new URL('.', feedbackUrl).href);
+
+  // The Solid login belongs to the browser session that signed in: another session of the
+  // same account has its own, and signing that one out leaves this one working.
+  const other = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const otherPage = await other.newPage();
+  await solidSignIn(otherPage, SOLID.admin);
+  expect((await otherPage.request.get('/api/feedback/pods')).status()).toBe(200);
+  await otherPage.request.post('/api/auth/logout');
+  await other.close();
+  expect((await page.request.get('/api/feedback/pods')).status()).toBe(200);
 
   // Signing out ends the admin's Solid login: reading the pods needs a new one.
   await page.request.post('/api/auth/logout');

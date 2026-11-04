@@ -4,7 +4,7 @@ import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
 import { allUsers, createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
-import { clientIdDocument, endLogin, finishLogin, resolveIssuer, SolidLoginError, startLogin } from './solidOidc.js';
+import { clientIdDocument, finishLogin, resolveIssuer, sessionKey, SolidLoginError, startLogin, type SolidLogin } from './solidOidc.js';
 import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
@@ -44,14 +44,17 @@ export function requireUser(req: Request): User {
   return req.user;
 }
 
-export function setSessionCookie(res: Response, userId: string) {
-  res.cookie(SESSION_COOKIE, createSession(userId), {
+/** Start a session for `userId` and give the browser its cookie. Returns the session token. */
+export function setSessionCookie(res: Response, userId: string): string {
+  const token = createSession(userId);
+  res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.publicUrl.startsWith('https://'),
     maxAge: 30 * 24 * 60 * 60 * 1000,
     path: '/',
   });
+  return token;
 }
 
 const google = () =>
@@ -62,16 +65,21 @@ const github = () =>
 export const providers = () => ({ google: !!google(), github: !!github(), solid: config.solidOidc.enabled, demo: config.demoMode });
 
 /**
- * Administrators who signed in with Solid keep their login (a DPoP-bound token, in
- * memory only) so Concord can read testers' pods as their WebID. Everyone else's
- * Solid tokens are thrown away straight after sign-in: we only needed to know who they are.
+ * Administrators who signed in with Solid keep their login (a DPoP-bound token
+ * and its key, in memory only) so Concord can read testers' pods as their WebID.
+ * It belongs to the browser session that signed in, not the account: another
+ * session of the same account can't use it. Everyone else's Solid tokens are
+ * dropped straight after sign-in: we only needed to know who they are.
  */
-const adminLogins = new Map<string, string>();
-export const adminLoginFor = (userId: string) => adminLogins.get(userId);
-export async function endAdminLogin(userId: string | undefined) {
-  if (!userId) return;
-  await endLogin(adminLogins.get(userId));
-  adminLogins.delete(userId);
+const adminLogins = new Map<string, SolidLogin>();
+const MAX_ADMIN_LOGINS = 100;
+export const adminLoginFor = (req: Request) => {
+  const token = req.cookies?.[SESSION_COOKIE];
+  return typeof token === 'string' && token ? adminLogins.get(sessionKey(token)) : undefined;
+};
+/** Forget the Solid login held for this session token (sign-out, or a new sign-in in the same browser). */
+export function endAdminLogin(sessionToken: unknown) {
+  if (typeof sessionToken === 'string' && sessionToken) adminLogins.delete(sessionKey(sessionToken));
 }
 
 /**
@@ -104,9 +112,10 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string) {
+function signInAs(req: Request, res: Response, userId: string): string {
+  endAdminLogin(req.cookies?.[SESSION_COOKIE]);
   destroySession(req.cookies?.[SESSION_COOKIE]);
-  setSessionCookie(res, userId);
+  return setSessionCookie(res, userId);
 }
 
 /**
@@ -120,8 +129,8 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
   const user = await upsertFederatedUser(identity, demoTester);
   if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user).catch((err) => console.warn(`[alpha] could not move testing record: ${(err as Error).message}`));
   clearTesterCookie(req, res);
-  signInAs(req, res, user.id);
-  return user;
+  const sessionToken = signInAs(req, res, user.id);
+  return { user, sessionToken };
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
 
@@ -198,8 +207,8 @@ export function mountAuth(router: Router) {
     const input = typeof req.query.webId === 'string' ? req.query.webId.trim().slice(0, 2000) : '';
     if (!input) return loginError(res, returnTo, 'Enter your WebID, or the address of your Solid provider.');
     try {
-      const { issuer } = await resolveIssuer(input);
-      const { loginId, url } = await startLogin(issuer, returnTo);
+      const { as } = await resolveIssuer(input);
+      const { loginId, url } = await startLogin(as, returnTo);
       res.cookie(SOLID_COOKIE, loginId, tmpCookie());
       res.redirect(url);
     } catch (err) {
@@ -219,15 +228,13 @@ export function mountAuth(router: Router) {
       if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] sign-in failed: ${(err as Error).message}`);
       return loginError(res, '/', err instanceof SolidLoginError ? err.message : 'Sign-in with Solid failed. Please try again.');
     }
-    if (managedWebId(done.webId)) {
-      await endLogin(done.loginId);
-      return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
+    if (managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
+    const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
+    // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
+    if (isAdmin(user)) {
+      if (adminLogins.size >= MAX_ADMIN_LOGINS) adminLogins.delete(adminLogins.keys().next().value!);
+      adminLogins.set(sessionKey(sessionToken), done.login);
     }
-    const user = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
-    // Keep an administrator's login (to read testers' pods as them); drop everyone else's tokens.
-    await endAdminLogin(user.id);
-    if (isAdmin(user)) adminLogins.set(user.id, done.loginId);
-    else await endLogin(done.loginId);
     res.redirect(`${config.webUrl}${done.returnTo}`);
   });
 }

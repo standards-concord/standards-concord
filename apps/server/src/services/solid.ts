@@ -4,6 +4,7 @@ import { Session } from '@inrupt/solid-client-authn-node';
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
 import { get, list, put } from '../db.js';
+import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
 
 /**
@@ -186,11 +187,16 @@ export const solid = {
       head = await s.fetch(folder, { method: 'HEAD' });
     }
     if (!head.ok) throw new Error(`HEAD ${folder} → ${head.status}`);
-    const link = parseLinks(head.headers.get('link'), folder);
-    const acl = link.find((l) => l.rel === 'acl')?.url;
-    if (!acl) throw new Error(`${folder} has no access control resource (Link rel="acl")`);
-    const acp = acl.endsWith('.acr') || link.some((l) => l.rel === 'type' && l.url === 'http://www.w3.org/ns/solid/acp#AccessControlResource');
-    const body = acp ? acpDocument(folder, rec.webId, want) : wacDocument(folder, rec.webId, want);
+    const { acl, acp } = aclOf(head.headers.get('link'), folder);
+    // Change only Concord's own sharing rule: whatever else the folder's access control says stays.
+    const existing = await readRdf(s.fetch.bind(s), acl);
+    let body: string;
+    if (acp) body = await acpMerge(folder, acl, existing ?? [], want);
+    else {
+      // No ACL of its own yet: it inherits one. Writing one stops the inheritance, so carry the inherited rules over.
+      const inherited = existing ? undefined : await inheritedAcl(s.fetch.bind(s), folder, rec.podUrl);
+      body = await wacMerge(folder, acl, existing, inherited, rec.webId, want);
+    }
     const res = await s.fetch(acl, { method: 'PUT', headers: { 'content-type': 'text/turtle' }, body });
     if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
     put('kv', { id: key, value: want });
@@ -230,59 +236,130 @@ export function parseLinks(header: string | null, base: string): { url: string; 
   return out;
 }
 
-const iri = (u: string) => {
-  // Only http(s) IRIs without characters that would break out of <...>.
-  if (!/^https?:\/\/[^\s<>"{}|\\^`]+$/.test(u)) throw new Error(`Not a usable IRI: ${u}`);
-  return `<${u}>`;
-};
+const ACL = 'http://www.w3.org/ns/auth/acl#';
+const ACP = 'http://www.w3.org/ns/solid/acp#';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const { namedNode: nn, quad: q } = DataFactory;
 
-/** WAC: the owner keeps full control; readers may read the folder and everything in it. */
-export function wacDocument(folder: string, owner: string, readers: string[]): string {
-  const lines = [
-    '@prefix acl: <http://www.w3.org/ns/auth/acl#> .',
-    '',
-    `<#owner> a acl:Authorization ;
-  acl:agent ${iri(owner)} ;
-  acl:accessTo ${iri(folder)} ;
-  acl:default ${iri(folder)} ;
-  acl:mode acl:Read, acl:Write, acl:Control .`,
-  ];
-  if (readers.length)
-    lines.push(
-      '',
-      '# Concord administrators (ADMIN_WEBIDS) can read testers\' feedback. Testers are told this.',
-      `<#concord-admins> a acl:Authorization ;
-  acl:agent ${readers.map(iri).join(', ')} ;
-  acl:accessTo ${iri(folder)} ;
-  acl:default ${iri(folder)} ;
-  acl:mode acl:Read .`,
-    );
-  return `${lines.join('\n')}\n`;
+/** The ACL resource a Link header points to, and whether it is ACP (.acr) rather than WAC. */
+function aclOf(link: string | null, resource: string) {
+  const links = parseLinks(link, resource);
+  const acl = links.find((l) => l.rel === 'acl')?.url;
+  if (!acl) throw new Error(`${resource} has no access control resource (Link rel="acl")`);
+  const acp = acl.endsWith('.acr') || links.some((l) => l.rel === 'type' && l.url === `${ACP}AccessControlResource`);
+  return { acl, acp };
 }
 
-/** ACP: the same policy as wacDocument, for servers that use Access Control Policies. */
-export function acpDocument(folder: string, owner: string, readers: string[]): string {
-  const controls = ['<#owner-access>', ...(readers.length ? ['<#admin-access>'] : [])].join(', ');
-  const lines = [
-    '@prefix acp: <http://www.w3.org/ns/solid/acp#> .',
-    '@prefix acl: <http://www.w3.org/ns/auth/acl#> .',
-    '',
-    `<> a acp:AccessControlResource ;
-  acp:resource ${iri(folder)} ;
-  acp:accessControl ${controls} ;
-  acp:memberAccessControl ${controls} .`,
-    '',
-    `<#owner-access> a acp:AccessControl ;
-  acp:apply [ a acp:Policy ; acp:allow acl:Read, acl:Write, acl:Control ; acp:anyOf [ a acp:Matcher ; acp:agent ${iri(owner)} ] ] .`,
-  ];
-  if (readers.length)
-    lines.push(
-      '',
-      '# Concord administrators (ADMIN_WEBIDS) can read testers\' feedback. Testers are told this.',
-      `<#admin-access> a acp:AccessControl ;
-  acp:apply [ a acp:Policy ; acp:allow acl:Read ; acp:anyOf [ a acp:Matcher ; acp:agent ${readers.map(iri).join(', ')} ] ] .`,
-    );
-  return `${lines.join('\n')}\n`;
+type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+/** GET an RDF document; undefined when it doesn't exist. */
+async function readRdf(fetchFn: Fetch, url: string): Promise<Quad[] | undefined> {
+  const r = await fetchFn(url, { headers: { accept: 'text/turtle' } });
+  if (r.status === 404) return undefined;
+  if (!r.ok) throw new Error(`GET ${url} → ${r.status}`);
+  return new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await r.text());
+}
+
+/** The nearest ancestor's ACL (the one a folder without its own inherits), up to the pod root. */
+async function inheritedAcl(fetchFn: Fetch, folder: string, podUrl: string): Promise<{ container: string; quads: Quad[] } | undefined> {
+  let container = new URL('..', folder).href;
+  while (container.startsWith(podUrl)) {
+    const head = await fetchFn(container, { method: 'HEAD' });
+    if (head.ok) {
+      const quads = await readRdf(fetchFn, aclOf(head.headers.get('link'), container).acl);
+      if (quads) return { container, quads };
+    }
+    if (container === podUrl) break;
+    container = new URL('..', container).href;
+  }
+  return undefined;
+}
+
+const usable = (u: string) => {
+  // Only absolute http(s) IRIs go into an access control document.
+  const url = new URL(u);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Not a usable IRI: ${u}`);
+  return nn(url.href);
+};
+
+function serialise(quads: Quad[], prefixes: Record<string, string>): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const w = new Writer({ prefixes });
+    w.addQuads(quads);
+    w.end((err, out) => (err ? reject(err) : resolve(out)));
+  });
+}
+
+/**
+ * WAC: the folder's ACL with Concord's sharing rule (<#concord-admins>: readers
+ * may read the folder and everything in it) set to `readers`, and nothing else
+ * changed. A folder without its own ACL starts from the rules it inherited
+ * (those with acl:default), re-pointed at the folder. The pod owner always keeps
+ * Read, Write and Control.
+ */
+export async function wacMerge(folder: string, aclUrl: string, existing: Quad[] | undefined, inherited: { container: string; quads: Quad[] } | undefined, owner: string, readers: string[]): Promise<string> {
+  const ours = nn(`${aclUrl}#concord-admins`);
+  const f = usable(folder);
+  let quads: Quad[] = [];
+  if (existing) quads = existing.filter((x) => !x.subject.equals(ours));
+  else if (inherited) {
+    const inheritedAuths = inherited.quads.filter((x) => x.predicate.value === `${ACL}default` && x.object.value === inherited.container).map((x) => x.subject);
+    inheritedAuths.forEach((auth, i) => {
+      const copy = nn(`${aclUrl}#inherited-${i + 1}`);
+      for (const x of inherited.quads.filter((y) => y.subject.equals(auth) && y.predicate.value !== `${ACL}accessTo` && y.predicate.value !== `${ACL}default`)) quads.push(q(copy, x.predicate, x.object));
+      quads.push(q(copy, nn(`${ACL}accessTo`), f), q(copy, nn(`${ACL}default`), f));
+    });
+  }
+  const o = usable(owner);
+  const ownerControls = quads.some(
+    (x) =>
+      x.predicate.value === `${ACL}agent` &&
+      x.object.equals(o) &&
+      quads.some((y) => y.subject.equals(x.subject) && y.predicate.value === `${ACL}mode` && y.object.value === `${ACL}Control`) &&
+      quads.some((y) => y.subject.equals(x.subject) && y.predicate.value === `${ACL}accessTo` && y.object.equals(f)),
+  );
+  if (!ownerControls) {
+    const me = nn(`${aclUrl}#concord-owner`);
+    quads = quads.filter((x) => !x.subject.equals(me));
+    quads.push(q(me, nn(RDF_TYPE), nn(`${ACL}Authorization`)), q(me, nn(`${ACL}agent`), o), q(me, nn(`${ACL}accessTo`), f), q(me, nn(`${ACL}default`), f));
+    for (const m of ['Read', 'Write', 'Control']) quads.push(q(me, nn(`${ACL}mode`), nn(`${ACL}${m}`)));
+  }
+  if (readers.length) {
+    quads.push(q(ours, nn(RDF_TYPE), nn(`${ACL}Authorization`)), q(ours, nn(`${ACL}accessTo`), f), q(ours, nn(`${ACL}default`), f), q(ours, nn(`${ACL}mode`), nn(`${ACL}Read`)));
+    for (const r of readers) quads.push(q(ours, nn(`${ACL}agent`), usable(r)));
+  }
+  return serialise(quads, { acl: ACL });
+}
+
+/**
+ * ACP: the folder's ACR with Concord's own access control (read for `readers`,
+ * on the folder and its members) set, and nothing else changed. ACP adds up
+ * policies, so the owner's inherited access is untouched.
+ */
+export async function acpMerge(folder: string, acrUrl: string, existing: Quad[], readers: string[]): Promise<string> {
+  const ac = nn(`${acrUrl}#concord-admins-access`);
+  const policy = nn(`${acrUrl}#concord-admins-policy`);
+  const matcher = nn(`${acrUrl}#concord-admins-matcher`);
+  const managed = [ac, policy, matcher];
+  let quads = existing.filter((x) => !managed.some((m) => x.subject.equals(m) || x.object.equals(m)));
+  if (readers.length) {
+    const acr = quads.find((x) => x.predicate.value === RDF_TYPE && x.object.value === `${ACP}AccessControlResource`)?.subject ?? nn(acrUrl);
+    if (!quads.some((x) => x.subject.equals(acr) && x.predicate.value === RDF_TYPE)) quads.push(q(acr as never, nn(RDF_TYPE), nn(`${ACP}AccessControlResource`)));
+    if (!quads.some((x) => x.subject.equals(acr) && x.predicate.value === `${ACP}resource`)) quads.push(q(acr as never, nn(`${ACP}resource`), usable(folder)));
+    quads = [
+      ...quads,
+      q(acr as never, nn(`${ACP}accessControl`), ac),
+      q(acr as never, nn(`${ACP}memberAccessControl`), ac),
+      q(ac, nn(RDF_TYPE), nn(`${ACP}AccessControl`)),
+      q(ac, nn(`${ACP}apply`), policy),
+      q(policy, nn(RDF_TYPE), nn(`${ACP}Policy`)),
+      q(policy, nn(`${ACP}allow`), nn(`${ACL}Read`)),
+      q(policy, nn(`${ACP}anyOf`), matcher),
+      q(matcher, nn(RDF_TYPE), nn(`${ACP}Matcher`)),
+      ...readers.map((r) => q(matcher, nn(`${ACP}agent`), usable(r))),
+    ];
+  }
+  return serialise(quads, { acp: ACP, acl: ACL });
 }
 
 /** Serialise an interview transcript as Turtle (schema.org Conversation) for the pod. */

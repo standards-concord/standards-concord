@@ -12,7 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
-import { fetchAs } from '../solidOidc.js';
+import { podReader } from '../solidOidc.js';
 import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor } from '../services/alpha.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
@@ -136,13 +136,14 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
+    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     setSessionCookie(res, user.id);
     rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
 
   r.post('/auth/logout', async (req, res) => {
-    await endAdminLogin(req.user?.id);
+    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     clearTesterCookie(req, res);
     destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
@@ -570,11 +571,11 @@ export function apiRouter(): Router {
   // Testers' feedback read straight from their pods, as the admin's own WebID (only if they signed in with Solid).
   r.get('/feedback/pods', async (req, res) => {
     feedbackAdmin(req);
-    const login = adminLoginFor(req.user!.id);
-    const as = login ? await fetchAs(login) : undefined;
-    // Their Solid login is kept in memory only: a server restart or an expired token ends it.
-    if (!as) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
-    res.json(await readPodFeedback(as));
+    const login = adminLoginFor(req);
+    const read = login ? await podReader(login) : undefined;
+    // Their Solid login is kept in memory, for the browser session that signed in: a restart, another browser or an expired token ends it.
+    if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
+    res.json(await readPodFeedback({ webId: login.webId, get: read }));
   });
   r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '25mb' }), async (req, res) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Send audio as the request body');

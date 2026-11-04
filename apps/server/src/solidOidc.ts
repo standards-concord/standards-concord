@@ -1,29 +1,32 @@
-import { lookup as dnsLookup } from 'node:dns';
 import { lookup as dnsLookupAll } from 'node:dns/promises';
-import { getSessionFromStorage, InMemoryStorage, Session } from '@inrupt/solid-client-authn-node';
+import { createHash } from 'node:crypto';
+import * as oauth from 'oauth4webapi';
 import { Parser, type Quad } from 'n3';
-import { custom } from 'openid-client';
 import { config } from './config.js';
-import { FetchError, ipLiteral, isPublicAddress, publicOnlyLookup, safeFetchText } from './safeFetch.js';
+import { FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
 
 /**
  * Signing in with your own WebID (Solid-OIDC), as a relying party.
  *
  * Concord sends the browser to the person's OpenID provider (the one their
- * WebID profile names), receives a DPoP-bound access token and an ID token,
- * and then checks for itself that the WebID's profile really lists that
- * provider as a `solid:oidcIssuer`. Without that last check any provider could
- * claim any WebID.
+ * WebID profile names), exchanges the code (PKCE, nonce) for a DPoP-bound access
+ * token and a signed ID token, and then checks for itself that the WebID's
+ * profile lists the token's verified issuer as a `solid:oidcIssuer`. Without
+ * that last check any provider could claim any WebID.
  *
- * The token exchange, PKCE and DPoP are done by Inrupt's client library. The
- * URLs involved come from strangers (a WebID, its profile, the provider's
- * metadata), so every request made for an untrusted host may only reach
- * public internet addresses.
+ * The provider's metadata is fetched once, when sign-in starts, and that same
+ * metadata is used to the end. Every request (discovery, registration, token,
+ * JWKS, refresh, profiles) goes through `guardedFetch`: https only, public
+ * addresses only (checked on the address actually connected to, IP literals
+ * included), no redirects, a byte cap and one deadline over the whole body.
+ * Only the operator's own Solid server and SOLID_TRUSTED_ISSUERS are exempt.
  */
 
 const SOLID_OIDC_ISSUER = 'http://www.w3.org/ns/solid/terms#oidcIssuer';
 const FOAF_NAME = 'http://xmlns.com/foaf/0.1/name';
 const VCARD_FN = 'http://www.w3.org/2006/vcard/ns#fn';
+const MAX_BYTES = 256 * 1024;
+const TIMEOUT_MS = 8000;
 
 /** Origins the operator configured (their own Solid server, SOLID_TRUSTED_ISSUERS): these may be private or plain http. */
 export function trustedOrigins(): string[] {
@@ -38,18 +41,6 @@ export function trustedOrigins(): string[] {
   return [...out];
 }
 const isTrusted = (url: URL) => trustedOrigins().includes(url.origin);
-const trustedHostnames = () => new Set(trustedOrigins().map((o) => new URL(o).hostname));
-
-/**
- * openid-client (inside Inrupt's library) makes the discovery, registration and
- * token requests. Its sockets may only reach public addresses, except the
- * operator's trusted hosts (the pod server Concord itself uses).
- */
-custom.setHttpOptionsDefaults({
-  timeout: 8000,
-  lookup: ((hostname: string, options: never, callback: never) =>
-    (trustedHostnames().has(hostname) ? dnsLookup : publicOnlyLookup)(hostname, options, callback)) as never,
-});
 
 export class SolidLoginError extends Error {}
 
@@ -68,7 +59,7 @@ function parseUrl(raw: string, what: string): URL {
   return url;
 }
 
-/** Hosts we fetch for strangers must resolve to public addresses only (no Concord-internal services). */
+/** A quick, friendly refusal before anything is fetched (guardedFetch still checks the address it connects to). */
 async function assertPublicHost(url: URL) {
   if (isTrusted(url)) return;
   const literal = ipLiteral(url);
@@ -76,8 +67,46 @@ async function assertPublicHost(url: URL) {
   if (!addresses.length || !addresses.every(isPublicAddress)) throw new SolidLoginError(`${url.host} isn’t reachable from Concord`);
 }
 
-const fetchText = (url: URL, accept: string) =>
-  safeFetchText(url, { accept, maxBytes: 256 * 1024, timeoutMs: 8000, allowPrivate: isTrusted(url), allowHttp: isTrusted(url) });
+function headerRecord(h: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  new Headers(h).forEach((v, k) => (out[k] = v));
+  return out;
+}
+
+/**
+ * The only fetch the Solid sign-in uses, handed to oauth4webapi as its
+ * customFetch. See the comment at the top for what it enforces.
+ */
+export async function guardedFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  const trusted = isTrusted(url);
+  const method = (init.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'POST') throw new FetchError('bad-response', `${method} is not allowed`);
+  let body: string | undefined;
+  if (init.body !== undefined && init.body !== null) {
+    if (typeof init.body === 'string') body = init.body;
+    else if (init.body instanceof URLSearchParams) body = init.body.toString();
+    else throw new FetchError('bad-response', 'Unsupported request body');
+  }
+  const headers = headerRecord(init.headers);
+  const r = await safeRequest(url, { method, headers, body, accept: headers.accept, maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS, allowPrivate: trusted, allowHttp: trusted });
+  // Response refuses bodies on these statuses; a redirect comes back as itself and is never followed.
+  const nullBody = [101, 204, 205, 304].includes(r.status);
+  if (r.status < 200 || r.status > 599) throw new FetchError('bad-response', `HTTP ${r.status}`);
+  return new Response(nullBody ? null : r.body, { status: r.status, headers: r.headers });
+}
+
+const oauthOptions = (url: URL) => ({
+  [oauth.customFetch]: guardedFetch as typeof fetch,
+  // Plain http only for the operator's own (trusted) Solid server, in development and tests.
+  ...(url.protocol === 'http:' && isTrusted(url) ? { [oauth.allowInsecureRequests]: true } : {}),
+});
+
+async function fetchText(url: URL, accept: string): Promise<string> {
+  const r = await guardedFetch(url, { headers: { accept } });
+  if (!r.ok) throw new FetchError(r.status === 404 || r.status === 410 ? 'not-found' : 'bad-response', `HTTP ${r.status}`, r.status);
+  return r.text();
+}
 
 export interface WebIdProfile {
   webId: string;
@@ -117,45 +146,34 @@ export async function fetchProfile(webId: string): Promise<WebIdProfile> {
   return parseProfile(url.href, doc.href, body);
 }
 
-interface ProviderMetadata {
-  issuer: string;
-  authorization_endpoint?: string;
-  token_endpoint?: string;
-  jwks_uri?: string;
-  registration_endpoint?: string;
-}
-
 /**
- * Check an OpenID provider before Inrupt's library talks to it: its metadata
- * must name itself, and the endpoints it lists must be https on public hosts.
- * (The JWKS is fetched by a library we can't give our own lookup to, so it is checked here.)
+ * Fetch an OpenID provider's metadata, once. It must name itself, and list an
+ * authorization endpoint, a token endpoint and a JWKS.
  */
-export async function checkProvider(issuer: string): Promise<string> {
+export async function discoverProvider(issuer: string): Promise<oauth.AuthorizationServer> {
   const url = parseUrl(issuer, 'Solid provider address');
-  const wellKnown = new URL(`${url.href.replace(/\/+$/, '')}/.well-known/openid-configuration`);
-  let meta: ProviderMetadata;
+  await assertPublicHost(url);
+  let meta: oauth.AuthorizationServer;
   try {
-    meta = JSON.parse(await fetchText(wellKnown, 'application/json')) as ProviderMetadata;
+    const r = await oauth.discoveryRequest(url, { algorithm: 'oidc', ...oauthOptions(url) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    meta = (await r.json()) as oauth.AuthorizationServer;
   } catch {
     throw new SolidLoginError(`${url.host} doesn’t look like a Solid provider (no OpenID configuration)`);
   }
-  if (typeof meta.issuer !== 'string' || !sameIssuer(meta.issuer, url.href)) throw new SolidLoginError(`${url.host} describes itself as a different provider`);
+  if (!meta || typeof meta.issuer !== 'string' || !sameIssuer(meta.issuer, url.href)) throw new SolidLoginError(`${url.host} describes itself as a different provider`);
   for (const field of ['authorization_endpoint', 'token_endpoint', 'jwks_uri'] as const) {
     if (typeof meta[field] !== 'string') throw new SolidLoginError(`${url.host}’s OpenID configuration has no ${field}`);
+    parseUrl(meta[field], 'provider endpoint');
   }
-  for (const field of ['authorization_endpoint', 'token_endpoint', 'jwks_uri', 'registration_endpoint'] as const) {
-    if (meta[field] === undefined) continue;
-    const endpoint = parseUrl(String(meta[field]), 'provider endpoint');
-    await assertPublicHost(endpoint);
-  }
-  return meta.issuer;
+  return meta;
 }
 
 /**
  * Where to send someone who typed `input`: a WebID (we use the provider its
  * profile names), or the address of a Solid provider itself.
  */
-export async function resolveIssuer(input: string): Promise<{ issuer: string; webId?: string }> {
+export async function resolveIssuer(input: string): Promise<{ as: oauth.AuthorizationServer; webId?: string }> {
   const url = parseUrl(input, 'WebID or Solid provider address');
   await assertPublicHost(url);
   let profile: WebIdProfile | undefined;
@@ -164,9 +182,9 @@ export async function resolveIssuer(input: string): Promise<{ issuer: string; we
   } catch {
     /* not a readable profile: try it as a provider below */
   }
-  if (profile?.issuers.length) return { issuer: await checkProvider(profile.issuers[0]!), webId: profile.webId };
+  if (profile?.issuers.length) return { as: await discoverProvider(profile.issuers[0]!), webId: profile.webId };
   try {
-    return { issuer: await checkProvider(url.href) };
+    return { as: await discoverProvider(url.href) };
   } catch (err) {
     if (profile) throw new SolidLoginError('That WebID’s profile doesn’t name a Solid provider (solid:oidcIssuer) to sign in with');
     throw err;
@@ -177,25 +195,10 @@ export async function resolveIssuer(input: string): Promise<{ issuer: string; we
 /* The login itself                                                          */
 /* ------------------------------------------------------------------------ */
 
-/** Inrupt's sessions (tokens and DPoP keys) live in this process only and are lost on restart. */
-const storage = new InMemoryStorage();
-
-interface Pending {
-  issuer: string;
-  returnTo: string;
-  at: number;
-}
-const pending = new Map<string, Pending>();
-const PENDING_TTL = 10 * 60 * 1000;
-
-const sweep = () => {
-  const now = Date.now();
-  for (const [id, p] of pending) if (now - p.at > PENDING_TTL) pending.delete(id);
-};
-
 export const redirectUrl = () => `${config.publicUrl}/auth/solid/callback`;
 /** The Solid-OIDC Client ID Document. Providers fetch it, so it needs a public https address. */
 export const clientIdUrl = () => (config.publicUrl.startsWith('https://') ? `${config.publicUrl}/auth/solid/client.jsonld` : undefined);
+const SCOPE = 'openid webid offline_access';
 
 export function clientIdDocument() {
   return {
@@ -205,7 +208,7 @@ export function clientIdDocument() {
     client_uri: config.webUrl,
     logo_uri: `${config.webUrl}/favicon.svg`,
     redirect_uris: [redirectUrl()],
-    scope: 'openid webid offline_access',
+    scope: SCOPE,
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'none',
@@ -214,24 +217,106 @@ export function clientIdDocument() {
   };
 }
 
-/** Start signing in: returns the login session's id (for a cookie) and where to send the browser. */
-export async function startLogin(issuer: string, returnTo: string): Promise<{ loginId: string; url: string }> {
-  sweep();
-  const session = new Session({ storage, keepAlive: true });
-  let url: string | undefined;
-  await session.login({
-    oidcIssuer: issuer,
-    redirectUrl: redirectUrl(),
-    clientName: 'Concord',
-    clientId: clientIdUrl(),
-    tokenType: 'DPoP',
-    handleRedirect: (u: string) => {
-      url = u;
+/** Dynamically registered clients, per provider (only for providers that don't take a Client ID Document). */
+const registered = new Map<string, oauth.Client>();
+
+async function clientFor(as: oauth.AuthorizationServer): Promise<oauth.Client> {
+  const cid = clientIdUrl();
+  if (cid && as.scopes_supported?.includes('webid')) return { client_id: cid, token_endpoint_auth_method: 'none' };
+  const known = registered.get(as.issuer);
+  if (known) return known;
+  if (!as.registration_endpoint) throw new SolidLoginError('That Solid provider can’t register Concord as an app');
+  const url = parseUrl(as.registration_endpoint, 'provider endpoint');
+  const r = await oauth.dynamicClientRegistrationRequest(
+    as,
+    {
+      client_name: 'Concord',
+      redirect_uris: [redirectUrl()],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+      application_type: 'web',
+      scope: SCOPE,
     },
-  });
-  if (!url) throw new SolidLoginError('The Solid provider didn’t start a sign-in');
-  pending.set(session.info.sessionId, { issuer, returnTo, at: Date.now() });
-  return { loginId: session.info.sessionId, url };
+    oauthOptions(url),
+  );
+  const client = await oauth.processDynamicClientRegistrationResponse(r);
+  if (registered.size > 200) registered.clear();
+  registered.set(as.issuer, client);
+  return client;
+}
+
+interface Pending {
+  as: oauth.AuthorizationServer;
+  client: oauth.Client;
+  verifier: string;
+  state: string;
+  nonce: string;
+  returnTo: string;
+  at: number;
+}
+const pending = new Map<string, Pending>();
+const PENDING_TTL = 10 * 60 * 1000;
+const MAX_PENDING = 1000;
+
+const sweep = () => {
+  const now = Date.now();
+  for (const [id, p] of pending) if (now - p.at > PENDING_TTL) pending.delete(id);
+};
+
+/** Start signing in: returns the login's id (for a cookie) and where to send the browser. */
+export async function startLogin(as: oauth.AuthorizationServer, returnTo: string): Promise<{ loginId: string; url: string }> {
+  sweep();
+  if (pending.size >= MAX_PENDING) throw new SolidLoginError('Too many sign-ins in progress. Please try again in a minute.');
+  const client = await clientFor(as);
+  const verifier = oauth.generateRandomCodeVerifier();
+  const state = oauth.generateRandomState();
+  const nonce = oauth.generateRandomNonce();
+  const url = new URL(as.authorization_endpoint!);
+  for (const [k, v] of Object.entries({
+    client_id: client.client_id,
+    redirect_uri: redirectUrl(),
+    response_type: 'code',
+    scope: SCOPE,
+    state,
+    nonce,
+    code_challenge: await oauth.calculatePKCECodeChallenge(verifier),
+    code_challenge_method: 'S256',
+    prompt: 'consent',
+  }))
+    url.searchParams.set(k, v);
+  const loginId = oauth.generateRandomState();
+  pending.set(loginId, { as, client, verifier, state, nonce, returnTo, at: Date.now() });
+  return { loginId, url: url.href };
+}
+
+/** What Concord keeps of an administrator's Solid login: a DPoP-bound token for reading pods as them. */
+export interface SolidLogin {
+  webId: string;
+  as: oauth.AuthorizationServer;
+  client: oauth.Client;
+  keys: CryptoKeyPair;
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number;
+}
+
+export interface FinishedLogin {
+  webId: string;
+  issuer: string;
+  name: string;
+  returnTo: string;
+  login: SolidLogin;
+}
+
+/** Retry once when the provider asks for a DPoP nonce (the DPoP handle remembers it). */
+async function withNonceRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (oauth.isDPoPNonceError(err)) return fn();
+    throw err;
+  }
 }
 
 /** A readable name for a WebID whose profile gives none: its first path segment ("jesse" in /jesse/profile/card#me), else its host. */
@@ -245,66 +330,96 @@ export function nameFromWebId(webId: string): string {
   }
 }
 
-export interface FinishedLogin {
-  webId: string;
-  issuer: string;
-  name: string;
-  returnTo: string;
-  /** Inrupt's session id: keep it to act as this person in their pods (DPoP-bound), or end it. */
-  loginId: string;
-}
-
 /**
  * Finish signing in. `loginId` is the cookie this browser got when it started;
- * the provider's state must belong to the same login. Then the WebID's profile
- * must list the provider we sent them to.
+ * the callback must carry that login's state. The ID token must be signed by
+ * the provider we started with (its JWKS), for us, with our nonce; then the
+ * WebID's profile must list the token's issuer.
  */
 export async function finishLogin(loginId: string | undefined, callbackUrl: string): Promise<FinishedLogin> {
   sweep();
   const p = loginId ? pending.get(loginId) : undefined;
   if (!loginId || !p) throw new SolidLoginError('Sign-in failed: it expired or was started in another browser. Please try again.');
   pending.delete(loginId);
-  const session = await getSessionFromStorage(loginId, { storage, refreshSession: false });
-  if (!session) throw new SolidLoginError('Sign-in failed: it expired. Please try again.');
-  let info;
+  const { as, client } = p;
+  const tokenUrl = new URL(as.token_endpoint!);
+  const opts = oauthOptions(tokenUrl);
+  let claims: oauth.IDToken;
+  let tokens: oauth.TokenEndpointResponse;
+  const keys = await oauth.generateKeyPair('ES256');
+  const DPoP = oauth.DPoP(client, keys);
   try {
-    info = await session.handleIncomingRedirect(callbackUrl);
+    const params = oauth.validateAuthResponse(as, client, new URL(callbackUrl), p.state);
+    let response: Response | undefined;
+    tokens = await withNonceRetry(async () => {
+      response = await oauth.authorizationCodeGrantRequest(as, client, oauth.None(), params, redirectUrl(), p.verifier, { DPoP, ...opts });
+      return oauth.processAuthorizationCodeResponse(as, client, response, { expectedNonce: p.nonce, requireIdToken: true });
+    });
+    // The ID token's signature, against the JWKS of the provider we started with.
+    await oauth.validateApplicationLevelSignature(as, response!, oauthOptions(new URL(as.jwks_uri!)));
+    claims = oauth.getValidatedIdTokenClaims(tokens)!;
   } catch (err) {
-    await endLogin(loginId);
-    throw new SolidLoginError(`Sign-in failed: ${(err as Error).message.split('\n')[0]?.slice(0, 200)}`);
+    const msg = err instanceof Error ? err.message.split('\n')[0]!.slice(0, 200) : 'unknown error';
+    throw new SolidLoginError(`Sign-in failed: ${msg}`);
   }
-  if (!info?.isLoggedIn || info.sessionId !== loginId || !info.webId) {
-    await endLogin(loginId);
-    throw new SolidLoginError('Sign-in failed: the provider didn’t confirm a WebID. Please try again.');
-  }
-  let profile: WebIdProfile;
+  if (tokens.token_type?.toLowerCase() !== 'dpop') throw new SolidLoginError('Sign-in failed: the provider didn’t issue a DPoP-bound token');
+  // oauth4webapi has checked iss === as.issuer, aud, exp and the nonce.
+  const webId = typeof claims.webid === 'string' ? claims.webid : claims.sub;
   try {
-    profile = await fetchProfile(info.webId);
-  } catch (err) {
-    await endLogin(loginId);
-    throw err;
+    new URL(webId);
+  } catch {
+    throw new SolidLoginError('Sign-in failed: the provider didn’t confirm a WebID');
   }
-  if (!issuerListed(profile, p.issuer)) {
-    await endLogin(loginId);
-    throw new SolidLoginError(`Sign-in refused: ${info.webId} doesn’t list ${p.issuer} as its Solid provider`);
-  }
-  return { webId: info.webId, issuer: p.issuer, name: profile.name ?? nameFromWebId(info.webId), returnTo: p.returnTo, loginId };
+  const profile = await fetchProfile(webId);
+  if (!issuerListed(profile, claims.iss)) throw new SolidLoginError(`Sign-in refused: ${webId} doesn’t list ${claims.iss} as its Solid provider`);
+  return {
+    webId,
+    issuer: claims.iss,
+    name: profile.name ?? nameFromWebId(webId),
+    returnTo: p.returnTo,
+    login: { webId, as, client, keys, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt: Date.now() + (tokens.expires_in ?? 300) * 1000 },
+  };
 }
 
-/** Forget a login's tokens and keys. */
-export async function endLogin(loginId: string | undefined) {
-  if (!loginId) return;
-  pending.delete(loginId);
-  const s = await getSessionFromStorage(loginId, { storage, refreshSession: false }).catch(() => undefined);
-  await s?.logout({ logoutType: 'app' }).catch(() => undefined);
-  for (const key of await storageKeys(loginId)) await storage.delete(key).catch(() => undefined);
+/** Refresh the access token if it is (nearly) expired. Returns false when the login can't continue. */
+async function fresh(login: SolidLogin): Promise<boolean> {
+  if (Date.now() < login.expiresAt - 30_000) return true;
+  if (!login.refreshToken) return false;
+  try {
+    const DPoP = oauth.DPoP(login.client, login.keys);
+    const opts = oauthOptions(new URL(login.as.token_endpoint!));
+    const t = await withNonceRetry(async () =>
+      oauth.processRefreshTokenResponse(login.as, login.client, await oauth.refreshTokenGrantRequest(login.as, login.client, oauth.None(), login.refreshToken!, { DPoP, ...opts })),
+    );
+    login.accessToken = t.access_token;
+    login.refreshToken = t.refresh_token ?? login.refreshToken;
+    login.expiresAt = Date.now() + (t.expires_in ?? 300) * 1000;
+    return true;
+  } catch {
+    return false;
+  }
 }
-// Inrupt keeps a session's data under one key per session.
-const storageKeys = async (id: string) => [`solidClientAuthenticationUser:${id}`];
 
-/** A fetch that acts as the signed-in WebID (DPoP-bound access token), or undefined if that login has ended. */
-export async function fetchAs(loginId: string): Promise<{ fetch: typeof fetch; webId: string } | undefined> {
-  const s = await getSessionFromStorage(loginId, { storage }).catch(() => undefined);
-  if (!s?.info.isLoggedIn || !s.info.webId) return undefined;
-  return { fetch: s.fetch.bind(s) as typeof fetch, webId: s.info.webId };
+/**
+ * A GET that acts as the signed-in WebID (DPoP proof per request), for the
+ * operator's own pod server only, never following redirects. Undefined if the
+ * login can no longer be used.
+ */
+export async function podReader(login: SolidLogin): Promise<((url: string, accept: string) => Promise<Response>) | undefined> {
+  if (!(await fresh(login))) return undefined;
+  const DPoP = oauth.DPoP(login.client, login.keys);
+  return async (url, accept) => {
+    const u = new URL(url);
+    if (!config.solid.serverUrl || u.origin !== new URL(config.solid.serverUrl).origin) throw new Error(`Not on this server’s pod server: ${url}`);
+    return withNonceRetry(() =>
+      oauth.protectedResourceRequest(login.accessToken, 'GET', u, new Headers({ accept }), null, {
+        DPoP,
+        [oauth.customFetch]: ((i: string, init: RequestInit) => fetch(i, { ...init, redirect: 'manual' })) as never,
+        ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}),
+      }),
+    );
+  };
 }
+
+/** Logins are kept per browser session: the key is a hash of the session cookie, never the account. */
+export const sessionKey = (sessionToken: string) => createHash('sha256').update(`solid-login:${sessionToken}`).digest('hex');
