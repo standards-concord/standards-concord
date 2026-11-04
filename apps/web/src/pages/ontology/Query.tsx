@@ -337,9 +337,10 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const ask = async (text: string) => {
     const mine: ChatMessage = { id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() };
     const history = [...chat, mine];
-    setChat(history);
-    // Whose conversation this is, as of now: the answer is kept only if that is still so when it arrives.
+    // Whose conversation this is, as of now: nothing is saved unless it still is, now and when the answer arrives.
     const token = accountToken();
+    if (!stillCurrent(token, account)) return;
+    setChat(history);
     setAsking(true);
     setChatError(undefined);
     try {

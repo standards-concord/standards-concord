@@ -547,6 +547,26 @@ describe('query assistant (offline helper)', () => {
     }
   });
 
+  it('keeps a condition from an earlier message unless told to replace it', async () => {
+    const agent = await login('contributor');
+    // The second condition used to silently replace the first.
+    const [, over, under] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those with minimum age under 15');
+    expect(under.unchanged).toBe(true);
+    expect(under.query).toBe(over.query);
+    expect(under.reply).toContain('already a condition on minimum age (over 10)');
+    const [, park, garden] = await converse(agent, 'List every volunteering opportunity', 'Only those called "Park"', 'Also only those called "Garden"');
+    expect(garden.unchanged).toBe(true);
+    expect(garden.query).toBe(park.query);
+    // Saying so replaces it.
+    const [, , instead] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Only those with minimum age under 15 instead');
+    expect(instead.query).toContain('FILTER(?minimumAge < 15)');
+    expect(instead.query).not.toContain('?minimumAge > 10');
+    // A condition on another property adds to it.
+    const [, , both] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those called "Park"');
+    expect(both.query).toContain('FILTER(?minimumAge > 10)');
+    expect(both.query).toContain('"park"');
+  });
+
   it('treats quoted words as values, never as instructions', async () => {
     const agent = await login('contributor');
     // "count" used to turn the list into a count, and "all rows" used to lift the limit.

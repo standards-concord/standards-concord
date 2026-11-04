@@ -337,6 +337,36 @@ test.describe('Query tab', () => {
     await other.close();
   });
 
+  test('a message sent while another tab is still signing out is cleared once the sign-out finishes', async ({ page, context }) => {
+    // Used to come back: the other tab announced the sign-out before the server had ended the session, so this tab
+    // asked the server, was told it was still signed in, and saved the whole conversation again.
+    await ask(page, 'List every volunteering opportunity');
+    const other = await context.newPage();
+    await other.goto('/');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let loggedOut = false;
+    await other.route(/\/api\/auth\/logout$/, async (r) => {
+      await held;
+      await r.continue();
+      loggedOut = true;
+    });
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    // Meanwhile, here, the session is still live: a new message goes through and is saved.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await ask(page, 'Also show the minimum age');
+    const mine = (p: Page) => p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    release();
+    await expect.poll(() => loggedOut).toBe(true);
+    await expect(other).toHaveURL(/\/login/);
+    // This tab signs out too, at once, and nothing of the account is left.
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(await mine(page)).toEqual([]);
+    await other.close();
+  });
+
   test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
     await ask(page, 'List every volunteering opportunity');
     // Another tab signs in as someone else (the session cookie is shared).

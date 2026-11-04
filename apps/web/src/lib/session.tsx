@@ -89,13 +89,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // so pages holding one account's drafts never carry on under another account.
   const sessionRef = useRef(session);
   sessionRef.current = session;
-  // Another tab signed out: forget this tab's account too (and anything of it written in the meantime), then re-check.
+  // Another tab finished signing out: this tab is signed out too, straight away (its workspace for the
+  // account closes, and anything of it written in the meantime goes), then the server confirms.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== SIGN_OUTS) return;
-      const was = sessionRef.current?.user?.id;
-      activeAccount = undefined;
+      const current = sessionRef.current;
+      const was = current?.user?.id;
       if (was) clearDrafts(was);
+      if (current) setSession({ ...current, user: undefined });
+      activeAccount = undefined;
       void api
         .session()
         .then(setSession)
@@ -142,9 +145,20 @@ export function useSession() {
   return c;
 }
 
-/** Drafts this browser keeps for an account (query drafts and query-assistant chats): removed on sign-out. */
-export function forgetAccountDrafts(userId: string) {
-  // First, so a reply still on its way for this account, in this tab or another, is dropped rather than saved after the clear-out.
+/**
+ * Signing out, in two steps around the request that ends the session. First,
+ * this tab forgets the account (so a reply on its way here is dropped) and
+ * clears its drafts. Then, once the server has ended the session, every tab is
+ * told: replies on their way there are dropped, their copy of the drafts is
+ * cleared again (anything written in between goes too), and they switch to
+ * signed out at once rather than asking the server while it may still say
+ * otherwise. The query drafts and assistant chats are what is cleared.
+ */
+export function beginSignOut(userId: string) {
+  activeAccount = undefined;
+  clearDrafts(userId);
+}
+export function finishSignOut(userId: string) {
   activeAccount = undefined;
   try {
     localStorage.setItem(SIGN_OUTS, String(Number(signOuts()) + 1));

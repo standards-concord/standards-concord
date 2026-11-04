@@ -9,8 +9,12 @@ import sparqljs, { type SparqlQuery } from 'sparqljs';
  * Two kinds of check:
  * - policy: read-only forms over the page's own data (no updates, SERVICE or
  *   FROM), applied to what the assistant writes;
- * - resources: queries that would build an enormous table or enormous values
- *   before returning a single row, applied to every query.
+ * - resources: queries whose own text makes them build an enormous table
+ *   (multiplying VALUES lists) or enormous values (repeated CONCAT or
+ *   REPLACE), applied to every query. This is not a memory bound: what a
+ *   query builds from the data (GROUP_CONCAT over many rows, a big join)
+ *   can't be known from the text. The browser bounds that with a cap on the
+ *   engine's memory and a limit on the size of a result row.
  */
 
 export type ParsedSparql = SparqlQuery;
@@ -53,54 +57,145 @@ const SHORT = new Set([
   'md5', 'sha1', 'sha256', 'sha384', 'sha512', 'lang', 'datatype', 'uuid', 'struuid', 'bnode',
 ]);
 
+type Env = Map<string, number>;
+
 /**
- * An upper bound on how long each variable's values can get, from the BINDs,
- * projections and VALUES that define them: CONCAT adds lengths, REPLACE can
- * multiply them, values from the data are assumed short.
+ * An upper bound on the longest value a query can build from its own
+ * expressions, worked out the way the query is evaluated: each query level
+ * (the outer query and every subquery) has its own variables, a subquery
+ * passes out only what it projects, patterns are read in order so a BIND
+ * sees what came before it, and projections come after WHERE. CONCAT adds
+ * lengths and REPLACE can multiply them; values from the data are assumed
+ * to be at most DATA_CHARS. GROUP_CONCAT depends on how many rows it joins,
+ * which can't be known from the text: it counts as GROUP_CHARS here, and the
+ * browser's memory cap and row-size limit bound what it really builds.
  */
 function longestValue(tree: ParsedSparql): { chars: number; variable?: string } {
-  const env = new Map<string, number>();
-  const est = (e: unknown): number => {
-    if (Array.isArray(e)) return Math.max(0, ...e.map(est));
+  let worst: { chars: number; variable?: string } = { chars: 0 };
+  const note = (chars: number, variable?: string) => {
+    if (chars > worst.chars || (chars === worst.chars && variable && !worst.variable)) worst = { chars, variable };
+  };
+
+  const est = (e: unknown, env: Env): number => {
+    if (Array.isArray(e)) return Math.max(0, ...e.map((x) => est(x, env)));
     if (!e || typeof e !== 'object') return 0;
     const n = e as Node;
     if (n.termType === 'Variable') return env.get(n.value as string) ?? DATA_CHARS;
     if (n.termType) return String(n.value ?? '').length;
     const args = (n.args as unknown[] | undefined) ?? [];
+    let out: number;
     if (n.type === 'operation') {
       const op = String(n.operator).toLowerCase();
-      if (SHORT.has(op)) return 64;
-      if (op === 'concat') return args.reduce<number>((s, a) => s + est(a), 0);
+      if (op === 'exists' || op === 'notexists') {
+        // The pattern inside is evaluated too (with the outer variables in scope), but yields only a boolean.
+        patterns(args, new Map(env));
+        return 64;
+      }
+      const sizes = args.map((a) => est(a, env));
+      if (SHORT.has(op)) out = 64;
+      else if (op === 'concat') out = sizes.reduce((x, y) => x + y, 0);
       // Every match (at most one per character, plus the empty ones) can become the whole replacement, or copies of the match.
-      if (op === 'replace') return (est(args[0]) + 1) * (est(args[2]) + 1);
-      if (op === 'encode_for_uri') return 3 * est(args[0]);
-      if (op === 'if') return Math.max(est(args[1]), est(args[2]));
-      return est(args);
-    }
-    if (n.type === 'functionCall') return est(args);
-    if (n.type === 'aggregate') return n.aggregation === 'group_concat' ? GROUP_CHARS : n.aggregation === 'count' || n.aggregation === 'sum' || n.aggregation === 'avg' ? 64 : est(n.expression);
-    return 0;
+      else if (op === 'replace') out = ((sizes[0] ?? 0) + 1) * ((sizes[2] ?? 0) + 1);
+      else if (op === 'encode_for_uri') out = 3 * (sizes[0] ?? 0);
+      else if (op === 'if') out = Math.max(sizes[1] ?? 0, sizes[2] ?? 0);
+      else out = Math.max(0, ...sizes);
+    } else if (n.type === 'functionCall') out = Math.max(0, ...args.map((a) => est(a, env)));
+    else if (n.type === 'aggregate') {
+      const inner = est(n.expression, env);
+      out = n.aggregation === 'group_concat' ? Math.max(GROUP_CHARS, inner) : n.aggregation === 'count' || n.aggregation === 'sum' || n.aggregation === 'avg' ? 64 : inner;
+    } else out = 0;
+    note(out);
+    return out;
   };
-  // Definitions can come before or after their uses in the text (projections before WHERE): settle in a few passes.
-  for (let pass = 0; pass < 8; pass++) {
-    let changed = false;
-    const define = (name: string, chars: number) => {
-      if (chars > (env.get(name) ?? -1)) env.set(name, chars), (changed = true);
-    };
-    for (const n of walk(tree)) {
-      if (n.type === 'bind') define((n.variable as Node).value as string, est(n.expression));
-      else if (n.type === 'values') for (const row of n.values as Record<string, unknown>[]) for (const [k, t] of Object.entries(row)) define(k.replace(/^\?/, ''), est(t));
-      else if (n.expression && (n.variable as Node | undefined)?.termType === 'Variable' && !n.type) define((n.variable as Node).value as string, est(n.expression));
+
+  /** Binds a variable; one already bound joins with the new value, so it can only be as long as the shorter. */
+  const bind = (env: Env, name: string, chars: number) => env.set(name, env.has(name) ? Math.min(env.get(name)!, chars) : chars);
+  const fromData = (env: Env, t: unknown) => {
+    const n = t as Node | undefined;
+    if (n?.termType === 'Variable') bind(env, n.value as string, DATA_CHARS);
+  };
+
+  /** Evaluates patterns in order into env, the variables of this query level. */
+  function patterns(list: unknown[], env: Env) {
+    for (const item of list) {
+      const p = item as Node;
+      switch (p.type) {
+        case 'bgp':
+          for (const t of p.triples as Node[]) for (const k of ['subject', 'predicate', 'object']) fromData(env, t[k]);
+          break;
+        case 'bind': {
+          const chars = est(p.expression, env);
+          bind(env, (p.variable as Node).value as string, chars);
+          note(chars, (p.variable as Node).value as string);
+          break;
+        }
+        case 'values':
+          for (const row of p.values as Record<string, unknown>[]) for (const [k, t] of Object.entries(row)) if (t) note(est(t, env));
+          for (const k of new Set((p.values as Record<string, unknown>[]).flatMap((r) => Object.keys(r))))
+            bind(env, k.replace(/^\?/, ''), Math.max(0, ...(p.values as Record<string, unknown>[]).map((r) => est(r[k], env))));
+          break;
+        case 'filter':
+          est(p.expression, env);
+          break;
+        case 'query':
+          // A subquery has its own variables and passes out only its projections.
+          for (const [k, v] of query(p)) bind(env, k, v);
+          break;
+        case 'union': {
+          // Each branch sees the variables so far; afterwards a variable may come from either.
+          const branches = (p.patterns as unknown[]).map((b) => {
+            const copy = new Map(env);
+            patterns([b], copy);
+            return copy;
+          });
+          for (const k of new Set(branches.flatMap((b) => [...b.keys()]))) env.set(k, Math.max(...branches.filter((b) => b.has(k)).map((b) => b.get(k)!)));
+          break;
+        }
+        case 'optional':
+        case 'minus':
+        case 'group':
+        case 'graph':
+        case 'service': {
+          if (p.type === 'graph' || p.type === 'service') fromData(env, p.name);
+          const inner = new Map(env);
+          patterns(p.patterns as unknown[], inner);
+          if (p.type !== 'minus') for (const [k, v] of inner) if (!env.has(k) || p.type !== 'optional') env.set(k, v);
+          break;
+        }
+        default:
+          break;
+      }
     }
-    if (!changed) break;
   }
-  let worst = { chars: 0, variable: undefined as string | undefined };
-  for (const [variable, chars] of env) if (chars > worst.chars) worst = { chars, variable };
-  // FILTER and ORDER BY expressions build values too, without naming them.
-  for (const n of walk(tree)) if (n.type === 'filter' || n.type === 'operation') {
-    const chars = est(n.type === 'filter' ? n.expression : n);
-    if (chars > worst.chars) worst = { chars, variable: undefined };
+
+  /** One query level: WHERE in order, then GROUP BY and projections in order. Returns what it projects. */
+  function query(q: Node): Env {
+    const env: Env = new Map();
+    if (q.values) patterns([{ type: 'values', values: q.values }], env);
+    patterns((q.where as unknown[] | undefined) ?? [], env);
+    for (const g of (q.group as Node[] | undefined) ?? []) {
+      const chars = est(g.expression, env);
+      if ((g.variable as Node | undefined)?.termType === 'Variable') bind(env, (g.variable as Node).value as string, chars);
+    }
+    for (const h of (q.having as unknown[] | undefined) ?? []) est(h, env);
+    const projected: Env = new Map();
+    for (const v of (q.variables as Node[] | undefined) ?? []) {
+      if (v.termType === 'Variable') projected.set(v.value as string, env.get(v.value as string) ?? DATA_CHARS);
+      else if (v.termType === 'Wildcard') for (const [k, c] of env) projected.set(k, c);
+      else if (v.expression && (v.variable as Node | undefined)?.termType === 'Variable') {
+        const name = (v.variable as Node).value as string;
+        const chars = est(v.expression, env);
+        env.set(name, chars);
+        projected.set(name, chars);
+        note(chars, name);
+      }
+    }
+    for (const o of (q.order as Node[] | undefined) ?? []) est(o.expression, env);
+    // CONSTRUCT templates and DESCRIBE only use what is bound.
+    return projected;
   }
+
+  if (tree.type === 'query') query(tree as unknown as Node);
   return worst;
 }
 

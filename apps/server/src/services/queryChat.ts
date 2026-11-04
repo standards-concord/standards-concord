@@ -404,7 +404,7 @@ function split(text: string): { show: string; condition?: string } {
 }
 
 /** Words that carry no meaning of their own in a condition. */
-const FILLER = new Set([...STOP, 'those', 'ones', 'one', 'that', 'are', 'was', 'were', 'be', 'their', 'than', 'whose', 'where', 'value', 'values', 'years', 'year', 'old', 'aged', 'only', 'just', 'records', 'items', 'please', 'than']);
+const FILLER = new Set([...STOP, 'those', 'ones', 'one', 'that', 'are', 'was', 'were', 'be', 'their', 'than', 'whose', 'where', 'value', 'values', 'years', 'year', 'old', 'aged', 'only', 'just', 'records', 'items', 'please', 'instead', 'now', 'rather']);
 
 /** Words of the text not accounted for by the given phrases, numbers or filler: if any are left, part of the request would be ignored. */
 function leftover(text: string, used: string[]): string[] {
@@ -438,10 +438,20 @@ function conditionFilters(ctx: Ctx, state: RecordsState, condition: string, s: S
   if (!clauses.length) return { declined: `I couldn’t find a condition in that. ${FILTER_HELP}` };
   const actions: (() => void)[] = [];
   const targets = new Map<string, string>();
-  const once = (key: string, what: string): string | undefined => {
+  // A property already filtered by an earlier message keeps its condition unless this one says to replace it.
+  const replacing = /\b(instead|change|replace|rather|now)\b/i.test(s.plain.replace(PLACEHOLDERS, ' '));
+  const describe = (f: NonNullable<PathStep['filter']>) => (f.op === 'contains' ? `contains “${f.value}”` : `${OP_WORDS[f.op] ?? f.op} ${f.value}`);
+  const once = (key: string, what: string, existing?: PathStep): string | undefined => {
     if (targets.has(key)) return `I can apply only one condition to ${what} offline, and that asks for two. Edit the query to combine them.`;
+    if (existing?.filter && !replacing)
+      return `There’s already a condition on ${what} (${describe(existing.filter)}), and offline I can keep only one per property. Say “instead” to replace it, for example “only those with ${what} under 12 instead”, or edit the query to combine them.`;
     targets.set(key, what);
     return undefined;
+  };
+  /** Where a filter on this property sits now: a linked thing's label, or the value itself. */
+  const filterSite = (iri: string) => {
+    const st = model.steps.find((x) => x.property === iri);
+    return st && (st.children.find((c) => c.property === RDFS_LABEL) ?? st);
   };
   for (const clause of clauses) {
     const shown = unquote(clause, s);
@@ -460,7 +470,7 @@ function conditionFilters(ctx: Ctx, state: RecordsState, condition: string, s: S
       if (extra.length || (!named[0] && !new RegExp(`\\b(${QUOTE_LEADS.join('|')})\\b`, 'i').test(clause)))
         return { declined: `I couldn’t tell what “${value}” should match in “${shown}”. ${FILTER_HELP}` };
       if (p && valueTypeOf(p) === 'number') return { declined: `${labelOf(p)} is a number, so compare it with “over”, “under” or “at least”. ${FILTER_HELP}` };
-      const twice = once(p?.iri ?? RDFS_LABEL, p ? labelOf(p) : 'the name');
+      const twice = once(p?.iri ?? RDFS_LABEL, p ? labelOf(p) : 'the name', filterSite(p?.iri ?? RDFS_LABEL));
       if (twice) return { declined: twice };
       actions.push(() => {
         let st = p ? model.steps.find((x) => x.property === p.iri) : model.steps.find((x) => x.property === RDFS_LABEL);
@@ -478,7 +488,7 @@ function conditionFilters(ctx: Ctx, state: RecordsState, condition: string, s: S
       const opWords = (NUMBER_OPS.find(([, o]) => o === op)![0].exec(clause) ?? [''])[0];
       const extra = leftover(clause, [labelOf(p), opWords]);
       if (extra.length) return { declined: `I couldn’t tell what “${extra.join(' ')}” means in “${shown}”, so I haven’t changed the query. ${FILTER_HELP}` };
-      const twice = once(p.iri, labelOf(p));
+      const twice = once(p.iri, labelOf(p), filterSite(p.iri));
       if (twice) return { declined: twice };
       actions.push(() => {
         let st = model.steps.find((x) => x.property === p.iri);

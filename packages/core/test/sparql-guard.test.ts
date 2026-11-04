@@ -20,11 +20,27 @@ describe('resource checks', () => {
     // However it is written: in a projection, in a FILTER, nested, with REPLACE.
     expect(resourceProblem(tree(`SELECT (CONCAT(?v20, ?v20) AS ?big) WHERE { ${doubling(20).replace(/^SELECT \?v20 WHERE \{|\}$/g, '')} }`))).toMatch(/characters/);
     expect(resourceProblem(tree('SELECT ?s WHERE { ?s ?p ?o FILTER(STRLEN(REPLACE(STR(?o), "", STR(?p))) > 3) }'))).toMatch(/characters/);
-    expect(resourceProblem(tree('SELECT ?b WHERE { BIND(CONCAT(CONCAT(CONCAT(?o, ?o, ?o, ?o, ?o), ?o, ?o, ?o, ?o, ?o), ?o, ?o) AS ?b) ?s ?p ?o }'))).toMatch(/characters/);
+    expect(resourceProblem(tree('SELECT ?b WHERE { ?s ?p ?o BIND(CONCAT(CONCAT(CONCAT(?o, ?o, ?o, ?o, ?o), ?o, ?o, ?o, ?o, ?o), ?o, ?o) AS ?b) }'))).toMatch(/characters/);
+    // Inside a subquery, and passed out of one.
+    const inner = doubling(20).replace(/^SELECT \?v20 WHERE \{|\}$/g, '');
+    expect(resourceProblem(tree(`SELECT ?big WHERE { { SELECT ?v20 WHERE { ${inner} } } BIND(CONCAT(?v20, ?v20) AS ?big) }`))).toMatch(/characters/);
+    expect(resourceProblem(tree(`SELECT * WHERE { { SELECT * WHERE { { SELECT ?v20 WHERE { ${inner} } } } } }`))).toMatch(/characters/);
+    // In one branch of a UNION, an OPTIONAL or a FILTER EXISTS.
+    expect(resourceProblem(tree(`SELECT * WHERE { { ?s ?p ?o } UNION { ${inner} } }`))).toMatch(/characters/);
+    expect(resourceProblem(tree(`SELECT * WHERE { ?s ?p ?o OPTIONAL { ${inner} } }`))).toMatch(/characters/);
+    expect(resourceProblem(tree(`SELECT * WHERE { ?s ?p ?o FILTER EXISTS { ${inner} } }`))).toMatch(/characters/);
+    // Growth built on GROUP_CONCAT (whose own size depends on the data) still counts.
+    expect(resourceProblem(tree(`SELECT ?big WHERE { { SELECT (GROUP_CONCAT(?o) AS ?g) WHERE { ?s ?p ?o } } BIND(CONCAT(?g, ?g, ?g) AS ?big) }`))).toMatch(/characters/);
   });
 
   it('lets ordinary string building through', () => {
     for (const q of [
+      // An inner and an outer ?x are different variables: this returns "aa" (it used to be estimated at 5 million characters).
+      'SELECT ?x WHERE { { SELECT (CONCAT(?x, ?x) AS ?y) WHERE { VALUES ?x { "a" } } } BIND(?y AS ?x) }',
+      // Eleven copies of a one-character value are eleven characters, whatever order the text puts them in.
+      `SELECT (CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) WHERE { BIND("x" AS ?x) }`,
+      `SELECT ?y WHERE { BIND("x" AS ?x) BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
+      'SELECT ?y WHERE { { BIND("ab" AS ?x) } UNION { BIND("cd" AS ?x) } BIND(CONCAT(?x, ?x, ?x) AS ?y) }',
       doubling(10),
       'SELECT ?s (CONCAT(?label, " – ", ?definition) AS ?text) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label ; <http://www.w3.org/2004/02/skos/core#definition> ?definition }',
       'SELECT (REPLACE(STR(?s), "#", "/") AS ?path) WHERE { ?s ?p ?o }',
