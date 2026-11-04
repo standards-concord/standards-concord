@@ -42,9 +42,21 @@ export class BookingError extends Error {
     message: string,
     readonly uncertain: boolean,
   ) {
-    super(message);
+    // Whatever went wrong, the message never carries the Meet link.
+    super(scrub(message));
   }
 }
+
+/**
+ * Upper bounds on a bot's life, so a booking Concord lost track of can't linger:
+ * it leaves a waiting room or an empty call after 20 minutes, and stops after six
+ * hours in a call. With joining at most 15 minutes after booking, no bot outlives
+ * its booking by more than about seven hours (the cancellation ledger relies on this).
+ */
+export const BOT_LIFETIME = { waiting_room_timeout: 20 * 60, noone_joined_timeout: 20 * 60, in_call_recording_timeout: 6 * 60 * 60 };
+
+/** How long Recall.ai honours an idempotency key; a replay is only sent well inside it. */
+export const IDEMPOTENCY_KEY_MS = 50 * 60 * 1000;
 
 type RecallBot = {
   id: string;
@@ -79,6 +91,7 @@ export const recall = {
           // Lets a lost booking be found again (see findBots).
           metadata: { concord_meeting: opts.meetingId, ...(opts.bookingId ? { concord_booking: opts.bookingId } : {}) },
           ...(opts.joinAt ? { join_at: opts.joinAt } : {}),
+          automatic_leave: BOT_LIFETIME,
           chat: { on_bot_join: { send_to: 'everyone', message: intro } },
           recording_config: {
             transcript: { provider: { meeting_captions: {} } },
@@ -95,7 +108,8 @@ export const recall = {
     } catch (err) {
       throw new BookingError(`Could not reach Recall.ai: ${scrub((err as Error).message)}`, true);
     }
-    if (!res.ok) throw new BookingError(await failure(res), res.status >= 500);
+    // 409: a request with this idempotency key is still being handled, so the bot may well exist.
+    if (!res.ok) throw new BookingError(await failure(res), res.status >= 500 || res.status === 409);
     // Accepted, but the reply got lost or garbled: the bot may well exist.
     let body: { id?: string };
     try {

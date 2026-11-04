@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { MeetBotInfo, Meeting, OntologyProject, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put, remove } from '../db.js';
+import { get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { withLock } from '../locks.js';
 import { parseCancellations, parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
@@ -12,6 +12,7 @@ import {
   botActive,
   cancelMeetingBot,
   dispatchBot,
+  dropMeeting,
   emit,
   endLiveMeeting,
   findLostBooking,
@@ -19,12 +20,13 @@ import {
   lastLineTime,
   meetingLock,
   NO_BOT_PROVIDER,
+  pruneSecrets,
   recordSeriesApproval,
   saveMeeting,
   seriesApproved,
 } from './meetings.js';
-import { recall } from './recall.js';
-import { ledgerBusy, retireDue, retiringCount, watchBooking } from './retiring.js';
+import { IDEMPOTENCY_KEY_MS, recall } from './recall.js';
+import { ledgerBusy, pendingFor, retireDue, retiringCount, watchBooking } from './retiring.js';
 import { allUsers, logActivity } from './users.js';
 
 /**
@@ -188,8 +190,9 @@ async function withdrawCall(meetingId: string, opts: { background?: boolean } = 
   const live = get<Meeting>('meetings', meetingId);
   if (live && live.status !== 'scheduled') {
     if (!botActive(live) || live.bot?.leaving) return live.bot?.leaving ? 'retrying' : 'done';
+    // Done only once nothing for this call is left in the cancellation ledger (a booking still being looked for counts).
     const ending = endLiveMeeting(meetingId).then(
-      () => 'done' as const,
+      () => (pendingFor(meetingId) ? ('retrying' as const) : ('done' as const)),
       () => 'retrying' as const,
     );
     if (opts.background) {
@@ -204,7 +207,7 @@ async function withdrawCall(meetingId: string, opts: { background?: boolean } = 
     // The bot is recorded for cancelling first (retried every minute until Recall.ai
     // confirms, and any line it sends meanwhile dropped), so the meeting can go now.
     const r = await cancelMeetingBot(m, opts);
-    remove('meetings', m.id);
+    dropMeeting(m.id);
     return r.ok && !('queued' in r && r.queued) ? 'done' : 'retrying';
   });
 }
@@ -467,7 +470,7 @@ async function dispatchOne(meetingId: string, now: Date) {
     // Left over from before the cancellation ledger: hand the bot to it and drop the call.
     if (cal.cancelPending) {
       await cancelMeetingBot(m);
-      remove('meetings', m.id);
+      dropMeeting(m.id);
       return;
     }
     // A booked bot on a call that's now skipped or waiting for approval is let go: the
@@ -483,7 +486,7 @@ async function dispatchOne(meetingId: string, now: Date) {
     if (t >= end) {
       // Whatever was booked (or may have been, if the reply was lost) is let go before the meeting forgets it.
       if (m.bot?.botId || m.bot?.uncertain || m.bot?.bookingId) await cancelMeetingBot(m);
-      if (cal.skip || cal.approval === 'pending') remove('meetings', m.id);
+      if (cal.skip || cal.approval === 'pending') dropMeeting(m.id);
       else {
         m.status = 'error';
         m.bot = { provider: m.bot?.provider ?? 'simulated', status: 'error', error: m.bot?.error ?? 'The call ended before the bot could join.' };
@@ -523,10 +526,13 @@ async function dispatchOne(meetingId: string, now: Date) {
     // request did land, Recall.ai answers with that bot rather than making a second one. A new booking
     // is recorded before it is sent (as unconfirmed until Recall.ai answers), so a restart mid-booking
     // looks for it instead of booking another.
-    const replay = m.bot?.uncertain && m.bot.bookingId && (m.bot.bookedUrl ?? m.meetingUrl) === m.meetingUrl;
+    // Recall.ai only honours a key for an hour, so a replay is sent well inside that; after it, the old booking is
+    // looked for (and cancelled if it turns up) while a new one is made.
+    const replay = !!m.bot?.uncertain && !!m.bot.bookingId && (m.bot.bookedUrl ?? m.meetingUrl) === m.meetingUrl && withinKey(m.bot.bookedAt, t);
     const bookingId = replay ? m.bot!.bookingId! : newId('bk');
     if (m.bot?.uncertain && !replay) watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
-    m.bot = { provider: 'recall', status: 'scheduled', bookingId, bookedUrl: m.meetingUrl, uncertain: true, error: m.bot?.error, cancelError: m.bot?.cancelError };
+    const bookedAt = replay ? m.bot!.bookedAt : now.toISOString();
+    m.bot = { provider: 'recall', status: 'scheduled', bookingId, bookedUrl: m.meetingUrl, bookedAt, uncertain: true, error: m.bot?.error, cancelError: m.bot?.cancelError };
     saveMeeting(m);
     const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined, bookingId);
     // Recall.ai refused the replay outright: that booking may still exist, so keep looking for it while a new one is made next time.
@@ -541,6 +547,7 @@ async function dispatchOne(meetingId: string, now: Date) {
         uncertain: bot.uncertain,
         bookingId: bot.uncertain ? bot.bookingId : undefined,
         bookedUrl: bot.uncertain ? bot.bookedUrl : undefined,
+        bookedAt: bot.uncertain ? bookedAt : undefined,
       };
     else if (t >= start) {
       m.bot = bot;
@@ -552,7 +559,10 @@ async function dispatchOne(meetingId: string, now: Date) {
 }
 
 /** A "Join a call now" booking whose answer was lost: adopt the bot if it exists, otherwise say booking failed. */
-async function settleLostBooking(meetingId: string) {
+/** Whether a booking first sent at `bookedAt` can still be replayed under its idempotency key. */
+const withinKey = (bookedAt: string | undefined, t: number) => !!bookedAt && t - new Date(bookedAt).getTime() < IDEMPOTENCY_KEY_MS;
+
+async function settleLostBooking(meetingId: string, now: Date) {
   return meetingLock(meetingId, async () => {
     const m = get<Meeting>('meetings', meetingId);
     // Still being booked by this process: the reply will settle it.
@@ -560,10 +570,15 @@ async function settleLostBooking(meetingId: string) {
     const lost = await findLostBooking(m);
     if (!lost) return;
     if (lost.botId) m.bot = { ...m.bot, botId: lost.botId, status: m.bot.status === 'in-call' ? 'in-call' : 'joining', uncertain: undefined, error: undefined };
-    else {
+    else if (!withinKey(m.bot.bookedAt, now.getTime())) {
+      // Too late to replay safely: keep looking for that booking (and cancel it if it turns up).
+      watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
+      if (m.bot.status === 'in-call') return;
+      m.bot = { provider: 'recall', status: 'error', error: 'Booking the bot failed. Send it again.' };
+    } else {
       // Not listed (yet): send the same booking again under its idempotency key, which returns the bot if it was made.
       const again = await dispatchBot(m, undefined, m.bot.bookingId);
-      if (again.botId) m.bot = { ...again, status: m.bot.status === 'in-call' ? 'in-call' : 'joining' };
+      if (again.botId) m.bot = { ...again, bookedAt: m.bot.bookedAt, status: m.bot.status === 'in-call' ? 'in-call' : 'joining' };
       else if (again.uncertain || m.bot.status === 'in-call') m.bot = { ...m.bot, error: again.error };
       else {
         watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
@@ -589,10 +604,11 @@ export async function dispatchDue(now = new Date(), opts: { sweep?: boolean } = 
     if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) await endLiveMeeting(fresh.id).catch((err) => console.warn(`[meet-bot] ending ${fresh.id}: ${(err as Error).message}`));
   }
   if (opts.sweep !== false) await retireDue(now);
+  pruneSecrets();
   for (const m of list<Meeting>('meetings')) {
     // A bot someone asked to leave: closed once the ledger confirms it has gone.
     if (m.bot?.leaving) await endLiveMeeting(m.id, { auto: true }).catch(() => undefined);
-    else if (m.bot?.uncertain && m.source === 'google-meet-bot') await settleLostBooking(m.id);
+    else if (m.bot?.uncertain && m.source === 'google-meet-bot') await settleLostBooking(m.id, now);
   }
 }
 

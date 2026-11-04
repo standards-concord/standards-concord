@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -12,7 +12,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
 import { BookingError, recall } from './recall.js';
-import { isRetired, retireBot, retireState, watchBooking } from './retiring.js';
+import { bookingPending, isRetired, retireBot, retireState, watchBooking } from './retiring.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
@@ -538,6 +538,17 @@ export const NO_BOT_PROVIDER =
 export const isMeetUrl = (url: string) => /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(url);
 
 /** Books a Recall.ai bot for a meeting (now, or at joinAt). Returns the bot state to store. */
+/** Removes a meeting along with its webhook secret (any bot it had is in the cancellation ledger by now). */
+export function dropMeeting(id: string) {
+  remove('meetings', id);
+  remove('kv', `meeting-secret:${id}`);
+}
+
+/** Webhook secrets whose meeting has gone (removed some other way). */
+export function pruneSecrets() {
+  for (const k of list<{ id: string }>('kv')) if (k.id.startsWith('meeting-secret:') && !get('meetings', k.id.slice('meeting-secret:'.length))) remove('kv', k.id);
+}
+
 /** Meetings whose "Join a call now" booking request is still out, in this process (none after a restart). */
 export const bookingsInFlight = new Set<string>();
 
@@ -604,7 +615,7 @@ export async function inviteBot(project: OntologyProject, user: User, title: str
     // The booking is recorded before it is sent (as unconfirmed until Recall.ai answers), so the bot's
     // first words can identify it, and a restart mid-booking looks for it instead of booking another.
     bot: recall.enabled()
-      ? { provider: 'recall', status: 'scheduled', bookingId: newId('bk'), bookedUrl: meetingUrl, uncertain: true }
+      ? { provider: 'recall', status: 'scheduled', bookingId: newId('bk'), bookedUrl: meetingUrl, bookedAt: new Date().toISOString(), uncertain: true }
       : { provider: 'simulated', status: 'scheduled' },
     chatModeAnnounced: !!opts.postPromptsToChat,
   });
@@ -713,33 +724,64 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
  * which only checks how the ledger is getting on.
  */
 export async function endLiveMeeting(meetingId: string, opts: { auto?: boolean } = {}) {
+  // 1. Under the lock: the bot is marked as leaving (so anything it sends is refused from now on).
+  const start = await meetingLock(meetingId, async () => {
+    const m = getMeeting(meetingId);
+    if (m.bot?.provider !== 'recall' || m.bot.status === 'done') return { m, bot: undefined };
+    if (!m.bot.leaving) {
+      m.bot = { ...m.bot, leaving: true };
+      save(m);
+    }
+    return { m, bot: { ...m.bot } };
+  });
+  // 2. Without the lock (Recall.ai can be slow, and other calls are being booked meanwhile).
   let error: string | undefined;
+  let found: string | undefined;
+  let lookingFor = false;
+  const bot = start.bot;
+  if (bot && !bot.botId && (bot.uncertain || bot.bookingId)) {
+    const url = bot.bookedUrl ?? start.m.meetingUrl;
+    if (opts.auto) {
+      // The clock's retry: the ledger is looking for (or cancelling) that booking; once it has settled, so has this.
+      if (bookingPending(meetingId, bot.bookingId)) error = bot.error ?? 'Still checking with Recall.ai which bot this call has.';
+    } else {
+      const lost = await findLostBooking(start.m);
+      if (!lost) {
+        // Recall.ai can't be asked: the ledger looks for the booking (backing off), and this call waits for it.
+        watchBooking(meetingId, bot.bookingId, url);
+        error = 'Couldn’t check with Recall.ai which bot this call has.';
+      } else if (lost.botId) found = lost.botId;
+      else {
+        // Not listed: the call is closed, and the ledger keeps looking for that booking (to cancel it).
+        watchBooking(meetingId, bot.bookingId, url);
+        lookingFor = true;
+      }
+    }
+  }
+  const botId = bot?.botId ?? found;
+  if (bot && botId && !error) {
+    const state = retireState(botId);
+    if (state === 'pending' && opts.auto) error = bot.error ?? 'The bot hasn’t left yet; Concord keeps trying.';
+    else if (state !== 'gone') {
+      const r = await retireBot(meetingId, { provider: 'recall', botId, leave: true }, undefined, { retryNow: true });
+      if (!r.ok) error = r.error;
+    }
+  }
+  // 3. Under the lock again, on the latest copy.
   const m = await meetingLock(meetingId, async () => {
     const m = getMeeting(meetingId);
-    const leaving = (e: string) => {
-      error = e;
-      m.bot = { ...m.bot!, leaving: true, error: e };
-      return save(m);
-    };
-    if (m.bot?.provider === 'recall' && m.bot.status !== 'done' && !m.bot.botId && (m.bot.uncertain || m.bot.bookingId)) {
-      const lost = await findLostBooking(m);
-      if (!lost) return leaving('Couldn’t check with Recall.ai which bot this call has.');
-      if (lost.botId) m.bot = { ...m.bot, botId: lost.botId, uncertain: undefined };
-      else {
-        // Not listed: Concord keeps looking for that booking (to cancel it) after the call is closed.
-        watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
-        m.bot = { ...m.bot, cancelError: 'The bot’s booking was never confirmed; Concord keeps looking for it, to make sure it has gone.' };
-      }
-    }
-    if (m.bot?.provider === 'recall' && m.bot.botId && m.bot.status !== 'done') {
-      const state = retireState(m.bot.botId);
-      if (state !== 'gone') {
-        if (opts.auto && state === 'pending') return leaving(m.bot.error ?? 'The bot hasn’t left yet; Concord keeps trying.');
-        const r = await retireBot(m.id, { provider: 'recall', botId: m.bot.botId, leave: true }, undefined, { retryNow: true });
-        if (!r.ok) return leaving(r.error);
-      }
-    }
-    if (m.bot) m.bot = { ...m.bot, status: 'done', leaving: undefined, error: undefined, uncertain: undefined };
+    if (!m.bot || m.bot.status === 'done') return m;
+    if (found && !m.bot.botId) m.bot = { ...m.bot, botId: found, uncertain: undefined };
+    if (error) m.bot = { ...m.bot, leaving: true, error };
+    else
+      m.bot = {
+        ...m.bot,
+        status: 'done',
+        leaving: undefined,
+        error: undefined,
+        uncertain: undefined,
+        cancelError: lookingFor ? 'The bot’s booking was never confirmed; Concord keeps looking for it, to make sure it has gone.' : m.bot.cancelError,
+      };
     return save(m);
   });
   emit(m, { type: 'meeting', meeting: m });

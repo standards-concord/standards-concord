@@ -13,9 +13,11 @@ import { recall } from './recall.js';
  * and idempotency key Concord sends when booking) and the Meet link it was
  * booked for. Not seeing it in a listing doesn't prove it was never made, so it
  * is looked for again and again (backing off to every six hours after the first
- * six) for WATCH_MAX_MS. By then any bot from that booking has long finished:
- * Recall.ai bots join within minutes of their start time and leave when the
- * call ends. A bot found this way is tracked by its own id from then on.
+ * six) for WATCH_MAX_MS (a week). By then any bot from that booking has long
+ * finished: every booking asks Recall.ai to join at most 15 minutes after it is
+ * made, to leave a waiting room or an empty call after 20 minutes, and to stop
+ * recording after six hours (see BOT_LIFETIME in recall.ts), so no bot lives more
+ * than about seven hours. A bot found this way is tracked by its own id from then on.
  *
  * A cancelled bot leaves a tombstone so a late webhook from it is still dropped.
  */
@@ -25,6 +27,8 @@ type Retiring = {
   botId?: string;
   /** Taking a bot out of a call (End call), rather than cancelling its booking. */
   leave?: boolean;
+  /** For a bot found by looking up a booking: which booking. */
+  fromBooking?: string;
   bookingId?: string;
   meetingUrl?: string;
   error?: string;
@@ -68,14 +72,24 @@ export function retireState(botId: string): 'gone' | 'pending' | 'none' {
 /** How many bots (or unconfirmed bookings) Concord is still trying to cancel. */
 export const retiringCount = () => records().length;
 
+/** Whether anything is still being cancelled (or looked for) for this meeting. */
+export const pendingFor = (meetingId: string) => records().some((r) => r.meetingId === meetingId);
+
+/** Whether an unconfirmed booking is still being looked for, or the bot it turned out to be is still being cancelled. */
+export const bookingPending = (meetingId: string, bookingId: string | undefined) =>
+  records().some((r) => r.meetingId === meetingId && (r.bookingId === bookingId || (!!bookingId && r.fromBooking === bookingId)));
+
 export type Outcome = { ok: true } | { ok: false; error: string; watching?: boolean };
 
-/** Recorded (if not already) and tried, under the one-at-a-time rule. */
-async function cancelById(meetingId: string, botId: string, now?: number) {
+/** Recorded (if not already) and tried, under the one-at-a-time rule and the entry's backoff. */
+async function cancelById(meetingId: string, botId: string, fromBooking: string | undefined, now?: number): Promise<Outcome> {
   const id = botKey(botId);
-  if (get('kv', `${GONE}${botId}`)) return { ok: true } as Outcome;
-  const r = get<Retiring>('kv', id) ?? put('kv', { id, meetingId, botId, attempts: 0 } satisfies Retiring);
-  return run(r as Retiring, now);
+  if (get('kv', `${GONE}${botId}`)) return { ok: true };
+  const existing = get<Retiring>('kv', id);
+  // Already on record and backing off: its turn hasn't come.
+  if (existing?.nextAt && (now === undefined || existing.nextAt > now)) return { ok: false, error: existing.error ?? 'Cancelling the bot is being retried.' };
+  const r = existing ?? put('kv', { id, meetingId, botId, fromBooking, attempts: 0 } satisfies Retiring);
+  return run(r, now);
 }
 
 /** One try. Settles the record (removes it) or leaves it for the next sweep. */
@@ -91,6 +105,11 @@ async function attempt(r: Retiring, now: number): Promise<Outcome> {
     remove('kv', r.id);
     return { ok: true };
   }
+  // Long past the bot's own lifetime (see createBot's automatic leaving): nothing from this booking can still be around.
+  if (now - (r.watchFrom ?? now) >= WATCH_MAX_MS) {
+    remove('kv', r.id);
+    return { ok: true };
+  }
   let found: { id: string; booking?: string }[];
   try {
     found = await recall.findBots(r.meetingUrl, r.meetingId);
@@ -101,24 +120,21 @@ async function attempt(r: Retiring, now: number): Promise<Outcome> {
   const mine = found.filter((b) => b.booking === r.bookingId);
   if (!mine.length) {
     // Not there (yet): keep looking rather than take one listing's word for it.
-    if (now - (r.watchFrom ?? now) >= WATCH_MAX_MS) {
-      remove('kv', r.id);
-      return { ok: true };
-    }
     return { ok: false, watching: true, error: 'A booking Recall.ai never confirmed isn’t listed yet; Concord keeps looking for it, to cancel it.' };
   }
   // Found: from now on each bot is its own entry (so it is never asked about twice at once), and this one is done.
   remove('kv', r.id);
   let failed: string | undefined;
   for (const b of mine) {
-    const c = await cancelById(r.meetingId, b.id);
+    const c = await cancelById(r.meetingId, b.id, r.bookingId, now || undefined);
     if (!c.ok) failed = c.error;
   }
   return failed ? { ok: false, error: failed } : { ok: true };
 }
 
-function backoff(attempts: number, watchedFor: number) {
-  if (watchedFor >= WATCH_MS) return 6 * HOUR;
+function backoff(r: Retiring, attempts: number, watchedFor: number) {
+  // Only a booking that can't be found is looked for less often; a known bot keeps its 30-minute cap.
+  if (!r.botId && watchedFor >= WATCH_MS) return 6 * HOUR;
   return Math.min(30, 2 ** Math.max(0, attempts - 2)) * MINUTE;
 }
 
@@ -133,7 +149,7 @@ async function run(r: Retiring, now?: number): Promise<Outcome> {
       const attempts = (still.attempts ?? 0) + 1;
       const watchFrom = still.watchFrom ?? now;
       // The first retry is due at the next sweep, then waits double each time.
-      const nextAt = now !== undefined && attempts > 1 ? now + backoff(attempts, now - (watchFrom ?? now)) : undefined;
+      const nextAt = now !== undefined && attempts > 1 ? now + backoff(still, attempts, now - (watchFrom ?? now)) : undefined;
       put('kv', { ...still, attempts, watchFrom, nextAt, error: out.ok ? undefined : out.error } satisfies Retiring);
     }
     return out;

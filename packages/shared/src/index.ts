@@ -401,6 +401,8 @@ export interface Meeting {
     bookingId?: string;
     /** The Meet link the current booking was made for. */
     bookedUrl?: string;
+    /** When the current booking was first sent (its idempotency key is only honoured for an hour). */
+    bookedAt?: string;
     /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */
     cancelError?: string;
     /** Someone ended the call but the bot couldn't be removed yet; retried every minute. */
