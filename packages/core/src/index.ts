@@ -10,7 +10,6 @@ export { serialize, FORMAT_INFO } from './serialize.js';
 
 // Changes
 export { applyChangeOps, ChangeOpError } from './changes.js';
-export { scrubGeneratedProvenance } from './remediate.js';
 export type { ChangeContext, ApplyResult } from './changes.js';
 export { diffOntologies } from './diff.js';
 export { classifyChange, CLASSIFICATION_RULES } from './classify.js';

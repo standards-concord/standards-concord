@@ -1,17 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { FORMAT_INFO, scrubGeneratedProvenance, serialize } from '@concord/core';
+import { FORMAT_INFO, serialize } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
-import { ONTOLOGY_FILE, ontologyStore } from '../services/ontologyStore.js';
+import { ontologyStore } from '../services/ontologyStore.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
-import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
+import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
 import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
@@ -123,23 +123,14 @@ export async function pageInput(
 
 export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 
-type SnapshotRead = { state: 'ok'; data: PublishedRequirements } | { state: 'absent' } | { state: 'corrupt' };
-
-/** The public use cases and requirements stored with a release: present and valid, absent, or unreadable. */
-function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
-  const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
-  if (!fs.existsSync(file)) return { state: 'absent' };
-  try {
-    const data = validSnapshot(JSON.parse(fs.readFileSync(file, 'utf8')));
-    return data ? { state: 'ok', data } : { state: 'corrupt' };
-  } catch {
-    return { state: 'corrupt' };
-  }
-}
-
+/** The public use cases and requirements stored with a release, if it has a readable copy. */
 function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
-  const read = readSnapshot(project, version);
-  return read.state === 'ok' ? read.data : undefined;
+  const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
+  try {
+    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as PublishedRequirements) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -161,122 +152,39 @@ export async function releasePageFiles(
 export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version);
 export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
 
-/** Which renderer last wrote each ontology's release pages. Kept in the data directory, never in anything served. */
-const pageStateFile = () => path.join(config.dataDir, 'public-pages.json');
-function readPageState(): Record<string, string> {
-  try {
-    return JSON.parse(fs.readFileSync(pageStateFile(), 'utf8')) as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
 /**
- * Brings every ontology's published release pages up to date with the current
- * renderer, and removes provenance that older versions wrote into the RDF.
- *
- * Runs at startup. An ontology whose pages weren't written by this renderer
- * (PAGE_GENERATOR, tracked in the data directory, so page content can't fake
- * it) has every release page regenerated. Each release is handled on its own,
- * so one bad release can't block the others. Snapshots: a valid one is kept
- * as it is; an unreadable one is kept untouched and the page says the use
- * cases weren't recorded; a missing one is backfilled only for the demo (its
- * use cases are fixed content), and otherwise recorded as not available.
- *
- * Changes are committed to the ontology's repository and go out with its next
- * push to GitHub. Tags still point at the original commits.
+ * Brings every published release's stored page up to date with the current
+ * renderer, once per renderer version (PAGE_VERSION). Security and privacy
+ * fixes to the page then reach copies written before them, and releases from
+ * before snapshots existed get one, so their pages stop following live data.
+ * An existing readable snapshot is kept as it is. Changes are committed to the
+ * ontology's repository, so they go out with its next push to GitHub.
  */
 export async function refreshReleasePages(): Promise<void> {
-  const state = readPageState();
   for (const project of list<OntologyProject>('ontologies')) {
     try {
-      // Cleaned releases need their pages rendered again.
-      if (await remediateProvenance(project)) delete state[project.slug];
-    } catch (err) {
-      console.warn(`[public] could not clean ${project.slug}: ${(err as Error).message}`);
-    }
-    const versions = new Set(ontologyStore.versions(project));
-    const releases = publishedReleases(project.id).filter((r) => versions.has(r.version));
-    const pending = releases.filter((r) => state[project.slug] !== PAGE_GENERATOR || readSnapshot(project, r.version).state === 'absent' || !fs.existsSync(path.join(ontologyStore.dir(project), 'releases', r.version, 'index.html')));
-    if (!pending.length) {
-      state[project.slug] = PAGE_GENERATOR;
-      continue;
-    }
-    const changed: Record<string, Record<string, string>> = {};
-    let failed = 0;
-    for (const release of pending) {
-      try {
-        const snapshot = readSnapshot(project, release.version);
-        let requirements: PublishedRequirements;
-        let writeSnapshot = false;
-        if (snapshot.state === 'ok') requirements = snapshot.data;
-        else if (snapshot.state === 'corrupt') requirements = { useCases: [], snapshotMissing: true };
-        else {
-          requirements = project.demo ? releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
-          writeSnapshot = true;
-        }
+      const versions = new Set(ontologyStore.versions(project));
+      const changed: Record<string, Record<string, string>> = {};
+      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
+        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
+        const page = path.join(dir, 'index.html');
+        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
+        const snapshot = requirementsSnapshot(project, release.version);
+        if (current && snapshot) continue;
+        const requirements = snapshot && Array.isArray(snapshot.useCases) ? snapshot : releaseRequirements(project, release.version);
         const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
-        if (!writeSnapshot) delete files[REQUIREMENTS_SNAPSHOT];
+        // Never rewrite a readable snapshot, only the page rendered from it.
+        if (snapshot) delete files[REQUIREMENTS_SNAPSHOT];
         changed[release.version] = files;
-      } catch (err) {
-        failed++;
-        console.warn(`[public] could not refresh ${project.slug} ${release.version}: ${(err as Error).message}`);
       }
-    }
-    try {
       if (Object.keys(changed).length) {
         ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
-      if (!failed) state[project.slug] = PAGE_GENERATOR;
     } catch (err) {
-      console.warn(`[public] could not save ${project.slug} release pages: ${(err as Error).message}`);
+      console.warn(`[public] could not refresh ${project.slug} release pages: ${(err as Error).message}`);
     }
   }
-  try {
-    fs.mkdirSync(config.dataDir, { recursive: true });
-    fs.writeFileSync(pageStateFile(), `${JSON.stringify(state, null, 2)}\n`);
-  } catch (err) {
-    console.warn(`[public] could not record page state: ${(err as Error).message}`);
-  }
-}
-
-/**
- * Strips the provenance older versions wrote into the working draft and every
- * released version (scrubGeneratedProvenance): contributor names on terms and
- * use case titles. Released files are rewritten with their serialisations,
- * and their pages are regenerated by refreshReleasePages.
- */
-async function remediateProvenance(project: OntologyProject): Promise<boolean> {
-  const working = await ontologyStore.working(project);
-  const draft = working.clone();
-  if (scrubGeneratedProvenance(draft)) {
-    await ontologyStore.commitWorking(project, draft, 'Remove contributor names and use case titles from annotations', { name: 'Concord' });
-    console.log(`[public] cleaned ${project.slug} working draft`);
-  }
-  const changed: Record<string, Record<string, string>> = {};
-  for (const version of ontologyStore.versions(project)) {
-    const graph = (await ontologyStore.at(project, version)).clone();
-    if (!scrubGeneratedProvenance(graph)) continue;
-    const files: Record<string, string> = { [ONTOLOGY_FILE]: await graph.toTurtle() };
-    for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
-      const name = `ontology.${FORMAT_INFO[format].extension}`;
-      if (format === 'turtle' || !fs.existsSync(path.join(ontologyStore.dir(project), 'releases', version, name))) continue;
-      try {
-        files[name] = await serialize(graph, format);
-      } catch (err) {
-        console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}: ${(err as Error).message}`);
-      }
-    }
-    changed[version] = files;
-  }
-  if (Object.keys(changed).length) {
-    ontologyStore.updateReleaseFiles(project, changed, `Remove contributor names and use case titles from released annotations (${Object.keys(changed).join(', ')})`);
-    ontologyStore.forgetReleases(project);
-    console.log(`[public] cleaned ${project.slug} releases: ${Object.keys(changed).join(', ')}`);
-    return true;
-  }
-  return false;
 }
 
 /**

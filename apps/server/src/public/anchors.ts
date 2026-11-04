@@ -29,11 +29,9 @@ export function termAnchors(view: OntologyView, namespace: string): Map<string, 
       const name = (localName(t.iri) || 'term').replace(/\s/g, '_');
       base = UI_ID.test(name) ? `term-${name}` : name;
     }
-    // Compared as they appear in a link, so #Café and a literal #Caf%C3%A9
-    // (the same URI once encoded) can't end up with the same href.
     let anchor = base;
-    for (let n = 2; used.has(fragment(anchor)); n++) anchor = `${base}-${n}`;
-    used.add(fragment(anchor));
+    for (let n = 2; used.has(anchor); n++) anchor = `${base}-${n}`;
+    used.add(anchor);
     out.set(t.iri, anchor);
   }
   return out;
@@ -45,7 +43,7 @@ export function termAnchors(view: OntologyView, namespace: string): Map<string, 
  * same name always gets the same id within one page.
  */
 export function pageIds(taken: Iterable<string>): (name: string) => string {
-  const used = new Set([...taken].flatMap((id) => [id, fragment(id)]));
+  const used = new Set(taken);
   const ids = new Map<string, string>();
   return (name: string) => {
     let id = ids.get(name);

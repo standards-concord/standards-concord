@@ -13,7 +13,6 @@ import { HttpError } from '../db.js';
  * normal git history that can be pushed to GitHub as-is.
  */
 const FILE = 'ontology.ttl';
-export const ONTOLOGY_FILE = FILE;
 
 function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
@@ -129,11 +128,6 @@ export const ontologyStore = {
     git(dir, ['add', 'releases']);
     if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
     return this.head(project);
-  },
-
-  /** Drops cached released graphs, after their files were rewritten. */
-  forgetReleases(project: Pick<OntologyProject, 'slug'>) {
-    for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {

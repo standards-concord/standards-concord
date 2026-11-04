@@ -139,7 +139,7 @@ export type NewOntologyInput = {
   namespace?: string;
   domain?: string;
   governanceTemplate?: GovernanceTemplateId;
-  /** List me as the ontology's creator (public). Off unless set. */
+  /** List me as the ontology's creator (public). Defaults to true. */
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {

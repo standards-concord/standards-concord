@@ -21,8 +21,7 @@ import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { proposalToOps, toLocalName } from './proposals.js';
 import { solid, transcriptToTurtle } from './solid.js';
-import { logActivity } from './users.js';
-import { redactOps, redactText, secretsFor } from './redact.js';
+import { getUser, logActivity } from './users.js';
 
 /* ------------------------------------------------------------------------ */
 /* Use cases                                                                 */
@@ -351,17 +350,15 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     fallback: () => heuristicSynthesis(graph.view().classes.map((c) => c.label?.toLowerCase() ?? ''), ucs),
   });
   // The ontology is published, but use cases may be private: its annotations
-  // cite use cases only by their (sign-in only) link, never their title or
-  // author, and the title (which reaches release notes) is redacted too.
-  const secrets = secretsFor(ucs);
+  // cite use cases only by their (sign-in only) link, never their title or author.
+  const terms = redactUseCases(value.terms, ucs);
   const sources = ucs.map((u) => `${config.publicUrl}/o/${encodeURIComponent(project.slug)}/use-cases/${encodeURIComponent(u.id)}`);
-  const redacted = redactOps(proposalToOps(graph, value.terms, sources).ops, secrets);
   const cr = await createChangeRequest(project, actor, {
-    title: redactText(value.title, secrets),
-    description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${redacted.dropped.length ? `\n\n**Left out.** ${redacted.dropped.join(', ')}: the name would publish a use case title or a person's name, so add it by hand with a neutral name.` : ''}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
+    title: value.title,
+    description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
     kind: 'feature',
     origin: { type: 'synthesis', useCaseIds: ucs.map((u) => u.id) },
-    ops: redacted.ops,
+    ops: proposalToOps(graph, terms, sources).ops,
     tests: value.competencyQuestionTests,
     analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
   });
@@ -378,6 +375,26 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     saveUseCase(u);
   }
   return cr;
+}
+
+/**
+ * Replaces use case titles and contributor names in the text that becomes
+ * ontology annotations (definitions, comments, editorial notes) with a neutral
+ * reference, in case the model quoted them.
+ */
+export function redactUseCases(terms: Proposal['terms'], ucs: UseCase[]): Proposal['terms'] {
+  const pattern = (values: (string | undefined)[]) => {
+    const words = [...new Set(values.map((v) => v?.trim()).filter((v): v is string => !!v && v.length >= 4))].sort((a, b) => b.length - a.length);
+    return words.length ? new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi') : undefined;
+  };
+  const titles = pattern(ucs.map((u) => u.sections.name));
+  const people = pattern(ucs.map((u) => getUser(u.authorId)?.name));
+  const clean = (text?: string) => {
+    if (text === undefined) return text;
+    const t = titles ? text.replace(titles, 'a use case') : text;
+    return people ? t.replace(people, 'a participant') : t;
+  };
+  return terms.map((t) => ({ ...t, definition: clean(t.definition), comment: clean(t.comment), reason: clean(t.reason) }));
 }
 
 /** Offline synthesis: each candidate class term not yet in the ontology becomes a new class. */

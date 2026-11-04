@@ -17,7 +17,7 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const ontologies = useOntologies();
   const templates = useAsync(() => api.governanceTemplates(), []);
   const user = useSession().session?.user;
-  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: false });
+  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: true });
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const create = useAction(async () => {
     const o = await api.createOntology({

@@ -20,12 +20,11 @@ import type {
   OntologyProject,
   Review,
   TimelineEvent,
-  UseCase,
   User,
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -36,7 +35,6 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
-import { redactOps, secretsFor } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -410,9 +408,7 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   const working = await ontologyStore.working(project);
   let after: OntologyGraph;
   try {
-    // No author: dcterms:contributor would publish the requester's name on every new term.
-    // Who asked for each change stays in the change request and the commit.
-    after = applyChangeOps(working, cr.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);
@@ -466,13 +462,6 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
     },
   });
   const compiled = value.terms.length ? proposalToOps(working, value.terms, `change request #${cr.number}`) : { ops: cr.ops, warnings: ['The offline assistant could not revise these edits; please edit them directly.'] };
-  // A request drafted from use cases keeps their titles and authors out of the revision too.
-  if (cr.origin.type === 'synthesis' && cr.origin.useCaseIds.length) {
-    const ucs = cr.origin.useCaseIds.map((id) => get<UseCase>('useCases', id)).filter((u): u is UseCase => !!u);
-    const redacted = redactOps(compiled.ops, secretsFor(ucs));
-    compiled.ops = redacted.ops;
-    if (redacted.dropped.length) compiled.warnings = [...compiled.warnings, `Left out ${redacted.dropped.join(', ')}: the name would publish a use case title or a person's name.`];
-  }
   cr.timeline.push(ev('ai-analysis', `AI revision requested by ${actor.name}: “${instruction}”. ${value.rationale}`, actor.id));
   if (value.competencyQuestionTests.length) cr.tests = value.competencyQuestionTests;
   cr.warnings = compiled.warnings;
