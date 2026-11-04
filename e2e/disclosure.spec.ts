@@ -12,8 +12,8 @@ test.describe('summaries, popups and disclosures', () => {
     demo = await demoOntology(request);
   });
 
-  test('the health chip says when a required check could not run', async ({ page, request }) => {
-    const o = (await (await request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { consistent: boolean; errors: number; incomplete?: string[]; reasoner?: string } };
+  test('the health chip says when a required check could not run', async ({ page }) => {
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { consistent: boolean; errors: number; incomplete?: string[]; reasoner?: string } };
     expect(o.health, 'the summary carries health').toBeTruthy();
     expect(Array.isArray(o.health!.incomplete), 'health lists checks that could not run').toBeTruthy();
     await page.goto(`/o/${demo.id}`);
@@ -125,11 +125,11 @@ test.describe('summaries, popups and disclosures', () => {
     expect(box.height).toBeGreaterThanOrEqual(label.height);
   });
 
-  test('a change request keeps cautions visible above the collapsed rationale', async ({ page, request }) => {
-    const crs = (await (await request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string }[];
+  test('a change request keeps cautions visible above the collapsed rationale', async ({ page }) => {
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string }[];
     let found = false;
     for (const c of crs.slice(0, 12)) {
-      const d = (await (await request.get(`/api/change-requests/${c.id}`)).json()) as { analysis?: { existingTerms?: string[] } };
+      const d = (await (await page.request.get(`/api/change-requests/${c.id}`)).json()) as { analysis?: { existingTerms?: string[] } };
       if (!d.analysis?.existingTerms?.length) continue;
       found = true;
       await page.goto(`/o/${demo.id}/changes/${c.id}`);
