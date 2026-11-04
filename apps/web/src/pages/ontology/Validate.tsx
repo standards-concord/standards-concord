@@ -364,7 +364,7 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
             </Badge>
           ) : (
             <Badge tone="danger" icon={TriangleAlert}>
-              {[violations && `${violations} violation${violations === 1 ? '' : 's'}`, warnings && `${warnings} warning${warnings === 1 ? '' : 's'}`, infos && `${infos} note${infos === 1 ? '' : 's'}`].filter(Boolean).join(', ') || `${problems} problems`}
+              {[violations && `${violations.toLocaleString('en')} violation${violations === 1 ? '' : 's'}`, warnings && `${warnings.toLocaleString('en')} warning${warnings === 1 ? '' : 's'}`, infos && `${infos.toLocaleString('en')} note${infos === 1 ? '' : 's'}`].filter(Boolean).join(', ') || `${problems} problems`}
             </Badge>
           )}
           {report.terms.length > 0 ? (
@@ -418,7 +418,12 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
                 </li>
               ))}
             </ul>
-            {byFocus.length > 200 && <p className="text-xs text-muted">Showing the first 200 nodes. Download the report for all of them.</p>}
+            {byFocus.length > 200 && <p className="text-xs text-muted">Showing the first 200 nodes. Download the report for the rest.</p>}
+            {report.truncated && (
+              <p className="text-xs text-muted" data-testid="validation-truncated">
+                The report lists the first 1,000 results and term issues. The counts above include them all.
+              </p>
+            )}
           </section>
         )}
       </div>

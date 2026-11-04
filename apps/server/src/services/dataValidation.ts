@@ -25,8 +25,11 @@ export interface DataValidation {
   valid: boolean;
   triples: number;
   summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
+  /** The first 1,000 SHACL results and term issues. The summary counts them all. */
   results: ShaclResult[];
   terms: TermIssue[];
+  /** Set when there were more results or term issues than are listed. */
+  truncated?: true;
 }
 
 /** Each loaded ontology version's Turtle and its hash, for the worker's cache. */
@@ -76,7 +79,6 @@ export async function validateDataAgainst(project: OntologyProject, version: str
     maxTriples: VALIDATION_LIMITS.triples,
     turtle: !!opts.turtle,
   }, opts.signal);
-  const count = (s: string) => outcome.results.filter((r) => r.severity === s).length;
   const body: DataValidation = {
     ontology: graph.ontologyIRI || project.ontologyIRI,
     version,
@@ -84,15 +86,10 @@ export async function validateDataAgainst(project: OntologyProject, version: str
     conforms: outcome.conforms,
     valid: outcome.valid,
     triples: outcome.triples,
-    summary: {
-      violations: count('Violation'),
-      warnings: count('Warning'),
-      infos: count('Info'),
-      termErrors: outcome.terms.filter((t) => t.severity === 'error').length,
-      termWarnings: outcome.terms.filter((t) => t.severity === 'warning').length,
-    },
+    summary: outcome.summary,
     results: outcome.results,
     terms: outcome.terms,
+    ...(outcome.truncated ? { truncated: true as const } : {}),
   };
   return { body, turtle: outcome.turtle };
 }

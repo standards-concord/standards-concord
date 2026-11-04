@@ -268,6 +268,46 @@ describe('POST to the ontology IRI validates data', () => {
     }
   });
 
+  it('lists at most 1,000 results and counts them all', async () => {
+    // Each opportunity lacks a role and an organisation: two results each, in the JSON and the Turtle report.
+    const roles = PREFIXES + Array.from({ length: 700 }, (_, i) => `ex:o${i} a vol:VolunteeringOpportunity ; vol:title "t" .`).join('\n');
+    const all = await post('/def/volunteering', roles);
+    expect(all.status).toBe(200);
+    expect(all.body.truncated).toBe(true);
+    expect(all.body.results).toHaveLength(1000);
+    expect(all.body.summary.violations + all.body.summary.warnings + all.body.summary.infos).toBeGreaterThan(1000);
+    const ttl = await request(app).post('/def/volunteering').set('Content-Type', 'text/turtle').set('Accept', 'text/turtle').send(roles);
+    expect(ttl.text).toMatch(/^# The first 1,000 of [\d,]+ results\./);
+    const store = new Store(new Parser().parse(ttl.text));
+    expect(store.getQuads(null, 'http://www.w3.org/ns/shacl#result', null, null)).toHaveLength(1000);
+    // Fewer than that: no flag.
+    expect((await post('/def/volunteering', VALID)).body.truncated).toBeUndefined();
+    // A review's 77 KB document: 1,900 nodes named with a 4,000-character prefix make 3,800 results of about
+    // 4,000 characters each. The report used to be written out whole (twice, for Turtle) before its size was checked.
+    const wide = `${PREFIXES}@prefix e: <https://e/${'x'.repeat(3990)}/> .\n${Array.from({ length: 1900 }, (_, i) => `e:s${i} a vol:VolunteeringOpportunity .`).join('\n')}`;
+    const many = await post('/def/volunteering', wide);
+    expect([many.status, many.body.summary.violations, many.body.results.length, many.body.truncated]).toEqual([200, 3800, 1000, true]);
+  });
+
+  it('stops a worker that uses more memory in all than allowed, and replaces one that grew large', async () => {
+    const before = { ...POOL_LIMITS };
+    try {
+      // Memory outside the heap (the SHACL engine's WebAssembly memory) counts: here any worker is over.
+      POOL_LIMITS.rssMb = 1;
+      const over = await post('/def/volunteering', VALID);
+      expect([over.status, over.body.error]).toEqual([413, expect.stringMatching(/more memory than the validator allows/)]);
+      POOL_LIMITS.rssMb = before.rssMb;
+      // A worker past recycleMb after its job is stopped, so it doesn't keep what it grew to.
+      POOL_LIMITS.recycleMb = 1;
+      expect((await post('/def/volunteering', VALID)).status).toBe(200);
+      for (let i = 0; i < 100 && poolState().threads; i++) await new Promise((r) => setTimeout(r, 20));
+      expect(poolState().threads).toBe(0);
+    } finally {
+      Object.assign(POOL_LIMITS, before);
+    }
+    expect((await post('/def/volunteering', VALID)).status).toBe(200);
+  });
+
   it('survives data that would exhaust a worker: it answers 413 and the next request works', async () => {
     // A review's 152 KB document: 100 relative @vocabs of 1,000 characters make a 100,000-character
     // property, on 2,000 nodes. Written out for the SHACL engine that was 200 MB, and running out of

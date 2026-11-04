@@ -77,6 +77,17 @@ export const MAX_IRI_LENGTH = 4096;
 
 const ABSOLUTE = /^[a-z][a-z0-9+.-]*:/i;
 const BAD_IRI = /[\u0000-\u0020<>"{}|^`\\]/;
+/** BCP 47 in outline, as Turtle and N-Triples accept it. */
+const LANGUAGE = /^[a-z]{1,8}(-[a-z0-9]{1,8})*$/i;
+/** Blank node labels as N-Triples can write them. */
+const BLANK_LABEL = /^[\p{L}\p{N}_]([\p{L}\p{N}_.\-\u00b7]*[\p{L}\p{N}_\-\u00b7])?$/u;
+
+/** Refuses an IRI the validator can't use: too long (413), relative or malformed (400). */
+function checkIri(iri: string, what = '') {
+  if (iri.length > MAX_IRI_LENGTH) throw new DataError(413, `The data uses a ${what}IRI longer than ${MAX_IRI_LENGTH.toLocaleString('en')} characters, the limit: <${iri.slice(0, 80)}…>.`);
+  if (!ABSOLUTE.test(iri)) throw new DataError(400, `The data uses a relative ${what}IRI <${iri.slice(0, 200)}>. Add @base (or xml:base), or pass a base IRI.`);
+  if (BAD_IRI.test(iri)) throw new DataError(400, `The data uses a ${what}IRI with characters IRIs can't contain: <${iri.slice(0, 200)}>.`);
+}
 
 /**
  * Parses instance data into triples in the default graph (named graphs are
@@ -102,11 +113,16 @@ export async function parseData(text: string, format: DataFormat, opts: ParseDat
     let size = 0;
     for (const t of [q.subject, q.predicate, q.object]) {
       size += t.value.length;
-      if (t.termType === 'Literal') size += (t as Literal).language.length + (t as Literal).datatype.value.length;
-      if (t.termType !== 'NamedNode') continue;
-      if (t.value.length > MAX_IRI_LENGTH) throw new DataError(413, `The data uses an IRI longer than ${MAX_IRI_LENGTH.toLocaleString('en')} characters, the limit: <${t.value.slice(0, 80)}…>.`);
-      if (!ABSOLUTE.test(t.value)) throw new DataError(400, `The data uses a relative IRI <${t.value}>. Add @base (or xml:base), or pass a base IRI.`);
-      if (BAD_IRI.test(t.value)) throw new DataError(400, `The data uses an IRI with characters IRIs can't contain: <${t.value}>.`);
+      if (t.termType === 'NamedNode') checkIri(t.value);
+      else if (t.termType === 'BlankNode') {
+        if (!BLANK_LABEL.test(t.value)) throw new DataError(400, `The data uses a blank node label that N-Triples can't write: _:${t.value.slice(0, 80)}.`);
+      } else if (t.termType === 'Literal') {
+        const { language, datatype } = t as Literal;
+        size += language.length + datatype.value.length;
+        // A datatype is an IRI like any other, and a language tag has a fixed form.
+        checkIri(datatype.value, 'datatype ');
+        if (language && !LANGUAGE.test(language)) throw new DataError(400, `The data uses a language tag that isn't one: "${language.slice(0, 80)}".`);
+      }
     }
     // The limits are on distinct triples (as RDF terms: "a" and "a"^^xsd:string are one), so repeats are free.
     // Throwing stops the parser where it is (see the stream* functions).

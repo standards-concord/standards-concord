@@ -155,6 +155,33 @@ describe('reading data', () => {
     expect(await parseData(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(1000)}` }, '@graph': nodes(5000) }), 'jsonld', { maxTriples: 25_000 })).toHaveLength(5000);
   });
 
+  it('checks datatype IRIs and language tags like any other term, in every format', async () => {
+    const long = `https://e/${'d'.repeat(5000)}`;
+    const ns = 'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:e="https://e/"';
+    const typed = (dt: string): [string, Parameters<typeof parseData>[1]][] => [
+      [`<https://e/s> <https://e/p> "x"^^<${dt}> .`, 'turtle'],
+      [`<https://e/s> <https://e/p> "x"^^<${dt}> .`, 'ntriples'],
+      [`<https://e/s> <https://e/p> "x"^^<${dt}> <https://e/g> .`, 'nquads'],
+      [`{ <https://e/s> <https://e/p> "x"^^<${dt}> . }`, 'trig'],
+      [`<?xml version="1.0"?><rdf:RDF ${ns}><rdf:Description rdf:about="https://e/s"><e:p rdf:datatype="${dt}">x</e:p></rdf:Description></rdf:RDF>`, 'rdfxml'],
+      [JSON.stringify({ '@id': 'https://e/s', 'https://e/p': { '@value': 'x', '@type': dt } }), 'jsonld'],
+    ];
+    for (const [text, format] of typed(long)) {
+      const err = await parseData(text, format).catch((e) => e);
+      expect([format, err.status, err.message]).toEqual([format, 413, expect.stringMatching(/datatype IRI longer than 4,096 characters/)]);
+    }
+    // A datatype IRI that would break the N-Triples written for the SHACL engine is a 400 (a review's 61-byte example).
+    const broken = await parseData('{"@id":"urn:s","urn:p":{"@value":"x","@type":"https://e/a>"}}', 'jsonld').catch((e) => e);
+    expect([broken.status, broken.message]).toEqual([400, expect.stringMatching(/datatype IRI with characters IRIs can't contain/)]);
+    const relative = await parseData('<https://e/s> <https://e/p> "x"^^<int> .', 'turtle').catch((e) => e);
+    expect([relative.status, relative.message]).toEqual([400, expect.stringMatching(/relative datatype IRI <int>/)]);
+    const lang = await parseData(JSON.stringify({ '@id': 'https://e/s', 'https://e/p': { '@value': 'x', '@language': 'en> .' } }), 'jsonld').catch((e) => e);
+    expect([lang.status, lang.message]).toEqual([400, expect.stringMatching(/language tag/)]);
+    // Ordinary datatypes, tags and labels pass.
+    const ok = await parseData('_:b1 <https://e/p> "x"@en-GB, "1"^^<http://www.w3.org/2001/XMLSchema#integer> .', 'turtle');
+    expect(ok).toHaveLength(2);
+  });
+
   it('limits JSON-LD by size, as it is converted whole', async () => {
     const doc = JSON.stringify({ '@id': 'https://e/a', 'https://e/p': 'x'.repeat(2000) });
     const err = await parseData(doc, 'jsonld', { maxJsonLdBytes: 1000 }).catch((e) => e);

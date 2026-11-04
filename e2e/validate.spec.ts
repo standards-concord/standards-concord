@@ -55,6 +55,17 @@ test.describe('Validate data', () => {
     await expect(page.getByTestId('validation-subtitle')).toHaveText('1 triple checked against v1.0.0');
   });
 
+  test('says when the report lists only the first 1,000 results, and counts them all', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    // 700 opportunities, each without a role or an organisation: 1,400 violations.
+    const data = `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/> .\n${Array.from({ length: 700 }, (_, i) => `ex:o${i} a vol:VolunteeringOpportunity ; vol:title "t" .`).join('\n')}\n`;
+    await setEditor(page, data);
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    await expect(page.getByTestId('validation-verdict')).toContainText('1,400 violations');
+    await expect(page.getByTestId('validation-truncated')).toHaveText('The report lists the first 1,000 results and term issues. The counts above include them all.');
+    await expectNoCrash(page);
+  });
+
   test('uploads a file, validates against the draft and downloads both reports', async ({ page }, info) => {
     await page.goto('/o/volunteering/validate');
     const file = info.outputPath('opportunity.jsonld');

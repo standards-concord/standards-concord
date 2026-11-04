@@ -138,6 +138,8 @@ export type DataValidation = {
   summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
   results: { focusNode: string; path?: string; value?: string; severity: 'Violation' | 'Warning' | 'Info'; constraint: string; shape?: string; message?: string }[];
   terms: { severity: 'error' | 'warning'; message: string; term?: string }[];
+  /** More results or term issues than the report lists (1,000 of each); the summary counts them all. */
+  truncated?: true;
 };
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
