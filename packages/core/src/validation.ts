@@ -380,14 +380,53 @@ export interface ValidateOptions {
   batched?: boolean;
 }
 
-/** What the derived shapes (toShacl) use; shapes using anything else are validated in one run. */
-const BATCHABLE = new Set(
-  [
-    'targetClass', 'property', 'path', 'datatype', 'class', 'minCount', 'maxCount', 'hasValue',
-    'qualifiedValueShape', 'qualifiedMinCount', 'qualifiedMaxCount', 'name', 'description', 'order', 'group', 'severity', 'message', 'deactivated',
-  ].map((k) => SH + k),
-);
-const BLANK_IRI = 'urn:x-concord-blank:';
+/**
+ * The structure the derived shapes (toShacl) have, which is what batching
+ * relies on: node shapes with class targets and property shapes; property
+ * shapes with a plain property path whose checks read only the focus node's
+ * own values for that property and those values' types; and qualified value
+ * shapes that only check a value's class or datatype. The SHACL predicates
+ * each kind of shape may use; anything else, anywhere, means one run.
+ */
+const SHAPE_ANNOTATIONS = ['name', 'description', 'order', 'group', 'severity', 'message', 'deactivated'];
+const ALLOWED: Record<'node' | 'property' | 'value', Set<string>> = {
+  node: new Set(['targetClass', 'property', ...SHAPE_ANNOTATIONS].map((k) => SH + k)),
+  property: new Set(['path', 'datatype', 'class', 'minCount', 'maxCount', 'hasValue', 'qualifiedValueShape', 'qualifiedMinCount', 'qualifiedMaxCount', ...SHAPE_ANNOTATIONS].map((k) => SH + k)),
+  value: new Set(['class', 'datatype'].map((k) => SH + k)),
+};
+
+/** Whether shapes have exactly the derived shapes' structure (see ALLOWED). */
+function derivedStructure(shapes: Store): boolean {
+  const kinds = new Map<string, Set<keyof typeof ALLOWED>>();
+  const mark = (t: Term, kind: keyof typeof ALLOWED) => {
+    const k = `${t.termType}:${t.value}`;
+    if (!kinds.has(k)) kinds.set(k, new Set());
+    kinds.get(k)!.add(kind);
+  };
+  for (const q of shapes.getQuads(null, SH + 'targetClass', null, null)) {
+    if (q.subject.termType !== 'NamedNode' || q.object.termType !== 'NamedNode') return false;
+    mark(q.subject as Term, 'node');
+  }
+  for (const q of shapes.getQuads(null, RDF_TYPE, null, null)) {
+    if (q.object.value === SH + 'NodeShape') mark(q.subject as Term, 'node');
+    else if (q.object.value === SH + 'PropertyShape') mark(q.subject as Term, 'property');
+    else if (q.object.value === NS.rdfs + 'Class' || q.object.value.startsWith(SH)) return false; // implicit class targets, other shape types
+  }
+  for (const q of shapes.getQuads(null, SH + 'property', null, null)) mark(q.object as Term, 'property');
+  for (const q of shapes.getQuads(null, SH + 'qualifiedValueShape', null, null)) mark(q.object as Term, 'value');
+  for (const q of shapes.getQuads(null, SH + 'path', null, null)) if (q.object.termType !== 'NamedNode') return false;
+  for (const q of shapes.getQuads(null, null, null, null)) {
+    if (!q.predicate.value.startsWith(SH)) continue;
+    const roles = kinds.get(`${q.subject.termType}:${q.subject.value}`);
+    // Each shape is one kind (a property shape that also has property shapes would nest checks), and uses only that kind's predicates.
+    if (!roles || roles.size !== 1) return false;
+    const [role] = roles;
+    if (!ALLOWED[role].has(q.predicate.value)) return false;
+    // sh:property only from node shapes: a property shape's values are never checked for their own properties.
+    if (q.predicate.value === SH + 'property' && role !== 'node') return false;
+  }
+  return true;
+}
 
 const SKOLEM = 'urn:x-concord-shape:';
 
@@ -437,24 +476,15 @@ export class ShapesValidator {
     const working = new Store();
     const untargeted = new Store();
     const targets = new Map<string, string[]>();
-    let batchable = true;
     for (const q of shapes.getQuads(null, null, null, null)) {
       const s = swap(q.subject as Term);
       const o = swap(q.object as Term);
       working.addQuad(s as never, q.predicate, o as never);
-      const p = q.predicate.value;
-      if (p === SH + 'targetClass') {
-        if (s.termType !== 'NamedNode' || o.termType !== 'NamedNode') batchable = false;
-        else targets.set(o.value, [...(targets.get(o.value) ?? []), s.value]);
-        continue;
-      }
-      if (p.startsWith(SH) && !BATCHABLE.has(p)) batchable = false;
-      // A path that isn't a plain property (inverse, sequence...) reaches data the batches don't include.
-      if (p === SH + 'path' && o.termType !== 'NamedNode') batchable = false;
-      if (p === RDF_TYPE && o.value === NS.rdfs + 'Class') batchable = false; // implicit class targets
-      untargeted.addQuad(s as never, q.predicate, o as never);
+      if (q.predicate.value === SH + 'targetClass') targets.set(o.value, [...(targets.get(o.value) ?? []), s.value]);
+      else untargeted.addQuad(s as never, q.predicate, o as never);
     }
-    return new ShapesValidator(shapes, writeNTriples(working), skolems, batchable ? { untargetedNT: writeNTriples(untargeted), targets } : undefined);
+    const shapesNT = writeNTriples(working);
+    return new ShapesValidator(shapes, shapesNT, skolems, derivedStructure(shapes) ? { untargetedNT: writeNTriples(untargeted), targets } : undefined);
   }
 
   /**
@@ -475,18 +505,21 @@ export class ShapesValidator {
     const counts: Record<Severity, number> = { Violation: 0, Warning: 0, Info: 0 };
     const rows: { result: ShaclResult; source: string }[] = [];
     let conforms = true;
+    const batched = !!this.batching && opts.batched !== false;
+    // Blank nodes become IRIs under a prefix made for this run, which no IRI in the data or shapes uses.
+    const blankPrefix = batched ? this.blankPrefix(data, context) : undefined;
     const run = (dataNT: string, shapesNT: string) => {
       const raw = store.validate(dataNT, shapesNT, 'ntriples') as SparqReport;
       if (!raw.conforms) conforms = false;
       for (const r of raw.results) {
-        const result = this.toResult(r);
+        const result = this.toResult(r, blankPrefix);
         counts[result.severity] = (counts[result.severity] ?? 0) + 1;
         if (rows.length < limit) rows.push({ result, source: r.sourceShape });
       }
     };
     try {
-      if (!this.batching || opts.batched === false) run(toNTriples([...context, ...data]), this.shapesNT);
-      else for (const batch of this.batches(data, context, opts.batchChars ?? 64 * 1024)) run(batch.data, batch.shapes);
+      if (!blankPrefix) run(toNTriples([...context, ...data]), this.shapesNT);
+      else for (const batch of this.batches(data, context, blankPrefix, opts.batchChars ?? 64 * 1024)) run(batch.data, batch.shapes);
     } finally {
       store.free();
     }
@@ -498,19 +531,38 @@ export class ShapesValidator {
     return { conforms, counts, results: rows.map((r) => r.result), sources: rows.map((r) => r.source) };
   }
 
-  /** A result as the engine reported it, in this module's terms (blank nodes as _:label again). */
-  private toResult(r: SparqReport['results'][number]): ShaclResult {
+  /** An IRI prefix, for writing blank nodes as IRIs, that no IRI in the data, context or shapes starts with. */
+  private blankPrefix(data: Quad[], context: Quad[]): string {
+    for (;;) {
+      const prefix = `urn:x-concord-blank-${globalThis.crypto.randomUUID()}:`;
+      const clash = (t: Term) => (t.termType === 'NamedNode' && t.value.startsWith(prefix)) || (t.termType === 'Literal' && (t as Literal).datatype.value.startsWith(prefix));
+      if (this.shapesNT.includes(prefix)) continue;
+      if (![...context, ...data].some((q) => clash(q.subject as Term) || clash(q.predicate as Term) || clash(q.object as Term))) return prefix;
+    }
+  }
+
+  /**
+   * A result as the engine reported it, in this module's terms. A focus node
+   * or value that is exactly one of this run's blank node IRIs is a blank node
+   * again (_:label); nothing else is rewritten, except those IRIs in messages.
+   */
+  private toResult(r: SparqReport['results'][number], blankPrefix?: string): ShaclResult {
     const source = unwrapIri(r.sourceShape);
     const skolem = source && this.skolems.get(source);
-    const unblank = (x: string) => x.replace(/<urn:x-concord-blank:([^>]*)>/g, '_:$1');
+    const blank = (nt: string) => {
+      const iri = blankPrefix && unwrapIri(nt);
+      return iri && iri.startsWith(blankPrefix) ? `_:${iri.slice(blankPrefix.length)}` : nt;
+    };
+    // The prefix is new for each run, so it can only appear in a message where the engine wrote a blank node's IRI.
+    const message = r.message && blankPrefix ? r.message.split(`<${blankPrefix}`).map((part, i) => (i === 0 ? part : `_:${part.replace('>', '')}`)).join('') : r.message;
     return {
-      focusNode: ntToString(unblank(r.focusNode)),
+      focusNode: ntToString(blank(r.focusNode)),
       ...(r.path ? { path: unwrapIri(r.path) ?? r.path } : {}),
-      ...(r.value ? { value: unblank(r.value) } : {}),
+      ...(r.value ? { value: blank(r.value) } : {}),
       severity: (r.severity.startsWith(SH) ? r.severity.slice(SH.length) : r.severity) as Severity,
       constraint: unwrapIri(r.sourceConstraintComponent) ?? r.sourceConstraintComponent,
       ...(skolem ? (skolem.owner ? { shape: skolem.owner } : {}) : source && !source.startsWith(SKOLEM) ? { shape: source } : {}),
-      ...(r.message ? { message: unblank(r.message) } : {}),
+      ...(message ? { message } : {}),
     };
   }
 
@@ -519,11 +571,11 @@ export class ShapesValidator {
    * each batch (blank nodes written as IRIs, so the shapes can name them as
    * sh:targetNode) and the shapes with those targets.
    */
-  private *batches(data: Quad[], context: Quad[], batchChars: number): Generator<{ data: string; shapes: string }> {
+  private *batches(data: Quad[], context: Quad[], blankPrefix: string, batchChars: number): Generator<{ data: string; shapes: string }> {
     const { untargetedNT, targets } = this.batching!;
     const SUB = NS.rdfs + 'subClassOf';
     const all = [...context, ...data];
-    const nt = ntWriter(true);
+    const nt = ntWriter(blankPrefix);
     // Every subClassOf triple joins every batch: sh:targetClass and sh:class follow them.
     const hierarchy = all.filter((q) => q.predicate.value === SUB);
     const hierarchyNT = hierarchy.map(nt).join('\n');
@@ -641,10 +693,10 @@ export class ShapesValidator {
  * Writes quads as N-Triples lines for validation. Unlike writeNTriples it
  * keeps the data's own blank node labels where it can (_:alice stays
  * _:alice), so results name them, renaming those N-Triples can't write. With
- * `blankIris`, blank nodes are written as urn:x-concord-blank: IRIs instead,
- * so that shapes can name them.
+ * `blankPrefix`, blank nodes are written as IRIs with that prefix instead, so
+ * that shapes can name them.
  */
-function ntWriter(blankIris = false) {
+function ntWriter(blankPrefix?: string) {
   const labels = new Map<string, string>();
   const used = new Set<string>();
   const label = (id: string) => {
@@ -658,7 +710,7 @@ function ntWriter(blankIris = false) {
     return l;
   };
   const term = (x: Term) =>
-    x.termType === 'BlankNode' ? (blankIris ? `<${BLANK_IRI}${label(x.value)}>` : `_:${label(x.value)}`) : x.termType === 'NamedNode' ? `<${x.value}>` : literalToNT(x as never);
+    x.termType === 'BlankNode' ? (blankPrefix ? `<${blankPrefix}${label(x.value)}>` : `_:${label(x.value)}`) : x.termType === 'NamedNode' ? `<${x.value}>` : literalToNT(x as never);
   return Object.assign((q: Quad) => `${term(q.subject as Term)} ${term(q.predicate as Term)} ${term(q.object as Term)} .`, { term });
 }
 

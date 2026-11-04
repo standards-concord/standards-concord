@@ -297,6 +297,54 @@ describe('SHACL validation against the derived shapes', () => {
     expect(limited.conforms).toBe(false);
   });
 
+  it('never confuses a blank node with an IRI, whatever IRIs the data uses', async () => {
+    const { graph, validator } = await setup();
+    const context = classHierarchy(graph);
+    // An incomplete opportunity as a blank node, and a complete one named with the prefix blank nodes once became.
+    const data = await parseData(
+      `${P}_:alice a vol:VolunteeringOpportunity ; vol:title "t" .
+      <urn:x-concord-blank:alice> a vol:VolunteeringOpportunity ; vol:title "t" ; vol:offeredBy ex:org ; vol:hasRole ex:role .
+      ex:org a vol:Organisation ; vol:offersOpportunity <urn:x-concord-blank:alice> . ex:role a vol:Role .`,
+      'turtle',
+    );
+    const whole = await validator.validate(data, context, { batched: false });
+    expect(whole.results.filter((r) => r.focusNode === '_:alice').length).toBeGreaterThan(0);
+    for (const batchChars of [1, 1000, undefined]) expect(await validator.validate(data, context, { batchChars })).toEqual(whole);
+    // sh:hasValue naming an IRI is not met by a blank node.
+    const hasValue = ShapesValidator.fromTurtle(`@prefix sh: <${SH}> . @prefix ex: <https://e/> . ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path ex:p ; sh:hasValue <urn:x-concord-blank:v> ] .`);
+    const blankValue = await parseData('@prefix ex: <https://e/> . ex:x a ex:T ; ex:p _:v .', 'turtle');
+    expect((await hasValue.validate(blankValue)).conforms).toBe(false);
+    expect((await hasValue.validate(blankValue, [], { batched: false })).conforms).toBe(false);
+  });
+
+  it('validates nested shapes in one run, as batches only hold the values’ types', async () => {
+    const data = await parseData('@prefix ex: <https://e/> . ex:s a ex:T ; ex:p ex:v . ex:v ex:q "yes" .', 'turtle');
+    const shapes = {
+      nested: '[ sh:path ex:p ; sh:property [ sh:path ex:q ; sh:minCount 1 ] ]',
+      qualifiedMin: '[ sh:path ex:p ; sh:qualifiedValueShape [ sh:property [ sh:path ex:q ; sh:minCount 1 ] ] ; sh:qualifiedMinCount 1 ]',
+      qualifiedMax: '[ sh:path ex:p ; sh:qualifiedValueShape [ sh:property [ sh:path ex:q ; sh:minCount 1 ] ] ; sh:qualifiedMaxCount 0 ]',
+      node: '[ sh:path ex:p ; sh:node [ sh:property [ sh:path ex:q ; sh:minCount 1 ] ] ]',
+    };
+    const expected = { nested: true, qualifiedMin: true, qualifiedMax: false, node: true };
+    for (const [name, ps] of Object.entries(shapes)) {
+      const validator = ShapesValidator.fromTurtle(`@prefix sh: <${SH}> . @prefix ex: <https://e/> . ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property ${ps} .`);
+      const batched = await validator.validate(data, [], { batchChars: 1 });
+      expect([name, batched.conforms]).toEqual([name, expected[name as keyof typeof expected]]);
+      expect(batched).toEqual(await validator.validate(data, [], { batched: false }));
+    }
+  });
+
+  it('reports literal values exactly, even when they mention the blank node prefix', async () => {
+    const validator = ShapesValidator.fromTurtle(
+      `@prefix sh: <${SH}> . @prefix ex: <https://e/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:property [ sh:path ex:p ; sh:datatype xsd:integer ] .`,
+    );
+    const data = await parseData('@prefix ex: <https://e/> . ex:x a ex:T ; ex:p "x"^^<urn:x-concord-blank:d>, "literal <urn:x-concord-blank:alice> text" .', 'turtle');
+    const report = await validator.validate(data);
+    expect(report.results.map((r) => r.value).sort()).toEqual(['"literal <urn:x-concord-blank:alice> text"', '"x"^^<urn:x-concord-blank:d>']);
+    const store = new Store(new Parser({ format: 'Turtle' }).parse(validator.reportTurtle(report)));
+    expect(store.getObjects(null, `${SH}value`, null).map((t) => t.value).sort()).toEqual(['literal <urn:x-concord-blank:alice> text', 'x']);
+  });
+
   it('keeps memory to a batch when data breaks thousands of constraints', async () => {
     // A review's 31 KB document: 1,900 nodes with 4,000-character IRIs, each missing ten required properties.
     const props = Array.from({ length: 10 }, (_, i) => `sh:property [ sh:path ex:p${i} ; sh:minCount 1 ]`).join(' ; ');

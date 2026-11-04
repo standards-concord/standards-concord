@@ -268,6 +268,19 @@ describe('POST to the ontology IRI validates data', () => {
     }
   });
 
+  it('never lets an IRI stand in for a blank node, or rewrites literals, in either report', async () => {
+    // An incomplete opportunity as a blank node, next to a complete one named with the prefix blank nodes once became.
+    const doc = `${PREFIXES}_:alice a vol:VolunteeringOpportunity ; vol:title "t"^^<urn:x-concord-blank:d> .
+<urn:x-concord-blank:alice> a vol:VolunteeringOpportunity ; vol:title "t" ; vol:offeredBy ex:org ; vol:hasRole ex:role .
+ex:org a vol:Organisation ; vol:offersOpportunity <urn:x-concord-blank:alice> . ex:role a vol:Role .`;
+    const json = await post('/def/volunteering', doc);
+    expect([json.status, json.body.valid]).toEqual([200, false]);
+    expect(json.body.results.some((r: { focusNode: string }) => r.focusNode === '_:alice')).toBe(true);
+    const ttl = await request(app).post('/def/volunteering').set('Content-Type', 'text/turtle').set('Accept', 'text/turtle').send(doc);
+    expect(ttl.status).toBe(200);
+    expect(new Store(new Parser().parse(ttl.text)).getQuads(null, 'http://www.w3.org/ns/shacl#result', null, null).length).toBeGreaterThan(0);
+  });
+
   it('lists at most 1,000 results and counts them all', async () => {
     // Each opportunity lacks a role and an organisation: two results each, in the JSON and the Turtle report.
     const roles = PREFIXES + Array.from({ length: 700 }, (_, i) => `ex:o${i} a vol:VolunteeringOpportunity ; vol:title "t" .`).join('\n');
