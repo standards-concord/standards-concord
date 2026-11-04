@@ -49,16 +49,25 @@ const activityTerms = [
   },
 ];
 
+/** Fork details need a signed-in user, like the rest of the API's private reads. */
+let reader: Agent;
+
 beforeAll(async () => {
   openDb();
   await seedDemo();
+  reader = await login('reviewer', 'Reader Rhi');
 });
 
 describe('development forks', () => {
   let dev: Agent;
 
+  it('fork details need sign-in; the fork documents themselves are public', async () => {
+    expect((await request(app).get('/api/ontologies/volunteering/forks')).status).toBe(401);
+    expect((await request(app).get('/def/volunteering/forks/charitybase-recurring-shifts.ttl')).status).toBe(200);
+  });
+
   it('the demo has a fork from a simulated developer', async () => {
-    const res = await request(app).get('/api/ontologies/volunteering/forks');
+    const res = await reader.get('/api/ontologies/volunteering/forks');
     const seeded = res.body.find((f: { slug: string }) => f.slug === 'charitybase-recurring-shifts');
     expect(seeded.version).toBe('1.0.0-fork.charitybase-recurring-shifts.1');
     expect(seeded.owner.name).toBe('Gareth Lewis');
@@ -116,12 +125,12 @@ describe('development forks', () => {
     expect(ttl.text).toMatch(/vol:VolunteeringActivity/);
     expect(ttl.text).toMatch(/1\.0\.0-fork\.volunteer-hours\.1/);
     // Same term IRIs as upstream will use, so app data stays valid after the merge.
-    const view = await request(app).get('/api/ontologies/volunteering/view?ref=forks/volunteer-hours');
+    const view = await reader.get('/api/ontologies/volunteering/view?ref=forks/volunteer-hours');
     expect(view.body.classes.some((c: { iri: string }) => c.iri === `${VOL}VolunteeringActivity`)).toBe(true);
-    const main = await request(app).get('/api/ontologies/volunteering/view');
+    const main = await reader.get('/api/ontologies/volunteering/view');
     expect(main.body.classes.some((c: { iri: string }) => c.iri === `${VOL}VolunteeringActivity`)).toBe(false);
 
-    const detail = await request(app).get(forkPath);
+    const detail = await reader.get(forkPath);
     expect(detail.body.history.length).toBe(2);
     expect(detail.body.history[0].subject).toBe('Add volunteering activities');
   });
@@ -132,7 +141,7 @@ describe('development forks', () => {
     expect(denied.status).toBe(403);
     const bad = await dev.post(`${forkPath}/edits`).send({ ops: [{ op: 'setSuperClasses', iri: `${VOL}Skill`, superClasses: [`${VOL}Cause`] }] });
     expect(bad.status).toBe(422);
-    const unchanged = await request(app).get(forkPath);
+    const unchanged = await reader.get(forkPath);
     expect(unchanged.body.revision).toBe(1);
   });
 
@@ -156,7 +165,7 @@ describe('development forks', () => {
     // Proposing again updates the same request rather than opening another.
     const again = await dev.post(`${forkPath}/propose`).send({});
     expect(again.body.changeRequest.id).toBe(crId);
-    const forks = await request(app).get('/api/ontologies/volunteering/forks');
+    const forks = await reader.get('/api/ontologies/volunteering/forks');
     expect(forks.body.map((f: { slug: string }) => f.slug)).toContain('volunteer-hours');
   });
 

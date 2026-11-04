@@ -45,6 +45,8 @@ const addClass = (localName: string, label: string, extra: Partial<Extract<Chang
 });
 
 let dev: Agent;
+/** Fork details need a signed-in user, like the rest of the API's private reads. */
+let reader: Agent;
 async function newFork(name: string) {
   const res = await dev.post(API).send({ name });
   expect(res.status).toBe(201);
@@ -55,6 +57,7 @@ beforeAll(async () => {
   openDb();
   await seedDemo();
   dev = await login('contributor', 'Rebase Rae');
+  reader = await login('reviewer', 'Reader Rhi');
 });
 
 describe('fork edits', () => {
@@ -65,7 +68,7 @@ describe('fork edits', () => {
       dev.post(`${path}/edits`).send({ ops: [addClass('ConcurrentB', 'concurrent b')] }),
     ]);
     expect([a.status, b.status]).toEqual([200, 200]);
-    const fork = (await request(app).get(path)).body;
+    const fork = (await reader.get(path)).body;
     expect(fork.revision).toBe(2);
     expect(fork.ops).toHaveLength(2);
     expect(fork.history).toHaveLength(3);
@@ -86,11 +89,11 @@ describe('syncing with upstream', () => {
     expect(check.conflicts).toEqual([expect.objectContaining({ curie: 'vol:Skill' })]);
     expect(check.fork.terms[0]).toMatchObject({ curie: 'vol:Skill', change: 'changed', upstream: 'diverged' });
 
-    const before = (await request(app).get(path)).body;
+    const before = (await reader.get(path)).body;
     const sync = (await dev.post(`${path}/sync`)).body;
     expect(sync.synced).toBe(false);
     expect(sync.conflicts).toEqual([expect.objectContaining({ iri: `${VOL}Skill` })]);
-    const after = (await request(app).get(path)).body;
+    const after = (await reader.get(path)).body;
     expect(after.head).toBe(before.head);
     expect(after.baseCommit).toBe(before.baseCommit);
     // Proposing a change that conflicts with the draft is refused too.
@@ -120,12 +123,12 @@ describe('syncing with upstream', () => {
     });
     expect(edit.status, JSON.stringify(edit.body)).toBe(200);
     await upstream([{ op: 'setDomainRange', iri: `${VOL}hasSkill`, domain: [`${VOL}Organisation`] }]);
-    const before = (await request(app).get(path)).body;
+    const before = (await reader.get(path)).body;
     const sync = (await dev.post(`${path}/sync`)).body;
     expect(sync.synced).toBe(false);
     expect(sync.message).toMatch(/consistent/);
     expect(sync.conflicts[0].message).toMatch(/inconsistent/);
-    expect((await request(app).get(path)).body.head).toBe(before.head);
+    expect((await reader.get(path)).body.head).toBe(before.head);
   });
 
   it('drops edits that have landed, and only replays the rest on the new base', async () => {
@@ -220,7 +223,7 @@ describe('migration', () => {
 });
 
 describe('second review', () => {
-  const fork = async (path: string) => (await request(app).get(path)).body;
+  const fork = async (path: string) => (await reader.get(path)).body;
 
   it('a slow read never writes back an old version of the fork', async () => {
     const path = await newFork('Stale reads');
@@ -353,7 +356,7 @@ describe('second review', () => {
 });
 
 describe('third review', () => {
-  const fork = async (path: string) => (await request(app).get(path)).body;
+  const fork = async (path: string) => (await reader.get(path)).body;
 
   it('saves are an atomic compare-and-swap on the record version, and a lost save undoes its commit', async () => {
     const path = await newFork('Atomic save');

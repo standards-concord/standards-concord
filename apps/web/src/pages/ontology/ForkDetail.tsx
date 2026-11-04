@@ -279,7 +279,7 @@ export function ForkPage() {
             <p className="mt-3 text-xs text-muted">
               Coding agents can do all of this over MCP: <code className="font-mono">create_fork</code>, <code className="font-mono">edit_fork</code>, <code className="font-mono">propose_fork</code> and,
               at the start of each session, <code className="font-mono">check_forks</code>.{' '}
-              <Link to={`/o/${id}/agents`} className="text-accent hover:underline">
+              <Link to={`/o/${id}/connect`} className="text-accent hover:underline">
                 Connect an agent
               </Link>
             </p>

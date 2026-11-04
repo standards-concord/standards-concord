@@ -10,9 +10,9 @@ import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { escapeHtml } from './markdown.js';
-import { renderOntologyPage, type OntologyPageInput } from './render.js';
+import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
-import { termAnchors } from './anchors.js';
+import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
 export { PUBLIC_BASE };
@@ -115,7 +115,7 @@ export async function pageInput(
     downloads,
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root },
-    requirements: isDraft ? publishedRequirements(project) : requirementsFor(project, version, opts.requirements ?? requirementsSnapshot(project, version)),
+    requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
@@ -123,7 +123,7 @@ export async function pageInput(
 
 export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 
-/** The public use cases and requirements stored with a release, if it has them. */
+/** The public use cases and requirements stored with a release, if it has a readable copy. */
 function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
   const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
   try {
@@ -138,10 +138,53 @@ function requirementsSnapshot(project: OntologyProject, version: string): Publis
  * the files beside it) and a snapshot of its public use cases and
  * requirements, so later edits never rewrite the published version.
  */
-export async function releasePageFiles(project: OntologyProject, release: Release, graph: Awaited<ReturnType<typeof ontologyStore.at>>): Promise<Record<string, string>> {
-  const requirements = publishedRequirements(project, release.version);
+export async function releasePageFiles(
+  project: OntologyProject,
+  release: Release,
+  graph: Awaited<ReturnType<typeof ontologyStore.at>>,
+  requirements: PublishedRequirements = releaseRequirements(project, release.version),
+): Promise<Record<string, string>> {
   const html = renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph, requirements }));
-  return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: `${JSON.stringify(requirements, null, 2)}\n` };
+  return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: snapshotFile(requirements) };
+}
+
+/** The public use cases and requirements to freeze into a release published now. */
+export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version);
+export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
+
+/**
+ * Brings every published release's stored page up to date with the current
+ * renderer, once per renderer version (PAGE_VERSION). Security and privacy
+ * fixes to the page then reach copies written before them, and releases from
+ * before snapshots existed get one, so their pages stop following live data.
+ * An existing readable snapshot is kept as it is. Changes are committed to the
+ * ontology's repository, so they go out with its next push to GitHub.
+ */
+export async function refreshReleasePages(): Promise<void> {
+  for (const project of list<OntologyProject>('ontologies')) {
+    try {
+      const versions = new Set(ontologyStore.versions(project));
+      const changed: Record<string, Record<string, string>> = {};
+      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
+        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
+        const page = path.join(dir, 'index.html');
+        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
+        const snapshot = requirementsSnapshot(project, release.version);
+        if (current && snapshot) continue;
+        const requirements = snapshot && Array.isArray(snapshot.useCases) ? snapshot : releaseRequirements(project, release.version);
+        const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
+        // Never rewrite a readable snapshot, only the page rendered from it.
+        if (snapshot) delete files[REQUIREMENTS_SNAPSHOT];
+        changed[release.version] = files;
+      }
+      if (Object.keys(changed).length) {
+        ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
+        console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
+      }
+    } catch (err) {
+      console.warn(`[public] could not refresh ${project.slug} release pages: ${(err as Error).message}`);
+    }
+  }
 }
 
 /**
@@ -190,7 +233,7 @@ async function serve(req: Request, res: Response) {
     const graph = await ontologyStore.at(project, latest ?? 'working');
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
     const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
-    if (anchor && !last.format) return res.redirect(303, `${root}#${encodeURIComponent(anchor)}`);
+    if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 

@@ -35,8 +35,10 @@ export function useOntology() {
  */
 export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
-  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query']] },
-  { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agents']], also: ['interview'] },
+  // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query'], ['connect', 'Connect an agent']] },
+  // What agents report is requirements input, next to use cases and meetings.
+  { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['forks', 'Forks'], ['releases', 'Releases']] },
   { label: 'Governance', tabs: [['governance', 'Governance']] },
 ];
