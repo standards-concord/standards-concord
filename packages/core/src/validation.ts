@@ -44,37 +44,52 @@ export class DataError extends Error {
 export interface ParseDataOptions {
   /** Base IRI for relative IRIs. Without one, relative IRIs are an error. */
   baseIRI?: string;
-  /** Refuse data with more triples than this. */
+  /** Refuse data with more (distinct) triples than this. */
   maxTriples?: number;
+  /** Refuse JSON-LD larger than this many bytes (default MAX_JSONLD_BYTES): it is expanded whole before any triple can be counted. */
+  maxJsonLdBytes?: number;
 }
+
+const tooMany = (max: number) => `The data has more than ${max.toLocaleString('en')} triples, the limit.`;
+
+/**
+ * The largest JSON-LD accepted, in bytes. JSON-LD has to be expanded (every
+ * context applied, nodes merged) before it yields triples, so it can't be cut
+ * off at the triple limit the way the other formats are: its size, and the
+ * validator's time limit, bound that work instead.
+ */
+export const MAX_JSONLD_BYTES = 2 * 1024 * 1024;
 
 const ABSOLUTE = /^[a-z][a-z0-9+.-]*:/i;
 const BAD_IRI = /[\u0000-\u0020<>"{}|^`\\]/;
 
 /**
  * Parses instance data into triples in the default graph (named graphs are
- * merged into it, as SHACL validates one data graph). Every parser is fed the
- * text a chunk at a time and stops at the triple after maxTriples, so a small
- * document that expands to many triples can't fill memory or keep the parser
- * busy before it is refused. RDF/XML with a DTD is refused, because entity
- * declarations can expand without limit.
+ * merged into it, as SHACL validates one data graph). The limit is on
+ * distinct triples. Turtle, TriG, N-Triples, N-Quads and RDF/XML parsers are
+ * fed the text a chunk at a time and stop at the first triple past the
+ * limit, so a small document that expands to many triples can't fill memory
+ * or keep the parser busy. JSON-LD has to be converted whole, so it has its
+ * own byte limit (MAX_JSONLD_BYTES) and relies on the caller's time limit.
+ * RDF/XML with a DTD is refused, because entity declarations can expand
+ * without limit.
  */
 export async function parseData(text: string, format: DataFormat, opts: ParseDataOptions = {}): Promise<Quad[]> {
   const max = opts.maxTriples ?? Infinity;
   const out = new Store();
-  let seen = 0;
+  let distinct = 0;
   const keep = (q: Quad) => {
-    // Throwing stops the parser where it is (see the stream* functions).
-    if (++seen > max) throw new DataError(413, `The data has more than ${max.toLocaleString('en')} triples, the limit.`);
     for (const t of [q.subject, q.predicate, q.object]) {
       if (t.termType !== 'NamedNode') continue;
       if (!ABSOLUTE.test(t.value)) throw new DataError(400, `The data uses a relative IRI <${t.value}>. Add @base (or xml:base), or pass a base IRI.`);
       if (BAD_IRI.test(t.value)) throw new DataError(400, `The data uses an IRI with characters IRIs can't contain: <${t.value}>.`);
     }
-    out.addQuad(q.subject, q.predicate, q.object);
+    // The limit is on distinct triples (as RDF terms: "a" and "a"^^xsd:string are one), so repeats are free.
+    // Throwing stops the parser where it is (see the stream* functions).
+    if (out.addQuad(q.subject, q.predicate, q.object) && ++distinct > max) throw new DataError(413, tooMany(max));
   };
   try {
-    await streamQuads(text, format, opts.baseIRI, keep, max);
+    await streamQuads(text, format, opts.baseIRI, keep, opts.maxJsonLdBytes ?? MAX_JSONLD_BYTES);
   } catch (err) {
     if (err instanceof DataError) throw err;
     throw new DataError(400, `Could not parse the data as ${DATA_FORMATS[format].label}: ${(err as Error).message}`);
@@ -191,59 +206,7 @@ function jsonDepth(doc: unknown, limit: number): number {
   return deepest;
 }
 
-/**
- * How many triples a flattened JSON-LD document (jsonld.flatten with no
- * context) makes. Flattening applies every context and merges each node's
- * descriptions into one, dropping duplicate values, so this is what toRDF
- * will emit: one triple per @type and per property value, and two per list
- * item, lists of lists included. (Values toRDF drops, such as relative IRIs,
- * are still counted, so it never undercounts.) @json and other literals are
- * never looked inside.
- */
-export function flattenedTripleCount(flattened: unknown): number {
-  let count = 0;
-  const isObject = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
-  const asArray = (x: unknown): unknown[] => (Array.isArray(x) ? x : [x]);
-  // Node objects (or arrays of them) and the items of lists still to count.
-  const stack: ({ node: unknown } | { list: unknown[] })[] = [{ node: flattened }];
-  /** A property's values: one triple each; a list adds its own; nested nodes are counted in turn. */
-  const values = (vs: unknown) => {
-    for (const v of asArray(vs)) {
-      count++;
-      if (!isObject(v) || '@value' in v) continue;
-      if ('@list' in v) stack.push({ list: asArray(v['@list']) });
-      else stack.push({ node: v });
-    }
-  };
-  while (stack.length) {
-    const next = stack.pop()!;
-    if ('list' in next) {
-      for (const item of next.list) {
-        count += 2;
-        if (!isObject(item) || '@value' in item) continue;
-        if ('@list' in item) stack.push({ list: asArray(item['@list']) });
-        else stack.push({ node: item });
-      }
-      continue;
-    }
-    const node = next.node;
-    if (Array.isArray(node)) {
-      for (const x of node) stack.push({ node: x });
-      continue;
-    }
-    if (!isObject(node) || '@value' in node) continue;
-    for (const [key, v] of Object.entries(node)) {
-      if (key === '@type') count += asArray(v).length;
-      else if (key === '@graph' || key === '@included') stack.push({ node: v });
-      else if (key === '@reverse' && isObject(v)) for (const rv of Object.values(v)) values(rv);
-      else if (key === '@list') stack.push({ list: asArray(v) });
-      else if (!key.startsWith('@')) values(v);
-    }
-  }
-  return count;
-}
-
-async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void, maxTriples = Infinity): Promise<void> {
+async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void, maxJsonLdBytes: number): Promise<void> {
   switch (format) {
     case 'turtle':
       return streamN3(text, 'Turtle', baseIRI, emit);
@@ -260,6 +223,8 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
       return feed(new RdfXmlParser({ baseIRI: baseIRI ?? '' }) as never, text, emit);
     }
     case 'jsonld': {
+      const bytes = text.length > maxJsonLdBytes ? Infinity : new TextEncoder().encode(text).length;
+      if (bytes > maxJsonLdBytes) throw new DataError(413, `JSON-LD data is limited to ${(maxJsonLdBytes / 1024 / 1024).toLocaleString('en')} MB. Send larger data as Turtle or N-Triples.`);
       let doc: unknown;
       try {
         doc = JSON.parse(text);
@@ -269,27 +234,26 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
       if (jsonDepth(doc, MAX_JSON_DEPTH) > MAX_JSON_DEPTH) throw new DataError(400, `The JSON is nested more than ${MAX_JSON_DEPTH} levels deep, the limit.`);
       const jsonld = (await import('jsonld')).default;
       let remote: string | undefined;
-      const options = {
-        base: baseIRI,
-        // Never fetch: a remote @context would let anyone make this server request any URL.
-        documentLoader: async (url: string) => {
-          remote = url;
-          throw new Error('remote documents are not loaded');
-        },
-      };
+      let nquads: string;
       try {
-        // Flatten first (expanding with every context, merging each node's descriptions
-        // and dropping duplicates): the triples it will make can then be counted, and
-        // refused before any are made. Flattening only shrinks the expanded document.
-        const flattened = await jsonld.flatten(doc as object, null as never, options as never);
-        doc = undefined;
-        if (flattenedTripleCount(flattened) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
-        const nquads = (await jsonld.toRDF(flattened as unknown as object, { ...options, format: 'application/n-quads' } as never)) as unknown as string;
-        return streamN3(nquads, 'N-Quads', undefined, emit);
+        // One pass to RDF. It can't be stopped part-way, so the byte limit above and the
+        // validator's time limit bound it; the triples it makes are then counted (distinct,
+        // as RDF) as they are read back, and refused past the limit.
+        nquads = (await jsonld.toRDF(doc as object, {
+          base: baseIRI,
+          format: 'application/n-quads',
+          // Never fetch: a remote @context would let anyone make this server request any URL.
+          documentLoader: async (url: string) => {
+            remote = url;
+            throw new Error('remote documents are not loaded');
+          },
+        } as never)) as unknown as string;
       } catch (err) {
         if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
         throw err;
       }
+      doc = undefined;
+      return streamN3(nquads, 'N-Quads', undefined, emit);
     }
     default:
       throw new DataError(400, `Unsupported data format: ${format as string}`);

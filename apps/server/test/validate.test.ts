@@ -173,6 +173,9 @@ describe('POST to the ontology IRI validates data', () => {
     expect(await type('text/turtle, application/json')).toBe('text/turtle');
     expect(await type('application/json;q=0.5, text/turtle;q=0.9')).toBe('text/turtle');
     expect(await type('*/*')).toBe('application/json');
+    // The type decides before parameters: an exact type beats a wildcard with a charset.
+    expect(await type('text/turtle;q=0, text/*;charset=utf-8')).toBe(406);
+    expect(await type('application/json, */*;charset=utf-8;q=0')).toBe('application/json');
   });
 
   it('refuses data over the size and triple limits', async () => {
@@ -213,6 +216,30 @@ describe('POST to the ontology IRI validates data', () => {
       POOL_LIMITS.timeoutMs = before;
     }
     expect((await post('/def/volunteering', VALID)).body.conforms).toBe(true);
+  });
+
+  it('treats running out of time on JSON-LD as its size limit', async () => {
+    const before = POOL_LIMITS.timeoutMs;
+    POOL_LIMITS.timeoutMs = 1;
+    try {
+      const slow = await post('/def/volunteering', JSON.stringify({ '@id': 'https://example.org/r', '@type': 'https://w3id.org/odi/volunteering#Role' }), 'application/ld+json');
+      expect(slow.status).toBe(413);
+      expect(slow.body.error).toMatch(/JSON-LD took longer than 0.001 s to convert to triples/);
+    } finally {
+      POOL_LIMITS.timeoutMs = before;
+    }
+  });
+
+  it('refuses JSON-LD over its own size limit, and counts distinct triples', async () => {
+    const big = JSON.stringify({ '@id': 'https://example.org/r', 'https://example.org/note': 'x'.repeat(2 * 1024 * 1024) });
+    const res = await post('/def/volunteering', big, 'application/ld+json');
+    expect(res.status).toBe(413);
+    expect(res.body.error).toMatch(/JSON-LD data is limited to 2 MB/);
+    // 30,000 copies of one triple are one triple, well under the limit.
+    const repeated = Array.from({ length: 30_000 }, () => '<https://example.org/r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://w3id.org/odi/volunteering#Role> .').join('\n');
+    const ok = await post('/def/volunteering', repeated, 'application/n-triples');
+    expect(ok.status).toBe(200);
+    expect(ok.body.triples).toBe(1);
   });
 
   it('answers 503 when the queue is full', async () => {

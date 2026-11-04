@@ -66,7 +66,7 @@ describe('reading data', () => {
   });
 
   it('stops parsing at the cap, in every format', async () => {
-    // Past the cap the data is broken: a 413, not a 400, shows the parser never read that far. (JSON-LD is counted exactly after expansion, before any triples are made.)
+    // Past the cap the data is broken: a 413, not a 400, shows the parser never read that far. (JSON-LD is converted whole, then counted as it is read back.)
     const n = 5000;
     const tail = ' this is not RDF <<<';
     const nt = Array.from({ length: n }, (_, i) => `<https://e/s${i}> <https://e/p> "${i}" .`).join('\n');
@@ -102,10 +102,32 @@ describe('reading data', () => {
     // The same description repeated is one set of triples.
     const repeated = JSON.stringify({ '@context': ctx, '@graph': Array.from({ length: 50 }, () => ({ '@id': 'https://e/a', '@type': 'https://e/T', p: 1 })) });
     expect(await parseData(repeated, 'jsonld', { maxTriples: 2 })).toHaveLength(2);
+    // Duplicates are judged as RDF: a plain string is an xsd:string, and @type is rdf:type.
+    const same = JSON.stringify({
+      '@context': ctx,
+      '@id': 'https://e/a',
+      '@type': 'https://e/T',
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type': { '@id': 'https://e/T' },
+      p: ['x', { '@value': 'x', '@type': 'http://www.w3.org/2001/XMLSchema#string' }],
+    });
+    expect(await parseData(same, 'jsonld', { maxTriples: 2 })).toHaveLength(2);
     // Arrays nested in arrays are flattened into one set of values.
     const nested = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', p: [[1, [2, [3]]]] });
     expect(await parseData(nested, 'jsonld', { maxTriples: 3 })).toHaveLength(3);
     expect((await parseData(nested, 'jsonld', { maxTriples: 2 }).catch((e) => e)).status).toBe(413);
+  });
+
+  it('limits JSON-LD by size, as it is converted whole', async () => {
+    const doc = JSON.stringify({ '@id': 'https://e/a', 'https://e/p': 'x'.repeat(2000) });
+    const err = await parseData(doc, 'jsonld', { maxJsonLdBytes: 1000 }).catch((e) => e);
+    expect([err.status, err.message]).toEqual([413, 'JSON-LD data is limited to 0.001 MB. Send larger data as Turtle or N-Triples.']);
+    expect(await parseData(doc, 'jsonld', { maxJsonLdBytes: 4000 })).toHaveLength(1);
+  });
+
+  it('counts distinct triples in every format, so repeats are free', async () => {
+    const repeated = Array.from({ length: 100 }, () => '<https://e/a> <https://e/p> "x" .').join('\n');
+    expect(await parseData(repeated, 'ntriples', { maxTriples: 1 })).toHaveLength(1);
+    expect(await parseData('<https://e/a> <https://e/p> "x", "x"^^<http://www.w3.org/2001/XMLSchema#string> .', 'turtle', { maxTriples: 1 })).toHaveLength(1);
   });
 
   it('refuses deeply nested JSON before expanding it', async () => {

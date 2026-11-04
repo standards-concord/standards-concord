@@ -88,8 +88,8 @@ export function wantsShaclProfile(req: Request): boolean {
  * as text/turtle with profile="http://www.w3.org/ns/shacl#". A range matches
  * when its type matches and each of its parameters (other than q) equals the
  * representation's; profile values match by IRI, with or without <>. The most
- * specific matching range decides (RFC 9110 12.5.1): a range with parameters
- * beats the bare type, which beats type/*, which beats *\/*. So
+ * specific matching range decides (RFC 9110 12.5.1): the exact type beats
+ * type/*, which beats *\/*, and among ranges of one type, more parameters win. So
  * "text/turtle;q=0, *\/*" refuses Turtle, and
  * 'text/turtle;profile="…shacl#";q=0, text/turtle' refuses the SHACL profile.
  */
@@ -121,12 +121,13 @@ export function acceptMatch(header: string | undefined, type: string, params: Re
       if (key === 'q') q = Number(value);
       else rangeParams.push([key, value]);
     }
-    let specificity = range === want ? 3 : range === `${major}/*` ? 2 : range === '*/*' ? 1 : 0;
+    // RFC 9110 12.5.1: the type and subtype decide first (exact over type/* over *\/*), then parameters.
+    let specificity = range === want ? 300 : range === `${major}/*` ? 200 : range === '*/*' ? 100 : 0;
     if (!specificity) return;
     if (rangeParams.length) {
       const matches = rangeParams.every(([k, v]) => params[k] !== undefined && norm(k, params[k]) === norm(k, v));
       if (!matches) return;
-      specificity += 3 + rangeParams.length;
+      specificity += rangeParams.length;
     }
     if (!Number.isFinite(q)) q = 0;
     if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q, position };

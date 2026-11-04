@@ -299,7 +299,7 @@ export function ValidateTab() {
               />
             )}
           </div>
-          <p className="text-xs text-muted">Up to 5 MB or 25,000 triples. Your data is sent to Concord to check and isn’t stored. Ctrl/⌘-Enter validates.</p>
+          <p className="text-xs text-muted">Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is sent to Concord to check and isn’t stored. Ctrl/⌘-Enter validates.</p>
           {error ? <InlineError error={error} /> : null}
         </div>
       </Card>

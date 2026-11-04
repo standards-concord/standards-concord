@@ -126,7 +126,14 @@ function pump() {
     const next = queue.shift()!;
     clearTimeout(next.wait);
     const timer = setTimeout(() => {
-      retire(slot!, new DataError(422, `Checking the data took longer than ${POOL_LIMITS.timeoutMs / 1000} s, so it was stopped. Try smaller or simpler data.`));
+      const seconds = POOL_LIMITS.timeoutMs / 1000;
+      retire(
+        slot!,
+        // JSON-LD is converted whole before its triples can be counted, so running out of time is its size limit.
+        next.job.format === 'jsonld'
+          ? new DataError(413, `The JSON-LD took longer than ${seconds} s to convert to triples, so it is too large or complex to check. Send less, or send it as Turtle or N-Triples.`)
+          : new DataError(422, `Checking the data took longer than ${seconds} s, so it was stopped. Try smaller or simpler data.`),
+      );
     }, POOL_LIMITS.timeoutMs);
     slot.current = { ...next, timer };
     slot.worker.postMessage(next.job);
