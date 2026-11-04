@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { FORMAT_INFO, serialize } from '@concord/core';
+import { DATA_MEDIA_TYPES, FORMAT_INFO, serialize } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -26,6 +26,9 @@ export { PUBLIC_BASE };
  *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .html)
  *
  * Browsers get the HTML page; anything asking for RDF gets RDF (Vary: Accept).
+ * Asking for the SHACL profile (Accept-Profile: <http://www.w3.org/ns/shacl#>,
+ * text/turtle;profile="http://www.w3.org/ns/shacl#", or ?_profile=shacl) gets
+ * the SHACL shapes. POST validates data against them: see validate.ts.
  * Persistent IRIs (w3id.org) redirect here, see w3id.ts.
  */
 
@@ -58,6 +61,40 @@ const EXTENSIONS: [string, OutputFormat | 'html'][] = [
   ['omn', 'manchester'],
   ['nt', 'ntriples'],
 ];
+
+export const SHACL_PROFILE = 'http://www.w3.org/ns/shacl#';
+const SHACL_PROFILE_RE = /^<?http:\/\/www\.w3\.org\/ns\/shacl#?>?$/;
+
+/**
+ * Whether the request asks for the SHACL profile of the ontology (W3C Content
+ * Negotiation by Profile): an Accept-Profile header, a profile parameter on an
+ * Accept media type, or the _profile query parameter. q=0 means "not this".
+ */
+export function wantsShaclProfile(req: Request): boolean {
+  const named = (token: string) => SHACL_PROFILE_RE.test(token.trim()) || token.trim().toLowerCase() === 'shacl';
+  const query = req.query._profile;
+  if (typeof query === 'string' && query.split(',').some(named)) return true;
+  const listed = (header: string | undefined, pick: (part: string) => string | undefined) =>
+    (header ?? '').split(',').some((part) => {
+      const token = pick(part);
+      return token !== undefined && named(token) && !/;\s*q\s*=\s*0(\.0*)?\s*(;|$)/i.test(part);
+    });
+  if (listed(req.get('Accept-Profile'), (part) => part.split(';')[0])) return true;
+  return listed(req.get('Accept'), (part) => /;\s*profile\s*=\s*"?([^";,]+)"?/i.exec(part)?.[1]);
+}
+
+/** Whether Accept allows a media type, ignoring parameters such as profile (which req.accepts treats as must-match). */
+function acceptsIgnoringParams(req: Request, type: string): boolean {
+  const header = req.get('Accept');
+  if (!header?.trim()) return true;
+  const [major] = type.split('/');
+  return header.split(',').some((part) => {
+    const [range, ...params] = part.split(';').map((x) => x.trim().toLowerCase());
+    const q = params.find((p) => p.startsWith('q='));
+    if (q && Number(q.slice(2)) === 0) return false;
+    return range === type || range === `${major}/*` || range === '*/*';
+  });
+}
 
 function splitExtension(segment: string): { base: string; format?: OutputFormat | 'html' } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
@@ -235,9 +272,22 @@ async function serve(req: Request, res: Response) {
   }
 
   let format = last.format;
+  // Data can be POSTed here to validate it (validate.ts).
+  res.set('Accept-Post', DATA_MEDIA_TYPES.join(', '));
+  if (!format && wantsShaclProfile(req)) {
+    res.vary('Accept');
+    res.vary('Accept-Profile');
+    if (!acceptsIgnoringParams(req, 'text/turtle')) {
+      res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
+      return;
+    }
+    res.set('Content-Profile', `<${SHACL_PROFILE}>`);
+    format = 'shacl';
+  }
   if (!format) {
     // The answer depends on Accept, including when it is a refusal.
     res.vary('Accept');
+    res.vary('Accept-Profile');
     const best = req.accepts(Object.keys(NEGOTIABLE));
     if (!best) {
       res
@@ -256,7 +306,7 @@ async function serve(req: Request, res: Response) {
     'Link',
     [
       `<${self}.html>; rel="alternate"; type="text/html"`,
-      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"`),
+      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"${f === 'shacl' ? `; profile="${SHACL_PROFILE}"` : ''}`),
       `<${self}>; rel="canonical"`,
     ].join(', '),
   );

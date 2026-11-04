@@ -71,6 +71,8 @@ export default defineConfig({
             SOLID_SERVER_URL: '',
             GOOGLE_CLIENT_ID: '',
             GITHUB_CLIENT_ID: '',
+            // Every test validates from the same address.
+            VALIDATE_RATE_LIMIT: '1000',
           },
           stdout: 'ignore',
           stderr: 'pipe',

@@ -8,6 +8,7 @@ import { HttpError } from './db.js';
 import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
 import { publicRouter } from './public/routes.js';
+import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
@@ -43,7 +44,9 @@ export function createApp(): express.Express {
   app.use(oauthRoutes);
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
   app.use('/api', apiRouter());
-  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation),
+  // and POST to them to validate data against their SHACL shapes.
+  app.use(validationRouter());
   app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.
