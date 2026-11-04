@@ -57,9 +57,9 @@ function Conflicts({ conflicts, onDiscard, pending }: { conflicts: ForkConflict[
         <li key={`${c.iri ?? ''}-${i}`} className="flex flex-wrap items-start gap-2 rounded-lg border border-line bg-surface p-3 text-sm">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
           <span className="min-w-0 flex-1">{c.message}</span>
-          {onDiscard && c.iri && (
+          {onDiscard && (c.discard?.length || c.iri) && (
             <Button size="sm" variant="ghost" icon={Undo2} loading={pending} onClick={() => onDiscard(c)}>
-              Discard my change to {c.curie ?? 'this term'}
+              Discard my change to {(c.discardLabels ?? [c.curie ?? 'this term']).join(', ')}
             </Button>
           )}
         </li>
@@ -152,20 +152,23 @@ export function ForkPage() {
     void reload();
   });
   const discard = (c: ForkConflict) => {
-    if (!c.iri) return;
-    if (window.confirm(`Discard this fork's change to ${c.curie ?? c.iri}? The fork goes back to upstream's version of it; you can redo the change after syncing.`))
+    // The conflict says which of the fork's changes cause it (an edit can reach a term indirectly).
+    const terms = c.discard ?? (c.iri ? [c.iri] : []);
+    const names = (c.discardLabels ?? [c.curie ?? c.iri ?? 'this term']).join(', ');
+    if (!terms.length) return;
+    if (window.confirm(`Discard this fork's change to ${names}? The fork goes back to upstream's version; you can redo the change after syncing.`))
       void act.run(async () => {
         const after = f.behindBy ? ' Now sync with upstream.' : '';
         try {
-          await api.discardForkChanges(id, forkSlug, [c.iri!]);
+          await api.discardForkChanges(id, forkSlug, terms);
         } catch (err) {
           // The same edit also changed other terms: say which, and only go ahead if confirmed.
           const message = (err as Error).message ?? '';
           if (!/^The same edit also changed/.test(message) || !window.confirm(`${message.replace(/ Discard them as well.*$/, '')} Discard all of them?`)) throw err;
-          await api.discardForkChanges(id, forkSlug, [c.iri!], true);
-          return `Discarded the edit to ${c.curie ?? c.iri} and the other changes made with it.${after}`;
+          await api.discardForkChanges(id, forkSlug, terms, true);
+          return `Discarded the edit to ${names} and the other changes made with it.${after}`;
         }
-        return `Discarded the change to ${c.curie ?? c.iri}.${after}`;
+        return `Discarded the change to ${names}.${after}`;
       });
   };
   const sync = () =>

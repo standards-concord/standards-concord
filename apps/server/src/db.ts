@@ -75,6 +75,21 @@ export function put<T extends { id: string }>(collection: Collection, doc: T, pa
   return doc;
 }
 
+/**
+ * Replace a document only if its `field` still has the value the caller read
+ * (undefined: not set), in one statement. Returns false, writing nothing, if
+ * the document changed or doesn't exist: a compare-and-swap that holds across
+ * processes sharing the database.
+ */
+export function putIf<T extends { id: string }>(collection: Collection, doc: T, field: string, expected: string | number | undefined): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
+  const cond = expected === undefined ? `json_extract(data, '$.${field}') IS NULL` : `json_extract(data, '$.${field}') = ?`;
+  const args: (string | number)[] = [JSON.stringify(doc), collection, doc.id];
+  if (expected !== undefined) args.push(expected);
+  const row = conn().prepare(`UPDATE docs SET data = ? WHERE collection = ? AND id = ? AND ${cond} RETURNING id`).get(...args);
+  return !!row;
+}
+
 export function get<T>(collection: Collection, id: string): T | undefined {
   const row = conn().prepare('SELECT data FROM docs WHERE collection = ? AND id = ?').get(collection, id) as
     | { data: string }

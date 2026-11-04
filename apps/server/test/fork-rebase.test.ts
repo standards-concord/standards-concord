@@ -5,8 +5,8 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
-import { get, openDb, put } from '../src/db.js';
-import { forkDetail, forkSummary } from '../src/services/forks.js';
+import { get, openDb, put, putIf } from '../src/db.js';
+import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -349,5 +349,107 @@ describe('second review', () => {
     const asks = await dev.post(`${path}/discard`).send({ terms: ['vol:LeftOne'] });
     expect(asks.status).toBe(409);
     expect(asks.body.error).toMatch(/vol:RightOne/);
+  });
+});
+
+describe('third review', () => {
+  const fork = async (path: string) => (await request(app).get(path)).body;
+
+  it('saves are an atomic compare-and-swap on the record version, and a lost save undoes its commit', async () => {
+    const path = await newFork('Atomic save');
+    const p = findProject('volunteering')!;
+    const f = get<OntologyFork>('forks', (await fork(path)).id)!;
+    const snapshot = { seq: f.seq };
+    // Another process closes the fork after this one read it.
+    expect(putIf('forks', { ...f, status: 'closed', seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
+    expect(putIf('forks', { ...f, status: 'active' }, 'seq', f.seq)).toBe(false);
+    const before = ontologyStore.forkHead(p, f.slug);
+    const graph = await ontologyStore.forkGraph(p, f.slug);
+    await expect(
+      forTests.commitAndSave(p, f, snapshot, () => ontologyStore.commitFork(p, f.slug, graph, 'Racing edit', { name: 'Racer', email: 'r@example.org' }, { expectedParent: before })),
+    ).rejects.toThrow(/changed/);
+    expect(ontologyStore.forkHead(p, f.slug)).toBe(before);
+    expect(get<OntologyFork>('forks', f.id)!.status).toBe('closed');
+  });
+
+  it('two proposals at once open one change request', async () => {
+    const path = await newFork('Double propose');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('ProposedOnce', 'proposed once')] });
+    const [a, b] = await Promise.all([dev.post(`${path}/propose`).send({}), dev.post(`${path}/propose`).send({})]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(a.body.changeRequest.id).toBe(b.body.changeRequest.id);
+    expect((await fork(path)).changeRequestIds).toHaveLength(1);
+  });
+
+  it('a header edit partly undone does not overwrite upstream on sync', async () => {
+    const p = findProject('volunteering')!;
+    const path = await newFork('Header undo');
+    const title = (await ontologyStore.working(p)).metadata().title;
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { title: 'Temporary title', description: 'Fork description kept' } }] });
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { title } }] });
+    expect((await fork(path)).ops).toEqual([{ op: 'setMetadata', set: { description: 'Fork description kept' } }]);
+    await upstream([{ op: 'setMetadata', set: { title: 'Upstream title' } }]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.conflicts).toEqual([]);
+    expect(sync.synced).toBe(true);
+    const ttl = (await request(app).get(`/def/volunteering/forks/${sync.fork.slug}.ttl`)).text;
+    expect(ttl).toContain('Upstream title');
+    expect(ttl).not.toContain('Temporary title');
+    expect(ttl).toContain('Fork description kept');
+  });
+
+  it('a requested source that looks like a stamp is still compared', async () => {
+    const path = await newFork('Manual source');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}Role`, set: { source: ['manual#42'] } }] });
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).not.toMatch(/^switch-/);
+    expect(check.fork.terms).toEqual([expect.objectContaining({ curie: 'vol:Role', upstream: 'not-proposed' })]);
+  });
+
+  it('sync reports the reasoner being down as an error, not as an inconsistency', async () => {
+    const path = await newFork('Sync without reasoner');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('SyncNeedsReasoner', 'sync needs reasoner')] });
+    await upstream([addClass('MeanwhileUpstream', 'meanwhile upstream')]);
+    const prev = { require: config.requireFullReasoner, python: process.env.CONCORD_PYTHON };
+    config.requireFullReasoner = true;
+    process.env.CONCORD_PYTHON = '/nonexistent/python';
+    try {
+      const sync = await dev.post(`${path}/sync`);
+      expect(sync.status).toBe(503);
+    } finally {
+      config.requireFullReasoner = prev.require;
+      if (prev.python === undefined) delete process.env.CONCORD_PYTHON;
+      else process.env.CONCORD_PYTHON = prev.python;
+    }
+  });
+
+  it('discarding everything needs no extra confirmation', async () => {
+    const path = await newFork('Discard all');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('GoneSoon', 'gone soon')] });
+    const all = await dev.post(`${path}/discard`).send({ all: true });
+    expect(all.status).toBe(200);
+    expect(all.body.ops).toEqual([]);
+  });
+
+  it('an indirect conflict names the change to discard, and discarding it resolves the conflict', async () => {
+    await upstream([addClass('SecondAnchor', 'second anchor')]);
+    const path = await newFork('Indirect resolve');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'removeTerm', iri: `${VOL}SecondAnchor` }] });
+    await upstream([addClass('SecondChild', 'second child', { subClassOf: [`${VOL}SecondAnchor`] })]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    const indirect = sync.conflicts.find((c: { curie: string }) => c.curie === 'vol:SecondChild');
+    expect(indirect.discard).toEqual([`${VOL}SecondAnchor`]);
+    expect(indirect.discardLabels).toEqual(['vol:SecondAnchor']);
+    expect((await dev.post(`${path}/discard`).send({ terms: indirect.discard })).status).toBe(200);
+    expect((await dev.post(`${path}/sync`)).body.synced).toBe(true);
+  });
+
+  it('migration advice covers code that fetches without an Accept header', async () => {
+    const path = await newFork('Wildcard advice');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('WildcardTerm', 'wildcard term')] });
+    await upstream([addClass('WildcardTerm', 'wildcard term')]);
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).toBe('switch-to-draft');
+    expect(check.steps.join(' ')).toMatch(/draft\.ttl/);
   });
 });

@@ -67,9 +67,9 @@ function NewForkDialog({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
-function ForkRow({ f }: { f: ForkSummary }) {
+function ForkRow({ f, sameName }: { f: ForkSummary; sameName?: boolean }) {
   const { id } = useOntology();
-  const { now } = useSession();
+  const { now, session } = useSession();
   const added = f.terms.filter((t) => t.change === 'added').length;
   const changed = f.terms.length - added;
   return (
@@ -85,6 +85,7 @@ function ForkRow({ f }: { f: ForkSummary }) {
           <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted">
             <span className="inline-flex items-center gap-1">
               <Avatar name={f.owner?.name} src={f.owner?.avatarUrl} size={16} simulated={f.owner?.simulated} /> {f.owner?.name ?? 'someone'}
+              {session?.user?.id === f.ownerId ? ' (you)' : sameName && <span className="font-mono text-subtle" title="Another account has the same name">#{f.ownerId.slice(-4)}</span>}
             </span>
             <span>·</span>
             <span>
@@ -113,6 +114,8 @@ export function ForksTab() {
   const [open, setOpen] = useState(false);
   const mine = (list.data ?? []).filter((f) => f.ownerId === session?.user?.id);
   const others = (list.data ?? []).filter((f) => f.ownerId !== session?.user?.id);
+  // Different accounts with the same display name get a short account suffix, so they can be told apart.
+  const sameName = (f: ForkSummary) => (list.data ?? []).some((g) => g.ownerId !== f.ownerId && !!g.owner?.name && g.owner.name === f.owner?.name);
 
   return (
     <div>
@@ -146,7 +149,7 @@ export function ForksTab() {
               <Card>
                 <ul className="divide-y divide-line">
                   {mine.map((f) => (
-                    <ForkRow key={f.id} f={f} />
+                    <ForkRow key={f.id} f={f} sameName={sameName(f)} />
                   ))}
                 </ul>
               </Card>
@@ -158,7 +161,7 @@ export function ForksTab() {
               <Card>
                 <ul className="divide-y divide-line">
                   {others.map((f) => (
-                    <ForkRow key={f.id} f={f} />
+                    <ForkRow key={f.id} f={f} sameName={sameName(f)} />
                   ))}
                 </ul>
               </Card>

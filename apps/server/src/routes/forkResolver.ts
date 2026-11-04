@@ -9,7 +9,7 @@ import { ontologyStore } from '../services/ontologyStore.js';
 /**
  * Dereferenceable development forks:
  *
- *   /def/<ontology>/forks/<fork>          content negotiated like the version pages (HTML for browsers and wildcard Accept)
+ *   /def/<ontology>/forks/<fork>          content negotiated (Turtle unless the client asks for HTML)
  *   /def/<ontology>/forks/<fork>.ttl      one format by extension (.jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl)
  *
  * Always the fork's latest revision, so an application that imports it picks
@@ -34,9 +34,10 @@ async function serve(req: Request, res: Response) {
 
   let format: OutputFormat | 'html' | undefined = seg.format;
   if (!format) {
-    // Exactly as the public version pages negotiate, so moving an import from the fork to a
-    // version (the migration plan) never changes what a client gets back.
-    const types = Object.keys(NEGOTIABLE);
+    // A fork IRI is an import target: HTML (a redirect to the fork's page) only for clients that
+    // ask for it, as browsers do; a bare Accept or */* (fetch, curl, RDF libraries) gets Turtle.
+    const wantsHtml = /\btext\/html\b/i.test(req.get('accept') ?? '');
+    const types = Object.keys(NEGOTIABLE).filter((t) => wantsHtml || NEGOTIABLE[t] !== 'html');
     const best = req.accepts(types);
     if (!best) return plain(res, 406, `Not acceptable. Available: ${types.join(', ')}, or add an extension such as .ttl`);
     format = NEGOTIABLE[best];

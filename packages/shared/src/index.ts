@@ -527,6 +527,8 @@ export interface OntologyFork {
   head: string;
   status: ForkStatus;
   changeRequestIds: string[];
+  /** Record version: every change to the stored fork advances it, and a change is only saved if it hasn't moved since it was read. */
+  seq?: number;
   /** The revision last proposed upstream; edits after it are not in the change request yet. */
   proposedRevision?: number;
   createdAt: string;
@@ -577,6 +579,10 @@ export interface ForkConflict {
   iri?: string;
   curie?: string;
   message: string;
+  /** What to pass to discard to resolve it: the terms of the fork's edits that cause it (may differ from `iri` when an edit reaches the term indirectly). */
+  discard?: string[];
+  /** Readable form of `discard`. */
+  discardLabels?: string[];
 }
 
 /** What an agent should do about a fork at the start of a development session. */

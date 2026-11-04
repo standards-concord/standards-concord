@@ -90,12 +90,14 @@ describe('development forks', () => {
     const jsonld = await request(app).get('/def/volunteering/forks/volunteer-hours.jsonld');
     expect(jsonld.status).toBe(200);
     expect(jsonld.headers['content-type']).toMatch(/application\/ld\+json/);
-    // Negotiated exactly like the public version pages, so migrating never changes the response.
-    const any = await request(app).get('/def/volunteering/forks/volunteer-hours').set('Accept', '*/*');
-    const anyVersion = await request(app).get('/def/volunteering/1.0.0').set('Accept', '*/*');
-    expect(any.status).toBe(303);
-    expect(anyVersion.headers['content-type']).toMatch(/text\/html/);
-    expect(anyVersion.headers['access-control-allow-origin']).toBe('*');
+    // An import target: Turtle unless the client asks for HTML, with CORS, so fetch() works cross-origin.
+    for (const accept of ['*/*', '']) {
+      const any = await request(app).get('/def/volunteering/forks/volunteer-hours').set('Accept', accept);
+      expect(any.status, accept).toBe(200);
+      expect(any.headers['content-type']).toMatch(/text\/turtle/);
+      expect(any.headers['access-control-allow-origin']).toBe('*');
+    }
+    expect((await request(app).get('/def/volunteering/1.0.0.ttl')).headers['access-control-allow-origin']).toBe('*');
     const html = await request(app).get('/def/volunteering/forks/volunteer-hours').set('Accept', 'text/html,application/xhtml+xml,*/*;q=0.8');
     expect(html.status).toBe(303);
     expect(html.headers.location).toMatch(/\/o\/volunteering\/forks\/volunteer-hours$/);

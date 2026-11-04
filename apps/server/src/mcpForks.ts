@@ -47,7 +47,7 @@ function brief(f: ForkSummary) {
 const WRITES = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
 
 const howToImport = (f: ForkSummary) =>
-  `Import the fork instead of the released ontology while you develop: use a file URL such as ${f.urls.formats.turtle} (or ${f.urls.iri} with an Accept header for the RDF format you want; like the release IRIs, it gives HTML to browsers and */*). Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
+  `Import the fork instead of the released ontology while you develop: use ${f.urls.iri} (Turtle unless you ask for another format) or a file URL such as ${f.urls.formats.turtle}. Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
 
 export function registerForkTools(server: McpServer, user: User, resolveOntology: (ref: string) => OntologyProject | undefined) {
   const forkArg = z.string().describe('Fork id (frk_…) or "<ontology-slug>/<fork-slug>", as returned by create_fork or list_forks');

@@ -238,6 +238,19 @@ export const ontologyStore = {
     }
   },
 
+  /**
+   * Move a fork branch back from `from` to `to`, only if it is still at
+   * `from`: undoes a commit whose fork record could not be saved.
+   */
+  rewindFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string, to: string, from: string): boolean {
+    try {
+      git(repoDir(project), ['update-ref', `refs/heads/${forkBranch(forkSlug)}`, to, from]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   /** Commits on main since `commit` (how far a fork has fallen behind). */
   commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): number {
     try {
