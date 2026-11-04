@@ -148,7 +148,8 @@ e:BelowOne a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatat
 e:AtMost a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:maxInclusive 9007199254740993.0 ] ) ] .
 e:Min1 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive 1.00000000000000001 ] ) ] .
 e:Min2 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive 1.00000000000000002 ] ) ] .`;
-    // Values above 2^53 and at most 2^53 + 1: not empty, and both bounds kept as written.
+    // Values above 2^53 and at most 2^53 + 1: not empty, and both bounds kept as written. (Checked as text:
+    // sparq 0.1.5 compares decimals as doubles when validating, so it can't tell these values apart.)
     const big = await shapesFor(['e:Above', 'e:AtMost'], defs);
     expect(big).not.toMatch(/sh:maxCount 0/);
     expect(big).toMatch(/sh:minExclusive 9007199254740992\.0/);
@@ -157,6 +158,26 @@ e:Min2 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype 
     const min = await shapesFor(['e:Min1', 'e:Min2'], defs);
     expect(min).toMatch(/sh:minInclusive 1\.00000000000000002/);
     expect(min).not.toMatch(/1\.00000000000000001/);
+  });
+
+  it('validates values at and around decimal bounds', async () => {
+    const defs = `e:Above a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minExclusive 2.5 ] ) ] .
+e:AtMost a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:maxInclusive 3.75 ] ) ] .
+e:AtLeast a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive -0.125 ] ) ] .
+e:Below a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:maxExclusive 0.5 ] ) ] .`;
+    expectValues(
+      await shapesFor(['e:Above', 'e:AtMost'], defs),
+      ['"2.51"^^xsd:decimal', '"3.75"^^xsd:decimal', '"3.750"^^xsd:decimal', '"3"^^xsd:integer', '"3"^^xsd:byte'],
+      ['"2.5"^^xsd:decimal', '"2.50"^^xsd:decimal', '"3.76"^^xsd:decimal', '"2"^^xsd:integer', '"4"^^xsd:integer', '"3.0"^^xsd:double'],
+    );
+    expectValues(
+      await shapesFor(['e:AtLeast', 'e:Below'], defs),
+      ['"-0.125"^^xsd:decimal', '"-0"^^xsd:integer', '"0.4999"^^xsd:decimal'],
+      ['"-0.126"^^xsd:decimal', '"0.5"^^xsd:decimal', '"1"^^xsd:integer'],
+    );
+    // The same bounds with whole numbers: 3 only, and 0 only.
+    expectValues(await shapesFor(['e:Above', 'e:AtMost', 'xsd:integer'], defs), ['"3"^^xsd:integer', '"3.0"^^xsd:decimal'], ['"2"^^xsd:integer', '"4"^^xsd:integer', '"3.5"^^xsd:decimal']);
+    expectValues(await shapesFor(['e:AtLeast', 'e:Below', 'xsd:int'], defs), ['"0"^^xsd:int'], ['"-1"^^xsd:int', '"1"^^xsd:int']);
   });
 
   it('finds the whole numbers between bounds exactly', async () => {

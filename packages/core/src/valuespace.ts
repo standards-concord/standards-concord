@@ -46,9 +46,11 @@ const INTEGER_BOUNDS: Record<string, [string | undefined, string | undefined]> =
 /**
  * The restrictions XML Schema puts on its built-in string subtypes and
  * xsd:dateTimeStamp, as SHACL patterns on the lexical form (which for the
- * string types is the value). Name-like types use XML's name characters (`\i`,
- * `\c`), which SHACL engines don't support, and a duration's lexical form
- * doesn't show its value (P0Y and PT0S are both zero), so those can't be checked.
+ * string types is the value). Name-like types need XML's name-character
+ * escapes (`\i`, `\c`), which XPath has but not every SHACL engine supports
+ * (pySHACL doesn't), and a duration's lexical form doesn't show its value (P0Y
+ * and PT0S are both zero), so those aren't checked here: only the token rules
+ * they inherit are, and a note says so.
  */
 const BUILTIN_PATTERNS: Record<string, string | null> = {
   normalizedString: '^[^\\r\\n\\t]*$',
