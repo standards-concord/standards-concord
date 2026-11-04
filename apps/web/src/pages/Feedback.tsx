@@ -172,7 +172,17 @@ export function FeedbackPage() {
     try {
       const r = await api.feedbackChat({ ...questionScope(sc), messages: msgs, answers: ans, pathway: sc.pathway, currentQuestionId });
       setMessages([...msgs, msg('assistant', r.reply)]);
-      if (r.answers) setAnswers({ ...ans, ...r.answers });
+      // Apply only what the reply changed, and never over an answer edited in the panel while it was on its way.
+      const changed = r.answers;
+      if (changed)
+        setAnswers((cur) => {
+          const next = { ...cur };
+          for (const [k, v] of Object.entries(changed)) {
+            const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+            if (!same(v, ans[k]) && same(cur[k], ans[k])) next[k] = v;
+          }
+          return next;
+        });
       setDone(r.done);
       setNextQ(r.nextQuestionId);
     } catch (e) {
