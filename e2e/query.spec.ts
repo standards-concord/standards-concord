@@ -145,6 +145,11 @@ test.describe('Query tab', () => {
   });
 
   test('the sample data is highlighted and checked against SHACL', async ({ page }) => {
+    // One workspace at a time: the data checker is behind "Check data".
+    await expect(page.getByTestId('data-editor')).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Check data' }).click();
+    await expect(page).toHaveURL(/view=check/);
+    await expect(page.getByTestId('query-builder')).toHaveCount(0);
     const data = page.getByTestId('data-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Check' }).click();
@@ -152,12 +157,33 @@ test.describe('Query tab', () => {
     await expect(report).toContainText(/\d+ problems?/);
     await expect(report).toContainText('saturday-shift');
 
+    // Switching away and back keeps the report.
+    await page.getByRole('tab', { name: 'Query ontology' }).click();
+    await page.getByRole('tab', { name: 'Check data' }).click();
+    await expect(report).toContainText('saturday-shift');
+
     // Editing the data changes what the builder finds.
     await data.click();
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
+    await page.getByRole('tab', { name: 'Query ontology' }).click();
     await run(page);
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');
+  });
+  test('long results are paginated', async ({ page }) => {
+    await page.getByRole('tab', { name: 'SPARQL' }).click();
+    await setEditor(page, 'sparql-editor', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
+    await run(page);
+    const table = results(page);
+    await expect(table.locator('tbody tr')).toHaveCount(50);
+    const pager = page.getByRole('navigation', { name: 'Result pages' });
+    await expect(pager).toContainText(/1–50 of [\d,]+/);
+    const first = await table.locator('tbody tr').first().innerText();
+    await pager.getByRole('button', { name: 'Next page' }).click();
+    await expect(pager).toContainText('51–100');
+    expect(await table.locator('tbody tr').first().innerText()).not.toBe(first);
+    await pager.getByRole('button', { name: 'Previous page' }).click();
+    await expect(pager).toContainText('1–50');
   });
 });

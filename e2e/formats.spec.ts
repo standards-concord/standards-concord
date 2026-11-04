@@ -25,7 +25,7 @@ test.describe('Formats tab', () => {
   for (const f of FORMATS) {
     test(`${f.tab} is highlighted as ${f.language}`, async ({ page }) => {
       await page.goto(`/o/${ontologyId}/source`);
-      await page.getByRole('tablist', { name: 'Format' }).getByRole('tab', { name: f.tab, exact: true }).click();
+      await page.getByLabel('Format', { exact: true }).selectOption({ label: f.tab });
       await expect(page).toHaveURL(new RegExp(`format=${f.id}`));
       const code = page.getByTestId('source-code');
       await expect(code).toBeVisible();
@@ -38,6 +38,18 @@ test.describe('Formats tab', () => {
       await expect(code).not.toContainText('zzz');
     });
   }
+
+  test('Turtle is the default, and each format explains itself on request', async ({ page }) => {
+    await page.goto(`/o/${ontologyId}/source`);
+    await expect(page.getByLabel('Format', { exact: true })).toHaveValue('turtle');
+    const about = page.getByTestId('format-about');
+    await expect(about.getByText('stored in git')).toBeHidden();
+    await about.getByText('About Turtle').click();
+    await expect(about.getByText('stored in git')).toBeVisible();
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'LinkML' });
+    await expect(about).toContainText('About LinkML');
+    await expect(about).toContainText('ODI');
+  });
 
   test('search, folding, copy and download work', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);

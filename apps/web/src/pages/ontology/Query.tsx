@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { BookOpen, Code2, Cpu, Download, Pencil, Play, ShieldCheck, Workflow } from 'lucide-react';
+import { BookOpen, ChevronLeft, ChevronRight, Code2, Cpu, Download, Pencil, Play, Search, ShieldCheck, Workflow } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
 import { api } from '../../api';
@@ -25,10 +25,7 @@ import { useOntology } from './Layout';
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-type Result =
-  | { kind: 'rows'; vars: string[]; rows: Record<string, string>[] }
-  | { kind: 'ask'; answer: boolean }
-  | { kind: 'graph'; text: string; count: number };
+type Result = { kind: 'rows'; vars: string[]; rows: Record<string, string>[] } | { kind: 'ask'; answer: boolean } | { kind: 'graph'; text: string; count: number };
 
 type Mode = 'builder' | 'sparql';
 type Target = 'ontology' | 'data';
@@ -64,7 +61,7 @@ function csv(result: Extract<Result, { kind: 'rows' }>) {
 
 function Segmented<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: { id: T; label: string; icon: typeof Code2 }[]; label: string }) {
   return (
-    <div className="flex gap-1 rounded-lg border border-line-strong p-0.5" role="tablist" aria-label={label}>
+    <div className="inline-flex gap-1 rounded-lg border border-line-strong p-0.5" role="tablist" aria-label={label}>
       {options.map((o) => (
         <button
           key={o.id}
@@ -81,17 +78,48 @@ function Segmented<T extends string>({ value, onChange, options, label }: { valu
   );
 }
 
+const ROWS_PER_PAGE = 50;
+const FINDINGS_PER_PAGE = 20;
+
+/** Previous / next paging for long results, so a big answer doesn't flood the page. */
+function Pager({ page, pageSize, total, onPage, label }: { page: number; pageSize: number; total: number; onPage: (p: number) => void; label: string }) {
+  const pages = Math.ceil(total / pageSize);
+  if (pages <= 1) return null;
+  return (
+    <nav className="flex items-center justify-end gap-2 px-3 py-1.5 text-xs text-muted" aria-label={label}>
+      <span>
+        {page * pageSize + 1}–{Math.min(total, (page + 1) * pageSize)} of {total.toLocaleString()}
+      </span>
+      <Button size="sm" variant="ghost" icon={ChevronLeft} onClick={() => onPage(page - 1)} disabled={page === 0} aria-label="Previous page" />
+      <span>
+        Page {page + 1} of {pages}
+      </span>
+      <Button size="sm" variant="ghost" icon={ChevronRight} onClick={() => onPage(page + 1)} disabled={page >= pages - 1} aria-label="Next page" />
+    </nav>
+  );
+}
+
+type Workspace = 'query' | 'check';
+
 export function QueryTab() {
   const { id, ontology } = useOntology();
   const [params, setParams] = useSearchParams();
   const mode: Mode = params.get('mode') === 'sparql' ? 'sparql' : 'builder';
+  const setParam = (k: string, v: string) => {
+    const n = new URLSearchParams(params);
+    n.set(k, v);
+    setParams(n, { replace: true });
+  };
   const setMode = (m: Mode) => {
     setResult(null);
     setQueryError(undefined);
-    const n = new URLSearchParams(params);
-    n.set('mode', m);
-    setParams(n, { replace: true });
+    setParam('mode', m);
   };
+  // One workspace at a time; both keep their inputs and results when you switch.
+  const workspace: Workspace = params.get('view') === 'check' ? 'check' : 'query';
+  const setWorkspace = (w: Workspace) => setParam('view', w);
+  const [rowPage, setRowPage] = useState(0);
+  const [findingPage, setFindingPage] = useState(0);
 
   const turtle = useAsync(() => api.source(id, 'turtle'), [id]);
   const shapes = useAsync(() => api.source(id, 'shacl'), [id]);
@@ -104,13 +132,21 @@ export function QueryTab() {
   const examples = useMemo(() => sparqlExamples(ontology.prefix, ontology.namespace), [ontology.prefix, ontology.namespace]);
   const [query, setQuery] = useState(examples[0].query);
   const [target, setTarget] = useState<Target>('ontology');
-  const [result, setResult] = useState<Result | null>(null);
+  const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
   const [data, setData] = useState(() => EXAMPLE_DATA(ontology.namespace, ontology.prefix));
-  const [report, setReport] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
+  const [report, setReportState] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
   const [checkError, setCheckError] = useState<unknown>();
 
+  const setResult = (r: Result | null) => {
+    setResultState(r);
+    setRowPage(0);
+  };
+  const setReport = (r: typeof report) => {
+    setReportState(r);
+    setFindingPage(0);
+  };
   const label = useMemo(() => makeLabeler(view.data), [view.data]);
   const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
 
@@ -128,7 +164,10 @@ export function QueryTab() {
   }, [view.data, model, ontology.namespace]);
   const allOptions = useMemo(() => (view.data ? propertyOptions(view.data, undefined, label) : []), [view.data, label]);
   const optionFor = useCallback((iri: string): PropertyOption | undefined => allOptions.find((o) => o.iri === iri), [allOptions]);
-  const built = useMemo(() => (model ? buildSparql(model, { prefixes: { ...prefixes, rdfs: 'http://www.w3.org/2000/01/rdf-schema#', skos: 'http://www.w3.org/2004/02/skos/core#' } }) : null), [model, prefixes]);
+  const built = useMemo(
+    () => (model ? buildSparql(model, { prefixes: { ...prefixes, rdfs: 'http://www.w3.org/2000/01/rdf-schema#', skos: 'http://www.w3.org/2004/02/skos/core#' } }) : null),
+    [model, prefixes],
+  );
 
   // Autocomplete: every term as a prefixed name, with its label.
   const completions = useMemo<Completion[]>(() => {
@@ -212,7 +251,15 @@ export function QueryTab() {
     try {
       // The ontology goes in the data graph too, so sh:class sees subclass relationships.
       const r = s.validate(`${turtle.data ?? ''}\n${data}`, shapes.data, 'turtle');
-      setReport({ conforms: r.conforms, results: r.results.map((x) => ({ focusNode: x.focusNode as string | undefined, path: x.path as string | undefined, severity: x.severity as string | undefined, message: x.message as string | undefined })) });
+      setReport({
+        conforms: r.conforms,
+        results: r.results.map((x) => ({
+          focusNode: x.focusNode as string | undefined,
+          path: x.path as string | undefined,
+          severity: x.severity as string | undefined,
+          message: x.message as string | undefined,
+        })),
+      });
     } catch (e) {
       setCheckError(e);
       setReport(null);
@@ -235,181 +282,203 @@ export function QueryTab() {
       </p>
       {loadError ? <InlineError error={loadError} /> : null}
 
-      <Card>
-        <CardHeader
-          title="Query the ontology"
-          subtitle={mode === 'builder' ? 'Build a query by picking classes and properties; it runs over the ontology plus your sample data' : 'SPARQL 1.1, with autocomplete for this ontology’s terms (Ctrl/⌘-Space) and Ctrl/⌘-Enter to run'}
-          icon={Play}
-          actions={
-            <div className="flex flex-wrap items-center gap-2">
-              <Segmented
-                label="Query mode"
-                value={mode}
-                onChange={setMode}
-                options={[
-                  { id: 'builder', label: 'Visual builder', icon: Workflow },
-                  { id: 'sparql', label: 'SPARQL', icon: Code2 },
-                ]}
-              />
-              <Button variant="primary" icon={Play} onClick={run} disabled={!ready || !activeQuery}>
-                Run
-              </Button>
-            </div>
-          }
-        />
-        <div className="space-y-3 p-4">
-          {mode === 'sparql' ? (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value=""
-                  onChange={(e) => {
-                    const ex = examples.find((x) => x.id === e.target.value);
-                    if (ex) {
-                      setQuery(ex.query);
-                      if (ex.id === 'instances') setTarget('data');
-                    }
-                  }}
-                  aria-label="Example queries"
-                  className="w-auto!"
-                >
-                  <option value="">Examples…</option>
-                  {examples.map((x) => (
-                    <option key={x.id} value={x.id} title={x.description}>
-                      {x.title}
-                    </option>
-                  ))}
-                </Select>
-                <label className="ml-auto flex items-center gap-2 text-sm">
-                  <span className="text-muted">Run against</span>
-                  <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!">
-                    <option value="ontology">The ontology</option>
-                    <option value="data">The ontology + sample data</option>
-                  </Select>
-                </label>
-              </div>
-              <CodeEditor value={query} onChange={setQuery} language="sparql" onRun={run} completions={completions} ariaLabel="SPARQL query" minHeight={200} maxHeight={420} testId="sparql-editor" />
-            </>
-          ) : !view.data || !model || !built ? (
-            view.error ? <InlineError error={view.error} /> : <Loading label="Reading the ontology’s classes…" />
-          ) : (
-            <div className="space-y-4">
-              <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} />
-              <QueryDiagram model={model} variables={built.variables} label={label} optionFor={optionFor} />
-              <details className="group" open>
-                <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted">
-                  <BookOpen className="size-4" /> The SPARQL this builds
-                </summary>
-                <div className="mt-2 space-y-2">
-                  <HighlightedCode code={built.query} language="sparql" className="text-[0.8rem] leading-relaxed" />
-                  <Button
-                    size="sm"
-                    icon={Pencil}
-                    onClick={() => {
-                      setQuery(built.query);
-                      setTarget('data');
-                      setMode('sparql');
-                    }}
-                  >
-                    Edit as SPARQL
-                  </Button>
-                </div>
-              </details>
-            </div>
-          )}
+      <Segmented
+        label="Workspace"
+        value={workspace}
+        onChange={setWorkspace}
+        options={[
+          { id: 'query', label: 'Query ontology', icon: Search },
+          { id: 'check', label: 'Check data', icon: ShieldCheck },
+        ]}
+      />
 
-          {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
-          {queryError ? <InlineError error={queryError} /> : null}
-          {result?.kind === 'ask' && (
-            <p className="text-sm" data-testid="query-answer">
-              Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
-            </p>
-          )}
-          {result?.kind === 'graph' && (
-            <div className="space-y-1" data-testid="query-graph">
-              <p className="text-xs text-muted">
-                {result.count} triple{result.count === 1 ? '' : 's'}
-                {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
-              </p>
-              <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
-            </div>
-          )}
-          {result?.kind === 'rows' && (
-            <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
-              <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
-                <span>
-                  {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
-                  {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
-                </span>
-                <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv(result))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
-                  <Download className="size-3" /> CSV
-                </a>
+      {workspace === 'query' ? (
+        <Card>
+          <CardHeader
+            title="Query the ontology"
+            subtitle={
+              mode === 'builder'
+                ? 'Build a query by picking classes and properties. It runs over the ontology plus the sample data from Check data.'
+                : 'SPARQL 1.1, with autocomplete for this ontology’s terms (Ctrl/⌘-Space) and Ctrl/⌘-Enter to run'
+            }
+            icon={Play}
+            actions={
+              <div className="flex flex-wrap items-center gap-2">
+                <Segmented
+                  label="Query mode"
+                  value={mode}
+                  onChange={setMode}
+                  options={[
+                    { id: 'builder', label: 'Visual builder', icon: Workflow },
+                    { id: 'sparql', label: 'SPARQL', icon: Code2 },
+                  ]}
+                />
+                <Button variant="primary" icon={Play} onClick={run} disabled={!ready || !activeQuery}>
+                  Run
+                </Button>
               </div>
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr>
-                    {result.vars.map((v) => (
-                      <th key={v} className="px-3 py-1.5 font-medium font-mono text-[var(--syn-variable)]">
-                        ?{v}
-                      </th>
+            }
+          />
+          <div className="space-y-3 p-4">
+            {mode === 'sparql' ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Select
+                    value=""
+                    onChange={(e) => {
+                      const ex = examples.find((x) => x.id === e.target.value);
+                      if (ex) {
+                        setQuery(ex.query);
+                        if (ex.id === 'instances') setTarget('data');
+                      }
+                    }}
+                    aria-label="Example queries"
+                    className="w-auto!"
+                  >
+                    <option value="">Examples…</option>
+                    {examples.map((x) => (
+                      <option key={x.id} value={x.id} title={x.description}>
+                        {x.title}
+                      </option>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.rows.slice(0, 500).map((r, i) => (
-                    <tr key={i} className="border-t border-line align-top">
+                  </Select>
+                  <label className="ml-auto flex items-center gap-2 text-sm">
+                    <span className="text-muted">Run against</span>
+                    <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!">
+                      <option value="ontology">The ontology</option>
+                      <option value="data">The ontology + sample data</option>
+                    </Select>
+                  </label>
+                </div>
+                <CodeEditor value={query} onChange={setQuery} language="sparql" onRun={run} completions={completions} ariaLabel="SPARQL query" minHeight={200} maxHeight={420} testId="sparql-editor" />
+              </>
+            ) : !view.data || !model || !built ? (
+              view.error ? (
+                <InlineError error={view.error} />
+              ) : (
+                <Loading label="Reading the ontology’s classes…" />
+              )
+            ) : (
+              <div className="space-y-4">
+                <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} />
+                <QueryDiagram model={model} variables={built.variables} label={label} optionFor={optionFor} />
+                <details className="group" open>
+                  <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted">
+                    <BookOpen className="size-4" /> The SPARQL this builds
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    <HighlightedCode code={built.query} language="sparql" className="text-[0.8rem] leading-relaxed" />
+                    <Button
+                      size="sm"
+                      icon={Pencil}
+                      onClick={() => {
+                        setQuery(built.query);
+                        setTarget('data');
+                        setMode('sparql');
+                      }}
+                    >
+                      Edit as SPARQL
+                    </Button>
+                  </div>
+                </details>
+              </div>
+            )}
+
+            {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
+            {queryError ? <InlineError error={queryError} /> : null}
+            {result?.kind === 'ask' && (
+              <p className="text-sm" data-testid="query-answer">
+                Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
+              </p>
+            )}
+            {result?.kind === 'graph' && (
+              <div className="space-y-1" data-testid="query-graph">
+                <p className="text-xs text-muted">
+                  {result.count} triple{result.count === 1 ? '' : 's'}
+                  {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
+                </p>
+                <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
+              </div>
+            )}
+            {result?.kind === 'rows' && (
+              <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
+                <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
+                  <span>
+                    {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+                    {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
+                  </span>
+                  <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv(result))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
+                    <Download className="size-3" /> CSV
+                  </a>
+                </div>
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr>
                       {result.vars.map((v) => (
-                        <td key={v} className="px-3 py-1.5 font-mono" title={r[v]}>
-                          {r[v] ? short(r[v], prefixes) : ''}
-                        </td>
+                        <th key={v} className="px-3 py-1.5 font-medium font-mono text-[var(--syn-variable)]">
+                          ?{v}
+                        </th>
                       ))}
                     </tr>
+                  </thead>
+                  <tbody>
+                    {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
+                      <tr key={i} className="border-t border-line align-top">
+                        {result.vars.map((v) => (
+                          <td key={v} className="px-3 py-1.5 font-mono" title={r[v]}>
+                            {r[v] ? short(r[v], prefixes) : ''}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
+              </div>
+            )}
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader
+            title="Check your data"
+            subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. The visual builder queries this data too."
+            icon={ShieldCheck}
+            actions={
+              <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes.data}>
+                Check
+              </Button>
+            }
+          />
+          <div className="space-y-3 p-4">
+            <CodeEditor value={data} onChange={setData} language="turtle" completions={completions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
+            {checkError ? <InlineError error={checkError} /> : null}
+            {report && (
+              <div className="space-y-2" data-testid="shacl-report">
+                <p className="text-sm">
+                  {report.conforms ? (
+                    <Badge tone="ok">Conforms</Badge>
+                  ) : (
+                    <Badge tone="danger">
+                      {report.results.length} problem{report.results.length === 1 ? '' : 's'}
+                    </Badge>
+                  )}
+                </p>
+                <ul className="space-y-1 text-sm">
+                  {report.results.slice(findingPage * FINDINGS_PER_PAGE, (findingPage + 1) * FINDINGS_PER_PAGE).map((r, i) => (
+                    <li key={i} className="rounded-md border border-line px-3 py-2">
+                      <span className="font-mono text-xs">{r.focusNode ? short(r.focusNode, prefixes) : ''}</span>
+                      {r.path ? <span className="font-mono text-xs text-muted"> · {short(r.path, prefixes)}</span> : null}
+                      <div>{r.message}</div>
+                    </li>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </Card>
-
-      <Card>
-        <CardHeader
-          title="Sample data"
-          subtitle="Turtle instance data: queried by the builder, and checked against SHACL shapes generated from the ontology"
-          icon={ShieldCheck}
-          actions={
-            <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes.data}>
-              Check
-            </Button>
-          }
-        />
-        <div className="space-y-3 p-4">
-          <CodeEditor value={data} onChange={setData} language="turtle" completions={completions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
-          {checkError ? <InlineError error={checkError} /> : null}
-          {report && (
-            <div className="space-y-2" data-testid="shacl-report">
-              <p className="text-sm">
-                {report.conforms ? (
-                  <Badge tone="ok">Conforms</Badge>
-                ) : (
-                  <Badge tone="danger">
-                    {report.results.length} problem{report.results.length === 1 ? '' : 's'}
-                  </Badge>
-                )}
-              </p>
-              <ul className="space-y-1 text-sm">
-                {report.results.slice(0, 100).map((r, i) => (
-                  <li key={i} className="rounded-md border border-line px-3 py-2">
-                    <span className="font-mono text-xs">{r.focusNode ? short(r.focusNode, prefixes) : ''}</span>
-                    {r.path ? <span className="font-mono text-xs text-muted"> · {short(r.path, prefixes)}</span> : null}
-                    <div>{r.message}</div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      </Card>
+                </ul>
+                <Pager page={findingPage} pageSize={FINDINGS_PER_PAGE} total={report.results.length} onPage={setFindingPage} label="Finding pages" />
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
