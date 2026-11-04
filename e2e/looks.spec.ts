@@ -152,9 +152,11 @@ test.describe('looks', () => {
   });
 
   for (const scheme of ['light', 'dark'] as const)
-    test(`white avatar initials stay readable on every hue in the ODI look (${scheme})`, async ({ page }) => {
+    test(`white avatar initials stay readable on every hue in every look (${scheme})`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
-      await page.goto('/login?look=odi');
+      await page.goto('/login');
+      for (const id of LOOKS) {
+      await page.evaluate((l) => (document.documentElement.dataset.look = l), id);
       const worst = await page.evaluate(() => {
         const probe = document.createElement('span');
         document.body.appendChild(probe);
@@ -172,8 +174,51 @@ test.describe('looks', () => {
         probe.remove();
         return min;
       });
-      expect(worst).toBeGreaterThanOrEqual(4.5);
+      expect(worst, id).toBeGreaterThanOrEqual(4.5);
+      }
     });
+
+  test('a migrated look is still used when storage refuses writes', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem('concord-look');
+      localStorage.setItem('concord-look-2', 'workbench');
+      Storage.prototype.setItem = () => {
+        throw new Error('read-only storage');
+      };
+      Storage.prototype.removeItem = () => {
+        throw new Error('read-only storage');
+      };
+    });
+    await page.goto('/login');
+    expect(await look(page)).toBe('workbench');
+  });
+
+  test('scrolling to a section respects reduced motion', async ({ page, request }) => {
+    await signIn(page, { name: 'Motion tester', role: 'steward' });
+    const demo = await demoOntology(request);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.addInitScript(() => {
+      const seen: string[] = ((window as unknown as { scrolls: string[] }).scrolls = []);
+      const wrap = (proto: { scrollIntoView?: unknown; scrollTo?: unknown }, name: 'scrollIntoView' | 'scrollTo') => {
+        const orig = proto[name] as (...a: unknown[]) => void;
+        proto[name] = function (this: unknown, ...args: unknown[]) {
+          const o = args[0];
+          if (o && typeof o === 'object' && 'behavior' in o) seen.push(String((o as { behavior: string }).behavior));
+          return orig.apply(this, args);
+        };
+      };
+      wrap(Element.prototype, 'scrollIntoView');
+      wrap(Element.prototype, 'scrollTo');
+    });
+    for (const path of [`/o/${demo.id}#health`, `/o/${demo.id}/governance#roles`, '/settings#appearance']) {
+      await page.goto(path);
+      await settle(page);
+      await page.waitForTimeout(300);
+    }
+    const scrolls = await page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls);
+    expect(scrolls.length, 'some scrolling happened').toBeGreaterThan(0);
+    expect(scrolls).not.toContain('smooth');
+  });
 
   for (const scheme of ['light', 'dark'] as const) {
     test(`every look's colour pairs meet WCAG AA contrast (${scheme})`, async ({ page }) => {
@@ -208,6 +253,8 @@ test.describe('looks', () => {
             ['danger-fg', 'danger'],
             ['control-line', 'surface', 3],
             ['control-line', 'bg', 3],
+            ['control-line', 'surface-2', 3],
+            ['subtle', 'surface-2'],
             ['header-focus', 'header-bg', 3],
             ['focus', 'surface', 3],
           ];
@@ -288,6 +335,14 @@ test.describe('looks', () => {
       const item = page.getByRole('menu').getByRole('link', { name: 'Appearance' });
       const [itemColor, menuBg] = await item.evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el.closest('[role=menu]')!).backgroundColor]);
       expect(await ratio(itemColor, menuBg), 'menu item contrast').toBeGreaterThanOrEqual(4.5);
+      // Keyboard focus inside the menu uses the page's focus colour, not the masthead's.
+      await page.keyboard.press('Shift');
+      await item.focus();
+      const [visible, ringStyle, ringColor] = await item.evaluate((el) => [el.matches(':focus-visible'), getComputedStyle(el).outlineStyle, getComputedStyle(el).outlineColor]);
+      if (visible) {
+        expect(ringStyle, 'menu focus ring').not.toBe('none');
+        expect(await ratio(ringColor, menuBg), 'menu focus ring contrast').toBeGreaterThanOrEqual(3);
+      }
       await page.keyboard.press('Escape');
       if (/rgba\(.*, 0?\.\d+\)$/.test(headerBg)) return; // translucent classic header: covered by the token test
       // Chevrons and the focus ring against the masthead.

@@ -229,7 +229,7 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
         onClick={() => onChange(!checked)}
         className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-control')}
       >
-        <span className={cx('inline-block size-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4.5' : 'translate-x-0.5')} />
+        <span className={cx('inline-block size-4 rounded-full shadow transition-transform', checked ? 'translate-x-4.5 bg-accent-fg' : 'translate-x-0.5 bg-white')} />
       </button>
       {label && (
         <label htmlFor={id} className="cursor-pointer text-sm">

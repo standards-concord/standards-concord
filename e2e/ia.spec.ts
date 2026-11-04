@@ -150,7 +150,14 @@ test.describe('progressive disclosure', () => {
       await page.keyboard.press('Shift+Tab');
       await page.keyboard.press('Tab');
       await expect(link).toBeFocused();
-      const [ring, bg] = await link.evaluate((el) => [getComputedStyle(el).outlineColor, getComputedStyle(el.closest('[data-testid=overview-asks]')!).backgroundColor]);
+      const [ring, bg, style, width] = await link.evaluate((el) => [
+        getComputedStyle(el).outlineColor,
+        getComputedStyle(el.closest('[data-testid=overview-asks]')!).backgroundColor,
+        getComputedStyle(el).outlineStyle,
+        getComputedStyle(el).outlineWidth,
+      ]);
+      expect(style, 'focus ring style').not.toBe('none');
+      expect(parseFloat(width), 'focus ring width').toBeGreaterThanOrEqual(2);
       const ratio = await page.evaluate(
         ([a, b]) => {
           const parse = (c: string) => c.match(/[\d.]+/g)!.slice(0, 3).map(Number);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import type { ChangeRequestStatus } from '@concord/shared';
 import { askOf } from '../../lib/asks';
+import { scrollBehavior } from '../../lib/motion';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { formatDate, plural, relativeTime } from '../../lib/format';
@@ -37,8 +38,7 @@ export function OverviewTab() {
   const healthKey = wantsHealth ? loc.key : undefined;
   useEffect(() => {
     if (!healthKey || !validation.data) return;
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    healthRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    healthRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   }, [healthKey, validation.data]);
 
   const members = o.members ?? [];
@@ -46,7 +46,7 @@ export function OverviewTab() {
     .filter((cr) => IN_PROGRESS.includes(cr.status))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
   const asks = inProgress.flatMap((cr) => {
-    const verb = askOf(cr, o.governance, myRoles, me);
+    const verb = askOf(cr, o.governance, myRoles, me, !!session?.user?.isPlatformAdmin);
     return verb ? [{ cr, verb }] : [];
   });
 

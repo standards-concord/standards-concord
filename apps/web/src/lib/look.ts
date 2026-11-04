@@ -53,12 +53,14 @@ export function storedLook(): LookId {
     const v = localStorage.getItem(KEY);
     if (isLook(v)) return v;
     const interim = localStorage.getItem(INTERIM_KEY);
-    if (isLook(interim)) {
+    if (!isLook(interim)) return DEFAULT_LOOK;
+    try {
       localStorage.setItem(KEY, interim);
       localStorage.removeItem(INTERIM_KEY);
-      return interim;
+    } catch {
+      /* storage is read-only here: still use the choice we read */
     }
-    return DEFAULT_LOOK;
+    return interim;
   } catch {
     return DEFAULT_LOOK;
   }

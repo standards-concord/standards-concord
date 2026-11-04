@@ -6,6 +6,7 @@ import { MicButton } from './MicButton';
 import { Avatar, Button, InlineError, cx } from './ui';
 import { Logo } from './badges';
 import { useDictation } from '../lib/speech';
+import { scrollBehavior } from '../lib/motion';
 
 export function TypingIndicator() {
   return (
@@ -65,7 +66,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: scrollBehavior() });
   }, [messages.length, pending]);
 
   useEffect(() => {

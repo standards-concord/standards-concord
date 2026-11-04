@@ -20,7 +20,7 @@
 :root,
 [data-look='classic'] {
   --danger-fg: #ffffff;
-  --control-line: #8c9096;
+  --control-line: #898d93;
   --header-focus: var(--focus);
   --bg: #fafaf9;
   --surface: #ffffff;
@@ -79,7 +79,8 @@
   --sh-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
   --sh-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
   --avatar-s: 45%;
-  --avatar-l: 45%;
+  /* Dark enough for white initials on every hue (e2e/looks.spec.ts). */
+  --avatar-l: 32%;
   --header-bg: color-mix(in srgb, var(--surface) 90%, transparent);
   --header-fg: var(--fg);
   --header-muted: var(--muted);
@@ -91,7 +92,7 @@
   :root,
   [data-look='classic'] {
     --danger-fg: #1a0b0a;
-    --control-line: #646a72;
+    --control-line: #656b73;
     --bg: #0f1012;
     --surface: #16181b;
     --surface-2: #1d2024;
@@ -125,7 +126,7 @@
     --syn-attr: #d19bff;
     --syn-selection: #2b3a66;
     --sh-xs: none;
-    --avatar-l: 40%;
+    --avatar-l: 32%;
     color-scheme: dark;
   }
 }
@@ -213,7 +214,7 @@
   --surface-2: #f0eee8;
   --fg: #1c1b19;
   --muted: #57534c;
-  --subtle: #716c63;
+  --subtle: #706b62;
   --line: #e0ddd5;
   --line-strong: #c9c4b8;
   --accent: #005a9c;
@@ -343,7 +344,7 @@
   --surface-2: #e7ebe7;
   --fg: #16201c;
   --muted: #4b5751;
-  --subtle: #64706a;
+  --subtle: #606c66;
   --line: #d3d9d4;
   --line-strong: #aeb8b2;
   --accent: #0b6e4f;
@@ -442,7 +443,7 @@
   }
   [data-look='spec'] {
     --danger-fg: #1a0b0a;
-    --control-line: #6d685e;
+    --control-line: #716c62;
     --bg: #141311;
     --surface: #1b1a17;
     --surface-2: #24221e;
@@ -526,7 +527,7 @@
   }
   [data-look='workbench'] {
     --danger-fg: #1a0b0a;
-    --control-line: #5f6b65;
+    --control-line: #64706a;
     --bg: #0f1412;
     --surface: #161c19;
     --surface-2: #1e2622;
@@ -637,6 +638,9 @@
 /* Menus that drop out of the masthead sit on the page surface, so they use page colours. */
 .app-header [role='menu'] {
   color: var(--fg);
+}
+.app-header [role='menu'] :focus-visible {
+  outline-color: var(--focus);
 }
 .page-title {
   font-size: var(--title-size);

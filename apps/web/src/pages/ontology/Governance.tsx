@@ -9,6 +9,7 @@ import { LevelBadge, RoleChips } from '../../components/badges';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, Input, Loading, Select, Toggle, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+import { scrollBehavior } from '../../lib/motion';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const ALL_ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -377,7 +378,7 @@ export function GovernanceTab() {
     setEditing(false);
   };
   useEffect(() => {
-    if (window.location.hash === '#roles') document.getElementById('roles')?.scrollIntoView({ behavior: 'smooth' });
+    if (window.location.hash === '#roles') document.getElementById('roles')?.scrollIntoView({ behavior: scrollBehavior() });
   }, []);
 
   const edit = (p: Partial<GovernancePolicy>) => setPolicy((x) => ({ ...x, ...p, templateId: p.templateId ?? 'custom', name: p.name ?? (p.templateId ? x.name : x.templateId === 'custom' ? x.name : `${x.name} (customised)`) }));
