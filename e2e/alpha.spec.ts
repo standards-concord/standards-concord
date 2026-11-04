@@ -25,26 +25,43 @@ test('a tester can go through the whole walkthrough', async ({ page, request }) 
 
   // 1. Welcome
   await expect(page.getByRole('heading', { name: '1. Welcome' })).toBeVisible();
+  // The feature tour is one click away rather than in front of the Start button.
+  await page.getByRole('button', { name: 'What can I try?' }).click();
+  await expect(page.getByText(/Coding agents connect over MCP/)).toBeVisible();
   await page.getByRole('button', { name: 'Let’s start' }).click();
 
-  // 2. Pick a role: every tester-facing role group is offered.
+  // 2. Pick a role: every tester-facing role group is offered; people appear once a role is chosen.
   await expect(page.getByRole('heading', { name: '2. Pick your role' })).toBeVisible();
-  for (const g of ROLE_GROUPS) await expect(page.getByRole('region', { name: g }).getByRole('button').first()).toBeVisible();
+  for (const g of ROLE_GROUPS) await expect(page.getByRole('region', { name: g }).getByRole('button').first()).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('button', { name: 'Join as a new ontology steward' })).toHaveCount(0);
+  const steward = page.getByRole('region', { name: 'Ontology steward' });
+  await steward.getByRole('button').first().click();
+  await expect(steward.getByRole('button').first()).toHaveAttribute('aria-expanded', 'true');
   // Priya Shah (the steward) also has the ODI role, so the steward group offers to join as a new steward.
-  await page.getByRole('region', { name: 'Ontology steward' }).getByRole('button', { name: 'Join as a new ontology steward' }).click();
+  await steward.getByRole('button', { name: 'Join as a new ontology steward' }).click();
 
   // 3. Explore the demo: signed in, with tasks tailored to the role.
   await expect(page.getByRole('heading', { name: '3. Explore the demo' })).toBeVisible();
   await expect(page.getByText('Viewing as Alpha tester')).toBeVisible();
   await expect(page.getByText(/As .*Steward/)).toBeVisible();
   await expect(page.getByRole('link', { name: demo.title })).toBeVisible();
+  // One suggested task up front; the full list is behind "Choose another task".
+  const next = page.getByRole('group', { name: 'Suggested next task' });
+  await expect(next).toBeVisible();
+  const firstLabel = (await next.getByRole('link').first().innerText()).trim();
+  await page.getByRole('button', { name: /Choose another task/ }).click();
   const tasks = page.locator('ul li').filter({ has: page.getByRole('button', { name: /Mark (not )?done/ }) });
   await expect(tasks.first()).toBeVisible();
   const count = await tasks.count();
   expect(count).toBeGreaterThanOrEqual(3);
   await expect(page.getByText(`0 of ${count} done`)).toBeVisible();
-  await tasks.first().getByRole('button', { name: 'Mark done' }).click();
+  await next.getByRole('button', { name: 'I’ve done this' }).click();
   await expect(page.getByText(`1 of ${count} done`)).toBeVisible();
+  // The suggestion moves on to the next task, and the list shows the first as done.
+  await expect(next.getByRole('link').first()).not.toHaveText(firstLabel);
+  await expect(tasks.first().getByRole('button', { name: 'Mark not done' })).toBeVisible();
+  await tasks.nth(1).getByRole('button', { name: 'Mark done' }).click();
+  await expect(page.getByText(`2 of ${count} done`)).toBeVisible();
   await page.getByRole('button', { name: 'Next: simulate the others' }).click();
 
   // 4. Simulate the others: their activity appears and the clock moves.
@@ -75,11 +92,14 @@ for (const group of ROLE_GROUPS) {
   test(`every task suggested to a ${group} opens a working page`, async ({ page }) => {
     await page.goto('/alpha');
     await page.getByRole('button', { name: 'Let’s start' }).click();
-    const first = page.getByRole('region', { name: group }).getByRole('button').first();
+    const region = page.getByRole('region', { name: group });
+    await region.getByRole('button').first().click();
+    const first = region.getByRole('button').nth(1);
     await expect(first).toBeVisible();
     await first.click();
     await expect(page.getByRole('heading', { name: '3. Explore the demo' })).toBeVisible();
 
+    await page.getByRole('button', { name: /Choose another task/ }).click();
     const links = page.locator('ul li a.text-sm');
     await expect(links.first()).toBeVisible();
     const targets = await links.evaluateAll((as) => as.map((a) => ({ label: a.textContent ?? '', href: a.getAttribute('href') ?? '' })));
@@ -98,12 +118,17 @@ for (const group of ROLE_GROUPS) {
 test('the floating walkthrough panel follows a tester around the app', async ({ page }) => {
   await page.goto('/alpha');
   await page.getByRole('button', { name: 'Let’s start' }).click();
-  await page.getByRole('region', { name: 'Domain expert / contributor' }).getByRole('button').first().click();
+  const contributor = page.getByRole('region', { name: 'Domain expert / contributor' });
+  await contributor.getByRole('button').first().click();
+  await contributor.getByRole('button').nth(1).click();
   await page.getByRole('button', { name: 'Keep the guide open while I explore' }).click();
   await expect(page).toHaveURL(/\/o\/[^/]+$/);
   const panel = page.getByRole('complementary').filter({ hasText: 'Alpha walkthrough' });
   await expect(panel).toBeVisible();
   await expect(panel.getByText('Step 3: Explore the demo')).toBeVisible();
+  // The floating guide shows one suggested task, with the rest on request.
+  await expect(panel.getByRole('group', { name: 'Suggested next task' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: /Choose another task/ })).toHaveAttribute('aria-expanded', 'false');
   await panel.getByRole('button', { name: 'Close walkthrough' }).click();
   await expect(panel).toHaveCount(0);
   await page.getByRole('button', { name: /Walkthrough/ }).click();

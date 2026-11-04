@@ -10,6 +10,7 @@ import { STEPS, TESTER_ROLES, tasksFor, testerRoleFor, useWalkthrough } from '..
 import { formatDate, roleLabel } from '../lib/format';
 import { ActivityList } from './ActivityFeed';
 import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx } from './ui';
+import { Disclosure } from './Disclosure';
 
 export function Stepper({ current, onPick, compact }: { current: number; onPick?: (i: number) => void; compact?: boolean }) {
   return (
@@ -38,26 +39,25 @@ export function Stepper({ current, onPick, compact }: { current: number; onPick?
 
 /* --------------------------------------------------------------- steps */
 
-function WelcomeStep({ compact }: { compact?: boolean }) {
+function WelcomeStep() {
   const w = useWalkthrough();
   return (
     <div className="space-y-3 text-sm">
       <p>
-        <strong>Concord</strong> is a prototype from the Open Data Institute for designing <em>strict</em> OWL ontologies together, with AI help — and running their whole governance lifecycle
-        without needing meetings.
+        <strong>Concord</strong> is a prototype from the Open Data Institute for designing strict OWL ontologies together, with AI help, and governing them without needing meetings.
       </p>
-      {!compact && (
-        <ul className="space-y-1.5 text-muted">
-          <li>• Describe how you use data to an AI interviewer (typed or spoken), or let a bot co-facilitate your Google Meet.</li>
-          <li>• Proposed changes are classified as patch / minor / major, validated by a reasoner, linted and FAIR-scored.</li>
-          <li>• Review and voting follow a governance policy you choose — then versions are released and published.</li>
-          <li>• Coding agents connect over MCP to read the ontology and report gaps.</li>
-        </ul>
-      )}
       <p className="text-muted">It takes about 5 minutes. Everything here is a sandbox: other participants are simulated, and you can fast-forward time.</p>
       <Button variant="primary" icon={ArrowRight} onClick={w.next}>
         Let’s start
       </Button>
+      <Disclosure tone="muted" title="What can I try?">
+        <ul className="space-y-1.5 text-muted">
+          <li>• Describe how you use data to an AI interviewer (typed or spoken), or let a bot co-facilitate your Google Meet.</li>
+          <li>• Proposed changes are classified as patch / minor / major, validated by a reasoner, linted and FAIR-scored.</li>
+          <li>• Review and voting follow a governance policy you choose, then versions are released and published.</li>
+          <li>• Coding agents connect over MCP to read the ontology and report gaps.</li>
+        </ul>
+      </Disclosure>
     </div>
   );
 }
@@ -66,6 +66,7 @@ function RoleStep({ compact }: { compact?: boolean }) {
   const w = useWalkthrough();
   const { session, setSession } = useSession();
   const personas = useAsync(() => api.personas(), []);
+  const [chosen, setChosen] = useState<string>();
   const login = useAction(async (body: { userId?: string; name?: string; role?: string }) => {
     const s = await api.demoLogin(body as { userId?: string });
     setSession(s);
@@ -77,47 +78,72 @@ function RoleStep({ compact }: { compact?: boolean }) {
   // Before sign-in the demo's member list isn't readable, so fall back to the roles the persona list carries.
   const rolesOf = (u: User & { roles?: Role[] }) => w.demo?.members?.find((m) => m.userId === u.id)?.roles ?? u.roles;
   const grouped = TESTER_ROLES.map((r) => ({ role: r, people: personas.data!.filter((p) => testerRoleFor(p, rolesOf(p)).key === r.key) }));
+  // Start with the role of whoever is signed in, if they're one of the personas.
+  const currentKey = grouped.find((g) => g.people.some((p) => p.id === session?.user?.id))?.role.key;
+  const open = chosen ?? currentKey;
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-muted">Choose who you’d like to be. You’ll sign in as a simulated persona; the others will act around you. You can switch at any time.</p>
+      <p className="text-sm text-muted">First choose a role, then the person you’ll be. The others will act around you, and you can switch at any time.</p>
       <InlineError error={login.error} />
       <div className={cx('grid gap-3', !compact && 'sm:grid-cols-2')}>
-        {grouped.map(({ role, people }) => (
-          <section key={role.key} aria-label={role.title} className="rounded-xl border border-line bg-surface p-4">
-            <div className="text-sm font-semibold">{role.title}</div>
-            <p className="mt-0.5 mb-3 text-xs text-muted">{role.blurb}</p>
-            <div className="space-y-2">
-              {people.map((p) => {
-                const current = session?.user?.id === p.id;
-                return (
-                  <button
-                    key={p.id}
-                    disabled={login.pending}
-                    onClick={() => void login.run({ userId: p.id })}
-                    className={cx('flex w-full items-start gap-3 rounded-lg border p-2.5 text-left transition-colors', current ? 'border-accent bg-accent-soft' : 'border-line hover:border-accent/60 hover:bg-surface-2')}
-                  >
-                    <Avatar name={p.name} src={p.avatarUrl} size={32} />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5 text-sm font-medium">
-                        {p.name}
-                        {current && <CircleCheck className="size-3.5 text-accent" />}
-                      </span>
-                      {p.organisation && <span className="block text-xs text-muted">{p.organisation}</span>}
-                      {!compact && p.persona && <span className="mt-1 line-clamp-2 block text-xs text-subtle">{p.persona}</span>}
-                      {rolesOf(p)?.length ? <span className="mt-1 block text-[0.7rem] text-muted">{rolesOf(p)!.map(roleLabel).join(' · ')}</span> : null}
-                    </span>
-                  </button>
-                );
-              })}
-              {!people.length && (
-                <Button size="sm" variant="ghost" disabled={login.pending} onClick={() => void login.run({ name: 'Alpha tester', role: role.roles[0] })}>
-                  Join as a new {role.title.toLowerCase()}
-                </Button>
+        {grouped.map(({ role, people }) => {
+          const expanded = open === role.key;
+          return (
+            <section key={role.key} aria-label={role.title} className={cx('rounded-xl border bg-surface p-4', expanded ? 'border-accent sm:col-span-2' : 'border-line')}>
+              <button type="button" aria-expanded={expanded} onClick={() => setChosen(expanded ? '' : role.key)} className="w-full text-left">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold">{role.title}</span>
+                  <span className="text-xs font-medium text-accent">{expanded ? 'Hide people' : people.length ? `Choose (${people.length})` : 'Choose'}</span>
+                </div>
+                <p className="mt-0.5 text-xs text-muted">{role.blurb}</p>
+              </button>
+              {expanded && (
+                <div className={cx('mt-3 grid gap-2', !compact && 'sm:grid-cols-2')}>
+                  {people.map((p) => {
+                    const current = session?.user?.id === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        disabled={login.pending}
+                        onClick={() => void login.run({ userId: p.id })}
+                        title={p.persona}
+                        className={cx('flex w-full items-start gap-3 rounded-lg border p-2.5 text-left transition-colors', current ? 'border-accent bg-accent-soft' : 'border-line hover:border-accent/60 hover:bg-surface-2')}
+                      >
+                        <Avatar name={p.name} src={p.avatarUrl} size={32} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-1.5 text-sm font-medium">
+                            {p.name}
+                            {current && <CircleCheck className="size-3.5 text-accent" />}
+                          </span>
+                          {p.organisation && <span className="block text-xs text-muted">{p.organisation}</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {!people.length && (
+                    <Button size="sm" variant="ghost" disabled={login.pending} onClick={() => void login.run({ name: 'Alpha tester', role: role.roles[0] })}>
+                      Join as a new {role.title.toLowerCase()}
+                    </Button>
+                  )}
+                  {people.length > 0 && (
+                    <Disclosure className={cx(!compact && 'sm:col-span-2')} tone="muted" title={<span className="text-xs">About these people and their permissions</span>}>
+                      <ul className="space-y-2 text-xs">
+                        {people.map((p) => (
+                          <li key={p.id}>
+                            <span className="font-medium">{p.name}</span>
+                            {rolesOf(p)?.length ? <span className="text-muted"> · {rolesOf(p)!.map(roleLabel).join(', ')}</span> : null}
+                            {p.persona && <span className="block text-subtle">{p.persona}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </Disclosure>
+                  )}
+                </div>
               )}
-            </div>
-          </section>
-        ))}
+            </section>
+          );
+        })}
       </div>
     </div>
   );
@@ -139,37 +165,61 @@ function TourStep({ compact }: { compact?: boolean }) {
   if (!demo) return <p className="text-sm text-muted">Looking for the demo ontology… (if this persists, create one from the hub).</p>;
   const tasks = tasksFor(w.myRoles, demo.id);
   const doneCount = tasks.filter((t) => w.done[t.id]).length;
+  const nextTask = tasks.find((t) => !w.done[t.id]);
   return (
     <div className="space-y-3">
       <p className="text-sm">
         The demo ontology is <Link className="font-medium text-accent hover:underline" to={`/o/${demo.id}`}>{demo.title}</Link>. As{' '}
-        {w.myRoles.length ? <strong>{w.myRoles.map(roleLabel).join(', ')}</strong> : 'a participant'}, here are things to try — keep this panel open while you explore.
+        {w.myRoles.length ? <strong>{w.myRoles.map(roleLabel).join(', ')}</strong> : 'a participant'}, here’s something to try.
       </p>
+      {nextTask ? (
+        <div className="rounded-xl border border-accent/40 bg-accent-soft/40 p-3" aria-label="Suggested next task" role="group">
+          <div className="text-xs font-medium tracking-wide text-muted uppercase">Try next</div>
+          <Link to={nextTask.to} className="mt-0.5 block text-sm font-semibold hover:text-accent">
+            {nextTask.label}
+          </Link>
+          <p className="mt-0.5 text-xs text-muted">{nextTask.detail}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Link to={nextTask.to}>
+              <Button size="sm" variant="primary" icon={ArrowRight}>
+                Go
+              </Button>
+            </Link>
+            <Button size="sm" variant="ghost" icon={Check} onClick={() => w.toggleTask(nextTask.id)}>
+              I’ve done this
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <p className="rounded-xl bg-ok-soft p-3 text-sm text-ok">You’ve tried everything suggested for this role.</p>
+      )}
       <div className="text-xs text-muted">
         {doneCount} of {tasks.length} done
       </div>
-      <ul className="space-y-1.5">
-        {tasks.map((t) => (
-          <li key={t.id} className="flex items-start gap-2.5 rounded-lg border border-line bg-surface p-2.5">
-            <button
-              onClick={() => w.toggleTask(t.id)}
-              className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong')}
-              aria-label={w.done[t.id] ? 'Mark not done' : 'Mark done'}
-            >
-              {w.done[t.id] && <Check className="size-3" />}
-            </button>
-            <div className="min-w-0 flex-1">
-              <Link to={t.to} className={cx('text-sm font-medium hover:text-accent', w.done[t.id] && 'text-muted line-through')}>
-                {t.label}
+      <Disclosure tone="muted" title="Choose another task" summary={`${tasks.length}`}>
+        <ul className="space-y-1.5">
+          {tasks.map((t) => (
+            <li key={t.id} className="flex items-start gap-2.5 rounded-lg border border-line bg-surface p-2.5">
+              <button
+                onClick={() => w.toggleTask(t.id)}
+                className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-control')}
+                aria-label={w.done[t.id] ? 'Mark not done' : 'Mark done'}
+              >
+                {w.done[t.id] && <Check className="size-3" />}
+              </button>
+              <div className="min-w-0 flex-1">
+                <Link to={t.to} className={cx('text-sm font-medium hover:text-accent', w.done[t.id] && 'text-muted line-through')}>
+                  {t.label}
+                </Link>
+                {!compact || !w.done[t.id] ? <p className="text-xs text-muted">{t.detail}</p> : null}
+              </div>
+              <Link to={t.to} className="mt-0.5 text-muted hover:text-accent" aria-label="Go">
+                <ArrowRight className="size-4" />
               </Link>
-              {!compact || !w.done[t.id] ? <p className="text-xs text-muted">{t.detail}</p> : null}
-            </div>
-            <Link to={t.to} className="mt-0.5 text-muted hover:text-accent" aria-label="Go">
-              <ArrowRight className="size-4" />
-            </Link>
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      </Disclosure>
       <Button variant="primary" size="sm" icon={ArrowRight} onClick={w.next}>
         Next: simulate the others
       </Button>
@@ -242,7 +292,7 @@ function FeedbackStep({ onNavigate }: { onNavigate?: () => void }) {
 export function StepBody({ step, compact, onNavigate }: { step: number; compact?: boolean; onNavigate?: () => void }) {
   switch (STEPS[step]?.id) {
     case 'welcome':
-      return <WelcomeStep compact={compact} />;
+      return <WelcomeStep />;
     case 'role':
       return <RoleStep compact={compact} />;
     case 'tour':
@@ -266,7 +316,7 @@ export function WalkthroughDock() {
       {!w.open && (
         <button
           onClick={() => w.setOpen(true)}
-          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-full border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
+          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-pill border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
         >
           <Compass className="size-4 text-accent" />
           Walkthrough

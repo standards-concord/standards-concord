@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { ChatMessage } from '@concord/shared';
-import { SendHorizontal, Sparkles } from 'lucide-react';
+import { SendHorizontal } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { MicButton } from './MicButton';
 import { Avatar, Button, InlineError, cx } from './ui';
+import { Logo } from './badges';
 import { useDictation } from '../lib/speech';
 
 export function TypingIndicator() {
@@ -24,9 +25,7 @@ function Bubble({ m, userName, children }: { m: ChatMessage; userName?: string; 
       {mine ? (
         <Avatar name={userName ?? 'You'} size={28} />
       ) : (
-        <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
-          <Sparkles className="size-3.5" />
-        </span>
+        <Logo className="size-7 shrink-0" />
       )}
       <div className={cx('max-w-[85%] min-w-0', mine && 'text-right')}>
         <div className={cx('inline-block rounded-2xl px-3.5 py-2.5 text-left', mine ? 'rounded-tr-sm bg-accent text-accent-fg' : 'rounded-tl-sm border border-line bg-surface')}>
@@ -99,9 +98,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
         ))}
         {pending && (
           <div className="flex gap-2.5">
-            <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
-              <Sparkles className="size-3.5" />
-            </span>
+            <Logo className="size-7 shrink-0" />
             <div className="rounded-2xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5">
               <TypingIndicator />
             </div>
@@ -128,7 +125,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
               }}
               placeholder={dict.listening ? 'Listening… speak naturally' : placeholder}
               className={cx(
-                'block w-full resize-none rounded-xl border border-line-strong bg-surface px-3.5 py-2.5 text-sm placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-60',
+                'block w-full resize-none rounded-xl border border-control bg-surface px-3.5 py-2.5 text-sm placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-60',
                 dict.listening && 'border-danger/60',
               )}
             />

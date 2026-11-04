@@ -4,14 +4,16 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
-import { renderOntologyPage } from '../src/public/render.js';
-import { pageInput } from '../src/public/routes.js';
+import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
+import { pageInput, refreshReleasePages } from '../src/public/routes.js';
 import { toPublishedRequirements } from '../src/public/requirements.js';
-import { findProject } from '../src/services/ontologies.js';
+import { termAnchors } from '../src/public/anchors.js';
+import { createProject, findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { createUseCase } from '../src/services/useCases.js';
-import { createUser } from '../src/services/users.js';
+import { createUseCase, listUseCases, redactUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
+import { createUser, getUser } from '../src/services/users.js';
+import type { OntologyView } from '@concord/core/types';
 
 const app = createApp();
 
@@ -235,5 +237,223 @@ describe('mapping the use case data onto the page', () => {
     expect(html).toContain('Working group call');
     expect(html).toMatch(/Met by <a class="ref" href="#Session"/);
     expect(html).toContain('2 working group use cases and 1 private use case also informed this version');
+  });
+});
+
+describe('review fixes', () => {
+  it('escapes dates that are not dates (stored XSS)', async () => {
+    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    input.view = { ...input.view, metadata: { ...input.view.metadata, modified: '<img src=x onerror=alert(1)>', issued: '"><script>alert(2)</script>' } };
+    input.release = undefined;
+    const html = renderOntologyPage(input);
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toContain('<script>alert(2)');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('never publishes a demo use case that someone edited, even as a simulated persona', async () => {
+    const project = findProject('volunteering')!;
+    const seeded = listUseCases(project.id).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
+    const author = getUser(seeded.authorId)!;
+    expect(author.simulated).toBe(true);
+    updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
+    for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
+      const res = await request(app).get(url);
+      expect(res.text, url).not.toContain('07700 900123');
+      expect(res.text, url).not.toContain('Renamed by a tester');
+      expect(res.text, url).toContain('Find weekly shifts that need volunteers');
+    }
+  });
+
+  it('negotiates only the types it produces, and refuses the rest', async () => {
+    const noHtml = await request(app).get('/def/volunteering').set('Accept', 'text/html;q=0, */*;q=1');
+    expect(noHtml.headers['content-type']).not.toMatch(/html/);
+    const app_ = await request(app).get('/def/volunteering').set('Accept', 'application/*');
+    expect(app_.headers['content-type']).toMatch(/^application\//);
+    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle', 'application/javascript', 'text/typescript']) {
+      const res = await request(app).get('/def/volunteering').set('Accept', accept);
+      expect(res.status, accept).toBe(406);
+      expect(res.headers.vary, accept).toMatch(/Accept/);
+      expect(res.headers['cache-control'], accept).toBe('no-store');
+    }
+    const html = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle');
+    expect(html.headers.link).toMatch(/1\.0\.0\.html>; rel="alternate"; type="text\/html"/);
+  });
+
+  it('keeps every own term anchor equal to its full IRI fragment, and moves page ids out of the way', async () => {
+    const NS = 'https://example.org/v#';
+    const cls = (iri: string, label?: string) => ({ kind: 'class' as const, iri, label, superClasses: [], equivalentClasses: [], disjointWith: [], restrictions: [], annotations: [] });
+    const view = {
+      metadata: { iri: 'https://example.org/v', creators: [], contributors: [], imports: [], keywords: [], extra: [] },
+      classes: [
+        cls('https://other.org/x#Thing'),
+        cls('https://other.org/x#main'),
+        cls(`${NS}Café`),
+        cls(`${NS}sec-classes`),
+        cls(`${NS}main`),
+        cls(`${NS}term-main`),
+        cls(`${NS}part:Child`),
+        cls(`${NS}part/Child`),
+        cls(`${NS}Child`),
+        cls(`${NS}%41`),
+        cls(`${NS}A`),
+        cls(`${NS}Thing`),
+      ],
+      objectProperties: [], datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: {}, tripleCount: 0,
+    } as unknown as OntologyView;
+    const a = termAnchors(view, NS);
+    // Own terms: exactly the fragment, whatever it looks like.
+    for (const f of ['Café', 'sec-classes', 'main', 'term-main', 'part:Child', 'part/Child', 'Child', '%41', 'A', 'Thing']) expect(a.get(`${NS}${f}`), f).toBe(f);
+    // External terms: their local name, kept clear of own fragments and page ids.
+    expect(a.get('https://other.org/x#Thing')).toBe('Thing-2');
+    expect(a.get('https://other.org/x#main')).toBe('term-main-2');
+    expect(new Set(a.values()).size).toBe(a.size);
+
+    // The page's own ids step aside: #main and #sec-classes are the terms.
+    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    input.project = { ...input.project, namespace: NS };
+    input.view = view;
+    const html = renderOntologyPage(input);
+    const ids = [...html.matchAll(/\sid="([^"]*)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size, 'ids are unique').toBe(ids.length);
+    expect(html).toMatch(/<article class="term" id="main" /);
+    expect(html).toMatch(/<article class="term" id="sec-classes" /);
+    expect(html).toMatch(/<article class="term" id="part:Child" /);
+    expect(html).toMatch(/<article class="term" id="part\/Child" /);
+    expect(html).toMatch(/<article class="term" id="%41" /);
+    expect(html).toContain('<main id="main-page" class="wrap">');
+    expect(html).toContain('<a class="skip" href="#main-page">');
+    expect(html).toContain('<section id="sec-classes-page" class="block">');
+    // Hrefs keep % as written (the browser tries the raw fragment first) and encode what a URL can't hold.
+    expect(html).toContain('href="#%41"');
+    expect(html).toContain('href="#Caf%C3%A9"');
+  });
+
+  it('redirects slash-namespace term IRIs to the same anchor the page uses', async () => {
+    const { fragment } = await import('../src/public/anchors.js');
+    expect(fragment('Café')).toBe('Caf%C3%A9');
+    expect(fragment('%41')).toBe('%41');
+    expect(fragment('part:Child')).toBe('part:Child');
+    expect(fragment('a b"<')).toBe('a%20b%22%3C');
+  });
+
+  it('links this and the latest version in the header', async () => {
+    const res = await request(app).get('/def/volunteering/1.0.0');
+    expect(res.text).toMatch(/<a href="[^"]*\/def\/volunteering\/1\.0\.0"><code>https:\/\/w3id\.org\/odi\/volunteering\/1\.0\.0<\/code><\/a>/);
+    expect(res.text).toMatch(/<a href="[^"]*\/def\/volunteering"><code>https:\/\/w3id\.org\/odi\/volunteering<\/code><\/a>/);
+    expect(res.text).toMatch(/role="tabpanel"[^>]*tabindex="0"/);
+  });
+
+  it('renders a release from the snapshot stored with it, not from today\'s data', async () => {
+    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
+    expect(fs.existsSync(file)).toBe(true);
+    const original = fs.readFileSync(file, 'utf8');
+    const snap = JSON.parse(original);
+    expect(snap.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+    try {
+      snap.useCases[0].title = 'As it was at release time';
+      fs.writeFileSync(file, JSON.stringify(snap));
+      const res = await request(app).get('/def/volunteering/1.0.0');
+      expect(res.text).toContain('As it was at release time');
+      const draft = await request(app).get('/def/volunteering/draft');
+      expect(draft.text).not.toContain('As it was at release time');
+    } finally {
+      fs.writeFileSync(file, original);
+    }
+  });
+});
+
+describe('re-review fixes', () => {
+  it('synthesis never copies a use case title or its author into the ontology', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Morgan Secretname', provider: 'github', subject: 'synth-privacy' });
+    const uc = createUseCase(project, tester, {
+      source: 'chat',
+      status: 'ready',
+      sections: { name: 'CONFIDENTIAL_PERSON_NAME_AND_CASE' },
+      terms: [{ label: 'Respite Break', kind: 'class' }],
+    });
+    const cr = await synthesise(project, tester, [uc.id]);
+    const ops = JSON.stringify(cr.ops);
+    expect(cr.ops.length).toBeGreaterThan(0);
+    expect(ops).not.toContain('CONFIDENTIAL_PERSON_NAME_AND_CASE');
+    expect(ops).not.toContain('Morgan Secretname');
+    // Provenance is a sign-in-only link to the use case.
+    expect(ops).toContain(`/o/volunteering/use-cases/${uc.id}`);
+    // The working group still sees which use case it came from.
+    expect(cr.description).toContain('CONFIDENTIAL_PERSON_NAME_AND_CASE');
+  });
+
+  it('redacts titles and names the model quoted', () => {
+    const project = findProject('volunteering')!;
+    const author = getUser(listUseCases(project.id)[0].authorId)!;
+    const uc = { ...listUseCases(project.id)[0], sections: { name: 'Secret Pilot' } };
+    const [t] = redactUseCases(
+      [{ action: 'add', kind: 'class', localName: 'X', label: 'x', definition: 'From the secret pilot case.', reason: `Asked for by ${author.name} in “Secret Pilot”` }],
+      [uc],
+    );
+    expect(t.definition).toBe('From the a use case case.');
+    expect(t.reason).not.toContain('Secret Pilot');
+    expect(t.reason).not.toContain(author.name);
+  });
+
+  it('lets an owner create an ontology without being named as its creator', async () => {
+    const owner = await createUser({ name: 'Quinn Private', provider: 'github', subject: 'no-credit' });
+    const hidden = await createProject({ title: 'Uncredited vocab', description: '', prefix: 'uv', creditCreator: false }, owner);
+    expect((await request(app).get(`/def/${hidden.slug}`)).text).not.toContain('Quinn Private');
+    const credited = await createProject({ title: 'Credited vocab', description: '', prefix: 'cv' }, owner);
+    expect((await request(app).get(`/def/${credited.slug}`)).text).toContain('Quinn Private');
+  });
+
+  it('says so when a release has no use case snapshot, instead of showing current data', async () => {
+    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
+    const original = fs.readFileSync(file, 'utf8');
+    try {
+      for (const broken of [undefined, '{not json', '{"useCases": "nope"}']) {
+        if (broken === undefined) fs.rmSync(file);
+        else fs.writeFileSync(file, broken);
+        const res = await request(app).get('/def/volunteering/1.0.0');
+        expect(res.text).toContain('were not recorded when it was published');
+        expect(res.text).not.toContain('Aggregate volunteering opportunities across platforms');
+      }
+    } finally {
+      fs.writeFileSync(file, original);
+    }
+  });
+
+  it('regenerates release pages written by an older renderer and backfills missing snapshots', async () => {
+    const project = findProject('volunteering')!;
+    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
+    const page = path.join(dir, 'index.html');
+    const snap = path.join(dir, 'requirements.json');
+    const original = { page: fs.readFileSync(page, 'utf8'), snap: fs.readFileSync(snap, 'utf8') };
+    try {
+      expect(original.page).toContain(PAGE_GENERATOR);
+      // A page from before the fixes, with no snapshot beside it.
+      fs.writeFileSync(page, '<html><meta name="generator" content="Concord"><img src=x onerror=alert(1)></html>');
+      fs.rmSync(snap);
+      await refreshReleasePages();
+      expect(fs.readFileSync(page, 'utf8')).toContain(PAGE_GENERATOR);
+      expect(fs.readFileSync(page, 'utf8')).not.toContain('onerror');
+      const backfilled = JSON.parse(fs.readFileSync(snap, 'utf8'));
+      expect(backfilled.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+
+      // An existing snapshot is history: only the page is re-rendered from it.
+      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'k', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
+      fs.writeFileSync(page, 'stale');
+      await refreshReleasePages();
+      expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases[0].title).toBe('Kept as released');
+      expect(fs.readFileSync(page, 'utf8')).toContain('Kept as released');
+      // Committed to the ontology's repository, so the fix goes out with its next push.
+      expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
+
+      // Up-to-date pages are left alone (no commit).
+      const head = ontologyStore.head(project);
+      await refreshReleasePages();
+      expect(ontologyStore.head(project)).toBe(head);
+    } finally {
+      fs.writeFileSync(page, original.page);
+      fs.writeFileSync(snap, original.snap);
+    }
   });
 });

@@ -72,7 +72,7 @@ test.describe('Formats tab', () => {
   });
 
   test('a published release renders too', async ({ page, request }) => {
-    const releases = (await (await request.get(`/api/ontologies/${ontologyId}/releases`)).json()) as { version: string; status: string }[];
+    const releases = (await (await page.request.get(`/api/ontologies/${ontologyId}/releases`)).json()) as { version: string; status: string }[];
     const published = releases.find((r) => r.status === 'published');
     test.skip(!published, 'no published release in the demo data');
     await page.goto(`/o/${ontologyId}/source?format=manchester&ref=${published!.version}`);

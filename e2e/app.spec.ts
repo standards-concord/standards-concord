@@ -15,7 +15,7 @@ test('signing in from the login page lands on the walkthrough', async ({ page })
 test('signed-out visitors are sent to the login page', async ({ page }) => {
   await page.goto('/settings');
   await expect(page).toHaveURL(/\/login\?next=%2Fsettings/);
-  await expect(page.getByRole('heading', { name: 'Welcome to Concord' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Concord: design open standards together' })).toBeVisible();
 });
 
 test.describe('signed in', () => {
@@ -32,21 +32,37 @@ test.describe('signed in', () => {
     });
   }
 
-  test('every ontology tab opens', async ({ page, request }) => {
+  test('every ontology section and page opens', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await page.goto(`/o/${demo.id}`);
-    const tabs = page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link');
-    await expect(tabs.first()).toBeVisible();
-    const names = (await tabs.allInnerTexts()).map((t) => t.trim());
-    expect(names).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Formats', 'Query', 'Change requests', 'Releases', 'Governance']));
+    const sections = page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link');
+    await expect(sections.first()).toBeVisible();
+    const names = (await sections.allInnerTexts()).map((t) => t.trim());
+    expect(names).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
+    const seen: string[] = [];
     for (const name of names) {
       await test.step(name, async () => {
-        await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name, exact: true }).click();
+        const link = page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name, exact: true });
+        await link.click();
         await settle(page);
         await expectNoCrash(page);
-        await expect(page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name, exact: true })).toHaveClass(/border-accent/);
+        await expect(link).toHaveAttribute('aria-current', 'page');
+        // Sections with several pages show them as a second row; open each one.
+        const sub = page.getByRole('navigation', { name: `${name} pages` });
+        if (await sub.count()) {
+          for (const pageName of (await sub.getByRole('link').allInnerTexts()).map((t) => t.trim())) {
+            await sub.getByRole('link', { name: pageName, exact: true }).click();
+            await settle(page);
+            await expectNoCrash(page);
+            await expect(sub.getByRole('link', { name: pageName, exact: true })).toHaveAttribute('aria-current', 'page');
+            await expect(link, `${pageName} stays inside ${name}`).toHaveAttribute('aria-current', 'page');
+            seen.push(pageName);
+          }
+        } else seen.push(name);
       });
     }
+    // Every page from before the regrouping is still reachable.
+    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Formats', 'Query', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
   });
 
   test('detail pages linked from the ontology open', async ({ page, request }) => {

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
@@ -8,8 +10,9 @@ import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { escapeHtml } from './markdown.js';
-import { renderOntologyPage, type OntologyPageInput } from './render.js';
-import { publishedRequirements } from './requirements.js';
+import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
+import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
+import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
 export { PUBLIC_BASE };
@@ -43,23 +46,22 @@ const EXTRA_INFO: Record<'dts' | 'npm', { label: string; mediaType: string; exte
   npm: { label: 'npm package', mediaType: 'application/gzip', extension: 'tgz' },
 };
 
-/** Media types we answer by content negotiation (SHACL, LinkML and the declarations are by extension only). */
+/**
+ * Media types answered by content negotiation: exactly the types we produce and
+ * send back, with no aliases (SHACL, LinkML, the declarations and the npm
+ * package are by extension only). HTML is first, so a bare Accept or *\/* gets
+ * the page.
+ */
 const NEGOTIABLE: Record<string, PublicFormat> = {
   'text/html': 'html',
-  'application/xhtml+xml': 'html',
   'text/turtle': 'turtle',
-  'application/x-turtle': 'turtle',
   'application/ld+json': 'jsonld',
   'application/rdf+xml': 'rdfxml',
-  'application/owl+xml': 'rdfxml',
   'application/n-triples': 'ntriples',
   'text/owl-manchester': 'manchester',
   'text/shaclc': 'shaclc',
   'text/javascript': 'javascript',
-  'application/javascript': 'javascript',
-  'application/ecmascript': 'javascript',
   'application/typescript': 'typescript',
-  'text/typescript': 'typescript',
 };
 
 /** File extensions, longest first so ".shacl.ttl" wins over ".ttl". */
@@ -107,7 +109,7 @@ export async function pageInput(
   project: OntologyProject,
   version: string,
   base: string,
-  opts: { relativeDownloads?: boolean; release?: Release; graph?: Awaited<ReturnType<typeof ontologyStore.at>> } = {},
+  opts: { relativeDownloads?: boolean; release?: Release; graph?: Awaited<ReturnType<typeof ontologyStore.at>>; requirements?: PublishedRequirements } = {},
 ): Promise<OntologyPageInput> {
   const isDraft = version === 'draft';
   const graph = opts.graph ?? (await ontologyStore.at(project, isDraft ? 'working' : version));
@@ -149,10 +151,76 @@ export async function pageInput(
     downloads,
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root },
-    requirements: publishedRequirements(project, isDraft ? undefined : version),
+    requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
+}
+
+export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
+
+/** The public use cases and requirements stored with a release, if it has a readable copy. */
+function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
+  const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
+  try {
+    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as PublishedRequirements) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Files that publish a release's public page: index.html (downloads link to
+ * the files beside it) and a snapshot of its public use cases and
+ * requirements, so later edits never rewrite the published version.
+ */
+export async function releasePageFiles(
+  project: OntologyProject,
+  release: Release,
+  graph: Awaited<ReturnType<typeof ontologyStore.at>>,
+  requirements: PublishedRequirements = releaseRequirements(project, release.version),
+): Promise<Record<string, string>> {
+  const html = renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph, requirements }));
+  return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: snapshotFile(requirements) };
+}
+
+/** The public use cases and requirements to freeze into a release published now. */
+export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version);
+export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
+
+/**
+ * Brings every published release's stored page up to date with the current
+ * renderer, once per renderer version (PAGE_VERSION). Security and privacy
+ * fixes to the page then reach copies written before them, and releases from
+ * before snapshots existed get one, so their pages stop following live data.
+ * An existing readable snapshot is kept as it is. Changes are committed to the
+ * ontology's repository, so they go out with its next push to GitHub.
+ */
+export async function refreshReleasePages(): Promise<void> {
+  for (const project of list<OntologyProject>('ontologies')) {
+    try {
+      const versions = new Set(ontologyStore.versions(project));
+      const changed: Record<string, Record<string, string>> = {};
+      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
+        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
+        const page = path.join(dir, 'index.html');
+        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
+        const snapshot = requirementsSnapshot(project, release.version);
+        if (current && snapshot) continue;
+        const requirements = snapshot && Array.isArray(snapshot.useCases) ? snapshot : releaseRequirements(project, release.version);
+        const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
+        // Never rewrite a readable snapshot, only the page rendered from it.
+        if (snapshot) delete files[REQUIREMENTS_SNAPSHOT];
+        changed[release.version] = files;
+      }
+      if (Object.keys(changed).length) {
+        ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
+        console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
+      }
+    } catch (err) {
+      console.warn(`[public] could not refresh ${project.slug} release pages: ${(err as Error).message}`);
+    }
+  }
 }
 
 /**
@@ -160,11 +228,6 @@ export async function pageInput(
  * X-Forwarded-Host can't change the links on a page; otherwise (local
  * development behind the Vite proxy) it comes from the request.
  */
-/** The page written into a release as index.html (downloads link to the files beside it). */
-export async function releasePageHtml(project: OntologyProject, release: Release, graph: Awaited<ReturnType<typeof ontologyStore.at>>): Promise<string> {
-  return renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph }));
-}
-
 function origin(req: Request) {
   return process.env.PUBLIC_URL ? config.publicUrl : `${req.protocol}://${req.host}`;
 }
@@ -172,6 +235,7 @@ function origin(req: Request) {
 function notFound(res: Response, message: string, home?: string) {
   res
     .status(404)
+    .set('Cache-Control', 'no-store')
     .type('html')
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Not found</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}a{color:#aab6ff}}</style></head><body><h1>Not found</h1><p>${escapeHtml(message)}</p>${home ? `<p><a href="${escapeHtml(home)}">Go to the latest version</a></p>` : ''}</body></html>`,
@@ -201,7 +265,8 @@ async function serve(req: Request, res: Response) {
     // send those to the term's anchor on the latest page.
     const graph = await ontologyStore.at(project, latest ?? 'working');
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
-    if (term && !last.format) return res.redirect(303, `${root}#${encodeURIComponent(requested)}`);
+    const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
+    if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 
@@ -228,9 +293,15 @@ async function serve(req: Request, res: Response) {
 
 /** The format an Accept header asks for, or undefined after answering 406. */
 export function negotiate(req: Request, res: Response): PublicFormat | undefined {
+  // The answer depends on Accept, including when it is a refusal.
+  res.vary('Accept');
   const best = req.accepts(Object.keys(NEGOTIABLE));
   if (!best) {
-    res.status(406).type('text/plain').send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl or .js`);
+    res
+      .status(406)
+      .set('Cache-Control', 'no-store')
+      .type('text/plain')
+      .send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl or .js`);
     return undefined;
   }
   return NEGOTIABLE[best];
@@ -245,6 +316,7 @@ function publicHeaders(res: Response, self: string, mutable: boolean) {
   res.set(
     'Link',
     [
+      `<${self}.html>; rel="alternate"; type="text/html"`,
       ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"`),
       `<${self}>; rel="canonical"`,
     ].join(', '),

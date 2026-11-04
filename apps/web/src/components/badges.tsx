@@ -1,5 +1,5 @@
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
-import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitMerge, MessageSquareText, Pencil, Sparkles, Users, type LucideIcon } from 'lucide-react';
+import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitMerge, MessageSquareText, Pencil, Users, Combine, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
 
@@ -59,7 +59,7 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
     case 'bug-report':
       return { icon: Bug, label: 'Bug report' };
     case 'synthesis':
-      return { icon: Sparkles, label: 'Synthesised from use cases' };
+      return { icon: Combine, label: 'Synthesised from use cases' };
     default:
       return { icon: Pencil, label: 'Proposed directly' };
   }
@@ -112,37 +112,6 @@ export function CqStatusChip({ status }: { status: CompetencyQuestion['status'] 
   return <Badge tone={m.tone}>{m.label}</Badge>;
 }
 
-export function HealthBadges({ o }: { o: OntologySummary }) {
-  const h = o.health;
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {h ? (
-        <>
-          <Badge tone={h.consistent ? 'ok' : 'danger'} icon={h.consistent ? CircleCheck : CircleAlert} title="OWL reasoner consistency">
-            {h.consistent ? 'Consistent' : 'Inconsistent'}
-          </Badge>
-          <Badge tone={h.fairScore >= 0.8 ? 'ok' : h.fairScore >= 0.5 ? 'warn' : 'danger'} title="FAIR score">
-            FAIR {pct(h.fairScore)}
-          </Badge>
-          {(h.errors > 0 || h.warnings > 0) && (
-            <Badge tone={h.errors ? 'danger' : 'warn'} title="Lint issues">
-              {h.errors ? `${h.errors} errors` : `${h.warnings} warnings`}
-            </Badge>
-          )}
-        </>
-      ) : (
-        <Badge tone="outline">Not validated yet</Badge>
-      )}
-      <Badge tone="outline">v{o.currentVersion}</Badge>
-      {o.stats.openChangeRequests > 0 && (
-        <Badge tone="accent" icon={GitMerge}>
-          {o.stats.openChangeRequests} open
-        </Badge>
-      )}
-    </div>
-  );
-}
-
 export function GoogleIcon({ className = 'size-4' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden>
@@ -165,7 +134,7 @@ export function GitHubIcon({ className = 'size-4' }: { className?: string }) {
 export function Logo({ className }: { className?: string }) {
   return (
     <svg className={cx('size-7', className)} viewBox="0 0 32 32" aria-hidden>
-      <rect width="32" height="32" rx="8" fill="var(--accent)" />
+      <rect className="app-logo-bg" width="32" height="32" rx="8" fill="var(--accent)" />
       <circle cx="12" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" />
       <circle cx="20" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" strokeOpacity=".7" />
     </svg>
