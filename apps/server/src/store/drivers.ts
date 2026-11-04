@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { PgDriver, Queryable } from './postgres.js';
 import { BUSY_TIMEOUT_MS, StoreBusyError } from './types.js';
 
@@ -81,6 +82,7 @@ export async function nodePostgresDriver(connectionString: string, opts: { max?:
 /** PGlite: Postgres compiled to WebAssembly, in process. For tests and local development; `dataDir` undefined keeps it in memory. */
 export async function pgliteDriver(dataDir?: string): Promise<PgDriver> {
   const { PGlite } = await import('@electric-sql/pglite');
+  if (dataDir) fs.mkdirSync(dataDir, { recursive: true }); // PGlite creates only the last folder of the path.
   const db = await PGlite.create(dataDir);
   return {
     // PGlite runs one statement at a time and holds statements from outside an open transaction until it ends.

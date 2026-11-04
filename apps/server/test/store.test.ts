@@ -68,6 +68,16 @@ describe.each(backends)('document store on $name', (backend) => {
     for (const s of open) await s.close().catch(() => {});
   });
 
+  if (backend.name === 'pglite')
+    it('opens on disk in a data directory that does not exist yet', async () => {
+      // Used to fail at startup: PGlite only creates the last folder of its path.
+      const dataDir = path.join(tmp, `missing-${n++}`, 'nested', 'pglite');
+      const onDisk = await openStore({ kind: 'pglite', dataDir });
+      open.push(onDisk);
+      await onDisk.put('kv', { id: 'x' });
+      expect(await onDisk.get('kv', 'x')).toEqual({ id: 'x' });
+    });
+
   it('round-trips documents exactly, key order and awkward characters included', async () => {
     const doc = { id: 'a', zeta: 1, alpha: { b: [1, 'two', null], a: true }, text: 'naïve 🚀 "quoted" \\ back\u0000nul', n: 0.1 + 0.2 };
     await store.put('users', doc);
