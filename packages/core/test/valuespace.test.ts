@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import { OntologyGraph, toShacl, toShaclc } from '../src/index.js';
+import { compare, intersect, xsdToXPathPattern } from '../src/valuespace.js';
+import { datatypeDefinitions } from '../src/valuespace.js';
 
 /**
  * Several datatypes on one property, checked by an independent SHACL engine
@@ -135,5 +137,87 @@ e:BelowOne a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatat
     const shapes = await shapesFor(['xsd:integer', 'xsd:byte']);
     expect(shapes).toMatch(/sh:datatype xsd:byte/);
     expect(shapes).not.toMatch(/sh:or/);
+  });
+
+  it('compares decimal bounds exactly, however long', async () => {
+    expect(compare('9007199254740992.0', '9007199254740993.0')).toBe(-1);
+    expect(compare('1.00000000000000001', '1.00000000000000002')).toBe(-1);
+    expect(compare('-0', '0.000')).toBe(0);
+    expect(compare('-.5', '-0.49999999999999999999')).toBe(-1);
+    const defs = `e:Above a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minExclusive 9007199254740992.0 ] ) ] .
+e:AtMost a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:maxInclusive 9007199254740993.0 ] ) ] .
+e:Min1 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive 1.00000000000000001 ] ) ] .
+e:Min2 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive 1.00000000000000002 ] ) ] .`;
+    // Values above 2^53 and at most 2^53 + 1: not empty, and both bounds kept as written.
+    const big = await shapesFor(['e:Above', 'e:AtMost'], defs);
+    expect(big).not.toMatch(/sh:maxCount 0/);
+    expect(big).toMatch(/sh:minExclusive 9007199254740992\.0/);
+    expect(big).toMatch(/sh:maxInclusive 9007199254740993\.0/);
+    // The larger of two minimums that differ beyond a double's precision.
+    const min = await shapesFor(['e:Min1', 'e:Min2'], defs);
+    expect(min).toMatch(/sh:minInclusive 1\.00000000000000002/);
+    expect(min).not.toMatch(/1\.00000000000000001/);
+  });
+
+  it('finds the whole numbers between bounds exactly', async () => {
+    const tiny = `e:Tiny a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:maxExclusive 0.0000000001 ] ) ] .
+e:Huge a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minExclusive 18446744073709551614.5 ] ) ] .
+e:NegHalf a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:decimal ; owl:withRestrictions ( [ xsd:minInclusive -1.5 ] ) ] .`;
+    // Below 0.0000000001 and not negative: 0.
+    const zero = await shapesFor(['e:Tiny', 'xsd:nonNegativeInteger'], tiny);
+    expect(zero).toMatch(/sh:maxInclusive 0 ;/);
+    expect(zero).toMatch(/sh:minInclusive 0 ;/);
+    expectValues(zero, ['"0"^^xsd:integer', '"0.0"^^xsd:decimal'], ['"1"^^xsd:integer']);
+    // Above 18446744073709551614.5 and an unsignedLong: only its maximum.
+    const top = await shapesFor(['e:Huge', 'xsd:unsignedLong'], tiny);
+    expect(top).toMatch(/sh:minInclusive 18446744073709551615 ;/);
+    expect(top).toMatch(/sh:maxInclusive 18446744073709551615 ;/);
+    // At least -1.5 and not positive: -1 and 0.
+    expectValues(await shapesFor(['e:NegHalf', 'xsd:nonPositiveInteger'], tiny), ['"-1"^^xsd:integer', '"0"^^xsd:integer'], ['"-2"^^xsd:integer', '"1"^^xsd:integer']);
+    const defs = datatypeDefinitions((await OntologyGraph.fromTurtle(`${PREFIXES}${tiny}`)).store);
+    expect(intersect(['https://example.org/e#NegHalf', 'http://www.w3.org/2001/XMLSchema#negativeInteger'], defs)).toMatchObject({ min: { value: '-1' }, max: { value: '-1' } });
+  });
+
+  it('keeps the restrictions of the built-in string types', async () => {
+    const defs = (base: string) => `e:NonEmpty a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype ${base} ; owl:withRestrictions ( [ xsd:minLength 1 ] ) ] .
+e:UpToTen a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:maxLength 10 ] ) ] .`;
+    expectValues(await shapesFor(['e:NonEmpty', 'e:UpToTen'], defs('xsd:token')), ['"a b"', '"a"^^xsd:token'], ['"a  b"', '" a "', '"a\\nb"', '"a\\tb"', '""']);
+    expectValues(await shapesFor(['e:NonEmpty', 'e:UpToTen'], defs('xsd:normalizedString')), ['"a  b"', '" a "'], ['"a\\nb"', '"a\\rb"', '"a\\tb"']);
+    expectValues(await shapesFor(['e:NonEmpty', 'e:UpToTen'], defs('xsd:language')), ['"en"', '"en-GB"'], ['"!!!"', '"en GB"', '"toolonglanguage"']);
+    // XML name characters can't be checked, and the note says so.
+    const ncname = await shapesFor(['e:NonEmpty', 'e:UpToTen'], defs('xsd:NCName'));
+    expect(ncname).toMatch(/^# Note: .*but not the restrictions of xsd:NCName/m);
+    expectValues(ncname, ['"abc"'], ['"a  b"', '" a"']); // still a token
+  });
+
+  it('keeps an XML Schema pattern’s meaning: ^ and $ are ordinary characters', async () => {
+    expect(xsdToXPathPattern('^a$')).toBe('^(\\^a\\$)$');
+    expect(xsdToXPathPattern('[^$]+')).toBe('^([^$]+)$');
+    expect(xsdToXPathPattern('\\$[0-9]+')).toBe('^(\\$[0-9]+)$');
+    const shapes = await shapesFor(
+      ['e:Caret', 'e:Short'],
+      `e:Caret a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:pattern "^a$" ] ) ] .
+e:Short a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:maxLength 5 ] ) ] .`,
+    );
+    expectValues(shapes, ['"^a$"'], ['"a"', '"x^a$"']);
+    expect(shapes).not.toMatch(/\(\?:/); // XPath 2.0 has no non-capturing groups
+  });
+
+  it('allows no values for dates and date-times together, or decimals and floats', async () => {
+    for (const pair of [['xsd:dateTime', 'xsd:date'], ['xsd:decimal', 'xsd:float'], ['xsd:integer', 'xsd:double']]) {
+      const shapes = await shapesFor(pair);
+      expect(shapes, pair.join(' ')).toMatch(/sh:maxCount 0/);
+      expectValues(shapes, [], ['"2020-01-01"^^xsd:date', '"2020-01-01T00:00:00Z"^^xsd:dateTime', '"1"^^xsd:float', '"1"^^xsd:integer']);
+    }
+  });
+
+  it('checks the time zone of xsd:dateTimeStamp', async () => {
+    const shapes = await shapesFor(
+      ['xsd:dateTimeStamp', 'e:Since2000'],
+      'e:Since2000 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:dateTime ; owl:withRestrictions ( [ xsd:minInclusive "2000-01-01T00:00:00Z"^^xsd:dateTime ] ) ] .',
+    );
+    expectValues(shapes, ['"2020-01-01T00:00:00Z"^^xsd:dateTime', '"2020-01-01T00:00:00+01:00"^^xsd:dateTimeStamp'], ['"2020-01-01T00:00:00"^^xsd:dateTime']);
+    // A date-time bound isn't checked by value yet, and the note says so.
+    expect(shapes).toMatch(/^# Note: .*but not the xsd:minInclusive facet/m);
   });
 });

@@ -595,7 +595,7 @@ function combineDatatypes(cls: string, ps: PropShape, defs: ReturnType<typeof da
     max: v.max,
     minLength: v.minLength,
     maxLength: v.maxLength,
-    patterns: [...(v.whole ? [WHOLE_NUMBER_PATTERN] : []), ...v.patterns.map((p) => `^(?:${p})$`)],
+    patterns: [...(v.whole ? [WHOLE_NUMBER_PATTERN] : []), ...v.patterns],
   };
   if (v.root) ps.codeType = { datatype: decimal ? NS.xsd + (v.whole ? 'integer' : 'decimal') : v.root };
   const unchecked = [...v.partial, ...(v.root ? [] : ['their datatype'])];

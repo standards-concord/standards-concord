@@ -43,6 +43,56 @@ const INTEGER_BOUNDS: Record<string, [string | undefined, string | undefined]> =
   positiveInteger: ['1', undefined],
 };
 
+/**
+ * The restrictions XML Schema puts on its built-in string subtypes and
+ * xsd:dateTimeStamp, as SHACL patterns on the lexical form (which for the
+ * string types is the value). Name-like types use XML's name characters (`\i`,
+ * `\c`), which SHACL engines don't support, and a duration's lexical form
+ * doesn't show its value (P0Y and PT0S are both zero), so those can't be checked.
+ */
+const BUILTIN_PATTERNS: Record<string, string | null> = {
+  normalizedString: '^[^\\r\\n\\t]*$',
+  token: '^([^ \\r\\n\\t]+( [^ \\r\\n\\t]+)*)?$',
+  language: '^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$',
+  Name: null,
+  NCName: null,
+  NMTOKEN: null,
+  ID: null,
+  IDREF: null,
+  ENTITY: null,
+  dateTimeStamp: '(Z|[+-][0-9]{2}:[0-9]{2})$',
+  yearMonthDuration: null,
+  dayTimeDuration: null,
+};
+
+/**
+ * An XML Schema pattern as a SHACL (XPath) one: XML Schema patterns match the
+ * whole value and treat `^` and `$` as ordinary characters; XPath's match
+ * anywhere and use them as anchors. So outside character classes they are
+ * escaped, and the pattern is anchored. XML Schema has no back-references, so
+ * the added group changes nothing.
+ */
+export function xsdToXPathPattern(p: string): string {
+  let out = '';
+  let depth = 0;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\') {
+      out += c + (p[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (c === '[') depth++;
+    else if (c === ']' && depth > 0) depth--;
+    else if ((c === '^' || c === '$') && depth === 0) {
+      out += `\\${c}`;
+      continue;
+    }
+    out += c;
+  }
+  return `^(${out})$`;
+}
+
 /** The lexical forms of whole numbers among xsd:decimal's (1, +01, 1.0, 1., .0). */
 export const WHOLE_NUMBER_PATTERN = '^[+-]?([0-9]+(\\.0*)?|\\.0+)$';
 
@@ -78,7 +128,7 @@ export interface ValueSpace {
   max?: Bound;
   minLength?: number;
   maxLength?: number;
-  /** XML Schema patterns, each matching the whole lexical form. */
+  /** SHACL (XPath) patterns, anchored, that the lexical form must match. */
   patterns: string[];
   /** Nothing qualifies. */
   empty?: boolean;
@@ -114,17 +164,31 @@ export function datatypeDefinitions(store: Store): Map<string, Definition[]> {
   return out;
 }
 
-/** -1, 0 or 1. Integers are compared exactly; anything else as numbers. */
-function compare(a: string, b: string): number {
-  const int = /^[+-]?\d+$/;
-  if (int.test(a) && int.test(b)) {
-    const x = BigInt(a);
-    const y = BigInt(b);
-    return x < y ? -1 : x > y ? 1 : 0;
-  }
-  const x = Number(a);
-  const y = Number(b);
-  return x < y ? -1 : x > y ? 1 : 0;
+/** A decimal lexical form as an exact fraction: `n / 10^scale`. */
+function decimal(s: string): { n: bigint; scale: number } {
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(s)!;
+  const frac = m[3] ?? '';
+  return { n: BigInt(`${m[1]}${m[2] || '0'}${frac}`), scale: frac.length };
+}
+
+/** -1, 0 or 1, comparing two decimal lexical forms exactly. */
+export function compare(a: string, b: string): number {
+  const x = decimal(a);
+  const y = decimal(b);
+  const l = x.n * 10n ** BigInt(Math.max(0, y.scale - x.scale));
+  const r = y.n * 10n ** BigInt(Math.max(0, x.scale - y.scale));
+  return l < r ? -1 : l > r ? 1 : 0;
+}
+
+/** The whole numbers at or above `min`, or at or below `max`: the bound rounded inwards, exactly. */
+function wholeBound(b: Bound, side: 'min' | 'max'): bigint {
+  const { n, scale } = decimal(b.value);
+  const d = 10n ** BigInt(scale);
+  // BigInt division truncates towards zero.
+  const floor = n >= 0n || n % d === 0n ? n / d : n / d - 1n;
+  const exact = n % d === 0n;
+  if (side === 'min') return exact ? (b.inclusive ? floor : floor + 1n) : floor + 1n;
+  return exact ? (b.inclusive ? floor : floor - 1n) : floor;
 }
 
 const tighterMin = (a: Bound | undefined, b: Bound | undefined): Bound | undefined => {
@@ -153,15 +217,14 @@ function meet(a: ValueSpace, b: ValueSpace): ValueSpace {
     empty: a.empty || b.empty || (a.root !== undefined && b.root !== undefined && a.root !== b.root) || undefined,
     partial: [...new Set([...a.partial, ...b.partial])],
   };
+  // Whole numbers: the bounds become the nearest whole numbers inside them, so emptiness is exact.
+  if (out.whole) {
+    if (out.min) out.min = { value: wholeBound(out.min, 'min').toString(), inclusive: true };
+    if (out.max) out.max = { value: wholeBound(out.max, 'max').toString(), inclusive: true };
+  }
   if (out.min && out.max) {
     const c = compare(out.min.value, out.max.value);
     if (c > 0 || (c === 0 && !(out.min.inclusive && out.max.inclusive))) out.empty = true;
-    // Whole numbers strictly between two consecutive whole numbers: none.
-    if (out.whole && !out.empty) {
-      const lo = Math.ceil(Number(out.min.value) + (out.min.inclusive ? 0 : 1e-9));
-      const hi = Math.floor(Number(out.max.value) - (out.max.inclusive ? 0 : 1e-9));
-      if (Number.isSafeInteger(lo) && Number.isSafeInteger(hi) && lo > hi) out.empty = true;
-    }
   }
   if (out.minLength !== undefined && out.maxLength !== undefined && out.minLength > out.maxLength) out.empty = true;
   return out;
@@ -176,6 +239,11 @@ export function valueSpace(dt: string, defs: Map<string, Definition[]>, seen: Se
     for (let x: string | undefined = dt; x && x !== root; x = XSD + XSD_BASE[x.slice(XSD.length)]) {
       const b = INTEGER_BOUNDS[x.slice(XSD.length)];
       if (b) out = meet(out, { patterns: [], partial: [], min: b[0] === undefined ? undefined : { value: b[0], inclusive: true }, max: b[1] === undefined ? undefined : { value: b[1], inclusive: true } });
+      const local = x.slice(XSD.length);
+      if (local in BUILTIN_PATTERNS) {
+        const pattern = BUILTIN_PATTERNS[local];
+        out = meet(out, pattern ? { patterns: [pattern], partial: [] } : { patterns: [], partial: [`the restrictions of ${name(x)}`] });
+      }
     }
     return out;
   }
@@ -207,7 +275,7 @@ function facetSpace(facet: string, value: Term, root: string | undefined): Value
       if (f !== 'minLength') out.maxLength = n;
       return out;
     case 'pattern':
-      out.patterns.push(value.value);
+      out.patterns.push(xsdToXPathPattern(value.value));
       return out;
     case 'minInclusive':
     case 'minExclusive':
