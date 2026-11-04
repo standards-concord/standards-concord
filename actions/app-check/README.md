@@ -96,7 +96,7 @@ CONCORD_ONTOLOGY_PATH=data/ontology.ttl \
 node run.mjs
 ```
 
-Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run.
+Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run. Without `CONCORD_COMMIT`, Concord can't tell versions of your app apart, so results only count from the run whose working-draft result is current, and every run tests every open change again.
 
 ## API
 

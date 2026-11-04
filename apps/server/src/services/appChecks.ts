@@ -233,8 +233,12 @@ function countsFrom(app: AppDoc, project = getProject(app.ontologyId)): number |
 function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = getProject(cr.ontologyId)): AppCheck | undefined {
   const from = countsFrom(app, project);
   const c = latestCheck(app.id, cr.id);
-  // Only from a run that passed the working draft with the same app commit as the baseline in force.
-  return from !== undefined && c?.revision === revision && (c.attempt ?? 0) >= from && c.commit === app.baseline!.commit ? c : undefined;
+  if (from === undefined || c?.revision !== revision || (c.attempt ?? 0) < from) return undefined;
+  const base = app.baseline!;
+  // With an app commit, results carry over between runs of that same commit. Without one there
+  // is no telling app versions apart, so only the run whose draft result is in force counts.
+  const sameApp = base.commit ? c.commit === base.commit : c.attempt === base.attempt;
+  return sameApp ? c : undefined;
 }
 
 /** Start a run: a new attempt number, and a record of exactly what this run is asked to test. */

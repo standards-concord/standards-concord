@@ -210,12 +210,13 @@ const baseline = await check('Working draft', pending.baseline.source, { CONCORD
 const attempt = pending.attempt;
 const baselineReply = (await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit })).json();
 rows.push(['Working draft', '', baseline.outcome, baselineReply.stale ? 'superseded by a newer run, or the draft moved on' : '']);
-if (baselineReply.stale) {
-  // A newer run (or a newer working draft) has taken over: this run's results wouldn't count.
-  log('The working draft moved on, or a newer run already reported it, so this run stops here. The next run tests the changes.');
-} else if (baseline.outcome !== 'passed') {
+if (baseline.outcome !== 'passed') {
+  // Whatever Concord made of it, an app that fails (or couldn't be tested on) the draft fails the job.
   console.error(`::error::${pending.app.name} ${baseline.outcome === 'failed' ? 'fails' : 'could not be tested'} against the current working draft of ${pending.ontology.title}, so the proposed changes were not tested. ${baseline.summary}`);
   exitCode = 1;
+} else if (baselineReply.stale) {
+  // A newer run (or a newer working draft) has taken over: this run's results wouldn't count.
+  log('The working draft moved on, or a newer run already reported it, so this run stops here. The next run tests the changes.');
 } else {
   for (const t of targets) {
     const r = await check(`#${t.number} ${t.title}`, t.source, { CONCORD_TARGET: `cr-${t.number}`, CONCORD_CHANGE_REQUEST: String(t.number), CONCORD_REVISION: t.revision });

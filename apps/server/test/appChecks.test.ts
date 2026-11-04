@@ -43,7 +43,9 @@ async function ciRun(token: string) {
   const p = await pending(token, true);
   const revisionFor = (target: string) => (target === 'baseline' ? p.baseline.revision : (p.targets.find((t) => t.changeRequestId === target)?.revision ?? 'not-listed'));
   const post = async (target: string, outcome: string, extra: Record<string, unknown> = {}) => {
-    const res = await report(token, { target, revision: revisionFor(target), attempt: p.attempt, outcome, ...extra });
+    // Like a GitHub run, the draft result names the app commit, unless a test says otherwise.
+    const commit = target === 'baseline' && !('commit' in extra) ? { commit: 'app-main' } : {};
+    const res = await report(token, { target, revision: revisionFor(target), attempt: p.attempt, outcome, ...commit, ...extra });
     expect(res.status, res.text).toBe(200);
     return res.body as { stale: boolean; replay?: boolean; check?: { outcome: string }; autopilot?: { action: string; message: string } };
   };
@@ -478,6 +480,34 @@ describe('autopilot', () => {
     expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', current: true });
   });
 
+  it('without an app commit, counts change results only from the run whose draft result is in force', async () => {
+    const crId = await freshCR('Autopilot without app commits');
+    const uma = await login('reviewer', 'Reviewer Uma');
+    const a = await connect(uma, 'Uma’s app', { enabled: true });
+    const run1 = await ciRun(a.token!);
+    await run1.post('baseline', 'passed', { commit: undefined });
+    await run1.post(crId, 'failed');
+    // Two overlapping runs; both pass the draft, the later one last.
+    const run2 = await ciRun(a.token!);
+    const run3 = await ciRun(a.token!);
+    expect((await run2.post('baseline', 'passed', { commit: undefined })).stale).toBe(false);
+    expect((await run3.post('baseline', 'passed', { commit: undefined })).stale).toBe(false);
+    // Run 2's pass on the change might be from another version of the app: it doesn't count.
+    await run2.post(crId, 'passed');
+    let d = await detail(crId);
+    expect(d.governance.approvals).toBe(0);
+    expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', current: false });
+    // Run 3's does.
+    expect((await run3.post(crId, 'passed')).autopilot!.action).toBe('approved');
+    d = await detail(crId);
+    expect(d.governance.approvals).toBe(1);
+    // Once the next run, without a commit, reports the draft, the change has to be tested again.
+    const run4 = await ciRun(a.token!);
+    await run4.post('baseline', 'passed', { commit: undefined });
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
+  });
+
   it('never overrides what the person said themselves', async () => {
     const crId = await freshCR('Autopilot leaves people alone');
     const ola = await login('reviewer', 'Reviewer Ola');
@@ -596,7 +626,7 @@ describe('autopilot', () => {
       const project = getProject(demoId);
       const head = ontologyStore.head(project);
       const run = await pending(token, true);
-      await report(token, { target: 'baseline', revision: run.baseline.revision, attempt: run.attempt, outcome: 'passed' });
+      await report(token, { target: 'baseline', revision: run.baseline.revision, attempt: run.attempt, outcome: 'passed', commit: 'app-main' });
       const revision = run.targets.find((t) => t.changeRequestId === crId)!.revision;
 
       // Start the merge, and before it can commit, the app's failure comes in.
@@ -790,6 +820,24 @@ wait
     const checks = (await Promise.all(((await pending(created.token!, true)).targets).map((t) => detail(t.changeRequestId)))).flatMap((d) => d.appChecks ?? []).filter((c) => c.appId === created.id);
     expect(checks.map((c) => c.outcome)).toEqual(['error']);
   }, 30_000);
+
+  it('fails the job when the app fails the working draft, even if a newer run reported first', async () => {
+    const jo = await login('reviewer', 'Developer Jo');
+    const created = (await jo.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Overtaken app' })).body as ConnectedApp;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
+    // While this run tests the draft, another run starts and reports a pass first; then this one fails.
+    fs.writeFileSync(
+      path.join(dir, 'test.mjs'),
+      `const h = { Authorization: 'Bearer ' + process.env.OTHER_RUN_TOKEN, 'Content-Type': 'application/json' };
+const p = await (await fetch(process.env.CONCORD_URL + '/api/app-checks/pending', { headers: h })).json();
+await fetch(process.env.CONCORD_URL + '/api/app-checks', { method: 'POST', headers: h, body: JSON.stringify({ target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed' }) });
+process.exit(3);
+`,
+    );
+    const res = await runAction(dir, { CONCORD_APP_TOKEN: created.token!, OTHER_RUN_TOKEN: created.token!, CONCORD_TEST_COMMAND: 'node test.mjs' });
+    expect(res.code, res.out).toBe(1);
+    expect(res.out).toMatch(/fails against the current working draft/);
+  });
 
   it('explains a missing or wrong token', async () => {
     const res = await runAction(os.tmpdir(), { CONCORD_APP_TOKEN: 'cna_wrong', CONCORD_TEST_COMMAND: 'true' });
