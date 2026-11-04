@@ -1,8 +1,8 @@
 import type { Request, Response } from 'express';
 import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
 import { config } from '../config.js';
-import { HttpError } from '../db.js';
-import { createSession, destroySession, sessionUser } from './users.js';
+import { get, HttpError, put, remove } from '../db.js';
+import { createSession, destroySession, getUser, sessionUser } from './users.js';
 import { solid } from './solid.js';
 
 /**
@@ -58,23 +58,52 @@ export function keepTesterForTransfer(req: Request, res: Response, demo: User) {
 }
 
 /**
- * A browser signed in with Google or GitHub that still remembers a demo tester
- * account has a record waiting to move (see `keepTesterForTransfer`). Try again;
- * once it has moved, the account they signed in to is the tester.
+ * Records still to move into an account, kept on the server (not just in the
+ * browser's cookie) so that signing out, or signing in on another device,
+ * doesn't lose them. Only `federatedSignIn` adds one, after the browser proved
+ * control of both the demo account and the provider identity.
+ */
+interface PendingTransfers {
+  id: string;
+  from: string[];
+}
+const pendingKey = (toId: string) => `alpha-transfer:${toId}`;
+export function addPendingTransfer(fromId: string, toId: string) {
+  const doc = get<PendingTransfers>('kv', pendingKey(toId)) ?? { id: pendingKey(toId), from: [] };
+  if (!doc.from.includes(fromId)) doc.from.push(fromId);
+  put('kv', doc);
+}
+function donePendingTransfer(fromId: string, toId: string) {
+  const doc = get<PendingTransfers>('kv', pendingKey(toId));
+  if (!doc) return;
+  doc.from = doc.from.filter((f) => f !== fromId);
+  if (doc.from.length) put('kv', doc);
+  else remove('kv', doc.id);
+}
+export const pendingTransfers = (toId: string) => get<PendingTransfers>('kv', pendingKey(toId))?.from ?? [];
+
+/**
+ * Move any testing records still waiting to come into the signed-in Google or
+ * GitHub account (see `addPendingTransfer`). In the browser that signed in, the
+ * demo account stays the tester until its record has moved.
  */
 export async function resumeTransfer(req: Request, res: Response) {
-  const remembered = sessionUser(req.cookies?.[TESTER_COOKIE]);
   const user = req.user;
-  if (!remembered || !user || user.simulated || !isLasting(user) || remembered.id === user.id) return;
-  if (remembered.simulated || !remembered.providers.every((p) => p.provider === 'demo')) return;
-  try {
-    await mergeTesterRecords(remembered, user);
-  } catch (err) {
-    console.warn(`[alpha] testing record still could not move: ${(err as Error).message}`);
-    return;
+  if (!user || user.simulated || !isLasting(user)) return;
+  for (const fromId of pendingTransfers(user.id)) {
+    const from = getUser(fromId);
+    try {
+      if (from) await mergeTesterRecords(from, user);
+    } catch (err) {
+      console.warn(`[alpha] testing record still could not move: ${(err as Error).message}`);
+      continue;
+    }
+    donePendingTransfer(fromId, user.id);
+    if (sessionUser(req.cookies?.[TESTER_COOKIE])?.id === fromId) {
+      clearTesterCookie(req, res);
+      delete req.cookies[TESTER_COOKIE];
+    }
   }
-  clearTesterCookie(req, res);
-  delete req.cookies[TESTER_COOKIE];
 }
 
 export function testerInfo(u: User): AlphaTesterInfo {
@@ -165,19 +194,23 @@ function mergeEntry(a: TestedVersion, b: TestedVersion): TestedVersion {
  * (testing.unreadable-<time>.jsonld) before a fresh one replaces it.
  */
 async function readVersions(userId: string): Promise<TestedVersion[]> {
-  let raw: string | undefined;
+  let copies: { pod?: string; local?: string };
   try {
-    raw = await solid.readExisting(userId, RECORD);
+    copies = await solid.readCopies(userId, RECORD);
   } catch (err) {
     throw new HttpError(503, `Your testing record could not be read just now, so nothing was changed. Please try again. (${(err as Error).message})`);
   }
-  if (!raw) return [];
-  try {
-    return normaliseVersions((JSON.parse(raw) as Partial<RecordDoc> | null)?.versions);
-  } catch {
-    await solid.write(userId, RECORD.replace('.jsonld', `.unreadable-${Date.now()}.jsonld`), raw, 'text/plain');
-    return [];
+  // A copy kept on this server (from before the pod was set up, or while it was unreachable) is merged in, never dropped.
+  const versions: TestedVersion[] = [];
+  for (const raw of [copies.pod, copies.local]) {
+    if (!raw) continue;
+    try {
+      versions.push(...normaliseVersions((JSON.parse(raw) as Partial<RecordDoc> | null)?.versions));
+    } catch {
+      await solid.write(userId, RECORD.replace('.jsonld', `.unreadable-${Date.now()}.jsonld`), raw, 'text/plain');
+    }
   }
+  return normaliseVersions(versions);
 }
 
 /**
@@ -205,7 +238,8 @@ async function writeVersions(user: User, versions: TestedVersion[]) {
     '@type': 'concord:AlphaTestingRecord',
     versions: [...versions].sort((a, b) => compareVersions(b.version, a.version)),
   };
-  return solid.write(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json');
+  // Straight to the pod or not at all: a copy left only on this server would be missed by the next read of the pod.
+  return solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json');
 }
 
 const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.podUrl?.startsWith(config.solid.serverUrl) ? 'solid' : 'local');
@@ -277,6 +311,6 @@ export async function mergeTesterRecords(from: User, into: User) {
   });
   for (const id of new Set(theirs.flatMap((v) => v.feedbackIds))) {
     const doc = await solid.readExisting(from.id, `feedback/${id}.json`);
-    if (doc && !(await solid.readExisting(into.id, `feedback/${id}.json`))) await solid.write(into.id, `feedback/${id}.json`, doc, 'application/json');
+    if (doc && !(await solid.readExisting(into.id, `feedback/${id}.json`))) await solid.writeExisting(into.id, `feedback/${id}.json`, doc, 'application/json');
   }
 }

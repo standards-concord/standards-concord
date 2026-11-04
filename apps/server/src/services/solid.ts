@@ -154,19 +154,41 @@ export const solid = {
    * callers never mistake a record that is out of reach for one that is empty.
    */
   async readExisting(userId: string, relPath: string): Promise<string | undefined> {
+    const { pod, local } = await this.readCopies(userId, relPath);
+    return pod ?? local;
+  },
+
+  /**
+   * Both copies of a resource: the pod's, and the one kept on this server (by
+   * `write` while the pod was unreachable, or because there is no pod). Throws if
+   * the pod answers with an error or can't be reached.
+   */
+  async readCopies(userId: string, relPath: string): Promise<{ pod?: string; local?: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
     const file = path.join(config.dataDir, 'private', userId, relPath);
-    const local = () => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined);
-    if (this.enabled && rec) {
-      const s = await sessionFor({ ...rec, id: userId });
-      const url = `${rec.podUrl}concord/${relPath}`;
-      const res = await s.fetch(url);
-      if (res.ok) return await res.text();
-      // Not in the pod: it may have been kept locally while the pod was unreachable.
-      if (res.status === 404 || res.status === 410) return local();
-      throw new Error(`GET ${url} → ${res.status}`);
-    }
-    return local();
+    const local = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+    if (!(this.enabled && rec)) return { local };
+    const s = await sessionFor({ ...rec, id: userId });
+    const url = `${rec.podUrl}concord/${relPath}`;
+    const res = await s.fetch(url);
+    if (res.ok) return { pod: await res.text(), local };
+    if (res.status === 404 || res.status === 410) return { local };
+    throw new Error(`GET ${url} → ${res.status}`);
+  },
+
+  /**
+   * Like `write`, but when the user has a pod the write must reach it: no quiet
+   * fallback to this server, which later reads of the pod wouldn't see. Throws
+   * if the pod refuses or can't be reached.
+   */
+  async writeExisting(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    if (!(this.enabled && rec)) return this.write(userId, relPath, body, contentType);
+    const s = await sessionFor({ ...rec, id: userId });
+    const url = `${rec.podUrl}concord/${relPath}`;
+    const res = await s.fetch(url, { method: 'PUT', headers: { 'content-type': contentType }, body });
+    if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
+    return { kind: 'solid', url };
   },
 
   /** A minimal WebID profile document for locally-hosted WebIDs. */

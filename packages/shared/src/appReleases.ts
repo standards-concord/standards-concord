@@ -69,6 +69,31 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.12.1',
+    date: '2026-11-04',
+    title: 'Clearer, safer agent connections',
+    pr: 34,
+    changes: [
+      {
+        id: 'oauth-consent',
+        type: 'fix',
+        title: 'The connect screen says who an app is and where access goes',
+        detail:
+          'When an agent asks to connect, Concord says whether it can confirm who made the app (an unverified app’s name and website are only its own claims) and exactly where access will be sent, including apps on this device.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+      {
+        id: 'chatgpt-steps',
+        type: 'fix',
+        title: 'Up-to-date steps for connecting ChatGPT',
+        detail: 'The ChatGPT instructions match ChatGPT’s current screens: create Concord as a plugin, install it, then pick it with @ in a chat.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+    ],
+  },
+  {
     version: '0.12.0',
     date: '2026-11-04',
     title: 'SHACL compact syntax and classes for apps',

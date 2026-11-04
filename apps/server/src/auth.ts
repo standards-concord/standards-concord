@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { HttpError } from './db.js';
 import type { AuthProvider } from '@concord/shared';
 import { createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
-import { clearTesterCookie, keepTesterForTransfer, mergeTesterRecords, testerFor } from './services/alpha.js';
+import { addPendingTransfer, clearTesterCookie, keepTesterForTransfer, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -102,9 +102,13 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
     );
   }
   // Until the record has moved, this browser keeps the demo account as the tester
-  // (so nothing is lost) and the move is tried again on the next visit.
+  // (so nothing is lost), and the server remembers the move and tries it again on
+  // the account's next visit, even after signing out or from another device.
   if (moved) clearTesterCookie(req, res);
-  else keepTesterForTransfer(req, res, demoTester!);
+  else {
+    addPendingTransfer(demoTester!.id, user.id);
+    keepTesterForTransfer(req, res, demoTester!);
+  }
   signInAs(req, res, user.id, identity.provider);
   return user;
 }

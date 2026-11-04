@@ -171,6 +171,17 @@ test('a comparison one tester picked doesn’t carry over to the next tester in 
   await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toBeVisible();
 
   // Sign out and start again as someone else, without reloading the page.
+  await signOutInPlace(page);
+  await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
+  await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
+  // The new tester has no history of their own, so they're asked, not shown the last tester's comparison.
+  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toHaveCount(0);
+  await expectNoCrash(page);
+});
+
+/** Sign out from the account menu and open /alpha again without reloading the page. */
+async function signOutInPlace(page: import('@playwright/test').Page) {
   await page.locator('.app-user-button').click();
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/\/login/);
@@ -178,10 +189,73 @@ test('a comparison one tester picked doesn’t carry over to the next tester in 
     history.pushState({}, '', '/alpha');
     dispatchEvent(new PopStateEvent('popstate'));
   });
+}
+
+test('a slow save for the previous tester doesn’t replace the next tester’s record', async ({ page }) => {
+  let fetched!: () => void;
+  const aFetched = new Promise<void>((r) => (fetched = r));
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const held: Promise<void>[] = [];
+  let aSession: string | undefined;
+  await page.route('**/api/alpha/visit', async (route) => {
+    const cookies = await page.context().cookies();
+    const session = cookies.find((c) => c.name === 'concord_session')?.value;
+    aSession ??= session;
+    if (session !== aSession) return route.continue();
+    // Every save made as tester A (who has tested 0.7.0 before) is slow to come back.
+    let done!: () => void;
+    held.push(new Promise<void>((r) => (done = r)));
+    await page.request.post('/api/alpha/visit', { data: { version: '0.7.0' } });
+    // Sent with A's cookies (the browser adds them below the level route.fetch sees).
+    const response = await route.fetch({ headers: { ...route.request().headers(), cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; ') } });
+    fetched();
+    await released;
+    await route.fulfill({ response });
+    done();
+  });
+  await page.goto('/alpha');
   await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
-  await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
-  // The new tester has no history of their own, so they're asked, not shown the last tester's comparison.
+  await aFetched;
+
+  // Tester B takes over the browser before A's save comes back.
+  await signOutInPlace(page);
+  const record = page.getByRole('group', { name: 'Your testing record' });
+  await record.getByRole('button', { name: /Keep a tester account in this browser/ }).click();
+  await expect(record).toContainText('tester account kept in this browser');
+  const changed = page.getByRole('region', { name: 'What’s changed' });
   await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
-  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toHaveCount(0);
+  release();
+  await Promise.all(held);
+  await page.waitForTimeout(500);
+  // A's history (0.7.0) never shows up as B's.
+  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toHaveCount(0);
   await expectNoCrash(page);
+});
+
+test('versions this browser has seen are never written over when they couldn’t be read', async ({ page }) => {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('seeded')) return;
+    sessionStorage.setItem('seeded', '1');
+    localStorage.setItem('concord.alpha.seen', JSON.stringify(['0.7.0']));
+    // The first read of the saved versions fails.
+    const get = Storage.prototype.getItem;
+    let failed = false;
+    Storage.prototype.getItem = function (key: string) {
+      if (key === 'concord.alpha.seen' && !failed) {
+        failed = true;
+        throw new Error('storage unavailable');
+      }
+      return get.call(this, key);
+    };
+  });
+  await page.goto('/alpha');
+  await expect(page.getByTestId('app-version')).toBeVisible();
+  await settle(page);
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('concord.alpha.seen'))) ?? '[]')).toEqual(['0.7.0']);
+  // Read properly next time, it's still there, so this browser knows what changed.
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'What’s changed' }).getByRole('heading', { name: 'What’s changed since 0.7.0' })).toBeVisible();
+  expect(JSON.parse((await page.evaluate(() => localStorage.getItem('concord.alpha.seen'))) ?? '[]')).toEqual(['0.7.0', APP_VERSION]);
 });

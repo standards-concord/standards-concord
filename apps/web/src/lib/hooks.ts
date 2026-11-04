@@ -66,12 +66,18 @@ export function useAction<A extends unknown[], R>(fn: (...args: A) => Promise<R>
   return { run, pending, error, clearError: () => setError(undefined) };
 }
 
-function readStored<T>(key: string, initial: T): T {
+/** The stored value; `readable` is false when storage couldn't be read (so it must not be written over). */
+function readStored<T>(key: string, initial: T): { value: T; readable: boolean } {
+  let raw: string | null;
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : initial;
+    raw = localStorage.getItem(key);
   } catch {
-    return initial;
+    return { value: initial, readable: false };
+  }
+  try {
+    return { value: raw ? (JSON.parse(raw) as T) : initial, readable: true };
+  } catch {
+    return { value: initial, readable: true };
   }
 }
 
@@ -81,24 +87,27 @@ function readStored<T>(key: string, initial: T): T {
  * new key, so one key's state never leaks into another's.
  */
 export function useLocalStorage<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
-  const [state, setState] = useState(() => ({ key, value: readStored(key, initial) }));
+  const [state, setState] = useState(() => ({ key, ...readStored(key, initial) }));
   let current = state;
   if (state.key !== key) {
     // Derived-state reset during render: React re-renders straight away with the new key's value.
-    current = { key, value: readStored(key, initial) };
+    current = { key, ...readStored(key, initial) };
     setState(current);
   }
   const set = useCallback(
     (v: T | ((p: T) => T)) => {
       setState((prev) => {
-        const base = prev.key === key ? prev.value : readStored(key, initial);
-        const next = typeof v === 'function' ? (v as (p: T) => T)(base) : v;
-        try {
-          localStorage.setItem(key, JSON.stringify(next));
-        } catch {
-          /* storage unavailable */
+        const base = prev.key === key ? prev : { key, ...readStored(key, initial) };
+        const next = typeof v === 'function' ? (v as (p: T) => T)(base.value) : v;
+        // If what was stored couldn't be read, keep the change in memory only, so it isn't lost by being written over.
+        if (base.readable) {
+          try {
+            localStorage.setItem(key, JSON.stringify(next));
+          } catch {
+            /* storage unavailable */
+          }
         }
-        return { key, value: next };
+        return { key, value: next, readable: base.readable };
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- initial is only a fallback

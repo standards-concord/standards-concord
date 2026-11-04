@@ -70,7 +70,9 @@ const C = createContext<TesterCtx | null>(null);
 export function TesterProvider({ children, roleKey }: { children: ReactNode; roleKey?: TesterRoleKey }) {
   const { session } = useSession();
   const userId = session?.user?.id;
-  const me = useAsync(() => api.alphaMe(), [userId]);
+  // Each answer is tagged with the account it was asked for, so a slow answer for the
+  // previous account (or a failed reload) never stands in for the current one.
+  const me = useAsync(async () => ({ forUser: userId, me: await api.alphaMe() }), [userId]);
   // What each tester (or anyone signed out) said they last tested ("first" = first time), and the
   // versions this browser has been used with.
   const [picks, setPicks] = useLocalStorage<Record<string, string>>('concord.alpha.picks', {});
@@ -84,7 +86,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
 
   // Save this version (and the role being tried) to the tester's pod, once per version and role.
   const recorded = useRef<string>('');
-  const me_ = me.data;
+  const me_ = me.data && me.data.forUser === userId ? me.data.me : undefined;
   const setMe = me.setData;
   useEffect(() => {
     const tester = me_?.tester;
@@ -100,11 +102,11 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     recorded.current = key;
     void api
       .alphaVisit({ version: APP_VERSION, commit: APP_COMMIT || undefined, role: roleKey })
-      .then((r) => setMe(r))
+      .then((r) => setMe((prev) => (prev && prev.forUser === userId && prev.me.tester?.id === tester.id ? { forUser: userId, me: r } : prev!)))
       .catch(() => {
         recorded.current = '';
       });
-  }, [me_, roleKey, setMe]);
+  }, [me_, roleKey, setMe, userId]);
 
   const testerKey = me_?.tester?.id ?? 'anon';
   const compare = compareFor?.tester === testerKey ? compareFor.version : undefined;
