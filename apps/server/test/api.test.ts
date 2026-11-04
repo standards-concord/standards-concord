@@ -980,4 +980,176 @@ describe('inline term edits', () => {
     expect(published.status).toBe('published');
     expect((await contributor.get(termPath(`${VOL}Agent`))).body.comment).toBe('Merged while the release waited.');
   });
+
+  /* Git is a projection of the database: kill points between the two, and repair. */
+  const repo = async () => {
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const { execFileSync } = await import('node:child_process');
+    const project = getProject(demoId);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: ontologyStore.dir(project), encoding: 'utf8' }).trim();
+    const path = await import('node:path');
+    const { config } = await import('../src/config.js');
+    const raw = path.join(config.dataDir, 'ontologies', project.slug);
+    // Without the repair that ontologyStore.dir() does first.
+    const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8' }).trim();
+    return { ontologyStore, project, git, rawGit };
+  };
+  const approvedEdit = async (who: string, iri: string, set: object) => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const created = await edit(await login('contributor', who), { termIri: iri, set, submit: true });
+    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    return created.body.id as string;
+  };
+
+  it('never lets a copy read before a merge be saved over it', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const id = await approvedEdit('Contributor Stale Copy', `${VOL}Cause`, { examples: ['stale copy'] });
+    // A writer holding a copy, paused before saving while a merge recorded itself: its save is refused.
+    await expect(
+      crsMod.updateCR(crsMod.getCR(id), (c) => {
+        put('changeRequests', { ...crsMod.getCR(id), status: 'merged', mergedCommit: 'abc', rev: (c.rev ?? 0) + 1 }, demoId);
+        c.status = 'withdrawn';
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: 'abc' });
+    // And a copy that is already out of date is refused before anything is written.
+    const old = { ...crsMod.getCR(id), rev: 0 };
+    await expect(crsMod.updateCR(old, (c) => (c.title = 'Overwritten'))).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('keeps a committed merge if the process dies before git is updated, and repairs git from the database', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore, project, rawGit } = await repo();
+    const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
+    const before = ontologyStore.head(project);
+    // Dies right after the database transaction: nothing in git is moved.
+    const spy = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => {
+      throw new Error('killed');
+    });
+    try {
+      expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Crash')))).status).toBe('merged');
+    } finally {
+      spy.mockRestore();
+    }
+    const merged = ontologyStore.head(project);
+    expect(merged).not.toBe(before);
+    expect(rawGit('rev-parse', 'HEAD')).toBe(before);
+    // The commit only the database names survives garbage collection.
+    rawGit('reflog', 'expire', '--expire=now', '--all');
+    rawGit('gc', '-q', '--prune=now');
+    expect(rawGit('cat-file', '-t', merged)).toBe('commit');
+    // Anything that reads the checkout repairs it first.
+    const { git } = await repo();
+    expect(git('rev-parse', 'HEAD')).toBe(merged);
+    expect(git('status', '--porcelain', '--untracked-files=no')).toBe('');
+    await expect((await login('member', 'Reader Crash')).get(termPath(`${VOL}Cause`)).then((r) => r.body.comment)).resolves.toBe('Survives a crash.');
+  });
+
+  it('repairs checked-out files that failed to update, not just the branch', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore, project, rawGit } = await repo();
+    const id = await approvedEdit('Contributor Checkout', `${VOL}Cause`, { editorialNote: 'Checked out eventually.' });
+    const spy = vi.spyOn(ontologyStore, 'checkout').mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+    try {
+      expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Checkout')))).status).toBe('merged');
+    } finally {
+      spy.mockRestore();
+    }
+    // The branch moved but the files did not: the next read puts them right.
+    expect(rawGit('rev-parse', 'HEAD')).toBe(ontologyStore.head(project));
+    const { git } = await repo();
+    expect(git('status', '--porcelain', '--untracked-files=no')).toBe('');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    expect(fs.readFileSync(path.join(ontologyStore.dir(project), 'ontology.ttl'), 'utf8')).toBe(ontologyStore.readWorkingText(project));
+  });
+
+  it('records a release atomically, survives a crash before its tag, and refuses a second publisher', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const releases = await import('../src/services/releases.js');
+    const { ontologyStore, project, rawGit } = await repo();
+    const { put, list } = await import('../src/db.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const steward = await login('steward', 'Steward Atomic');
+    const stewardUser = await userOf(steward);
+    const id = await approvedEdit('Contributor Atomic', `${VOL}Cause`, { examples: ['released atomically'] });
+    expect((await crsMod.merge(crsMod.getCR(id), stewardUser)).status).toBe('merged');
+    await steward.post(`/api/ontologies/${demoId}/releases`).send({});
+    const pending = list<{ id: string; status: string; version: string; changeRequestIds: string[] }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
+    const draft = put('releases', { ...pending, status: 'draft' }, demoId);
+    const tag = `v${draft.version}`;
+
+    // Two publishers queued on the same (soon stale) release object, and the first dies right after its database transaction.
+    const spy = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => {
+      throw new Error('killed');
+    });
+    let first, second;
+    try {
+      [first, second] = await Promise.allSettled([releases.publishRelease({ ...draft } as never, stewardUser), releases.publishRelease({ ...draft } as never, stewardUser)]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(first.status).toBe('fulfilled');
+    expect(second).toMatchObject({ status: 'rejected', reason: { status: 409 } });
+    // Everything the release records landed together.
+    const stored = list<{ id: string; status: string; commit?: string }>('releases', demoId).find((r) => r.id === draft.id)!;
+    expect(stored.status).toBe('published');
+    expect(stored.commit).toBe(ontologyStore.head(project));
+    expect(getProject(demoId).currentVersion).toBe(draft.version);
+    for (const crId of draft.changeRequestIds) expect(crsMod.getCR(crId).status).toBe('released');
+    // The tag and files follow from the database once anything reads the repository.
+    expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
+    ontologyStore.dir(project);
+    expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
+    expect((await ontologyStore.at(project, draft.version)).ontologyIRI).toBeTruthy();
+    // Publishing again is refused rather than rewriting the version.
+    const released = ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
+    await expect(releases.publishRelease({ ...draft } as never, stewardUser)).rejects.toMatchObject({ status: 409 });
+    expect(ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl')).toBe(released);
+  });
+
+  it('keeps a vote that passed for requests approved before votes were recorded on approval', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { getProject, updateProject } = await import('../src/services/ontologies.js');
+    const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
+    const { put } = await import('../src/db.js');
+    const { newId } = await import('../src/ids.js');
+    const project = getProject(demoId);
+    const saved = project.governance;
+    const lazy = GOVERNANCE_TEMPLATES['lazy-consensus'];
+    // Lazy consensus where one yes vote passes, so the test can hold a real, completed vote.
+    updateProject({ ...project, governance: { ...lazy, changes: { ...lazy.changes, patch: { ...lazy.changes.patch, vote: { ...lazy.changes.patch.vote!, quorum: 0, threshold: 0.5 } } } } });
+    try {
+      const contributor = await login('contributor', 'Contributor Legacy Vote');
+      const editor = await login('editor', 'Editor Legacy Vote');
+      const editorUser = await userOf(editor);
+      const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Voted through long ago.' } });
+      const id = created.body.id;
+      // Objected to, voted on (and passed), then approved, all by an older version: approvedAs has no `voted`.
+      put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorUser.id, roles: ['editor'], decision: 'object', at: '2000-01-01T12:00:00Z' }, id);
+      put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: editorUser.id, roles: ['editor'], choice: 'yes', at: '2000-01-03T00:00:00Z' }, id);
+      const cr = crsMod.getCR(id);
+      put(
+        'changeRequests',
+        {
+          ...cr,
+          status: 'approved',
+          opsUpdatedAt: '2000-01-01T00:00:00Z',
+          reviewStartedAt: '2000-01-01T00:00:00Z',
+          approvedAs: { level: 'patch', confirmation: false },
+          timeline: [...cr.timeline, { at: '2000-01-02T00:00:00Z', type: 'status', message: 'vote opened (An objection was raised, so this goes to a vote.)' }, { at: '2000-01-06T00:00:00Z', type: 'status', message: 'approved — The vote passed.' }],
+        },
+        demoId,
+      );
+      const merged = await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Legacy Vote')));
+      expect(merged.status).toBe('merged');
+    } finally {
+      updateProject({ ...getProject(demoId), governance: saved });
+    }
+  });
 });

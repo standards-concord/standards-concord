@@ -58,11 +58,31 @@ const save = (cr: ChangeRequest) =>
     return stamp(cr);
   });
 
-/** Writes a request, bumping its revision (a merge only lands if the revision it checked is still current). */
+/**
+ * Writes a request if it is still at the revision it was read at, bumping the
+ * revision: a compare-and-swap, so a copy read before someone else's write
+ * (another process's, or a merge's) can never be written over it. Call inside
+ * a transaction with any other rows that go with it (a review, a vote).
+ */
 function stamp(cr: ChangeRequest) {
-  cr.rev = (getCR(cr.id).rev ?? 0) + 1;
-  cr.updatedAt = clock.iso();
-  return put('changeRequests', cr, cr.ontologyId);
+  return transaction(() => {
+    const stored = getCR(cr.id);
+    if ((stored.rev ?? 0) !== (cr.rev ?? 0)) throw new HttpError(409, 'This request was changed by someone else meanwhile. Reload it and try again.');
+    cr.rev = (stored.rev ?? 0) + 1;
+    cr.updatedAt = clock.iso();
+    return put('changeRequests', cr, cr.ontologyId);
+  });
+}
+
+/** Marks a merged request released, inside the release's own transaction (see releases.publishRelease). */
+export function markReleased(id: string, releaseId: string, version: string, at: string) {
+  const cr = getCR(id);
+  if (cr.status !== 'merged') return;
+  cr.status = 'released';
+  cr.releaseId = releaseId;
+  cr.statusSince = at;
+  cr.timeline.push({ at, type: 'released', message: `released in ${version}` });
+  stamp(cr);
 }
 
 /** Replace `cr`'s contents with the stored copy, in place, so callers holding it see the latest. */
@@ -77,9 +97,14 @@ function locked<T>(cr: ChangeRequest, fn: (cr: ChangeRequest) => Promise<T> | T)
   return withWorkingDraftLock({ id: cr.ontologyId }, async () => fn(refresh(cr)));
 }
 
-/** Change a stored request from elsewhere (meetings, releases), the same safe way. */
-export function updateCR(cr: ChangeRequest, fn: (cr: ChangeRequest) => void): Promise<ChangeRequest> {
+/**
+ * Change a stored request from elsewhere (e.g. meetings), the same safe way:
+ * under the lock, on the latest copy, and only if it is still at
+ * `expectedRev` (by default the revision of the copy passed in).
+ */
+export function updateCR(cr: ChangeRequest, fn: (cr: ChangeRequest) => void, expectedRev = cr.rev): Promise<ChangeRequest> {
   return locked(cr, (c) => {
+    if ((c.rev ?? 0) !== (expectedRev ?? 0)) throw new HttpError(409, 'This request was changed by someone else meanwhile. Reload it and try again.');
     fn(c);
     return save(c);
   });
@@ -160,6 +185,7 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
     tests,
     warnings,
     baseCommit: ontologyStore.head(project),
+    rev: 0,
   };
   put('changeRequests', cr, cr.ontologyId); // new, so nobody else can be changing it yet
   logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
@@ -460,10 +486,13 @@ export function addReview(cr: ChangeRequest, actor: User, decision: Review['deci
     const roles = rolesFor(c.ontologyId, actor.id);
     if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
     const review: Review = { id: newId('rev'), changeRequestId: c.id, userId: actor.id, roles, decision, comment, at: clock.iso() };
-    put('reviews', review, c.id);
     const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
     c.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
-    save(c);
+    // The review only counts if the request it was given on is still the stored one.
+    transaction(() => {
+      put('reviews', review, c.id);
+      save(c);
+    });
     logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
     return advanceNow(c, actor);
   });
@@ -477,9 +506,11 @@ export function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], 
     if (!g.rule.vote || !roles.some((r) => g.rule.vote!.voterRoles.includes(r)))
       throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
     const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: c.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
-    put('votes', vote, c.id);
     c.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
-    save(c);
+    transaction(() => {
+      put('votes', vote, c.id);
+      save(c);
+    });
     logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
     return advanceNow(c, actor);
   });
@@ -626,7 +657,17 @@ function draftMovedOn(cr: ChangeRequest, why: string) {
 function approvalLost(cr: ChangeRequest, outcome: ChangeRequestStatus) {
   if (outcome === 'needs-work' || outcome === 'rejected') return true;
   // Governance can't see a vote that already closed, so "voting" only counts if it never had one (e.g. a late objection under lazy consensus).
-  return outcome === 'voting' && !cr.approvedAs?.voted;
+  return outcome === 'voting' && !(cr.approvedAs?.voted ?? passedVote(cr));
+}
+
+/**
+ * For requests approved before Concord recorded whether a vote approved them:
+ * whether the last vote opened on them (since the edits last changed) passed.
+ */
+function passedVote(cr: ChangeRequest): boolean {
+  const since = cr.opsUpdatedAt ?? cr.createdAt;
+  const opened = [...cr.timeline].reverse().find((e) => e.type === 'status' && e.message.startsWith('vote opened') && e.at >= since);
+  return !!opened && governanceFor({ ...cr, status: 'voting', statusSince: opened.at }).outcome === 'approved';
 }
 
 /** Why an approved request, just re-checked against the latest draft, can't be merged now (or undefined if it can). */
@@ -642,7 +683,8 @@ function mergeBlocker(cr: ChangeRequest): { status: ChangeRequestStatus; message
   const level = cr.classification?.level ?? 'minor';
   const was = cr.approvedAs;
   if (!was) {
-    // Approved before Concord recorded what it was approved as: check it afresh, as if in review.
+    // Approved before Concord recorded what it was approved as: a vote that passed still stands; otherwise check it afresh, as if in review.
+    if (passedVote(cr)) return undefined;
     const fresh = governanceFor({ ...cr, status: 'review' });
     return fresh.outcome === 'approved' ? undefined : { status: 'review', message: `back in review: on the latest draft it needs more than it was approved with (${fresh.unmet[0] ?? fresh.next})` };
   }

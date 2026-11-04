@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
-import { updateCR } from './changeRequests.js';
+import { markReleased } from './changeRequests.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -168,7 +168,9 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   return withWorkingDraftLock(getProject(r.ontologyId), () => publishNow(r, actor));
 }
 
-async function publishNow(r: Release, actor: User | undefined): Promise<Release> {
+async function publishNow(stale: Release, actor: User | undefined): Promise<Release> {
+  // A fresh read under the lock: another publisher may have published it while this one waited.
+  const r = mustGet<Release>('releases', stale.id);
   const can = publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
   const project = getProject(r.ontologyId);
@@ -212,25 +214,23 @@ async function publishNow(r: Release, actor: User | undefined): Promise<Release>
 
   const author = actor ?? getUser(r.createdBy);
   assertStillHeld(project);
-  // Only lands if the draft is still the one released (see ontologyStore.advanceTo).
-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, base);
-  r.status = 'published';
-  r.publishedAt = clock.iso();
-  r.statusSince = r.publishedAt;
-
-  // Mark change requests as released.
-  for (const id of r.changeRequestIds) {
-    await updateCR(mustGet<ChangeRequest>('changeRequests', id), (cr) => {
-      cr.status = 'released';
-      cr.releaseId = r.id;
-      cr.statusSince = r.publishedAt!;
-      cr.timeline.push({ at: r.publishedAt!, type: 'released', message: `released in ${r.version}` });
-    });
-  }
-
-  project.currentVersion = r.version;
-  project.stage = 'released';
-  updateProject(project);
+  const publishedAt = clock.iso();
+  // The release commit, the release's record, its requests' statuses and the
+  // ontology's current version are written in one transaction, only if the
+  // draft is still the one released and the release is still unpublished
+  // (see ontologyStore.advanceTo). The tag follows from the database.
+  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, base, (commit) => {
+    const latest = mustGet<Release>('releases', r.id);
+    if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
+    Object.assign(r, latest, { commit, status: 'published', publishedAt, statusSince: publishedAt });
+    save(r);
+    for (const id of r.changeRequestIds) markReleased(id, r.id, r.version, publishedAt);
+    const p = getProject(r.ontologyId);
+    p.currentVersion = r.version;
+    p.stage = 'released';
+    updateProject(p);
+  });
+  Object.assign(project, getProject(r.ontologyId));
 
   // Public ontologies are persisted to GitHub on release, when configured.
   if (project.github && config.github.publishToken) {
@@ -244,7 +244,7 @@ async function publishNow(r: Release, actor: User | undefined): Promise<Release>
   }
   save(r);
   logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
-  return r;
+  return Object.assign(stale, r);
 }
 
 /** Periodic: close votes; auto-draft releases when the policy asks for it. */
