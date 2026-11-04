@@ -1,8 +1,8 @@
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
 import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitMerge, MessageSquareText, Pencil, Users, Combine, type LucideIcon } from 'lucide-react';
-import { PenLine } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
+import { PenLine } from 'lucide-react';
 
 export function LevelBadge({ level, className }: { level?: ChangeLevel; className?: string }) {
   if (!level) return null;
