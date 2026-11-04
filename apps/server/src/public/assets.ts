@@ -79,29 +79,74 @@ main{padding-top:28px;padding-bottom:48px}
 .js .panel[hidden]{display:none}
 html:not(.js) .panel+.panel{border-top:1px solid var(--line);margin-top:32px;padding-top:32px}
 .block{margin-bottom:36px}
-.spec{display:grid;grid-template-columns:220px minmax(0,1fr);gap:40px}
-.toc{position:sticky;top:64px;align-self:start;font-size:.9rem;max-height:calc(100vh - 80px);overflow:auto}
-.toc-title{font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-size:.75rem}
-.toc ol{list-style:none;margin:0;padding:0}
-.toc li{padding:4px 0;display:flex;justify-content:space-between;gap:8px}
-.toc a{color:var(--fg);text-decoration:none}
-.toc a:hover{color:var(--accent-fg)}
+.card{border:1px solid var(--line);border-radius:var(--radius);background:var(--bg);box-shadow:var(--shadow)}
+.browse{display:grid;grid-template-columns:300px minmax(0,1fr);gap:24px;align-items:start}
+.browse-nav{position:sticky;top:64px;max-height:calc(100vh - 84px);overflow:auto;padding:12px;font-size:.9rem}
+.search input{width:100%;padding:8px 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin-bottom:8px}
+.nav-title,.nav-group>summary{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px}
+.nav-group>summary{list-style:none;cursor:pointer}
+.nav-group>summary::-webkit-details-marker{display:none}
+.nav-group>summary::before{content:"▸";display:inline-block;width:1em;transition:transform .15s}
+.nav-group[open]>summary::before{transform:rotate(90deg)}
+.browse-nav ul{list-style:none;margin:0;padding:0}
+.ctree ul ul{padding-left:14px}
+.node{display:flex;align-items:center;gap:4px;border-radius:6px}
+.ctree summary{cursor:pointer;list-style:none;font-weight:400;margin:0}
+.nav-group>summary{margin-bottom:4px}
+.js .browse .term:target{outline:none}
+.ctree summary::-webkit-details-marker{display:none}
+.ctree summary::before{content:"▸";color:var(--muted);font-size:.75rem;width:14px;flex:none;text-align:center;transition:transform .15s}
+.ctree details[open]>summary::before{transform:rotate(90deg)}
+.node.leaf::before{content:"•";color:var(--muted);opacity:.5;width:14px;flex:none;text-align:center}
+.node .n{font-size:.65rem;color:var(--muted);margin-left:auto;padding-right:6px}
+.nav-item{display:block;flex:1;min-width:0;padding:3px 8px;border-radius:6px;color:var(--fg);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav-item:hover{background:var(--bg-soft)}
+.nav-item[aria-current="true"]{background:var(--accent-soft);color:var(--accent-fg);font-weight:600}
+.nav-item.deprecated{text-decoration:line-through;color:var(--muted)}
+.nav-overview{font-weight:600}
+.browse-main{min-width:0}
+.overview{padding:20px 22px;margin-bottom:16px}
+.overview .pick{margin:12px 0 4px}
+.namespaces{margin-top:12px}
+.group-title{font-size:1rem;color:var(--muted);margin:24px 0 10px}
+.js .term-group,.js .browse.focused .overview{display:none}
+.js .term-group.is-open{display:block}
+.js .browse.has-selection .term:not(.is-selected),.js .browse.has-selection .group-title{display:none}
+.btn{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:.875rem;font-weight:500;line-height:1.2;padding:7px 12px;border-radius:8px;border:1px solid var(--line-strong);background:var(--bg);color:var(--fg);text-decoration:none;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--accent);color:var(--accent-fg)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{color:#fff;filter:brightness(1.08)}
+.btn-ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn-ghost:hover{background:var(--bg-soft);border-color:transparent}
+.btn-icon{padding:4px 6px}
+html:not(.js) .copy{display:none}
+.copy.copied{color:var(--ok)}
+.warn-text{color:var(--warn)}
+.comment{font-size:.92rem}
+.report-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px;margin:12px 0 20px}
+.choice{border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;background:var(--bg-soft)}
+.choice h3{margin-top:0}
+.field{display:block;margin-bottom:12px}
+.field>span{display:block;font-size:.875rem;font-weight:600;margin-bottom:4px}
+.field input,.field textarea{width:100%;padding:8px 10px;border:1px solid var(--line-strong);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+.hp{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+.report-dialog{border:1px solid var(--line);border-radius:14px;padding:20px 22px;max-width:760px;width:calc(100% - 32px);background:var(--bg);color:var(--fg);box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.report-dialog::backdrop{background:rgba(15,18,24,.45)}
+.dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.dialog-head h2{font-size:1.15rem;margin:0}
+.report-page{padding-top:32px;max-width:860px}
+.report-term{margin:16px 0}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:8px}
 .stat{border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;text-decoration:none;color:var(--fg);background:var(--bg);box-shadow:var(--shadow)}
 .stat strong{display:block;font-size:1.6rem;line-height:1.1}
 .stat span{color:var(--muted);font-size:.875rem}
 .stat:hover{border-color:var(--accent)}
-.tree ul{list-style:none;margin:0;padding-left:18px;border-left:1px solid var(--line)}
-.tree>ul{padding-left:0;border-left:0}
-.tree li{padding:3px 0 3px 10px;position:relative}
-.tree ul ul li::before{content:"";position:absolute;left:-1px;top:15px;width:8px;border-top:1px solid var(--line)}
-.filter input{width:100%;max-width:360px;padding:8px 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit;margin-bottom:8px}
-.index-group h3{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:1em 0 .5em}
-.term{border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin:0 0 14px;background:var(--bg);box-shadow:var(--shadow)}
+.term{border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;margin:0 0 14px;background:var(--bg);box-shadow:var(--shadow)}
 .term:target,.uc:target,tr:target,.flash{outline:2px solid var(--accent);outline-offset:2px}
 .term.is-deprecated{opacity:.85}
-.term-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:4px}
-.term-head h4{font-size:1.15rem;margin:0}
+.term-head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:8px 12px;margin-bottom:2px}
+.term-title{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+.term-head h3{font-size:1.15rem;margin:0}
 .permalink{color:var(--muted);text-decoration:none;margin-right:6px;font-weight:400}
 .permalink:hover{color:var(--accent-fg)}
 .kind-class{background:#fff1e0;color:#9a4d00}
@@ -111,13 +156,13 @@ html:not(.js) .panel+.panel{border-top:1px solid var(--line);margin-top:32px;pad
 .kind-individual{background:#f6e8fb;color:#7a2d91}
 .kind-deprecated{background:var(--bad-soft);color:var(--bad)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .kind-class{background:#33230f;color:#ffbf73}:root:not([data-theme="light"]) .kind-objectProperty{background:#0f2638;color:#8cc6ff}:root:not([data-theme="light"]) .kind-datatypeProperty{background:#11291a;color:#86dba0}:root:not([data-theme="light"]) .kind-annotationProperty{background:#22252c;color:#b6bcc8}:root:not([data-theme="light"]) .kind-individual{background:#2a1631;color:#e3a6f5}}
-.iri{margin:0 0 .6em;font-size:.85rem;color:var(--muted)}
+.iri{display:flex;align-items:center;gap:4px;margin:0 0 .6em;font-size:.85rem;color:var(--muted)}
 .iri code{background:none;padding:0}
 .definition{font-size:1.02rem;margin-bottom:.8em}
 dl.facts{margin:0;border-top:1px solid var(--line)}
-dl.facts .row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;padding:7px 0;border-bottom:1px solid var(--line)}
+dl.facts .row{display:grid;grid-template-columns:160px minmax(0,1fr);gap:16px;padding:9px 0;border-bottom:1px solid var(--line)}
 dl.facts .row:last-child{border-bottom:0}
-dl.facts dt{color:var(--muted);font-size:.875rem}
+dl.facts dt{color:var(--muted);font-size:.8rem;font-weight:500}
 dl.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
 dl.facts ul{margin:0;padding-left:1.1em}
 .ref{font-weight:500;text-decoration-color:color-mix(in srgb,currentColor 35%,transparent)}
@@ -164,26 +209,30 @@ html:not(.js) .uc-filters{display:none}
 .foot a{color:var(--muted)}
 details summary{cursor:pointer;font-weight:600;margin-bottom:8px}
 @media (max-width:860px){
-  .spec{grid-template-columns:1fr;gap:0}
-  .toc{position:static;top:auto;max-height:none;border:1px solid var(--line);border-radius:var(--radius);padding:12px 16px;margin-bottom:24px}
+  .browse{grid-template-columns:1fr;gap:16px}
+  .browse-nav{position:static;max-height:50vh}
   .wrap{padding:0 16px}
   dl.meta .row,dl.facts .row{grid-template-columns:1fr;gap:2px}
   .story{padding:18px}
   .table{display:block;overflow-x:auto}
 }
-@media print{.tabs,.toc,.uc-filters,.filter,.filter-empty,.skip{display:none!important}.panel[hidden],.uc[hidden],.index-group[hidden]{display:block!important}[data-term][hidden]{display:inline-block!important}.term,.uc{break-inside:avoid;box-shadow:none}}
+@media print{.tabs,.browse-nav,.uc-filters,.filter-empty,.skip,.report-link,.copy,.report-dialog,.pick{display:none!important}.browse{display:block}.panel[hidden],.uc[hidden],.term-group,.overview,.term{display:block!important}.group-title{display:block!important}.term,.uc{break-inside:avoid;box-shadow:none}}
 `;
 
 /**
  * Tabs that follow the URL hash: #tab-use-cases opens a tab, and a term or use
- * case anchor (e.g. #Volunteer, #uc-123) opens the tab that contains it and
- * scrolls to it. Without JavaScript every panel is shown in order.
+ * case anchor (e.g. #Volunteer, #uc-123) opens the tab that contains it. On
+ * the Specification tab a term anchor shows that term alone, as in the app's
+ * Browse view, with the tree and search on the left; the overview shows when
+ * no term is picked. Without JavaScript (and in print) everything is shown in
+ * order.
  */
 export const PAGE_SCRIPT = `
 (function(){
   var root=document.documentElement;root.classList.add('js');
   var tabs=[].slice.call(document.querySelectorAll('[role="tab"]'));
   var panels=[].slice.call(document.querySelectorAll('[role="tabpanel"]'));
+  var browse=document.querySelector('.browse');
   function show(id){
     tabs.forEach(function(t){var on=t.getAttribute('aria-controls')===id;t.setAttribute('aria-selected',on?'true':'false');t.tabIndex=on?0:-1;});
     panels.forEach(function(p){p.hidden=p.id!==id;});
@@ -194,18 +243,44 @@ export const PAGE_SCRIPT = `
     var el=document.getElementById(id);if(el)return el;
     try{return document.getElementById(decodeURIComponent(id));}catch(e){return null;}
   }
+  // Browse: which term (or group of terms) the Specification tab shows.
+  function focus(el){
+    if(!browse)return;
+    var term=el&&el.classList.contains('term')&&browse.contains(el)?el:null;
+    var group=term?term.closest('.term-group'):(el&&el.classList.contains('term-group')?el:null);
+    browse.classList.toggle('has-selection',!!term);
+    browse.classList.toggle('focused',!!group);
+    browse.querySelectorAll('.term.is-selected').forEach(function(t){t.classList.remove('is-selected');});
+    browse.querySelectorAll('.term-group.is-open').forEach(function(g){g.classList.remove('is-open');});
+    if(term)term.classList.add('is-selected');
+    if(group)group.classList.add('is-open');
+    var href=term?'#'+term.id:group?null:'#'+(browse.querySelector('.overview')||{}).id;
+    browse.querySelectorAll('.nav-item').forEach(function(a){
+      var h=a.getAttribute('href');var on=false;
+      if(href){try{on=h===href||decodeURIComponent(h)===href;}catch(e){on=h===href;}}
+      if(on){a.setAttribute('aria-current','true');var d=a.closest('details');while(d){d.open=true;d=d.parentElement&&d.parentElement.closest('details');}
+        var nav=browse.querySelector('.browse-nav');if(nav&&nav.scrollHeight>nav.clientHeight){var r=a.getBoundingClientRect(),n=nav.getBoundingClientRect();if(r.top<n.top||r.bottom>n.bottom)nav.scrollTop+=r.top-n.top-n.height/3;}}
+      else a.removeAttribute('aria-current');
+    });
+  }
   function route(scroll){
     var el=find(location.hash);
     var panel=el?(el.getAttribute('role')==='tabpanel'?el:el.closest('[role="tabpanel"]')):null;
     show(panel?panel.id:panels[0].id);
+    focus(el);
     // A use case hidden by the status filter: clear the filter so the link lands on it.
     if(el&&el.classList.contains('uc')&&el.hidden){var all=document.querySelector('[data-filter="all"]');if(all)all.click();}
-    if(el&&panel&&el!==panel&&scroll!==false){el.scrollIntoView({block:'start'});}
+    if(el&&panel&&el!==panel&&scroll!==false){
+      // Beside a sticky term list the card is already at the top; on narrow screens the list comes first.
+      var nav=browse&&browse.querySelector('.browse-nav');
+      var beside=nav&&browse.contains(el)&&getComputedStyle(nav).position==='sticky';
+      if(beside){if(browse.getBoundingClientRect().top<0)browse.scrollIntoView({block:'start'});}else el.scrollIntoView({block:'start'});
+    }
   }
   tabs.forEach(function(t,i){
     t.addEventListener('click',function(e){
       e.preventDefault();var id=t.getAttribute('aria-controls');
-      history.pushState(null,'','#'+id);show(id);
+      history.pushState(null,'','#'+id);show(id);focus(null);
     });
     t.addEventListener('keydown',function(e){
       var d=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;if(!d)return;
@@ -216,13 +291,69 @@ export const PAGE_SCRIPT = `
   window.addEventListener('popstate',function(){route(false);});
   route();
 
+  // Search: names, local names, alternative labels and definitions.
   var input=document.querySelector('input.term-filter');
   if(input){input.addEventListener('input',function(){
     var q=input.value.trim().toLowerCase();var any=false;
-    document.querySelectorAll('[data-term]').forEach(function(c){var hit=!q||c.getAttribute('data-term').indexOf(q)>=0;c.hidden=!hit;if(hit)any=true;});
-    document.querySelectorAll('.index-group').forEach(function(g){g.hidden=!g.querySelector('[data-term]:not([hidden])');});
-    var empty=document.querySelector('.filter-empty');if(empty)empty.hidden=any;
+    var items=[].slice.call(document.querySelectorAll('.browse-nav [data-term]')).reverse();
+    items.forEach(function(li){
+      var hit=!q||li.getAttribute('data-term').indexOf(q)>=0;
+      var kid=!!li.querySelector('[data-term]:not([hidden])');
+      li.hidden=!(hit||kid);
+      var d=li.querySelector(':scope > details');if(d&&q&&kid)d.open=true;
+      if(!li.hidden&&q)any=true;
+    });
+    document.querySelectorAll('.nav-group').forEach(function(g){g.hidden=!!q&&!g.querySelector('[data-term]:not([hidden])');if(q&&!g.hidden)g.open=true;});
+    var title=document.querySelector('.nav-title');if(title)title.hidden=!!q&&!document.querySelector('.ctree [data-term]:not([hidden])');
+    var empty=document.querySelector('.filter-empty');if(empty)empty.hidden=!q||any;
   });}
+
+  // Copy a term's IRI.
+  document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
+    var done=function(){b.classList.add('copied');b.setAttribute('aria-label','Copied');setTimeout(function(){b.classList.remove('copied');b.setAttribute('aria-label','Copy IRI');},1500);};
+    if(navigator.clipboard)navigator.clipboard.writeText(b.getAttribute('data-copy')).then(done,function(){});
+  });});
+
+  // Report a problem: a dialog on this site, the report page anywhere else (e.g. a copy on GitHub).
+  var dialog=document.querySelector('.report-dialog');
+  if(dialog&&dialog.showModal){
+    var form=dialog.querySelector('.report-form');var alertBox=form.querySelector('[role="alert"]');
+    var body=dialog.querySelector('[data-report-body]');var done=dialog.querySelector('[data-report-done]');
+    var sending=false;
+    var close=function(){dialog.close();};
+    dialog.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener('click',close);});
+    dialog.addEventListener('click',function(e){if(e.target===dialog)close();});
+    var fail=function(msg){alertBox.textContent=msg;alertBox.hidden=false;};
+    var fresh=function(){
+      form.elements.token.value='';
+      return fetch(form.action+'/token',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(j){if(j&&j.token)form.elements.token.value=j.token;}).catch(function(){});
+    };
+    document.querySelectorAll('[data-report]').forEach(function(a){a.addEventListener('click',function(e){
+      var action;try{action=new URL(form.action,location.href);}catch(err){return;}
+      if(action.origin!==location.origin)return;
+      e.preventDefault();
+      dialog.querySelector('[data-report-name]').textContent=a.getAttribute('data-term-name');
+      form.elements.term.value=a.getAttribute('data-term-iri');
+      var member=dialog.querySelector('[data-member-report]');if(member)member.href=a.getAttribute('data-member-href');
+      form.elements.title.value='';form.elements.description.value='';
+      alertBox.hidden=true;body.hidden=false;done.hidden=true;
+      fresh();
+      dialog.showModal();
+    });});
+    form.addEventListener('submit',function(e){
+      e.preventDefault();if(sending)return;
+      var data={};['term','version','token','website','title','description'].forEach(function(k){data[k]=form.elements[k]?form.elements[k].value:'';});
+      sending=true;var button=form.querySelector('button[type="submit"]');button.disabled=true;
+      fetch(form.action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify(data)})
+        .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
+        .then(function(res){
+          if(res.ok){body.hidden=true;done.hidden=false;dialog.querySelector('[data-report-ref]').textContent=res.j.reference||'';}
+          else{fail(res.j.error||'Something went wrong. Please try again.');if(/expired|quick/.test(res.j.error||''))fresh();}
+        })
+        .catch(function(){fail('Could not send the report. Check your connection and try again.');})
+        .then(function(){sending=false;button.disabled=false;});
+    });
+  }
 
   var buttons=[].slice.call(document.querySelectorAll('[data-filter]'));
   buttons.forEach(function(b){b.addEventListener('click',function(){

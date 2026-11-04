@@ -117,7 +117,7 @@ export async function pageInput(
     latestVersion: latest,
     downloads,
     pageUrl: `${root}/${version}`,
-    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root },
+    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
     requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),

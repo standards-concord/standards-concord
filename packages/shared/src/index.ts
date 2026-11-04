@@ -371,7 +371,9 @@ export type ChangeRequestOrigin =
   | { type: 'agent'; agentName?: string; reportId?: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
-  | { type: 'synthesis'; useCaseIds: string[] };
+  | { type: 'synthesis'; useCaseIds: string[] }
+  /** Reported anonymously from the public ontology page. */
+  | { type: 'public-report'; termIri: string; version: string };
 
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
