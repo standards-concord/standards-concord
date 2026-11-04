@@ -127,7 +127,8 @@ export async function pageInput(
     };
   });
   const mod = await toWrapperClasses(graph, { name: project.slug });
-  const example = mod.classes.find((c) => c.properties.length > 1 && !c.extends) ?? mod.classes[0];
+  const withGetter = mod.classes.filter((c) => c.datasetGetter);
+  const example = withGetter.find((c) => c.properties.length > 1 && !c.extends) ?? withGetter[0];
   return {
     project,
     code: {
@@ -136,7 +137,7 @@ export async function pageInput(
       packageName: `${project.slug}-ontology`,
       datasetClass: mod.datasetClass,
       exampleClass: example?.name,
-      exampleGetter: example ? example.name[0].toLowerCase() + example.name.slice(1) : undefined,
+      exampleGetter: example?.datasetGetter,
       exampleProperty: example?.properties[0]?.name,
     },
     view: graph.view(),

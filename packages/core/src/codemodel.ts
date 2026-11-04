@@ -49,6 +49,8 @@ export interface CodeModel {
   thingName?: string;
   /** Every top-level name taken (classes, Thing); the dataset class must avoid these. */
   taken: Set<string>;
+  /** Constraints the classes can't express exactly. */
+  notes: string[];
 }
 
 /** Marks a class-valued property whose class has no generated class. */
@@ -116,10 +118,14 @@ const XSD_BASE: Record<string, string> = {
   NMTOKEN: 'token', ID: 'NCName', IDREF: 'NCName', ENTITY: 'NCName', dateTimeStamp: 'dateTime', yearMonthDuration: 'duration', dayTimeDuration: 'duration',
 };
 
-/** Whether datatype `a` is `b` or derived from it. */
-export function derivesFrom(a: string, b: string): boolean {
-  for (let x: string | undefined = a; x; x = x.startsWith(NS.xsd) && XSD_BASE[x.slice(NS.xsd.length)] ? NS.xsd + XSD_BASE[x.slice(NS.xsd.length)] : undefined)
+/** Whether datatype `a` is `b` or derived from it, through the ontology's own datatypes (`bases`) and XML Schema's. */
+export function derivesFrom(a: string, b: string, bases: Map<string, string> = new Map()): boolean {
+  const seen = new Set<string>();
+  for (let x: string | undefined = a; x && !seen.has(x); ) {
     if (x === b) return true;
+    seen.add(x);
+    x = bases.get(x) ?? (x.startsWith(NS.xsd) && XSD_BASE[x.slice(NS.xsd.length)] ? NS.xsd + XSD_BASE[x.slice(NS.xsd.length)] : undefined);
+  }
   return false;
 }
 
@@ -174,14 +180,25 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   const narrower = (preferred: ValueType, other: ValueType): ValueType => {
     if (preferred.node && other.node && preferred.node !== THING && other.node !== THING && isSub(other.node, preferred.node)) return other;
     if (preferred.node === THING && other.node) return other;
-    if (preferred.datatype && other.datatype && derivesFrom(other.datatype, preferred.datatype)) return other;
+    if (preferred.datatype && other.datatype && derivesFrom(other.datatype, preferred.datatype, derived.datatypeBases)) return other;
     if (!preferred.node && !preferred.datatype) return other;
     return preferred;
   };
-  /** Both constraints apply: the larger minimum, the smaller maximum, the narrower type. */
-  const merge = (preferred: Raw, other: Raw): Raw => {
+  const notes = new Set<string>();
+  const typeName = (t: ValueType) => (t.datatype ? `<${t.datatype}>` : t.node === THING ? 'any resource' : `<${byIri.get(t.node!)?.targetClass}>`);
+  /**
+   * Both constraints apply: the larger minimum, the smaller maximum, the
+   * narrower type. Two types neither of which is narrower can't both be
+   * expressed by one accessor: `preferred` is used, and a note says so.
+   */
+  const merge = (preferred: Raw, other: Raw, where: string): Raw => {
     const max = Math.min(preferred.maxCount ?? Infinity, other.maxCount ?? Infinity);
-    const t = narrower({ node: preferred.node, datatype: preferred.datatype }, { node: other.node, datatype: other.datatype });
+    const a = { node: preferred.node, datatype: preferred.datatype };
+    const b = { node: other.node, datatype: other.datatype };
+    const t = narrower(a, b);
+    const typed = (x: ValueType) => Boolean(x.datatype || (x.node && x.node !== THING));
+    if (typed(a) && typed(b) && t === a && narrower(b, a) === b && typeName(a) !== typeName(b))
+      notes.add(`${where} <${preferred.path}>: values must be both ${typeName(a)} and ${typeName(b)}, which one accessor can't express; it uses ${typeName(a)}.`);
     return {
       path: preferred.path,
       ...(t.node ? { node: t.node } : {}),
@@ -192,32 +209,41 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   };
 
   // Effective properties: constraints from every superclass and the class's own all apply together.
+  // Results are cached unless a superclass cycle cut them short, so shared ancestors are worked out once.
   const effectiveRaw = new Map<string, Map<string, Raw>>();
-  const effectiveOf = (iri: string, stack: Set<string>): Map<string, Raw> => {
+  const effectiveOf = (iri: string, stack: Set<string>): { props: Map<string, Raw>; cut: boolean } => {
     const done = effectiveRaw.get(iri);
-    if (done) return done;
+    if (done) return { props: done, cut: false };
     const s = byIri.get(iri)!;
+    const where = names.get(iri)!;
     const out = new Map<string, Raw>();
     const next = new Set(stack).add(iri);
+    let cut = false;
     for (const sup of s.superClasses) {
       const ss = byClass.get(sup);
-      if (!ss || next.has(ss.iri)) continue;
-      for (const [path, p] of effectiveOf(ss.iri, next)) {
+      if (!ss) continue;
+      if (next.has(ss.iri)) {
+        cut = true;
+        continue;
+      }
+      const inherited = effectiveOf(ss.iri, next);
+      cut ||= inherited.cut;
+      for (const [path, p] of inherited.props) {
         const prev = out.get(path);
-        out.set(path, prev ? merge(prev, p) : { ...p });
+        out.set(path, prev ? merge(prev, p, where) : { ...p });
       }
     }
     for (const ps of s.properties) {
       if (!safeIri(ps.path)) continue;
       const prev = out.get(ps.path);
-      // A shape that only restricts cardinality keeps the inherited value type; the global range is only a fallback.
       const type = statedType(ps) ?? (prev ? {} : rangeType(ps.path));
       const own: Raw = { path: ps.path, ...type, minCount: ps.minCount, maxCount: ps.maxCount };
-      out.set(ps.path, prev ? merge(own, prev) : own);
+      // A type that only comes from the global range never widens an inherited one: the inherited type is
+      // preferred unless the range is narrower. A restriction on this class is preferred over what it inherits.
+      out.set(ps.path, !prev ? own : ps.fromRange || !statedType(ps) ? merge(prev, own, where) : merge(own, prev, where));
     }
-    // Only cache results computed without a cycle cut short.
-    if (stack.size === 0) effectiveRaw.set(iri, out);
-    return out;
+    if (!cut) effectiveRaw.set(iri, out);
+    return { props: out, cut };
   };
 
   const classes: CodeClass[] = [];
@@ -229,7 +255,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     if (visiting.has(iri)) return undefined; // a superclass cycle
     visiting.add(iri);
     const s = byIri.get(iri)!;
-    const eff = effectiveOf(iri, new Set());
+    const eff = effectiveOf(iri, new Set()).props;
     // Candidate base: the first named superclass that isn't part of a cycle through this class.
     const supers = s.superClasses.map((c) => byClass.get(c)).filter((x) => x !== undefined).map((ss) => build(ss.iri));
     let base = supers.find((b) => b && !chainIncludes(b, iri));
@@ -269,7 +295,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
 
   const needThing = classes.some((c) => [...c.effective.values()].some((p) => p.node === THING));
   const thingName = needThing ? allocate('Thing', taken, RESERVED_CLASSES) : undefined;
-  return { classes, byShape, thingName, taken };
+  return { classes, byShape, thingName, taken, notes: [...notes] };
 }
 
 /** owl:Thing, for documentation of the Thing wrapper. */

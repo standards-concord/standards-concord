@@ -88,6 +88,17 @@ e:dp a owl:DatatypeProperty ; rdfs:domain e:DA ; rdfs:range xsd:integer .
 e:DParent a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:dq ; owl:allValuesFrom xsd:positiveInteger ] .
 e:DChild a owl:Class ; rdfs:subClassOf e:DParent , [ a owl:Restriction ; owl:onProperty e:dq ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
 e:dq a owl:DatatypeProperty ; rdfs:domain e:DChild ; rdfs:range xsd:integer .
+e:MyToken a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:pattern "^[A-Z]+$" ] ) ] .
+e:TA a owl:Class . e:TB a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:tp ; owl:allValuesFrom e:MyToken ] .
+e:TC a owl:Class ; rdfs:subClassOf e:TA , e:TB .
+e:tp a owl:DatatypeProperty ; rdfs:domain e:TA ; rdfs:range xsd:string .
+e:TParent a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:tq ; owl:allValuesFrom e:MyToken ] .
+e:TChild a owl:Class ; rdfs:subClassOf e:TParent , [ a owl:Restriction ; owl:onProperty e:tq ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
+e:tq a owl:DatatypeProperty ; rdfs:domain e:TChild ; rdfs:range xsd:string .
+e:UA a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:up ; owl:allValuesFrom xsd:string ] .
+e:UB a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:up ; owl:allValuesFrom xsd:integer ] .
+e:UC a owl:Class ; rdfs:subClassOf e:UA , e:UB .
+e:up a owl:DatatypeProperty .
 `;
 const edge = () => OntologyGraph.fromTurtle(EDGE);
 
@@ -161,6 +172,28 @@ describe('SHACL compact syntax', () => {
     ]));
     expect(fromC.getObjects(null, DataFactory.namedNode(SH + 'hasValue'), null).map((o) => o.value)).toContain('line\nnext "quoted"\ttab \\ back');
     expect(fromC.getObjects(null, DataFactory.namedNode(SH + 'hasValue'), null).map((o) => o.value)).toContain('😀 café \\u0041');
+  });
+
+  it('writes IRIs with = in them, in full or under a prefix, past the header comment', async () => {
+    const g = await OntologyGraph.fromTurtle(`
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      @prefix q: <https://example.org/?key=value#> .
+      @prefix k: <https://example.org/k#> .
+      <https://example.org/k> a owl:Ontology .
+      k:K a owl:Class .
+      <https://outside.example/p=x> a owl:DatatypeProperty ; rdfs:domain k:K ; rdfs:range xsd:string .
+      <https://outside.example/p?key=value> a owl:DatatypeProperty ; rdfs:domain k:K ; rdfs:range xsd:string .
+      q:prop a owl:DatatypeProperty ; rdfs:domain k:K ; rdfs:range xsd:anyURI .
+    `);
+    for (const extended of [false, true]) {
+      const text = await toShaclc(g, { extended }); // throws if the output would parse to different shapes
+      expect(text).toMatch(/^# .*'/m); // the header has an apostrophe, which isn't the start of a string
+      expect(text).toContain('<https://outside.example/p=x> xsd:string');
+      expect(text).toContain('PREFIX q: <https://example.org/?key=value#>');
+      expect(text).toContain('q:prop datatype=xsd:anyURI');
+    }
   });
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -296,6 +329,14 @@ describe('Generated JavaScript classes', () => {
     // Datatype constraints from two superclasses: xsd:positiveInteger from DB narrows xsd:integer from DA.
     expect(cls('DC').extends).toBeUndefined();
     expect(mod.ts).toMatch(/export class DC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#positiveInteger"\)/);
+    // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string.
+    expect(cls('TC').extends).toBeUndefined();
+    expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken"\)/);
+    // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
+    expect(mod.notes).toEqual([expect.stringMatching(/^UC <https:\/\/example\.org\/e#up>: values must be both <http:\/\/www\.w3\.org\/2001\/XMLSchema#string> and <http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>/)]);
+    expect(mod.ts).toMatch(/^ \* Note: UC <https:\/\/example\.org\/e#up>: values must be both/m);
+    // Every class has the dataset getter it advertises.
+    for (const c of mod.classes.filter((c) => c.datasetGetter)) expect(mod.ts).toContain(`get ${c.datasetGetter}(): Iterable<${c.name}>`);
     // The X/Y cycle still gives a loadable order.
     expect(mod.ts.indexOf('export class Y ')).toBeLessThan(mod.ts.indexOf('export class X extends Y'));
 
@@ -327,6 +368,9 @@ describe('Generated JavaScript classes', () => {
       const dchild = new m.DChild('https://x/dchild', store, DataFactory);
       dchild.dq = 4;
       expect(dtOf('https://x/dchild', 'https://example.org/e#dq').datatype.value).toBe(XSD + 'positiveInteger');
+      const tchild = new m.TChild('https://x/tchild', store, DataFactory);
+      tchild.tq = 'ABC';
+      expect(dtOf('https://x/tchild', 'https://example.org/e#tq').datatype.value).toBe('https://example.org/e#MyToken');
       const dc = new m.DC('https://x/dc', store, DataFactory);
       dc.dp.add(5);
       expect(dtOf('https://x/dc', 'https://example.org/e#dp').datatype.value).toBe(XSD + 'positiveInteger');
@@ -338,6 +382,38 @@ describe('Generated JavaScript classes', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('works out shared ancestors once, so diamond hierarchies stay fast', async () => {
+    // 30 layers of two classes, each a subclass of both classes in the layer above: 2^30 paths to the top.
+    const lines = ['@prefix owl: <http://www.w3.org/2002/07/owl#> .', '@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .', '@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .',
+      '@prefix d: <https://example.org/d#> .', '<https://example.org/d> a owl:Ontology .', 'd:A0 a owl:Class . d:B0 a owl:Class .',
+      'd:top a owl:DatatypeProperty ; rdfs:domain d:A0 ; rdfs:range xsd:string .'];
+    // Named so the deepest layers come first, before their ancestors have been looked at.
+    const a = (i: number) => `d:A${String(99 - i)}`;
+    const b = (i: number) => `d:B${String(99 - i)}`;
+    lines[5] = `${a(0)} a owl:Class . ${b(0)} a owl:Class .`;
+    lines[6] = `d:top a owl:DatatypeProperty ; rdfs:domain ${a(0)} ; rdfs:range xsd:string .`;
+    for (let i = 1; i <= 30; i++) lines.push(`${a(i)} a owl:Class ; rdfs:subClassOf ${a(i - 1)} , ${b(i - 1)} .`, `${b(i)} a owl:Class ; rdfs:subClassOf ${a(i - 1)} , ${b(i - 1)} .`);
+    const g = await OntologyGraph.fromTurtle(lines.join('\n'));
+    const started = Date.now();
+    const mod = await toWrapperClasses(g, { name: 'diamond' });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(mod.classes.find((c) => c.name === 'A69')!.extends).toBe('A70');
+  }, 20_000);
+
+  it('gives the public page an example getter that exists', async () => {
+    const g = await OntologyGraph.fromTurtle(`
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix s: <https://example.org/s#> .
+      <https://example.org/s> a owl:Ontology .
+      s:Size a owl:Class .
+      s:of a owl:ObjectProperty ; rdfs:domain s:Size ; rdfs:range <https://elsewhere.example/Thing> .
+    `);
+    const mod = await toWrapperClasses(g, { name: 's' });
+    // The Thing wrapper has no getter; Size's is size_, as size is taken by the dataset.
+    expect(mod.classes.map((c) => [c.name, c.datasetGetter])).toEqual(expect.arrayContaining([['Size', 'size_'], ['Thing', undefined]]));
+  });
 
   it('packages the classes as an npm tarball', async () => {
     const g = await loadFixture();

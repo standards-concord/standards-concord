@@ -59,6 +59,8 @@ export interface GeneratedClass {
   shapeIRI: string;
   extends?: string;
   properties: { name: string; path: string }[];
+  /** The dataset wrapper's getter for this class's instances (none for the Thing wrapper). */
+  datasetGetter?: string;
 }
 
 export interface GeneratedModule {
@@ -70,6 +72,8 @@ export interface GeneratedModule {
   dts: string;
   classes: GeneratedClass[];
   datasetClass: string;
+  /** Constraints in the shapes that the classes can't express exactly. */
+  notes: string[];
   ontology: { iri?: string; versionIRI?: string; version?: string; namespace: string };
 }
 
@@ -234,6 +238,7 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     if (reservedGetters.has(g)) g = `${g}_`;
     g = uniqueName(g, getterNames);
     getterNames.add(g);
+    c.datasetGetter = g;
     return `  /** Every instance of ${commentSafe(`<${c.classIRI}>`)} in the dataset. */\n  get ${g}(): Iterable<${c.name}> {\n    return this.instancesOf(${JSON.stringify(c.classIRI)}, ${c.name});\n  }`;
   });
   const dataset = `/** Finds the instances of every class above in an RDF/JS dataset. */\nexport class ${datasetClass} extends DatasetWrapper {\n${getters.join('\n\n')}\n}`;
@@ -247,6 +252,7 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     ` *`,
     ` * Usage: const data = new ${datasetClass}(dataset, factory); for (const x of data.${getters.length ? /get (\w+)\(/.exec(getters[0])![1] : 'thing'}) { ... }`,
     ` * or wrap one node: new ${classes[0]?.name ?? 'Thing'}(iri, dataset, factory).`,
+    ...(model.notes.length ? [` *`, ...model.notes.map((n) => ` * Note: ${commentSafe(n)}`)] : []),
     ` */`,
   ].join('\n');
   const ontologyConst = `/** The ontology these classes were generated from. */\nexport const ontology = ${JSON.stringify(Object.fromEntries(Object.entries(ontology).filter(([, x]) => x !== undefined)), null, 2)} as const;`;
@@ -262,7 +268,7 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
   const esbuild = await import('esbuild');
   const { code } = await esbuild.transform(ts, { loader: 'ts', format: 'esm', target: 'es2022', legalComments: 'none' });
   const js = `${header}\n${code}`;
-  return { ts, js, dts: declarations(ts), classes: all, datasetClass, ontology };
+  return { ts, js, dts: declarations(ts), classes: all, datasetClass, notes: model.notes, ontology };
 }
 
 /**

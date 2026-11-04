@@ -26,6 +26,8 @@ export interface PropShape {
   minCount?: number;
   maxCount?: number;
   hasValue?: Term;
+  /** The value type is only the property's global range (from its domain), not a restriction on this class. */
+  fromRange?: boolean;
   qualified: { shape: { cls?: string; datatype?: string }; min?: number; max?: number }[];
 }
 
@@ -42,6 +44,8 @@ export interface DerivedNodeShape {
 export interface DerivedShapes {
   /** Object or datatype property, and its declared range, for every property in the ontology. */
   propertyInfo: Map<string, PropertyInfo>;
+  /** Datatypes the ontology defines, and the datatype each is based on. */
+  datatypeBases: Map<string, string>;
   /** IRI of the shapes graph (`<ontology>/shapes`), when the ontology has an IRI. */
   shapesIRI?: string;
   shapesNs: string;
@@ -78,6 +82,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (r && p.range.length === 1) {
         if (isDatatype(graph, r)) ps.datatype = r;
         else ps.cls = r;
+        ps.fromRange = true;
       }
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
@@ -95,6 +100,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       ...v.objectProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: true, range: p.range }]),
       ...v.datatypeProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: false, range: p.range }]),
     ]),
+    datatypeBases: datatypeBases(graph),
     shapesIRI: graph.ontologyIRI ? `${ont}/shapes` : undefined,
     shapesNs,
     prefixes: { ...graph.prefixes, sh: SH, [`${pref}sh`]: shapesNs },
@@ -154,6 +160,26 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
         if (q.shape.datatype) add(vs, SH + 'datatype', nn(q.shape.datatype));
         if (q.min !== undefined) add(qb, SH + 'qualifiedMinCount', int(q.min));
         if (q.max !== undefined) add(qb, SH + 'qualifiedMaxCount', int(q.max));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Datatypes defined in the ontology and the datatype each restricts or equals:
+ * `e:Code owl:equivalentClass [ owl:onDatatype xsd:string ; ... ]` gives
+ * e:Code → xsd:string.
+ */
+function datatypeBases(graph: OntologyGraph): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const d of graph.store.getSubjects(nn(RDF_TYPE), nn(NS.rdfs + 'Datatype'), null)) {
+    if (d.termType !== 'NamedNode') continue;
+    for (const eq of objects(graph.store, d, NS.owl + 'equivalentClass')) {
+      const base = eq.termType === 'NamedNode' ? eq : objects(graph.store, eq, NS.owl + 'onDatatype')[0];
+      if (base?.termType === 'NamedNode' && base.value !== d.value) {
+        out.set(d.value, base.value);
+        break;
       }
     }
   }
@@ -244,53 +270,37 @@ const STRING_ESCAPES = { '\\': '\\', "'": "'", '"': '"', n: '\n', r: '\r', t: '\
 /**
  * shaclc-parse 2.0.0 unescapes literals with a private N3 lexer method that, in
  * n3 2.x, needs a table of escapes, which shaclc-parse doesn't pass; so any
- * literal with a backslash escape (a newline, a quote) fails to parse. The
- * table is supplied for the duration of the (synchronous) parse.
+ * literal with a backslash escape (a newline, a quote) fails to parse. Its IRI
+ * rule also leaves out '=', which IRIs may contain. Both are put right for the
+ * duration of the (synchronous) parse.
  */
 export async function parseShaclc(text: string, extended: boolean): Promise<Quad[]> {
   const { parse } = await import('shaclc-parse');
-  const lexer = shaclcN3().Lexer.prototype as unknown as {
+  const req = createRequire(createRequire(import.meta.url).resolve('shaclc-parse'));
+  const lexer = (req('n3') as typeof import('n3')).Lexer.prototype as unknown as {
     _unescape: (item: string, replacements?: Record<string, string>) => string | null;
   };
+  const rules = (req('./ShaclcParser.js') as { lexer: { rules: RegExp[] } }).lexer.rules;
+  // The IRIREF rule, which excludes '=' (the SHACLC grammar allows it, as in `?key=value`).
+  const iriRule = rules.findIndex((r) => r.source.startsWith('^(?:(<([^=<>'));
+  const originalRule = rules[iriRule];
   const original = lexer._unescape;
   lexer._unescape = function (item, replacements) {
     return original.call(this, item, replacements ?? STRING_ESCAPES);
   };
-  const { text: shielded, unshield } = shieldIriRefs(text);
+  if (iriRule >= 0) rules[iriRule] = new RegExp(originalRule.source.replace('^(?:(<([^=<>', '^(?:(<([^<>'), originalRule.flags);
   try {
-    return (parse(shielded, { extendedSyntax: extended }) as unknown as Quad[]).map(unshield);
+    return parse(text, { extendedSyntax: extended }) as unknown as Quad[];
   } finally {
     lexer._unescape = original;
+    if (iriRule >= 0) rules[iriRule] = originalRule;
   }
 }
 
 /**
- * shaclc-parse's IRI rule leaves out `=`, which IRIs may contain (as in
- * `?key=value`). For parsing, absolute IRI references containing one are
- * swapped for placeholders, and put back in the parsed quads.
- */
-function shieldIriRefs(text: string): { text: string; unshield: (q: Quad) => Quad } {
-  const nonce = randomBytes(8).toString('hex');
-  const back = new Map<string, string>();
-  let out = '';
-  scanText(text, {
-    other: (s) => (out += s),
-    string: (s) => (out += s),
-    iri: (s) => {
-      const iri = s.slice(1, -1);
-      if (!iri.includes('=') || !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(iri)) return void (out += s);
-      const ph = `urn:x-concord-iri:${nonce}:${back.size}`;
-      back.set(ph, iri);
-      out += `<${ph}>`;
-    },
-  });
-  const term = <T extends Term>(t: T): T => (t.termType === 'NamedNode' && back.has(t.value) ? (nn(back.get(t.value)!) as unknown as T) : t);
-  return { text: out, unshield: back.size ? (q) => DataFactory.quad(term(q.subject), term(q.predicate), term(q.object), q.graph) : (q) => q };
-}
-
-/**
- * Splits SHACLC text into string literals, IRI references and everything else,
- * so a rewrite never touches the inside of a string or an IRI.
+ * Splits SHACLC text into string literals, IRI references and everything else
+ * (comments included), so a rewrite never touches the inside of a string, an
+ * IRI or a comment.
  */
 function scanText(text: string, on: { string: (s: string) => void; iri: (s: string) => void; other: (s: string) => void }): void {
   let i = 0;
@@ -303,6 +313,12 @@ function scanText(text: string, on: { string: (s: string) => void; iri: (s: stri
       j = Math.min(text.length, j + end.length);
       on.string(text.slice(i, j));
       i = j;
+    } else if (c === '#') {
+      // A comment (shaclc-write writes no '#' outside IRIs, strings and comments) runs to the end of the line.
+      const nl = text.indexOf('\n', i);
+      const j = nl < 0 ? text.length : nl;
+      on.other(text.slice(i, j));
+      i = j;
     } else if (c === '<') {
       const close = text.indexOf('>', i);
       const j = close < 0 ? text.length : close + 1;
@@ -310,7 +326,7 @@ function scanText(text: string, on: { string: (s: string) => void; iri: (s: stri
       i = j;
     } else {
       let j = i;
-      while (j < text.length && !'"\'<'.includes(text[j])) j++;
+      while (j < text.length && !'"\'<#'.includes(text[j])) j++;
       on.other(text.slice(i, j));
       i = j;
     }
@@ -341,11 +357,6 @@ function rawUnicodeEscapes(text: string): string {
   return out;
 }
 
-/** The n3 module shaclc-parse itself loads. */
-function shaclcN3(): typeof import('n3') {
-  const req = createRequire(import.meta.url);
-  return createRequire(req.resolve('shaclc-parse'))('n3');
-}
 
 const commentLine = (s: string) => s.replace(/[\r\n\u2028\u2029]+/g, ' ');
 
@@ -485,7 +496,10 @@ function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, r
       else ps.qualified.push({ shape: typed, min: 1 });
       break;
     case 'only':
-      if (filler) Object.assign(ps, typed);
+      if (filler) {
+        Object.assign(ps, typed);
+        delete ps.fromRange;
+      }
       break;
     case 'value':
       ps.hasValue = r.literal !== undefined ? literal(r.literal) : nn(r.filler!);

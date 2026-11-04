@@ -8,6 +8,7 @@ import { CodeView } from '../../components/code/CodeView';
 import { FORMAT_LANGUAGE } from '../../components/code/languages';
 import { useOntology } from './Layout';
 import { publicPageUrl } from '../../lib/format';
+import { datasetClassName } from '../../lib/classes-hint';
 
 const FORMATS: { id: OutputFormat; label: string; ext: string; note: string }[] = [
   { id: 'turtle', label: 'Turtle', ext: 'ttl', note: 'The canonical, human-readable RDF serialisation. This is what’s stored in git.' },
@@ -76,7 +77,7 @@ export function SourceTab() {
       <p className="flex items-start gap-2 text-sm text-muted">
         <Info className="mt-0.5 size-4 shrink-0" /> {meta.note}
       </p>
-      {format === 'typescript' && <ImportHint slug={ontology.slug} version={ref === 'working' ? 'draft' : ref} />}
+      {format === 'typescript' && <ImportHint slug={ontology.slug} version={ref === 'working' ? 'draft' : ref} code={source.data} />}
       <Card className="p-0">
         {source.error && source.data === undefined ? (
           <div className="p-4">
@@ -93,11 +94,12 @@ export function SourceTab() {
 }
 
 /** How to use the generated classes: import from the version's URL, or install it as an npm package. */
-function ImportHint({ slug, version }: { slug: string; version: string }) {
+function ImportHint({ slug, version, code }: { slug: string; version: string; code?: string }) {
   const base = `${window.location.origin}${publicPageUrl(slug, version)}`;
+  const dataset = datasetClassName(code, slug);
   const lines = [
     `// In a browser, with no build step:`,
-    `import { ${datasetName(slug)} } from "${base}.js";`,
+    `import { ${dataset} } from "${base}.js";`,
     ``,
     `// With npm and a bundler (the package is "${slug}-ontology"):`,
     `// npm install ${base}.tgz`,
@@ -114,14 +116,4 @@ function ImportHint({ slug, version }: { slug: string; version: string }) {
       </p>
     </div>
   );
-}
-
-/** The dataset wrapper's name, as the generator makes it ('volunteering' → VolunteeringDataset). */
-function datasetName(slug: string): string {
-  const id = slug
-    .split(/[^A-Za-z0-9]+/)
-    .filter(Boolean)
-    .map((w) => w[0].toUpperCase() + w.slice(1))
-    .join('');
-  return `${/^[0-9]/.test(id) ? `_${id}` : id || 'Ontology'}Dataset`;
 }

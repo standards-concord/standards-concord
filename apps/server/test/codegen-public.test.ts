@@ -66,6 +66,10 @@ describe('generated JavaScript classes at the ontology IRI', () => {
     expect(html.headers['content-type']).toMatch(/text\/html/);
     expect(html.text).toContain('Use in JavaScript and TypeScript');
     expect(html.text).toContain('/def/volunteering/1.0.0.js');
+    // The example loops over a getter the dataset class really has.
+    const getter = /for \(const item of data\.(\w+)\)/.exec(html.text)?.[1];
+    expect(getter).toBeTruthy();
+    expect(ts.text).toMatch(new RegExp(`get ${getter}\\(\\): Iterable<`));
   });
 
   it('serves a bare-import module for bundlers, the declarations and the TypeScript source', async () => {
