@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
+import YAML from 'yaml';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
@@ -75,6 +76,13 @@ describe('public ontology pages', () => {
     expect(shacl.text).toMatch(/sh:NodeShape/);
     const latest = await request(app).get('/def/volunteering.jsonld');
     expect(latest.headers['content-type']).toMatch(/ld\+json/);
+    // YAML-LD: by extension and by Accept, the same document as the JSON-LD.
+    const yamlld = await request(app).get('/def/volunteering/1.0.0.yamlld');
+    expect(yamlld.headers['content-type']).toMatch(/^application\/ld\+yaml/);
+    const negotiated = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'application/ld+yaml');
+    expect(negotiated.headers['content-type']).toMatch(/^application\/ld\+yaml/);
+    const jsonld = await request(app).get('/def/volunteering/1.0.0.jsonld');
+    expect(YAML.parse(negotiated.text)).toEqual(JSON.parse(jsonld.text));
   });
 
   it('advertises alternates in the Link header', async () => {

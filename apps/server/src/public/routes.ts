@@ -23,7 +23,7 @@ export { PUBLIC_BASE };
  *   /def/<slug>                 the ontology IRI: the latest release
  *   /def/<slug>/<version>       a version IRI, e.g. /def/volunteering/1.0.0
  *   /def/<slug>/draft           the unreleased working draft
- *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .shaclc, .html)
+ *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .yamlld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .shaclc, .html)
  *   /def/<slug>/<version>.js    JavaScript classes for every SHACL node shape (@rdfjs/wrapper), to import from a browser
  *                               (?deps=bare imports "@rdfjs/wrapper" by name instead of from a CDN); also .ts and .d.ts
  *   /def/<slug>/<version>.tgz   the same classes as an npm package: npm install <this URL>
@@ -36,7 +36,7 @@ export { PUBLIC_BASE };
  */
 
 /** Formats offered for download and by content negotiation, in display order. */
-const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl', 'shaclc', 'javascript', 'typescript'];
+const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'yamlld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl', 'shaclc', 'javascript', 'typescript'];
 
 /** What a /def URL can return: a serialisation, the HTML page, type declarations or an npm package. */
 export type PublicFormat = OutputFormat | 'html' | 'dts' | 'npm';
@@ -56,6 +56,7 @@ const NEGOTIABLE: Record<string, PublicFormat> = {
   'text/html': 'html',
   'text/turtle': 'turtle',
   'application/ld+json': 'jsonld',
+  'application/ld+yaml': 'yamlld',
   'application/rdf+xml': 'rdfxml',
   'application/n-triples': 'ntriples',
   'text/owl-manchester': 'manchester',
@@ -75,6 +76,7 @@ const EXTENSIONS: [string, PublicFormat][] = [
   ['js', 'javascript'],
   ['tgz', 'npm'],
   ['jsonld', 'jsonld'],
+  ['yamlld', 'yamlld'],
   ['html', 'html'],
   ['ttl', 'turtle'],
   ['owl', 'rdfxml'],

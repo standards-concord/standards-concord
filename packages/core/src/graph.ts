@@ -114,12 +114,14 @@ export class OntologyGraph {
     return parseN3(turtle, 'Turtle', baseIRI);
   }
 
-  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'ntriples'): Promise<OntologyGraph> {
+  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'yamlld' | 'ntriples'): Promise<OntologyGraph> {
     switch (format) {
       case 'turtle': return OntologyGraph.fromTurtle(text);
       case 'ntriples': return parseN3(text, 'N-Triples');
       case 'rdfxml': return parseRdfXml(text);
       case 'jsonld': return parseJsonLd(text);
+      // YAML-LD is JSON-LD written as YAML.
+      case 'yamlld': return parseJsonLd(JSON.stringify((await import('yaml')).default.parse(text)));
       default: throw new Error(`Unsupported input format: ${format as string}`);
     }
   }

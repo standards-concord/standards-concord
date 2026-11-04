@@ -35,6 +35,12 @@ const FORMATS: {
     note: 'Linked data as JSON, convenient for web developers.',
   },
   {
+    id: 'yamlld',
+    label: 'YAML-LD',
+    ext: 'yamlld',
+    note: 'The JSON-LD written as YAML: the same linked data, easier to read and edit by hand.',
+  },
+  {
     id: 'ntriples',
     label: 'N-Triples',
     ext: 'nt',

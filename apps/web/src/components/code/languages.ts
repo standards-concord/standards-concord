@@ -239,6 +239,7 @@ export const FORMAT_LANGUAGE: Record<string, CodeLanguage> = {
   ntriples: 'ntriples',
   rdfxml: 'xml',
   jsonld: 'json',
+  yamlld: 'yaml',
   linkml: 'yaml',
   manchester: 'manchester',
   shaclc: 'shaclc',

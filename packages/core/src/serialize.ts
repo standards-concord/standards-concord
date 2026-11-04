@@ -12,12 +12,14 @@ import { toManchester } from './manchester.js';
 import { toLinkML } from './linkml.js';
 import { toShacl, toShaclc } from './shacl.js';
 import { toWrapperClasses, withWrapperImport } from './codegen.js';
+import YAML from 'yaml';
 
 export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: string; extension: string }> = {
   turtle: { label: 'Turtle', mediaType: 'text/turtle', extension: 'ttl' },
   ntriples: { label: 'N-Triples', mediaType: 'application/n-triples', extension: 'nt' },
   rdfxml: { label: 'RDF/XML', mediaType: 'application/rdf+xml', extension: 'owl' },
   jsonld: { label: 'JSON-LD', mediaType: 'application/ld+json', extension: 'jsonld' },
+  yamlld: { label: 'YAML-LD', mediaType: 'application/ld+yaml', extension: 'yamlld' },
   manchester: { label: 'Manchester syntax', mediaType: 'text/owl-manchester', extension: 'omn' },
   linkml: { label: 'LinkML (YAML)', mediaType: 'application/x-yaml', extension: 'linkml.yaml' },
   shacl: { label: 'SHACL shapes (Turtle)', mediaType: 'text/turtle', extension: 'shacl.ttl' },
@@ -37,6 +39,8 @@ export async function serialize(graph: OntologyGraph, format: OutputFormat, opts
     case 'ntriples': return writeNTriples(graph.store);
     case 'rdfxml': return writeRdfXml(graph.store, graph.prefixes, graph.ontologyIRI);
     case 'jsonld': return writeJsonLd(graph);
+    // YAML-LD (W3C draft): the same JSON-LD document, written as YAML.
+    case 'yamlld': return YAML.stringify(JSON.parse(await writeJsonLd(graph)), { lineWidth: 0 });
     case 'manchester': return toManchester(graph);
     case 'linkml': return toLinkML(graph);
     case 'shacl': return toShacl(graph);
