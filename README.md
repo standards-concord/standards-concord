@@ -36,25 +36,20 @@ docker compose up --build   # Concord on :8787, Community Solid Server on :3000
 
 ### Deploy (Vercel and Azure)
 
-The web app is served by Vercel. Everything that needs a long-running server (the API, sign-in, the MCP endpoint, live meeting streams, the governance clock, the Solid server) runs on one small Azure VM, launched by [deploy/azure/deploy.sh](deploy/azure/deploy.sh), which fits Azure for Students' free tier (an AWS template is kept as an alternative). Vercel forwards `/api`, `/auth`, `/mcp` and `/people` to it, so people only ever see the Vercel link. GitHub Actions tests every push and builds the backend image; the server picks up a new image within five minutes. Step by step: [docs/deploy.md](docs/deploy.md).
+The web app is served by Vercel. Everything that needs a long-running server (the API, sign-in, the MCP endpoint, live meeting streams, the governance clock, the Solid server) runs on one small Azure VM, launched by [deploy/azure/deploy.sh](deploy/azure/deploy.sh), which fits Azure for Students' free tier (an AWS template is kept as an alternative). Vercel forwards `/api`, `/auth`, `/mcp`, `/people` and the OAuth endpoints for MCP clients to it, so people only ever see the Vercel link. GitHub Actions tests every push and builds the backend image; the server picks up a new image within five minutes. Step by step: [docs/deploy.md](docs/deploy.md).
 
 ### Connect a coding agent
 
-Create a token under *Agents* in any ontology, then:
+Open `/connect` on any Concord site for install buttons. In short, with nothing but the URL:
 
 ```sh
-claude mcp add --transport http concord https://<host>/mcp --header "Authorization: Bearer cnc_..."
+claude mcp add --transport http concord https://standards-concord.vercel.app/mcp   # Claude Code, then /mcp → Authenticate
+codex mcp add concord --url https://standards-concord.vercel.app/mcp && codex mcp login concord
 ```
 
-For Codex, add to `~/.codex/config.toml`:
+In Claude (web, desktop, mobile, and Claude Code when signed in with a Claude account), the *Add to Claude* button opens the prefilled custom connector dialog. The first connection opens a browser so the person signs in to Concord and clicks Allow: the MCP endpoint implements the [MCP authorization spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) (OAuth 2.1 with PKCE, protected resource metadata, dynamic client registration and client ID metadata documents), so there is no token to copy. Personal tokens (Settings) remain for headless agents such as CI.
 
-```toml
-[mcp_servers.concord]
-url = "https://<host>/mcp"
-bearer_token_env_var = "CONCORD_TOKEN"
-```
-
-Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search_terms`, `get_term`, `sparql_query`, `validate_data`, `report_gap`, `propose_change`, `get_change_request`.
+This repo is also a plugin marketplace for Claude Code (`/plugin marketplace add jeswr/standards-concord`) and Codex (`codex plugin marketplace add jeswr/standards-concord`), and `server.json` is its [MCP Registry](https://registry.modelcontextprotocol.io) entry. **When Concord moves domain**, run `node scripts/public-url.mjs https://<new-origin>` and merge: that updates every listing and republishes the registry entry. The site itself needs no change: every URL it shows and every OAuth endpoint is derived from the address it is served on (set `CONCORD_PROXY_SECRET` in Vercel and on the backend so the backend trusts the forwarded address; see [docs/deploy.md](docs/deploy.md)). Installed plugins follow when they update, and agents sign in again at the new address, so keep the old one working for a while. Listing details and what to submit where: [docs/mcp-listings.md](docs/mcp-listings.md).
 
 ### Optional services
 

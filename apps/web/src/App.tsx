@@ -27,6 +27,8 @@ import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
 import { GovernanceTab } from './pages/ontology/Governance';
 import { AgentsTab } from './pages/ontology/Agents';
+import { ConnectPage } from './pages/Connect';
+import { OAuthAuthorizePage } from './pages/OAuthAuthorize';
 
 const AdminFeedbackPage = lazy(() => import('./pages/AdminFeedback').then((m) => ({ default: m.AdminFeedbackPage })));
 
@@ -77,6 +79,8 @@ function Routed() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
+          <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
           <Route path="/settings" element={<RequireUser><SettingsPage /></RequireUser>} />
           <Route path="/admin/feedback" element={<RequireUser><AdminFeedbackPage /></RequireUser>} />
