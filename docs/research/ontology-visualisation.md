@@ -22,6 +22,12 @@ The Browse tab has three views that share the class tree on the left and the ter
 - **Diagram.** A UML-style class diagram, because the ODI works in LinkML and data modellers read UML. Boxes list datatype attributes as `name : type [min..max]`. Object properties are labelled associations with cardinalities. Subclasses point to their parent with a hollow triangle. Layout is layered top-down (parents above children) with dagre, so the hierarchy stays readable. It can show the whole ontology, or a class and everything one or two links away. Attributes, inherited attributes, relationships and subclass links can each be turned off. It's drawn as SVG, so it's sharp at any zoom and can be downloaded.
 - **Graph.** A network overview in the spirit of WebVOWL and OntoGraf, with a hierarchical layout by default and force-directed and radial alternatives. Node size reflects the number of subclasses. Attributes (as yellow datatype nodes, VOWL style) and disjointness can be switched on. Selecting a class fades everything outside its neighbourhood. Clicking a relationship opens the property. It can be downloaded as a PNG.
 
+### Following Astra's UI review (findings 10, 11 and 25)
+
+- The tree starts with only the top-level classes. Object properties, datatype properties and individuals start as collapsed headings with counts, and open on their own when the selected term is in them. Search still covers every category.
+- A term page keeps its definition, type, and parent and subclasses (or domain and range) visible, plus any deprecation warning. A class's property table is open by default. Everything else is in collapsed sections with counts: **Logical rules**, **Usage**, **Examples**, **Editorial details** and the neighbourhood diagram.
+- In the Diagram and Graph views, the term navigation folds into a "Terms" panel so the drawing gets the room, and the selected term opens in a side panel with a close button. Arriving with a class selected shows its immediate neighbours, with **Show entire ontology** one click away. Picking a node on the canvas keeps the current scope. Graph relationship labels show on the selection's links, or everywhere when the graph is small.
+
 ## Making them modern and accessible
 
 - Pan and zoom follow current canvas tools: drag or scroll to pan, pinch or ctrl/⌘ + scroll to zoom, and +, −, 0 and the arrow keys from the keyboard.

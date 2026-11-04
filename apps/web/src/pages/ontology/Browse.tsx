@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import { Bug, ChevronDown, ChevronRight, LayoutTemplate, Network, ListTree, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
@@ -46,19 +46,20 @@ function IriList({ iris, label, onSelect, empty = '—' }: { iris: string[]; lab
   );
 }
 
-function Section({ title, children, defaultOpen = true }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
+function Section({ title, count, children, defaultOpen = false }: { title: string; count?: number; children: ReactNode; defaultOpen?: boolean }) {
   return (
-    <details open={defaultOpen} className="group mt-5 border-t border-line pt-4">
-      <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+    <details open={defaultOpen} className="group mt-4 border-t border-line pt-3">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-4 text-muted transition-transform group-open:rotate-90" aria-hidden />
         {title}
+        {count !== undefined && <span className="rounded-full bg-surface-2 px-1.5 text-xs font-medium text-muted">{count}</span>}
       </summary>
       <div className="mt-3">{children}</div>
     </details>
   );
 }
 
-function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: string; onSelect: (i: string) => void; model: OntologyModel; showNeighbourhood: boolean }) {
+function TermDetailPanel({ iri, onSelect, model, showNeighbourhood, compact, onClose }: { iri: string; onSelect: (i: string) => void; model: OntologyModel; showNeighbourhood: boolean; compact?: boolean; onClose?: () => void }) {
   const { id, label, view } = useOntology();
   const term = useAsync(() => api.term(id, iri), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
@@ -66,8 +67,21 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
   if (!term.data) return <Loading />;
   const t: TermDetail = term.data;
   const prefixes = view.data?.prefixes;
+  const isClass = t.kind === 'class' && model.classes.has(t.iri);
+  const isProp = t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty';
+  const slotCount = isClass ? model.allSlots(t.iri).reduce((n, g) => n + g.slots.length, 0) : 0;
+  const rules =
+    t.kind === 'class'
+      ? t.restrictions.length + t.equivalentClasses.length + t.disjointWith.length
+      : isProp
+        ? t.superProperties.length + (t.inverseOf ? 1 : 0) + t.characteristics.length
+        : t.kind === 'individual'
+          ? Object.keys(t.facts).length
+          : 0;
+  const usage = (t.usedBy?.length ?? 0) + (isClass ? model.incoming(t.iri).length : 0);
+  const editorial = (t.altLabels?.length ? 1 : 0) + (t.source?.length ? 1 : 0) + (t.editorialNote ? 1 : 0);
   return (
-    <Card className="p-5">
+    <Card className={cx('p-5', compact && 'p-4')}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -87,9 +101,16 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
             <CopyButton text={t.iri} variant="ghost" />
           </div>
         </div>
-        <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
-          Report a problem with this term
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
+            {compact ? 'Report a problem' : 'Report a problem with this term'}
+          </Button>
+          {onClose && (
+            <button type="button" className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-fg" onClick={onClose} aria-label="Close term details">
+              <X className="size-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {t.deprecated && t.replacedBy && (
@@ -105,17 +126,47 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
       )}
       {t.comment && <p className="mt-2 text-sm text-muted">{t.comment}</p>}
 
+      {/* Always visible: what it is and where it sits. Everything else is grouped below. */}
       <dl className="mt-4 divide-y divide-line border-t border-line">
-        {t.altLabels?.length ? <Row k="Also known as">{t.altLabels.join(', ')}</Row> : null}
         {t.kind === 'class' && (
           <>
             <Row k="Subclass of">
               <IriList iris={t.superClasses} label={label} onSelect={onSelect} empty="owl:Thing (top level)" />
             </Row>
-            <Row k="Subclasses">
-              <SubclassList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+            {model.classes.has(t.iri) && (
+              <Row k="Subclasses">
+                <SubclassList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+              </Row>
+            )}
+          </>
+        )}
+        {isProp && (
+          <>
+            <Row k="Domain">
+              <IriList iris={t.domain} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
             </Row>
-            {t.restrictions.length > 0 && (
+            <Row k="Range">
+              <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
+            </Row>
+          </>
+        )}
+        {t.kind === 'individual' && (
+          <Row k="Instance of">
+            <IriList iris={t.types} label={label} onSelect={onSelect} />
+          </Row>
+        )}
+      </dl>
+
+      {isClass && (
+        <Section title="Properties" count={slotCount} defaultOpen>
+          <PropertyTable iri={t.iri} model={model} label={label} onSelect={onSelect} compact={compact} />
+        </Section>
+      )}
+
+      {rules > 0 && (
+        <Section title="Logical rules" count={rules}>
+          <dl className="divide-y divide-line">
+            {t.kind === 'class' && t.restrictions.length > 0 && (
               <Row k="Restrictions">
                 <ul className="space-y-1 font-mono text-[0.8rem]">
                   {t.restrictions.map((r, i) => (
@@ -128,37 +179,27 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
                 </ul>
               </Row>
             )}
-            {t.equivalentClasses.length > 0 && (
+            {t.kind === 'class' && t.equivalentClasses.length > 0 && (
               <Row k="Equivalent to">
                 <IriList iris={t.equivalentClasses} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.disjointWith.length > 0 && (
+            {t.kind === 'class' && t.disjointWith.length > 0 && (
               <Row k="Disjoint with">
                 <IriList iris={t.disjointWith} label={label} onSelect={onSelect} />
               </Row>
             )}
-          </>
-        )}
-        {(t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty') && (
-          <>
-            <Row k="Domain">
-              <IriList iris={t.domain} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
-            </Row>
-            <Row k="Range">
-              <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
-            </Row>
-            {t.superProperties.length > 0 && (
+            {isProp && t.superProperties.length > 0 && (
               <Row k="Sub-property of">
                 <IriList iris={t.superProperties} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.inverseOf && (
+            {isProp && t.inverseOf && (
               <Row k="Inverse of">
                 <TermLink iri={t.inverseOf} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.characteristics.length > 0 && (
+            {isProp && t.characteristics.length > 0 && (
               <Row k="Characteristics">
                 <span className="flex flex-wrap gap-1">
                   {t.characteristics.map((c) => (
@@ -167,59 +208,63 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
                 </span>
               </Row>
             )}
-          </>
-        )}
-        {t.kind === 'individual' && (
-          <>
-            <Row k="Instance of">
-              <IriList iris={t.types} label={label} onSelect={onSelect} />
-            </Row>
-            {Object.entries(t.facts).map(([p, vs]) => (
-              <Row key={p} k={label(p)}>
-                {vs.map((v) => (v.startsWith('http') ? label(v) : v)).join(', ')}
-              </Row>
-            ))}
-          </>
-        )}
-        {t.examples?.length ? (
-          <Row k="Examples">
-            <ul className="list-disc pl-4">
-              {t.examples.map((e, i) => (
-                <li key={i}>{e}</li>
+            {t.kind === 'individual' &&
+              Object.entries(t.facts).map(([p, vs]) => (
+                <Row key={p} k={label(p)}>
+                  {vs.map((v) => (v.startsWith('http') ? label(v) : v)).join(', ')}
+                </Row>
               ))}
-            </ul>
+          </dl>
+        </Section>
+      )}
+
+      <Section title="Usage" count={usage}>
+        <dl className="divide-y divide-line">
+          <Row k="Used by">
+            {t.usedBy?.length ? (
+              <ul className="space-y-1">
+                {t.usedBy.map((u, i) => (
+                  <li key={i}>
+                    <TermLink iri={u.iri} label={(x) => u.label ?? label(x)} onSelect={onSelect} /> <span className="text-xs text-muted">via {u.via}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-muted">Not referenced by other terms.</span>
+            )}
           </Row>
-        ) : null}
-        {t.source?.length ? <Row k="Source">{t.source.join(', ')}</Row> : null}
-        {t.editorialNote && <Row k="Editorial note">{t.editorialNote}</Row>}
-        <Row k="Used by">
-          {t.usedBy?.length ? (
-            <ul className="space-y-1">
-              {t.usedBy.map((u, i) => (
-                <li key={i}>
-                  <TermLink iri={u.iri} label={(x) => u.label ?? label(x)} onSelect={onSelect} /> <span className="text-xs text-muted">via {u.via}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <span className="text-muted">Not referenced by other terms.</span>
+          {isClass && (
+            <Row k="Relationships pointing here">
+              <IncomingList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+            </Row>
           )}
-        </Row>
-      </dl>
-      {t.kind === 'class' && model.classes.has(t.iri) && view.data && (
-        <>
-          <Section title="Properties">
-            <PropertyTable iri={t.iri} model={model} label={label} onSelect={onSelect} />
-          </Section>
-          <Section title="Relationships pointing here">
-            <IncomingList iri={t.iri} model={model} label={label} onSelect={onSelect} />
-          </Section>
-          {showNeighbourhood && (
-            <Section title="Neighbourhood diagram">
-              <Neighbourhood iri={t.iri} view={view.data} model={model} label={label} onSelect={onSelect} />
-            </Section>
-          )}
-        </>
+        </dl>
+      </Section>
+
+      {t.examples?.length ? (
+        <Section title="Examples" count={t.examples.length}>
+          <ul className="list-disc space-y-1 pl-4 text-sm">
+            {t.examples.map((e, i) => (
+              <li key={i}>{e}</li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
+      {editorial > 0 && (
+        <Section title="Editorial details" count={editorial}>
+          <dl className="divide-y divide-line">
+            {t.altLabels?.length ? <Row k="Also known as">{t.altLabels.join(', ')}</Row> : null}
+            {t.source?.length ? <Row k="Source">{t.source.join(', ')}</Row> : null}
+            {t.editorialNote && <Row k="Editorial note">{t.editorialNote}</Row>}
+          </dl>
+        </Section>
+      )}
+
+      {isClass && showNeighbourhood && view.data && (
+        <Section title="Neighbourhood diagram">
+          <Neighbourhood iri={t.iri} view={view.data} model={model} label={label} onSelect={onSelect} />
+        </Section>
       )}
       <BugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} ontologyId={id} termIri={t.iri} termLabel={t.label ?? label(t.iri)} />
     </Card>
@@ -227,11 +272,16 @@ function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: str
 }
 
 function PropList({ title, items, selected, onSelect, label }: { title: string; items: TermView[]; selected?: string; onSelect: (i: string) => void; label: Labeler }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed until asked for, or until the selected term is in this list.
+  const has = !!selected && items.some((i) => i.iri === selected);
+  const [open, setOpen] = useState(has);
+  useEffect(() => {
+    if (has) setOpen(true);
+  }, [has]);
   if (!items.length) return null;
   return (
-    <div className="mt-4">
-      <button className="mb-1 flex w-full items-center gap-1 text-xs font-semibold tracking-wide text-muted uppercase" onClick={() => setOpen((o) => !o)}>
+    <div className="mt-3">
+      <button className="mb-1 flex w-full items-center gap-1 rounded text-xs font-semibold tracking-wide text-muted uppercase hover:text-fg" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />} {title} ({items.length})
       </button>
       {open && (
@@ -261,46 +311,51 @@ const MODES: { key: Mode; label: string; icon: typeof ListTree; hint: string }[]
   { key: 'graph', label: 'Graph', icon: Network, hint: 'Network overview' },
 ];
 
-function DiagramView({ model, selected, onSelect }: { model: OntologyModel; selected?: string; onSelect: (iri: string) => void }) {
+/** Whole ontology, or a class and everything one or two links away. */
+function ScopeControl({ hops, setHops, selected, focusable }: { hops: number; setHops: (h: number) => void; selected?: string; focusable: boolean }) {
+  const { label } = useOntology();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="flex items-center gap-2 text-xs text-muted">
+        Show
+        <Select value={focusable ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Scope">
+          <option value="0">Whole ontology</option>
+          <option value="1" disabled={!focusable}>
+            {focusable ? `${label(selected!)} and direct links` : 'Around a class (pick one first)'}
+          </option>
+          <option value="2" disabled={!focusable}>
+            {focusable ? `${label(selected!)}, two links out` : 'Two links out (pick a class)'}
+          </option>
+        </Select>
+      </label>
+      {focusable && hops > 0 && (
+        <Button size="sm" variant="ghost" icon={Maximize} onClick={() => setHops(0)}>
+          Show entire ontology
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function DiagramView({ model, selected, focus, hops, onSelect }: { model: OntologyModel; selected?: string; focus?: string; hops: number; onSelect: (iri: string) => void }) {
   const { view, label } = useOntology();
-  const [params, setParams] = useSearchParams();
   const [opts, setOpts] = useState<DiagramOptions>(DEFAULT_DIAGRAM_OPTIONS);
-  const focusable = !!selected && model.classes.has(selected);
-  const hops = Number(params.get('hops') ?? '0');
-  const focus = focusable && hops > 0 ? selected : undefined;
   const scope = useMemo(() => (focus ? neighbourhood(model, focus, hops, opts) : new Set(model.classes.keys())), [model, focus, hops, opts]);
-  const setHops = (h: number) => {
-    const next = new URLSearchParams(params);
-    if (h) next.set('hops', String(h));
-    else next.delete('hops');
-    setParams(next, { replace: true });
-  };
   const toggle = (k: keyof DiagramOptions) => setOpts((o) => ({ ...o, [k]: !o[k] }));
   if (!view.data) return null;
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
-        <label className="flex items-center gap-2 text-xs text-muted">
-          Show
-          <Select value={focus ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Diagram scope">
-            <option value="0">Whole ontology</option>
-            <option value="1" disabled={!focusable}>
-              {focusable ? `${label(selected!)} and direct links` : 'Around a class (pick one first)'}
-            </option>
-            <option value="2" disabled={!focusable}>
-              {focusable ? `${label(selected!)}, two links out` : 'Two links out (pick a class)'}
-            </option>
-          </Select>
-        </label>
         <Chip active={opts.attributes} onClick={() => toggle('attributes')}>Attributes</Chip>
         <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>Inherited attributes</Chip>
         <Chip active={opts.associations} onClick={() => toggle('associations')}>Relationships</Chip>
         <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>Subclasses</Chip>
       </div>
-      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={selected ? 520 : 680} />
+      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={640} />
     </div>
   );
 }
+
 
 export function BrowseTab() {
   const { id, view, label } = useOntology();
@@ -308,8 +363,10 @@ export function BrowseTab() {
   const selected = params.get('term') ?? undefined;
   const raw = params.get('view');
   const mode: Mode = raw === 'graph' || raw === 'diagram' ? raw : 'tree';
+  const canvas = mode !== 'tree';
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
+  const [navOpen, setNavOpen] = useState<boolean>();
   useEffect(() => {
     const t = setTimeout(() => setDebounced(q.trim()), 250);
     return () => clearTimeout(t);
@@ -317,34 +374,104 @@ export function BrowseTab() {
   const results = useAsync(async () => (debounced ? api.search(id, debounced) : undefined), [id, debounced]);
   const model = useMemo(() => (view.data ? buildModel(view.data) : undefined), [view.data]);
 
-  const select = (iri: string) => {
+  // Canvas scope: an explicit ?hops= wins; otherwise a selected class shows its direct links.
+  const focusable = !!selected && !!model?.classes.has(selected);
+  const hopsParam = params.get('hops');
+  const hops = focusable ? (hopsParam !== null ? Math.max(0, Math.min(2, Number(hopsParam) || 0)) : 1) : 0;
+  const focus = focusable && hops > 0 ? selected : undefined;
+
+  const update = (f: (p: URLSearchParams) => void, replace = false) => {
     const next = new URLSearchParams(params);
-    next.set('term', iri);
-    setParams(next, { replace: false });
+    f(next);
+    setParams(next, { replace });
   };
-  const setMode = (m: Mode) => {
-    const next = new URLSearchParams(params);
-    if (m === 'tree') next.delete('view');
-    else next.set('view', m);
-    setParams(next, { replace: true });
-  };
+  const select = (iri: string) => update((p) => p.set('term', iri));
+  // Picking a node on the canvas keeps the current scope rather than jumping to its neighbourhood.
+  const selectOnCanvas = (iri: string) =>
+    update((p) => {
+      p.set('term', iri);
+      p.set('hops', String(hops));
+    });
+  const setHops = (h: number) => update((p) => p.set('hops', String(h)), true);
+  const setMode = (m: Mode) =>
+    update((p) => {
+      if (m === 'tree') p.delete('view');
+      else p.set('view', m);
+    }, true);
+  const clear = () => update((p) => p.delete('term'));
 
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
   const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length;
+  // In the canvas views the navigation folds away so the drawing gets the room.
+  const showNav = navOpen ?? !canvas;
+
+  const nav = (
+    <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
+      {debounced ? (
+        <div>
+          <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Search results</div>
+          {results.loading && !results.data ? (
+            <Loading />
+          ) : results.error ? (
+            <ErrorCard error={results.error} />
+          ) : results.data?.length ? (
+            <ul>
+              {results.data.map((t) => (
+                <li key={t.iri}>
+                  <button onClick={() => select(t.iri)} className={cx('w-full rounded-md px-2 py-1.5 text-left hover:bg-surface-2', selected === t.iri && 'bg-accent-soft')}>
+                    <div className="text-sm font-medium">{t.label ?? label(t.iri)}</div>
+                    <div className="text-xs text-muted">
+                      {KIND_LABEL[t.kind]}
+                      {t.definition && ` · ${t.definition.slice(0, 70)}${t.definition.length > 70 ? '…' : ''}`}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="px-2 py-4 text-sm text-muted">No terms match “{debounced}”.</p>
+          )}
+        </div>
+      ) : (
+        <>
+          <ClassTree model={model} label={label} selected={selected} onSelect={select} />
+          <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
+          <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
+          <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
+        </>
+      )}
+    </Card>
+  );
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="relative w-full max-w-sm">
-          <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search terms, definitions…" className="pl-9" aria-label="Search terms" />
-          {q && (
-            <button className="absolute top-2.5 right-3 text-muted" onClick={() => setQ('')} aria-label="Clear search">
-              <X className="size-4" />
-            </button>
+        <div className="flex w-full max-w-md items-center gap-2">
+          {canvas && (
+            <Button size="sm" variant="secondary" icon={showNav ? PanelLeftClose : PanelLeftOpen} onClick={() => setNavOpen(!showNav)} aria-expanded={showNav} aria-controls="browse-nav" className="h-9 shrink-0">
+              {showNav ? 'Hide terms' : 'Terms'}
+            </Button>
           )}
+          <div className="relative w-full">
+            <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
+            <Input
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                if (e.target.value) setNavOpen(true);
+              }}
+              placeholder="Search terms, definitions…"
+              className="pl-9"
+              aria-label="Search terms"
+            />
+            {q && (
+              <button className="absolute top-2.5 right-3 text-muted" onClick={() => setQ('')} aria-label="Clear search">
+                <X className="size-4" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View">
           {MODES.map((m) => (
@@ -366,54 +493,35 @@ export function BrowseTab() {
         <EmptyState icon={ListTree} title="This ontology has no terms yet">
           Describe a use case or upload a meeting, then synthesise a change request — approved changes appear here.
         </EmptyState>
-      ) : (
+      ) : !canvas ? (
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
-          <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
-            {debounced ? (
-              <div>
-                <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Search results</div>
-                {results.loading && !results.data ? (
-                  <Loading />
-                ) : results.error ? (
-                  <ErrorCard error={results.error} />
-                ) : results.data?.length ? (
-                  <ul>
-                    {results.data.map((t) => (
-                      <li key={t.iri}>
-                        <button onClick={() => select(t.iri)} className={cx('w-full rounded-md px-2 py-1.5 text-left hover:bg-surface-2', selected === t.iri && 'bg-accent-soft')}>
-                          <div className="text-sm font-medium">{t.label ?? label(t.iri)}</div>
-                          <div className="text-xs text-muted">
-                            {KIND_LABEL[t.kind]}
-                            {t.definition && ` · ${t.definition.slice(0, 70)}${t.definition.length > 70 ? '…' : ''}`}
-                          </div>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="px-2 py-4 text-sm text-muted">No terms match “{debounced}”.</p>
-                )}
-              </div>
-            ) : (
-              <>
-                <ClassTree model={model} label={label} selected={selected} onSelect={select} />
-                <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
-                <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
-                <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
-              </>
-            )}
-          </Card>
+          <div id="browse-nav">{nav}</div>
           <div className="min-w-0 space-y-4">
-            {mode === 'graph' && <OntologyGraph view={v} selected={selected} onSelect={select} height={selected ? 440 : 620} />}
-            {mode === 'diagram' && <DiagramView model={model} selected={selected} onSelect={select} />}
             {selected ? (
-              <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={mode === 'tree'} />
+              <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
             ) : (
-              mode === 'tree' && (
-                <EmptyState icon={ListTree} title="Pick a term">
-                  Choose a class or property on the left to see its definition, properties, axioms and a diagram of what it connects to. Or switch to the Diagram or Graph view above to see the whole ontology.
-                </EmptyState>
-              )
+              <EmptyState icon={ListTree} title="Pick a term">
+                Choose a class or property on the left to see its definition, properties and where it’s used. Or switch to the Diagram or Graph view above to see the whole ontology.
+              </EmptyState>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className={cx('grid gap-4', showNav ? 'lg:grid-cols-[280px_1fr]' : 'grid-cols-1')}>
+          {showNav && <div id="browse-nav">{nav}</div>}
+          <div className={cx('grid min-w-0 gap-4', selected && 'xl:grid-cols-[1fr_380px]')}>
+            <div className="min-w-0 space-y-2">
+              <ScopeControl hops={hops} setHops={setHops} selected={selected} focusable={focusable} />
+              {mode === 'graph' ? (
+                <OntologyGraph view={v} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} height={620} />
+              ) : (
+                <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} />
+              )}
+            </div>
+            {selected && (
+              <aside className="min-w-0 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto" aria-label="Term details">
+                <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={false} compact onClose={clear} />
+              </aside>
             )}
           </div>
         </div>

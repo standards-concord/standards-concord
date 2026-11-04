@@ -4,6 +4,7 @@ import type { Core, ElementDefinition } from 'cytoscape';
 import dagre from '@dagrejs/dagre';
 import { makeLabeler } from '../lib/ontology';
 import { buildModel, isDatatype } from '../lib/ontologyModel';
+import { DEFAULT_DIAGRAM_OPTIONS, neighbourhood } from './ontology-viz/ClassDiagram';
 import { Chip, Loading, Select } from './ui';
 import { textWidth, themeColours, ZoomControls } from './ontology-viz/PanZoom';
 
@@ -27,7 +28,7 @@ const DEFAULT_FILTERS: GraphFilters = { subclass: true, relations: true, datatyp
  * domain to range. Datatype attributes and disjointness can be switched on. Selecting a
  * class highlights its neighbourhood and fades the rest.
  */
-export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view: OntologyView; selected?: string; onSelect?: (iri: string) => void; height?: number }) {
+export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, height = 560 }: { view: OntologyView; selected?: string; focus?: string; hops?: number; onSelect?: (iri: string) => void; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const [ready, setReady] = useState(false);
@@ -38,11 +39,19 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
   onSelectRef.current = onSelect;
   const model = useMemo(() => buildModel(view), [view]);
 
+  // With a focus class, only it and the classes within `hops` links are drawn.
+  const scope = useMemo(
+    () => (focus ? neighbourhood(model, focus, hops, { ...DEFAULT_DIAGRAM_OPTIONS, associations: filters.relations, subclasses: filters.subclass }) : undefined),
+    [model, focus, hops, filters.relations, filters.subclass],
+  );
+
   const elements = useMemo(() => {
     const label = makeLabeler(view);
     const els: ElementDefinition[] = [];
     const nodeIds = new Set<string>();
+    const inScope = (iri: string) => !scope || scope.has(iri);
     for (const c of view.classes) {
+      if (!inScope(c.iri)) continue;
       const kids = model.descendants(c.iri).length;
       els.push({ data: { id: c.iri, label: label(c.iri), kind: 'class', deprecated: c.deprecated ? 1 : 0, size: Math.min(28 + kids * 6, 64), w: nodeWidth(label(c.iri)) } });
       nodeIds.add(c.iri);
@@ -53,19 +62,19 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
       els.push({ data: { id: iri, label: label(iri), kind: 'external', size: 28, w: nodeWidth(label(iri)) } });
     };
     if (filters.subclass)
-      for (const [c, ps] of model.parents) for (const p of ps) els.push({ data: { id: `sub:${c}:${p}`, source: c, target: p, kind: 'sub' } });
+      for (const [c, ps] of model.parents) for (const p of ps) if (nodeIds.has(c) && nodeIds.has(p)) els.push({ data: { id: `sub:${c}:${p}`, source: c, target: p, kind: 'sub' } });
     if (filters.relations)
       for (const p of view.objectProperties)
         for (const d of p.domain)
           for (const r of p.range) {
-            if (!model.classes.has(d)) continue;
+            if (!nodeIds.has(d) || (model.classes.has(r) && !nodeIds.has(r))) continue;
             if (!model.classes.has(r)) external(r);
             els.push({ data: { id: `p:${p.iri}:${d}:${r}`, source: d, target: r, label: label(p.iri), kind: 'prop', property: p.iri } });
           }
     if (filters.datatypes)
       for (const p of view.datatypeProperties)
         for (const d of p.domain) {
-          if (!model.classes.has(d)) continue;
+          if (!nodeIds.has(d)) continue;
           const id = `lit:${p.iri}:${d}`;
           const r = p.range.find(isDatatype);
           const text = r ? r.replace(/^.*[#/]/, '') : 'Literal';
@@ -77,13 +86,13 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
       for (const c of view.classes)
         for (const d of c.disjointWith) {
           const key = [c.iri, d].sort().join('|');
-          if (done.has(key) || !model.classes.has(d)) continue;
+          if (done.has(key) || !nodeIds.has(d) || !nodeIds.has(c.iri)) continue;
           done.add(key);
           els.push({ data: { id: `dis:${key}`, source: c.iri, target: d, kind: 'disjoint' } });
         }
     }
     return els;
-  }, [view, model, filters]);
+  }, [view, model, filters, scope]);
 
   // Hierarchy positions from dagre, parents above children.
   const positions = useMemo(() => {
@@ -141,11 +150,13 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
           { selector: 'edge[kind = "sub"]', style: { 'line-color': c.muted, 'target-arrow-color': c.muted, 'target-arrow-shape': 'triangle', 'target-arrow-fill': 'hollow', 'arrow-scale': 1.3 } },
           {
             selector: 'edge[kind = "prop"], edge[kind = "dprop"]',
-            style: { 'line-style': 'dashed', 'line-color': c.accent, 'target-arrow-color': c.accent, label: 'data(label)', 'font-size': 9.5, color: c.muted, 'text-rotation': 'autorotate', 'text-background-color': c.surface, 'text-background-opacity': 1, 'text-background-padding': '2px' },
+            style: { 'line-style': 'dashed', 'line-color': c.accent, 'target-arrow-color': c.accent, 'font-size': 9.5, color: c.muted, 'text-rotation': 'autorotate', 'text-background-color': c.surface, 'text-background-opacity': 1, 'text-background-padding': '2px' },
           },
           { selector: 'edge[kind = "dprop"]', style: { 'line-color': '#b8920f', 'target-arrow-color': '#b8920f' } },
           { selector: 'edge[kind = "disjoint"]', style: { 'line-color': c.warn, 'line-style': 'dotted', 'target-arrow-shape': 'none', 'source-arrow-shape': 'none', opacity: 0.6 } },
           { selector: 'edge.hl', style: { width: 2.4, 'z-index': 10 } },
+          // Relationship names appear on the selection's links, or everywhere when the graph is small.
+          { selector: 'edge.labelled[label], edge.hl[label]', style: { label: 'data(label)' } },
         ],
         layout: { name: 'preset', positions: (n: { id: () => string }) => positions[n.id()] ?? { x: 0, y: 0 }, padding: 30, fit: true } as never,
       });
@@ -158,6 +169,15 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
         if (p) onSelectRef.current?.(p);
       });
       cy.on('zoom', () => setZoom(cy.zoom()));
+      // Fitting a handful of nodes would blow them up; keep text at a readable size.
+      const clampFit = () => {
+        if (cy.zoom() > 1.15) {
+          cy.zoom(1.15);
+          cy.center();
+        }
+      };
+      clampFit();
+      cy.on('layoutstop', clampFit);
       cyRef.current = cy;
       setZoom(cy.zoom());
       setReady(true);
@@ -187,8 +207,9 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
     const cy = cyRef.current;
     if (!cy || !ready) return;
     cy.batch(() => {
-      cy.elements().removeClass('faded hl');
+      cy.elements().removeClass('faded hl labelled');
       cy.$(':selected').unselect();
+      if (cy.edges().length <= 40) cy.edges().addClass('labelled');
       if (!selected) return;
       const n = cy.getElementById(selected);
       if (n.empty() || !n.isNode()) return;
@@ -199,7 +220,7 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
     });
     const n = cy.getElementById(selected ?? '');
     if (n.nonempty() && n.isNode()) cy.animate({ center: { eles: n }, duration: 300 });
-  }, [selected, ready]);
+  }, [selected, ready, elements]);
 
   const exportPng = () => {
     const cy = cyRef.current;
@@ -216,7 +237,7 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
   };
 
   const toggle = (k: keyof GraphFilters) => setFilters((f) => ({ ...f, [k]: !f[k] }));
-  const classCount = view.classes.length;
+  const classCount = elements.filter((e) => e.data.kind === 'class').length;
   const edgeCount = elements.filter((e) => e.data.source).length;
 
   return (
@@ -230,7 +251,7 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
             <option value="radial">Radial by depth</option>
           </Select>
         </label>
-        <span className="text-xs text-muted">Show</span>
+        <span className="text-xs text-muted">Include</span>
         <Chip active={filters.subclass} onClick={() => toggle('subclass')}>Subclasses</Chip>
         <Chip active={filters.relations} onClick={() => toggle('relations')}>Relationships</Chip>
         <Chip active={filters.datatypes} onClick={() => toggle('datatypes')}>Attributes</Chip>
@@ -240,13 +261,18 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
         className="relative overflow-hidden rounded-lg border border-line bg-surface"
         style={{ height }}
         role="img"
-        aria-label={`Graph of ${classCount} classes and ${edgeCount} links. The Diagram view and each class's page give the same information as text.`}
+        aria-label={`Graph of ${classCount} classes and ${edgeCount} links${focus ? ` around ${makeLabeler(view)(focus)}` : ''}. The Diagram view and each class's page give the same information as text.`}
         data-testid="ontology-graph"
         data-ready={ready ? 'true' : 'false'}
       >
         {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
         <div ref={ref} className="size-full" />
-        {ready && <ZoomControls k={zoom} onIn={() => zoomBy(1.2)} onOut={() => zoomBy(1 / 1.2)} onFit={() => cyRef.current?.fit(undefined, 30)} onExport={exportPng} exportLabel="Download as PNG" />}
+        {ready && <ZoomControls k={zoom} onIn={() => zoomBy(1.2)} onOut={() => zoomBy(1 / 1.2)} onFit={() => {
+              const cy = cyRef.current;
+              if (!cy) return;
+              cy.fit(undefined, 30);
+              if (cy.zoom() > 1.15) (cy.zoom(1.15), cy.center());
+            }} onExport={exportPng} exportLabel="Download as PNG" />}
         <div className="pointer-events-none absolute bottom-2 left-2 flex flex-wrap gap-x-4 gap-y-1 rounded-md bg-surface/90 px-2.5 py-1.5 text-[0.7rem] text-muted">
           <span>Solid ▷ subclass of</span>
           <span className="text-accent">Dashed → relationship (domain → range)</span>

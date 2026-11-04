@@ -21,7 +21,8 @@ interface Row {
  * automatically so the selection is always visible.
  */
 export function ClassTree({ model, label, selected, onSelect, filter }: { model: OntologyModel; label: Labeler; selected?: string; onSelect: (iri: string) => void; filter?: string }) {
-  const [open, setOpen] = useState<Set<string>>(() => new Set(model.roots.flatMap((r) => [r])));
+  // Start with just the top-level classes; branches open on request or to reveal the selection.
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [active, setActive] = useState<string>();
   const refs = useRef(new Map<string, HTMLLIElement>());
   const typed = useRef({ text: '', at: 0 });

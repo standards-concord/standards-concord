@@ -31,17 +31,19 @@ test.describe('class tree and class pages', () => {
     await page.goto(base);
     await settle(page);
     await expect(tree(page)).toBeVisible();
+    // Starts with just the top-level classes.
     const agent = item(page, 'agent');
-    await expect(agent).toHaveAttribute('aria-expanded', 'true');
-    await expect(item(page, 'person')).toHaveAttribute('aria-level', '2');
-
-    // One tab stop; arrows move, Left collapses, Right expands, Enter opens.
-    await agent.focus();
-    await page.keyboard.press('ArrowLeft');
     await expect(agent).toHaveAttribute('aria-expanded', 'false');
     await expect(item(page, 'person')).toHaveCount(0);
+
+    // One tab stop; arrows move, Right expands, Left collapses, Enter opens.
+    await agent.focus();
     await page.keyboard.press('ArrowRight');
     await expect(agent).toHaveAttribute('aria-expanded', 'true');
+    await expect(item(page, 'person')).toHaveAttribute('aria-level', '2');
+    await page.keyboard.press('ArrowLeft');
+    await expect(agent).toHaveAttribute('aria-expanded', 'false');
+    await page.keyboard.press('ArrowRight');
     await page.keyboard.press('ArrowDown');
     await expect(item(page, 'organisation')).toBeFocused();
     await page.keyboard.press('Enter');
@@ -57,6 +59,25 @@ test.describe('class tree and class pages', () => {
     await expect(item(page, 'person')).toHaveCount(0);
     await page.getByRole('button', { name: 'Expand all classes' }).click();
     await expect(item(page, 'volunteer')).toBeVisible();
+  });
+
+  test('property and individual lists start collapsed, with counts, and open to show a selected term', async ({ page }) => {
+    await page.goto(base);
+    await settle(page);
+    const objProps = page.getByRole('button', { name: /^Object properties \(\d+\)$/ });
+    await expect(objProps).toHaveAttribute('aria-expanded', 'false');
+    await objProps.click();
+    await expect(objProps).toHaveAttribute('aria-expanded', 'true');
+    await page.getByRole('button', { name: 'has skill', exact: true }).click();
+    await expect.poll(() => term(page)).toBe(`${VOL}hasSkill`);
+
+    await page.goto(`${base}?term=${encodeURIComponent(`${VOL}startDateTime`)}`);
+    await settle(page);
+    await expect(page.getByRole('button', { name: /^Datatype properties \(\d+\)$/ })).toHaveAttribute('aria-expanded', 'true');
+    // A property shows its domain and range up front, and its rules on request.
+    const panel = page.locator('main');
+    await expect(panel.getByText('Domain', { exact: true })).toBeVisible();
+    await expect(panel.getByText('Range', { exact: true })).toBeVisible();
   });
 
   test('a class page shows where it sits, its properties and what points to it', async ({ page }) => {
@@ -80,11 +101,18 @@ test.describe('class tree and class pages', () => {
     await expect(hasSkill).toContainText('0..*');
 
     // Relationships that can point at a volunteer, via its parent.
-    const incoming = panel.locator('details', { hasText: 'Relationships pointing here' });
-    await expect(incoming.getByRole('button', { name: 'submitted by' })).toBeVisible();
-    await expect(incoming.getByText('points to its parent person')).toBeVisible();
+    // Secondary detail is grouped into collapsed sections with counts.
+    const usage = panel.locator('details', { has: page.locator('summary', { hasText: 'Usage' }) });
+    await expect(usage).not.toHaveAttribute('open');
+    await usage.locator('summary').click();
+    await expect(usage.getByRole('button', { name: 'submitted by' })).toBeVisible();
+    await expect(usage.getByText('points to its parent person')).toBeVisible();
+    const editorial = panel.locator('details', { has: page.locator('summary', { hasText: 'Editorial details' }) });
+    await editorial.locator('summary').click();
+    await expect(editorial.getByText('Source')).toBeVisible();
 
     // A neighbourhood diagram of the class.
+    await panel.locator('summary', { hasText: 'Neighbourhood diagram' }).click();
     const mini = panel.getByTestId('class-diagram');
     await expect(mini.locator('[data-node]')).not.toHaveCount(0);
     await expect(mini.locator(`[data-node="${VOL}Person"]`)).toBeVisible();
@@ -146,20 +174,26 @@ test.describe('class diagram', () => {
     await page.goto(`${base}?view=diagram`);
     await settle(page);
     const d = page.getByTestId('class-diagram');
-    const scope = page.getByRole('combobox', { name: 'Diagram scope' });
+    const scope = page.getByRole('combobox', { name: 'Scope' });
     await expect(scope.locator('option[value="1"]')).toHaveAttribute('disabled', '');
 
+    const all = await d.locator('[data-node]').count();
+    // Picking a class on the canvas keeps the whole diagram, and opens the class beside it.
     await d.locator(`[data-node="${VOL}Role"]`).click();
     await expect.poll(() => term(page)).toBe(`${VOL}Role`);
-    await expect(page.getByRole('heading', { name: 'volunteer role', exact: true })).toBeVisible();
+    const details = page.getByRole('complementary', { name: 'Term details' });
+    await expect(details.getByRole('heading', { name: 'volunteer role', exact: true })).toBeVisible();
     await expect(d.locator(`[data-node="${VOL}Role"]`)).toHaveAttribute('aria-pressed', 'true');
+    await expect(d.locator('[data-node]')).toHaveCount(all);
 
-    const all = await d.locator('[data-node]').count();
     await scope.selectOption('1');
     await expect.poll(() => d.locator('[data-node]').count()).toBeLessThan(all);
     await expect(d.locator(`[data-node="${VOL}TimeCommitment"]`)).toBeVisible();
     await expect(d.locator(`[data-node="${VOL}Location"]`)).toHaveCount(0);
     await expect(page).toHaveURL(/hops=1/);
+    await page.getByRole('button', { name: 'Show entire ontology' }).click();
+    await expect(d.locator('[data-node]')).toHaveCount(all);
+    await scope.selectOption('1');
 
     // Keyboard: arrows move between boxes, Enter opens.
     await d.locator(`[data-node="${VOL}Role"]`).focus();
@@ -195,8 +229,8 @@ test.describe('class diagram', () => {
     expect(svg).toContain('volunteering opportunity');
   });
 
-  test('the diagram passes an accessibility check', async ({ page }) => {
-    await page.goto(`${base}?view=diagram`);
+  test('the diagram, with a class open beside it, passes an accessibility check', async ({ page }) => {
+    await page.goto(`${base}?view=diagram&term=${encodeURIComponent(`${VOL}Session`)}`);
     await settle(page);
     await expect(page.getByTestId('class-diagram').locator('[data-node]').first()).toBeVisible();
     await axe(page, 'main');
@@ -229,10 +263,25 @@ test.describe('graph', () => {
   test('selecting a class from the tree highlights it in the graph and opens its page', async ({ page }) => {
     await page.goto(`${base}?view=graph`);
     await expect(page.getByTestId('ontology-graph')).toHaveAttribute('data-ready', 'true');
+    // The term navigation folds away in the canvas views.
+    await expect(tree(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Terms' }).click();
+    await item(page, 'agent').click();
+    await item(page, 'agent').press('ArrowRight');
     await item(page, 'person').click();
     await expect.poll(() => term(page)).toBe(`${VOL}Person`);
     await expect(page).toHaveURL(/view=graph/);
-    await expect(page.getByRole('heading', { name: 'person', exact: true })).toBeVisible();
+    await expect(page.getByRole('complementary', { name: 'Term details' }).getByRole('heading', { name: 'person', exact: true })).toBeVisible();
+    // Arriving at a class shows its immediate neighbours, with the whole ontology a click away.
+    const g = page.getByTestId('ontology-graph');
+    await expect(g).toHaveAttribute('aria-label', /around person/);
+    const near = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
+    await page.getByRole('button', { name: 'Show entire ontology' }).click();
+    await expect(g).not.toHaveAttribute('aria-label', /around person/);
+    const all = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
+    expect(near).toBeLessThan(all);
+    await page.getByRole('button', { name: 'Close term details' }).click();
+    await expect.poll(() => term(page)).toBeNull();
     // A click on a node in the canvas selects it too.
     const box = (await page.getByTestId('ontology-graph').boundingBox())!;
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);

@@ -47,7 +47,7 @@ export function HierarchyPath({ iri, model, label, onSelect }: { iri: string; mo
   );
 }
 
-function SlotRow({ s, label, onSelect, model }: { s: Slot; label: Labeler; onSelect: Go; model: OntologyModel }) {
+function SlotRow({ s, label, onSelect, model, compact }: { s: Slot; label: Labeler; onSelect: Go; model: OntologyModel; compact?: boolean }) {
   const card = cardText(s.min, s.max);
   return (
     <tr className="border-t border-line align-top">
@@ -75,7 +75,7 @@ function SlotRow({ s, label, onSelect, model }: { s: Slot; label: Labeler; onSel
       <td className="py-2 pr-3 font-mono text-[0.8rem] whitespace-nowrap" title={cardTitle(s)}>
         {card}
       </td>
-      <td className="hidden py-2 text-muted md:table-cell">{s.property.definition}</td>
+      {!compact && <td className="hidden py-2 text-muted md:table-cell">{s.property.definition}</td>}
     </tr>
   );
 }
@@ -90,7 +90,7 @@ function cardTitle(s: Slot) {
  * then those inherited from each ancestor. Types and cardinalities come from domains,
  * ranges, restrictions and functional characteristics.
  */
-export function PropertyTable({ iri, model, label, onSelect }: { iri: string; model: OntologyModel; label: Labeler; onSelect: Go }) {
+export function PropertyTable({ iri, model, label, onSelect, compact }: { iri: string; model: OntologyModel; label: Labeler; onSelect: Go; compact?: boolean }) {
   const groups = model.allSlots(iri);
   const total = groups.reduce((n, g) => n + g.slots.length, 0);
   if (!total) return <p className="text-sm text-muted">No properties have this class (or its parents) as their domain yet.</p>;
@@ -102,7 +102,7 @@ export function PropertyTable({ iri, model, label, onSelect }: { iri: string; mo
             <th scope="col" className="pb-1.5 pr-3 font-medium">Property</th>
             <th scope="col" className="pb-1.5 pr-3 font-medium">Expected type</th>
             <th scope="col" className="pb-1.5 pr-3 font-medium">How many</th>
-            <th scope="col" className="hidden pb-1.5 font-medium md:table-cell">Description</th>
+            {!compact && <th scope="col" className="hidden pb-1.5 font-medium md:table-cell">Description</th>}
           </tr>
         </thead>
         {groups.map((g) => (
@@ -115,7 +115,7 @@ export function PropertyTable({ iri, model, label, onSelect }: { iri: string; mo
               </tr>
             )}
             {g.slots.length ? (
-              g.slots.map((s) => <SlotRow key={s.property.iri} s={s} label={label} onSelect={onSelect} model={model} />)
+              g.slots.map((s) => <SlotRow key={s.property.iri} s={s} label={label} onSelect={onSelect} model={model} compact={compact} />)
             ) : (
               <tr className="border-t border-line">
                 <td colSpan={4} className="py-2 text-muted">
