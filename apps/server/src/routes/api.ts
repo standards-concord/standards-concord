@@ -35,7 +35,8 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
-import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
+import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
+import { getPublicReport, listPublicReports, removePublicReport } from '../public/report.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -353,6 +354,38 @@ export function apiRouter(): Router {
   });
   r.post('/webhooks/recall', async (req, res) => {
     await meetings.recallWebhook(String(req.query.meeting), String(req.query.secret), req.body);
+    res.json({ ok: true });
+  });
+
+  /* ------------------- reports from the public page ------------------ */
+  // Held for review: only editors, stewards and owners see them, and nothing happens until one of them acts.
+  const moderator = (req: Request) => {
+    const p = project(req);
+    const user = requireUser(req);
+    requireRole(p.id, user, ['editor', 'steward', 'owner'], 'review reports from the public page');
+    return { p, user };
+  };
+  r.get('/ontologies/:id/public-reports', (req, res) => {
+    res.json(listPublicReports(moderator(req).p.id));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/accept', async (req, res) => {
+    const { p, user } = moderator(req);
+    const report = getPublicReport(p.id, String(req.params.reportId));
+    if (!report) throw new HttpError(404, 'That report has already been reviewed');
+    removePublicReport(report.id);
+    const cr = await crs.createChangeRequest(p, await publicReporter(), {
+      title: report.title || `Problem with ${report.termName}`,
+      description: `${report.description}\n\nTerm: <${report.termIri}>\n\nReported by a member of the public from the public page (${report.version === 'draft' ? 'working draft' : `version ${report.version}`}) and opened for discussion by ${user.name}. No edits were drafted from it.`,
+      kind: 'bug',
+      origin: { type: 'public-report', termIri: report.termIri, version: report.version },
+      ops: [],
+    });
+    res.status(201).json(crs.detail(cr));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/dismiss', (req, res) => {
+    const { p } = moderator(req);
+    const report = getPublicReport(p.id, String(req.params.reportId));
+    if (report) removePublicReport(report.id);
     res.json({ ok: true });
   });
 

@@ -293,19 +293,25 @@ export const PAGE_SCRIPT = `
 
   // Search: names, local names, alternative labels and definitions.
   var input=document.querySelector('input.term-filter');
-  if(input){input.addEventListener('input',function(){
-    var q=input.value.trim().toLowerCase();var any=false;
+  var searchStatus=document.querySelector('[data-search-status]');var searchTimer;
+  if(input){input.closest('label').hidden=false;input.addEventListener('input',function(){
+    var q=input.value.trim().toLowerCase();var any=false;var n=0;
     var items=[].slice.call(document.querySelectorAll('.browse-nav [data-term]')).reverse();
     items.forEach(function(li){
       var hit=!q||li.getAttribute('data-term').indexOf(q)>=0;
       var kid=!!li.querySelector('[data-term]:not([hidden])');
-      li.hidden=!(hit||kid);
+      li.hidden=!(hit||kid);if(q&&hit)n++;
       var d=li.querySelector(':scope > details');if(d&&q&&kid)d.open=true;
       if(!li.hidden&&q)any=true;
     });
     document.querySelectorAll('.nav-group').forEach(function(g){g.hidden=!!q&&!g.querySelector('[data-term]:not([hidden])');if(q&&!g.hidden)g.open=true;});
     var title=document.querySelector('.nav-title');if(title)title.hidden=!!q&&!document.querySelector('.ctree [data-term]:not([hidden])');
     var empty=document.querySelector('.filter-empty');if(empty)empty.hidden=!q||any;
+    // Tell screen readers how many terms match, once typing pauses.
+    clearTimeout(searchTimer);searchTimer=setTimeout(function(){
+      if(!searchStatus)return;
+      searchStatus.textContent=q?(n?n+(n===1?' term matches':' terms match'):'No terms match'):'';
+    },400);
   });}
 
   // Copy a term's IRI.
@@ -323,10 +329,17 @@ export const PAGE_SCRIPT = `
     var close=function(){dialog.close();};
     dialog.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener('click',close);});
     dialog.addEventListener('click',function(e){if(e.target===dialog)close();});
-    var fail=function(msg){alertBox.textContent=msg;alertBox.hidden=false;};
+    var desc=form.elements.description;
+    var fail=function(msg,field){
+      alertBox.textContent=msg;alertBox.hidden=false;
+      if(field==='description'){desc.setAttribute('aria-invalid','true');desc.setAttribute('aria-describedby',alertBox.id);desc.focus();}
+    };
+    var clearError=function(){alertBox.hidden=true;desc.removeAttribute('aria-invalid');desc.removeAttribute('aria-describedby');};
     var fresh=function(){
       form.elements.token.value='';
-      return fetch(form.action+'/token',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(j){if(j&&j.token)form.elements.token.value=j.token;}).catch(function(){});
+      var q='?term='+encodeURIComponent(form.elements.term.value)+'&version='+encodeURIComponent(form.elements.version.value);
+      return fetch(form.action+'/token'+q,{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
+        .then(function(res){if(res.ok&&res.j.token)form.elements.token.value=res.j.token;else if(res.j.error)fail(res.j.error);}).catch(function(){});
     };
     document.querySelectorAll('[data-report]').forEach(function(a){a.addEventListener('click',function(e){
       var action;try{action=new URL(form.action,location.href);}catch(err){return;}
@@ -336,7 +349,7 @@ export const PAGE_SCRIPT = `
       form.elements.term.value=a.getAttribute('data-term-iri');
       var member=dialog.querySelector('[data-member-report]');if(member)member.href=a.getAttribute('data-member-href');
       form.elements.title.value='';form.elements.description.value='';
-      alertBox.hidden=true;body.hidden=false;done.hidden=true;
+      clearError();body.hidden=false;done.hidden=true;
       fresh();
       dialog.showModal();
     });});
@@ -347,8 +360,16 @@ export const PAGE_SCRIPT = `
       fetch(form.action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify(data)})
         .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
         .then(function(res){
-          if(res.ok){body.hidden=true;done.hidden=false;dialog.querySelector('[data-report-ref]').textContent=res.j.reference||'';}
-          else{fail(res.j.error||'Something went wrong. Please try again.');if(/expired|quick/.test(res.j.error||''))fresh();}
+          if(res.ok){
+            dialog.querySelector('[data-report-ref]').textContent=res.j.reference||'';
+            body.hidden=true;done.hidden=false;
+            // The form that had focus is gone: move to the confirmation, which screen readers announce.
+            dialog.querySelector('[data-report-done-title]').focus();
+          }else{
+            clearError();fail(res.j.error||'Something went wrong. Please try again.',res.j.field);
+            // Each form token is good for one try; the reply carries the next.
+            if(res.j.token)form.elements.token.value=res.j.token;else fresh();
+          }
         })
         .catch(function(){fail('Could not send the report. Check your connection and try again.');})
         .then(function(){sending=false;button.disabled=false;});

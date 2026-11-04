@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { ChangeRequestKind, ChangeRequestStatus } from '@concord/shared';
-import { Bug, GitPullRequest, Plus } from 'lucide-react';
+import { Bug, GitPullRequest, Globe, Plus } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -85,6 +85,68 @@ function NewChangeRequestDialog({ open, onClose }: { open: boolean; onClose: () 
   );
 }
 
+/**
+ * Reports from the public page, held for review. Shown as plain text (never
+ * rendered), only to editors, stewards and owners; nothing happens to one
+ * until it's opened as a bug report or dismissed.
+ */
+function PublicReports() {
+  const { id, hasRole } = useOntology();
+  const nav = useNavigate();
+  const { now } = useSession();
+  const moderator = hasRole('editor', 'steward', 'owner');
+  const reports = useAsync(() => (moderator ? api.publicReports(id) : Promise.resolve([])), [id, moderator]);
+  const accept = useAction(async (reportId: string) => {
+    const cr = await api.acceptPublicReport(id, reportId);
+    nav(`/o/${id}/changes/${cr.id}`);
+  });
+  const dismiss = useAction(async (reportId: string) => {
+    await api.dismissPublicReport(id, reportId);
+    reports.reload();
+  });
+  if (!moderator || !reports.data?.length) return null;
+  return (
+    <section aria-labelledby="public-reports-h" className="mb-6">
+      <Card>
+        <div className="border-b border-line px-5 py-3.5">
+          <h3 id="public-reports-h" className="flex items-center gap-2 font-semibold">
+            <Globe className="h-4 w-4 text-muted" aria-hidden="true" />
+            Reports from the public page <span className="text-sm font-normal text-muted">({reports.data.length} to review)</span>
+          </h3>
+          <p className="mt-0.5 text-sm text-muted">Sent without an account. Only editors, stewards and owners see these. Open one as a bug report to discuss it, or dismiss it.</p>
+        </div>
+        <ul className="divide-y divide-line">
+          {reports.data.map((r) => (
+            <li key={r.id} className="px-5 py-3.5" data-public-report>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-medium">{r.title || `Problem with ${r.termName}`}</span>
+                <span className="text-xs text-muted">
+                  <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(r.termIri)}`}>
+                    {r.termName}
+                  </Link>{' '}
+                  · {r.version === 'draft' ? 'working draft' : `version ${r.version}`} · {relativeTime(r.createdAt, now())}
+                </span>
+              </div>
+              <p className="mt-1.5 whitespace-pre-wrap break-words text-sm">{r.description}</p>
+              <div className="mt-2.5 flex gap-2">
+                <Button size="sm" variant="primary" icon={Bug} loading={accept.pending} onClick={() => void accept.run(r.id)}>
+                  Open as bug report
+                </Button>
+                <Button size="sm" variant="ghost" loading={dismiss.pending} onClick={() => void dismiss.run(r.id)}>
+                  Dismiss
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <div className="px-5 pb-3">
+          <InlineError error={accept.error ?? dismiss.error} />
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 export function ChangeRequestsTab() {
   const { id, userById } = useOntology();
   const { now } = useSession();
@@ -116,6 +178,7 @@ export function ChangeRequestsTab() {
           </Button>
         </div>
       </div>
+      <PublicReports />
       <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2" role="group" aria-label="Filter change requests">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium text-muted">Show</span>

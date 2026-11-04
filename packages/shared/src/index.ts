@@ -375,6 +375,24 @@ export type ChangeRequestOrigin =
   /** Reported anonymously from the public ontology page. */
   | { type: 'public-report'; termIri: string; version: string };
 
+/**
+ * A problem reported from the public ontology page by someone without an
+ * account. Held for review: only editors, stewards and owners see it, and
+ * nothing is done with it (no change request, activity or AI triage) until
+ * one of them opens it as a bug report.
+ */
+export interface PublicReport {
+  id: string;
+  ontologyId: string;
+  termIri: string;
+  termName: string;
+  /** The version of the page it was sent from ("draft" for the working draft). */
+  version: string;
+  title: string;
+  description: string;
+  createdAt: string;
+}
+
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
   | 'triage' // automated classification + validation running/needs triage

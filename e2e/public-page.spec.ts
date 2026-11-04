@@ -90,6 +90,8 @@ test.describe('Public ontology page', () => {
     // Definitions count too.
     await search.fill('two hours a week');
     await expect(nav.getByRole('link', { name: /^time commitment$/i })).toBeVisible();
+    // Screen readers hear how many terms match.
+    await expect(nav.locator('[data-search-status]')).toHaveText(/^\d+ terms? match/);
     await search.fill('zzzz-no-match');
     await expect(nav.getByText('No terms match.')).toBeVisible();
     await search.fill('');
@@ -235,6 +237,8 @@ test.describe('Public ontology page', () => {
     await expect(page.locator('article.term#VolunteeringOpportunity')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Use cases and requirements' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Formats' })).toBeVisible();
+    // Search needs the script, so it isn't offered without it.
+    await expect(page.getByPlaceholder('Search terms, definitions…')).toBeHidden();
     // Reporting still works: the button goes to a report page with a plain form.
     await page.locator('article.term#VolunteeringOpportunity').getByRole('link', { name: 'Report a problem with this term' }).click();
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Report a problem with “volunteering opportunity”');
@@ -305,7 +309,10 @@ test.describe('Public ontology page', () => {
     await expect(pub.locator('body')).not.toContainText(user.name);
   });
 
-  test('anyone can report a problem with a term as a member of the public', async ({ page }) => {
+  test('anyone can report a problem with a term; it waits for a moderator, shown as plain text', async ({ page, browser, consoleGuard }) => {
+    // The first try is refused on purpose (too quick), which the browser logs.
+    consoleGuard.allow(/status of 400/);
+    const marker = `Dialog report ${Date.now()}`;
     await page.goto(`${PAGE}#VolunteeringOpportunity`);
     await page.locator('article.term#VolunteeringOpportunity').getByRole('link', { name: 'Report a problem with this term' }).click();
     const dialog = page.getByRole('dialog', { name: 'Report a problem with “volunteering opportunity”' });
@@ -313,14 +320,49 @@ test.describe('Public ontology page', () => {
     await expect(dialog.getByRole('heading', { name: 'As a member', exact: true })).toBeVisible();
     await expect(dialog.getByRole('heading', { name: 'As a member of the public' })).toBeVisible();
     await dialog.getByLabel('Short title (optional)').fill('Internships');
-    await dialog.getByLabel('What’s the problem?').fill(`Dialog report ${Date.now()}: does an unpaid internship count?`);
-    // The form token is only accepted after a few seconds: no instant bot posts.
+    await dialog.getByLabel('What’s the problem?').fill(`${marker}: does an unpaid internship count? ![probe](https://attacker.example/pixel)`);
+    // Sent straight away, the form token isn't accepted yet: the error is shown and the next try gets a fresh token.
+    await dialog.getByRole('button', { name: 'Send report' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('That was quick');
     await page.waitForTimeout(3_100);
     await dialog.getByRole('button', { name: 'Send report' }).click();
-    await expect(dialog.getByText('Thanks for your report.')).toBeVisible();
-    await expect(dialog.locator('[data-report-ref]')).toHaveText(/^cr_/);
+    // The form is replaced by the confirmation, which takes focus so it's announced.
+    const thanks = dialog.getByRole('heading', { name: 'Thanks for your report' });
+    await expect(thanks).toBeVisible();
+    await expect(thanks).toBeFocused();
+    await expect(dialog.locator('[data-report-ref]')).toHaveText(/^prp_/);
     await dialog.getByRole('button', { name: 'Close' }).last().click();
     await expect(dialog).toBeHidden();
+
+    // A steward finds it waiting on the change requests page, as typed: no image is loaded.
+    const context = await browser.newContext();
+    const steward = await context.newPage();
+    const remote: string[] = [];
+    steward.on('request', (r) => {
+      if (r.url().includes('attacker.example')) remote.push(r.url());
+    });
+    await signIn(steward, { name: 'E2E moderator', role: 'steward' });
+    await steward.goto('/o/volunteering/changes');
+    const queue = steward.getByRole('region', { name: /Reports from the public page/ });
+    const item = queue.locator('[data-public-report]').filter({ hasText: marker });
+    await expect(item).toBeVisible();
+    await expect(item).toContainText('![probe](https://attacker.example/pixel)');
+    await expect(item.locator('img')).toHaveCount(0);
+    // Opened as a bug report, it's still plain text.
+    await item.getByRole('button', { name: 'Open as bug report' }).click();
+    await expect(steward).toHaveURL(/\/o\/volunteering\/changes\/cr_/);
+    await expect(steward.getByRole('heading', { name: 'Internships' }).first()).toBeVisible();
+    await expect(steward.getByText(`${marker}: does an unpaid internship count? ![probe](https://attacker.example/pixel)`)).toBeVisible();
+    await expect(steward.locator('img[src*="attacker.example"]')).toHaveCount(0);
+    expect(remote).toEqual([]);
+    await context.close();
+  });
+
+  test('people without a moderating role never see public reports', async ({ page }) => {
+    await signIn(page, { name: 'E2E contributor', role: 'contributor' });
+    await page.goto('/o/volunteering/changes');
+    await expect(page.getByRole('heading', { name: 'Change requests' })).toBeVisible();
+    await expect(page.getByRole('region', { name: /Reports from the public page/ })).toHaveCount(0);
   });
 
   test('a member signs in from the public page and lands on the term with the report form open', async ({ page }) => {

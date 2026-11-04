@@ -352,7 +352,7 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
   const inputs: CleanupInputs = get<CleanupInputs>('kv', cleanupInputsKey(project)) ?? { id: cleanupInputsKey(project), terms: {} };
   const harvestedTitles = () => [...new Set(Object.values(inputs.terms).flat())];
   // Terms generated from use cases whose requests are gone don't say who asked: any member's name there is provenance.
-  const userNames = list<User>('users').map((u) => u.name).filter(Boolean);
+  const userNames = list<User>('users').filter((u) => u.id !== 'usr_public').map((u) => u.name).filter(Boolean);
   const legacyPeople = () => secretsFor([], { people: Object.keys(inputs.terms).length ? userNames : [] });
   const norm = (name: string) => name.normalize('NFKC').trim().toLowerCase();
   const memberNames = new Set(userNames.map(norm));

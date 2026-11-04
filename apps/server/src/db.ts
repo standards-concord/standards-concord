@@ -17,6 +17,7 @@ export type Collection =
   | 'interviews'
   | 'meetings'
   | 'changeRequests'
+  | 'publicReports'
   | 'reviews'
   | 'votes'
   | 'releases'

@@ -232,6 +232,15 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   /* ------------------------- class hierarchy ------------------------- */
   const localClass = (iri: string) => index.get(iri)?.term.kind === 'class';
   const roots = view.classes.filter((c) => !c.superClasses.some(localClass));
+  // Classes the tree can't reach (a cycle with no root, say) are listed on their own, so every class can be found.
+  const reached = new Set<string>();
+  const reach = (iri: string) => {
+    if (reached.has(iri)) return;
+    reached.add(iri);
+    for (const k of (subClasses.get(iri) ?? []).filter(localClass)) reach(k);
+  };
+  roots.forEach((r) => reach(r.iri));
+  const unreached = view.classes.filter((c) => !reached.has(c.iri));
   const searchText = (t: TermView) => `${nameOf(t)} ${localName(t.iri)} ${(t.altLabels ?? []).join(' ')} ${t.definition ?? ''}`.toLowerCase();
   const navLink = (iri: string) => {
     const { term, anchor, name } = index.get(iri)!;
@@ -326,15 +335,16 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     ? `<dialog class="report-dialog" id="${id('report-dialog')}" aria-labelledby="${id('report-dialog-title')}">
   <div class="dialog-head"><h2 id="${id('report-dialog-title')}">Report a problem with “<span data-report-name></span>”</h2><button class="btn btn-ghost btn-icon" type="button" data-close aria-label="Close">×</button></div>
   <div data-report-body>${reportChoices({ action: input.links.report, iri: '', version: input.kind === 'draft' ? 'draft' : input.version, memberUrl: input.links.app ?? '#', id })}</div>
-  <div data-report-done hidden><p><strong>Thanks for your report.</strong> The working group will look at it.</p><p class="muted">Reference: <code data-report-ref></code></p><p><button class="btn" type="button" data-close>Close</button></p></div>
+  <div data-report-done hidden><h3 tabindex="-1" data-report-done-title>Thanks for your report</h3><p>Someone from the working group will review it.</p><p class="muted">Reference: <code data-report-ref></code></p><p><button class="btn" type="button" data-close>Close</button></p></div>
 </dialog>`
     : '';
   const spec = `
 <div class="browse">
   <aside class="browse-nav card" aria-label="Terms">
-    <label class="search"><span class="sr-only">Search terms</span><input class="term-filter" type="search" placeholder="Search terms, definitions…" autocomplete="off"></label>
+    <label class="search" hidden><span class="sr-only">Search terms</span><input class="term-filter" type="search" placeholder="Search terms, definitions…" autocomplete="off"></label>
+    <p class="sr-only" role="status" aria-live="polite" data-search-status></p>
     <a class="nav-item nav-overview" href="#${id('sec-overview')}">Overview</a>
-    ${roots.length ? `<p class="nav-title">Classes <span class="count">${view.classes.length}</span></p><div class="ctree">${tree(roots.map((r) => r.iri), new Set(), 0)}</div>` : ''}
+    ${view.classes.length ? `<p class="nav-title">Classes <span class="count">${view.classes.length}</span></p><div class="ctree">${tree(roots.map((r) => r.iri), new Set(), 0)}${unreached.length ? `<ul class="unrooted">${byName(unreached.map((c) => c.iri)).map((iri) => `<li data-term="${esc(searchText(index.get(iri)!.term))}"><span class="node leaf">${navLink(iri)}</span></li>`).join('')}</ul>` : ''}</div>` : ''}
     ${navGroups}
     <p class="muted filter-empty" hidden>No terms match.</p>
   </aside>

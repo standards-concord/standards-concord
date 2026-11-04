@@ -26,6 +26,7 @@ import type {
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicReport,
   Release,
   ReleaseDetail,
   Role,
@@ -211,6 +212,9 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
+  acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
+  dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
