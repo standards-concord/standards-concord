@@ -545,9 +545,10 @@ export function apiRouter(): Router {
   r.post('/feedback/:id/publication/withdraw', async (req, res) => {
     res.json(await withdrawPublication(String(req.params.id), req.body?.token));
   });
-  r.post('/feedback/:id/publication/resolve', (req, res) => {
+  r.post('/feedback/:id/publication/resolve', async (req, res) => {
     feedbackAdmin(req);
-    const { action, issue, comment } = req.body ?? {};
+    const { action, issue, comment, ref } = req.body ?? {};
+    if (typeof ref !== 'string' || !ref) throw new HttpError(400, 'ref (from the list of summaries waiting for you) is required');
     let a: AdminAction;
     if (action === 'adopt') {
       if (!Number.isSafeInteger(issue) || issue <= 0) throw new HttpError(400, 'issue must be an issue number');
@@ -557,7 +558,7 @@ export function apiRouter(): Router {
       a = { action, comment };
     } else if (action === 'check' || action === 'repost' || action === 'confirm') a = { action };
     else throw new HttpError(400, 'action must be check, adopt, repost, confirm or comment');
-    res.json(resolvePublication(String(req.params.id), a));
+    res.json(await resolvePublication(String(req.params.id), a, ref));
   });
   // Public summaries waiting for an administrator, listed apart from feedback (whose row may be deleted).
   r.get('/feedback/publications/attention', (req, res) => {

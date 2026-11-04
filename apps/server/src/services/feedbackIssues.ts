@@ -64,8 +64,8 @@ export interface Publication {
   patched?: boolean;
   /** Ids of the triage comments this server posted on the issue and hasn't deleted yet. */
   comments?: number[];
-  /** A triage comment may have been posted without its id being recorded. */
-  commentUnknown?: boolean;
+  /** A triage comment may have been posted without its id being recorded: a fresh id for each such uncertainty. */
+  commentUnknown?: string;
   /** Triage in progress through this server: no withdrawal finishes while a comment is being posted. */
   triage?: { claim: string; until: number; phase: 'commenting' | 'labelling' };
   /** The routine's decision, saved before anything is written, so a retry carries out the same one. */
@@ -107,6 +107,7 @@ export const issuesEnabled = () => !!config.feedbackIssues.token && validRepo(co
 const safeError = (msg: string) => (config.feedbackIssues.token ? msg.split(config.feedbackIssues.token).join('***') : msg).slice(0, 300);
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const validId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
+const uncertainty = () => randomBytes(9).toString('hex');
 
 /* ------------------------------ rendering ------------------------------- */
 
@@ -455,7 +456,7 @@ async function retractStep(pub: Publication, claim: string): Promise<boolean> {
       fenced(pub.id, claim, () => ({ ...release, nextAttemptAt: cur.triage!.until }));
       return false;
     }
-    fenced(pub.id, claim, (p) => ({ triage: undefined, commentUnknown: p.commentUnknown || p.triage?.phase === 'commenting' }));
+    fenced(pub.id, claim, (p) => ({ triage: undefined, commentUnknown: p.commentUnknown || (p.triage?.phase === 'commenting' ? uncertainty() : undefined) }));
   }
   for (const cid of publicationFor(pub.id)?.comments ?? []) {
     await deleteComment(pub.repo, cid);
@@ -557,6 +558,14 @@ export async function withdrawPublication(feedbackId: string, token: unknown): P
 export type AdminAction = { action: 'check' } | { action: 'adopt'; issue: number } | { action: 'repost' } | { action: 'confirm' } | { action: 'comment'; comment: number };
 
 type AttentionKind = 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+/**
+ * Names exactly what an administrator is deciding about. A decision made on
+ * an older view (a stale page, a second tab) carries an older ref and is refused.
+ */
+export function attentionRef(p: Publication): string {
+  return sha(JSON.stringify([attentionKind(p), p.state, p.issue?.number, p.candidates?.map((c) => c.number), p.commentUnknown, p.triageParked?.at, p.lastError, p.adminNeeded, p.sentAt])).slice(0, 16);
+}
+
 /** Why a record is waiting for an administrator, if it is. */
 function attentionKind(p: Publication): AttentionKind | undefined {
   if (p.state === 'needs-admin') return 'post-unknown';
@@ -576,12 +585,17 @@ function attentionKind(p: Publication): AttentionKind | undefined {
  *   one they found on the issue; "confirm" says there is none.
  * - A summary taken out of the triage queue: "check" puts it back.
  */
-export function resolvePublication(id: string, a: AdminAction): FeedbackPublicationStatus {
+export async function resolvePublication(id: string, a: AdminAction, ref: string): Promise<FeedbackPublicationStatus> {
+  const before = get<Publication>('feedbackPublications', id);
+  if (!before || !attentionKind(before)) throw new HttpError(409, 'That public summary isn’t waiting for an administrator');
+  if (attentionRef(before) !== ref) throw new HttpError(409, 'That public summary changed since you looked at it; reload and decide again');
+  // A recorded comment must really be this server's triage comment on this issue.
+  if (a.action === 'comment') await verifyTriageComment(before, a.comment);
   const p = transaction(() => {
     const p = get<Publication>('feedbackPublications', id);
     if (!p) return undefined;
     const k = attentionKind(p);
-    if (!k) return undefined;
+    if (!k || attentionRef(p) !== ref) return undefined;
     const reset = { ...release, adminNeeded: undefined, lastError: undefined, nextAttemptAt: now() };
     let next: Publication | undefined;
     if (k === 'comment-unknown') {
@@ -606,9 +620,27 @@ export function resolvePublication(id: string, a: AdminAction): FeedbackPublicat
     if (next) put('feedbackPublications', next);
     return next;
   });
-  if (!p) throw new HttpError(409, 'That public summary isn’t waiting for an administrator, or that choice doesn’t apply to it');
+  if (!p) throw new HttpError(409, 'That public summary changed since you looked at it, or that choice doesn’t apply to it');
   if (ACTIVE.includes(p.state)) void processPublication(id);
   return status(p);
+}
+
+/** The comment exists, is on this summary's issue, was written by the token's account and ends with the triage footer. */
+async function verifyTriageComment(p: Publication, id: number) {
+  if (!p.issue) throw new HttpError(409, 'That summary has no issue');
+  await waitForPause(p.repo).catch(() => {
+    throw new HttpError(503, 'GitHub asked us to wait; try again later');
+  });
+  let c: { issue_url?: string; user?: { login?: string }; body?: string } | null;
+  try {
+    c = (await github('GET', `/repos/${p.repo}/issues/comments/${id}`)) as typeof c;
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 404) throw new HttpError(400, 'No comment with that id exists');
+    throw new HttpError(502, safeError((err as Error).message));
+  }
+  const me = await botLogin();
+  if (!c?.issue_url?.endsWith(`/repos/${p.repo}/issues/${p.issue.number}`)) throw new HttpError(400, `That comment isn’t on issue #${p.issue.number}`);
+  if (c.user?.login !== me || !c.body?.endsWith(TRIAGE_FOOTER)) throw new HttpError(400, 'That comment wasn’t posted by the triage step');
 }
 
 /** Public summaries waiting for an administrator, whether or not their feedback still exists. */
@@ -619,6 +651,7 @@ export function publicationsNeedingAdmin() {
     .map((p) => ({
       id: p.id,
       kind: attentionKind(p)!,
+      ref: attentionRef(p),
       state: p.state,
       summary: p.summary,
       repo: p.repo,
@@ -672,7 +705,7 @@ export function triageQueue() {
   const filed = list<Publication>('feedbackPublications')
     .filter(triageable)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const row = (p: Publication) => ({ issue: p.issue!.number, url: p.issue!.url, summary: p.summary, createdAt: p.createdAt });
+  const row = (p: Publication) => ({ issue: p.issue!.number, url: p.issue!.url, summary: p.summary, createdAt: p.createdAt, ...(p.decision && !p.triagedAt ? { savedDecision: p.decision } : {}) });
   return {
     pending: filed.filter((p) => !p.triagedAt && !p.commentUnknown && !p.triageParked).slice(0, 10).map(row),
     triaged: filed.filter((p) => p.triagedAt).slice(-100).map(row),
@@ -688,7 +721,6 @@ function parseTriage(b: Record<string, unknown>, issue: number): TriageDecision 
   const dup = b.possibleDuplicateOf;
   if (dup !== undefined) {
     if (!validId(dup) || dup === issue) throw new HttpError(400, 'possibleDuplicateOf must be another issue’s number');
-    if (!triageQueue().triaged.some((t) => t.issue === dup)) throw new HttpError(400, 'possibleDuplicateOf must be a triaged feedback summary from the queue');
   }
   const comment = b.comment;
   if (needsJesse && comment !== TRIAGE_NEUTRAL) throw new HttpError(400, `When needsJesse is true the comment must be exactly “${TRIAGE_NEUTRAL}”`);
@@ -714,7 +746,8 @@ export const triageComment = (d: TriageDecision) => `${escapeMarkdown(d.comment)
  * paused, and a withdrawal waits until the triage stops.
  */
 export async function triagePublication(issueNumber: number, body: Record<string, unknown>) {
-  const input = parseTriage(body, issueNumber);
+  // {"resume": true} carries out the decision already saved for this issue (the queue shows it).
+  const input = body.resume === true ? undefined : parseTriage(body, issueNumber);
   const repo = config.feedbackIssues.repo;
   const claim = randomBytes(12).toString('hex');
   const pub = transaction(() => {
@@ -723,15 +756,18 @@ export async function triagePublication(issueNumber: number, body: Record<string
     if (p.triagedAt) throw new HttpError(409, 'That issue has already been triaged');
     if (p.triage?.phase === 'commenting' && p.triage.until <= now()) {
       // A worker vanished while posting the comment: it may exist, so it is never posted again.
-      put('feedbackPublications', { ...p, triage: undefined, commentUnknown: true });
+      put('feedbackPublications', { ...p, triage: undefined, commentUnknown: uncertainty() });
       return undefined;
     }
     if (p.commentUnknown) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
     if (p.triage && p.triage.until > now()) throw new HttpError(409, 'That issue is being triaged');
     if (p.triageParked) throw new HttpError(409, 'That issue was taken out of the triage queue');
-    if (p.decision && !sameDecision(p.decision, input)) throw new HttpError(409, 'A different decision is already recorded for that issue; send the same one again');
+    if (!input && !p.decision) throw new HttpError(409, 'No decision is saved for that issue; send one');
+    if (p.decision && input && !sameDecision(p.decision, input)) throw new HttpError(409, 'A different decision is already recorded for that issue; send {"resume": true} to carry it out');
     if (!p.decision) {
       if (!triageQueue().pending.some((x) => x.issue === issueNumber)) throw new HttpError(409, 'Triage the oldest summaries first, as listed in the queue');
+      // Checked for a new decision only: a saved one is carried out even if its target was withdrawn since.
+      if (input!.possibleDuplicateOf && !triageQueue().triaged.some((t) => t.issue === input!.possibleDuplicateOf)) throw new HttpError(400, 'possibleDuplicateOf must be a triaged feedback summary from the queue');
       if (triageSlotsUsed(repo) >= TRIAGE_PER_HOUR) throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
     }
     if (pauseOf(repo).until > now()) throw new HttpError(503, 'GitHub asked us to wait; try again later');
@@ -741,7 +777,7 @@ export async function triagePublication(issueNumber: number, body: Record<string
   });
   if (!pub) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
   const resuming = !!pub.decision;
-  const decision = pub.decision ?? input;
+  const decision = pub.decision ?? input!;
   /** Before every request: still ours, still filed, feedback still there, not paused. */
   const check = async () => {
     const p = get<Publication>('feedbackPublications', pub.id);
@@ -817,13 +853,20 @@ export async function triagePublication(issueNumber: number, body: Record<string
       }
     }
     rateOk(repo);
-    release(() => ({ triagedAt: new Date(now()).toISOString() }));
+    // Recorded only if the summary is still filed: a withdrawal during the last read wins.
+    const done = transaction(() => {
+      const p = get<Publication>('feedbackPublications', pub.id);
+      if (!p || p.triage?.claim !== claim) return false;
+      put('feedbackPublications', { ...p, triage: undefined, ...(triageable(p) ? { triagedAt: new Date(now()).toISOString() } : {}) });
+      return triageable(p);
+    });
+    if (!done) throw new HttpError(409, 'The tester withdrew this summary');
     return { issue: issueNumber, labels: wanted, comments: publicationFor(pub.id)?.comments ?? [] };
   } catch (err) {
     if (err instanceof GitHubError) {
       if (err.rateLimited) rateLimited(repo, err.retryAt);
       // A comment that may have been posted without its id: never posted again; withdrawal asks an administrator.
-      release((p) => ({ commentUnknown: p.commentUnknown || (commenting && err.ambiguous) }));
+      release((p) => ({ commentUnknown: p.commentUnknown || (commenting && err.ambiguous ? uncertainty() : undefined) }));
       throw new HttpError(err.rateLimited ? 503 : 502, safeError(err.message));
     }
     release();

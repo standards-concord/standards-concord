@@ -52,12 +52,12 @@ function NumberField({ label, value, onChange }: { label: string; value: string;
 /** One summary waiting for a decision, with the choices that apply to it. */
 function PublicationDecision({ p, onDone }: { p: PublicationNeedingAdmin; onDone: () => void }) {
   const [num, setNum] = useState('');
-  const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[1]) => {
-    await api.resolveFeedbackPublication(p.id, body);
+  const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[2]) => {
+    await api.resolveFeedbackPublication(p.id, p.ref, body);
     onDone();
   });
   const n = Number(num);
-  const btn = (label: string, body: Parameters<typeof api.resolveFeedbackPublication>[1], disabled = false) => (
+  const btn = (label: string, body: Parameters<typeof api.resolveFeedbackPublication>[2], disabled = false) => (
     <Button size="sm" variant="ghost" disabled={disabled} loading={act.pending} onClick={() => void act.run(body)}>
       {label}
     </Button>

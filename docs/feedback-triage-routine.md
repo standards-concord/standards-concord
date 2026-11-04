@@ -33,6 +33,6 @@ DECIDING
 
 STEPS
 1. Read the queue. If "pending" is empty, stop at once and send nothing.
-2. For each pending summary, oldest first: decide, then send the decision once. If the server refuses it (any status other than 200), don't retry with different content; note the status and move on. A 503 means GitHub asked the server to wait: stop the run.
+2. For each pending summary, oldest first: if it has a "savedDecision", send {"resume": true} and nothing else for it. Otherwise decide, then send the decision once. If the server refuses it (any status other than 200), don't retry with different content; note the status and move on. A 503 means GitHub asked the server to wait: stop the run.
 3. End with a summary: how many you triaged, how many were refused and with which statuses. Apply the rules for comments above to it.
 ```

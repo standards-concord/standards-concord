@@ -160,6 +160,8 @@ export interface PublicationNeedingAdmin {
   id: string;
   /** Why it's waiting: a post whose outcome is unknown, a withdrawal, a triage comment whose outcome is unknown, or a summary out of the triage queue. */
   kind: 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+  /** Sent back with a decision, so a decision about an older state is refused. */
+  ref: string;
   state: 'needs-admin' | 'withdrawing' | 'filed';
   summary: string;
   repo: string;
@@ -272,8 +274,11 @@ export const api = {
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
   feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
   withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
-  resolveFeedbackPublication: (feedbackId: string, body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number }) =>
-    post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, body),
+  resolveFeedbackPublication: (
+    feedbackId: string,
+    ref: string,
+    body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number },
+  ) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { ...body, ref }),
   publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
