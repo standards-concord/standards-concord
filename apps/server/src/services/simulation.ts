@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
-import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, User } from '@concord/shared';
+import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
 import { clearAll, list, put } from '../db.js';
@@ -15,13 +15,14 @@ import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, s
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { releasePageHtml } from '../public/routes.js';
+import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseTick, voteOnRelease } from './releases.js';
 import { sourceLinesFor } from './meetings.js';
 import { generateRequirements, markPublished } from './requirements.js';
 import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
+import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
 
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
@@ -37,6 +38,11 @@ async function ensurePersonas(): Promise<Map<string, User>> {
     byKey.set(p.key, u);
   }
   return byKey;
+}
+
+/** Records a demo use case's seeded content as the only version public pages show. */
+function freezeDemoSeed(u: UseCase) {
+  put('useCases', { ...u, demoSeed: structuredClone({ sections: u.sections, competencyQuestions: u.competencyQuestions }) }, u.ontologyId);
 }
 
 export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name === u?.name);
@@ -77,74 +83,42 @@ async function seedHistory() {
   );
   for (const p of PERSONAS) setRoles(project.id, people.get(p.key)!.id, p.roles);
 
-  // Version 1.0.0 is already out: that makes the semver story concrete.
-  const first = await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.');
-
   const aisha = people.get('aisha')!;
   const mei = people.get('mei')!;
   const tom = people.get('tom')!;
   const gareth = people.get('gareth')!;
 
-  // The use case behind 1.0.0, with executable competency questions run on every change.
-  const cqFile = path.join(path.dirname(FIXTURE), 'volunteering-cqs.json');
-  const dataFile = path.join(path.dirname(FIXTURE), 'volunteering-example-data.ttl');
-  if (fs.existsSync(cqFile)) {
-    const exampleData = fs.existsSync(dataFile) ? fs.readFileSync(dataFile, 'utf8') : undefined;
-    const cqs = JSON.parse(fs.readFileSync(cqFile, 'utf8')) as { question: string; sparql: string }[];
-    createUseCase(project, tom, {
-      source: 'form',
-      status: 'closed',
-      visibility: 'public',
-      resolution: { status: 'closed', at: clock.iso(), by: priya.id, releaseId: first.id, version: '1.0.0', note: 'The first release was designed around this use case.' },
-      sections: {
-        name: 'Aggregate volunteering opportunities across platforms',
-        goal: 'Let volunteering platforms, councils and charities publish opportunities once, so that aggregators can show them all in one search.',
-        actors: 'Volunteer-involving organisations (publishers); volunteering platforms and aggregators (consumers); prospective volunteers.',
-        description: 'Organisations publish opportunities as open data using the standard. Aggregators harvest them and let people search by cause, place, time, skills and accessibility.',
-        usageScenarios: [
-          'A national platform harvests opportunities from forty local volunteer centres and shows them in one map-based search.',
-          'A person who uses a wheelchair searches for remote or step-free opportunities supporting the environment.',
-        ],
-      },
-      competencyQuestions: cqs.map((q) => ({ id: newId('cq'), question: q.question, sparql: q.sparql, exampleData, status: 'answerable' as const })),
-    });
-  }
-
-  // 1.0.0's use cases and requirements document, frozen with the release.
-  try {
-    await markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
-  } catch (err) {
-    console.warn(`[seed] requirements document: ${(err as Error).message}`);
-  }
+  // Version 1.0.0 is already out: that makes the semver story concrete. Its use case,
+  // and its use cases and requirements document, exist before its files are written,
+  // so the release's public page and snapshot include them.
+  await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.', async (first) => {
+    // The use case behind 1.0.0, with executable competency questions run on every change.
+    const cqs = aggregationCompetencyQuestions();
+    if (cqs.length) {
+      const exampleData = aggregationExampleData();
+      freezeDemoSeed(createUseCase(project, tom, {
+        source: 'form',
+        status: 'closed',
+        visibility: 'public',
+        resolution: { status: 'closed', at: clock.iso(), by: priya.id, releaseId: first.id, version: '1.0.0', note: 'The first release was designed around this use case.' },
+        sections: structuredClone(AGGREGATION_USE_CASE),
+        competencyQuestions: cqs.map((q) => ({ id: newId('cq'), question: q.question, sparql: q.sparql, exampleData, status: 'answerable' as const })),
+      }));
+    }
+    try {
+      await markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
+    } catch (err) {
+      console.warn(`[seed] requirements document: ${(err as Error).message}`);
+    }
+  });
 
   const shifts = createUseCase(project, aisha, {
     source: 'chat',
     status: 'accepted',
     visibility: 'public',
-    sections: {
-      name: 'Find weekly shifts that need volunteers',
-      goal: 'Help council volunteer coordinators fill recurring shifts, and help residents find regular volunteering that fits around work.',
-      actors: 'Volunteer coordinator (primary); resident looking to volunteer; council volunteering website; partner charities.',
-      description: 'Coordinators publish rotas of recurring shifts at council-run and partner services. Residents search for shifts by day, place and whether they need a DBS check, and sign up to a rota.',
-      usageScenarios: [
-        'The Northvale food bank needs four people every Saturday 9am–1pm. The coordinator publishes the shift once as a weekly rota and residents sign up.',
-        'A resident who works weekdays searches for weekend shifts within two miles that reimburse bus fares and do not need a DBS check.',
-      ],
-      basicFlow: [
-        { step: 1, actorPerson: 'Coordinator', description: 'Publishes an opportunity with a recurring weekly session and the number of places.' },
-        { step: 2, actorSystem: 'Council website', description: 'Lists sessions that still have places, with location and requirements.' },
-        { step: 3, actorPerson: 'Resident', description: 'Filters by day, distance, expenses and DBS requirement, then applies.' },
-      ],
-      dataSources: [{ name: 'Council volunteering CRM' }, { name: 'Partner charity rotas (spreadsheets)' }],
-    },
-    competencyQuestions: [
-      { id: newId('cq'), question: 'Which weekly shifts near Northvale still need volunteers this Saturday?', exampleAnswer: 'Food bank, Saturday 9am–1pm, 2 places left', status: 'untested' },
-      { id: newId('cq'), question: 'Which opportunities reimburse travel expenses?', exampleAnswer: 'Library reading buddies; park clean-up', status: 'untested' },
-    ],
-    terms: [
-      { label: 'shift', kind: 'class', definition: 'A recurring session on a rota.', evidence: ['coordinators think in terms of shifts'] },
-      { label: 'expenses reimbursed', kind: 'datatypeProperty', definition: 'Whether volunteers can claim back out-of-pocket costs.', evidence: ['which opportunities pay expenses'] },
-    ],
+    sections: structuredClone(WEEKLY_SHIFTS_USE_CASE),
+    competencyQuestions: WEEKLY_SHIFTS_QUESTIONS.map((q) => ({ id: newId('cq'), ...q, status: 'untested' as const })),
+    terms: structuredClone(WEEKLY_SHIFTS_TERMS),
   });
 
   // A merged patch waiting for the next release.
@@ -214,12 +188,14 @@ async function seedHistory() {
   });
 
   await seedTraceability(project, { priya, aisha, mei, gareth }, shifts.id);
+  // What the public pages may show of the personas' use cases, from now on.
+  for (const u of list<UseCase>('useCases', project.id)) if (u.visibility === 'public') freezeDemoSeed(u);
 
   updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
   return list<OntologyProject>('ontologies').find((o) => o.slug === DEMO_SLUG);
 }
 
-async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string) {
+async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
   const working = await ontologyStore.working(project);
   const stamped = stampRelease(working, { version, level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
   const files: Record<string, string> = {};
@@ -246,7 +222,9 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     publishedAt: now,
     statusSince: now,
   };
-  files['index.html'] = await releasePageHtml(project, r, stamped);
+  put('releases', r, project.id);
+  await beforeWrite?.(r);
+  Object.assign(files, await releasePageFiles(project, r, stamped));
   r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
   put('releases', r, project.id);
   project.currentVersion = version;

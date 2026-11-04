@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { UseCase } from '@concord/shared';
 import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
-import { ClipboardList, FileText, MessageSquarePlus, Sparkles } from 'lucide-react';
+import { ClipboardList, FileText, MessageSquarePlus, GitPullRequestDraft } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -75,12 +75,12 @@ export function UseCasesTab() {
               >
                 Cancel
               </Button>
-              <Button icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing ontology changes from the selected use cases">
+              <Button icon={GitPullRequestDraft} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing ontology changes from the selected use cases">
                 {selected.size ? `Draft changes from ${selected.size} selected` : 'Draft changes from all'}
               </Button>
             </>
           ) : (
-            <Button icon={Sparkles} disabled={!list.data?.length} onClick={() => setSelecting(true)} title="Choose use cases and let the platform draft ontology changes from them">
+            <Button icon={GitPullRequestDraft} disabled={!list.data?.length} onClick={() => setSelecting(true)} title="Choose use cases and let the platform draft ontology changes from them">
               Draft changes
             </Button>
           )}

@@ -202,7 +202,7 @@ function TourStep({ compact }: { compact?: boolean }) {
             <li key={t.id} className="flex items-start gap-2.5 rounded-lg border border-line bg-surface p-2.5">
               <button
                 onClick={() => w.toggleTask(t.id)}
-                className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong')}
+                className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-control')}
                 aria-label={w.done[t.id] ? 'Mark not done' : 'Mark done'}
               >
                 {w.done[t.id] && <Check className="size-3" />}
@@ -316,7 +316,7 @@ export function WalkthroughDock() {
       {!w.open && (
         <button
           onClick={() => w.setOpen(true)}
-          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-full border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
+          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-pill border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
         >
           <Compass className="size-4 text-accent" />
           Walkthrough

@@ -568,6 +568,8 @@ const METADATA_PREDICATES: Record<string, { p: string; kind: 'iri' | 'lang' | 's
   preferredNamespace: { p: NS.vann + 'preferredNamespaceUri', kind: 'anyURI' },
 };
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
 export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): void {
   const s = g.store;
   const o = g.ontologyIRI;
@@ -588,7 +590,10 @@ export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): voi
         case 'lang': term = langLit(v); break;
         case 'string': term = literal(v); break;
         case 'anyURI': term = typedLit(v, NS.xsd + 'anyURI'); break;
-        case 'date': term = typedLit(v, v.includes('T') ? NS.xsd + 'dateTime' : NS.xsd + 'date'); break;
+        case 'date':
+          if (!ISO_DATE.test(v) || Number.isNaN(Date.parse(v))) fail(`${field} must be an ISO date such as 2026-11-04, not "${v.slice(0, 40)}"`);
+          term = typedLit(v, v.includes('T') ? NS.xsd + 'dateTime' : NS.xsd + 'date');
+          break;
         default: term = looksLikeIRI(v) ? nn(v) : literal(v);
       }
       s.addQuad(nn(o), nn(spec.p), term as any);

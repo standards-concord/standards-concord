@@ -346,6 +346,12 @@ export interface UseCase {
   anonymisation?: { status: 'proposed' | 'published' | 'declined' | 'withdrawn'; draft?: AnonymisedDraft; proposedAt: string; decidedAt?: string; publishedId?: string };
   /** Set when the author withdrew a shared or anonymised use case: only they can see it now. */
   withdrawnAt?: string;
+  /**
+   * Demo only: the content a simulated persona's use case was seeded with. Testers
+   * can sign in as personas and edit their use cases, so public pages show this
+   * instead, and a persona's use case without it is never published.
+   */
+  demoSeed?: { sections: UseCaseSections; competencyQuestions: CompetencyQuestion[] };
   sections: UseCaseSections;
   competencyQuestions: CompetencyQuestion[];
   terms: ElicitedTerm[];

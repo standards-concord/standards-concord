@@ -1,5 +1,5 @@
 import type { OntologyProject } from '@concord/shared';
-import { publicUseCases, releasingDocument, requirementsDocument } from '../services/requirements.js';
+import { publicUseCases, releasingDocument, requirementsDocument, withdrawnSince } from '../services/requirements.js';
 
 /**
  * What the public ontology page shows on its "Use cases and requirements" tab.
@@ -142,4 +142,21 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
 export function publishedRequirements(project: OntologyProject, version?: string, opts: { releasing?: boolean } = {}): PublishedRequirements {
   const doc = version ? (opts.releasing ? releasingDocument(project.id, version) : requirementsDocument(project.id, version)) : undefined;
   return toPublishedRequirements(doc, doc?.useCases ?? publicUseCases(project.id));
+}
+
+/**
+ * What a release's page shows. Each release stores a snapshot of its public
+ * use cases and requirements (requirements.json, written at publish time), so
+ * later edits never rewrite a published version. Releases from before
+ * snapshots existed, and the working draft, use the current data.
+ */
+export function requirementsFor(project: OntologyProject, version: string | undefined, snapshot: PublishedRequirements | undefined): PublishedRequirements {
+  if (!snapshot) return publishedRequirements(project, version);
+  // A use case its author withdrew after the release is no longer shown (the copy on GitHub can't be recalled).
+  const gone = withdrawnSince(project.id, snapshot.useCases.map((u) => u.id));
+  const document = snapshot.document ?? publishedRequirements(project, version).document;
+  return {
+    document: document && { ...document, requirements: document.requirements?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)) })) },
+    useCases: snapshot.useCases.filter((u) => !gone.has(u.id)),
+  };
 }

@@ -15,7 +15,7 @@ const VARIANTS: Record<Variant, string> = {
   secondary: 'bg-surface text-fg border border-line-strong hover:bg-surface-2',
   ghost: 'text-fg hover:bg-surface-2 border border-transparent',
   subtle: 'bg-accent-soft text-accent hover:brightness-95 border border-transparent',
-  danger: 'bg-danger text-white hover:brightness-110 border border-transparent',
+  danger: 'bg-danger text-danger-fg hover:brightness-110 border border-transparent',
 };
 
 export function Button({
@@ -49,14 +49,14 @@ export function Button({
 /* ---------------------------------------------------------------- Layout */
 
 export function Card({ className, children, as: As = 'div' }: { className?: string; children: ReactNode; as?: 'div' | 'section' | 'article' }) {
-  return <As className={cx('rounded-xl border border-line bg-surface', className)}>{children}</As>;
+  return <As className={cx('ui-card rounded-xl border border-line bg-surface', className)}>{children}</As>;
 }
 
 export function CardHeader({ title, subtitle, actions, icon: Icon }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
       <div className="min-w-0">
-        <h3 className="flex items-center gap-2 text-sm font-semibold">
+        <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
           {Icon && <Icon className="size-4 text-muted" />}
           {title}
         </h3>
@@ -71,8 +71,8 @@ export function PageHeader({ title, subtitle, actions, eyebrow }: { title: React
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        {eyebrow && <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">{eyebrow}</div>}
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        {eyebrow && <div className="page-eyebrow mb-1 text-xs font-medium tracking-wide text-muted uppercase">{eyebrow}</div>}
+        <h1 className="page-title">{title}</h1>
         {subtitle && <p className="mt-1 max-w-2xl text-sm text-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -128,7 +128,7 @@ export function EmptyState({ icon: Icon, title, children, action }: { icon?: Luc
   return (
     <div className="flex flex-col items-center rounded-xl border border-dashed border-line-strong px-6 py-12 text-center">
       {Icon && (
-        <div className="mb-3 rounded-full bg-surface-2 p-3">
+        <div className="mb-3 rounded-pill bg-surface-2 p-3">
           <Icon className="size-5 text-muted" />
         </div>
       )}
@@ -159,7 +159,7 @@ const TONES: Record<Tone, string> = {
 };
 export function Badge({ tone = 'neutral', children, className, icon: Icon, title }: { tone?: Tone; children: ReactNode; className?: string; icon?: LucideIcon; title?: string }) {
   return (
-    <span title={title} className={cx('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap', TONES[tone], className)}>
+    <span title={title} className={cx('ui-badge inline-flex items-center gap-1 rounded-pill px-2 py-0.5 text-xs font-medium whitespace-nowrap', TONES[tone], className)}>
       {Icon && <Icon className="size-3" />}
       {children}
     </span>
@@ -172,8 +172,8 @@ export function Avatar({ name, src, size = 28, simulated }: { name?: string; src
   return (
     <span
       title={name + (simulated ? ' (simulated)' : '')}
-      className={cx('relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full text-[0.65rem] font-semibold text-white', simulated && 'ring-2 ring-dashed ring-line-strong')}
-      style={{ width: size, height: size, background: `hsl(${hue} 45% 45%)`, fontSize: size * 0.38 }}
+      className={cx('relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--r-avatar)] text-[0.65rem] font-semibold text-white', simulated && 'ring-2 ring-dashed ring-line-strong')}
+      style={{ width: size, height: size, background: `hsl(${hue} var(--avatar-s) var(--avatar-l))`, fontSize: size * 0.38 }}
     >
       {src && !broken ? <img src={src} alt="" className="size-full object-cover" onError={() => setBroken(true)} /> : initials(name)}
     </span>
@@ -184,8 +184,8 @@ export function ProgressBar({ value, tone = 'accent', className, marker }: { val
   const colors = { accent: 'bg-accent', ok: 'bg-ok', warn: 'bg-warn', danger: 'bg-danger' };
   const v = Math.max(0, Math.min(1, value || 0));
   return (
-    <div className={cx('relative h-1.5 w-full overflow-hidden rounded-full bg-surface-2', className)}>
-      <div className={cx('h-full rounded-full transition-all', colors[tone])} style={{ width: `${v * 100}%` }} />
+    <div className={cx('relative h-1.5 w-full overflow-hidden rounded-pill bg-surface-2', className)}>
+      <div className={cx('h-full rounded-pill transition-all', colors[tone])} style={{ width: `${v * 100}%` }} />
       {marker !== undefined && <div className="absolute top-0 h-full w-0.5 bg-fg/60" style={{ left: `${Math.min(1, marker) * 100}%` }} />}
     </div>
   );
@@ -194,7 +194,7 @@ export function ProgressBar({ value, tone = 'accent', className, marker }: { val
 /* ---------------------------------------------------------------- Forms */
 
 const inputCls =
-  'w-full rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60';
+  'w-full rounded-lg border border-control bg-surface px-3 py-2 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60';
 
 export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={cx(inputCls, 'h-9', props.className)} />;
@@ -227,7 +227,7 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
         aria-checked={checked}
         disabled={disabled}
         onClick={() => onChange(!checked)}
-        className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-line-strong')}
+        className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-control')}
       >
         <span className={cx('inline-block size-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4.5' : 'translate-x-0.5')} />
       </button>
@@ -314,8 +314,8 @@ export function CodeBlock({ code, className, maxHeight = 520 }: { code: string; 
 export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
   return (
     <div>
-      <div className="text-xs text-muted">{label}</div>
-      <div className="mt-0.5 text-lg font-semibold tabular-nums">{value}</div>
+      <div className="ui-stat-label text-xs text-muted">{label}</div>
+      <div className="ui-stat-value mt-0.5 text-lg font-semibold tabular-nums">{value}</div>
       {hint && <div className="text-xs text-muted">{hint}</div>}
     </div>
   );
@@ -328,7 +328,7 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       disabled={disabled}
       onClick={onClick}
       className={cx(
-        'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50',
+        'inline-flex items-center gap-1 rounded-pill border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50',
         active ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',
         className,
       )}

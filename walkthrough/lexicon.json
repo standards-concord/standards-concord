@@ -1,0 +1,15 @@
+{
+  "_comment": "How the narrator should say words it might get wrong. Keys match whole words, case-sensitively. Captions keep the original spelling.",
+  "SHACL": "shackle",
+  "SPARQL": "sparkle",
+  "OWL": "owl",
+  "ODI": "O D I",
+  "ODI's": "O D I's",
+  "MCP": "M C P",
+  "LinkML": "Link M L",
+  "FAIR": "fair",
+  "W3C": "W 3 C",
+  "WebAssembly": "Web Assembly",
+  "Turtle": "Turtle",
+  "IRI": "I R I"
+}

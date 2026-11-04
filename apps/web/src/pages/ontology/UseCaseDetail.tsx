@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { UseCaseDetail, UseCaseLink, UseCaseStatus } from '@concord/shared';
 import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
-import { Archive, ArrowLeft, ExternalLink, FileText, GitPullRequest, Link2, Lock, MessageSquareText, Send, Sparkles, Tag, Trash2, Undo2, Users, Workflow } from 'lucide-react';
+import { Archive, ArrowLeft, ExternalLink, FileText, GitPullRequest, Link2, Lock, MessageSquareText, Send, GitPullRequestDraft, Tag, Trash2, Undo2, Users, Workflow } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate } from '../../lib/format';
@@ -88,7 +88,7 @@ export function UseCaseDetailPage() {
                 </Button>
               )}
               {canDraft && (
-                <Button variant={draftIsNext ? 'primary' : 'secondary'} icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing the ontology changes this use case needs">
+                <Button variant={draftIsNext ? 'primary' : 'secondary'} icon={GitPullRequestDraft} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing the ontology changes this use case needs">
                   Draft changes
                 </Button>
               )}

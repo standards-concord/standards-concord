@@ -207,6 +207,30 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  walkthrough:
+    devDependencies:
+      '@rdfjs/wrapper':
+        specifier: 0.34.0
+        version: 0.34.0
+      '@types/node':
+        specifier: ^26.6.5
+        version: 26.6.5
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      n3:
+        specifier: ^2.13.12
+        version: 2.13.12
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^5.0.4
+        version: 5.0.4(@types/node@26.6.5)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(yaml@2.9.1))
+
 packages:
 
   '@anthropic-ai/sdk@0.133.0':
@@ -760,6 +784,10 @@ packages:
 
   '@rdfjs/types@2.0.1':
     resolution: {integrity: sha512-uyAzpugX7KekAXAHq26m3JlUIZJOC0uSBhpnefGV5i15bevDyyejoB7I+9MKeUrzXD8OOUI3+4FeV1wwQr5ihA==}
+
+  '@rdfjs/wrapper@0.34.0':
+    resolution: {integrity: sha512-psGw4IAH0E27P7Nlro0SzjqPJJ+aE3MkYKWfNbBk+vwT2Zt+gJJyuznuYg54peZs4rAF9FLoqCe4JdvQNDTzMw==}
+    engines: {node: '>=24.0.0'}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     resolution: {integrity: sha512-aWR+XKH9+rW7m5fWq/5360J3mHycrx/o6xZM2DQFdJnTMdyP7/WzxPjhtLbVWdKo2y612/4U1bWqb3HQhiF7vg==}
@@ -2959,6 +2987,8 @@ snapshots:
   '@rdfjs/types@2.0.1':
     dependencies:
       '@types/node': 26.6.5
+
+  '@rdfjs/wrapper@0.34.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     optional: true

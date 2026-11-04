@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react';
 import type { FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
-import { Download, Mic, Sparkles } from 'lucide-react';
+import { Download, Mic, ListChecks } from 'lucide-react';
 import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { download, formatDate } from '../lib/format';
@@ -91,7 +91,7 @@ export function AdminFeedbackPage() {
         subtitle={`${data.length} submission${data.length === 1 ? '' : 's'} · ${data.filter((d) => d.usedVoice).length} used voice`}
         actions={
           <>
-            <Button icon={Sparkles} loading={sum.pending} onClick={() => void sum.run()} disabled={!data.length}>
+            <Button icon={ListChecks} loading={sum.pending} onClick={() => void sum.run()} disabled={!data.length}>
               AI summary
             </Button>
             <Button icon={Download} disabled={!data.length} onClick={() => download('concord-feedback.json', JSON.stringify(data, null, 2), 'application/json')}>
@@ -106,7 +106,7 @@ export function AdminFeedbackPage() {
       <InlineError error={sum.error} />
       {summary && (
         <Card className="mb-6">
-          <CardHeader icon={Sparkles} title="Summary" />
+          <CardHeader icon={ListChecks} title="Summary" />
           <div className="space-y-4 p-5">
             <Markdown text={summary.summary} />
             {summary.themes.length > 0 && (

@@ -33,7 +33,8 @@ import { getUser, logActivity } from './users.js';
 /* Public view of use cases                                                  */
 /* ------------------------------------------------------------------------ */
 
-export const isPublishable = (u: UseCase) => u.visibility === 'public' && !u.withdrawnAt && !['draft', 'archived'].includes(u.status);
+export const isPublishable = (u: UseCase) =>
+  u.visibility === 'public' && !u.withdrawnAt && !['draft', 'archived'].includes(u.status) && (!!u.demoSeed || !getUser(u.authorId)?.simulated);
 
 /** What a use case's status will be once a given set of change requests is released. */
 function projectedStatus(u: UseCase, release?: { version: string; changeRequestIds: string[] }): { status: PublicUseCase['status']; coveredIn?: string } {
@@ -54,7 +55,9 @@ function projectedStatus(u: UseCase, release?: { version: string; changeRequestI
  */
 export function toPublic(u: UseCase, release?: { version: string; changeRequestIds: string[] }): PublicUseCase {
   if (!isPublishable(u)) throw new Error(`Use case ${u.id} is not public`);
-  const s = u.sections;
+  // A demo persona's use case is published as seeded, whatever testers have since typed into it.
+  const s = u.demoSeed?.sections ?? u.sections;
+  const questions = u.demoSeed?.competencyQuestions ?? u.competencyQuestions;
   const { status, coveredIn } = projectedStatus(u, release);
   const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x : undefined);
   const base = {
@@ -65,7 +68,7 @@ export function toPublic(u: UseCase, release?: { version: string; changeRequestI
     description: str(s.description),
     actors: str(s.actors),
     scenarios: (s.usageScenarios ?? []).filter((x): x is string => typeof x === 'string'),
-    competencyQuestions: u.competencyQuestions.map((q) => ({ question: String(q.question), ...(str(q.exampleAnswer) ? { exampleAnswer: q.exampleAnswer } : {}) })),
+    competencyQuestions: questions.map((q) => ({ question: String(q.question), ...(str(q.exampleAnswer) ? { exampleAnswer: q.exampleAnswer } : {}) })),
     status,
     ...(coveredIn ? { coveredIn } : {}),
   };
@@ -110,6 +113,16 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
   if (gone.size) out.withdrawnNote = `${gone.size} use case${gone.size === 1 ? ' was' : 's were'} withdrawn by ${gone.size === 1 ? 'its author' : 'their authors'} after this version was published, so ${gone.size === 1 ? 'it is' : 'they are'} no longer shown. The story above may still draw on ${gone.size === 1 ? 'it' : 'them'}, and the copy in the released files on GitHub cannot be recalled.`;
   if (!viewer || !isGroupMember(d.ontologyId, viewer)) delete out.unpublished;
   return out;
+}
+
+/** Of these use case ids, the ones that are gone or no longer public (withdrawn, made private or group-only). */
+export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
+  return new Set(
+    ids.filter((id) => {
+      const u = get<UseCase>('useCases', id);
+      return !u || u.ontologyId !== ontologyId || !!u.withdrawnAt || u.visibility !== 'public';
+    }),
+  );
 }
 
 /** True when a draft cites a use case that is no longer public: it must be written again, not patched. */
