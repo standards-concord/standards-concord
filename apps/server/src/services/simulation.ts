@@ -16,6 +16,7 @@ import { canApprove, canVote } from './governance.js';
 import { createFork, editFork } from './forks.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { releasePageHtml } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseTick, voteOnRelease } from './releases.js';
@@ -234,7 +235,6 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
       /* format not available */
     }
   }
-  const commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
   const now = clock.iso();
   const r: Release = {
     id: newId('rel'),
@@ -245,12 +245,13 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     changeRequestIds: [],
     notes,
     versionIRI: `${project.ontologyIRI}/${version}`,
-    commit,
     createdBy: steward.id,
     createdAt: now,
     publishedAt: now,
     statusSince: now,
   };
+  files['index.html'] = await releasePageHtml(project, r, stamped);
+  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
   put('releases', r, project.id);
   project.currentVersion = version;
   updateProject(project);

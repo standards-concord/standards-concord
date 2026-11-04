@@ -4,7 +4,7 @@ import { ArrowLeft, ExternalLink, Minus, Rocket, Scale, ThumbsDown, ThumbsUp } f
 import { api, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { formatDate, roleLabel } from '../../lib/format';
+import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
@@ -15,7 +15,7 @@ import { ReleaseStatus } from './Releases';
 
 export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
-  const { id, userById, hasRole, myRoles, reload } = useOntology();
+  const { id, ontology, userById, hasRole, myRoles, reload } = useOntology();
   const { session } = useSession();
   const state = useAsync(() => api.release(releaseId), [releaseId]);
   const act = useAction(async (fn: () => Promise<ReleaseDetail>) => {
@@ -50,6 +50,14 @@ export function ReleaseDetailPage() {
             <p className="mt-4 border-t border-line pt-3 text-xs text-muted">
               Drafted by {userById(r.createdBy)?.name ?? 'someone'} on {formatDate(r.createdAt)}
               {r.publishedAt && ` · published ${formatDate(r.publishedAt, true)}`}
+              {r.status === 'published' && (
+                <>
+                  {' · '}
+                  <a href={publicPageUrl(ontology.slug, r.version)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="release-public-page">
+                    Public page <ExternalLink className="size-3" aria-hidden />
+                  </a>
+                </>
+              )}
             </p>
             <Disclosure className="mt-2" tone="muted" title="Technical details" summary="version IRI, commit">
               <div className="space-y-1 text-xs text-muted">

@@ -6,8 +6,9 @@ import { mountAuth, sessionMiddleware } from './auth.js';
 import { config } from './config.js';
 import { HttpError } from './db.js';
 import { mcpHandler } from './mcp.js';
+import { publicRouter } from './public/routes.js';
 import { apiRouter } from './routes/api.js';
-import { forkResolver, versionFallback } from './routes/forkResolver.js';
+import { forkResolver } from './routes/forkResolver.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
 
@@ -35,9 +36,8 @@ export function createApp(): express.Express {
   app.use('/api', apiRouter());
   // Development forks, dereferenceable so applications can import them (/def/<ontology>/forks/<fork>).
   app.use(forkResolver());
-  // Released and draft versions at /def/<ontology>/<version>, where fork migration plans point.
-  // Last of the /def handlers, so the public ontology pages take these URLs over when present.
-  app.use(versionFallback());
+  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

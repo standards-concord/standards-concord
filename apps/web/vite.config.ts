@@ -18,8 +18,8 @@ export default defineConfig({
       '/api': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
       '/mcp': { target, changeOrigin: true },
-      // Dereferenceable ontology documents (not /definitely-a-page).
-      '^/def/': { target, changeOrigin: true },
+      // Public ontology pages and fork documents; the regex keeps app routes such as /definitions out.
+      '^/def/': { target, changeOrigin: false },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },

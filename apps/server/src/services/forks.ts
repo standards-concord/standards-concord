@@ -15,6 +15,7 @@ import type {
 } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
+import { PUBLIC_BASE } from '../public/w3id.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import type { ProposedTerm } from '../llm/schemas.js';
@@ -53,8 +54,6 @@ import { getUser, logActivity, publicUser } from './users.js';
  *   that differs from the base means both sides changed it, a conflict.
  */
 
-/** Where public ontology documents live; fork documents sit under /def/<slug>/forks/. */
-const PUBLIC_BASE = '/def';
 const OPEN_CR = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
 const CR_STATE: Record<string, string> = {
   draft: 'a draft',
@@ -140,7 +139,7 @@ export function forkUrls(p: Pick<OntologyProject, 'slug'>, f: Pick<OntologyFork,
   return { iri, formats: documentUrls(iri), app: `${config.webUrl}/o/${encodeURIComponent(p.slug)}/forks/${encodeURIComponent(f.slug)}` };
 }
 
-/** Public URL of a released version, or of the working draft (served by routes/forkResolver.ts until the public pages land). */
+/** Public URL of a released version, or of the working draft (the public pages, public/routes.ts); fork documents sit under /def/<slug>/forks/. */
 export const versionUrl = (p: Pick<OntologyProject, 'slug'>, version: string | 'draft') => `${publicRoot(p)}/${version}`;
 const releaseVersionIRI = (p: OntologyProject, version: string) => `${p.ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 

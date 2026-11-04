@@ -1,7 +1,7 @@
 import { FORMAT_INFO, serialize } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import { Router, type Request, type Response } from 'express';
-import { config } from '../config.js';
+import { NEGOTIABLE, splitExtension } from '../public/routes.js';
 import { findFork, forkUrls, forkVersion } from '../services/forks.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -18,28 +18,8 @@ import { ontologyStore } from '../services/ontologyStore.js';
  * web application can load the fork straight from the browser.
  */
 
-/** Media types answered by content negotiation (LinkML and SHACL are by extension only). */
-const NEGOTIABLE: Record<string, OutputFormat | 'html'> = {
-  'text/turtle': 'turtle',
-  'application/x-turtle': 'turtle',
-  'application/ld+json': 'jsonld',
-  'application/rdf+xml': 'rdfxml',
-  'application/owl+xml': 'rdfxml',
-  'application/n-triples': 'ntriples',
-  'text/owl-manchester': 'manchester',
-  'text/html': 'html',
-  'application/xhtml+xml': 'html',
-};
-
-/** Longest extension first, so ".shacl.ttl" wins over ".ttl". */
-const EXTENSIONS = (Object.entries(FORMAT_INFO) as [OutputFormat, (typeof FORMAT_INFO)[OutputFormat]][])
-  .map(([format, info]) => [info.extension, format] as const)
-  .sort((a, b) => b[0].length - a[0].length);
-
-function splitExtension(segment: string): { base: string; format?: OutputFormat } {
-  for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
-  return { base: segment };
-}
+/** Content negotiation as for the public pages, but Turtle first, so clients that send *\/* (curl, fetch) get RDF rather than a redirect. */
+const NEGOTIABLE_TYPES = Object.keys(NEGOTIABLE).sort((a, b) => Number(NEGOTIABLE[a] === 'html') - Number(NEGOTIABLE[b] === 'html'));
 
 function plain(res: Response, status: number, message: string) {
   res.status(status).type('text/plain').send(message);
@@ -57,9 +37,8 @@ async function serve(req: Request, res: Response) {
 
   let format: OutputFormat | 'html' | undefined = seg.format;
   if (!format) {
-    // Turtle first, so clients that send */* (curl, fetch) get RDF rather than a redirect.
-    const best = req.accepts(Object.keys(NEGOTIABLE));
-    if (!best) return plain(res, 406, `Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl`);
+    const best = req.accepts(NEGOTIABLE_TYPES);
+    if (!best) return plain(res, 406, `Not acceptable. Available: ${NEGOTIABLE_TYPES.join(', ')}, or add an extension such as .ttl`);
     format = NEGOTIABLE[best];
     res.vary('Accept');
   }
@@ -82,62 +61,6 @@ async function serve(req: Request, res: Response) {
   res.type(`${info.mediaType}; charset=utf-8`);
   res.set('Content-Disposition', `inline; filename="${project.slug}-fork-${fork.slug}.${info.extension}"`);
   res.send(await serialize(graph, format));
-}
-
-/**
- * The main ontology's versions at the URLs fork migration plans point to:
- *
- *   /def/<ontology>/<version>   a released version (or "latest")
- *   /def/<ontology>/draft       the working draft, which changes until the next release
- *
- * with the same extensions and negotiation as forks. The public ontology
- * pages serve these URLs with HTML documentation when they are deployed;
- * this resolver is mounted after them, so it only answers when they don't.
- */
-async function serveVersion(req: Request, res: Response) {
-  res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Expose-Headers', 'Link, Content-Type');
-  const project = findProject(String(req.params.slug));
-  if (!project) return plain(res, 404, `There is no ontology called “${req.params.slug}”.`);
-  const seg = splitExtension(String(req.params.version));
-  const releases = ontologyStore.versions(project);
-  const version = seg.base === 'latest' ? releases.at(-1) : seg.base;
-  if (!version || (version !== 'draft' && !releases.includes(version))) return plain(res, 404, `${project.title} has no version “${seg.base}”. Released: ${releases.join(', ') || 'none yet'}; or use “draft”.`);
-  let format: OutputFormat | 'html' | undefined = seg.format;
-  if (!format) {
-    const best = req.accepts(Object.keys(NEGOTIABLE));
-    if (!best) return plain(res, 406, `Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl`);
-    format = NEGOTIABLE[best];
-    res.vary('Accept');
-  }
-  const app = `${config.webUrl}/o/${encodeURIComponent(project.slug)}${version === 'draft' ? '' : '/releases'}`;
-  if (format === 'html') return res.redirect(303, app);
-  const graph = version === 'draft' ? await ontologyStore.working(project) : await ontologyStore.at(project, version);
-  const info = FORMAT_INFO[format];
-  const etag = version === 'draft' ? ontologyStore.head(project) : version;
-  res.set('Cache-Control', version === 'draft' ? 'no-cache' : 'public, max-age=3600');
-  res.set('ETag', `"${etag}-${format}"`);
-  if (req.fresh) return void res.status(304).end();
-  res.type(`${info.mediaType}; charset=utf-8`);
-  res.set('Content-Disposition', `inline; filename="${project.slug}-${version}.${info.extension}"`);
-  res.send(await serialize(graph, format));
-}
-
-/** Mount after any other /def handlers: answers released and draft versions of the main ontology. */
-export function versionFallback(): Router {
-  const r = Router();
-  r.options('/def/:slug/:version', (_req, res) => {
-    res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS', 'Access-Control-Allow-Headers': 'Accept' });
-    res.status(204).end();
-  });
-  r.get('/def/:slug/:version', async (req, res, next) => {
-    try {
-      await serveVersion(req, res);
-    } catch (err) {
-      next(err);
-    }
-  });
-  return r;
 }
 
 export function forkResolver(): Router {

@@ -212,6 +212,6 @@ describe('migration', () => {
     expect(released.text).not.toContain('vol:Resolvable');
     expect((await request(app).get('/def/volunteering/latest').set('Accept', 'text/turtle')).status).toBe(200);
     expect((await request(app).get('/def/volunteering/9.9.9.ttl')).status).toBe(404);
-    expect((await request(app).get('/def/volunteering/draft').set('Accept', 'text/html')).status).toBe(303);
+    expect((await request(app).get('/def/volunteering/draft').set('Accept', 'text/html')).status).toBe(200);
   });
 });
