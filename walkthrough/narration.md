@@ -55,10 +55,10 @@ And the third is governance without endless meetings. Every change is classified
 Let's look inside. The Browse page shows the classes and their relationships, so you can get a feel for the model before you read a line of code.
 
 [do: open-formats turtle]
-Formats shows the same ontology however you need it. Turtle is the canonical form, and it's what we keep in git.
+Source and export shows the same ontology however you need it. Turtle is the canonical form, and it's what we keep in git.
 
 [do: show-format linkml]
-LinkML is there too, because the ODI uses it internally to generate schemas and documentation.
+LinkML is there too, for teams that generate schemas and documentation from one model.
 
 [do: show-format shacl]
 And there are SHACL shapes, generated from the OWL, for validating data.
@@ -71,7 +71,7 @@ The shapes are also available in SHACL compact syntax, which is far easier to re
 ## Classes for developers {#classes-tab requires=jsClasses}
 
 [do: show-format typescript]
-And for developers there's a Classes tab: JavaScript and TypeScript classes generated from those shapes, which an app can import straight from the standard's address. We'll use them in a moment.
+And for developers there's a Classes format: JavaScript and TypeScript classes generated from those shapes, which an app can import straight from the standard's address. We'll use them in a moment.
 
 ## Querying in the browser {#query}
 
