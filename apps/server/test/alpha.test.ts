@@ -6,6 +6,8 @@ import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { changeQuestions, FEEDBACK_QUESTIONS, questionsFor } from '../src/services/feedback.js';
 import { createUser, upsertFederatedUser } from '../src/services/users.js';
+import { mergeTesterRecords, normaliseVersions, recordVersion } from '../src/services/alpha.js';
+import { solid } from '../src/services/solid.js';
 
 const app = createApp();
 
@@ -93,7 +95,9 @@ describe('feedback about what changed', () => {
     const expected = changesFor(changesSince('0.6.0'), 'agent').filter((c) => c.type !== 'fix' || c.ask);
     expect(newIds).toEqual(expected.slice(0, 6).map((c) => `new:${c.id}`));
     // The agent's own changes come first, newest first.
-    expect(newIds.slice(0, 3)).toEqual(['new:chatgpt', 'new:agent-pages', 'new:mcp-oauth']);
+    const agentsOwn = expected.filter((c) => c.roles.includes('agent')).map((c) => `new:${c.id}`);
+    expect(agentsOwn).toEqual(expect.arrayContaining(['new:chatgpt', 'new:agent-pages', 'new:mcp-oauth']));
+    expect(newIds.slice(0, Math.min(6, agentsOwn.length))).toEqual(agentsOwn.slice(0, 6));
     expect(qs.map((q) => q.id)).toEqual(expect.arrayContaining(['new:other', 'overall', 'missing', 'comments']));
     // Nothing from the full questionnaire about the whole app (e.g. governance) is asked again.
     expect(qs.some((q) => q.id.startsWith('gov_'))).toBe(false);
@@ -108,10 +112,12 @@ describe('feedback about what changed', () => {
   it('serves the change questions and walks through them in the chat', async () => {
     const q = await request(app).get('/api/feedback/questions').query({ pathway: 'changes', since: '0.7.0', role: 'agent' });
     expect(q.status).toBe(200);
-    expect(q.body.slice(0, 2).map((x: { id: string }) => x.id)).toEqual(['new:chatgpt', 'new:agent-pages']);
+    const firstForAgents = changesFor(changesSince('0.7.0'), 'agent').filter((c) => c.type !== 'fix' || c.ask)[0];
+    expect(firstForAgents.roles).toContain('agent');
+    expect(q.body[0].id).toBe(`new:${firstForAgents.id}`);
     const chat = await request(app).post('/api/feedback/chat').send({ pathway: 'changes', since: '0.7.0', role: 'agent', messages: [], answers: {} });
     expect(chat.status).toBe(200);
-    expect(chat.body.nextQuestionId).toBe('new:chatgpt');
+    expect(chat.body.nextQuestionId).toBe(`new:${firstForAgents.id}`);
     expect(chat.body.reply).toMatch(/What’s new since 0\.7\.0/);
   });
 });
@@ -187,5 +193,46 @@ describe('alpha tester records', () => {
     expect((await upsertFederatedUser({ provider: 'github', subject: 'gh-link-1', name: 'Real Name' })).id).toBe(demo.id);
     const other = await createUser({ name: 'Alpha tester', provider: 'demo', subject: 'tester_link_2' });
     expect((await upsertFederatedUser({ provider: 'github', subject: 'gh-link-1', name: 'Real Name' }, other)).id).toBe(demo.id);
+  });
+
+  it('survives a malformed record in the pod', async () => {
+    const u = await createUser({ name: 'Messy pod', provider: 'demo', subject: 'messy' });
+    await solid.write(u.id, 'alpha/testing.jsonld', JSON.stringify({ versions: [{ version: '0.7.0', roles: {}, feedbackIds: 'x' }, { version: 42 }, null, { version: '0.7.0', roles: ['agent', 'nope'], firstAt: 'yesterday' }] }));
+    const r = await recordVersion(u, { version: '0.8.0', role: 'member' });
+    expect(r.versions).toEqual([
+      expect.objectContaining({ version: '0.8.0', roles: ['member'], feedbackIds: [] }),
+      expect.objectContaining({ version: '0.7.0', roles: ['agent'], feedbackIds: [] }),
+    ]);
+    await solid.write(u.id, 'alpha/testing.jsonld', 'not json');
+    expect((await recordVersion(u, { version: '0.8.0' })).versions.map((v) => v.version)).toEqual(['0.8.0']);
+    expect(normaliseVersions({ versions: 1 })).toEqual([]);
+  });
+
+  it('keeps every update when several arrive at once', async () => {
+    const u = await createUser({ name: 'Many tabs', provider: 'demo', subject: 'tabs' });
+    await Promise.all([
+      recordVersion(u, { version: '0.6.0' }),
+      recordVersion(u, { version: '0.7.0', role: 'agent' }),
+      recordVersion(u, { version: '0.7.0', role: 'member' }),
+      recordVersion(u, { version: '0.8.0', feedbackId: 'fb_one' }),
+      recordVersion(u, { version: '0.8.0', feedbackId: 'fb_two' }),
+    ]);
+    const all = (await recordVersion(u, { version: '0.8.1' })).versions;
+    expect(all.map((v) => v.version)).toEqual(['0.8.1', '0.8.0', '0.7.0', '0.6.0']);
+    expect(all.find((v) => v.version === '0.7.0')?.roles?.sort()).toEqual(['agent', 'member']);
+    expect(all.find((v) => v.version === '0.8.0')?.feedbackIds.sort()).toEqual(['fb_one', 'fb_two']);
+  });
+
+  it('moves a demo tester’s record into the existing account they sign in to', async () => {
+    const existing = await upsertFederatedUser({ provider: 'github', subject: 'gh-existing-1', name: 'Existing' });
+    await recordVersion(existing, { version: '0.6.0', feedbackId: 'fb_old' });
+    const demo = await createUser({ name: 'Alpha tester', provider: 'demo', subject: 'tester_merge' });
+    await recordVersion(demo, { version: '0.8.0', role: 'agent', feedbackId: 'fb_new' });
+    await solid.write(demo.id, 'feedback/fb_new.json', '{"id":"fb_new"}', 'application/json');
+    await mergeTesterRecords(demo, existing);
+    const after = (await recordVersion(existing, { version: '0.6.0' })).versions;
+    expect(after.map((v) => v.version)).toEqual(['0.8.0', '0.6.0']);
+    expect(after[0]).toMatchObject({ roles: ['agent'], feedbackIds: ['fb_new'] });
+    expect(await solid.read(existing.id, 'feedback/fb_new.json')).toBe('{"id":"fb_new"}');
   });
 });

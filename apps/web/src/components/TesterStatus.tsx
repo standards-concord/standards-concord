@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { ArrowRight, Bug, History, KeyRound, Sparkles } from 'lucide-react';
 import { APP_RELEASES, type ChangeWithRelease } from '@concord/shared';
@@ -11,7 +11,7 @@ import { TESTER_ROLES } from '../lib/walkthrough';
 import { formatDate } from '../lib/format';
 import { GitHubIcon, GoogleIcon } from './badges';
 import { Disclosure } from './Disclosure';
-import { Badge, Button, Card, InlineError, Select, cx } from './ui';
+import { Badge, Button, Card, InlineError, Select, buttonClasses, cx } from './ui';
 
 /**
  * The alpha tester's status, for the top of the alpha pages: the version of
@@ -102,17 +102,13 @@ function OAuthButtons({ returnTo }: { returnTo: string }) {
   return (
     <div className="flex flex-wrap gap-2">
       {session.providers.google && (
-        <a href={api.oauthUrl('google', returnTo)}>
-          <Button size="sm">
-            <GoogleIcon /> Sign in with Google
-          </Button>
+        <a href={api.oauthUrl('google', returnTo)} className={buttonClasses('secondary', 'sm')}>
+          <GoogleIcon /> Sign in with Google
         </a>
       )}
       {session.providers.github && (
-        <a href={api.oauthUrl('github', returnTo)}>
-          <Button size="sm">
-            <GitHubIcon /> Sign in with GitHub
-          </Button>
+        <a href={api.oauthUrl('github', returnTo)} className={buttonClasses('secondary', 'sm')}>
+          <GitHubIcon /> Sign in with GitHub
         </a>
       )}
     </div>
@@ -186,29 +182,29 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
   );
 }
 
-function VersionPicker({ onPicked }: { onPicked?: () => void }) {
+function VersionPicker({ id, onPicked }: { id: string; onPicked?: () => void }) {
   const t = useTester();
-  const id = useId();
   return (
     <div className="flex max-w-xl flex-wrap items-center gap-2 text-sm">
       <label htmlFor={id} className="font-medium">
-        Last version you tested
+        {t.hasHistory ? 'Compare with' : 'Last version you tested'}
       </label>
       <Select
         id={id}
         className="h-8 w-auto max-w-full text-xs"
-        value={t.since ?? (t.sinceSource === 'picked' ? 'first' : '')}
+        value={t.since ?? (t.baselineSource === 'picked' ? 'first' : '')}
         onChange={(e) => {
           const v = e.target.value;
-          t.pickSince(v === 'first' ? null : v || undefined);
           onPicked?.();
+          t.pickSince(v === 'first' ? null : v || undefined);
         }}
       >
-        {!t.since && t.sinceSource !== 'picked' && <option value="">Choose…</option>}
-        <option value="first">This is my first time</option>
+        {!t.since && t.baselineSource !== 'picked' && <option value="">Choose…</option>}
+        {!t.hasHistory && <option value="first">This is my first time</option>}
         {t.earlier.map((r) => (
           <option key={r.version} value={r.version}>
             {r.version}: {r.title} ({formatDate(r.date)})
+            {r.version === t.baseline && t.hasHistory ? ' (last tested)' : ''}
           </option>
         ))}
       </Select>
@@ -216,59 +212,71 @@ function VersionPicker({ onPicked }: { onPicked?: () => void }) {
   );
 }
 
-const SOURCE_LABEL = { picked: 'you picked it', pod: 'from your pod', browser: 'from this browser' } as const;
+const SOURCE_LABEL = { picked: 'you picked it', pod: 'from your pod', browser: 'from this browser', compare: 'comparing' } as const;
 
-/** What changed since the tester's last version, or a picker to find out. */
+/**
+ * What changed since the tester's last version, or a picker to find out. The
+ * picker stays open while they try versions, until they press Done, which
+ * returns focus to the button that opened it; a status line announces the result.
+ */
 export function WhatsChanged() {
   const t = useTester();
   const demo = useDemoOntology();
-  const [picking, setPicking] = useState(false);
   const role = TESTER_ROLES.find((r) => r.key === t.roleKey);
-
-  if (!t.since)
-    return (
-      <div className="space-y-2" role="region" aria-label="What’s changed">
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <History className="size-4 text-accent" aria-hidden /> Tested Concord before?
-        </h2>
-        {t.sinceSource === 'picked' && !picking ? (
-          <p className="text-sm text-muted">
-            Welcome! Everything is new to you, so the walkthrough covers it all.{' '}
-            <button type="button" className="text-accent hover:underline" onClick={() => setPicking(true)}>
-              I have tested before
-            </button>
-          </p>
-        ) : (
-          <>
-            <p className="text-sm text-muted">Pick the last version you tried and we’ll show you what’s changed since, point you at it, and ask about that rather than everything.</p>
-            <VersionPicker onPicked={() => setPicking(false)} />
-          </>
-        )}
-      </div>
-    );
-
+  const pickerId = useId();
+  const toggle = useRef<HTMLButtonElement>(null);
+  const undecided = !t.since && t.baselineSource !== 'picked';
+  const [picking, setPicking] = useState(false);
+  const showPicker = picking || undecided;
+  const done = () => {
+    setPicking(false);
+    requestAnimationFrame(() => toggle.current?.focus());
+  };
+  const n = t.changes.length;
+  const status = t.since ? `Showing ${n} change${n === 1 ? '' : 's'} since ${t.since}.` : t.baselineSource === 'picked' ? 'First time testing: everything is new to you.' : '';
   const shown = t.forRole.slice(0, 5);
   const rest = t.forRole.slice(5);
+
   return (
     <div className="space-y-3" role="region" aria-label="What’s changed">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <History className="size-4 text-accent" aria-hidden /> What’s changed since {t.since}
+          <History className="size-4 text-accent" aria-hidden /> {t.since ? `What’s changed since ${t.since}` : 'Tested Concord before?'}
         </h2>
-        <span className="text-xs text-muted">
-          {t.changes.length} change{t.changes.length === 1 ? '' : 's'} · {SOURCE_LABEL[t.sinceSource!]} ·{' '}
-          <button type="button" className="text-accent hover:underline" onClick={() => setPicking((p) => !p)} aria-expanded={picking}>
-            {picking ? 'Done' : 'Compare with another version'}
-          </button>
-        </span>
+        {!undecided && (
+          <span className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
+            {t.since && (
+              <span>
+                {n} change{n === 1 ? '' : 's'} · {SOURCE_LABEL[t.sinceSource!]}
+              </span>
+            )}
+            {t.sinceSource === 'compare' && (
+              <button type="button" className="text-accent hover:underline" onClick={() => t.pickSince(undefined)}>
+                Back to {t.baseline ? `your last tested version (${t.baseline})` : 'your history'}
+              </button>
+            )}
+            <button ref={toggle} type="button" className="text-accent hover:underline" aria-expanded={showPicker} aria-controls={pickerId} onClick={() => (picking ? done() : setPicking(true))}>
+              {picking ? 'Done' : t.hasHistory ? 'Compare with another version' : 'Change'}
+            </button>
+          </span>
+        )}
       </div>
-      {picking && <VersionPicker onPicked={() => setPicking(false)} />}
-      {role && t.forRole.some((c) => c.roles.includes(role.key)) && <p className="text-xs text-muted">Changes for {role.title.toLowerCase()}s come first.</p>}
-      <ChangeList changes={shown} demoId={demo?.id} />
-      {rest.length > 0 && (
-        <Disclosure tone="muted" title={<span className="text-xs">Show all {t.changes.length} changes</span>}>
-          <ChangeList changes={rest} demoId={demo?.id} />
-        </Disclosure>
+      <p role="status" aria-live="polite" className="sr-only">
+        {status}
+      </p>
+      {undecided && <p className="text-sm text-muted">Pick the last version you tried and we’ll show you what’s changed since, point you at it, and ask about that rather than everything.</p>}
+      {showPicker && <VersionPicker id={pickerId} onPicked={() => setPicking(true)} />}
+      {!t.since && t.baselineSource === 'picked' && <p className="text-sm text-muted">Welcome! Everything is new to you, so the walkthrough covers it all.</p>}
+      {t.since && (
+        <>
+          {role && t.forRole.some((c) => c.roles.includes(role.key)) && <p className="text-xs text-muted">Changes for {role.title.toLowerCase()}s come first.</p>}
+          {n === 0 ? <p className="text-sm text-muted">Nothing has changed since then.</p> : <ChangeList changes={shown} demoId={demo?.id} />}
+          {rest.length > 0 && (
+            <Disclosure tone="muted" title={<span className="text-xs">Show all {n} changes</span>}>
+              <ChangeList changes={rest} demoId={demo?.id} />
+            </Disclosure>
+          )}
+        </>
       )}
     </div>
   );

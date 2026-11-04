@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.11.0',
+    version: '0.12.0',
     date: '2026-11-04',
     title: 'Returning testers see what changed',
     changes: [
@@ -65,6 +65,54 @@ export const APP_RELEASES: AppRelease[] = [
           'The alpha pages show which version you’re testing. Sign in and Concord saves the version and your feedback to your own pod; next time it shows what changed, points your role at the new parts and asks about those rather than everything.',
         roles: [],
         ask: 'How useful is seeing what’s changed since your last visit, rather than starting over?',
+      },
+    ],
+  },
+  {
+    version: '0.11.1',
+    date: '2026-11-04',
+    title: 'Tidier ontology header',
+    pr: 33,
+    changes: [
+      {
+        id: 'header-alignment',
+        type: 'fix',
+        title: 'Header chips and the health breakdown line up',
+        detail: 'The chips in each ontology’s header and the breakdown behind its health status are aligned.',
+        roles: [],
+      },
+    ],
+  },
+  {
+    version: '0.11.0',
+    date: '2026-11-04',
+    title: 'Source & export, and Query & validate',
+    pr: 13,
+    changes: [
+      {
+        id: 'source-export',
+        type: 'feat',
+        title: 'Pick a format from one dropdown on Source & export',
+        detail: 'The Source page is now Source & export, with every format (Turtle, LinkML, JSON-LD, SHACL and the rest) in one dropdown.',
+        roles: ['steward', 'contributor', 'agent', 'odi'],
+        to: '{o}/source',
+        tasks: ['linkml'],
+        ask: 'Could you find the format you wanted on Source & export?',
+      },
+      {
+        id: 'query-workspace',
+        type: 'feat',
+        title: 'Query & validate shows one workspace at a time',
+        detail: 'Query & validate puts the query builder, the SPARQL editor and SHACL validation one at a time, and long results are paginated.',
+        roles: ['steward', 'agent', 'contributor'],
+        to: '{o}/query',
+      },
+      {
+        id: 'query-builder-fixes',
+        type: 'fix',
+        title: 'Query builder fixes',
+        detail: 'Number filters accept every number format, and the builder’s queries match what it shows.',
+        roles: [],
       },
     ],
   },

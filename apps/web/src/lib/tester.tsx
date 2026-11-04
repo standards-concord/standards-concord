@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   APP_RELEASES,
   APP_VERSION,
@@ -20,16 +20,18 @@ import { useSession } from './session';
  * Which version of Concord an alpha tester is using, which one they tested
  * last, and what changed in between.
  *
- * The last tested version comes from, in order: what the tester picked on the
- * alpha page, the record in their pod (when signed in), or the versions this
- * browser has seen.
+ * The last tested version (the baseline) comes from, in order: the record in
+ * their pod (when signed in), the versions this browser has been used with, or,
+ * when neither knows, the version the tester picked (saved per tester). Picking
+ * another version when the history is known is a temporary comparison that
+ * lasts until "Back to …" or a reload.
  */
 
 /** Short commit of this web build, when the build knew it. */
 export const APP_COMMIT: string = (import.meta.env.VITE_APP_COMMIT as string | undefined) ?? '';
 export const CURRENT_RELEASE: AppRelease = APP_RELEASES[0];
 
-export type SinceSource = 'picked' | 'pod' | 'browser';
+export type SinceSource = 'picked' | 'pod' | 'browser' | 'compare';
 
 interface TesterCtx {
   version: string;
@@ -42,7 +44,15 @@ interface TesterCtx {
   /** The version they last tested, if known. Undefined for a first-time tester. */
   since?: string;
   sinceSource?: SinceSource;
-  /** Pick the version they last tested; `null` means "this is my first time", `undefined` clears the choice. */
+  /** Where the baseline came from when nothing is being compared. */
+  baseline?: string;
+  baselineSource?: Exclude<SinceSource, 'compare'>;
+  /** True when the pod or this browser knows an earlier version, so a pick is only a comparison. */
+  hasHistory: boolean;
+  /**
+   * Pick a version: with no history it becomes the saved baseline (`null` = "this is my first time");
+   * with history it is a temporary comparison. `undefined` clears either.
+   */
   pickSince: (v: string | null | undefined) => void;
   /** Everything that changed since `since`, newest first. */
   changes: ChangeWithRelease[];
@@ -61,9 +71,11 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
   const { session } = useSession();
   const userId = session?.user?.id;
   const me = useAsync(() => api.alphaMe(), [userId]);
-  // What the tester picked here ("first" = first time), and which versions this browser has been used with.
-  const [picked, setPicked] = useLocalStorage<string | null>('concord.alpha.since', null);
+  // What each tester (or anyone signed out) said they last tested ("first" = first time), and the
+  // versions this browser has been used with.
+  const [picks, setPicks] = useLocalStorage<Record<string, string>>('concord.alpha.picks', {});
   const [seen, setSeen] = useLocalStorage<string[]>('concord.alpha.seen', []);
+  const [compare, setCompare] = useState<string>();
 
   useEffect(() => {
     if (!seen.includes(APP_VERSION)) setSeen((s) => [...new Set([...s, APP_VERSION])]);
@@ -78,8 +90,8 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     if (!tester) return;
     const key = `${tester.id}:${APP_VERSION}:${roleKey ?? ''}`;
     if (recorded.current === key) return;
-    const entry = me_.versions.find((v) => v.version === APP_VERSION);
-    if (entry && (!roleKey || entry.roles?.includes(roleKey))) {
+    const entry = me_.versions.find((v) => v?.version === APP_VERSION);
+    if (entry && (!roleKey || (Array.isArray(entry.roles) && entry.roles.includes(roleKey)))) {
       recorded.current = key;
       return;
     }
@@ -92,15 +104,23 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
       });
   }, [me_, roleKey, setMe]);
 
+  const testerKey = me_?.tester?.id ?? 'anon';
   const value = useMemo<TesterCtx>(() => {
-    const fromPod = me_ ? lastTestedBefore(me_.versions) : undefined;
-    const fromBrowser = lastTestedBefore(seen.map((version) => ({ version })));
-    let since: string | undefined;
-    let sinceSource: SinceSource | undefined;
-    if (picked === 'first') sinceSource = 'picked';
-    else if (picked && findRelease(picked) && compareVersions(picked, APP_VERSION) < 0) [since, sinceSource] = [findRelease(picked)!.version, 'picked'];
-    else if (fromPod) [since, sinceSource] = [fromPod, 'pod'];
-    else if (fromBrowser) [since, sinceSource] = [fromBrowser, 'browser'];
+    const valid = (v: string | undefined) => (v && findRelease(v) && compareVersions(v, APP_VERSION) < 0 ? findRelease(v)!.version : undefined);
+    const versions = Array.isArray(me_?.versions) ? me_.versions.filter((v) => typeof v?.version === 'string') : [];
+    const fromPod = lastTestedBefore(versions);
+    const fromBrowser = lastTestedBefore((Array.isArray(seen) ? seen : []).filter((v) => typeof v === 'string').map((version) => ({ version })));
+    const pick = picks?.[testerKey] ?? (testerKey !== 'anon' ? picks?.anon : undefined);
+    let baseline: string | undefined;
+    let baselineSource: TesterCtx['baselineSource'];
+    if (fromPod) [baseline, baselineSource] = [fromPod, 'pod'];
+    else if (fromBrowser) [baseline, baselineSource] = [fromBrowser, 'browser'];
+    else if (pick === 'first') baselineSource = 'picked';
+    else if (valid(pick)) [baseline, baselineSource] = [valid(pick), 'picked'];
+    const hasHistory = !!(fromPod || fromBrowser);
+    const compared = valid(compare);
+    const since = compared ?? baseline;
+    const sinceSource: SinceSource | undefined = compared ? 'compare' : baselineSource;
     const changes = since ? changesSince(since) : [];
     return {
       version: APP_VERSION,
@@ -111,14 +131,25 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
       reloadMe: me.reload,
       since,
       sinceSource,
-      pickSince: (v) => setPicked(v === null ? 'first' : (v ?? null)),
+      baseline,
+      baselineSource,
+      hasHistory,
+      pickSince: (v) => {
+        if (hasHistory) return setCompare(v && v !== baseline ? v : undefined);
+        setPicks((p) => {
+          const next = { ...(p ?? {}) };
+          if (v === undefined) delete next[testerKey];
+          else next[testerKey] = v === null ? 'first' : v;
+          return next;
+        });
+      },
       changes,
       forRole: changesFor(changes, roleKey),
       newForRole: (role) => changes.filter((c) => c.roles.includes(role)),
       earlier: APP_RELEASES.filter((r) => compareVersions(r.version, APP_VERSION) < 0),
       roleKey,
     };
-  }, [me_, me.loading, me.error, me.reload, seen, picked, setPicked, roleKey]);
+  }, [me_, me.loading, me.error, me.reload, seen, picks, setPicks, compare, testerKey, roleKey]);
 
   return <C.Provider value={value}>{children}</C.Provider>;
 }

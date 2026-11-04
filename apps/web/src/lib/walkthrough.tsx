@@ -31,6 +31,8 @@ interface Ctx extends State {
   reset: () => void;
   /** Demo ontology detail (members) for role display; undefined while loading. */
   demo?: OntologyDetail;
+  /** True while the demo's members (and so the tester's roles) are loading. */
+  demoLoading: boolean;
   reloadDemo: () => Promise<void>;
   myRoles: Role[];
 }
@@ -60,6 +62,7 @@ export function WalkthroughProvider({ children }: { children: ReactNode }) {
     toggleTask: (id) => setState((s) => ({ ...s, done: { ...s.done, [id]: !s.done[id] } })),
     reset: () => setState({ ...INITIAL, started: true }),
     demo: demoState.data,
+    demoLoading: demoState.loading,
     reloadDemo: demoState.reload,
     myRoles,
   };

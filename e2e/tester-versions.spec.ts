@@ -1,5 +1,9 @@
 import { test, expect, expectNoCrash, settle } from './fixtures';
-import { APP_RELEASES, APP_VERSION, changesSince } from '../packages/shared/src/appReleases';
+import { APP_RELEASES, APP_VERSION, changesFor, changesSince, type AppChange } from '../packages/shared/src/appReleases';
+
+/** The start of the question the feedback chat asks about a change (see changeQuestions on the server). */
+const questionAbout = (c: AppChange) => (c.ask ?? `how well does this work for you: ${c.title}`).slice(0, 30);
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * App versions for alpha testers: the alpha page says which version you're
@@ -83,8 +87,10 @@ test('a returning tester’s versions and feedback are saved to their pod and st
   await agents.getByRole('button').first().click();
   await agents.getByRole('button', { name: 'Join as a new agent developer' }).click();
   await expect(page.getByRole('heading', { name: '3. Explore the demo' })).toBeVisible();
+  const forAgents = changesFor(changesSince('0.7.0'), 'agent').filter((c) => c.type !== 'fix' || c.ask);
+  expect(forAgents[0].roles).toContain('agent');
   const whatsNew = page.getByRole('region', { name: 'New since 0.7.0' });
-  await expect(whatsNew.getByRole('listitem', { name: 'Agent reports and “Connect an agent” are separate' })).toBeVisible();
+  await expect(whatsNew.getByRole('listitem', { name: forAgents[0].title })).toBeVisible();
   await expect(whatsNew.getByText('For your role').first()).toBeVisible();
   await expect(page.getByRole('group', { name: 'Suggested next task' }).getByText('Changed since 0.7.0')).toBeVisible();
   // Still the same tester, so the record stays theirs.
@@ -93,12 +99,13 @@ test('a returning tester’s versions and feedback are saved to their pod and st
   // Feedback on what changed goes to the tester's pod with the version they tested.
   await page.goto('/feedback');
   await page.getByRole('button', { name: /What’s changed since 0\.7\.0/ }).click();
-  // Agents' changes first, newest first.
-  await expect(page.getByText(/If you use ChatGPT, could you connect it/).first()).toBeVisible({ timeout: 20_000 });
+  // Agents' changes first, newest first; one can be skipped.
+  const chat = page.getByRole('main');
+  await expect(chat.getByText(new RegExp(esc(questionAbout(forAgents[0])))).first()).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
-  await expect(page.getByText(/Is it clear where to connect an agent/).first()).toBeVisible({ timeout: 20_000 });
+  await expect(chat.getByText(new RegExp(`New in ${esc(forAgents[1].version)}: ${esc(questionAbout(forAgents[1]))}`)).first()).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: '4', exact: true }).click();
-  await expect(page.getByText(/How useful is seeing what’s changed since your last visit/).first()).toBeVisible({ timeout: 20_000 });
+  await expect(chat.getByText(new RegExp(`New in ${esc(forAgents[2].version)}: ${esc(questionAbout(forAgents[2]))}`)).first()).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: 'Submit what I’ve said so far' }).click();
   await expect(page.getByRole('heading', { name: 'Thank you!' })).toBeVisible();
   await expect(page.getByTestId('feedback-saved')).toContainText(`A copy is saved to your private storage, with the version you tested (${APP_VERSION})`);
@@ -108,5 +115,45 @@ test('a returning tester’s versions and feedback are saved to their pod and st
   expect(current.feedbackIds).toHaveLength(1);
   expect(current.roles).toContain('agent');
   expect(me.versions.map((v) => v.version)).toContain('0.7.0');
+  await expectNoCrash(page);
+});
+
+test('a tester with history can compare with another version and come back, by keyboard', async ({ page }) => {
+  await page.goto('/alpha');
+  await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
+  await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
+  expect((await page.request.post('/api/alpha/visit', { data: { version: '0.7.0' } })).ok()).toBeTruthy();
+  await page.reload();
+  const changed = page.getByRole('region', { name: 'What’s changed' });
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toBeVisible();
+  // No buttons nested inside links in the status card.
+  for (const part of [changed, page.getByRole('group', { name: 'Your testing record' })]) await expect(part.locator('a button, button a')).toHaveCount(0);
+
+  const toggle = changed.getByRole('button', { name: 'Compare with another version' });
+  await toggle.focus();
+  await page.keyboard.press('Enter');
+  const picker = changed.getByLabel('Compare with');
+  await expect(picker).toBeVisible();
+  // There's history, so "first time" isn't offered, and the pod's version is marked.
+  await expect(picker.locator('option[value="first"]')).toHaveCount(0);
+  await expect(picker.locator('option[value="0.7.0"]')).toHaveText(/\(last tested\)/);
+  await picker.focus();
+  await picker.selectOption('0.5.0');
+  // The picker stays put (and keeps focus) while the result is announced.
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toBeVisible();
+  await expect(picker).toBeFocused();
+  await expect(changed.getByRole('status')).toHaveText(`Showing ${changesSince('0.5.0').length} changes since 0.5.0.`);
+  await expect(changed.getByText(/comparing/)).toBeVisible();
+  await changed.getByRole('button', { name: 'Done' }).click();
+  await expect(picker).toHaveCount(0);
+  await expect(changed.getByRole('button', { name: 'Compare with another version' })).toBeFocused();
+
+  // The comparison is temporary: back to the tested version, and gone after a reload.
+  await changed.getByRole('button', { name: /Back to your last tested version \(0\.7\.0\)/ }).click();
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toBeVisible();
+  await changed.getByRole('button', { name: 'Compare with another version' }).click();
+  await changed.getByLabel('Compare with').selectOption('0.5.0');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toBeVisible();
   await expectNoCrash(page);
 });

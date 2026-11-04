@@ -6,6 +6,7 @@ import { api, type FeedbackAnswers } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useWalkthrough } from '../lib/walkthrough';
+import { useDemoOntology, useOntologies } from '../lib/ontologies';
 import { useTester } from '../lib/tester';
 import { VersionLine } from '../components/TesterStatus';
 import { dictationSupport } from '../lib/speech';
@@ -14,6 +15,18 @@ import { ChatView } from '../components/ChatView';
 import { Badge, Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
 
 type Pathway = FeedbackSubmission['pathway'];
+
+/** What an interview is about, fixed when it starts. */
+interface Scope {
+  pathway: Pathway;
+  version: string;
+  commit?: string;
+  since?: string;
+  role?: string;
+}
+
+/** The questionnaire scope the server needs: only the "changes" pathway depends on the baseline and role. */
+const questionScope = (sc: Scope) => (sc.pathway === 'changes' && sc.since ? { pathway: sc.pathway, since: sc.since, role: sc.role, version: sc.version } : { pathway: sc.pathway });
 
 const msg = (role: ChatMessage['role'], content: string): ChatMessage => ({ id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, role, content, at: new Date().toISOString() });
 
@@ -129,11 +142,18 @@ export function FeedbackPage() {
   const { session } = useSession();
   const w = useWalkthrough();
   const tester = useTester();
+  const demoSummary = useDemoOntology();
+  const { loading: ontologiesLoading } = useOntologies();
+  // The scope is fixed when an interview starts, so wait until we know the tester's history and role.
+  const { loading: sessionLoading } = useSession();
+  const ready = !!session && !sessionLoading && !tester.meLoading && (!session.user || (!ontologiesLoading && !demoSummary) || (!!w.demo && !w.demoLoading));
   const [pathway, setPathway] = useState<Pathway>();
   // Returning testers can answer questions about what changed since the version they last tested.
   const changeCount = tester.since ? tester.changes.filter((c) => c.type !== 'fix' || c.ask).length : 0;
-  const scope = pathway === 'changes' && tester.since ? { pathway, since: tester.since, role: tester.roleKey, version: tester.version } : { pathway };
-  const questions = useAsync(() => api.feedbackQuestions(scope), [scope.pathway, tester.since, tester.roleKey]);
+  // The version, baseline and role are fixed when the interview starts, so the questions can't change
+  // under the tester if their pod history arrives (or they switch role) part-way through.
+  const [scope, setScope] = useState<Scope>();
+  const questions = useAsync(() => api.feedbackQuestions(scope ? questionScope(scope) : {}), [scope]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [answers, setAnswers] = useState<FeedbackAnswers>({});
   const [done, setDone] = useState(false);
@@ -146,11 +166,11 @@ export function FeedbackPage() {
   const [submitted, setSubmitted] = useState<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>();
   const voice = dictationSupport() !== 'none';
 
-  const turn = async (p: Pathway, msgs: ChatMessage[], ans: FeedbackAnswers) => {
+  const turn = async (sc: Scope, msgs: ChatMessage[], ans: FeedbackAnswers, currentQuestionId?: string) => {
     setPending(true);
     setChatError(undefined);
     try {
-      const r = await api.feedbackChat({ ...scope, pathway: p, messages: msgs, answers: ans, ...(p === 'changes' && tester.since ? { since: tester.since, role: tester.roleKey, version: tester.version } : {}) });
+      const r = await api.feedbackChat({ ...questionScope(sc), messages: msgs, answers: ans, pathway: sc.pathway, currentQuestionId });
       setMessages([...msgs, msg('assistant', r.reply)]);
       if (r.answers) setAnswers({ ...ans, ...r.answers });
       setDone(r.done);
@@ -163,21 +183,24 @@ export function FeedbackPage() {
   };
 
   const start = (p: Pathway) => {
+    const sc: Scope = { pathway: p, version: tester.version, commit: tester.commit || undefined, since: tester.since, role: tester.roleKey ?? w.myRoles[0] };
+    setScope(sc);
     setPathway(p);
     setMessages([]);
     setAnswers({});
     setDone(false);
-    void turn(p, [], {});
+    void turn(sc, [], {});
   };
 
   const send = (text: string, viaVoice: boolean, value?: { qid: string; v: FeedbackAnswers[string] }) => {
-    if (!pathway) return;
+    if (!pathway || !scope) return;
     if (viaVoice) setUsedVoice(true);
     const nextMsgs = [...messages, msg('user', text)];
     const nextAns = value ? { ...answers, [value.qid]: value.v } : answers;
     setMessages(nextMsgs);
     setAnswers(nextAns);
-    void turn(pathway, nextMsgs, nextAns);
+    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one.
+    void turn(scope, nextMsgs, nextAns, nextQ);
   };
 
   const submit = useAction(async () => {
@@ -185,14 +208,14 @@ export function FeedbackPage() {
       userId: session?.user?.id,
       name: name.trim() || undefined,
       email: email.trim() || undefined,
-      role: tester.roleKey ?? w.myRoles[0],
+      role: scope?.role,
       pathway: pathway!,
       answers,
       transcript: messages,
       usedVoice,
-      appVersion: tester.version,
-      appCommit: tester.commit || undefined,
-      sinceVersion: tester.since,
+      appVersion: scope?.version ?? tester.version,
+      appCommit: scope?.commit,
+      sinceVersion: scope?.since,
     });
     void tester.reloadMe();
     setSubmitted(s);
@@ -237,7 +260,7 @@ export function FeedbackPage() {
         </Card>
         <div className={cx('mx-auto grid gap-4', changeCount ? 'max-w-5xl sm:grid-cols-3' : 'max-w-3xl sm:grid-cols-2')}>
           {changeCount > 0 && (
-            <button onClick={() => start('changes')} className="group text-left">
+            <button onClick={() => start('changes')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
               <Card className="h-full border-accent p-6 transition-shadow group-hover:shadow-md">
                 <History className="size-6 text-accent" />
                 <h2 className="mt-3 font-semibold">What’s changed since {tester.since}</h2>
@@ -250,7 +273,7 @@ export function FeedbackPage() {
               </Card>
             </button>
           )}
-          <button onClick={() => start('structured')} className="group text-left">
+          <button onClick={() => start('structured')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
             <Card className="h-full p-6 transition-shadow group-hover:border-accent group-hover:shadow-md">
               <ListChecks className="size-6 text-accent" />
               <h2 className="mt-3 font-semibold">{changeCount ? 'Guided feedback on everything' : 'Guided feedback'}</h2>
@@ -258,7 +281,7 @@ export function FeedbackPage() {
               <p className="mt-2 text-sm text-muted">A friendly assistant walks you through a short set of questions about each part of Concord.</p>
             </Card>
           </button>
-          <button onClick={() => start('general')} className="group text-left">
+          <button onClick={() => start('general')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
             <Card className="h-full p-6 transition-shadow group-hover:border-accent group-hover:shadow-md">
               <MessageCircle className="size-6 text-accent" />
               <h2 className="mt-3 font-semibold">Just tell us something</h2>
@@ -290,7 +313,7 @@ export function FeedbackPage() {
         <Card className="flex h-[calc(100vh-13rem)] min-h-[520px] flex-col p-4">
           <div className="flex items-center justify-between border-b border-line pb-3">
             <div>
-              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : pathway === 'changes' ? `What’s changed since ${tester.since}` : 'Tell us something'}</h1>
+              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : pathway === 'changes' ? `What’s changed since ${scope?.since}` : 'Tell us something'}</h1>
               {pathway !== 'general' && qs.length > 0 && <p className="text-xs text-muted">{answeredCount} of {qs.length} questions answered</p>}
             </div>
             {current && <span className="text-xs text-muted">{current.section}</span>}
