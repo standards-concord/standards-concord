@@ -65,8 +65,8 @@ export function isBuiltinDatatype(iri: string): boolean {
 
 /**
  * The OWL 2 datatype map (OWL 2 Structural Specification §4). Other XSD types such as
- * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL and are rejected
- * by reasoners like HermiT.
+ * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL, so DL reasoners
+ * (sparq included) do not decide them.
  */
 export const OWL2_DATATYPES = new Set<string>([
   NS.rdf + 'PlainLiteral', NS.rdf + 'XMLLiteral', NS.rdf + 'langString', NS.rdfs + 'Literal', NS.owl + 'real', NS.owl + 'rational',

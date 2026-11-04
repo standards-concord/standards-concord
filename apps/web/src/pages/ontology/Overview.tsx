@@ -88,6 +88,7 @@ export function OverviewTab() {
                   report={validation.data}
                   label={label}
                   openLintKey={healthKey}
+                  checkInBrowser={() => api.source(id, 'turtle', 'working')}
                   lintNote={
                     <>
                       Lint runs again on every{' '}

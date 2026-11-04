@@ -4,7 +4,7 @@ A prototype platform for designing data standards together, built for the Open D
 
 - **Gather requirements three ways.** An AI interviewer follows Elisa Kendall's use case template and asks for competency questions with example answers. Google Meet transcripts can be uploaded, or a co-facilitator bot can join a live call and ask clarifying questions in chat. Coding agents such as Claude Code and Codex connect over MCP, read the ontology and report missing or ill-fitting concepts.
 - **Turn requirements into changes.** Use cases are synthesised into a change request with structured edits and SPARQL tests for each competency question. The model never writes RDF directly: it proposes terms, and the server compiles them into validated edit operations.
-- **Govern without meetings.** Every change is classified as patch, minor or major by explicit rules (based on OWL versioning practice and gist's semver approach), validated (strict lint, HermiT reasoner, FAIR checks, competency questions) and then reviewed under the ontology's governance policy. Policies come from a drop-down of five templates (steward-led, lazy consensus, W3C working group, membership vote, ODI-stewarded) and can be tuned: sign-off counts and roles, review periods, votes with quorum and threshold, vetoes, ODI privilege, ownership and transfer, and what is automated.
+- **Govern without meetings.** Every change is classified as patch, minor or major by explicit rules (based on OWL versioning practice and gist's semver approach), validated (strict lint, OWL 2 DL reasoning with sparq, FAIR checks, competency questions) and then reviewed under the ontology's governance policy. Policies come from a drop-down of five templates (steward-led, lazy consensus, W3C working group, membership vote, ODI-stewarded) and can be tuned: sign-off counts and roles, review periods, votes with quorum and threshold, vetoes, ODI privilege, ownership and transfer, and what is automated.
 - **Release properly.** Releases take the highest level of their changes, bump the semantic version, stamp `owl:versionIRI`, `owl:priorVersion` and `owl:backwardCompatibleWith` or `owl:incompatibleWith`, and include every format plus a SPARQL migration script for major versions. Each ontology is a git repository (tag per release) that is pushed to GitHub on release when configured.
 - **Readable at its own address.** The ontology IRI and every version IRI resolve to a public page in the style of W3C and Widoco vocabulary docs: metadata, a reference entry for every term (anchored by its IRI fragment), the use cases and requirements behind the version, release notes and every serialisation. RDF clients get Turtle, JSON-LD, RDF/XML or N-Triples from the same address by content negotiation, or by extension (`/def/<slug>/<version>.ttl`). The page is also written into each release as `index.html`, and w3id.org redirect rules are generated for persistent IRIs.
 - **Query it in the browser.** The Query tab loads the ontology into [sparq](https://github.com/sparq-org/sparq), a SPARQL engine compiled to WebAssembly, to run SPARQL and check instance data against the ontology's SHACL shapes without a round trip to the server.
@@ -24,7 +24,7 @@ pnpm dev            # API on :8787, web app on :5173
 
 Open http://localhost:5173/alpha. With no configuration it runs entirely offline: the AI steps use deterministic fallbacks, private data is stored on local disk, and sign-in is by demo account.
 
-For full OWL DL reasoning (HermiT), install Java 11+ and run `./toolkit/setup.sh`. Without it, a built-in structural reasoner is used.
+Full OWL 2 DL reasoning (consistency, unsatisfiable classes, the inferred hierarchy) runs on [sparq](https://github.com/sparq-org/sparq) compiled to WebAssembly, the same code on the server and in the browser, so there is nothing extra to install. `./toolkit/setup.sh` only installs LinkML, which one of the core tests uses.
 
 To use Claude, set `ANTHROPIC_API_KEY` (see [.env.example](.env.example) for every setting). The default model is `claude-opus-5-5`.
 
@@ -70,7 +70,7 @@ packages/core     OWL engine: parsing, edit operations, diff, change classificat
 packages/shared   Domain types and the HTTP API contract
 apps/server       Express API, MCP endpoint, governance engine, AI prompts, Solid, meeting bot
 apps/web          React app
-toolkit           Python helper for HermiT/Pellet reasoning (owlready2)
+toolkit           Python virtualenv with LinkML, used by tests
 docs              Research, the alpha walkthrough script and questions for ODI colleagues
 ```
 

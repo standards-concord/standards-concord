@@ -19,7 +19,7 @@ It boots its own offline Concord (fresh demo data, simulated AI) on ports 8798 a
 | `chapters.txt` | Chapter timestamps in YouTube's description format |
 | `report.json` | Voice, scenes recorded and skipped, platform features found, stand-ins used, warnings |
 
-Needs Node 22.13+, pnpm, ffmpeg, and Playwright's Chromium (`pnpm exec playwright install chromium`). For the reasoner to show as passing, run `./toolkit/setup.sh` first (HermiT needs Java).
+Needs Node 22.13+, pnpm, ffmpeg, and Playwright's Chromium (`pnpm exec playwright install chromium`).
 
 ## Changing the script
 

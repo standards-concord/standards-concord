@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DataFactory } from 'n3';
 import { NS, OntologyGraph, XSD, applyChangeOps, fairCheck, lint, owlReasoner, runCompetencyQuestions, structuralReasoner, validate } from '../src/index.js';
-import { X, baseOntology, fixtureText, hasOwlToolkit, loadFixture } from './helpers.js';
+import { X, baseOntology, fixtureText, loadFixture } from './helpers.js';
 
 const { namedNode, literal } = DataFactory;
 const VOL = 'https://w3id.org/odi/volunteering#';
@@ -174,48 +174,103 @@ describe('structuralReasoner', () => {
   });
 });
 
-describe.skipIf(!hasOwlToolkit)('owlReasoner (HermiT via owlready2)', () => {
-  it('fixture is consistent and coherent', async () => {
+describe('owlReasoner (sparq OWL 2 DL)', () => {
+  const T = (body: string) => OntologyGraph.fromTurtle(`@prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+    @prefix xsd: <http://www.w3.org/2001/XMLSchema#> . @prefix ex: <https://example.org/t#> .
+    <https://example.org/t> a owl:Ontology .
+    ex:Agent a owl:Class . ex:Person a owl:Class ; rdfs:subClassOf ex:Agent .
+    ex:Organisation a owl:Class ; rdfs:subClassOf ex:Agent ; owl:disjointWith ex:Person .
+    ex:worksFor a owl:ObjectProperty ; rdfs:domain ex:Person ; rdfs:range ex:Organisation .
+    ex:employs a owl:ObjectProperty ; owl:inverseOf ex:worksFor .
+    ex:age a owl:DatatypeProperty, owl:FunctionalProperty ; rdfs:domain ex:Person ; rdfs:range xsd:nonNegativeInteger .
+    ex:alice a owl:NamedIndividual . ex:bob a owl:NamedIndividual . ex:acme a owl:NamedIndividual .
+    ${body}`);
+  const E = (l: string) => 'https://example.org/t#' + l;
+
+  it('fixture is consistent and coherent, with nothing inferred beyond the asserted hierarchy', async () => {
     const r = await owlReasoner(await loadFixture());
     expect(r.error).toBeUndefined();
-    expect(r).toMatchObject({ engine: 'hermit', available: true, consistent: true, unsatisfiable: [] });
-  }, 60000);
+    expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: true, unsatisfiable: [], inferredSubClassOf: [] });
+    // The header's dcterms:created "…"^^xsd:date is an annotation: no caveat, no profile note.
+    expect(r.explanation).toBeUndefined();
+    expect(r.profile).toBeUndefined();
+  });
+  it('fixture plus its example data is consistent', async () => {
+    const g = await OntologyGraph.fromTurtle(fixtureText('volunteering.ttl') + '\n' + fixtureText('volunteering-example-data.ttl'));
+    expect(await owlReasoner(g)).toMatchObject({ engine: 'sparq', available: true, consistent: true });
+  });
   it('detects an unsatisfiable class', async () => {
     const r = await owlReasoner(unsatisfiable());
-    expect(r.available).toBe(true);
-    expect(r.consistent).toBe(true);
-    expect(r.unsatisfiable).toEqual([X('PersonOrganisation')]);
-  }, 60000);
+    expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: true, unsatisfiable: [X('PersonOrganisation')] });
+    expect(r.explanation).toMatch(/ex:PersonOrganisation is a subclass of disjoint classes/);
+  });
   it('detects unsatisfiability through a restriction and range', async () => {
     expect((await owlReasoner(unsatViaRange())).unsatisfiable).toEqual([X('Contractor')]);
-  }, 60000);
-  it('detects an inconsistent ontology', async () => {
+  });
+  it('detects an inconsistent ontology and names the likely cause', async () => {
     const r = await owlReasoner(inconsistent());
-    expect(r.available).toBe(true);
-    expect(r.consistent).toBe(false);
-  }, 60000);
-  it('reports inferred subclass relations', async () => {
+    expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: false });
+    expect(r.explanation).toMatch(/Likely cause: individual ex:acme is an instance of disjoint classes/);
+  });
+  it('reports direct inferred subclass relations, not ones the asserted hierarchy already gives', async () => {
     const g = applyChangeOps(baseOntology(), [
       { op: 'addClass', localName: 'Worker', label: 'worker', definition: 'An agent that works for an organisation.', subClassOf: [X('Agent')], restrictions: [{ property: X('worksFor'), kind: 'some', filler: X('Organisation') }] },
     ]).graph;
-    const r = await owlReasoner(g);
-    expect(r.inferredSubClassOf).toContainEqual([X('Worker'), X('Person')]);
-  }, 60000);
-  it('treats non-OWL 2 datatypes as rdfs:Literal instead of failing', async () => {
+    expect((await owlReasoner(g)).inferredSubClassOf).toEqual([[X('Worker'), X('Person')]]);
+    const h = await T(`ex:Staff a owl:Class ; owl:equivalentClass [ owl:intersectionOf ( ex:Person [ a owl:Restriction ; owl:onProperty ex:worksFor ; owl:someValuesFrom ex:Organisation ] ) ] .
+      ex:Nurse a owl:Class ; rdfs:subClassOf ex:Person, [ a owl:Restriction ; owl:onProperty ex:worksFor ; owl:someValuesFrom ex:Organisation ] .
+      ex:Employer a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:employs ; owl:someValuesFrom owl:Thing ] .`);
+    // Nurse ⊑ Staff ⊑ Person: only the direct link is reported; Employer ⊑ Organisation comes through the inverse.
+    expect((await owlReasoner(h)).inferredSubClassOf).toEqual([[E('Employer'), E('Organisation')], [E('Nurse'), E('Staff')], [E('Staff'), E('Person')]]);
+  });
+  // Constructs outside ALCH that HermiT used to be needed for (sparq#7031).
+  it.each([
+    ['a qualified cardinality clash', 'ex:Busy a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:worksFor ; owl:onClass ex:Organisation ; owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ], [ a owl:Restriction ; owl:onProperty ex:worksFor ; owl:onClass ex:Organisation ; owl:maxQualifiedCardinality "1"^^xsd:nonNegativeInteger ] .', ['Busy']],
+    ['a union domain', 'ex:Place a owl:Class ; owl:disjointWith ex:Agent . ex:at a owl:ObjectProperty ; rdfs:domain [ owl:unionOf ( ex:Person ex:Organisation ) ] . ex:Spot a owl:Class ; rdfs:subClassOf ex:Place, [ a owl:Restriction ; owl:onProperty ex:at ; owl:someValuesFrom owl:Thing ] .', ['Spot']],
+    ['AllDisjointClasses', 'ex:Role a owl:Class . [ a owl:AllDisjointClasses ; owl:members ( ex:Agent ex:Role ) ] . ex:AR a owl:Class ; rdfs:subClassOf ex:Agent, ex:Role .', ['AR']],
+  ])('finds the unsatisfiable class in %s', async (_, body, unsat) => {
+    expect((await owlReasoner(await T(body))).unsatisfiable).toEqual(unsat.map(E));
+  });
+  it.each([
+    ['two values for a functional data property', 'ex:alice ex:age 30, 31 .'],
+    ['a literal of the wrong type for the range', 'ex:alice ex:age "sixteen" .'],
+    ['a negative value for a nonNegativeInteger range', 'ex:alice ex:age -3 .'],
+    ['a functional object property with two different values', 'ex:boss a owl:ObjectProperty, owl:FunctionalProperty . ex:alice ex:boss ex:bob, ex:acme . ex:bob owl:differentFrom ex:acme .'],
+    ['typing through an inverse property', 'ex:alice ex:employs ex:bob . ex:alice a ex:Person .'],
+    ['two individuals sharing a key', 'ex:Person owl:hasKey ( ex:age ) . ex:alice a ex:Person ; ex:age 3 . ex:bob a ex:Person ; ex:age 3 . ex:alice owl:differentFrom ex:bob .'],
+  ])('finds the inconsistency in %s', async (_, body) => {
+    expect(await owlReasoner(await T(body))).toMatchObject({ engine: 'sparq', available: true, consistent: false });
+  });
+  it('classifies with nominals and property chains', async () => {
+    const r = await owlReasoner(await T(`ex:Colour a owl:Class ; owl:equivalentClass [ owl:oneOf ( ex:red ex:green ) ] . ex:red a owl:NamedIndividual . ex:green a owl:NamedIndividual .
+      ex:hasColour a owl:ObjectProperty . ex:RedThing a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty ex:hasColour ; owl:hasValue ex:red ] .
+      ex:Coloured a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty ex:hasColour ; owl:someValuesFrom ex:Colour ] .
+      ex:hasParent a owl:ObjectProperty . ex:hasGrandparent a owl:ObjectProperty ; owl:propertyChainAxiom ( ex:hasParent ex:hasParent ) .
+      ex:GP a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:hasParent ; owl:someValuesFrom [ a owl:Restriction ; owl:onProperty ex:hasParent ; owl:someValuesFrom ex:Person ] ] .
+      ex:HasPersonGP a owl:Class ; owl:equivalentClass [ a owl:Restriction ; owl:onProperty ex:hasGrandparent ; owl:someValuesFrom ex:Person ] .`));
+    expect(r.inferredSubClassOf).toEqual([[E('GP'), E('HasPersonGP')], [E('RedThing'), E('Coloured')]]);
+  });
+  it('treats non-OWL 2 datatypes as rdfs:Literal instead of abstaining, and says so', async () => {
     const g = applyChangeOps(baseOntology(), [{ op: 'addDatatypeProperty', localName: 'birthDate', label: 'birth date', definition: 'The date a person was born.', domain: [X('Person')], range: [XSD.date] }]).graph;
     const r = await owlReasoner(g);
-    expect(r.available).toBe(true);
+    expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: true });
     expect(r.explanation).toMatch(/xsd:date/);
-  }, 60000);
-});
-
-describe('owlReasoner fallback', () => {
-  it('falls back to the structural reasoner when Python is missing', async () => {
-    const r = await owlReasoner(inconsistent(), { python: '/nonexistent/python3' });
-    expect(r.available).toBe(false);
-    expect(r.engine).toBe('structural');
-    expect(r.consistent).toBe(false);
-    expect(r.error).toBeTruthy();
+  });
+  it('reports profile violations that do not stop reasoning', async () => {
+    const r = await owlReasoner(await T('ex:alice ex:undeclaredProp ex:bob .'));
+    expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: true });
+    expect(r.profile?.map((n) => n.kind)).toContain('Undeclared');
+  });
+  it('falls back to the structural checks, saying why, when the ontology is outside OWL 2 DL', async () => {
+    const r = await owlReasoner(await T('ex:partOf a owl:ObjectProperty, owl:TransitiveProperty . ex:Thing1 a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:partOf ; owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .'));
+    expect(r).toMatchObject({ engine: 'structural', available: false });
+    expect(r.error).toMatch(/outside OWL 2 DL: .*partOf is not simple/);
+  });
+  it('falls back to the structural checks when sparq runs out of budget', async () => {
+    const r = await owlReasoner(unsatViaRange(), { budget: { maxSteps: 1 } });
+    expect(r).toMatchObject({ engine: 'structural', available: false });
+    expect(r.error).toMatch(/budget/);
+    expect(r.unsatisfiable).toEqual([X('Contractor')]); // from the structural checks
   });
 });
 

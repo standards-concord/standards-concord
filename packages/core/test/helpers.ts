@@ -14,8 +14,6 @@ export const loadFixture = () => OntologyGraph.fromTurtle(fixtureText('volunteer
 export const NSX = 'https://example.org/test#';
 export const X = (local: string) => NSX + local;
 
-/** True when toolkit/.venv has owlready2 and Java is on PATH. */
-export const hasOwlToolkit = existsSync(path.join(TOOLKIT, '.venv', 'bin', 'python'));
 export const linkmlBin = (tool: string) => path.join(TOOLKIT, '.venv', 'bin', tool);
 
 /** A small base ontology: Agent > Person, Organisation (disjoint); Place; worksFor; name. */

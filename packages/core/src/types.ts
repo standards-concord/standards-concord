@@ -316,15 +316,31 @@ export interface FairReport {
   checks: FairCheck[];
 }
 
+/** An OWL 2 DL profile violation the reasoner reported (OWL 2 Structural Specification §11 and related rules). */
+export interface OwlProfileNote {
+  /** sparq's violation kind, e.g. Undeclared, IllegalPunning, NonSimpleProperty. */
+  kind: string;
+  detail: string;
+}
+
 export interface ReasonerResult {
-  engine: 'hermit' | 'pellet' | 'structural';
+  /**
+   * sparq: complete OWL 2 DL reasoning (WebAssembly). structural: the fast, incomplete checks.
+   * hermit and pellet only appear in reports stored before Concord moved to sparq.
+   */
+  engine: 'sparq' | 'structural' | 'hermit' | 'pellet';
+  /** false when the complete reasoner gave no verdict, so only the structural checks ran (see `error`). */
   available: boolean;
   consistent: boolean;
   unsatisfiable: IRI[];
   /** Inferred direct subclass axioms not asserted: [sub, super] */
   inferredSubClassOf: [IRI, IRI][];
   explanation?: string;
+  /** OWL 2 DL profile violations that did not stop reasoning (e.g. an undeclared property). */
+  profile?: OwlProfileNote[];
   durationMs: number;
+  /** Time spent inside the reasoner itself, excluding loading and serialising. */
+  checkMs?: number;
   error?: string;
 }
 

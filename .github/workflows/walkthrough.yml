@@ -32,16 +32,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      # HermiT, so the reasoner shows as passing in the video.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - run: pnpm install --frozen-lockfile
-      - run: ./toolkit/setup.sh
       - name: Install Chromium, ffmpeg and fonts
         run: |
           pnpm exec playwright install --with-deps chromium

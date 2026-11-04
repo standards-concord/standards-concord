@@ -18,7 +18,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
 | `/settings` | Profile and WebID, pod, sign-in providers, connected agents (disconnect), personal tokens (create, revoke), appearance | ✅ | account, agents, oauth, looks |
 | `/admin/feedback` | Read and summarise tester feedback (platform admins only) | 🟡 | security (refusal for non-admins). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests |
-| `/o/:id` overview | Lifecycle bubble, health chip, lint, FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment |
+| `/o/:id` overview | Lifecycle bubble, health chip, lint, reasoner (and its in-browser re-check), FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment, reasoner |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
@@ -67,6 +67,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Flow | Status | Specs |
 | --- | --- | --- |
 | Plain-language request → drafted edits → submit → classified and validated | ✅ | change-requests |
+| OWL 2 DL reasoning with sparq: working-draft health, a change that makes a class unsatisfiable, rerunning the check in the browser, signed-out visitors refused | ✅ | reasoner |
 | Approvals from the right roles; author's own doesn't count; review period; auto-merge | ✅ | change-requests |
 | Request changes → needs work → AI revision → back in review (earlier approvals reset) | ✅ | change-requests |
 | Comments show once in the discussion | ✅ | change-requests |

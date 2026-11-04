@@ -27,16 +27,12 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      # HermiT (full OWL DL reasoning) runs on Java through owlready2.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
+      # Python only for LinkML, which checks the generated schemas in the core tests.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pnpm install --frozen-lockfile
-      - run: ./toolkit/setup.sh --linkml
+      - run: ./toolkit/setup.sh
       - name: Typecheck
         run: pnpm -r typecheck
       - name: Test

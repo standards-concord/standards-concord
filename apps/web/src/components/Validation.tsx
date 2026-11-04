@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
-import type { IssueSeverity } from '@concord/core/types';
-import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
+import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/core/types';
+import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Cpu, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
 import { Badge, ProgressBar, cx } from './ui';
@@ -90,12 +90,58 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
   );
 }
 
-export function ReasonerResult({ report, label }: { report: ValidationReport; label: Labeler }) {
+/** "sparq · reasoning 1.2 ms (14 ms in all)", or "structural · 3 ms". */
+function timing(r: ReasonerReport) {
+  return r.checkMs !== undefined ? `${r.engine} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${r.engine} · ${r.durationMs} ms`;
+}
+
+const sameVerdict = (a: ReasonerReport, b: ReasonerReport) =>
+  a.available === b.available && a.consistent === b.consistent && [...a.unsatisfiable].sort().join(' ') === [...b.unsatisfiable].sort().join(' ');
+
+/**
+ * Runs the same OWL reasoner (sparq, WebAssembly) on this device over the draft's Turtle and
+ * compares the verdict with the server's.
+ */
+function BrowserCheck({ server, load, label }: { server: ReasonerReport; load: () => Promise<string>; label: Labeler }) {
+  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; error?: string }>({ status: 'idle' });
+  const run = async () => {
+    setState({ status: 'running' });
+    try {
+      const turtle = await load();
+      const { reasonOverTurtle } = await import('@concord/core/reasoner');
+      setState({ status: 'done', r: await reasonOverTurtle(turtle) });
+    } catch (e) {
+      setState({ status: 'error', error: (e as Error).message });
+    }
+  };
+  const r = state.r;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <button type="button" onClick={run} disabled={state.status === 'running'} className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-surface-2 disabled:opacity-60">
+        <Cpu className="size-3.5" aria-hidden /> {state.status === 'running' ? 'Checking in this browser…' : 'Check again in this browser'}
+      </button>
+      <span role="status" className="text-muted">
+        {state.status === 'error' && <span className="text-danger">The in-browser check failed: {state.error}</span>}
+        {state.status === 'done' && r && (
+          <>
+            This browser:{' '}
+            <strong className={!r.available ? 'text-warn' : r.consistent && !r.unsatisfiable.length ? 'text-ok' : 'text-danger'}>
+              {!r.available ? 'no verdict' : !r.consistent ? 'inconsistent' : r.unsatisfiable.length ? `unsatisfiable: ${r.unsatisfiable.map(label).join(', ')}` : 'consistent, all classes satisfiable'}
+            </strong>{' '}
+            ({timing(r)}). {sameVerdict(r, server) ? 'Same result as the server.' : <span className="text-warn">The server's result differs; it reflects the draft when the page loaded.</span>}
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
+export function ReasonerResult({ report, label, checkInBrowser }: { report: ValidationReport; label: Labeler; /** Loads the validated graph as Turtle, to re-run the reasoner in this browser. */ checkInBrowser?: () => Promise<string> }) {
   const r = report.reasoner;
   const problem = !r.consistent || r.unsatisfiable.length > 0;
-  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0;
+  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0 || !!r.profile?.length;
   const verdict = !r.available ? (
-    <span className="text-warn">The {r.engine === 'structural' ? 'OWL' : r.engine} reasoner did not run; only structural checks ran.</span>
+    <span className="text-warn">The OWL reasoner gave no verdict; only structural checks ran.</span>
   ) : r.consistent ? (
     <span>
       <strong className="text-ok">Consistent.</strong> {r.unsatisfiable.length ? `${plural(r.unsatisfiable.length, 'unsatisfiable class', 'unsatisfiable classes')}.` : 'All classes are satisfiable.'}
@@ -108,6 +154,16 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
       {!r.available && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
       {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
       {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
+      {!!r.profile?.length && (
+        <div>
+          <p className="text-xs text-muted">OWL 2 DL profile notes (reasoning still ran):</p>
+          <ul className="mt-1 text-xs">
+            {r.profile.map((n, i) => (
+              <li key={i}>{n.detail}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {r.inferredSubClassOf.length > 0 && (
         <div>
           <p className="text-xs text-muted">Inferred (not asserted) subclass relations:</p>
@@ -127,9 +183,7 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
       <p className="flex flex-wrap items-center gap-2">
         <Brain className="size-4 text-muted" />
         {verdict}
-        <span className="text-xs text-subtle">
-          {r.engine} · {r.durationMs} ms
-        </span>
+        <span className="text-xs text-subtle">{timing(r)}</span>
       </p>
       {(hasDetail || (!r.available && r.error)) &&
         (problem ? (
@@ -139,6 +193,7 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
             {detail}
           </Disclosure>
         ))}
+      {checkInBrowser && <BrowserCheck server={r} load={checkInBrowser} label={label} />}
     </div>
   );
 }
@@ -266,7 +321,7 @@ export function CqResults({ report }: { report: ValidationReport }) {
 }
 
 /** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
-export function ValidationDetails({ report, label, openLintKey, lintNote }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode }) {
+export function ValidationDetails({ report, label, openLintKey, lintNote, checkInBrowser }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode; /** Loads the validated graph as Turtle, to re-run the reasoner in this browser. */ checkInBrowser?: () => Promise<string> }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
   const infos = report.lint.length - errors - warnings;
@@ -278,7 +333,7 @@ export function ValidationDetails({ report, label, openLintKey, lintNote }: { re
   return (
     <div className="space-y-5">
       <ValidationSummary report={report} />
-      <ReasonerResult report={report} label={label} />
+      <ReasonerResult report={report} label={label} checkInBrowser={checkInBrowser} />
       <div className="divide-y divide-line rounded-lg border border-line">
         <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
           <LintIssues report={report} label={label} />

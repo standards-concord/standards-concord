@@ -146,7 +146,7 @@ export function lint(graph: OntologyGraph, opts: LintOptions = {}): Issue[] {
         push('error', 'object-range-is-datatype', `object property ${c(p.iri)} has datatype range ${c(r)}; make it a datatype property`, p.iri, LINT_REFERENCES.datatypeRange);
       }
       if (p.kind === 'datatypeProperty' && isBuiltinDatatype(r) && !OWL2_DATATYPES.has(r)) {
-        push(sev('warning', 'info'), 'datatype-not-owl2', `range ${c(r)} of ${c(p.iri)} is not in the OWL 2 datatype map; OWL 2 DL reasoners (HermiT) reject it. Prefer ${r === NS.xsd + 'date' ? 'xsd:dateTime' : 'an OWL 2 datatype'}`, p.iri, LINT_REFERENCES.owl2Datatype);
+        push(sev('warning', 'info'), 'datatype-not-owl2', `range ${c(r)} of ${c(p.iri)} is not in the OWL 2 datatype map, so OWL 2 DL reasoners cannot check its values (Concord reasons with it as rdfs:Literal). Prefer ${r === NS.xsd + 'date' ? 'xsd:dateTime' : 'an OWL 2 datatype'}`, p.iri, LINT_REFERENCES.owl2Datatype);
       }
       if (p.kind === 'objectProperty' && !dt && graph.isDeclared(r) && !graph.isClassIri(r)) {
         push('warning', 'range-not-class', `range ${c(r)} of ${c(p.iri)} is not declared as a class`, p.iri, LINT_REFERENCES.datatypeRange);
