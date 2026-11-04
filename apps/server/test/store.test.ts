@@ -193,6 +193,36 @@ describe.each(backends)('document store on $name', (backend) => {
     expect(await store.claim('oauthCodes', 'r', 'usedAt', 2)).toBeUndefined();
   });
 
+  it('work a transaction starts without awaiting runs outside it once the transaction ends', async () => {
+    // Async code inherits the context it started in. Without care, a fire-and-forget task started inside a
+    // transaction would keep using the transaction's connection after COMMIT (on Postgres, a connection already
+    // back in the pool and possibly in someone else's transaction).
+    const later = gate();
+    let background: Promise<unknown> | undefined;
+    await store.transaction(async () => {
+      await store.put('kv', { id: 'in-tx' });
+      background = (async () => {
+        await later.opened;
+        await store.put('kv', { id: 'after-tx' });
+        return store.transaction(async () => store.put('kv', { id: 'own-tx' }));
+      })();
+    });
+    const g = gate();
+    const other = store.transaction(async () => {
+      await store.put('kv', { id: 'other-tx' });
+      await g.opened;
+      throw new Error('roll back');
+    });
+    await sleep(20);
+    later.open();
+    await sleep(20);
+    g.open();
+    await expect(other).rejects.toThrow('roll back');
+    await background;
+    // The background writes waited for the other transaction rather than joining it, so its rollback kept them.
+    expect((await store.list<Doc>('kv')).map((d) => d.id).sort()).toEqual(['after-tx', 'in-tx', 'own-tx']);
+  });
+
   it('scrubFreeSpace succeeds when nothing holds a lock, and keeps the data', async () => {
     await store.put('oauthClients', { id: 'c', secret: 'x'.repeat(1000) });
     await store.put('oauthClients', { id: 'c', secretHash: 'h' });

@@ -44,6 +44,11 @@ interface Ctx {
   /** The transaction's connection, when inside one. */
   tx?: Queryable;
   noWait: boolean;
+  /**
+   * Set when the transaction ends. Work it started without awaiting inherits this context; from then on it runs
+   * outside the transaction, never on the connection, which has gone back to the pool.
+   */
+  ended?: boolean;
 }
 
 /**
@@ -68,7 +73,8 @@ export class PostgresStore implements DocStore {
 
   private ctx(): Ctx | undefined {
     const c = this.als.getStore();
-    return c?.store === this ? c : undefined;
+    if (c?.store !== this) return undefined;
+    return c.ended ? { ...c, tx: undefined } : c;
   }
 
   /** Reads go on the transaction's connection inside one, otherwise on any pooled connection. */
@@ -160,7 +166,12 @@ export class PostgresStore implements DocStore {
       } else {
         await tx.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]);
       }
-      return this.als.run({ store: this, tx, noWait }, fn);
+      const ctx: Ctx = { store: this, tx, noWait };
+      try {
+        return await this.als.run(ctx, fn);
+      } finally {
+        ctx.ended = true;
+      }
     });
   }
 

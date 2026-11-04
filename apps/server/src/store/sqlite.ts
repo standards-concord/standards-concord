@@ -12,6 +12,8 @@ interface Ctx {
   store: SqliteStore;
   inTransaction: boolean;
   noWait: boolean;
+  /** Set when the transaction ends. Work it started without awaiting (which inherits this context) then runs outside it. */
+  ended?: boolean;
 }
 
 /**
@@ -54,7 +56,8 @@ export class SqliteStore implements DocStore {
 
   private ctx(): Ctx | undefined {
     const c = this.als.getStore();
-    return c?.store === this ? c : undefined;
+    if (c?.store !== this) return undefined;
+    return c.ended ? { ...c, inTransaction: false } : c;
   }
 
   /**
@@ -153,14 +156,16 @@ export class SqliteStore implements DocStore {
       this.db.exec('BEGIN IMMEDIATE');
       this.active = new Promise((resolve) => (done = resolve));
     });
+    const ctx: Ctx = { store: this, inTransaction: true, noWait };
     try {
-      const out = await this.als.run({ store: this, inTransaction: true, noWait }, fn);
+      const out = await this.als.run(ctx, fn);
       this.db.exec('COMMIT');
       return out;
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
     } finally {
+      ctx.ended = true;
       this.active = undefined;
       done();
     }
