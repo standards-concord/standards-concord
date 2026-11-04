@@ -60,7 +60,7 @@ export function UseCasesTab() {
         <div>
           <h2 className="text-lg font-semibold">Use cases</h2>
           <p className="max-w-2xl text-sm text-muted">
-            Requirements captured with Elisa Kendall’s use case template and competency questions — by interview, from meetings, or from coding agents.
+            Requirements captured as use cases with competency questions, by interview, from meetings, or from coding agents.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

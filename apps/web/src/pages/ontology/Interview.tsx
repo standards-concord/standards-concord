@@ -132,7 +132,7 @@ export function InterviewPage() {
           </div>
           <div className="mb-5">
             <CompletenessMeter value={s.useCase.completeness} />
-            <p className="mt-1.5 text-xs text-muted">Fills in as you talk, following Elisa Kendall’s use case template.</p>
+            <p className="mt-1.5 text-xs text-muted">Fills in as you talk.</p>
           </div>
           <UseCaseDocument uc={s.useCase} live highlight={lastTargets as string[]} />
         </Card>
