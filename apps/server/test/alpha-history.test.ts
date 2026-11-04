@@ -1,6 +1,9 @@
 import request from 'supertest';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createApp } from '../src/app.js';
+import { config } from '../src/config.js';
 import { get, openDb, put } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { createSession, createUser, sessionUser, upsertFederatedUser } from '../src/services/users.js';
@@ -21,55 +24,35 @@ beforeAll(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const legacyDoc = (versions: string[], feedbackIds: string[] = []) =>
-  JSON.stringify({ versions: versions.map((version) => ({ version, firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds })) });
-const versionsOf = (me: { versions: { version: string }[] }) => me.versions.map((v) => v.version);
 const tester = (subject: string) => createUser({ name: `Tester ${subject}`, provider: 'demo', subject });
 
-describe('upgrading from a record kept only in the pod', () => {
-  // Before this server kept the history, the first visit after upgrading started an empty one and overwrote the pod.
-  it('imports what the pod and this server’s files held, and keeps it', async () => {
-    const u = await tester('legacy-both');
-    vi.spyOn(solid, 'readLegacy').mockResolvedValueOnce({ pod: legacyDoc(['0.7.0'], ['fb_pod']), local: legacyDoc(['0.6.0']) });
+describe('the first copy in a tester’s pod', () => {
+  // Writing the mirror used to replace whatever was already at that path in their pod, even if this server hadn't written it.
+  it('keeps anything already at that path, word for word, beside it', async () => {
+    const u = await tester('already-there');
+    const theirs = '@prefix ex: <https://example.org/> .\nex:mine ex:says "keep me" .\n';
+    await solid.write(u.id, 'alpha/testing.jsonld', theirs, 'text/turtle');
+    await recordVersion(u, { version: '0.8.0' });
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+\.jsonld$/.test(f));
+    expect(aside).toHaveLength(1);
+    expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe(theirs);
+    expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0']);
+    // Only the first time: later copies are this server's own.
+    await recordVersion(u, { version: '0.8.1' });
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-'))).toHaveLength(1);
+  });
+
+  it('writes nothing while the pod can’t say whether something is there, and catches up later', async () => {
+    const u = await tester('pod-unsure');
+    const keep = vi.spyOn(solid, 'keepExisting').mockRejectedValueOnce(new Error('GET … → 500'));
+    const write = vi.spyOn(solid, 'writeExisting');
     const me = await recordVersion(u, { version: '0.8.0' });
-    expect(versionsOf(me)).toEqual(['0.8.0', '0.7.0', '0.6.0']);
-    expect(me.versions[1].feedbackIds).toEqual(['fb_pod']);
-    // Imported once: later visits don't read the pod again.
-    const reads = vi.spyOn(solid, 'readLegacy');
-    reads.mockClear();
-    expect(versionsOf(await recordVersion(u, { version: '0.8.1' }))).toEqual(['0.8.1', '0.8.0', '0.7.0', '0.6.0']);
-    expect(reads).not.toHaveBeenCalled();
-  });
-
-  it('imports a record left in this server’s files', async () => {
-    const agent = request.agent(app);
-    const id = (await agent.post('/api/auth/demo').send({ name: 'Old local record' })).body.user.id as string;
-    await solid.write(id, 'alpha/testing.jsonld', legacyDoc(['0.7.0']), 'application/ld+json');
-    // (The demo sign-in itself doesn't touch the record, so this is the first time it's read.)
-    expect(versionsOf((await agent.get('/api/alpha/me')).body)).toEqual(['0.7.0']);
-  });
-
-  it('changes nothing while the old record can’t be read, rather than starting an empty one', async () => {
-    const u = await tester('legacy-down');
-    vi.spyOn(solid, 'readLegacy').mockRejectedValueOnce(new Error('GET … → 500'));
-    await expect(recordVersion(u, { version: '0.8.0' })).rejects.toMatchObject({ status: 503 });
-    expect(get('kv', `alpha-history:${u.id}`)).toBeUndefined();
-    vi.spyOn(solid, 'readLegacy').mockResolvedValueOnce({ pod: legacyDoc(['0.7.0']) });
-    expect(versionsOf(await recordVersion(u, { version: '0.8.0' }))).toEqual(['0.8.0', '0.7.0']);
-  });
-
-  it('finishes a move an older version left waiting, unless the demo account has since become someone else’s', async () => {
-    const into = await upsertFederatedUser({ provider: 'github', subject: 'legacy-into', name: 'Waiting account' });
-    const demo = await tester('legacy-from');
-    const relinked = await tester('legacy-relinked');
-    await upsertFederatedUser({ provider: 'github', subject: 'legacy-other', name: 'Someone else' }, relinked);
-    put('kv', { id: `alpha-transfer:${into.id}`, from: [demo.id, relinked.id] });
-    vi.spyOn(solid, 'readLegacy').mockImplementation(async (userId) =>
-      userId === demo.id ? { pod: legacyDoc(['0.7.0']) } : userId === relinked.id ? { pod: legacyDoc(['0.5.0'], ['fb_private']) } : {},
-    );
-    const me = await recordVersion(into, { version: '0.8.0' });
-    expect(versionsOf(me)).toEqual(['0.8.0', '0.7.0']);
-    expect(get('kv', `alpha-transfer:${into.id}`)).toBeUndefined();
+    expect(me.podBehind).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+    keep.mockRestore();
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    expect(write).toHaveBeenCalled();
   });
 });
 
@@ -107,6 +90,28 @@ describe('feedback from a tester', () => {
     expect(fb.status).toBe(201);
     const me = (await agent.get('/api/alpha/me')).body;
     expect(me.versions).toEqual([expect.objectContaining({ version: '0.8.0', feedbackIds: [fb.body.id] })]);
+  });
+});
+
+describe('feedback sent while playing a persona', () => {
+  // When the tester's record moved while the request was on its way, the feedback used to be stored as the persona's, with no tester.
+  it('is refused, not stored without its tester, when the remembered tester’s session has ended', async () => {
+    const agent = request.agent(app);
+    const demoId = (await agent.post('/api/auth/demo').send({ name: 'Plays a persona' })).body.user.id as string;
+    const persona = ((await agent.get('/api/personas')).body as { id: string }[])[0];
+    await agent.post('/api/auth/demo').send({ userId: persona.id });
+    expect((await agent.get('/api/alpha/me')).body.tester.id).toBe(demoId);
+    const into = await upsertFederatedUser({ provider: 'github', subject: 'persona-move-into', name: 'Moved into' });
+    const { getUser } = await import('../src/services/users.js');
+    await mergeTesterRecords(getUser(demoId)!, into);
+    const { listFeedback } = await import('../src/services/feedback.js');
+    const before = listFeedback().length;
+    const fb = await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] });
+    expect(fb.status).toBe(409);
+    expect(String(fb.headers['set-cookie'])).toMatch(/concord_tester=;/);
+    expect(listFeedback()).toHaveLength(before);
+    // With the stale cookie gone, the persona can send feedback as anyone signed out of a tester account would.
+    expect((await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] })).status).toBe(201);
   });
 });
 
