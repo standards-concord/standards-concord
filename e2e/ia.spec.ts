@@ -252,4 +252,73 @@ test.describe('progressive disclosure', () => {
     await expect(page.getByText('Not covered yet:').first()).toBeVisible();
     await expect(page.getByText('Not covered yet', { exact: true })).toHaveCount(0);
   });
+
+  test('use cases list stays plain until Draft changes starts a selection', async ({ page }) => {
+    await page.goto(`/o/${demo.id}/use-cases`);
+    await settle(page);
+    await expect(page.getByRole('main').getByRole('checkbox')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Draft changes', exact: true }).click();
+    const boxes = page.getByRole('main').getByRole('checkbox');
+    expect(await boxes.count()).toBeGreaterThan(0);
+    await expect(page.getByRole('button', { name: 'Draft changes from all' })).toBeVisible();
+    await page.getByRole('button', { name: 'Select all' }).click();
+    await expect(page.getByRole('button', { name: new RegExp(`Draft changes from ${await boxes.count()} selected`) })).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel' }).click();
+    await expect(boxes).toHaveCount(0);
+  });
+
+  test('a use case opens its first group, with the rest a click away', async ({ page, request }) => {
+    const ucs = (await (await request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; completeness: number; source: string; status: string }[];
+    const uc = [...ucs].sort((a, b) => b.completeness - a.completeness)[0];
+    await page.goto(`/o/${demo.id}/use-cases/${uc.id}`);
+    await settle(page);
+    await expectNoCrash(page);
+    const overview = page.getByRole('button', { name: /^Overview/ });
+    await expect(overview).toHaveAttribute('aria-expanded', 'true');
+    await overview.click();
+    await expect(overview).toHaveAttribute('aria-expanded', 'false');
+    const terms = page.getByRole('button', { name: /Terms mentioned/ });
+    await expect(terms).toHaveAttribute('aria-expanded', 'false');
+    await terms.click();
+    await expect(terms).toHaveAttribute('aria-expanded', 'true');
+    // Competency questions show the question and status first; detail opens per question.
+    const detail = page.getByRole('button', { name: 'Example answer, terms and test' });
+    if (await detail.count()) {
+      await detail.first().click();
+      await expect(detail.first()).toHaveAttribute('aria-expanded', 'true');
+    }
+    // One primary action, chosen by the use case's state.
+    const primary = uc.source === 'chat' && uc.status === 'eliciting' ? 'Continue the interview' : uc.status === 'ready' || uc.status === 'synthesised' ? 'Draft changes' : 'Mark as ready';
+    await expect(page.getByRole('button', { name: primary })).toHaveClass(/bg-accent /);
+  });
+
+  test('releases are grouped into in progress, latest and previous', async ({ page, request }) => {
+    const releases = (await (await request.get(`/api/ontologies/${demo.id}/releases`)).json()) as { status: string; version: string }[];
+    await page.goto(`/o/${demo.id}/releases`);
+    await settle(page);
+    await expectNoCrash(page);
+    if (releases.some((r) => r.status === 'draft' || r.status === 'voting')) await expect(page.getByRole('region', { name: 'In progress' })).toBeVisible();
+    const published = releases.filter((r) => r.status === 'published');
+    if (published.length) await expect(page.getByRole('region', { name: 'Latest published' })).toBeVisible();
+    if (published.length > 1) {
+      await page.getByRole('button', { name: /Previous releases/ }).click();
+      await expect(page.getByText(`v${published[1].version}`).first()).toBeVisible();
+    }
+  });
+
+  test('a published release keeps approval and technical details behind disclosures', async ({ page }) => {
+    await page.goto(`/o/${demo.id}/releases`);
+    await settle(page);
+    const latest = page.getByRole('region', { name: 'Latest published' });
+    test.skip(!(await latest.count()), 'no published release in the demo');
+    await latest.getByRole('link').first().click();
+    await settle(page);
+    await expectNoCrash(page);
+    const how = page.getByRole('button', { name: /How this was approved/ });
+    await expect(how).toHaveAttribute('aria-expanded', 'false');
+    await how.click();
+    await expect(page.getByText('Next:', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: /Technical details/ }).click();
+    await expect(page.getByText('Version IRI:')).toBeVisible();
+  });
 });
