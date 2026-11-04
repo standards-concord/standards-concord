@@ -99,7 +99,7 @@ export function Popover({
 
   return (
     <div
-      className="relative inline-block"
+      className="relative inline-flex"
       ref={ref}
       onBlur={(e) => {
         // Tabbing out of the trigger and panel closes it, like a disclosure menu.

@@ -184,7 +184,15 @@ export const actions: Record<string, Action> = {
   async 'show-format'(c, format) {
     const name = FORMAT_TABS[format] ?? new RegExp(format, 'i');
     await c.d.scroll(-2000, 400);
-    await c.d.click(c.d.page.getByRole('tab', { name }), `the ${format} format tab`);
+    // Formats are a labelled dropdown: point at it, then pick the format.
+    const select = c.d.page.getByLabel('Format', { exact: true });
+    const labels = (await select.locator('option').allTextContents().catch(() => [] as string[])).map((t) => t.trim());
+    const label = labels.find((t) => name.test(t));
+    if (!label) c.d.warn(`Could not find the ${format} format`);
+    else if (await c.d.pointAt(select, 'the Format dropdown')) {
+      await select.selectOption({ label });
+      await c.d.settle();
+    }
     await sleep(700);
     await c.d.scroll(260, 1400);
   },
