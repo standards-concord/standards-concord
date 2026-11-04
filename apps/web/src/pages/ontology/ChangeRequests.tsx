@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { ChangeRequestKind, ChangeRequestStatus } from '@concord/shared';
 import { Bug, GitPullRequest, Globe, Plus } from 'lucide-react';
@@ -100,6 +100,8 @@ function PublicReports() {
   const listRef = useRef<HTMLUListElement>(null);
   // What the last action did, for screen readers; and whether to keep the panel after its last report goes.
   const [status, setStatus] = useState('');
+  // The report position to move focus to once a dismissal has redrawn the list.
+  const [refocus, setRefocus] = useState<number | null>(null);
   const accept = useAction(async (reportId: string) => {
     const cr = await api.acceptPublicReport(id, reportId);
     nav(`/o/${id}/changes/${cr.id}`);
@@ -109,13 +111,17 @@ function PublicReports() {
     await api.dismissPublicReport(id, reportId);
     await reports.reload();
     setStatus('Report dismissed.');
-    // The focused button went with its report: move to the report that took its place, or the heading.
-    requestAnimationFrame(() => {
-      const items = listRef.current?.querySelectorAll<HTMLElement>('[data-public-report]') ?? [];
-      const next = items[Math.min(at, items.length - 1)]?.querySelector<HTMLElement>('button');
-      (next ?? heading.current)?.focus();
-    });
+    setRefocus(at);
   });
+  // The focused button went with its report: once the new list is on screen, move to the report that took
+  // its place, or the heading. (An effect, not a timer: it runs after React has drawn the new list.)
+  useEffect(() => {
+    if (refocus === null || dismiss.pending) return;
+    const items = listRef.current?.querySelectorAll<HTMLElement>('[data-public-report]') ?? [];
+    const next = items[Math.min(refocus, items.length - 1)]?.querySelector<HTMLElement>('button');
+    (next ?? heading.current)?.focus();
+    setRefocus(null);
+  }, [refocus, dismiss.pending, reports.data]);
   if (!moderator) return null;
   if (reports.error && !reports.data)
     return <ErrorCard className="mb-6" title="Couldn’t load reports from the public page" error={reports.error} onRetry={() => void reports.reload()} />;

@@ -489,6 +489,27 @@ describe('public reports: third review', () => {
   });
 });
 
+describe('public reports: fourth review', () => {
+  it('looks a term up by its exact IRI: a look-alike is a different term, and only the text people write is normalised', async () => {
+    const lookalike = `${NS}\uFF36olunteeringOpportunity`; // a fullwidth V
+    const v = await visitor('192.0.2.90');
+    // No form, no token and no report for a term that doesn't exist, however much it looks like one that does.
+    expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(lookalike)}&version=1.0.0`)).status).toBe(404);
+    const before = queued().length;
+    const res = await v.send({ term: lookalike, token: v.token({ term: lookalike }) });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(queued()).toHaveLength(before);
+    // Versions are exact too.
+    expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(TERM)}&version=${encodeURIComponent('\uFF11.0.0')}`)).body.version).not.toBe('1.0.0');
+    // The real term still works, and the description is normalised as before.
+    const ok = await v.send({ description: 'The \uFF26ullwidth letters in this report are plain text.' });
+    expect(ok.status).toBe(201);
+    const stored = queued().find((r) => r.id === ok.body.reference)!;
+    expect(stored.termIri).toBe(TERM);
+    expect(stored.description).toContain('Fullwidth letters');
+  });
+});
+
 describe('public Browse', () => {
   it('lists every class, even ones in a cycle with no root', async () => {
     const project = findProject('volunteering')!;

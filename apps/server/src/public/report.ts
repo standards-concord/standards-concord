@@ -281,6 +281,9 @@ async function findTerm(project: OntologyProject, version: string | undefined, i
   return undefined;
 }
 
+/** An identifier (a term IRI, a version) exactly as sent: IRIs are compared code point for code point, so nothing is normalised. */
+const exact = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : '');
+/** Free text a person wrote: normalised, without control characters, trimmed. */
 const clean = (v: unknown, max: number) =>
   typeof v === 'string'
     ? v
@@ -307,8 +310,8 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   const who = visitor(req);
   if (attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
   const b = (req.body ?? {}) as Record<string, unknown>;
-  const iri = clean(b.term, 2000);
-  const found = iri ? await findTerm(project, clean(b.version, 40) || undefined, iri) : undefined;
+  const iri = exact(b.term, 2000);
+  const found = iri ? await findTerm(project, exact(b.version, 40) || undefined, iri) : undefined;
   if (!found) throw new ReportError(400, 'That term isn’t in this ontology.');
   const session = browserSession(req, res);
   const scope = { slug: project.slug, term: found.term.iri, version: found.version, session };
@@ -357,8 +360,8 @@ export function reportRouter(): Router {
     return p;
   };
   const term = async (req: Request, p: OntologyProject) => {
-    const iri = clean(req.query.term, 2000);
-    return iri ? await findTerm(p, clean(req.query.version, 40) || undefined, iri) : undefined;
+    const iri = exact(req.query.term, 2000);
+    return iri ? await findTerm(p, exact(req.query.version, 40) || undefined, iri) : undefined;
   };
 
   r.get(`${base}/token`, async (req, res, next) => {
