@@ -41,39 +41,36 @@ export const XSD: Record<string, string> = Object.fromEntries(
  */
 export const isSafePrefix = (p: string): boolean => /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
 
-/** Characters RFC 3987 never allows unescaped in an IRI (besides controls, spaces and surrogates). */
-const IRI_FORBIDDEN = new Set([...'<>"{}|\\^`']);
+/** Unicode noncharacters: U+FDD0 to U+FDEF, and the last two code points of every plane. */
+const isNoncharacter = (cp: number): boolean => (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
 
 /**
- * A namespace IRI safe to put in a context or a prefix declaration: an
- * absolute IRI (RFC 3987) with a scheme, no spaces, controls, lone
- * surrogates, quotes or angle brackets, and every `%` followed by two hex
- * digits. http(s) IRIs must also parse as URLs, which is where square
- * brackets (IPv6 hosts) are allowed.
+ * A namespace IRI safe to put in a context or a prefix declaration. Only
+ * http(s) namespaces are accepted, and only in the canonical form a URL
+ * parser gives back unchanged, so nothing malformed or ambiguous survives:
+ * - no user name or password, a host, and at most one `#`;
+ * - no square brackets outside an IPv6 host;
+ * - ending in `#` or `/`, as a namespace does;
+ * - once percent-decoded, valid UTF-8 with no control characters or
+ *   Unicode noncharacters.
+ * Non-ASCII characters must be percent-encoded (and hosts punycoded), which
+ * is the form the parser gives back.
  */
 export function isSafeNamespace(iri: string): boolean {
-  const m = /^([A-Za-z][A-Za-z0-9+.-]*):(.+)$/s.exec(iri);
-  if (!m) return false;
-  const web = /^https?$/i.test(m[1]);
-  const rest = m[2];
-  for (let i = 0; i < rest.length; i++) {
-    const c = rest.charCodeAt(i);
-    if (c >= 0xd800 && c <= 0xdbff) {
-      const d = rest.charCodeAt(i + 1);
-      if (!(d >= 0xdc00 && d <= 0xdfff)) return false;
-      i++;
-      continue;
-    }
-    if (c >= 0xdc00 && c <= 0xdfff) return false;
-    if (c <= 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0xfffe || c === 0xffff) return false;
-    const ch = rest[i];
-    if (IRI_FORBIDDEN.has(ch)) return false;
-    if (ch === '%' && !/^[0-9A-Fa-f]{2}$/.test(rest.slice(i + 1, i + 3))) return false;
-    if ((ch === '[' || ch === ']') && !web) return false;
-  }
-  if (web) {
-    try { new URL(iri); } catch { return false; }
-    if (!/^https?:\/\/[^/?#]/i.test(iri)) return false;
+  let url: URL;
+  try { url = new URL(iri); } catch { return false; }
+  if (url.href !== iri) return false;
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+  if (url.username || url.password || !url.hostname) return false;
+  if (iri.split('#').length > 2) return false;
+  if (!iri.endsWith('#') && !iri.endsWith('/')) return false;
+  const afterHost = url.pathname + url.search + url.hash;
+  if (/[[\]]/.test(afterHost)) return false;
+  let decoded: string;
+  try { decoded = decodeURIComponent(iri); } catch { return false; }
+  for (const ch of decoded) {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x20 || (cp >= 0x7f && cp <= 0x9f) || (cp >= 0xd800 && cp <= 0xdfff) || isNoncharacter(cp)) return false;
   }
   return true;
 }

@@ -64,8 +64,16 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
     // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
     if (p && isSafePrefix(p) && isSafeNamespace(ns) && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
   }
-  const compacted = await jsonld.compact(expanded, context as any, { documentLoader: noRemoteDocuments as any });
-  return JSON.stringify(sortKeys(compacted), null, 2) + '\n';
+  return JSON.stringify(sortKeys(await compactJsonLd(expanded, context)), null, 2) + '\n';
+}
+
+/**
+ * Compacts expanded JSON-LD with a context, never loading anything: a remote
+ * context or `@import` in the context is an error, whatever put it there.
+ */
+export async function compactJsonLd(expanded: object, context: Record<string, unknown>): Promise<object> {
+  const jsonld = (await import('jsonld')).default;
+  return jsonld.compact(expanded as any, context as any, { documentLoader: noRemoteDocuments as any });
 }
 
 /** Sorts object keys and node arrays for stable output (never reorders @list members). */
