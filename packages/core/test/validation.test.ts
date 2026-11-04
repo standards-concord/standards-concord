@@ -52,6 +52,19 @@ describe('reading data', () => {
     expect(err.message).toMatch(/more than 10 triples/);
   });
 
+  it('never loads remote contexts from @import or scoped contexts either', async () => {
+    const docs = [
+      { '@context': { '@version': 1.1, '@import': 'https://remote.example/import.jsonld' }, '@id': 'https://e/a', 'https://e/p': 1 },
+      { '@context': { '@version': 1.1, p: { '@id': 'https://e/p', '@context': 'https://remote.example/scoped.jsonld' } }, '@id': 'https://e/a', p: { 'https://e/q': 1 } },
+      { '@context': { '@version': 1.1, T: { '@id': 'https://e/T', '@context': ['https://remote.example/type.jsonld'] } }, '@id': 'https://e/a', '@type': 'T', 'https://e/q': 1 },
+    ];
+    for (const doc of docs) {
+      const err = await parseData(JSON.stringify(doc), 'jsonld').catch((e) => e);
+      expect(err).toBeInstanceOf(DataError);
+      expect(err.message).toMatch(/Remote JSON-LD contexts are not fetched \(https:\/\/remote\.example\//);
+    }
+  });
+
   it('stops parsing at the cap, in every format', async () => {
     // Past the cap the data is broken: a 413, not a 400, shows the parser never read that far. (JSON-LD is counted exactly after expansion, before any triples are made.)
     const n = 5000;
