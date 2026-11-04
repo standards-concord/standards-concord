@@ -568,7 +568,25 @@ const METADATA_PREDICATES: Record<string, { p: string; kind: 'iri' | 'lang' | 's
   preferredNamespace: { p: NS.vann + 'preferredNamespaceUri', kind: 'anyURI' },
 };
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+/**
+ * A valid xsd:date (2026-11-04) or xsd:dateTime (2026-11-04T10:00:00, with
+ * optional fractional seconds and time zone): the lexical forms we store, with
+ * real calendar values (no 31 February, no 25:00, no +15:00 offset).
+ */
+const XSD_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?)?(Z|([+-])(\d{2}):(\d{2}))?$/;
+export function isXsdDateOrDateTime(v: string): boolean {
+  const m = XSD_DATE.exec(v);
+  if (!m) return false;
+  const [, y, mo, d, h, mi, sec, tz, , th, tm] = m;
+  const year = Number(y), month = Number(mo), day = Number(d);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (day > days) return false;
+  if (h !== undefined && (Number(h) > 23 || Number(mi) > 59 || Number(sec) > 59)) return false;
+  if (tz && tz !== 'Z' && (Number(tm) > 59 || Number(th) * 60 + Number(tm) > 14 * 60)) return false;
+  return true;
+}
 
 export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): void {
   const s = g.store;
@@ -591,7 +609,7 @@ export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): voi
         case 'string': term = literal(v); break;
         case 'anyURI': term = typedLit(v, NS.xsd + 'anyURI'); break;
         case 'date':
-          if (!ISO_DATE.test(v) || Number.isNaN(Date.parse(v))) fail(`${field} must be an ISO date such as 2026-11-04, not "${v.slice(0, 40)}"`);
+          if (!isXsdDateOrDateTime(v)) fail(`${field} must be an ISO date such as 2026-11-04 (or a date-time with seconds, 2026-11-04T10:00:00Z), not "${v.slice(0, 40)}"`);
           term = typedLit(v, v.includes('T') ? NS.xsd + 'dateTime' : NS.xsd + 'date');
           break;
         default: term = looksLikeIRI(v) ? nn(v) : literal(v);

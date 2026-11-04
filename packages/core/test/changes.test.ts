@@ -218,6 +218,11 @@ describe('applyChangeOps', () => {
   it('setMetadata only accepts ISO dates for date fields', () => {
     expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { modified: '<img src=x onerror=alert(1)>' } }])).toThrow(/ISO date/);
     expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: '2026-13-45' } }])).toThrow(/ISO date/);
+    // Real calendar values only, in the lexical form xsd:date / xsd:dateTime require.
+    for (const bad of ['2026-02-31', '2025-02-29', '2026-11-04T10:00Z', '2026-11-04T24:00:00', '2026-11-04T10:00:00+15:00', '0000-01-01'])
+      expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: bad } }]), bad).toThrow(/ISO date/);
+    for (const good of ['2024-02-29', '2026-11-04', '2026-11-04Z', '2026-11-04T10:00:00.123+01:00'])
+      expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: good } }]), good).not.toThrow();
     const { graph } = applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: '2026-11-04T10:00:00Z' } }]);
     expect(graph.view().metadata.issued).toBe('2026-11-04T10:00:00Z');
   });
