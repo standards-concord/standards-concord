@@ -138,11 +138,17 @@ export function buildModel(view: OntologyView): OntologyModel {
   const properties = new Map<string, PropertyView>([...view.objectProperties, ...view.datatypeProperties].map((p) => [p.iri, p]));
   const parents = new Map<string, string[]>();
   const children = new Map<string, string[]>();
+  // Appends in place: building lists by spreading would make large hubs quadratic.
+  const push = <T,>(m: Map<string, T[]>, k: string, v: T) => {
+    const list = m.get(k);
+    if (list) list.push(v);
+    else m.set(k, [v]);
+  };
   for (const c of view.classes) {
     const named = [...c.superClasses, ...(c.superClassConjuncts ?? []).flatMap((x) => x.classes)];
     const ps = [...new Set(named.filter((s) => classes.has(s) && s !== c.iri))];
     parents.set(c.iri, ps);
-    for (const p of ps) children.set(p, [...(children.get(p) ?? []), c.iri]);
+    for (const p of ps) push(children, p, c.iri);
   }
   const byLabel = (a: string, b: string) => (classes.get(a)?.label ?? a).localeCompare(classes.get(b)?.label ?? b);
   for (const v of children.values()) v.sort(byLabel);
@@ -207,21 +213,45 @@ export function buildModel(view: OntologyView): OntologyModel {
     return da.size > 0 && (da.has(b) || ancestors(b).some((y) => da.has(y)));
   };
 
-  // Depth-first, stopping as soon as the budget is spent, so multiple inheritance can't explode.
+  // The first route down to each class in tree order (roots, then children breadth first),
+  // used when walking up can't find one cheaply.
+  let treeParent: Map<string, string> | undefined;
+  const treePath = (iri: string) => {
+    if (!treeParent) {
+      treeParent = new Map();
+      const seen = new Set(roots);
+      let frontier = [...roots];
+      while (frontier.length) {
+        const next: string[] = [];
+        for (const f of frontier)
+          for (const k of children.get(f) ?? [])
+            if (!seen.has(k)) (seen.add(k), treeParent.set(k, f), next.push(k));
+        frontier = next;
+      }
+    }
+    const out = [iri];
+    for (let x = treeParent.get(iri); x !== undefined; x = treeParent.get(x)) out.unshift(x);
+    return out;
+  };
+  const rootSet = new Set(roots);
+  // Paths run from a root shown in the tree (including a cycle's stand-in root) down to the
+  // class. Depth-first, stopping as soon as the budget is spent, so multiple inheritance can't
+  // explode; a walk that loops back on itself without reaching a root is dropped.
   const paths = (iri: string, limit = 4) => {
     const out: string[][] = [];
     let more = false;
+    let steps = 0;
     const go = (x: string, suffix: string[], seen: Set<string>) => {
-      if (out.length >= limit) {
+      if (out.length >= limit || ++steps > 5000) {
         more = true;
         return;
       }
-      const ps = (parents.get(x) ?? []).filter((p) => !seen.has(p));
-      if (!ps.length) {
+      if (rootSet.has(x)) {
         out.push([x, ...suffix]);
         return;
       }
-      for (const p of ps) {
+      for (const p of parents.get(x) ?? []) {
+        if (seen.has(p)) continue;
         if (out.length >= limit) {
           more = true;
           return;
@@ -230,6 +260,7 @@ export function buildModel(view: OntologyView): OntologyModel {
       }
     };
     go(iri, [], new Set());
+    if (!out.length && classes.has(iri)) out.push(treePath(iri));
     return { paths: out, more };
   };
 
@@ -246,7 +277,7 @@ export function buildModel(view: OntologyView): OntologyModel {
   // Functional directly, through a functional super-property, or because an inverse of it
   // is inverse-functional.
   const inverses = new Map<string, string[]>();
-  const addInverse = (a: string, b: string) => inverses.set(a, [...(inverses.get(a) ?? []), b]);
+  const addInverse = (a: string, b: string) => push(inverses, a, b);
   for (const p of properties.values()) if (p.inverseOf) (addInverse(p.iri, p.inverseOf), addInverse(p.inverseOf, p.iri));
   // Searches every super-property reachable from the property, so the answer doesn't depend
   // on evaluation order even when sub-property links form a cycle.
@@ -268,7 +299,7 @@ export function buildModel(view: OntologyView): OntologyModel {
   const functional = (p: PropertyView) => functionalIri(p.iri);
 
   const domainIndex = new Map<string, PropertyView[]>();
-  for (const p of properties.values()) for (const d of p.domain) domainIndex.set(d, [...(domainIndex.get(d) ?? []), p]);
+  for (const p of properties.values()) for (const d of p.domain) push(domainIndex, d, p);
 
   // A property's own ranges plus those of its super-properties.
   const propRanges = memo((iri: string) => {
@@ -456,7 +487,7 @@ export function buildModel(view: OntologyView): OntologyModel {
   });
   // The classes that state something about each property.
   const statedOn = new Map<string, string[]>();
-  for (const c of classes.keys()) for (const prop of stated(c).keys()) statedOn.set(prop, [...(statedOn.get(prop) ?? []), c]);
+  for (const c of classes.keys()) for (const prop of stated(c).keys()) push(statedOn, prop, c);
   const position = memo((iri: string) => new Map([iri, ...ancestors(iri)].map((c, i) => [c, i])));
 
   /**
@@ -465,25 +496,52 @@ export function buildModel(view: OntologyView): OntologyModel {
    * is kept once (at its nearest statement).
    */
   const keyOf = (x: Contribution) => (x.r ? restrictionKey(x.r) : `domain|${x.on}`);
-  const hasCycle = [...classes.keys()].some((c) => (parents.get(c) ?? []).some((p) => p === c || ancestorSet(p).has(c)));
+  // Linear-time cycle check: an iterative depth-first search that finds a back edge.
+  const hasCycle = (() => {
+    const state = new Map<string, 1 | 2>();
+    for (const start of classes.keys()) {
+      if (state.has(start)) continue;
+      const stack: [string, number][] = [[start, 0]];
+      state.set(start, 1);
+      while (stack.length) {
+        const top = stack[stack.length - 1];
+        const ps = parents.get(top[0]) ?? [];
+        if (top[1] >= ps.length) {
+          state.set(top[0], 2);
+          stack.pop();
+          continue;
+        }
+        const p = ps[top[1]++];
+        const st = state.get(p);
+        if (st === 1) return true;
+        if (st === undefined) (state.set(p, 1), stack.push([p, 0]));
+      }
+    }
+    return false;
+  })();
   // For a property most of the hierarchy mentions, build each class's list from its parents'
   // (deduplicated) lists, so the work doesn't grow with depth times restrictions.
-  const fromParents = new Map<string, Contribution[]>();
-  const incremental = (iri: string, prop: string): Contribution[] => {
+  // Each entry records how many subclass steps up its statement is, so with several parents
+  // a restriction is attributed to the nearest class that states it.
+  type Entry = { x: Contribution; d: number };
+  const fromParents = new Map<string, Entry[]>();
+  const incrementalEntries = (iri: string, prop: string): Entry[] => {
     const k = `${iri}\n${prop}`;
     const hit = fromParents.get(k);
     if (hit) return hit;
-    const keys = new Set<string>();
-    const out: Contribution[] = [];
-    const push = (x: Contribution) => {
+    const best = new Map<string, Entry>();
+    const offer = (x: Contribution, d: number) => {
       const key = keyOf(x);
-      if (!keys.has(key)) (keys.add(key), out.push(x));
+      const cur = best.get(key);
+      if (!cur || d < cur.d) best.set(key, { x, d });
     };
-    stated(iri).get(prop)?.forEach(push);
-    for (const parent of parents.get(iri) ?? []) incremental(parent, prop).forEach(push);
+    for (const x of stated(iri).get(prop) ?? []) offer(x, 0);
+    for (const parent of parents.get(iri) ?? []) for (const e of incrementalEntries(parent, prop)) offer(e.x, e.d + 1);
+    const out = [...best.values()].sort((a, b) => a.d - b.d);
     fromParents.set(k, out);
     return out;
   };
+  const incremental = (iri: string, prop: string) => incrementalEntries(iri, prop).map((e) => e.x);
   const contributionsFor = (iri: string, prop: string) => {
     const all = statedOn.get(prop) ?? [];
     const chain = [iri, ...ancestors(iri)];

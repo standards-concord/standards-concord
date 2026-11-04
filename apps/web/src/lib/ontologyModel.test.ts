@@ -272,6 +272,40 @@ describe('ontology model: unknown properties and cycles', () => {
     expect(m.roots).toContain(I('Root'));
     expect(m.roots.filter((x) => x === I('A') || x === I('B'))).toHaveLength(1);
   });
+
+  it('gives paths through a longer cycle that start at the root shown in the tree', () => {
+    const m = model([cls('Root'), cls('A', { sup: ['B'] }), cls('B', { sup: ['C'] }), cls('C', { sup: ['A'] })], []);
+    const stand = m.roots.find((x) => x !== I('Root'))!;
+    expect(stand).toBe(I('A'));
+    for (const c of ['A', 'B', 'C']) {
+      const { paths } = m.paths(I(c));
+      expect(paths.length).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(path[0]).toBe(stand);
+        expect(path.at(-1)).toBe(I(c));
+        // Each step goes from a parent to one of its children, as the tree draws it.
+        for (let i = 1; i < path.length; i++) expect(m.children.get(path[i - 1])).toContain(path[i]);
+      }
+    }
+  });
+
+  it('attributes an inherited restriction to the nearest class that states it', () => {
+    // D has two parents. Through P1 the restriction comes from G, two steps up; P2 states it
+    // directly, one step up.
+    const m = model(
+      [
+        cls('F'),
+        cls('X'),
+        cls('G', { r: [r('p', 'some', 'F')] }),
+        cls('P1', { sup: ['G'], r: [r('p', 'max', undefined, 5)] }),
+        cls('P2', { r: [r('p', 'some', 'F')] }),
+        cls('D', { sup: ['P1', 'P2'], r: [r('p', 'some', 'X')] }),
+      ],
+      [prop('p')],
+    );
+    const s = slot(m, 'D', 'p')!;
+    expect(s.qualified.find((q) => q.filler === I('F'))?.on).toBe(I('P2'));
+  });
 });
 
 describe('ontology model: performance', () => {
@@ -279,12 +313,12 @@ describe('ontology model: performance', () => {
     const fillers = Array.from({ length: 10 }, (_, i) => cls(`F${i}`));
     const chain = [cls('C0', { r: fillers.map((f, i) => r('p', 'some', `F${i}`)) })];
     for (let i = 1; i < 400; i++) chain.push(cls(`C${i}`, { sup: [`C${i - 1}`], r: [...fillers.map((_, j) => r('p', 'some', `F${j}`)), r('q', 'some', `F${i % 10}`)] }));
-    const m = model([...fillers, ...chain], [prop('p'), prop('q')]);
     const t = performance.now();
+    const m = model([...fillers, ...chain], [prop('p'), prop('q')]);
     for (const c of m.classes.keys()) m.ownSlots(c);
     m.incoming(I('F0'));
-    // Tens of milliseconds locally; it took about 2 s when every restriction was compared with
-    // every other. The limit leaves room for slow CI machines.
+    // Building the model and every slot takes tens of milliseconds locally; it took about 2 s
+    // when every restriction was compared with every other. The limit leaves room for slow CI.
     expect(performance.now() - t).toBeLessThan(1000);
     expect(slotCard(slot(m, 'C399', 'p')!)).toBe('1..*');
   });
@@ -297,14 +331,30 @@ describe('ontology model: performance', () => {
       props.push(...own);
       chain.push(cls(`C${i}`, { sup: i ? [`C${i - 1}`] : [], r: own.slice(0, 3).map((p) => ({ property: p.iri, kind: 'some' as const, filler: I('F') })) }));
     }
-    const m = model([cls('F'), ...chain], props);
     const t = performance.now();
+    const m = model([cls('F'), ...chain], props);
     for (const c of m.classes.keys()) m.ownSlots(c);
     m.incoming(I('F'));
-    // Tens of milliseconds locally; building every inherited slot at every level took about 3 s.
-    // The limit leaves room for slow CI machines.
+    // Building the model and every slot takes tens of milliseconds locally; building every
+    // inherited slot at every level took about 3 s. The limit leaves room for slow CI.
     expect(performance.now() - t).toBeLessThan(1000);
     expect(m.allSlots(I('C399')).flatMap((g) => g.slots)).toHaveLength(4000);
+  });
+});
+
+describe('ontology model: construction', () => {
+  it('builds a deep chain and a wide hub in linear time', () => {
+    const chain = Array.from({ length: 5000 }, (_, i) => cls(`C${i}`, { sup: i ? [`C${i - 1}`] : [] }));
+    const hub = [cls('Hub'), ...Array.from({ length: 5000 }, (_, i) => cls(`K${i}`, { sup: ['Hub'] }))];
+    const domains = Array.from({ length: 2000 }, (_, i) => prop(`d${i}`, { domain: [I('Hub')] }));
+    const t = performance.now();
+    const a = model(chain, []);
+    const b = model(hub, domains);
+    // A few milliseconds each locally; materialising ancestor sets to look for cycles, or
+    // growing lists by copying them, made this take seconds.
+    expect(performance.now() - t).toBeLessThan(300);
+    expect(a.roots).toEqual([I('C0')]);
+    expect(b.children.get(I('Hub'))).toHaveLength(5000);
   });
 });
 

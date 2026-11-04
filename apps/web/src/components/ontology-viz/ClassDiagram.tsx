@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
@@ -24,6 +24,8 @@ export const DEFAULT_DIAGRAM_OPTIONS: DiagramOptions = { attributes: true, inher
 
 interface BoxLine {
   text: string;
+  /** The text wrapped to the box width. */
+  rows: string[];
   inherited?: boolean;
   conflict?: boolean;
   iri: string;
@@ -32,6 +34,8 @@ interface BoxLine {
 interface DNode {
   iri: string;
   title: string;
+  titleRows: string[];
+  head: number;
   lines: BoxLine[];
   deprecated?: boolean;
   width: number;
@@ -59,9 +63,52 @@ const TITLE_FONT = `600 13px ${FONT}`;
 const ATTR_FONT = `12px ${FONT}`;
 const LABEL_FONT = `11px ${FONT}`;
 const HEAD = 30;
+const TITLE_ROW = 16;
 const ROW = 18;
 const PADX = 12;
 const MAX_ATTRS = 12;
+const MAX_WIDTH = 340;
+// Text measured on a canvas can render a little wider in SVG, so wrapping leaves some slack.
+const SLACK = 4;
+const UP = '↑ ';
+
+/**
+ * Greedy word wrap to `max` pixels, breaking words too long for a line, and ending with an
+ * ellipsis if more than `maxRows` rows would be needed (the full text stays in the title and
+ * accessible name).
+ */
+export function wrapText(text: string, font: string, max: number, maxRows: number): string[] {
+  const fits = (t: string) => textWidth(t, font) <= max;
+  const rows: string[] = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const next = cur ? `${cur} ${word}` : word;
+    if (fits(next)) {
+      cur = next;
+      continue;
+    }
+    if (cur) rows.push(cur);
+    cur = word;
+    while (cur.length > 1 && !fits(cur)) {
+      let lo = 1;
+      let hi = cur.length - 1;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (fits(cur.slice(0, mid))) lo = mid;
+        else hi = mid - 1;
+      }
+      rows.push(cur.slice(0, lo));
+      cur = cur.slice(lo);
+    }
+  }
+  if (cur) rows.push(cur);
+  if (rows.length <= maxRows) return rows;
+  const kept = rows.slice(0, maxRows);
+  let last = kept[maxRows - 1];
+  while (last.length > 0 && !fits(`${last}…`)) last = last.slice(0, -1);
+  kept[maxRows - 1] = `${last.trimEnd()}…`;
+  return kept;
+}
 
 function typeName(iris: string[], exprs: string[], label: Labeler) {
   const parts = [...iris.map((i) => (isDatatype(i) ? i.replace(/^.*[#/]/, '') : label(i))), ...exprs];
@@ -118,14 +165,21 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       for (const grp of groups)
         for (const s of grp.slots)
           if (s.property.kind === 'datatypeProperty' || s.range.every(isDatatype) && s.range.length)
-            lines.push({ text: slotLine(s, label), inherited: grp.from !== iri, conflict: !!s.conflict, iri: s.property.iri });
+            lines.push({ text: slotLine(s, label), rows: [], inherited: grp.from !== iri, conflict: !!s.conflict, iri: s.property.iri });
     }
     const shown = lines.slice(0, MAX_ATTRS);
-    if (lines.length > MAX_ATTRS) shown.push({ text: `+ ${lines.length - MAX_ATTRS} more`, iri: '' });
+    if (lines.length > MAX_ATTRS) shown.push({ text: `+ ${lines.length - MAX_ATTRS} more`, rows: [], iri: '' });
     const title = c.label ?? label(iri);
-    const width = Math.ceil(Math.min(340, Math.max(120, textWidth(title, TITLE_FONT) + PADX * 2 + 4, ...shown.map((l) => textWidth(l.text, ATTR_FONT) + PADX * 2 + (l.inherited ? 12 : 0)))));
-    const height = HEAD + (shown.length ? shown.length * ROW + 10 : 0);
-    nodes.set(iri, { iri, title, lines: shown, deprecated: c.deprecated, width, height, x: 0, y: 0 });
+    const indent = textWidth(UP, ATTR_FONT);
+    const inset = (l: BoxLine) => PADX * 2 + SLACK + (l.inherited ? indent : 0);
+    // As wide as the longest line, up to MAX_WIDTH; longer text wraps onto more rows.
+    const width = Math.ceil(Math.min(MAX_WIDTH, Math.max(120, textWidth(title, TITLE_FONT) + PADX * 2 + SLACK, ...shown.map((l) => textWidth(l.text, ATTR_FONT) + inset(l)))));
+    const titleRows = wrapText(title, TITLE_FONT, width - PADX * 2 - SLACK, 3);
+    for (const l of shown) l.rows = wrapText(l.text, ATTR_FONT, width - inset(l), 3);
+    const head = HEAD + (titleRows.length - 1) * TITLE_ROW;
+    const rowCount = shown.reduce((n, l) => n + l.rows.length, 0);
+    const height = head + (shown.length ? rowCount * ROW + 10 : 0);
+    nodes.set(iri, { iri, title, titleRows, head, lines: shown, deprecated: c.deprecated, width, height, x: 0, y: 0 });
     g.setNode(iri, { width, height });
   }
 
@@ -188,8 +242,16 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
     e.ly = y;
     e.lw = textWidth(e.label!, LABEL_FONT) + 10;
   }
+  // The drawing's bounds (used to fit and export it) cover every box, edge and label.
   const gl = g.graph();
-  return { nodes: [...nodes.values()], edges: [...edges, ...loops], width: (gl.width ?? 400) + (loops.length ? 160 : 0), height: gl.height ?? 300 };
+  let width = gl.width ?? 0;
+  let height = gl.height ?? 0;
+  for (const n of nodes.values()) (width = Math.max(width, n.x + n.width)), (height = Math.max(height, n.y + n.height));
+  for (const e of [...edges, ...loops]) {
+    for (const pt of e.points) (width = Math.max(width, pt.x)), (height = Math.max(height, pt.y));
+    if (e.lx !== undefined && e.ly !== undefined) (width = Math.max(width, e.lx + (e.lw ?? 0) / 2)), (height = Math.max(height, e.ly + 8));
+  }
+  return { nodes: [...nodes.values()], edges: [...edges, ...loops], width: width || 400, height: height || 300 };
 }
 
 function nearestInDirection(from: DNode, all: DNode[], key: string) {
@@ -248,7 +310,16 @@ export function ClassDiagram({
   const [hover, setHover] = useState<string>();
   const [focused, setFocused] = useState<string>();
   const [current, setCurrent] = useState<string>();
-  const layout = useMemo(() => layoutDiagram(model, scope, options, label), [model, scope, options, label]);
+  // Text is measured to size the boxes, so lay out again once the web font has loaded.
+  const [fonts, setFonts] = useState(0);
+  useEffect(() => {
+    let live = true;
+    document.fonts?.ready.then(() => live && setFonts((n) => n + 1));
+    return () => {
+      live = false;
+    };
+  }, []);
+  const layout = useMemo(() => layoutDiagram(model, scope, options, label), [model, scope, options, label, fonts]);
   const colours = useMemo(() => themeColours(), [view]);
   const pz = usePanZoom(box, layout, layout);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
@@ -413,21 +484,38 @@ export function ClassDiagram({
                   {focused === n.iri && <rect data-focus-ring x={-5} y={-5} width={n.width + 10} height={n.height + 10} rx={11} fill="none" stroke={c.accent} strokeWidth={2.5} />}
                   <rect width={n.width} height={n.height} rx={8} fill={c.surface} stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />
                   {n.lines.length ? (
-                    <path d={`M0,8 a8,8 0 0 1 8,-8 h${n.width - 16} a8,8 0 0 1 8,8 v${HEAD - 8} h${-n.width} z`} fill={filled ? c.accent : c.accentSoft} />
+                    <path d={`M0,8 a8,8 0 0 1 8,-8 h${n.width - 16} a8,8 0 0 1 8,8 v${n.head - 8} h${-n.width} z`} fill={filled ? c.accent : c.accentSoft} />
                   ) : (
                     <rect width={n.width} height={n.height} rx={8} fill={filled ? c.accent : c.accentSoft} />
                   )}
                   {!n.lines.length && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />}
-                  <text x={n.width / 2} y={19.5} textAnchor="middle" fontSize="13" fontWeight="600" fill={filled ? c.accentFg : c.fg} textDecoration={n.deprecated ? 'line-through' : undefined}>
-                    {n.title}
+                  <text data-title textAnchor="middle" fontSize="13" fontWeight="600" fill={filled ? c.accentFg : c.fg} textDecoration={n.deprecated ? 'line-through' : undefined}>
+                    {n.titleRows.map((t, i) => (
+                      <tspan key={i} x={n.width / 2} y={19.5 + i * TITLE_ROW}>
+                        {t}
+                      </tspan>
+                    ))}
                   </text>
-                  {n.lines.length > 0 && <line x1={0} x2={n.width} y1={HEAD} y2={HEAD} stroke={c.line} />}
-                  {n.lines.map((l, i) => (
-                    <text key={i} x={PADX} y={HEAD + 18 + i * ROW} fontSize="12" fill={l.conflict ? c.danger : l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
-                      {l.inherited && <tspan fill={c.subtle}>↑ </tspan>}
-                      {l.text}
-                    </text>
-                  ))}
+                  {n.lines.length > 0 && <line x1={0} x2={n.width} y1={n.head} y2={n.head} stroke={c.line} />}
+                  {n.lines.map((l, i) => {
+                    const first = n.lines.slice(0, i).reduce((k, x) => k + x.rows.length, 0);
+                    const x0 = PADX + (l.inherited ? textWidth(UP, ATTR_FONT) : 0);
+                    return (
+                      <text key={i} data-attr fontSize="12" fill={l.conflict ? c.danger : l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
+                        {l.rows.length > 1 || l.rows[0] !== l.text ? <title>{l.text}</title> : null}
+                        {l.inherited && (
+                          <tspan x={PADX} y={n.head + 18 + first * ROW} fill={c.subtle}>
+                            {UP}
+                          </tspan>
+                        )}
+                        {l.rows.map((t, j) => (
+                          <tspan key={j} x={x0} y={n.head + 18 + (first + j) * ROW}>
+                            {t}
+                          </tspan>
+                        ))}
+                      </text>
+                    );
+                  })}
                 </g>
               );
             })}

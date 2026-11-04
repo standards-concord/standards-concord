@@ -388,8 +388,8 @@ test.describe('large and unusual ontologies (stubbed)', () => {
   const cls = (l: string, sup: string[] = [], restrictions: unknown[] = []) => ({ kind: 'class', iri: NS + l, label: l, superClasses: sup.map((x) => NS + x), equivalentClasses: [], disjointWith: [], restrictions });
   const prop = (l: string, extra: Record<string, unknown> = {}) => ({ kind: 'objectProperty', iri: NS + l, label: l, domain: [], range: [], superProperties: [], characteristics: [], ...extra });
 
-  async function stub(page: Page, classes: ReturnType<typeof cls>[], objectProperties: ReturnType<typeof prop>[] = []) {
-    const view = { metadata: { iri: 'https://example.org/big', title: 'Big', creators: [], contributors: [] }, classes, objectProperties, datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: { big: NS }, tripleCount: 1 };
+  async function stub(page: Page, classes: ReturnType<typeof cls>[], objectProperties: ReturnType<typeof prop>[] = [], datatypeProperties: ReturnType<typeof prop>[] = []) {
+    const view = { metadata: { iri: 'https://example.org/big', title: 'Big', creators: [], contributors: [] }, classes, objectProperties, datatypeProperties, annotationProperties: [], individuals: [], prefixes: { big: NS }, tripleCount: 1 };
     await page.route(/\/api\/ontologies\/[^/]+\/view/, (r) => r.fulfill({ json: view }));
     await page.route(/\/api\/ontologies\/[^/]+\/terms\//, (r) => {
       const iri = decodeURIComponent(new URL(r.request().url()).pathname.split('/terms/')[1]);
@@ -450,6 +450,49 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(row).toBeVisible();
     const clipped = await row.evaluate((el) => [...el.querySelectorAll('span')].some((s) => s.scrollWidth > s.clientWidth + 1));
     expect(clipped).toBe(false);
+  });
+
+  test('long names wrap inside their diagram boxes and the exported drawing', async ({ page }) => {
+    const long = 'Organisation that coordinates volunteering opportunities across several regional partners';
+    const word = 'Supercalifragilisticexpialidociousorganisationalidentifierwithoutanyspaces';
+    const classes = [
+      { ...cls('Long', [], [{ property: NS + 'collaboratesWithAnotherOrganisationOnSharedProgrammes', kind: 'some', filler: NS + 'Long' }]), label: long },
+      { ...cls('Word', ['Long']), label: word },
+    ];
+    const attr = { ...prop('theFullRegisteredCharityNumberAsRecordedByTheNationalRegulator', { domain: [NS + 'Long'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' };
+    await stub(page, classes, [prop('collaboratesWithAnotherOrganisationOnSharedProgrammes')], [attr]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    const result = await d.locator('svg[data-width]').evaluate((svg) => {
+      const out: string[] = [];
+      for (const node of svg.querySelectorAll('[data-node]')) {
+        const box = node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect();
+        for (const t of node.querySelectorAll('text')) {
+          const b = t.getBoundingClientRect();
+          if (b.left < box.left - 1 || b.right > box.right + 1 || b.top < box.top - 1 || b.bottom > box.bottom + 1) out.push(`${t.textContent} overflows its box`);
+        }
+      }
+      // The export uses data-width/height (plus a 20px margin) as its bounds.
+      const content = (svg.querySelector('[data-viewport]') as SVGGElement).getBBox();
+      const w = Number((svg as SVGSVGElement).dataset.width);
+      const h = Number((svg as SVGSVGElement).dataset.height);
+      if (content.x < -20 || content.y < -20 || content.x + content.width > w + 20 || content.y + content.height > h + 20) out.push(`content ${JSON.stringify(content)} exceeds ${w}x${h}`);
+      return out;
+    });
+    expect(result).toEqual([]);
+    // The full names are still there for assistive technology.
+    await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-label', new RegExp(`^${long}`));
+    await expect(d.locator(`[data-node="${NS}Word"]`)).toHaveAttribute('aria-label', new RegExp(`^${word}`));
+  });
+
+  test('every class in a longer subclass cycle can be selected in the tree', async ({ page }) => {
+    await stub(page, [cls('Root'), cls('A', ['B']), cls('B', ['C']), cls('C', ['A'])]);
+    for (const c of ['A', 'B', 'C']) {
+      await page.goto(`${base}?term=${encodeURIComponent(NS + c)}`);
+      await expect(tree(page).getByRole('treeitem', { name: new RegExp(`^${c}\\b`) })).toHaveAttribute('aria-selected', 'true');
+      await expect(tree(page).getByRole('treeitem', { name: /^Root\b/ })).toBeVisible();
+    }
   });
 
   test('classes in a subclass cycle still appear in the tree', async ({ page }) => {
