@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { ChangeOp, ChangeRequestDetail, ChangeRequestStatus } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, GitMerge, MessageSquare, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Undo2, Wand2, X, Minus, History, Scale } from 'lucide-react';
+import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, History, MessageSquare, Minus, Scale, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Undo2, Wand2, X } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -13,6 +13,7 @@ import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
 import { CqResults, FairChecks, LintIssues, ReasonerResult, ValidationSummary } from '../../components/Validation';
 import { Markdown } from '../../components/Markdown';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 
 const FLOW: ChangeRequestStatus[] = ['draft', 'triage', 'review', 'voting', 'approved', 'merged', 'released'];
@@ -233,17 +234,6 @@ export function ChangeRequestPage() {
               view meeting
             </Link>
           )}
-          {cr.origin.type === 'chat' && cr.origin.useCaseId && (
-            <Link className="text-accent hover:underline" to={`/o/${id}/use-cases/${cr.origin.useCaseId}`}>
-              view use case
-            </Link>
-          )}
-          {cr.origin.type === 'synthesis' &&
-            cr.origin.useCaseIds.map((u, i) => (
-              <Link key={u} className="text-accent hover:underline" to={`/o/${id}/use-cases/${u}`}>
-                use case {i + 1}
-              </Link>
-            ))}
         </div>
         <div className="mt-4 max-w-3xl">
           <LifecycleProgress status={cr.status} hasVote={!!cr.governance.rule.vote} />
@@ -255,6 +245,19 @@ export function ChangeRequestPage() {
           {cr.description && (
             <Card className="p-5">
               <Markdown text={cr.description} />
+            </Card>
+          )}
+
+          {!!cr.useCases?.length && (
+            <Card>
+              <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
+              <ul className="divide-y divide-line" data-testid="cr-use-cases">
+                {cr.useCases.map((u) => (
+                  <li key={u.id} className="px-5 py-3">
+                    <UseCaseRefLink ontologyId={id} r={u} />
+                  </li>
+                ))}
+              </ul>
             </Card>
           )}
 

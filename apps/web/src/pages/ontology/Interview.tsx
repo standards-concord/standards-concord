@@ -7,6 +7,7 @@ import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { ChatView } from '../../components/ChatView';
 import { CompletenessMeter, UseCaseDocument } from '../../components/UseCaseDocument';
+import { AnonymisedVersion, VisibilityPicker } from '../../components/UseCaseSharing';
 import { Button, Card, ErrorCard, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -20,8 +21,9 @@ export function InterviewPage() {
   const [sendError, setSendError] = useState<unknown>();
   const [panel, setPanel] = useState<'chat' | 'doc'>('chat');
   const finish = useAction(async () => {
-    const { useCase } = await api.finishInterview(sessionId);
-    nav(`/o/${id}/use-cases/${useCase.id}`);
+    await api.finishInterview(sessionId);
+    // Reload so the interviewer's closing message and the sharing choices show.
+    await state.reload();
   });
 
   if (state.error && !state.data) return <ErrorCard error={state.error} onRetry={state.reload} />;
@@ -56,10 +58,32 @@ export function InterviewPage() {
           <p className="text-sm text-muted">Talk or type about how you use — or would like to use — {ontology.domain ? `${ontology.domain} data` : 'this data'}. There are no wrong answers.</p>
         </div>
         <Button variant="primary" icon={CircleCheck} loading={finish.pending} onClick={() => (s.done ? nav(`/o/${id}/use-cases/${s.useCaseId}`) : void finish.run())}>
-          {s.done ? 'Done — view use case' : 'Finish'}
+          {s.done ? 'View use case' : 'Finish'}
         </Button>
       </div>
       {finish.error ? <ErrorCard error={finish.error} className="mb-4" /> : null}
+      {s.done && (
+        <Card className="mb-6 p-5" as="section">
+          <h3 className="mb-1 text-base font-semibold">What happens to this use case?</h3>
+          <p className="mb-4 text-sm text-muted">
+            {s.useCase.visibility === 'private'
+              ? 'It is private: only you can see it. You can publish the anonymised version below, share the original, or keep everything private.'
+              : s.useCase.visibility === 'group'
+                ? 'It is shared with the working group, who will triage it.'
+                : 'It is public and will be triaged by the working group.'}
+          </p>
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div>
+              {s.useCase.visibility === 'private' ? (
+                <AnonymisedVersion uc={s.useCase} ontologyId={id} onChange={(u) => state.setData((p) => ({ ...(p as InterviewDetail), useCase: u }))} />
+              ) : (
+                <Button onClick={() => nav(`/o/${id}/use-cases/${s.useCaseId}`)}>View the use case</Button>
+              )}
+            </div>
+            <VisibilityPicker uc={s.useCase} onChange={(u) => state.setData((p) => ({ ...(p as InterviewDetail), useCase: u }))} />
+          </div>
+        </Card>
+      )}
 
       <div className="mb-3 inline-flex rounded-lg border border-line-strong p-0.5 lg:hidden">
         <button onClick={() => setPanel('chat')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', panel === 'chat' ? 'bg-surface-2 font-medium' : 'text-muted')}>
@@ -96,7 +120,7 @@ export function InterviewPage() {
                       )
                     </>
                   )}
-                  . Only the use case document is shared with the group.
+                  . The use case stays private to you unless you choose to share it.
                 </span>
               </p>
             }

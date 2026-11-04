@@ -830,9 +830,22 @@ export interface SessionInfo {
  *  POST /api/ontologies/:id/ownership-transfer {toUserId} -> {status, voteId?}
  *
  * Use cases & interviews
- *  GET  /api/ontologies/:id/use-cases                -> UseCase[]
- *  GET  /api/use-cases/:id                           -> UseCase
- *  PATCH /api/use-cases/:id {sections?, competencyQuestions?, status?} -> UseCase
+ *  GET  /api/ontologies/:id/use-cases                -> UseCase[]  (only those the viewer may see; see UseCaseVisibility)
+ *  GET  /api/ontologies/:id/public-use-cases         -> PublicUseCase[]  (no sign-in needed)
+ *  GET  /api/use-cases/:id                           -> UseCaseDetail  (404 for private use cases of others)
+ *  PATCH /api/use-cases/:id {sections?, competencyQuestions?, status?} -> UseCaseDetail
+ *  POST /api/use-cases/:id/visibility {visibility}   -> UseCaseDetail  (author only)
+ *  POST /api/use-cases/:id/submit                    -> UseCaseDetail  (draft -> triage)
+ *  POST /api/use-cases/:id/triage {status, note?}    -> UseCaseDetail  (editors: accepted | deferred | out-of-scope | closed | triage)
+ *  POST /api/use-cases/:id/links {type, id?, url?, relation, label?} -> UseCaseDetail
+ *  DELETE /api/use-cases/:id/links/:target           -> UseCaseDetail
+ *  POST /api/use-cases/:id/anonymise                 -> UseCaseDetail  (author of a private use case: draft an anonymised version)
+ *  POST /api/use-cases/:id/anonymise/publish {draft?} -> { original, published }  (author consents; published has no name)
+ *  POST /api/use-cases/:id/anonymise/decline         -> UseCaseDetail
+ *  GET  /api/ontologies/:id/requirements             -> RequirementsDocument summaries (drafts for the working group only)
+ *  GET  /api/ontologies/:id/requirements/:version    -> RequirementsDocument
+ *  GET  /api/ontologies/:id/requirements/:version/markdown -> text/markdown (also committed as USE_CASES.md on release)
+ *  POST /api/releases/:id/requirements               -> RequirementsDocument  (editors: write or rewrite the draft)
  *  POST /api/ontologies/:id/interviews {useCaseId?}  -> InterviewSession  (starts with the assistant's first question)
  *  GET  /api/interviews/:id                          -> InterviewSession & { useCase: UseCase }
  *  POST /api/interviews/:id/messages {content}       -> { session: InterviewSession; useCase: UseCase }
@@ -851,7 +864,7 @@ export interface SessionInfo {
  *
  * Change requests
  *  GET  /api/ontologies/:id/change-requests?status=  -> ChangeRequest[]
- *  POST /api/ontologies/:id/change-requests {title, description, kind, ops?, naturalLanguage?} -> ChangeRequestDetail
+ *  POST /api/ontologies/:id/change-requests {title, description, kind, ops?, naturalLanguage?, useCaseIds?} -> ChangeRequestDetail
  *        (if ops omitted and naturalLanguage given, the LLM drafts ops)
  *  POST /api/ontologies/:id/bug-reports {title, description, termIri?} -> ChangeRequestDetail
  *  GET  /api/change-requests/:id                     -> ChangeRequestDetail

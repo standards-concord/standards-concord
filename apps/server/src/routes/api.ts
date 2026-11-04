@@ -321,10 +321,14 @@ export function apiRouter(): Router {
   });
   r.post('/interviews/:id/messages', async (req, res) => {
     const s = useCases.getInterview(String(req.params.id));
-    res.json(await useCases.interviewTurn(s, requireUser(req), str(req.body?.content, 'content', 8000)));
+    const user = requireUser(req);
+    const out = await useCases.interviewTurn(s, user, str(req.body?.content, 'content', 8000));
+    res.json({ session: out.session, useCase: useCaseDetail(out.useCase.id, user) });
   });
   r.post('/interviews/:id/finish', async (req, res) => {
-    res.json(await useCases.finishInterview(useCases.getInterview(String(req.params.id)), requireUser(req)));
+    const user = requireUser(req);
+    const out = await useCases.finishInterview(useCases.getInterview(String(req.params.id)), user);
+    res.json({ useCase: useCaseDetail(out.useCase.id, user) });
   });
   r.post('/ontologies/:id/synthesise', async (req, res) => {
     const p = project(req);

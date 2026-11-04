@@ -622,7 +622,7 @@ function heuristicTurn(project: OntologyProject, session: InterviewSession, u: U
   if (!next) {
     const q = [...u.competencyQuestions, ...cqs];
     return {
-      reply: `Thank you, that's really useful. Here's what I captured:\n\n- **Goal:** ${updates.goal ?? s.goal ?? '—'}\n- **Actors:** ${s.actors ?? '—'}\n- **Scenarios:** ${(s.usageScenarios ?? []).length}\n- **Competency questions:** ${q.map((x) => x.question).join(' / ') || '—'}\n\nYou can edit any of this in the use case panel. I'll pass it to the editors, who will use it to propose changes to the ontology.`,
+      reply: `Thank you, that's really useful. Here's what I captured:\n\n- **Goal:** ${updates.goal ?? s.goal ?? '—'}\n- **Actors:** ${s.actors ?? '—'}\n- **Scenarios:** ${(s.usageScenarios ?? []).length}\n- **Competency questions:** ${q.map((x) => x.question).join(' / ') || '—'}\n\nYou can edit any of this in the use case panel. Next, you choose who can see it: it stays private to you unless you share it.`,
       targets: [],
       sectionUpdates: updates,
       newCompetencyQuestions: cqs,

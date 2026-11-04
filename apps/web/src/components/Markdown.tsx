@@ -13,7 +13,8 @@ export function Markdown({ text, className }: { text: string; className?: string
   const html = useMemo(() => {
     const out = marked.parse(escapeHtml(text ?? ''), { async: false }) as string;
     // Make links open in a new tab and drop javascript: URLs.
-    return out.replace(/<a href="(?!javascript:)/g, '<a target="_blank" rel="noreferrer" href="').replace(/href="javascript:[^"]*"/g, 'href="#"');
+    // In-page anchors (#uc-…, #req-…) stay in the same tab.
+    return out.replace(/<a href="(?!javascript:|#)/g, '<a target="_blank" rel="noreferrer" href="').replace(/href="javascript:[^"]*"/g, 'href="#"');
   }, [text]);
   return <div className={cx('prose-chat text-sm leading-relaxed', className)} dangerouslySetInnerHTML={{ __html: html }} />;
 }

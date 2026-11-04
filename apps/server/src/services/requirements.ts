@@ -112,7 +112,9 @@ export function documentFor(ontologyId: string, version: string, viewer?: User):
 }
 
 const CAST = ['Sam', 'Priti', 'Jordan', 'Ada', 'Kofi', 'Morgan', 'Lena', 'Ravi'];
-const lowerFirst = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
+const LOWERABLE = /^(A|An|The|This|That|These|Every|Each|Some|Many|Most|Our|We|They|People|Volunteers|Organisations|Let|Help|Make|Find|Publish|Record|Report|Show|Tell)\b/;
+/** Lower-case a leading common word so a sentence can continue it (proper nouns are left alone). */
+const lowerFirst = (s: string) => (LOWERABLE.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
 const stripDot = (s: string) => s.trim().replace(/[.!]+$/, '');
 
 /** Offline stand-in: a simple running story with one fictional character per use case. */
@@ -142,7 +144,7 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
       ...(s.requirements ? s.requirements.split(/\n+|;\s*/).filter((x) => x.trim().length > 8).map((x) => reqFor(stripDot(x.replace(/^[-*\d.)\s]+/, '')) + '.', ref, terms)) : []),
     ];
     const paras = [
-      `${who}${s.actors ? `, one of the ${lowerFirst(stripDot(s.actors.split(/[;(]/)[0]))},` : ''} ${s.goal ? `wants to ${lowerFirst(stripDot(s.goal))}` : `needs to ${lowerFirst(stripDot(s.name ?? 'use this data'))}`} [${ref}].`,
+      `${who}${s.actors ? ` works with ${lowerFirst(stripDot(s.actors.split(/[;(]/)[0]))} and` : ''} ${s.goal ? `wants to ${lowerFirst(stripDot(s.goal))}` : `needs to ${lowerFirst(stripDot(s.name ?? 'use this data'))}`} [${ref}].`,
       s.usageScenarios?.[0] && `Take a typical day: ${lowerFirst(stripDot(s.usageScenarios[0]))} [${ref}].${s.usageScenarios[1] ? ` Another time, ${lowerFirst(stripDot(s.usageScenarios[1]))}.` : ''}`,
       !s.usageScenarios?.length && s.description && `${stripDot(s.description)} [${ref}].`,
       u.competencyQuestions.length &&
@@ -152,7 +154,7 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
           .join(' and ')} ${reqIds
           .slice(0, 3)
           .map((r) => `[${r}]`)
-          .join('')}.`,
+          .join(', ')}.`,
     ].filter(Boolean);
     return { heading: s.name || ref, markdown: paras.join('\n\n'), useCaseRefs: [ref] };
   });

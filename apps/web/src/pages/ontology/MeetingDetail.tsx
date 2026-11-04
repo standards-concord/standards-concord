@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { Meeting, UseCase } from '@concord/shared';
-import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquareWarning, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleHelp, ClipboardList, Gavel, Lightbulb, MessageSquareWarning, Sparkles, Wand2 } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, titleCase } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Spinner } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { MeetingStatus } from './Meetings';
 
@@ -74,7 +75,14 @@ export function MeetingDetailPage() {
     const r = await api.proposeFromMeeting(meetingId);
     setProposed({ useCases: r.useCases, changeRequestId: r.changeRequest?.id });
     if (r.changeRequest) nav(`/o/${id}/changes/${r.changeRequest.id}`);
+    else void m.reload();
   });
+  // Which use cases each transcript line fed into.
+  const lineUseCases = useMemo(() => {
+    const map = new Map<number, { id: string; number: number }[]>();
+    for (const u of m.data?.useCases ?? []) for (const i of u.sourceLines ?? []) map.set(i, [...(map.get(i) ?? []), { id: u.id, number: u.number }]);
+    return map;
+  }, [m.data?.useCases]);
 
   if (m.error && !m.data) return <ErrorCard error={m.error} onRetry={m.reload} />;
   if (!m.data) return <Loading />;
@@ -113,7 +121,7 @@ export function MeetingDetailPage() {
               Analyse transcript
             </Button>
           )}
-          {a && (
+          {a && !mt.useCases?.length && (
             <Button variant="primary" icon={Sparkles} loading={propose.pending} onClick={() => void propose.run()}>
               Turn into use cases and a change request
             </Button>
@@ -142,13 +150,18 @@ export function MeetingDetailPage() {
             )}
             {!mt.transcript.length && !waitingBot && <p className="text-sm text-muted">No transcript yet.</p>}
             {mt.transcript.map((l, i) => (
-              <div key={i} className="flex gap-3">
+              <div key={i} id={`line-${i}`} className={`flex gap-3 ${lineUseCases.has(i) ? 'rounded-md bg-accent-soft/30 -mx-2 px-2 py-1' : ''}`}>
                 <span className="w-10 shrink-0 pt-0.5 text-right font-mono text-[0.7rem] text-subtle">{fmtT(l.t)}</span>
                 <div className="min-w-0">
                   <span className="text-xs font-semibold" style={{ color: colorFor(l.speaker) }}>
                     {l.speaker}
                   </span>
                   <p className="text-sm leading-relaxed">{l.text}</p>
+                  {lineUseCases.get(i)?.map((u) => (
+                    <Link key={u.id} to={`/o/${id}/use-cases/${u.id}`} className="mt-1 mr-1 inline-block rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[0.65rem] text-accent hover:underline" title="This line fed into a use case">
+                      UC-{u.number}
+                    </Link>
+                  ))}
                 </div>
               </div>
             ))}
@@ -156,6 +169,18 @@ export function MeetingDetailPage() {
         </Card>
 
         <div className="space-y-4">
+          {!!mt.useCases?.length && (
+            <Card>
+              <CardHeader icon={ClipboardList} title={`Use cases from this call (${mt.useCases.length})`} subtitle="Highlighted lines in the transcript fed into them" />
+              <ul className="divide-y divide-line" data-testid="meeting-use-cases">
+                {mt.useCases.map((u) => (
+                  <li key={u.id} className="px-5 py-3">
+                    <UseCaseRefLink ontologyId={id} r={u} />
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
           <Card>
             <CardHeader icon={Bot} title="Co-lead bot prompts" subtitle="Gaps and follow-up questions the bot raised" />
             <ul className="divide-y divide-line">

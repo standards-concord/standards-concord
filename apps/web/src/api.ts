@@ -30,8 +30,15 @@ import type {
   SessionInfo,
   TermView,
   TranscriptLine,
+  AnonymisedDraft,
+  PublicUseCase,
+  RequirementsDocument,
   UseCase,
+  UseCaseDetail,
+  UseCaseLink,
   UseCaseSections,
+  UseCaseStatus,
+  UseCaseVisibility,
   User,
   ValidationReport,
 } from '@concord/shared';
@@ -125,7 +132,9 @@ export type MemberWithUser = Membership & { user: User };
 export type OntologyDetail = OntologySummary & { members: MemberWithUser[] };
 export type UsedBy = { iri: string; label?: string; via: string };
 export type TermDetail = TermView & { usedBy: UsedBy[] };
-export type InterviewDetail = InterviewSession & { useCase: UseCase };
+export type InterviewDetail = InterviewSession & { useCase: UseCaseDetail };
+export type RequirementsSummary = Pick<RequirementsDocument, 'id' | 'version' | 'status' | 'generatedAt' | 'title' | 'releaseId' | 'coverage'>;
+export type NewUseCaseLink = Pick<UseCaseLink, 'type' | 'relation'> & { id?: string; url?: string; label?: string };
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
 export type FeedbackChatResponse = { reply: string; answers: FeedbackAnswers; done: boolean; nextQuestionId?: string };
@@ -144,6 +153,8 @@ export type NewChangeRequestInput = {
   kind: ChangeRequestKind;
   ops?: ChangeOp[];
   naturalLanguage?: string;
+  /** Use cases this change addresses. */
+  useCaseIds?: string[];
 };
 export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment';
 export type VoteChoice = 'yes' | 'no' | 'abstain';
@@ -182,14 +193,28 @@ export const api = {
 
   // Use cases & interviews
   useCases: (id: string) => get<UseCase[]>(`/api/ontologies/${e(id)}/use-cases`),
-  useCase: (id: string) => get<UseCase>(`/api/use-cases/${e(id)}`),
-  updateUseCase: (id: string, body: { sections?: UseCaseSections; competencyQuestions?: CompetencyQuestion[]; status?: UseCase['status'] }) =>
-    patch<UseCase>(`/api/use-cases/${e(id)}`, body),
+  useCase: (id: string) => get<UseCaseDetail>(`/api/use-cases/${e(id)}`),
+  updateUseCase: (id: string, body: { sections?: UseCaseSections; competencyQuestions?: CompetencyQuestion[]; status?: UseCaseStatus }) =>
+    patch<UseCaseDetail>(`/api/use-cases/${e(id)}`, body),
+  setUseCaseVisibility: (id: string, visibility: UseCaseVisibility) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/visibility`, { visibility }),
+  submitUseCase: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/submit`),
+  triageUseCase: (id: string, status: UseCaseStatus, note?: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/triage`, { status, note }),
+  addUseCaseLink: (id: string, link: NewUseCaseLink) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/links`, link),
+  removeUseCaseLink: (id: string, target: string) => del<UseCaseDetail>(`/api/use-cases/${e(id)}/links/${e(target)}`),
+  proposeAnonymised: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/anonymise`),
+  publishAnonymised: (id: string, draft?: Partial<AnonymisedDraft>) =>
+    post<{ original: UseCaseDetail; published: UseCaseDetail }>(`/api/use-cases/${e(id)}/anonymise/publish`, { draft }),
+  declineAnonymised: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/anonymise/decline`),
+  publicUseCases: (id: string) => get<PublicUseCase[]>(`/api/ontologies/${e(id)}/public-use-cases`),
+  requirementsDocs: (id: string) => get<RequirementsSummary[]>(`/api/ontologies/${e(id)}/requirements`),
+  requirementsDoc: (id: string, version: string) => get<RequirementsDocument>(`/api/ontologies/${e(id)}/requirements/${e(version)}`),
+  requirementsMarkdown: (id: string, version: string) => request<string>('GET', `/api/ontologies/${e(id)}/requirements/${e(version)}/markdown`, undefined, { raw: true }),
+  generateRequirements: (releaseId: string) => post<RequirementsDocument>(`/api/releases/${e(releaseId)}/requirements`),
   startInterview: (id: string, useCaseId?: string) => post<InterviewSession>(`/api/ontologies/${e(id)}/interviews`, { useCaseId }),
   interview: (id: string) => get<InterviewDetail>(`/api/interviews/${e(id)}`),
   sendInterviewMessage: (id: string, content: string) =>
-    post<{ session: InterviewSession; useCase: UseCase }>(`/api/interviews/${e(id)}/messages`, { content }),
-  finishInterview: (id: string) => post<{ useCase: UseCase }>(`/api/interviews/${e(id)}/finish`),
+    post<{ session: InterviewSession; useCase: UseCaseDetail }>(`/api/interviews/${e(id)}/messages`, { content }),
+  finishInterview: (id: string) => post<{ useCase: UseCaseDetail }>(`/api/interviews/${e(id)}/finish`),
   synthesise: (id: string, useCaseIds?: string[]) => post<ChangeRequest>(`/api/ontologies/${e(id)}/synthesise`, { useCaseIds }),
 
   // Meetings
