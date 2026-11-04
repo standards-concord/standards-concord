@@ -17,6 +17,7 @@ The job fails if the working draft breaks the app, or if any proposed change cou
 
 On the **App checks** page of the ontology (Changes → App checks), turn on autopilot for your app and Concord says yes for you when your apps pass: it approves the change in review (if your role's approvals count for that level of change) and votes yes when it goes to a vote. You choose which levels it may say yes to (patch and minor by default, not breaking changes).
 
+- It acts only on **verified** runs: GitHub Actions runs in the app's repository that GitHub vouches for (the job needs `permissions: id-token: write`, and the app's GitHub repository must be set on Concord), or results you report yourself while signed in to Concord. A run with only the app token still shows its results, but autopilot doesn't say yes or no on them. So a leaked token can't get anything approved; at most an unverified failure takes a yes back until the next verified run.
 - It says yes only once every one of your apps with autopilot on has passed both the current working draft and the current version of the change. Results count only from the run since which the app has passed the working draft without a break, with the same app commit, so a result from before the app broke, or from another version of it, never comes back. Those changes are tested again.
 - It speaks only where your say counts: it approves only if your role's approvals count for that level of change, and votes (yes or no) only if your role votes on it.
 - If an app fails, the yes is taken back, and if you choose, autopilot votes no in a vote. While an app fails the working draft itself, its results say nothing about the changes, so autopilot says nothing at all.
@@ -40,6 +41,9 @@ jobs:
   concord:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # lets GitHub vouch for the run, so autopilot can trust it
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,6 +57,12 @@ jobs:
           test-command: npm test
           # ontology-file: data/ontology.ttl
 ```
+
+## The token
+
+The token identifies one app on one ontology. It can start runs, report results, and download what each change open for checks (in review, in a vote, or approved) would produce: the change's edits plus the provenance the merge adds (the author's name, the date and the change number), which any member of the ontology can see. It can't read drafts, rejected or withdrawn changes, or anything else that needs signing in.
+
+Replace it on the App checks page at any time; the old one stops working at once. It also stops working when the app is removed, when the ontology's owners or stewards disconnect the app, or when the person who connected it is no longer a member of the ontology.
 
 ## How your tests see the ontology
 
@@ -98,9 +108,11 @@ node run.mjs
 
 Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run. Without `CONCORD_COMMIT` the script uses the checkout's git commit when the working tree is clean. With no commit at all, Concord can't tell versions of your app apart, so results only count from the run whose working-draft result is current, and every run tests every open change again, up to `max-changes`. If more are open than that, the job fails, because the changes left out have no result that counts.
 
+Outside GitHub Actions, runs aren't verified, so autopilot doesn't act on them; the results still show on each change.
+
 ## API
 
 The script uses two endpoints, authenticated with `Authorization: Bearer cna_…`:
 
 - `GET /api/app-checks/pending?commit=<app commit>` starts a run. Changes already tested by this same app commit are left out; without `commit`, every open change is listed. The reply to the run's working-draft result carries `targets` again: what the run should test now that its draft result is in, longest waiting first (since the app last tested it, or since it was proposed). Use that list. It returns the run's `attempt` number and lists the baseline and open change requests, each with a `revision` and a `source` path. `GET /api/change-requests/:id/proposed?format=turtle` is the ontology after a change. Send the app token with it, as with the other calls: change requests are only for signed-in people and the CI of apps connected to that ontology.
-- `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit? }`. A run may only report the targets and revisions it was given, and must report the working draft first: change results are tied to that run's working-draft pass and app commit, and count only while that commit's pass is the one in force. If the reply for the working draft says `stale`, a newer run has taken over and this one should stop. The reply says whether the result was `stale` (the change moved on while it was being tested, or a newer run already reported) or a `replay` of one already recorded, and what autopilot did. Within a revision, a newer attempt's result replaces an older one's; a run can't report two different outcomes for one target.
+- `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit?, oidc? }`. `oidc`, sent with the working-draft result, is a GitHub Actions OIDC token for the audience `concord-app-check:<app id>`; if it checks out (signed by GitHub, from the app's repository, for the same commit, not used before) the run is verified and the reply says `verified: true`. The app's owner can also call both endpoints signed in, without the token, by sending `appId`; those runs count as verified. A run may only report the targets and revisions it was given, and must report the working draft first: change results are tied to that run's working-draft pass and app commit, and count only while that commit's pass is the one in force. If the reply for the working draft says `stale`, a newer run has taken over and this one should stop. The reply says whether the result was `stale` (the change moved on while it was being tested, or a newer run already reported) or a `replay` of one already recorded, and what autopilot did. Within a revision, a newer attempt's result replaces an older one's; a run can't report two different outcomes for one target.

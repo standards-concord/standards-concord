@@ -134,6 +134,10 @@ function AutopilotEditor({ app, onSaved, policyOff }: { app: ConnectedApp; onSav
             </Select>
           </label>
           <p className="text-xs text-muted">
+            Autopilot only acts on verified runs: GitHub Actions runs in this app’s repository that GitHub vouches for (the workflow file asks for this with <code>id-token: write</code>), or results you report yourself while signed in. A run with only the app token shows its results but doesn’t move autopilot.
+          </p>
+          {!app.repo && <p className="text-xs text-warn">Add the app’s GitHub repository so Concord can check its runs come from there.</p>}
+          <p className="text-xs text-muted">
             Autopilot waits until all of your apps with autopilot on have tested the current version of a change, does nothing if an app already fails the working draft, and never overrides a review or vote you make yourself. Your roles: {myRoles.map(roleLabel).join(', ') || 'none yet'}.
           </p>
         </div>
@@ -236,7 +240,8 @@ function ConnectForm({ ontologyId, onCreated }: { ontologyId: string; onCreated:
 }
 
 export function AppsTab() {
-  const { id, ontology } = useOntology();
+  const { id, ontology, myRoles } = useOntology();
+  const canDisconnect = myRoles.includes('owner') || myRoles.includes('steward');
   const { session } = useSession();
   const uid = session?.user?.id;
   const state = useAsync(() => api.apps(id), [id]);
@@ -341,6 +346,20 @@ export function AppsTab() {
                         {a.autopilot.enabled && <Badge tone="accent">Autopilot on</Badge>}
                       </div>
                     </div>
+                    {canDisconnect && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Disconnect ${a.name}`}
+                        onClick={async () => {
+                          if (!confirm(`Disconnect ${a.owner?.name ?? 'this person'}’s app ${a.name}? Its token stops working and its results disappear from change requests.`)) return;
+                          await api.deleteApp(a.id);
+                          state.setData((prev) => (prev ?? []).filter((x) => x.id !== a.id));
+                        }}
+                      >
+                        Disconnect
+                      </Button>
+                    )}
                   </li>
                 ))}
               </ul>

@@ -14,6 +14,9 @@ jobs:
   concord:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # lets GitHub vouch for the run, so autopilot can trust its results
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

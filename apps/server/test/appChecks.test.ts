@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -39,7 +41,30 @@ const pending = async (token: string, all = false, commit?: string) => {
   expect(res.status, res.text).toBe(200);
   return res.body as PendingAppChecks;
 };
-const report = (token: string, body: Record<string, unknown>) => request(app).post('/api/app-checks').set('Authorization', `Bearer ${token}`).send(body);
+/*
+ * GitHub's side of verified runs: a signing key, its JWKS, and the id-token endpoint a GitHub
+ * job calls, served locally. Concord is pointed at it with GITHUB_OIDC_ISSUER.
+ */
+const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test-key', alg: 'RS256', use: 'sig' };
+let issuer = '';
+function mintOidc(claims: Record<string, unknown>, opts: { key?: typeof privateKey; kid?: string } = {}) {
+  const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const h = enc({ alg: 'RS256', typ: 'JWT', kid: opts.kid ?? 'test-key' });
+  const body = enc({ iss: issuer, iat: now, nbf: now, exp: now + 300, jti: randomUUID(), run_id: 1, ...claims });
+  return `${h}.${body}.${createSign('RSA-SHA256').update(`${h}.${body}`).sign(opts.key ?? privateKey).toString('base64url')}`;
+}
+const oidcFor = (appId: string, repository: string, sha?: string) => mintOidc({ aud: `concord-app-check:${appId}`, repository, ...(sha && { sha }) });
+/** Apps the tests connected with a repository, by token, so their CI runs come with GitHub's proof. */
+const repos = new Map<string, { appId: string; repo: string }>();
+
+const report = (token: string, body: Record<string, unknown>) => {
+  const known = repos.get(token);
+  // Like a GitHub job with id-token: write, the draft result carries proof of the run.
+  const proof = body.target === 'baseline' && !('oidc' in body) && known ? { oidc: oidcFor(known.appId, known.repo, body.commit as string | undefined) } : {};
+  return request(app).post('/api/app-checks').set('Authorization', `Bearer ${token}`).send({ ...body, ...proof });
+};
 
 /** One CI run, as the GitHub Action makes it: ask what to test, then report with the run's attempt. */
 async function ciRun(token: string) {
@@ -89,10 +114,13 @@ async function freshCR(title: string, localName = `testNote${crCount + 1}`) {
   return created.body.id as string;
 }
 
-async function connect(agent: Agent, name: string, autopilot?: Record<string, unknown>) {
-  const res = await agent.post(`/api/ontologies/${demoId}/apps`).send({ name, autopilot });
+/** Connect an app with a GitHub repository, so its runs can be verified (see report()). */
+async function connect(agent: Agent, name: string, autopilot?: Record<string, unknown>, repo = `example/app-${repos.size + 1}`) {
+  const res = await agent.post(`/api/ontologies/${demoId}/apps`).send({ name, autopilot, repo });
   expect(res.status, res.text).toBe(201);
-  return res.body as ConnectedApp;
+  const created = res.body as ConnectedApp;
+  repos.set(created.token!, { appId: created.id, repo });
+  return created;
 }
 
 async function asOwner() {
@@ -120,6 +148,20 @@ function touchWorkingDraft() {
 }
 
 beforeAll(async () => {
+  const stub = http.createServer((req, res) => {
+    const u = new URL(req.url!, 'http://stub');
+    if (u.pathname === '/.well-known/jwks') return res.end(JSON.stringify({ keys: [jwk] }));
+    if (u.pathname === '/token') {
+      if (req.headers.authorization !== 'Bearer gh-request-token') return res.writeHead(403).end();
+      const sha = u.searchParams.get('sha');
+      return res.end(JSON.stringify({ value: mintOidc({ aud: u.searchParams.get('audience'), repository: u.searchParams.get('repo'), ...(sha && { sha }) }) }));
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((r) => stub.listen(0, '127.0.0.1', r));
+  stub.unref();
+  issuer = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
+  process.env.GITHUB_OIDC_ISSUER = issuer;
   openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
@@ -215,6 +257,17 @@ describe('connected apps', () => {
     const proposed = await request(app).get(minor.source).set('Authorization', `Bearer ${created.token}`);
     expect(proposed.status).toBe(200);
     expect((await reader.get(minor.source)).status).toBe(200);
+    // Only changes open for checks: not a draft, nor one that was withdrawn.
+    const author = await login('editor', 'Author of a draft');
+    const draft = (await author.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'A draft nobody has submitted', description: 'Not ready.', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: `${VOL}Session`, set: { comment: 'Draft wording.' } }] })).body;
+    expect(draft.status).toBe('draft');
+    expect((await request(app).get(`/api/change-requests/${draft.id}/proposed`).set('Authorization', `Bearer ${created.token}`)).status).toBe(404);
+    expect((await author.get(`/api/change-requests/${draft.id}/proposed`)).status).toBe(200);
+    await author.post(`/api/change-requests/${draft.id}/submit`);
+    expect((await request(app).get(`/api/change-requests/${draft.id}/proposed`).set('Authorization', `Bearer ${created.token}`)).status).toBe(200);
+    const withdrawn = await author.post(`/api/change-requests/${draft.id}/withdraw`);
+    expect(withdrawn.status, withdrawn.text).toBe(200);
+    expect((await request(app).get(`/api/change-requests/${draft.id}/proposed`).set('Authorization', `Bearer ${created.token}`)).status).toBe(404);
     expect(proposed.headers['content-type']).toContain('text/turtle');
     expect(proposed.headers['x-concord-revision']).toBe(minor.revision);
     expect(proposed.text).toContain('accessNote');
@@ -577,6 +630,101 @@ describe('autopilot', () => {
     expect((await detail(crId)).governance.approvals).toBe(1);
   });
 
+  it('only acts on verified runs, so the app token alone can’t make it say yes', async () => {
+    const crId = await freshCR('Autopilot needs verified runs');
+    const xia = await login('reviewer', 'Reviewer Xia');
+    const a = await connect(xia, 'Xia’s app', { enabled: true }, 'example/xia-app');
+    // Whoever holds the token reports passes, but without GitHub's proof of the run.
+    const run = await pending(a.token!, true, 'xia-v1');
+    const base = await report(a.token!, { target: 'baseline', revision: run.baseline.revision, attempt: run.attempt, outcome: 'passed', commit: 'xia-v1', oidc: undefined });
+    expect(base.body.verified).toBe(false);
+    const target = run.targets.find((t) => t.changeRequestId === crId)!;
+    const res = await report(a.token!, { target: crId, revision: target.revision, attempt: run.attempt, outcome: 'passed' });
+    expect(res.body.autopilot.action).toBe('none');
+    expect(res.body.autopilot.message).toMatch(/waiting for a verified run/i);
+    let d = await detail(crId);
+    expect(d.governance.approvals).toBe(0);
+    expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', verified: false });
+
+    // Proof that doesn't hold is refused outright.
+    const bad = async (oidc: string, why: RegExp) => {
+      const p = await pending(a.token!, true, 'xia-v1');
+      const r = await report(a.token!, { target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed', commit: 'xia-v1', oidc });
+      expect(r.status, r.text).toBe(400);
+      expect(r.body.error).toMatch(why);
+    };
+    await bad(oidcFor(a.id, 'attacker/fork', 'xia-v1'), /not this app’s repository/);
+    await bad(oidcFor('app_other', 'example/xia-app', 'xia-v1'), /another audience/);
+    await bad(oidcFor(a.id, 'example/xia-app', 'other-commit'), /tested commit other-commit/);
+    await bad(mintOidc({ aud: `concord-app-check:${a.id}`, repository: 'example/xia-app', exp: Math.floor(Date.now() / 1000) - 600 }), /expired/);
+    await bad(mintOidc({ aud: `concord-app-check:${a.id}`, repository: 'example/xia-app' }, { key: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey }), /signature/);
+    await bad(mintOidc({ aud: `concord-app-check:${a.id}`, repository: 'example/xia-app', iss: 'https://evil.example' }), /issued by GitHub Actions/);
+    await bad('not.a-token', /malformed/);
+    const once = oidcFor(a.id, 'example/xia-app', 'xia-v1');
+    const p1 = await pending(a.token!, true, 'xia-v1');
+    expect((await report(a.token!, { target: 'baseline', revision: p1.baseline.revision, attempt: p1.attempt, outcome: 'passed', commit: 'xia-v1', oidc: once })).body.verified).toBe(true);
+    await bad(once, /already used/);
+
+    // A run GitHub vouches for counts.
+    const ok = await ciRun(a.token!);
+    expect((await ok.post('baseline', 'passed', { commit: 'xia-v1' })).stale).toBe(false);
+    expect((await ok.post(crId, 'passed')).autopilot!.action).toBe('approved');
+    d = await detail(crId);
+    expect(d.governance.approvals).toBe(1);
+    expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ verified: true, current: true });
+
+    // A later unverified failure takes the yes back, but can't make autopilot vote no.
+    const later = await pending(a.token!, true, 'xia-v1');
+    await report(a.token!, { target: 'baseline', revision: later.baseline.revision, attempt: later.attempt, outcome: 'passed', commit: 'xia-v1', oidc: undefined });
+    await report(a.token!, { target: crId, revision: later.targets.find((t) => t.changeRequestId === crId)!.revision, attempt: later.attempt, outcome: 'failed' });
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    expect(standing(await detail(crId), a.ownerId)).toHaveLength(0);
+  });
+
+  it('counts results the app’s owner reports signed in, without the token', async () => {
+    const crId = await freshCR('Autopilot from the owner’s own report');
+    const yan = await login('reviewer', 'Reviewer Yan');
+    const a = await connect(yan, 'Yan’s app', { enabled: true }, 'example/yan-app');
+    const p = (await yan.get(`/api/app-checks/pending?all=1&appId=${a.id}`)).body as PendingAppChecks;
+    expect((await yan.post('/api/app-checks').send({ appId: a.id, target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed', commit: 'yan-v1' })).body.verified).toBe(true);
+    const target = p.targets.find((t) => t.changeRequestId === crId)!;
+    const res = await yan.post('/api/app-checks').send({ appId: a.id, target: crId, revision: target.revision, attempt: p.attempt, outcome: 'passed' });
+    expect(res.body.autopilot.action).toBe('approved');
+    // Nobody else can report for it that way.
+    const zed = await login('reviewer', 'Reviewer Zed');
+    expect((await zed.post('/api/app-checks').send({ appId: a.id, target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'failed' })).status).toBe(403);
+    expect((await request(app).post('/api/app-checks').send({ appId: a.id, target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'failed' })).status).toBe(401);
+  });
+
+  it('stops an app working once its owner leaves the ontology, and lets owners and stewards disconnect any app', async () => {
+    const crId = await freshCR('Autopilot when the owner leaves');
+    const ann = await login('reviewer', 'Reviewer Ann');
+    const a = await connect(ann, 'Ann’s app', { enabled: true });
+    const target = (await pending(a.token!, true)).targets.find((t) => t.changeRequestId === crId)!;
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    expect((await request(app).get(target.source).set('Authorization', `Bearer ${a.token}`)).status).toBe(200);
+
+    const owner = await asOwner();
+    const removed = await owner.delete(`/api/ontologies/${demoId}/members/${a.ownerId}`);
+    expect(removed.status, removed.text).toBe(204);
+    // Its token no longer works, for anything.
+    expect((await request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${a.token}`)).status).toBe(401);
+    expect((await request(app).get(target.source).set('Authorization', `Bearer ${a.token}`)).status).toBe(401);
+    // And autopilot no longer speaks for them.
+    expect(standing(await detail(crId), a.ownerId)).toHaveLength(0);
+
+    // Someone else's app: a member can't disconnect it; an owner or steward can.
+    const ben = await login('reviewer', 'Reviewer Ben');
+    const b = await connect(ben, 'Ben’s app');
+    const cal = await login('reviewer', 'Reviewer Cal');
+    expect((await cal.delete(`/api/apps/${b.id}`)).status).toBe(403);
+    expect((await cal.post(`/api/apps/${b.id}/token`)).status).toBe(403);
+    const steward = await login('steward', 'Steward Dee');
+    expect((await steward.post(`/api/apps/${b.id}/token`)).status).toBe(403);
+    expect((await steward.delete(`/api/apps/${b.id}`)).status).toBe(204);
+    expect((await request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${b.token}`)).status).toBe(401);
+  });
+
   it('never overrides what the person said themselves', async () => {
     const crId = await freshCR('Autopilot leaves people alone');
     const ola = await login('reviewer', 'Reviewer Ola');
@@ -846,11 +994,18 @@ console.log('ok', process.env.CONCORD_TARGET);
   it('without a commit, every run tests the open changes again and autopilot’s yes stands', async () => {
     const crId = await freshCR('Autopilot with commit-less runs');
     const kai = await login('reviewer', 'Developer Kai');
-    const created = (await kai.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Commit-less app', autopilot: { enabled: true } })).body as ConnectedApp;
+    const created = (await kai.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Commit-less app', repo: 'example/commit-less', autopilot: { enabled: true } })).body as ConnectedApp;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
     // The app passes only this change, so autopilot doesn't approve (and merge) any other.
     const number = (await detail(crId)).number;
-    const env = { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: `test "$CONCORD_TARGET" = baseline -o "$CONCORD_CHANGE_REQUEST" = ${number}`, CONCORD_MAX_CHANGES: '100' };
+    const env = {
+      CONCORD_APP_TOKEN: created.token!,
+      CONCORD_TEST_COMMAND: `test "$CONCORD_TARGET" = baseline -o "$CONCORD_CHANGE_REQUEST" = ${number}`,
+      CONCORD_MAX_CHANGES: '100',
+      // GitHub vouches for the run (a job with id-token: write).
+      ACTIONS_ID_TOKEN_REQUEST_URL: `${issuer}/token?repo=example/commit-less`,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'gh-request-token',
+    };
     const first = await runAction(dir, env);
     expect((await detail(crId)).governance.approvals, first.out).toBe(1);
     const second = await runAction(dir, env);

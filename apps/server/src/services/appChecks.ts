@@ -23,6 +23,7 @@ import { addReview, addVote, advance, getCR, governanceFor, listCRs, reviewsFor,
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { runAudience, verifyGithubRun } from './ciIdentity.js';
 import { getUser, logActivity, publicUser } from './users.js';
 
 /**
@@ -46,7 +47,7 @@ interface AppDoc extends ConnectedApp {
     baseline: string;
     targets: Record<string, string>;
     /** What this run found on the working draft, and with which app commit. Its change results are tied to it. */
-    reported?: { outcome: AppCheckOutcome; commit?: string };
+    reported?: { outcome: AppCheckOutcome; commit?: string; verified?: boolean };
     /** The run asked to test everything again (recheck). */
     all?: boolean;
   }[];
@@ -133,6 +134,13 @@ function ownApp(id: string, actor: User): AppDoc {
   return doc;
 }
 
+/** The app's owner, or the ontology's owners and stewards, who can disconnect any app on it. */
+function manageApp(id: string, actor: User): AppDoc {
+  const doc = getAppDoc(id);
+  if (doc.ownerId === actor.id || actor.isPlatformAdmin || rolesFor(doc.ontologyId, actor.id).some((r) => r === 'owner' || r === 'steward')) return doc;
+  throw new HttpError(403, 'Only the person who connected this app, or the ontology’s owners and stewards, can disconnect it');
+}
+
 export async function updateApp(id: string, actor: User, patch: { name?: unknown; repo?: unknown; autopilot?: unknown }): Promise<ConnectedApp> {
   const doc = ownApp(id, actor);
   if (patch.name !== undefined) doc.name = cleanName(patch.name);
@@ -157,9 +165,11 @@ export function rotateToken(id: string, actor: User): ConnectedApp {
 }
 
 export async function deleteApp(id: string, actor: User) {
-  const doc = ownApp(id, actor);
+  const doc = manageApp(id, actor);
   for (const c of list<AppCheck>('appChecks').filter((x) => x.appId === id)) remove('appChecks', c.id);
   remove('apps', id);
+  if (doc.ownerId !== actor.id)
+    logActivity({ ontologyId: doc.ontologyId, actorId: actor.id, type: 'app.disconnected', message: `disconnected ${getUser(doc.ownerId)?.name ?? 'someone'}’s app ${doc.name}, so its token no longer works`, link: `/o/${doc.ontologyId}/apps` });
   // Anything autopilot said on the strength of this app no longer stands.
   await reconcile(doc.ontologyId, [doc.ownerId]);
 }
@@ -171,8 +181,23 @@ export function appForToken(authorization: string | undefined): AppDoc {
   const h = hash(token);
   const doc = list<AppDoc>('apps').find((a) => a.tokenHash === h);
   if (!doc) throw new HttpError(401, 'Unknown or replaced app token');
+  stillConnected(doc);
   doc.lastSeenAt = clock.iso();
   saveApp(doc);
+  return doc;
+}
+
+/** An app works only while the person who connected it is still a member of the ontology. */
+function stillConnected(doc: AppDoc) {
+  if (!rolesFor(doc.ontologyId, doc.ownerId).length) throw new HttpError(401, 'This app’s owner is no longer a member of the ontology, so the app is disconnected');
+}
+
+/** The app a signed-in person reports for themselves (their own CI, or a simulated run). */
+export function appForOwner(appId: unknown, actor: User): AppDoc {
+  if (typeof appId !== 'string' || !appId) throw new HttpError(400, 'Send appId, or the app token as Authorization: Bearer cna_…');
+  const doc = getAppDoc(appId);
+  if (doc.ownerId !== actor.id) throw new HttpError(403, 'Only the person who connected this app can report for it without its token');
+  stillConnected(doc);
   return doc;
 }
 
@@ -221,6 +246,8 @@ export async function proposedSource(cr: ChangeRequest, format: OutputFormat): P
 
 const latestCheck = (appId: string, crId: string) => get<AppCheck>('appChecks', checkId(appId, crId));
 const isOpen = (cr: ChangeRequest) => (CHECKABLE as readonly string[]).includes(cr.status);
+/** Whether CI may test (and so download) this change: only while it's in review, a vote, or approved. */
+export const openForChecks = isOpen;
 
 /**
  * When the app's results for changes count from: the run since which it has passed the
@@ -245,10 +272,13 @@ function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = g
 
 type Target = PendingAppChecks['targets'][number];
 
-/** Whether the app has a result for this change that counts now (and isn't an error). */
-function settled(app: AppDoc, cr: ChangeRequest, revision: string, project: OntologyProject) {
+/**
+ * Whether the app has a result for this change that counts now (and isn't an error). For a
+ * verified run, an unverified result doesn't settle anything: the run tests the change again.
+ */
+function settled(app: AppDoc, cr: ChangeRequest, revision: string, project: OntologyProject, needVerified = false) {
   const counted = resultFor(app, cr, revision, project);
-  return !!counted && counted.outcome !== 'error';
+  return !!counted && counted.outcome !== 'error' && (!needVerified || !!counted.verified);
 }
 
 /**
@@ -257,7 +287,7 @@ function settled(app: AppDoc, cr: ChangeRequest, revision: string, project: Onto
  * those waiting longest, and testing one sends it to the back, so neither a backlog nor a steady
  * stream of new changes can starve a change whose earlier result stopped counting.
  */
-function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string, string>): (Target & { settled: boolean; waitingSince: string })[] {
+function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string, string>, needVerified = false): (Target & { settled: boolean; waitingSince: string })[] {
   return listCRs(project.id)
     .filter(isOpen)
     .filter((cr) => !crIds || crIds[cr.id] === revisionOf(cr, project))
@@ -276,7 +306,7 @@ function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string
         page: `/o/${project.id}/changes/${cr.id}`,
         lastOutcome: last?.revision === revision ? last.outcome : undefined,
         lastTestedAt: last?.at,
-        settled: settled(app, cr, revision, project),
+        settled: settled(app, cr, revision, project, needVerified),
         waitingSince: last?.at ?? cr.createdAt,
       };
     })
@@ -318,7 +348,7 @@ export function pending(app: AppDoc, all: boolean, commitParam?: unknown): Pendi
 /** After a run's draft result is in: the changes this run should test, given what counts now. */
 function retestsFor(app: AppDoc, run: NonNullable<AppDoc['runs']>[number], project: OntologyProject): Target[] {
   if (run.reported?.outcome !== 'passed') return [];
-  return targetsFor(app, project, run.targets)
+  return targetsFor(app, project, run.targets, !!run.reported.verified)
     .filter((t) => run.all || !t.settled)
     .map(({ settled: _s, waitingSince: _w, ...t }) => t);
 }
@@ -344,6 +374,14 @@ export interface ReportInput {
   summary?: unknown;
   runUrl?: unknown;
   commit?: unknown;
+  /** With the working draft result: a GitHub Actions OIDC token proving the run (see ciIdentity). */
+  oidc?: unknown;
+}
+
+/** How a report was made: with the app token alone, or by something that vouches for the run. */
+export interface ReportedBy {
+  /** The app's owner reported it signed in, or the demo's simulated CI did. */
+  trusted?: boolean;
 }
 
 /**
@@ -365,7 +403,7 @@ function ordering(
   throw new HttpError(409, `Run ${next.attempt} already reported ${previous.outcome} for this; a run reports each target once`);
 }
 
-export async function report(app: AppDoc, input: ReportInput) {
+export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {}) {
   const outcome = input.outcome as AppCheckOutcome;
   if (!OUTCOMES.includes(outcome)) throw new HttpError(400, `outcome must be one of ${OUTCOMES.join(', ')}`);
   const revision = short(input.revision, 64);
@@ -384,26 +422,38 @@ export async function report(app: AppDoc, input: ReportInput) {
   const at = clock.iso();
 
   if (input.target === 'baseline') {
-    const commit = short(input.commit, 64);
+    let commit = short(input.commit, 64);
     if (run.reported && (run.reported.outcome !== outcome || run.reported.commit !== commit))
       throw new HttpError(409, `Run ${attempt} already reported ${run.reported.outcome} for the working draft; a run reports it once`);
-    run.reported = { outcome, commit };
+    // A run is verified when GitHub vouches that it ran in the app's repository (or its owner
+    // reported it signed in). Only verified results move autopilot, so a leaked token can't.
+    let verified = !!by.trusted;
+    if (input.oidc !== undefined && !run.reported) {
+      if (!app.repo) throw new HttpError(400, 'Set the app’s GitHub repository on Concord, so it can check the run comes from there');
+      const proof = await verifyGithubRun(input.oidc, runAudience(app.id));
+      if (proof.repository.toLowerCase() !== app.repo.toLowerCase()) throw new HttpError(400, `The run is from ${proof.repository}, not this app’s repository ${app.repo}`);
+      if (commit && proof.sha && commit !== proof.sha) throw new HttpError(400, `The run tested commit ${proof.sha}, not ${commit}`);
+      commit = commit ?? proof.sha;
+      verified = true;
+    }
+    if (run.reported) verified = !!run.reported.verified;
+    run.reported = { outcome, commit, verified };
     saveApp(app);
     const order = ordering(app.baseline, { revision, attempt, outcome }, baselineRevision(project));
     if (order === 'stale') return { stale: true, targets: [] };
-    if (order === 'replay') return { stale: false, replay: true, targets: retestsFor(app, run, project) };
+    if (order === 'replay') return { stale: false, replay: true, verified, targets: retestsFor(app, run, project) };
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
     // Still passing the same draft with the same app: earlier results for changes still count.
     const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
     if (outcome === 'passed' && !unbroken) app.passingSince = attempt;
-    app.baseline = { revision, outcome, summary, runUrl, at, attempt, commit };
+    app.baseline = { revision, outcome, summary, runUrl, at, attempt, commit, verified };
     saveApp(app);
     if (before !== outcome && outcome === 'failed')
       logActivity({ ontologyId: project.id, actorId: app.ownerId, type: 'app.baseline-failed', message: `reports that their app ${app.name} fails against the current working draft`, link: `/o/${project.id}/apps` });
     // The baseline decides whether this app's results mean anything, so re-decide everywhere.
     await reconcile(project.id, [app.ownerId]);
     // Everything this result left without a result that counts gets tested in this same run.
-    return { stale: false, targets: retestsFor(getAppDoc(app.id), run, project) };
+    return { stale: false, verified, targets: retestsFor(getAppDoc(app.id), run, project) };
   }
 
   if (typeof input.target !== 'string') throw new HttpError(400, "target must be 'baseline' or a change request id");
@@ -428,6 +478,7 @@ export async function report(app: AppDoc, input: ReportInput) {
     runUrl,
     commit,
     attempt,
+    verified: !!run.reported.verified,
     at,
   };
   put('appChecks', check, cr.id);
@@ -450,9 +501,9 @@ export async function report(app: AppDoc, input: ReportInput) {
   return { check, stale: false, autopilot };
 }
 
-/** Report a result as an app, without its token (the demo's simulated CI). */
+/** Report a result as an app, without its token (the demo's simulated CI, which is trusted). */
 export function reportAs(appId: string, input: ReportInput) {
-  return report(getAppDoc(appId), input);
+  return report(getAppDoc(appId), input, { trusted: true });
 }
 
 /** Start a run as an app, without its token (the demo's simulated CI). */
@@ -536,17 +587,24 @@ function decide(cr: ChangeRequest, userId: string, stage: Stage, spoke = peopleW
   if (brokenBase.length) return none(`${names(brokenBase)} doesn’t pass the working draft, so its results don’t say anything about this change`);
   const untestedBase = apps.filter((a) => a.baseline?.revision !== base);
   if (untestedBase.length) return none(`waiting for ${names(untestedBase)} to test the current working draft`);
+  const verifiedRun = 'from GitHub Actions in its repository, or reported by its owner signed in';
+  const unverifiedBase = apps.filter((a) => !a.baseline?.verified);
+  if (unverifiedBase.length) return none(`waiting for a verified run of ${names(unverifiedBase)} (${verifiedRun})`);
 
   const revision = revisionOf(cr, project);
-  const result = (a: AppDoc) => resultFor(a, cr, revision, project)?.outcome;
+  const counted = (a: AppDoc) => resultFor(a, cr, revision, project);
+  const result = (a: AppDoc) => counted(a)?.outcome;
   const failed = apps.filter((a) => result(a) === 'failed');
   if (failed.length) {
-    const opposing = failed.filter((a) => a.autopilot.onFailure === 'oppose');
+    // Only a verified failure votes no; any failure stops a yes.
+    const opposing = failed.filter((a) => a.autopilot.onFailure === 'oppose' && counted(a)?.verified);
     if (stage === 'voting' && opposing.length) return { say: 'no', why: `${names(opposing)} failed against this change`, apps: opposing };
     return none(`${names(failed)} failed against this change`);
   }
   const waiting = apps.filter((a) => result(a) !== 'passed');
   if (waiting.length) return none(`waiting for ${names(waiting)} to test this version of the change`);
+  const unverified = apps.filter((a) => !counted(a)?.verified);
+  if (unverified.length) return none(`waiting for a verified run of ${names(unverified)} on this change (${verifiedRun})`);
   const notFor = apps.filter((a) => !a.autopilot.levels.includes(level));
   if (notFor.length) return none(`autopilot for ${names(notFor)} isn’t on for ${level} changes`);
   return { say: 'yes', why: `${names(apps)} passed against this change`, apps };

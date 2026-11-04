@@ -6,6 +6,8 @@ describe('workflowYaml', () => {
     const yaml = workflowYaml('https://standards-concord.vercel.app');
     expect(yaml).toContain('concord-url: "https://standards-concord.vercel.app"');
     expect(yaml).toContain('token: ${{ secrets.CONCORD_APP_TOKEN }}');
+    // GitHub vouches for the run, so autopilot can trust it.
+    expect(yaml).toMatch(/^      id-token: write/m);
   });
 
   it('can’t be made to add keys or steps', () => {

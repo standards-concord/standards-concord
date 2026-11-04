@@ -51,6 +51,11 @@ function Row({ c }: { c: AppCheckResult }) {
         </Badge>
         {!c.current && <span className="text-xs text-muted">out of date (the change, the working draft or the app has moved on), waiting for a new run</span>}
         {c.app.autopilot && <Badge tone="outline">Autopilot on</Badge>}
+        {c.current && c.verified === false && (
+          <span className="text-xs text-muted" title="Neither GitHub (for a run in the app’s repository) nor the app’s owner vouched for this run, so autopilot doesn’t act on it.">
+            not verified, so autopilot ignores it
+          </span>
+        )}
       </div>
       <p className="mt-0.5 text-xs text-muted">
         {c.app.owner?.name ?? 'Someone'}’s app{c.app.repo ? ` (${c.app.repo})` : ''} · {relativeTime(c.at, now())}

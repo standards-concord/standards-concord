@@ -132,7 +132,7 @@ function runTests(extraEnv) {
       }
     };
     // Its own process group, so stopping it stops the processes it spawned too.
-    const child = spawn(command, { shell: true, detached: groupKill, env: { ...env, ...extraEnv, CONCORD_APP_TOKEN: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, { shell: true, detached: groupKill, env: { ...env, ...extraEnv, CONCORD_APP_TOKEN: '', ACTIONS_ID_TOKEN_REQUEST_TOKEN: '', ACTIONS_ID_TOKEN_REQUEST_URL: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
     running = child;
     let timedOut = false;
     let settled = false;
@@ -162,6 +162,29 @@ function runTests(extraEnv) {
     // If something it started escaped the group and holds the output open, don't wait for it forever.
     child.on('exit', (code) => setTimeout(() => finish(code), 10_000).unref());
   });
+}
+
+/** A GitHub Actions OIDC token for this app's audience, or undefined outside GitHub or without the permission. */
+async function runIdentity(appId) {
+  const url = env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  if (!url || !requestToken) {
+    if (env.GITHUB_ACTIONS)
+      console.log('::warning::Add `permissions: id-token: write` to this job so GitHub can vouch for the run. Without it, results show on Concord but autopilot ignores them.');
+    return undefined;
+  }
+  try {
+    const u = new URL(url);
+    u.searchParams.set('audience', `concord-app-check:${appId}`);
+    const res = await fetch(u, { headers: { Authorization: `Bearer ${requestToken}`, Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const value = (await res.json()).value;
+    if (env.GITHUB_ACTIONS && value) console.log(`::add-mask::${value}`);
+    return value || undefined;
+  } catch (err) {
+    console.log(`::warning::GitHub couldn't vouch for this run (${err.message}), so autopilot will ignore its results.`);
+    return undefined;
+  }
 }
 
 // Where each version of the ontology goes while the tests run.
@@ -224,7 +247,11 @@ let exitCode = 0;
 // Always test the working draft first: if the app fails there, its results say nothing about the changes.
 const baseline = await check('Working draft', pending.baseline.source, { CONCORD_TARGET: 'baseline', CONCORD_REVISION: pending.baseline.revision });
 const attempt = pending.attempt;
-const baselineReply = (await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit })).json();
+// Ask GitHub to vouch for this run (needs `permissions: id-token: write`), just before reporting,
+// because the proof is short-lived. Only results from a vouched-for run move autopilot.
+const oidc = await runIdentity(pending.app.id);
+const baselineReply = (await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit, ...(oidc && { oidc }) })).json();
+if (oidc && baselineReply.verified) log('GitHub vouched for this run, so autopilot can act on its results.');
 rows.push(['Working draft', '', baseline.outcome, baselineReply.stale ? 'superseded by a newer run, or the draft moved on' : '']);
 if (baseline.outcome !== 'passed') {
   // Whatever Concord made of it, an app that fails (or couldn't be tested on) the draft fails the job.

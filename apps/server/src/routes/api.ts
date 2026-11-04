@@ -239,19 +239,24 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------ members & governance --------------------- */
-  r.put('/ontologies/:id/members/:userId', (req, res) => {
+  r.put('/ontologies/:id/members/:userId', async (req, res) => {
     const p = project(req);
     requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
     const roles = (Array.isArray(req.body?.roles) ? req.body.roles : []).filter((x: Role) => ROLES.includes(x)) as Role[];
     if (roles.includes('owner') && !rolesFor(p.id, req.user!.id).includes('owner') && !req.user!.isPlatformAdmin) throw new HttpError(403, 'Only an owner can make someone an owner; use ownership transfer');
     if (!getUser(String(req.params.userId))) throw new HttpError(404, 'No such user');
-    res.json(setRoles(p.id, String(req.params.userId), roles));
+    const m = setRoles(p.id, String(req.params.userId), roles);
+    // What autopilot may say for them depends on their roles.
+    await reconcileAutopilot(p.id, [String(req.params.userId)]);
+    res.json(m);
   });
 
-  r.delete('/ontologies/:id/members/:userId', (req, res) => {
+  r.delete('/ontologies/:id/members/:userId', async (req, res) => {
     const p = project(req);
     requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
     removeMember(p.id, String(req.params.userId));
+    // Their apps stop working (see appForToken), and autopilot no longer speaks for them.
+    await reconcileAutopilot(p.id, [String(req.params.userId)]);
     res.status(204).end();
   });
 

@@ -643,8 +643,11 @@ export interface ConnectedApp {
   /** Only returned when the app is created or its token is replaced. */
   token?: string;
   autopilot: AutopilotSettings;
-  /** The app's result against the current working draft, before any proposed change. */
-  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; commit?: string; current?: boolean };
+  /**
+   * The app's result against the current working draft, before any proposed change. `verified`
+   * when GitHub vouched that the run ran in the app's repository, or its owner reported it signed in.
+   */
+  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; commit?: string; current?: boolean; verified?: boolean };
   lastSeenAt?: string;
   createdAt: string;
   owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
@@ -664,6 +667,8 @@ export interface AppCheck {
   commit?: string;
   /** The run that produced it, as issued by GET /api/app-checks/pending. Newer runs win. */
   attempt?: number;
+  /** From a verified run (see ConnectedApp.baseline). Only verified results move autopilot. */
+  verified?: boolean;
   at: string;
 }
 

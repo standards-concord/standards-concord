@@ -102,9 +102,16 @@ test.describe('app checks', () => {
     expect(await proposed.text()).toContain('familyFriendly');
     const attempt = pending.attempt;
     await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: 'passed' } });
+    const unverified = await page.request.post('/api/app-checks', { headers: auth, data: { target: crId, revision: target.revision, attempt, outcome: 'passed' } });
+    // With only the token (no proof from GitHub), the result shows but autopilot waits.
+    expect((await unverified.json()).autopilot.message).toMatch(/verified run/);
+
+    // The owner reports a run themselves, signed in, which counts like one GitHub vouches for.
+    const appId = ((await (await page.request.get(`/api/ontologies/${demo.id}/apps`)).json()) as { id: string; name: string }[]).find((a) => a.name === 'Family finder')!.id;
+    const own = await (await page.request.get(`/api/app-checks/pending?all=1&appId=${appId}`)).json();
+    await page.request.post('/api/app-checks', { data: { appId, target: 'baseline', revision: own.baseline.revision, attempt: own.attempt, outcome: 'passed' } });
     const res = await page.request.post('/api/app-checks', {
-      headers: auth,
-      data: { target: crId, revision: target.revision, attempt, outcome: 'passed', runUrl: 'https://github.com/example/family-finder/actions/runs/7' },
+      data: { appId, target: crId, revision: target.revision, attempt: own.attempt, outcome: 'passed', runUrl: 'https://github.com/example/family-finder/actions/runs/7' },
     });
     expect((await res.json()).autopilot.action).toBe('approved');
 
