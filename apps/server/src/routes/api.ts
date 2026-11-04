@@ -37,7 +37,7 @@ import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
-import { approveHold, listHolds, readOntology } from '../public/holds.js';
+import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -162,6 +162,11 @@ export function apiRouter(): Router {
   const forCaller = (req: Request, s: OntologySummary) => {
     if (req.user) return s;
     const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
+    // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
+    if (isHeld(s, 'draft')) {
+      const { classes: _cl, properties: _p, individuals: _i, ...rest } = stats;
+      return { ...s, ownerIds: [], stats: rest, health: undefined };
+    }
     return { ...s, ownerIds: [], stats };
   };
 

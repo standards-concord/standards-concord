@@ -138,6 +138,28 @@ test.describe('privacy review', () => {
     expect(calls).toEqual(['draft fp-draft-1', 'draft fp-draft-2', '1.0.0 fp-release', '0.9.0 fp-broken']);
   });
 
+  test('the hub shows a dash, not a count, for an ontology whose working draft is being reviewed', async ({ page }) => {
+    // (Signed out, the home page is the landing page; the hub's cards are what show these counts.)
+    // The server leaves out graph counts and health while the draft is held (apps/server/test/public.test.ts); the hub
+    // used to assume they were always there.
+    await page.route('**/api/ontologies', async (route) => {
+      const res = await route.fetch();
+      const list = (await res.json()) as { id: string; stats: Record<string, number>; health?: unknown }[];
+      await route.fulfill({
+        response: res,
+        json: list.map((o) => (o.id === demo.id ? { ...o, health: undefined, stats: { releases: o.stats.releases } } : o)),
+      });
+    });
+    await signIn(page, { name: 'E2E Hub Viewer', role: 'contributor' });
+    await page.goto('/');
+    await settle(page);
+    const card = page.getByRole('link', { name: new RegExp(demo.title) }).first();
+    await expect(card).toBeVisible();
+    await expect(card).not.toContainText('undefined');
+    await expect(card).not.toContainText('NaN');
+    await expect(card).toContainText('—');
+  });
+
   test('members without the steward role are not shown the versions waiting for approval', async ({ page }) => {
     await signIn(page, { name: 'E2E Hold Member', role: 'contributor' });
     let asked = false;

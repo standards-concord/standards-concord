@@ -176,14 +176,15 @@ export interface OntologyProject {
 }
 
 export interface OntologySummary extends OntologyProject {
+  /** Counts a caller may not see are left out: activity for signed-out callers, and the graph's while its working draft waits for approval. */
   stats: {
-    classes: number;
-    properties: number;
-    individuals: number;
-    useCases: number;
-    openChangeRequests: number;
+    classes?: number;
+    properties?: number;
+    individuals?: number;
+    useCases?: number;
+    openChangeRequests?: number;
     releases: number;
-    members: number;
+    members?: number;
   };
   health?: {
     passed: boolean;

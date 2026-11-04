@@ -10,6 +10,7 @@ import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { holdLegacy, isHeld, readOntology } from './holds.js';
+import { publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
@@ -89,10 +90,7 @@ function splitExtension(segment: string): { base: string; format?: PublicFormat 
   return { base: segment };
 }
 
-export const publishedReleases = (ontologyId: string) =>
-  list<Release>('releases', ontologyId)
-    .filter((r) => r.status === 'published')
-    .sort((a, b) => (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt));
+export { publishedReleases } from './published.js';
 
 /** The latest released version, if any, that exists in the repository. */
 export function latestVersion(project: OntologyProject): string | undefined {

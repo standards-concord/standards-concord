@@ -13,7 +13,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
-import { anyHeld, holdReleaseIfDraftHeld } from '../public/holds.js';
+import { anyHeld, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -251,9 +251,10 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   updateProject(project);
 
   // Public ontologies are persisted to GitHub on release, when configured.
-  // Nothing leaves Concord while any version is waiting for approval: main and every tag would carry it.
-  if (project.github && config.github.publishToken && anyHeld(project)) {
-    console.log(`[release] not pushing ${project.slug} to GitHub: a version is waiting for a steward’s approval`);
+  // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
+  // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
+  if (project.github && config.github.publishToken && (anyHeld(project) || !historyApproved(project))) {
+    console.log(`[release] not pushing ${project.slug} to GitHub: ${anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
   } else if (project.github && config.github.publishToken) {
     try {
       const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
