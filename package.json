@@ -10,13 +10,16 @@
     "start": "pnpm --filter @concord/server start",
     "test:e2e": "playwright test -c e2e --project=local",
     "test:e2e:live": "playwright test -c e2e --project=live",
-    "walkthrough": "pnpm --filter @concord/walkthrough record"
+    "walkthrough": "pnpm --filter @concord/walkthrough record",
+    "avatars": "node scripts/generate-avatars.mjs"
   },
   "packageManager": "pnpm@10.0.0",
   "engines": {
     "node": ">=22.13"
   },
   "devDependencies": {
+    "@dicebear/core": "9.4.2",
+    "@dicebear/notionists": "9.4.2",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@playwright/test": "1.63.0",
     "@vercel/functions": "3.10.1",

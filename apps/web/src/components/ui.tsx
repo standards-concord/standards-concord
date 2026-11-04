@@ -169,13 +169,21 @@ export function Badge({ tone = 'neutral', children, className, icon: Icon, title
 export function Avatar({ name, src, size = 28, simulated }: { name?: string; src?: string; size?: number; simulated?: boolean }) {
   const [broken, setBroken] = useState(false);
   const hue = [...(name ?? '?')].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
+  const label = (name ?? 'Unknown') + (simulated ? ' (simulated)' : '');
+  // A picture if there is one (demo accounts get a bundled one; see apps/server/src/services/avatars.ts),
+  // otherwise, or if it fails to load, the person's initials on their colour.
+  const picture = src && !broken;
   return (
     <span
-      title={name + (simulated ? ' (simulated)' : '')}
+      role="img"
+      aria-label={label}
+      title={label}
+      data-avatar={picture ? 'picture' : 'initials'}
       className={cx('relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--r-avatar)] text-[0.65rem] font-semibold text-white', simulated && 'ring-2 ring-dashed ring-line-strong')}
-      style={{ width: size, height: size, background: `hsl(${hue} var(--avatar-s) var(--avatar-l))`, fontSize: size * 0.38 }}
+      // The pictures are black line art, so they sit on a light tint of the person's colour; initials are white on the darker shade.
+      style={{ width: size, height: size, background: `hsl(${hue} var(--avatar-s) ${picture ? 'var(--avatar-picture-l, 86%)' : 'var(--avatar-l)'})`, fontSize: size * 0.38 }}
     >
-      {src && !broken ? <img src={src} alt="" className="size-full object-cover" onError={() => setBroken(true)} /> : initials(name)}
+      {picture ? <img src={src} alt="" decoding="async" className="size-full object-cover" onError={() => setBroken(true)} /> : <span aria-hidden="true">{initials(name)}</span>}
     </span>
   );
 }

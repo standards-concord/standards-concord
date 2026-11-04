@@ -632,6 +632,8 @@ export interface ActivityItem {
   ontologyId?: string;
   actorId?: string;
   actorName?: string;
+  /** The actor's profile picture, filled in when the feed is read. */
+  actorAvatarUrl?: string;
   simulated?: boolean;
   type: string;
   message: string;

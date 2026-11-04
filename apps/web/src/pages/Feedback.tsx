@@ -264,6 +264,7 @@ export function FeedbackPage() {
             bigMic
             error={chatError}
             userName={name || session?.user?.name}
+            userAvatarUrl={session?.user?.avatarUrl}
             onSend={(t, v) => send(t, v)}
             placeholder={done ? 'Anything else? Or submit when ready.' : 'Type or tap the mic and talk…'}
             quickReplies={current && current.type !== 'text' ? <QuickReplies key={current.id} q={current} current={answers[current.id]} onPick={(text, v) => send(text, false, { qid: current.id, v })} /> : undefined}

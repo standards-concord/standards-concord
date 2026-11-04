@@ -3,6 +3,7 @@ import type { ActivityItem, AgentToken, AuthProvider, User } from '@concord/shar
 import { clock } from '../clock.js';
 import { get, HttpError, list, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
+import { demoAvatarFor } from './avatars.js';
 import { solid } from './solid.js';
 
 export async function createUser(input: {
@@ -18,13 +19,15 @@ export async function createUser(input: {
   isPlatformAdmin?: boolean;
 }): Promise<User> {
   const id = input.id ?? newId('usr');
+  const providers = [{ provider: input.provider, subject: input.subject }];
   const base: User = {
     id,
     name: input.name,
     email: input.email,
-    avatarUrl: input.avatarUrl,
+    // Demo accounts (simulated people and alpha testers) get a bundled picture.
+    avatarUrl: input.avatarUrl ?? demoAvatarFor({ id, providers }),
     webId: solid.localWebId(id),
-    providers: [{ provider: input.provider, subject: input.subject }],
+    providers,
     simulated: input.simulated,
     persona: input.persona,
     organisation: input.organisation,
@@ -56,6 +59,19 @@ export async function upsertFederatedUser(p: { provider: AuthProvider; subject: 
     return put('users', existing);
   }
   return createUser({ ...p });
+}
+
+/** Gives demo accounts made before profile pictures existed their picture. Returns how many changed. */
+export function backfillDemoAvatars(): number {
+  let changed = 0;
+  for (const u of list<User>('users')) {
+    if (u.avatarUrl) continue;
+    const avatarUrl = demoAvatarFor(u);
+    if (!avatarUrl) continue;
+    put('users', { ...u, avatarUrl });
+    changed++;
+  }
+  return changed;
 }
 
 export const getUser = (id: string) => get<User>('users', id);
@@ -135,5 +151,9 @@ export function logActivity(a: Omit<ActivityItem, 'id' | 'at' | 'actorName' | 's
 
 export function listActivity(ontologyId?: string, limit = 50): ActivityItem[] {
   const items = ontologyId ? list<ActivityItem>('activity', ontologyId) : list<ActivityItem>('activity');
-  return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  // The picture is looked up when read, so older entries and changed pictures show too.
+  return items
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, limit)
+    .map((a) => ({ ...a, actorAvatarUrl: a.actorId ? getUser(a.actorId)?.avatarUrl : undefined }));
 }

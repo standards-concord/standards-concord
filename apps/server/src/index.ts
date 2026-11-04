@@ -4,12 +4,15 @@ import { openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
+import { backfillDemoAvatars } from './services/users.js';
 
 openDb();
 const secrets = migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {
+  const pictures = backfillDemoAvatars();
+  if (pictures) console.log(`[seed] gave ${pictures} demo account(s) a profile picture`);
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
 // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
