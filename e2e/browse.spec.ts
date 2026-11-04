@@ -500,7 +500,8 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
     expect(await overflow()).toEqual([]);
 
-    // The exported file still fits when it is opened where the font isn't available.
+    // The exported file draws its text as outlines, so it looks the same wherever it is opened,
+    // whatever fonts are available; only characters Inter lacks (here, CJK) stay as text.
     const download = page.waitForEvent('download');
     await d.getByRole('button', { name: 'Download as SVG' }).click();
     const file = await (await download).path();
@@ -513,17 +514,34 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         const view = svg.getBoundingClientRect();
         const inside = (t: Element, box: DOMRect, what: string) => {
           const b = t.getBoundingClientRect();
-          if (b.left < box.left - 1 || b.right > box.right + 1) out.push(`${t.textContent?.slice(0, 40)} overflows ${what}`);
+          const name = t.closest('[aria-label]')?.getAttribute('aria-label')?.slice(0, 40);
+          if (b.left < box.left - 1 || b.right > box.right + 1) out.push(`${name} overflows ${what}`);
         };
-        for (const node of svg.querySelectorAll('[data-node]')) for (const t of node.querySelectorAll('text')) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
+        const words = svg.querySelectorAll('g[aria-label]');
+        if (words.length < 5) out.push(`only ${words.length} outlined text groups`);
+        for (const t of svg.querySelectorAll('text')) if (/[A-Za-z]/.test(t.textContent ?? '')) out.push(`"${t.textContent?.slice(0, 40)}" was left as text`);
+        for (const node of svg.querySelectorAll('[data-node]')) for (const t of node.querySelectorAll('g[aria-label] > :not(title)')) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
         for (const edge of svg.querySelectorAll('[data-edge]')) {
           const rect = edge.querySelector('rect');
-          if (rect) for (const t of edge.querySelectorAll('text')) inside(t, rect.getBoundingClientRect(), 'its label');
+          if (rect) for (const t of edge.querySelectorAll('g[aria-label] > :not(title)')) inside(t, rect.getBoundingClientRect(), 'its label');
         }
-        for (const t of svg.querySelectorAll('text')) inside(t, view, 'the drawing');
+        for (const t of svg.querySelectorAll('g[aria-label] > :not(title)')) inside(t, view, 'the drawing');
         return out;
       });
       expect(problems, font).toEqual([]);
+    }
+    // The outlines are the same glyphs, in the same places, as on screen: each exported text
+    // spans the same width as the live one (a dropped or misplaced character would change it).
+    await viewer.setContent(svgText);
+    const widths = (root: Page | ReturnType<Page['locator']>, sel: string) => root.locator(sel).evaluateAll((els) => els.map((e) => Math.round((e as SVGGraphicsElement).getBBox().width)));
+    for (const [live, out] of [
+      [`[data-node="${NS}Long"] text`, `[data-node="${NS}Long"] g[aria-label]`],
+      [`[data-edge="assoc"][data-source="${NS}Long"] text`, `[data-edge="assoc"][data-source="${NS}Long"] g[aria-label]`],
+    ]) {
+      const shown = await widths(d, live);
+      const exported = await widths(viewer, out);
+      expect(exported.length).toBe(shown.length);
+      exported.forEach((w, i) => expect(Math.abs(w - shown[i]), `${out} #${i}`).toBeLessThanOrEqual(2));
     }
     await viewer.close();
     // The full names are still there for assistive technology.
@@ -606,16 +624,17 @@ test.describe('large and unusual ontologies (stubbed)', () => {
 });
 
 test.describe('reduced motion', () => {
-  // How many times the drawing (viewport and node positions) changes, sampled every frame, while
+  // How many times the drawing (zoom, pan and every node's position) changes, sampled every frame, while
   // an action takes effect: an animation passes through intermediate states, an immediate
   // change goes straight to the end. Counting frames drawn is unreliable on slow machines.
   const changesDuring = async (page: Page, action: () => Promise<void>) => {
     await page.waitForTimeout(800);
     await page.evaluate(() => {
-      type Cy = { pan: () => { x: number; y: number }; nodes: () => { position: () => { x: number; y: number } }[] };
+      type Cy = { pan: () => { x: number; y: number }; zoom: () => number; nodes: () => { position: () => { x: number; y: number } }[] };
       const cy = (document.querySelector('[data-testid="ontology-graph"] [data-cy]') as HTMLElement & { cy: Cy }).cy;
       const w = window as unknown as { states: string[]; sampling: boolean };
-      const state = () => JSON.stringify([cy.pan(), ...cy.nodes().slice(0, 8).map((n) => n.position())].map((p) => [Math.round(p.x), Math.round(p.y)]));
+      // The zoom, the pan and every node's position.
+      const state = () => JSON.stringify([Math.round(cy.zoom() * 1000), ...[cy.pan(), ...cy.nodes().map((n) => n.position())].map((p) => [Math.round(p.x), Math.round(p.y)])]);
       w.states = [state()];
       w.sampling = true;
       const tick = () => {

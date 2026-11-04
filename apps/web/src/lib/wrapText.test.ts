@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { wrapRows } from './wrapText';
+import { graphemes, wrapRows } from './wrapText';
 
 // Seven pixels a character, counting how many characters are measured in total.
 function counter() {
@@ -30,6 +30,29 @@ describe('wrapRows', () => {
     const measure = (t: string) => t.replace(/\u200b/g, '').length * 7;
     const rows = wrapRows(`A${zw}${'B'.repeat(45)}`, measure, 312, 3);
     expect(rows).toEqual([`A${zw}${'B'.repeat(43)}`, 'BB']);
+  });
+
+  it('never splits an emoji family or a flag', () => {
+    // Whole emoji are 14 px, 'i' 7 px; a fragment of one (half a flag, part of a family, a lone
+    // surrogate) is narrow, which tempted the previous search into splitting them.
+    const measure = (t: string) => graphemes(t).reduce((w, g) => w + (g === 'i' ? 7 : ['👨‍👩‍👧‍👦', '🇨🇳', '🚀', '…'].includes(g) ? 14 : 2), 0);
+    for (const unit of ['👨‍👩‍👧‍👦', '🇨🇳', '🚀']) {
+      const rows = wrapRows(`ii${unit.repeat(80)}`, measure, 312, 3);
+      expect(rows).toHaveLength(3);
+      for (const row of rows) for (const g of graphemes(row)) expect(['i', unit, '…']).toContain(g);
+    }
+  });
+
+  it('finds the ellipsis without remeasuring a long last row character by character', () => {
+    const zw = (n: number) => {
+      let chars = 0;
+      const measure = (t: string) => ((chars += t.length), t.replace(/\u200b/g, '').length * 7);
+      // The third row is 44 Ws and then the zero-width run, with no room left for the ellipsis.
+      wrapRows('W'.repeat(132) + '\u200b'.repeat(n) + 'W'.repeat(10), measure, 312, 3);
+      return chars;
+    };
+    // Doubling the hidden zero-width run should roughly double the work, not quadruple it.
+    expect(zw(16_000) / zw(8_000)).toBeLessThan(2.6);
   });
 
   it('stops measuring once the shown rows are known, however long the text', () => {

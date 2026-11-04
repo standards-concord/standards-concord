@@ -221,18 +221,25 @@ export function curve(points: { x: number; y: number }[]) {
   return d;
 }
 
-export function downloadSvg(svg: SVGSVGElement | null, filename: string, bg: string) {
+export async function downloadSvg(svg: SVGSVGElement | null, filename: string, bg: string) {
   if (!svg) return;
-  const clone = svg.cloneNode(true) as SVGSVGElement;
-  // The file names its font but doesn't embed it, so a viewer without that font substitutes
-  // another, which may be wider. Fixing each run of text to the length it has here makes any
-  // substitute fit the same boxes.
-  const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])) as SVGTextContentElement[];
-  const live = runs(svg);
-  runs(clone).forEach((el, i) => {
-    const len = live[i]?.getComputedTextLength();
-    if (len) (el.setAttribute('textLength', len.toFixed(2)), el.setAttribute('lengthAdjust', 'spacingAndGlyphs'));
-  });
+  let clone = svg.cloneNode(true) as SVGSVGElement;
+  // SVG files name their fonts but don't carry them, so text is exported as outlines and looks
+  // the same in any viewer. If the outlines can't be made, each run of text is instead fixed to
+  // its on-screen length, which browsers honour.
+  try {
+    const { outlineText } = await import('../../lib/outlineText');
+    await outlineText(svg, clone);
+  } catch (err) {
+    console.warn('Exporting text as outlines failed; exporting it as text', err);
+    clone = svg.cloneNode(true) as SVGSVGElement;
+    const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])) as SVGTextContentElement[];
+    const live = runs(svg);
+    runs(clone).forEach((el, i) => {
+      const len = live[i]?.getComputedTextLength();
+      if (len) (el.setAttribute('textLength', len.toFixed(2)), el.setAttribute('lengthAdjust', 'spacingAndGlyphs'));
+    });
+  }
   const vp = clone.querySelector('[data-viewport]');
   vp?.removeAttribute('transform');
   const w = svg.dataset.width ?? '800';
