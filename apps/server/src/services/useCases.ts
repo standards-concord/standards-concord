@@ -50,7 +50,8 @@ export const canTriage = (ontologyId: string, user?: User) => !!user && (user.is
 export function canSee(u: UseCase, viewer?: User): boolean {
   if (viewer && u.authorId === viewer.id) return true;
   if (u.withdrawnAt) return false;
-  if (u.status === 'archived') return u.visibility !== 'private' && isGroupMember(u.ontologyId, viewer);
+  // Archived ones, and public ones the author hasn't submitted yet, are for the author and the working group.
+  if (u.status === 'archived' || u.status === 'draft') return u.visibility !== 'private' && isGroupMember(u.ontologyId, viewer);
   if (u.visibility === 'public') return true;
   if (u.visibility === 'group') return isGroupMember(u.ontologyId, viewer);
   return false;
@@ -66,6 +67,23 @@ export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, vie
  * saved validation results (below).
  */
 const noLongerPublic: ((u: UseCase) => void)[] = [];
+
+const consentLocks = new Map<string, Promise<unknown>>();
+/**
+ * Runs `fn` exclusively for an ontology. Everything that commits material
+ * derived from use cases (a release, a drafted change request) and everything
+ * that changes consent (withdrawal, visibility, archiving) goes through it, so a
+ * withdrawal can't land between the consent check and the commit: it waits.
+ */
+export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T): Promise<T> {
+  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  consentLocks.set(ontologyId, tail);
+  void tail.then(() => {
+    if (consentLocks.get(ontologyId) === tail) consentLocks.delete(ontologyId);
+  });
+  return run;
+}
 export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPublic.push(fn);
 const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived';
 
@@ -171,6 +189,7 @@ export function present(u: UseCase, viewer?: User): UseCase {
     return !!t && canSee(t, viewer);
   };
   const fromMeeting = u.source === 'meeting' && meetingOk(u.sourceRef);
+  const group = isGroupMember(u.ontologyId, viewer);
   const out: UseCase = {
     id: u.id,
     number: u.number,
@@ -184,12 +203,14 @@ export function present(u: UseCase, viewer?: User): UseCase {
     ...(u.anonymous ? { anonymous: true } : {}),
     // Notes on a call's use case name the call and its speakers: only for those who may see the call.
     sections: u.source === 'meeting' && !fromMeeting ? { ...u.sections, notes: undefined } : u.sections,
-    competencyQuestions: u.competencyQuestions,
+    // Drafted SPARQL and example data are working material for the group; others get the questions and answers.
+    competencyQuestions: group ? u.competencyQuestions : u.competencyQuestions.map(({ id, question, exampleAnswer, status }) => ({ id, question, ...(exampleAnswer ? { exampleAnswer } : {}), status })),
     // Evidence quotes can name people: dropped for anonymous use cases, and for a call's use cases when the viewer can't see the call.
     terms: u.anonymous || (u.source === 'meeting' && !fromMeeting) ? u.terms.map(({ label, kind, definition, existingIri }) => ({ label, kind, definition, existingIri })) : u.terms,
-    links: (u.links ?? []).filter(linkOk).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
+    links: (u.links ?? []).filter((l) => linkOk(l) && (l.type !== 'change-request' || !!viewer)).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
     changeRequestIds: u.changeRequestIds,
-    resolution: u.resolution,
+    // Who triaged an anonymous use case could be its author, so that is left out.
+    resolution: u.resolution && (u.anonymous ? { ...u.resolution, by: undefined } : u.resolution),
     completeness: u.completeness,
     createdAt: u.createdAt,
     updatedAt: u.updatedAt,
@@ -1037,45 +1058,48 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     ],
     fallback: () => heuristicSynthesis(graph.view().classes.map((c) => c.label?.toLowerCase() ?? ''), ucs),
   });
-  // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
-  if (ucs.some((u) => { const now = get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !canSee(now, actor); }))
-    throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
-  // The ontology is published, but use cases may be private: its annotations
-  // cite use cases only by their (sign-in only) link, never their title or author.
-  const terms = redactUseCases(value.terms, ucs);
-  const sources = ucs.map((u) => `${config.publicUrl}/o/${encodeURIComponent(project.slug)}/use-cases/${encodeURIComponent(u.id)}`);
-  const cr = await createChangeRequest(project, actor, {
-    title: value.title,
-    description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
-    kind: 'feature',
-    origin: { type: 'synthesis', useCaseIds: ucs.map((u) => u.id) },
-    ops: proposalToOps(graph, terms, sources).ops,
-    tests: value.competencyQuestionTests,
-    analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
-  });
-  // Carry the drafted SPARQL back onto the use cases so the tests keep running on every future change.
-  // Each use case is read again and only the fields synthesis owns are changed, so an edit or
-  // withdrawal made while drafting is never overwritten.
-  const linked: string[] = [];
-  for (const stale of ucs) {
-    const u = get<UseCase>('useCases', stale.id);
-    if (!u || !isPublic(u)) continue;
-    linked.push(u.id);
-    for (const q of u.competencyQuestions) {
-      const t = value.competencyQuestionTests.find((x) => x.question.toLowerCase() === q.question.toLowerCase());
-      if (t) {
-        q.sparql = t.sparql;
-        q.exampleData = t.exampleData;
+  // From the consent check to the change request being stored, no use case can be withdrawn (it waits).
+  return withConsentLock(project.id, async () => {
+    // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
+    if (ucs.some((u) => { const now = get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !canSee(now, actor); }))
+      throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
+    // The ontology is published, but use cases may be private: its annotations
+    // cite use cases only by their (sign-in only) link, never their title or author.
+    const terms = redactUseCases(value.terms, ucs);
+    const sources = ucs.map((u) => `${config.publicUrl}/o/${encodeURIComponent(project.slug)}/use-cases/${encodeURIComponent(u.id)}`);
+    const cr = await createChangeRequest(project, actor, {
+      title: value.title,
+      description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
+      kind: 'feature',
+      origin: { type: 'synthesis', useCaseIds: ucs.map((u) => u.id) },
+      ops: proposalToOps(graph, terms, sources).ops,
+      tests: value.competencyQuestionTests,
+      analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
+    });
+    // Carry the drafted SPARQL back onto the use cases so the tests keep running on every future change.
+    // Each use case is read again and only the fields synthesis owns are changed, so an edit or
+    // withdrawal made while drafting is never overwritten.
+    const linked: string[] = [];
+    for (const stale of ucs) {
+      const u = get<UseCase>('useCases', stale.id);
+      if (!u || !isPublic(u)) continue;
+      linked.push(u.id);
+      for (const q of u.competencyQuestions) {
+        const t = value.competencyQuestionTests.find((x) => x.question.toLowerCase() === q.question.toLowerCase());
+        if (t) {
+          q.sparql = t.sparql;
+          q.exampleData = t.exampleData;
+        }
       }
+      u.changeRequestIds = [...new Set([...(u.changeRequestIds ?? []), cr.id])];
+      if (['triage', 'accepted', 'draft'].includes(u.status)) u.status = 'accepted';
+      saveUseCase(u);
+      syncUseCase(u, [cr]);
     }
-    u.changeRequestIds = [...new Set([...(u.changeRequestIds ?? []), cr.id])];
-    if (['triage', 'accepted', 'draft'].includes(u.status)) u.status = 'accepted';
-    saveUseCase(u);
-    syncUseCase(u, [cr]);
-  }
-  cr.useCaseIds = linked;
-  put('changeRequests', cr, cr.ontologyId);
-  return cr;
+    cr.useCaseIds = linked;
+    put('changeRequests', cr, cr.ontologyId);
+    return cr;
+  });
 }
 
 /**

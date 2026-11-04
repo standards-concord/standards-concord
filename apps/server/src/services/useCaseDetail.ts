@@ -66,7 +66,8 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
     ...u,
     trace: {
       source,
-      changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, status: c.status, releaseId: c.releaseId })),
+      // Change requests are behind sign-in, and so are their titles.
+      changeRequests: viewer ? crs.map((c) => ({ id: c.id, number: c.number, title: c.title, status: c.status, releaseId: c.releaseId })) : [],
       releases: releases.map((r) => ({ id: r.id, version: r.version, status: r.status })),
       related: related.sort((a, b) => a.number - b.number),
       other,

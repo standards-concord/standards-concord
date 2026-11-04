@@ -62,7 +62,8 @@ export interface RequirementsDocumentView {
   /** Either one markdown body, or an intro plus sections, or both. */
   intro?: string;
   markdown?: string;
-  sections?: { id: string; heading: string; markdown: string }[];
+  /** useCaseIds: the use cases each section draws on, kept so a section can be dropped if one is withdrawn. */
+  sections?: { id: string; heading: string; markdown: string; useCaseIds?: string[] }[];
   requirements?: RequirementView[];
 }
 
@@ -71,6 +72,8 @@ export interface PublishedRequirements {
   useCases: PublicUseCaseView[];
   /** A release whose snapshot is missing or unreadable: shown as such, never filled with current data. */
   snapshotMissing?: boolean;
+  /** How many use cases recorded with this release have since been withdrawn (and, with what was written from them, are not shown). */
+  withdrawn?: number;
 }
 
 /**
@@ -96,7 +99,7 @@ interface SourceDocument {
   title: string;
   generatedAt?: string;
   intro?: string;
-  sections?: { id: string; heading: string; markdown: string }[];
+  sections?: { id: string; heading: string; markdown: string; useCaseIds?: string[] }[];
   requirements?: { id: string; text: string; useCaseIds: string[]; termIris?: string[]; status: string }[];
   useCases?: SourceUseCase[];
 }
@@ -112,7 +115,7 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
       version: doc.version,
       generatedAt: doc.generatedAt,
       intro: doc.intro,
-      sections: doc.sections?.map((s) => ({ id: s.id, heading: s.heading, markdown: s.markdown })),
+      sections: doc.sections?.map((s) => ({ id: s.id, heading: s.heading, markdown: s.markdown, ...(s.useCaseIds ? { useCaseIds: s.useCaseIds } : {}) })),
       requirements: doc.requirements?.map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds, termIris: r.termIris, status: r.status })),
     },
     useCases: useCases.map((u) => ({
@@ -156,26 +159,26 @@ export function publishedRequirements(project: OntologyProject, version?: string
  */
 export function requirementsFor(project: OntologyProject, snapshot: PublishedRequirements | undefined): PublishedRequirements {
   if (!snapshot || !Array.isArray(snapshot.useCases)) return { useCases: [], snapshotMissing: true };
-  // A use case withdrawn after the release is no longer shown, and neither is anything written from it:
-  // the requirements that came only from it, the sections citing it, and the introduction (the
-  // copy on GitHub can't be recalled). Same rule as served() in services/requirements.ts.
-  const cited = [...snapshot.useCases.map((u) => u.id), ...(snapshot.document?.requirements ?? []).flatMap((r) => r.useCaseIds)];
+  // A use case that may no longer be published (withdrawn, archived, made private or group-only) is no
+  // longer shown, and neither is anything written from it: every requirement citing it, every section
+  // drawing on it (or, in a snapshot that didn't record what sections draw on, every section), the
+  // introduction and the written title (the copy on GitHub can't be recalled). Same rule as served()
+  // in services/requirements.ts.
+  const d = snapshot.document;
+  const cited = [...snapshot.useCases.map((u) => u.id), ...(d?.requirements ?? []).flatMap((r) => r.useCaseIds), ...(d?.sections ?? []).flatMap((x) => x.useCaseIds ?? [])];
   const gone = withdrawnSince(project.id, [...new Set(cited)]);
   const useCases = snapshot.useCases.filter((u) => !gone.has(u.id));
-  const d = snapshot.document;
-  if (!d || !gone.size) return { document: d, useCases };
-  const citesGone = (md: string) => [...gone].some((id) => md.includes(`#uc-${id}`));
+  if (!d || !gone.size) return { document: d, useCases, ...(gone.size ? { withdrawn: gone.size } : {}) };
+  const citesGone = (md = '') => [...gone].some((id) => md.includes(`#uc-${id}`));
   return {
     document: {
-      ...d,
-      intro: undefined,
-      markdown: d.markdown && !citesGone(d.markdown) ? d.markdown : undefined,
-      sections: d.sections?.filter((x) => !citesGone(x.markdown)),
-      requirements: d.requirements
-        ?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), original: r.useCaseIds.length }))
-        .filter((r) => r.useCaseIds.length > 0 || r.original === 0)
-        .map(({ original: _, ...r }) => r),
+      title: `${project.title}: use cases and requirements for ${d.version}`,
+      version: d.version,
+      generatedAt: d.generatedAt,
+      sections: d.sections?.filter((x) => x.useCaseIds && !x.useCaseIds.some((id) => gone.has(id)) && !citesGone(x.markdown)),
+      requirements: d.requirements?.filter((r) => !r.useCaseIds.some((id) => gone.has(id))),
     },
     useCases,
+    withdrawn: gone.size,
   };
 }

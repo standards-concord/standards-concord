@@ -204,7 +204,7 @@ export async function summary(p: OntologyProject, withHealth = true, viewer?: Us
         // The same rule as canSee in services/useCases.ts.
         if (viewer && u.authorId === viewer.id) return true;
         if (u.withdrawnAt || u.visibility === 'private') return false;
-        return (u.visibility === 'public' && u.status !== 'archived') || isGroupMember(p.id, viewer);
+        return (u.visibility === 'public' && u.status !== 'archived' && u.status !== 'draft') || isGroupMember(p.id, viewer);
       }).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: list<Release>('releases', p.id).filter((r) => r.status === 'published').length,

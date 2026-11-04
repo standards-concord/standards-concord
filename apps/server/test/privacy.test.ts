@@ -7,7 +7,8 @@ import { findDocument, generateRequirements, markPublished, renderMarkdown, requ
 import { findProject } from '../src/services/ontologies.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { completingRelease, derivedStatus } from '../src/services/traceability.js';
-import { getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, withdrawUseCase } from '../src/services/useCases.js';
+import { createUseCase, getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, withConsentLock, withdrawUseCase } from '../src/services/useCases.js';
+import { requirementsFor, toPublishedRequirements } from '../src/public/requirements.js';
 
 /**
  * One test (or more) per finding of the privacy review of use case sharing:
@@ -467,6 +468,119 @@ describe('second review: races, published documents, validation, numbering and c
     expect(JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toMatch(/Archived by an editor/);
     expect((await editor.get(`/api/use-cases/${id}`)).status).toBe(200);
     expect((await author.get(`/api/use-cases/${id}`)).status).toBe(200);
+  });
+});
+
+describe('third review: open reads, published passages, commits and caching', () => {
+  it('never says who triaged an anonymous use case, and keeps drafts and drafted SPARQL for the group (findings 1, 2)', async () => {
+    const editor = await login('editor', 'Triaging Editor');
+    const project = findProject(demoId)!;
+    const anon = createUseCase(project, userNamed('Triaging Editor'), { source: 'chat', visibility: 'public', anonymous: true, status: 'triage', sections: { name: 'Anonymous triaged case' }, competencyQuestions: [{ id: 'cq_x', question: 'Which ones?', sparql: 'SELECT ?secretSparql WHERE {}', exampleData: '<urn:secret-data> a <urn:x> .', status: 'draft' }] });
+    expect((await editor.post(`/api/use-cases/${anon.id}/triage`).send({ status: 'accepted', note: 'ok' })).status).toBe(200);
+    const outsider = await login('contributor');
+    for (const agent of [request(app), outsider]) {
+      const detail = await agent.get(`/api/use-cases/${anon.id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.resolution?.by).toBeUndefined();
+      expect(JSON.stringify(detail.body)).not.toContain(userNamed('Triaging Editor').id);
+      expect(JSON.stringify(detail.body)).not.toMatch(/secretSparql|secret-data/);
+      expect(JSON.stringify((await agent.get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toContain(userNamed('Triaging Editor').id);
+    }
+    // A public use case its author hasn't submitted yet is not shown to others.
+    const draft = createUseCase(project, userNamed('Triaging Editor'), { source: 'form', visibility: 'public', status: 'draft', sections: { name: 'Unsubmitted public draft' } });
+    expect((await outsider.get(`/api/use-cases/${draft.id}`)).status).toBe(404);
+    expect(JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toMatch(/Unsubmitted public draft/);
+  });
+
+  it('shows signed-out visitors no change request titles through a use case (finding 5)', async () => {
+    const steward = await login('steward');
+    const withCr = (await steward.get(`/api/ontologies/${demoId}/use-cases`)).body.find((u: UseCase) => u.visibility === 'public' && u.changeRequestIds?.length) as UseCase;
+    const crTitle = get<ChangeRequest>('changeRequests', withCr.changeRequestIds![0])!.title;
+    const anon = await request(app).get(`/api/use-cases/${withCr.id}`);
+    expect(anon.body.trace.changeRequests).toEqual([]);
+    expect(anon.text).not.toContain(crTitle);
+    expect((await steward.get(`/api/use-cases/${withCr.id}`)).body.trace.changeRequests.length).toBeGreaterThan(0);
+  });
+
+  it('drops whole passages written from a withdrawn or archived use case, with a plain title and matching counts (findings 2, 7)', async () => {
+    const author = await login('contributor', 'Two Case Author');
+    const a = await useCaseVia(author, 'Shared passage A', 'public');
+    const b = await useCaseVia(author, 'Shared passage B', 'public');
+    const project = findProject(demoId)!;
+    const release = { id: 'rel_pass', ontologyId: demoId, version: '9.5.0', status: 'published', changeRequestIds: [] } as unknown as Release;
+    const doc = await markPublished(await generateRequirements(project, { version: '9.5.0', release }), release);
+    // One requirement cites both, with a title that quotes A.
+    put('requirementsDocs', { ...doc, title: 'Mentions Shared passage A', requirements: [...doc.requirements, { id: 'R99', text: 'From Shared passage A and B', useCaseIds: [a, b], termIris: [], status: 'open' as const }] }, demoId);
+    // Archiving counts as no longer publishable, just like withdrawal.
+    expect((await author.patch(`/api/use-cases/${a}`).send({ status: 'archived' })).status).toBe(200);
+    const served = requirementsDocument(demoId, '9.5.0')!;
+    const text = JSON.stringify(served) + renderMarkdown(served);
+    expect(text).not.toMatch(/Shared passage A/);
+    expect(served.requirements.some((r) => r.id === 'R99')).toBe(false);
+    expect(served.useCases.some((u) => u.id === b)).toBe(true);
+    const listed = (await request(app).get(`/api/ontologies/${demoId}/requirements`)).body.find((d: { version: string }) => d.version === '9.5.0');
+    expect(listed.title).toBe(served.title);
+    expect(listed.coverage).toEqual(served.coverage);
+    // The public page's snapshot: a section that draws on A goes even without an inline link, and so does one with no recorded sources.
+    const snap = toPublishedRequirements({ ...doc, sections: [{ id: 's1', heading: 'About A', markdown: 'no link here', useCaseIds: [a] }, { id: 's2', heading: 'Unknown', markdown: 'old snapshot', useCaseIds: undefined as never }, { id: 's3', heading: 'About B', markdown: 'b', useCaseIds: [b] }] }, doc.useCases);
+    const view = requirementsFor(project, snap);
+    expect(view.document!.sections!.map((x) => x.id)).toEqual(['s3']);
+    expect(JSON.stringify(view)).not.toMatch(/Shared passage A/);
+    expect(view.withdrawn).toBe(1);
+  });
+
+  it('a withdrawal waits while something derived from use cases is being committed (findings 3, 4)', async () => {
+    const author = await login('contributor', 'Waiting Author');
+    const id = await useCaseVia(author, 'Waits for the commit', 'public');
+    const order: string[] = [];
+    let release!: () => void;
+    const held = withConsentLock(demoId, () => new Promise<void>((r) => (release = () => { order.push('commit'); r(); })));
+    const withdrawal = author.post(`/api/use-cases/${id}/withdraw`).then((res) => { order.push('withdraw'); return res; });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(order).toEqual([]);
+    expect(getUseCase(id).withdrawnAt).toBeUndefined();
+    release();
+    await held;
+    expect((await withdrawal).status).toBe(200);
+    expect(order).toEqual(['commit', 'withdraw']);
+    expect(getUseCase(id).withdrawnAt).toBeTruthy();
+  });
+
+  it('a retriage that was running when a use case was withdrawn does not bring its tests back (finding 4)', async () => {
+    const { triage } = await import('../src/services/changeRequests.js');
+    const author = await login('contributor', 'Retriage Author');
+    const id = await useCaseVia(author, 'Retriage race', 'public');
+    const q = getUseCase(id).competencyQuestions[0].question;
+    const cr = list<ChangeRequest>(demoId)[0];
+    const saved = structuredClone(cr);
+    put('changeRequests', { ...cr, tests: [...(cr.tests ?? []), { question: q, sparql: 'SELECT * WHERE { ?s ?p ?o }', exampleData: '<urn:RETRIAGE-SECRET> a <urn:x> .' }] }, demoId);
+    const running = triage(get<ChangeRequest>('changeRequests', cr.id)!);
+    withdrawUseCase(getUseCase(id), userNamed('Retriage Author'));
+    await running;
+    const after = JSON.stringify(get<ChangeRequest>('changeRequests', cr.id));
+    expect(after).not.toContain('RETRIAGE-SECRET');
+    expect(after).not.toContain(q);
+    put('changeRequests', saved, demoId);
+  });
+
+  it('a requirement keeps a term the ontology lacks through regeneration, so it is not met (finding 8)', async () => {
+    const author = await login('contributor', 'Missing Term Author');
+    const id = await useCaseVia(author, 'Needs a missing term', 'public');
+    const u = getUseCase(id);
+    put('useCases', { ...u, terms: [{ label: 'Opportunity', kind: 'class' }, { label: 'Zzschedule', kind: 'class' }] }, demoId);
+    const doc = await generateRequirements(findProject(demoId)!, { version: '9.4.0' });
+    const mine = doc.requirements.filter((r) => r.useCaseIds.includes(id));
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((r) => r.missingTerms?.includes('Zzschedule'))).toBe(true);
+    expect(mine.some((r) => r.status === 'met')).toBe(false);
+  });
+
+  it('marks API responses private and uncacheable, and public pages for revalidation (finding 9)', async () => {
+    const res = await request(app).get(`/api/ontologies/${demoId}/use-cases`);
+    expect(res.headers['cache-control']).toBe('private, no-store');
+    expect(res.headers.vary).toMatch(/Cookie/);
+    const page = await request(app).get(`/def/${findProject(demoId)!.slug}/1.0.0`).set('Accept', 'text/html');
+    expect(page.headers['cache-control']).toBe('no-cache');
   });
 });
 

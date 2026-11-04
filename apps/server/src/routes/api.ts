@@ -1,7 +1,7 @@
 import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
-import type { ChangeRequestKind, GovernancePolicy, Meeting, Role, SessionInfo, User } from '@concord/shared';
+import type { ChangeRequestKind, GovernancePolicy, Meeting, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
@@ -110,6 +110,12 @@ const PUBLIC_READS = [
 export function apiRouter(): Router {
   const r = Router();
   r.use(express.json({ limit: '5mb' }));
+  // Responses depend on who is signed in (and on consent that can be withdrawn at any time), so no cache may keep or share them.
+  r.use((_req, res, next) => {
+    res.set('Cache-Control', 'private, no-store');
+    res.vary('Cookie');
+    next();
+  });
 
   /* ------------------------------ auth ------------------------------ */
   r.get('/session', (req, res) => res.json(sessionInfo(req.user)));
@@ -284,33 +290,26 @@ export function apiRouter(): Router {
   r.get('/ontologies/:id/use-cases', (req, res) => res.json(useCases.listUseCases(project(req).id, req.user)));
   r.get('/ontologies/:id/public-use-cases', (req, res) => res.json(requirements.publicUseCases(project(req).id)));
   r.get('/use-cases/:id', (req, res) => res.json(useCaseDetail(String(req.params.id), req.user)));
-  r.patch('/use-cases/:id', (req, res) => {
+  // Changes that can take consent away (edits, visibility, withdrawal, archiving, triage) wait for any
+  // release or drafted change request being committed from the ontology's use cases (withConsentLock).
+  const consentChange = (req: Request, fn: (u: UseCase, user: User) => void) => {
     const user = requireUser(req);
-    const u = useCases.getUseCaseFor(String(req.params.id), user);
-    useCases.updateUseCase(u, user, req.body ?? {});
-    res.json(useCaseDetail(u.id, user));
-  });
-  r.post('/use-cases/:id/visibility', (req, res) => {
-    const user = requireUser(req);
-    const u = useCases.getUseCaseFor(String(req.params.id), user);
-    useCases.setVisibility(u, user, req.body?.visibility);
-    res.json(useCaseDetail(u.id, user));
-  });
-  r.post('/use-cases/:id/withdraw', (req, res) => {
-    const user = requireUser(req);
-    useCases.withdrawUseCase(useCases.getUseCaseFor(String(req.params.id), user), user);
-    res.json(useCaseDetail(String(req.params.id), user));
-  });
+    const id = String(req.params.id);
+    const ontologyId = useCases.getUseCaseFor(id, user).ontologyId;
+    return useCases.withConsentLock(ontologyId, () => {
+      fn(useCases.getUseCaseFor(id, user), user);
+      return useCaseDetail(id, user);
+    });
+  };
+  r.patch('/use-cases/:id', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.updateUseCase(u, user, req.body ?? {}))));
+  r.post('/use-cases/:id/visibility', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.setVisibility(u, user, req.body?.visibility))));
+  r.post('/use-cases/:id/withdraw', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.withdrawUseCase(u, user))));
   r.post('/use-cases/:id/submit', (req, res) => {
     const user = requireUser(req);
     useCases.submitUseCase(useCases.getUseCaseFor(String(req.params.id), user), user);
     res.json(useCaseDetail(String(req.params.id), user));
   });
-  r.post('/use-cases/:id/triage', (req, res) => {
-    const user = requireUser(req);
-    useCases.triageUseCase(useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.status, optStr(req.body?.note));
-    res.json(useCaseDetail(String(req.params.id), user));
-  });
+  r.post('/use-cases/:id/triage', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.triageUseCase(u, user, req.body?.status, optStr(req.body?.note)))));
   r.post('/use-cases/:id/links', (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};

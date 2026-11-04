@@ -114,16 +114,18 @@ export const findDocument = (ontologyId: string, version: string) => docs(ontolo
 function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
   const gone = withdrawnSince(d.ontologyId, [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])]);
   const cites = (ids: string[], md = '') => ids.some((id) => gone.has(id)) || [...gone].some((id) => md.includes(`#uc-${id}`));
+  // A requirement drawn from a withdrawn use case may quote it, so it goes, even if other use cases share it.
   const requirements = d.requirements
-    .map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), termIris: r.termIris, ...(r.missingTerms?.length ? { missingTerms: r.missingTerms } : {}), status: r.status }))
-    .filter((r, i) => r.useCaseIds.length > 0 || d.requirements[i].useCaseIds.length === 0);
+    .filter((r) => !r.useCaseIds.some((id) => gone.has(id)))
+    .map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds, termIris: r.termIris, ...(r.missingTerms?.length ? { missingTerms: r.missingTerms } : {}), status: r.status }));
   const useCases = d.useCases.filter((u) => !gone.has(u.id));
   const out: RequirementsDocument = {
     id: d.id,
     ontologyId: d.ontologyId,
     ...(d.releaseId ? { releaseId: d.releaseId } : {}),
     version: d.version,
-    title: d.title,
+    // The written title may echo a withdrawn use case: a plain one replaces it.
+    title: gone.size ? plainTitle(d.ontologyId, d.version) : d.title,
     status: d.status,
     generatedAt: d.generatedAt,
     ...(d.simulated ? { simulated: true } : {}),
@@ -139,6 +141,8 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
   return out;
 }
 
+const plainTitle = (ontologyId: string, version: string) => `${getProject(ontologyId).title}: use cases and requirements for ${version}`;
+
 const coverageOf = (useCases: PublicUseCase[]) => ({
   total: useCases.length,
   closed: useCases.filter((u) => u.status === 'closed').length,
@@ -146,12 +150,16 @@ const coverageOf = (useCases: PublicUseCase[]) => ({
   open: useCases.filter((u) => !['closed', 'addressed', 'deferred', 'out-of-scope'].includes(u.status)).length,
 });
 
-/** Of these use case ids, the ones that are gone or no longer public (withdrawn, made private or group-only). */
+/**
+ * Of these use case ids, the ones that may no longer be published: gone,
+ * withdrawn, made private or group-only, or archived. The same predicate
+ * (isPublishable) decides what goes into a document in the first place.
+ */
 export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
   return new Set(
     ids.filter((id) => {
       const u = get<UseCase>('useCases', id);
-      return !u || u.ontologyId !== ontologyId || !!u.withdrawnAt || u.visibility !== 'public';
+      return !u || u.ontologyId !== ontologyId || !isPublishable(u);
     }),
   );
 }
@@ -188,6 +196,8 @@ export function listDocuments(ontologyId: string, viewer?: User) {
   return docs(ontologyId)
     .filter((d) => d.status === 'published' || group)
     .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+    // Through the serving projection, so titles and counts match what the document itself shows.
+    .map((d) => (d.status === 'published' ? served(d, viewer) : d))
     .map(({ id, version, status, generatedAt, title, releaseId, coverage }) => ({ id, version, status, generatedAt, title, releaseId, coverage }));
 }
 
@@ -240,7 +250,8 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
     const ref = useCaseLabel(u);
     const who = cast[i];
     const s = u.sections;
-    const terms = u.terms.map((t) => t.label).filter((l) => termLabels.has(l.toLowerCase()));
+    // Every term the use case needs, present or not: one the ontology lacks is kept as missing, so the requirement can't be met without it.
+    const terms = u.terms.map((t) => t.label);
     // Terms a question mentions by name ("organisations" -> organisation), so a requirement can be checked against the graph.
     const mentioned = (q: string) => {
       const text = q.toLowerCase();

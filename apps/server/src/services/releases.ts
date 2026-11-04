@@ -17,6 +17,7 @@ import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
+import { withConsentLock } from './useCases.js';
 import { syncUseCasesForCR } from './traceability.js';
 import { getUser, logActivity } from './users.js';
 
@@ -196,51 +197,55 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     }
   }
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
-  const doc = await prepareForRelease(project, r);
-  if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
-  // The use case snapshot always goes in, so the release never shows live data;
-  // a rendering failure only costs the stored page (served pages render on request).
-  const requirements = releaseRequirements(project, r.version);
-  files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
-  try {
-    Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
-  } catch (err) {
-    console.warn(`[release] public page: ${(err as Error).message}`);
-  }
-
-  const author = actor ?? getUser(r.createdBy);
-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
-  r.status = 'published';
-  r.publishedAt = clock.iso();
-  r.statusSince = r.publishedAt;
-
-  // Mark change requests as released.
-  for (const id of r.changeRequestIds) {
-    const cr = mustGet<ChangeRequest>('changeRequests', id);
-    cr.status = 'released';
-    cr.releaseId = r.id;
-    cr.statusSince = r.publishedAt;
-    cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
-    put('changeRequests', cr, cr.ontologyId);
-    // Use cases this change addressed are now closed by this version.
-    syncUseCasesForCR(cr);
-  }
-  if (doc) await markPublished(doc, r);
-
-  project.currentVersion = r.version;
-  project.stage = 'released';
-  updateProject(project);
-
-  // Public ontologies are persisted to GitHub on release, when configured.
-  if (project.github && config.github.publishToken) {
+  // From the use cases being read for the release to the release being pushed, no one can withdraw
+  // one or change who may see it (withdrawals wait), so what is committed is what they consented to.
+  await withConsentLock(project.id, async () => {
+    const doc = await prepareForRelease(project, r);
+    if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
+    // The use case snapshot always goes in, so the release never shows live data;
+    // a rendering failure only costs the stored page (served pages render on request).
+    const requirements = releaseRequirements(project, r.version);
+    files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
     try {
-      const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
-      ontologyStore.push(project, remote);
-      r.githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
     } catch (err) {
-      console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
+      console.warn(`[release] public page: ${(err as Error).message}`);
     }
-  }
+
+    const author = actor ?? getUser(r.createdBy);
+    r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
+    r.status = 'published';
+    r.publishedAt = clock.iso();
+    r.statusSince = r.publishedAt;
+
+    // Mark change requests as released.
+    for (const id of r.changeRequestIds) {
+      const cr = mustGet<ChangeRequest>('changeRequests', id);
+      cr.status = 'released';
+      cr.releaseId = r.id;
+      cr.statusSince = r.publishedAt;
+      cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
+      put('changeRequests', cr, cr.ontologyId);
+      // Use cases this change addressed are now closed by this version.
+      syncUseCasesForCR(cr);
+    }
+    if (doc) await markPublished(doc, r);
+
+    project.currentVersion = r.version;
+    project.stage = 'released';
+    updateProject(project);
+
+    // Public ontologies are persisted to GitHub on release, when configured.
+    if (project.github && config.github.publishToken) {
+      try {
+        const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
+        ontologyStore.push(project, remote);
+        r.githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      } catch (err) {
+        console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
+      }
+    }
+  });
   save(r);
   logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return r;

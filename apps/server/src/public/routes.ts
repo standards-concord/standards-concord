@@ -252,7 +252,8 @@ async function serve(req: Request, res: Response) {
     format = NEGOTIABLE[best];
   }
 
-  res.set('Cache-Control', version === 'draft' ? 'no-cache' : 'public, max-age=300');
+  // Revalidated on every request (the ETag keeps that cheap), so a withdrawn use case never outlives withdrawal in a cache.
+  res.set('Cache-Control', 'no-cache');
   const self = `${root}/${version}`;
   res.set(
     'Link',

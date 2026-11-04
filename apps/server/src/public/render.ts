@@ -607,6 +607,7 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
 ${story}
 <section class="block" aria-labelledby="${id('sec-use-cases')}">
   <h2 id="${id('sec-use-cases')}">Use cases</h2>
+  ${reqs.withdrawn ? `<p class="muted withdrawn-note">${reqs.withdrawn === 1 ? 'One use case' : `${reqs.withdrawn} use cases`} recorded with this version ${reqs.withdrawn === 1 ? 'has' : 'have'} since been withdrawn, so ${reqs.withdrawn === 1 ? 'it is' : 'they are'} not shown, and neither is anything written from ${reqs.withdrawn === 1 ? 'it' : 'them'}.</p>` : ''}
   ${
     ucs.length
       ? `<div class="uc-filters" role="group" aria-label="Filter use cases by status">${filters

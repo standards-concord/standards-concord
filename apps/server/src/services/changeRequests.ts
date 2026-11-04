@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -236,6 +236,13 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
     };
     cr.timeline.push(ev('validated', message));
   }
+  // A use case withdrawn while this ran has had its questions scrubbed from the stored change
+  // request: keep that, and drop any result for a question that no longer runs.
+  const stored = get<ChangeRequest>('changeRequests', cr.id);
+  if (stored) cr.tests = stored.tests;
+  const key = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
+  const allowed = new Set([...competencyTests(project.id), ...(cr.tests ?? [])].map((q) => key(q.question)));
+  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: cr.validation.competencyQuestions.filter((r) => allowed.has(key(r.question))) };
   return save(cr);
 }
 
