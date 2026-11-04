@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ApprovalRule, ChangeLevel, GovernancePolicy, Role } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
-import { Crown, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
+import { Crown, EyeOff, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { pct, plural, roleLabel } from '../../lib/format';
@@ -356,6 +356,68 @@ function RulesSection({
 
 const TRANSFER: Record<GovernancePolicy['ownership']['transfer'], string> = { 'owner-decides': 'The owner decides', 'member-vote': 'Voting members vote', 'odi-approval': 'ODI must approve' };
 
+const localName = (iri: string) => iri.replace(/^.*[#/]/, '') || iri;
+
+/**
+ * What the privacy clean-up took out of the published ontology because it
+ * might reveal a private use case or a person. Owners and stewards put back
+ * what was a false alarm, or keep it out for good.
+ */
+function WithheldReview() {
+  const { id, hasRole } = useOntology();
+  const canReview = hasRole('owner', 'steward');
+  const items = useAsync(() => (canReview ? api.withheld(id) : Promise.resolve([])), [id, canReview]);
+  const heading = useRef<HTMLSpanElement>(null);
+  const act = useAction(async (fn: () => Promise<unknown>) => {
+    await fn();
+    await items.reload();
+    // The row (and the button that had focus) is gone: keep keyboard users in the list.
+    heading.current?.focus();
+  });
+  if (!canReview) return null;
+  if (items.error && !items.data) return <ErrorCard error={items.error} onRetry={items.reload} />;
+  if (!items.data?.length) return null;
+  const reason = { credit: 'a credit an old merge wrote', 'use case title': 'names a use case', name: 'names a person' } as const;
+  return (
+    <section aria-labelledby="withheld-h">
+      <Card>
+        <CardHeader
+          icon={EyeOff}
+          title={
+            <span id="withheld-h" ref={heading} tabIndex={-1} className="outline-none">
+              Withheld from the public page ({items.data.length})
+            </span>
+          }
+        />
+        <p className="px-5 pt-3 pb-2 text-sm text-muted">
+          Older versions of Concord could publish use case titles and people’s names. These statements were taken out of the public ontology for that reason. Put back any that are fine to publish.
+        </p>
+        <ul className="divide-y divide-line">
+          {items.data.map((w) => (
+            <li key={w.id} className="px-5 py-3" data-withheld>
+              <div className="text-xs text-muted">
+                {localName(w.subject)} · {localName(w.predicate)} · {w.version === 'working' ? 'working draft' : `version ${w.version}`} · {reason[w.reason]}
+              </div>
+              <p className="mt-1 whitespace-pre-wrap break-words text-sm">{w.object.value}</p>
+              <div className="mt-2 flex gap-2">
+                <Button size="sm" loading={act.pending} onClick={() => void act.run(() => api.restoreWithheld(id, w.id))}>
+                  Put back
+                </Button>
+                <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run(() => api.dismissWithheld(id, w.id))}>
+                  Keep it out
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        <div className="px-5 pb-3">
+          <InlineError error={act.error} />
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 export function GovernanceTab() {
   const { id, ontology, hasRole, reload } = useOntology();
   const templates = useAsync(() => api.governanceTemplates(), []);
@@ -416,6 +478,7 @@ export function GovernanceTab() {
       {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can view the policy; only owners and stewards can change it.</p>}
       {editing && <p className="rounded-lg bg-accent-soft px-4 py-2.5 text-sm">Editing the policy. Nothing changes for anyone until you save; the summary below previews your edits.</p>}
       <InlineError error={save.error} />
+      <WithheldReview />
 
       <PolicySummary policy={policy} preview={editing && dirty} />
 

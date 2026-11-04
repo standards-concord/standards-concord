@@ -91,7 +91,7 @@ export const ontologyStore = {
     const dir = repoDir(project);
     fs.writeFileSync(path.join(dir, FILE), await graph.toTurtle());
     git(dir, ['add', FILE]);
-    const status = git(dir, ['status', '--porcelain']);
+    const status = git(dir, ['diff', '--cached', '--name-only']);
     if (status) git(dir, ['commit', '-q', '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
     return this.head(project);
   },
@@ -132,7 +132,8 @@ export const ontologyStore = {
         else fs.writeFileSync(file, content);
       }
     git(dir, ['add', 'releases']);
-    if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    // Only what was staged here: other changes in the repository (a hand edit, say) aren't swept in or in the way.
+    if (git(dir, ['diff', '--cached', '--name-only'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
     return this.head(project);
   },
 
@@ -141,7 +142,8 @@ export const ontologyStore = {
     const dir = repoDir(project);
     fs.writeFileSync(path.join(dir, name), content);
     git(dir, ['add', name]);
-    if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    // Only what was staged here: other changes in the repository (a hand edit, say) aren't swept in or in the way.
+    if (git(dir, ['diff', '--cached', '--name-only'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
     return this.head(project);
   },
 

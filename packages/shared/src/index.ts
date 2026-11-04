@@ -373,6 +373,30 @@ export type ChangeRequestOrigin =
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] };
 
+/**
+ * A statement the privacy clean-up took out of a published ontology (the
+ * working draft or a release) because it may reveal a private use case or a
+ * person: kept here, privately, so an owner or steward can put it back if it
+ * was a false alarm.
+ */
+export interface WithheldStatement {
+  id: string;
+  ontologyId: string;
+  /** "working" for the working draft, else a release version. */
+  version: string;
+  subject: string;
+  predicate: string;
+  object: { value: string; language?: string; datatype?: string };
+  reason: 'credit' | 'use case title' | 'name';
+  at: string;
+}
+
+export interface PrivacyFinding {
+  /** e.g. "definition of :PilotRecord", "title". */
+  where: string;
+  kind: 'use case title' | 'name';
+}
+
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
   | 'triage' // automated classification + validation running/needs triage
@@ -485,6 +509,14 @@ export interface ChangeRequest {
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
   mergedCommit?: string;
+  /**
+   * What a merge would publish from the private use cases this was
+   * synthesised from (where, and what kind: never the text itself). Set when
+   * a merge is held back for it.
+   */
+  privacyFindings?: PrivacyFinding[];
+  /** An editor confirmed nothing in this version of the request is private (it changes if the request does). */
+  privacyCleared?: { by: string; at: string; fingerprint: string };
   releaseId?: string;
   timeline: TimelineEvent[];
   createdAt: string;

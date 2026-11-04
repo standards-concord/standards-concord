@@ -37,7 +37,7 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
-import { publishableLines, redactOps, redactText, revealing, secretsOf } from './redact.js';
+import { privacyFindings, publicationFingerprint, redactOps, redactText, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -402,6 +402,21 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
   return cr;
 }
 
+/**
+ * An editor confirms that what a held-back request would publish isn't
+ * private (a false alarm, or something already public), then merges it. The
+ * confirmation covers this exact version: any later edit needs another.
+ */
+export async function confirmNothingPrivate(cr: ChangeRequest, actor: User): Promise<ChangeRequest> {
+  requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'confirm a change request publishes nothing private');
+  if (cr.status !== 'needs-work' || !cr.privacyFindings?.length) throw new HttpError(409, 'This request isn’t held back for privacy');
+  cr.privacyCleared = { by: actor.id, at: clock.iso(), fingerprint: publicationFingerprint(cr) };
+  cr.timeline.push(ev('comment', 'confirmed nothing in it is private', actor.id));
+  setStatus(cr, 'approved', 'approved again after the privacy check', actor.id);
+  save(cr);
+  return merge(cr, actor);
+}
+
 /** Merge into the working draft. Re-applies the edits on the current head (a rebase). */
 export async function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
@@ -410,27 +425,31 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   const author = getUser(cr.authorId);
   const working = await ontologyStore.working(project);
   let after: OntologyGraph;
-  // Requests queued before redaction existed are checked again here, so a merge can't publish them.
+  // The ontology is published, but use cases may be private. A request drafted from them is checked
+  // here (including ones queued before these checks existed), and held back rather than rewritten:
+  // a person edits it, or confirms nothing in it is private, before it's published.
   const secrets = secretsOf(cr);
-  const redacted = secrets ? redactOps(cr.ops, secrets) : { ops: cr.ops, dropped: [] };
+  if (secrets) {
+    const findings = privacyFindings(cr, secrets);
+    if (findings.length && cr.privacyCleared?.fingerprint !== publicationFingerprint(cr)) {
+      cr.privacyFindings = findings;
+      const what = [...new Set(findings.map((f) => (f.kind === 'name' ? 'a person’s name' : 'a use case title')))].join(' and ');
+      setStatus(cr, 'needs-work', `held back before merging: it would publish ${what} (in ${findings.map((f) => f.where).join(', ')}). Edit it, or an editor can confirm nothing in it is private.`);
+      return save(cr);
+    }
+  }
+  cr.privacyFindings = undefined;
   try {
     // No author: dcterms:contributor would publish the requester's name on every new term.
     // Who asked for each change stays in the change request.
-    after = applyChangeOps(working, redacted.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    after = applyChangeOps(working, cr.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
     scrubGeneratedProvenance(after);
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);
   }
-  if (secrets) {
-    // What was merged is what gets described from here on (commit, release notes).
-    if (redacted.dropped.length) cr.timeline.push(ev('comment', `left out ${redacted.dropped.join(', ')} when merging: the name would publish a use case title or a person's name`));
-    cr.ops = redacted.ops;
-    cr.kgcl = publishableLines(toKGCL(redacted.ops, after.prefixes), secrets);
-  }
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
-  const redactedTitle = secrets ? redactText(cr.title, secrets) : cr.title;
-  const title = secrets && revealing(redactedTitle, secrets) ? 'Changes from use cases' : redactedTitle;
+  const title = cr.title;
   cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: 'Concord' });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
   if (project.stage === 'discovery') {

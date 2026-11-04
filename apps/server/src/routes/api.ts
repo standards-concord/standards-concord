@@ -35,6 +35,7 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
+import { dismissWithheld, listWithheld, restoreWithheld } from '../public/routes.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -356,10 +357,35 @@ export function apiRouter(): Router {
     res.json({ ok: true });
   });
 
+  /* ----------------- statements withheld by the clean-up -------------- */
+  // What the privacy clean-up took out of the published ontology: owners and stewards decide what goes back.
+  const steward = (req: Request) => {
+    const p = project(req);
+    requireRole(p.id, requireUser(req), ['owner', 'steward'], 'review what was withheld from the public page');
+    return p;
+  };
+  r.get('/ontologies/:id/withheld', (req, res) => {
+    res.json(listWithheld(steward(req).id));
+  });
+  r.post('/ontologies/:id/withheld/:wid/restore', async (req, res) => {
+    await restoreWithheld(steward(req), String(req.params.wid));
+    res.json({ ok: true });
+  });
+  r.post('/ontologies/:id/withheld/:wid/dismiss', (req, res) => {
+    dismissWithheld(steward(req), String(req.params.wid));
+    res.json({ ok: true });
+  });
+
   /* ---------------------------- change requests ---------------------- */
   r.get('/ontologies/:id/change-requests', (req, res) => {
     const status = optStr(req.query.status);
     res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status));
+  });
+
+  // A request held back because it would publish something from private use cases: an editor confirms it doesn't.
+  r.post('/change-requests/:id/confirm-nothing-private', async (req, res) => {
+    const cr = await crs.confirmNothingPrivate(crs.getCR(String(req.params.id)), requireUser(req));
+    res.json(crs.detail(cr));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {

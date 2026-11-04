@@ -348,7 +348,7 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     messages: [
       {
         role: 'user',
-        content: `Current ontology:\n\n${ontologyDigest(graph)}\n\nUse cases:\n\n${ucs.map(useCaseDigest).join('\n\n')}\n\nPropose the changes. Write one SPARQL test per competency question (SELECT, using the ontology's terms) with small example Turtle data that should make it return rows.`,
+        content: `Current ontology:\n\n${ontologyDigest(graph)}\n\nUse cases:\n\n${ucs.map((u, i) => useCaseDigest(u, { anonymous: true, n: i + 1 })).join('\n\n')}\n\nPropose the changes. Write one SPARQL test per competency question (SELECT, using the ontology's terms) with small example Turtle data that should make it return rows.`,
       },
     ],
     fallback: () => heuristicSynthesis(graph.view().classes.map((c) => c.label?.toLowerCase() ?? ''), ucs),

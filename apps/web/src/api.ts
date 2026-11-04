@@ -26,6 +26,7 @@ import type {
   OntologySummary,
   OntologyView,
   OutputFormat,
+  WithheldStatement,
   Release,
   ReleaseDetail,
   Role,
@@ -211,6 +212,10 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  confirmNothingPrivate: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/confirm-nothing-private`),
+  withheld: (id: string) => get<WithheldStatement[]>(`/api/ontologies/${e(id)}/withheld`),
+  restoreWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/restore`),
+  dismissWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/dismiss`),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
