@@ -769,10 +769,15 @@ export interface RequirementsDocument {
 export interface OAuthRequestInfo {
   id: string;
   clientName: string;
+  /** Name, website and logo come from the app itself and are not checked. */
   clientUri?: string;
   logoUri?: string;
-  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code. */
+  /** For apps identified by a metadata document URL: the host that published it, which Concord did check. */
+  publisher?: string;
+  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code; for a native app, its link scheme (com.example.app:). */
   redirectHost: string;
+  /** web: an https site. local: an app on this computer listening on localhost. native: an installed app's link scheme. */
+  redirectKind: 'web' | 'local' | 'native';
   localRedirect: boolean;
   resource?: string;
 }

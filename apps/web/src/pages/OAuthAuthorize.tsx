@@ -41,6 +41,7 @@ export function OAuthAuthorizePage() {
   const deny = useAction(async () => go((await api.denyOAuth(id)).redirect, 'denied'));
   const here = `/oauth/authorize?request=${encodeURIComponent(id)}`;
   const user = session?.user;
+  const websiteHost = req.data?.clientUri ? new URL(req.data.clientUri).host : undefined;
 
   return (
     <div className="mx-auto flex max-w-md flex-col px-4 py-12">
@@ -66,13 +67,31 @@ export function OAuthAuthorizePage() {
           <h1 className="text-center text-xl font-semibold tracking-tight" data-testid="oauth-title">
             {req.data.clientName} wants to connect to Concord
           </h1>
-          {req.data.clientUri && (
-            <p className="mt-1 text-center text-xs text-muted">
-              <a href={req.data.clientUri} target="_blank" rel="noreferrer" className="hover:underline">
-                {new URL(req.data.clientUri).host}
-              </a>
-            </p>
-          )}
+          <p className="mt-1 text-center text-xs text-muted" data-testid="oauth-identity">
+            {req.data.publisher ? (
+              <>
+                Identified by <strong className="font-mono">{req.data.publisher}</strong>
+                {websiteHost && websiteHost !== req.data.publisher ? <> · says its website is {websiteHost}</> : null}
+              </>
+            ) : (
+              <>
+                Concord can’t confirm who made this app: its name{websiteHost ? <> and website ({websiteHost})</> : null} are its own claims.
+              </>
+            )}
+          </p>
+          <div className="mt-4 rounded-lg border border-line bg-surface-2 p-3 text-center text-sm" data-testid="oauth-destination">
+            {req.data.redirectKind === 'native' ? (
+              <>
+                Access will be sent to an app installed on this device that opens <strong className="font-mono">{req.data.redirectHost}</strong> links.
+              </>
+            ) : (
+              <>
+                Access will be sent to <strong className="font-mono">{req.data.redirectHost}</strong>
+                {req.data.localRedirect ? ' (an app on this computer)' : ''}.
+              </>
+            )}
+            <div className="mt-1 text-xs text-muted">Only allow if that’s the app you’re connecting.</div>
+          </div>
 
           {!user ? (
             <div className="mt-6 space-y-3 text-center">
@@ -102,13 +121,13 @@ export function OAuthAuthorizePage() {
                 <li className="flex gap-2.5">
                   <MessageSquarePlus className="mt-0.5 size-4 shrink-0 text-muted" /> Report gaps and propose changes in your name
                 </li>
+                <li className="flex gap-2.5">
+                  <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted" /> Covers every ontology you can see on the hub, including working drafts
+                </li>
               </ul>
               <p className="mt-5 flex gap-2 border-t border-line pt-4 text-xs text-muted">
                 <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
-                <span>
-                  After you allow, you’ll go back to <strong className="font-mono">{req.data.redirectHost}</strong>
-                  {req.data.localRedirect ? ' (an app on this computer)' : ''}. You can disconnect it any time in Settings.
-                </span>
+                <span>You can disconnect it any time in Settings.</span>
               </p>
               <div className="mt-5 flex gap-2">
                 <Button className="flex-1" onClick={() => void deny.run()} loading={deny.pending} disabled={allow.pending} data-testid="oauth-deny">
