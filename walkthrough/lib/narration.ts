@@ -171,6 +171,75 @@ export function forSpeech(text: string, lexicon: Record<string, string>): string
   return out;
 }
 
+/**
+ * The text sent to the voice, built word by word from the caption text so that each
+ * caption word's position in the spoken text is known (for timing captions from the
+ * voice's character timestamps).
+ */
+export function speechMap(text: string, lexicon: Record<string, string>): { speech: string; words: string[]; starts: number[] } {
+  const words = plain(text).split(/\s+/).filter(Boolean);
+  const starts: number[] = [];
+  let speech = '';
+  for (const w of words) {
+    if (speech) speech += ' ';
+    starts.push(speech.length);
+    speech += forSpeech(w, lexicon);
+  }
+  return { speech, words, starts };
+}
+
+/**
+ * Readable caption phrases: one per sentence, and a long sentence split into balanced
+ * pieces under `max` characters, at a comma near the middle where there is one.
+ */
+export function phrases(text: string, max = 84): { text: string; firstWord: number }[] {
+  const words = plain(text).split(/\s+/).filter(Boolean);
+  const out: { text: string; firstWord: number }[] = [];
+  const len = (from: number, to: number) => words.slice(from, to).join(' ').length;
+  const split = (from: number, to: number) => {
+    if (len(from, to) <= max || to - from < 2) {
+      out.push({ text: words.slice(from, to).join(' '), firstWord: from });
+      return;
+    }
+    // Break where the two halves are closest in length; a comma break wins if it's not too lopsided.
+    let best = from + 1;
+    let bestScore = Infinity;
+    for (let k = from + 1; k < to; k++) {
+      const imbalance = Math.abs(len(from, k) - len(k, to));
+      const score = /[,;:]$/.test(words[k - 1]) ? imbalance - max / 3 : imbalance;
+      if (score < bestScore) {
+        bestScore = score;
+        best = k;
+      }
+    }
+    split(from, best);
+    split(best, to);
+  };
+  let start = 0;
+  words.forEach((w, i) => {
+    if (/[.!?]["')\]]*$/.test(w)) {
+      split(start, i + 1);
+      start = i + 1;
+    }
+  });
+  if (start < words.length) split(start, words.length);
+  return out;
+}
+
+/** Caption cues for one clip, in seconds from the clip's start. */
+export function cuesFor(text: string, lexicon: Record<string, string>, duration: number, charStarts?: number[]) {
+  const map = speechMap(text, lexicon);
+  const ps = phrases(text);
+  const totalChars = map.speech.length || 1;
+  const at = (wordIndex: number) => {
+    if (wordIndex >= map.words.length) return duration;
+    const c = map.starts[wordIndex];
+    // Use the voice's own timing when it reported one; otherwise share time by length.
+    return charStarts?.[c] ?? (c / totalChars) * duration;
+  };
+  return ps.map((p, i) => ({ start: at(p.firstWord), end: i + 1 < ps.length ? at(ps[i + 1].firstWord) : duration, text: p.text }));
+}
+
 /** Splits a paragraph into sentences for caption cues. */
 export function sentences(text: string): string[] {
   const parts = plain(text).match(/[^.!?]+(?:[.!?]+["')\]]*|$)/g) ?? [];

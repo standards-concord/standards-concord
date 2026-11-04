@@ -34,6 +34,8 @@ export interface Ctx {
   };
   /** Rewrites local URLs in text to the hub URL shown on screen. */
   shown: (text: string) => string;
+  /** Things the video must say on screen about how it was made. */
+  notices: { classesStandIn: boolean };
   state: {
     token?: string;
     fork?: { id?: string; slug?: string; iri?: string; appUrl?: string; js?: string };
@@ -64,6 +66,14 @@ const CHAPTERS: Record<string, { eyebrow: string; title: string; sub?: string; a
 };
 
 const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
+
+const STAND_IN = 'Preview: this hub doesn’t serve generated classes yet, so a stand-in module with the same shape is used';
+
+/** Opens the sample app, labelling it if it runs on stand-in classes. */
+async function gotoApp(c: Ctx, opts: { keepCard?: boolean } = {}) {
+  await c.d.goto(c.app.url, opts);
+  if (c.notices.classesStandIn) await c.d.label(STAND_IN);
+}
 
 /** Shows a URL, or if we're already there (e.g. under a chapter card), reveals it. */
 async function show(c: Ctx, url: string) {
@@ -219,12 +229,14 @@ export const actions: Record<string, Action> = {
     if (!ch) return c.d.warn(`No chapter "${name}"`);
     await c.d.chapter({ eyebrow: ch.eyebrow, title: ch.title, sub: ch.sub }, 0);
     await sleep(900);
-    await c.d.goto(ch.at(c), { keepCard: true });
+    if (ch.at(c) === c.app.url) await gotoApp(c, { keepCard: true });
+    else await c.d.goto(ch.at(c), { keepCard: true });
   },
 
   /* ------------------------------- app ------------------------------- */
   async 'open-app'(c) {
-    await show(c, c.app.url);
+    if (c.d.page.url() === c.app.url) await show(c, c.app.url);
+    else await gotoApp(c);
     await sleep(500);
     await c.d.pointAt(c.d.page.locator('.card').first(), 'an opportunity card');
   },
@@ -340,7 +352,7 @@ export const actions: Record<string, Action> = {
     await c.term.say('Done. Each opportunity shows the hours given, and volunteers can log time with "Log hours". Reload the app to try it.');
   },
   async 'open-app-feature'(c) {
-    await c.d.goto(c.app.url);
+    await gotoApp(c);
     await sleep(400);
     await c.d.highlight(c.d.page.locator('.pill.hours'), 'hours given');
     await sleep(2200);
@@ -411,6 +423,7 @@ export const actions: Record<string, Action> = {
       await api.dispose();
     }
     await c.d.goto(o(c, `/changes/${cr.id}`));
+    await c.d.label('Simulated CI: a passing test run was reported to Concord for this demo');
     await ringAround(c, /^App checks$/);
     await sleep(3000);
     await c.d.highlight(c.d.page.getByText('Autopilot', { exact: true }), 'the Autopilot badge', 'autopilot voted yes');
@@ -448,7 +461,7 @@ export const actions: Record<string, Action> = {
     await editApp(c, before.replace(/from "[^"]+\/def\/[^"]+\.js";/, `from "${target}";`));
     await c.term.say('Switched to the released standard. The fork is no longer needed.');
     await sleep(1200);
-    await c.d.goto(c.app.url);
+    await gotoApp(c);
   },
   async 'outro-card'(c) {
     await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: 'Try it: standards-concord.vercel.app/alpha' }, 0);

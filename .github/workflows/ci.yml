@@ -77,7 +77,7 @@ jobs:
   # The narrated walkthrough video: every step of its script must still work against
   # this commit's app, so a renamed button fails here rather than in the next recording.
   walkthrough:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

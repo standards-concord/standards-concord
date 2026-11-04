@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -39,7 +39,14 @@ export interface Clip {
   /** Seconds. */
   duration: number;
   cached: boolean;
+  /** Start time (seconds) of each character of the spoken text, when the provider reports it. */
+  charStarts?: number[];
 }
+
+/** ElevenLabs output format. 128 kbps MP3 works on every plan; 192 kbps needs Creator or above. */
+const ELEVENLABS_FORMAT = process.env.ELEVENLABS_OUTPUT_FORMAT || 'mp3_44100_128';
+/** A fixed seed makes ElevenLabs more repeatable (it does not guarantee identical audio). */
+const ELEVENLABS_SEED = 4242;
 
 export const DEFAULTS: Record<ProviderName, { voice?: string; model?: string; key?: string }> = {
   // "George": a warm, mid-paced British narrator from ElevenLabs' default voice library.
@@ -134,20 +141,26 @@ export class Voice {
   private key(req: SynthRequest) {
     const o = this.opts;
     const d = DEFAULTS[o.provider];
-    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, o.provider === 'elevenlabs' ? [req.previous, req.next] : null]);
+    // Everything that changes the audio is part of its identity.
+    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, o.provider === 'elevenlabs' ? [req.previous, req.next, ELEVENLABS_FORMAT, ELEVENLABS_SEED] : null]);
     return createHash('sha256').update(material).digest('hex').slice(0, 24);
   }
 
   async synth(req: SynthRequest): Promise<Clip> {
     const ext = this.opts.provider === 'say' ? 'aiff' : this.opts.provider === 'silent' ? 'wav' : 'mp3';
     const file = path.join(this.cacheDir, this.opts.provider, `${this.key(req)}.${ext}`);
-    if (existsSync(file)) return { file, duration: await probeDuration(file), cached: true };
+    const timing = `${file}.timing.json`;
+    const readTiming = async () => (existsSync(timing) ? (JSON.parse(await readFile(timing, 'utf8')) as number[]) : undefined);
+    if (existsSync(file)) return { file, duration: await probeDuration(file), cached: true, charStarts: await readTiming() };
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.part.${ext}`;
     switch (this.opts.provider) {
-      case 'elevenlabs':
-        await writeFile(tmp, await this.elevenlabs(req));
+      case 'elevenlabs': {
+        const r = await this.elevenlabs(req);
+        await writeFile(tmp, r.audio);
+        if (r.charStarts) await writeFile(timing, JSON.stringify(r.charStarts));
         break;
+      }
       case 'openai':
         await writeFile(tmp, await this.openai(req));
         break;
@@ -162,7 +175,7 @@ export class Voice {
         break;
     }
     await rename(tmp, file);
-    return { file, duration: await probeDuration(file), cached: false };
+    return { file, duration: await probeDuration(file), cached: false, charStarts: await readTiming() };
   }
 
   private secret(name: string) {
@@ -173,7 +186,17 @@ export class Voice {
 
   private async post(url: string, init: RequestInit, what: string): Promise<Response> {
     for (let attempt = 1; ; attempt++) {
-      const res = await fetch(url, init);
+      let res: Response;
+      try {
+        res = await fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+      } catch (err) {
+        // Timeouts and dropped connections are worth another try too.
+        if (attempt < 4) {
+          await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt));
+          continue;
+        }
+        throw new Error(`${what} failed: ${(err as Error).message}`);
+      }
       if (res.ok) return res;
       const body = await res.text().catch(() => '');
       if ((res.status === 429 || res.status >= 500) && attempt < 4) {
@@ -186,13 +209,15 @@ export class Voice {
 
   private async elevenlabs(req: SynthRequest) {
     const voice = this.opts.voice ?? DEFAULTS.elevenlabs.voice;
+    // The with-timestamps endpoint also returns when each character is spoken, for captions.
     const res = await this.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_192`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=${ELEVENLABS_FORMAT}`,
       {
         method: 'POST',
-        headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY'), 'content-type': 'application/json', accept: 'audio/mpeg' },
+        headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY'), 'content-type': 'application/json' },
         body: JSON.stringify({
           text: req.text,
+          seed: ELEVENLABS_SEED,
           model_id: this.opts.model ?? DEFAULTS.elevenlabs.model,
           previous_text: req.previous,
           next_text: req.next,
@@ -201,7 +226,9 @@ export class Voice {
       },
       'ElevenLabs',
     );
-    return Buffer.from(await res.arrayBuffer());
+    const j = (await res.json()) as { audio_base64: string; alignment?: { characters: string[]; character_start_times_seconds: number[] } };
+    const starts = j.alignment?.character_start_times_seconds;
+    return { audio: Buffer.from(j.audio_base64, 'base64'), charStarts: starts && starts.length === req.text.length ? starts : undefined };
   }
 
   private async openai(req: SynthRequest) {

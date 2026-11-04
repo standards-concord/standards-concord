@@ -7,6 +7,8 @@
  *   pnpm walkthrough --only intro,goals    just some scenes
  *   pnpm walkthrough --strict              fail on any UI drift (a missing button etc.)
  *   pnpm walkthrough --check               run every step quickly with no video or voice (CI)
+ *   pnpm walkthrough --publish             a release video: strict, no stand-ins, no outside
+ *                                          requests, and it fails rather than produce a flawed video
  *   pnpm walkthrough --help
  *
  * Output goes to walkthrough/out/: concord-walkthrough.mp4 (1080p, AAC, soft captions),
@@ -21,7 +23,7 @@ import { Capture } from './lib/capture.ts';
 import { Director, sleep } from './lib/director.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { forSpeech, parseNarration, selectScenes, type Action, type Scene } from './lib/narration.ts';
+import { cuesFor, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
@@ -41,6 +43,7 @@ const { values: argv } = parseArgs({
     check: { type: 'boolean' },
     only: { type: 'string' },
     strict: { type: 'boolean' },
+    publish: { type: 'boolean' },
     out: { type: 'string', default: path.join(HERE, 'out') },
     narration: { type: 'string', default: path.join(HERE, 'narration.md') },
     web: { type: 'string', default: 'dev' },
@@ -64,6 +67,13 @@ if (argv['list-actions']) {
   process.exit(0);
 }
 
+// A release video must be exactly what the script claims, or nothing at all.
+if (argv.publish) {
+  argv.strict = true;
+  argv['no-shims'] = true;
+  if (argv.draft || argv.check) throw new Error('--publish records the real thing: drop --draft/--check');
+}
+
 const log = (s: string) => console.log(s);
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
@@ -77,6 +87,7 @@ async function main() {
 
   const provider = (argv.draft || argv.check ? 'silent' : (argv.voice as ProviderName | undefined) ?? autoProvider()) as ProviderName;
   if (!DEFAULTS[provider]) throw new Error(`Unknown voice provider "${provider}". Use elevenlabs, openai, google, say or silent.`);
+  if (argv.publish && (provider === 'silent' || provider === 'say')) throw new Error(`--publish needs a narration voice (elevenlabs, openai or google), not "${provider}"`);
   const key = needsKey(provider);
   if (key && !process.env[key]) process.env[key] = await askHidden(`${key} (input hidden): `);
   const voice = new Voice({ provider, voice: argv['voice-id'], model: argv.model, rate: argv.rate ? Number(argv.rate) : undefined }, path.join(HERE, '.cache', 'voice'));
@@ -112,6 +123,14 @@ async function main() {
 
     const features = await detectFeatures(hub, mcp, ontology.id);
     log(`Platform features: ${[...features].join(', ') || 'none of the optional ones'}`);
+    // For drafts only: let the app scenes run on a stand-in for the generated classes,
+    // clearly labelled on screen. Published videos (--no-shims) skip those scenes instead.
+    const classesStandIn = !features.has('jsClasses') && !argv['no-shims'];
+    if (classesStandIn) {
+      // Scenes that show the hub's own Classes pages still skip (unless=jsClassesStandIn).
+      features.add('jsClasses').add('jsClassesStandIn');
+      log('  generated JS classes: not on this hub; the draft uses a labelled stand-in');
+    }
 
     const { kept, skipped } = selectScenes(narration, features, argv.only?.split(','));
     for (const s of skipped) log(`  skip ${s.id}: ${s.reason}`);
@@ -120,12 +139,13 @@ async function main() {
     // 2. Voice every paragraph (cached), with its neighbours for natural flow.
     const steps = kept.flatMap((s) => s.steps.map((st) => ({ scene: s, step: st })));
     const spoken = steps.filter((x) => x.step.text);
-    const clips = new Map<object, { file: string; duration: number }>();
+    const clips = new Map<object, { file: string; duration: number; charStarts?: number[] }>();
+    const say = (text: string) => speechMap(text, lexicon).speech;
     if (!argv.check) {
       log(`Voicing ${spoken.length} paragraphs…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
-        const c = await voice.synth({ text: forSpeech(x.step.text, lexicon), previous: spoken[i - 1] && forSpeech(spoken[i - 1].step.text, lexicon), next: spoken[i + 1] && forSpeech(spoken[i + 1].step.text, lexicon) });
+        const c = await voice.synth({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) });
         if (!c.cached) fresh++;
         clips.set(x.step, c);
       });
@@ -145,6 +165,8 @@ async function main() {
 
     const shown = (text: string) => local.reduce((t, l) => t.split(l).join(shownHub), text);
     const shims = new Set<string>();
+    const outside = new Set<string>();
+    await guardNetwork(context, { allowed: [hub, concord?.api, stat.url].filter(Boolean) as string[], outside });
     await routeModules(page, { hub, api: concord?.api, shownHub, noShims: !!argv['no-shims'], shims });
 
     // Warm up: compile pages in the dev server and fill caches so nothing loads on camera.
@@ -165,6 +187,7 @@ async function main() {
       app: { url: `${stat.url}/`, dir: appDir, sampleDir: path.join(HERE, 'sample-app'), classes: mainClasses },
       shown,
       state: { token },
+      notices: { classesStandIn },
     };
 
     // 4. Record: each paragraph starts its actions and its narration together, and the
@@ -183,7 +206,7 @@ async function main() {
       }
       stat.close();
       await browser.close();
-      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], warnings: d.warnings }, null, 2));
+      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], warnings: d.warnings }, null, 2));
       log(`\nChecked ${kept.length} scenes: ${d.warnings.length ? `${d.warnings.length} warning(s)` : 'all steps worked'}.`);
       if (d.warnings.length) process.exitCode = 1;
       return;
@@ -199,7 +222,7 @@ async function main() {
       for (const step of scene.steps) {
         const clip = clips.get(step);
         const start = cap.now();
-        if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text });
+        if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
         const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
         await Promise.all([run(ctx, scene, step.actions), speaking]);
         await run(ctx, scene, step.after);
@@ -208,6 +231,9 @@ async function main() {
     }
     await sleep(1500);
     const seconds = await cap.stop();
+    // A big backlog means the encoder couldn't keep up. Timing stays right (frames are counted),
+    // but the machine is close to running out of memory, so it's worth knowing.
+    if (cap.peakBacklogBytes > 256 * 1024 * 1024) d.warnings.push(`video encoder fell behind (peak backlog ${Math.round(cap.peakBacklogBytes / 1048576)} MB); use a faster machine`);
     stat.close();
     await browser.close();
 
@@ -217,6 +243,11 @@ async function main() {
     await mux({ video, videoSeconds: seconds, clips: placed, out, captions: path.join(argv.out!, 'concord-walkthrough.vtt'), chapters, title: narration.meta.title });
     await rm(video, { force: true });
     await writeFile(path.join(argv.out!, 'chapters.txt'), chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
+    // A clean transcript of exactly the scenes in this video.
+    await writeFile(
+      path.join(argv.out!, 'transcript.md'),
+      `# ${narration.meta.title ?? 'Concord walkthrough'}\n\n` + kept.map((s, i) => `## ${s.title} (${fmt(chapters[i].at)})\n\n${s.steps.filter((st) => st.text).map((st) => plain(st.text)).join('\n\n')}`).join('\n\n') + '\n',
+    );
     const report = {
       recordedAt: new Date().toISOString(),
       duration: Math.round(seconds),
@@ -226,10 +257,16 @@ async function main() {
       scenes: kept.map((s) => s.id),
       skipped,
       shims: [...shims],
+      outsideRequests: [...outside],
       warnings: d.warnings,
+      captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };
     await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify(report, null, 2));
+    if (argv.publish && (d.warnings.length || shims.size || outside.size)) {
+      throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s). See report.json.`);
+    }
     log(`\nDone: ${out} (${fmt(seconds)})`);
+    if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
     if (shims.size) log(`\n⚠ Stand-ins were used for platform features this hub doesn't serve yet:\n  ${[...shims].join('\n  ')}\n  Re-record once they're deployed, or pass --no-shims to refuse.`);
     if (d.warnings.length) log(`\n${d.warnings.length} warning(s); see report.json.`);
   } finally {
@@ -310,6 +347,22 @@ async function detectFeatures(hub: string, mcp: McpClient, ontologyId: string): 
   if (await ok(`${hub}/.well-known/oauth-protected-resource`, undefined, (r) => r.ok && /json/.test(r.headers.get('content-type') ?? ''))) f.add('connectPage');
   for (const x of (argv.features ?? '').split(',')) if (x.startsWith('-')) f.delete(x.slice(1));
   return f;
+}
+
+/**
+ * Recordings shouldn't depend on the outside world: anything not served by the hub
+ * being recorded, the stage server, or a route below is blocked and reported. The app's
+ * web fonts are the one exception, so the video shows the real typography.
+ */
+const ALLOWED_OUTSIDE = [/^https:\/\/fonts\.(googleapis|gstatic)\.com\//];
+
+async function guardNetwork(context: import('@playwright/test').BrowserContext, o: { allowed: string[]; outside: Set<string> }) {
+  await context.route(/^https?:\/\//, async (route) => {
+    const url = route.request().url();
+    if (o.allowed.some((a) => url.startsWith(a)) || ALLOWED_OUTSIDE.some((r) => r.test(url))) return route.fallback();
+    o.outside.add(new URL(url).origin);
+    return route.abort('blockedbyclient');
+  });
 }
 
 /**
