@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { Download, Maximize2, Minus, Plus } from 'lucide-react';
+import { Download, ImageDown, Maximize2, Minus, Plus } from 'lucide-react';
 import { cx } from '../ui';
 
 export interface Transform {
@@ -143,7 +143,7 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
   return { t, fit, reveal, zoomIn: () => zoomAt(1.2), zoomOut: () => zoomAt(1 / 1.2), handlers };
 }
 
-export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Download as SVG', k, children }: { onIn: () => void; onOut: () => void; onFit: () => void; onExport?: () => void; exportLabel?: string; k: number; children?: ReactNode }) {
+export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Download as SVG', onExportPng, k, children }: { onIn: () => void; onOut: () => void; onFit: () => void; onExport?: () => void; exportLabel?: string; onExportPng?: () => void; k: number; children?: ReactNode }) {
   const btn = 'flex size-8 items-center justify-center text-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-accent';
   return (
     <div className="absolute top-2 right-2 z-10 flex items-center gap-2">
@@ -164,6 +164,11 @@ export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Down
         {onExport && (
           <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExport} aria-label={exportLabel} title={exportLabel}>
             <Download className="size-4" />
+          </button>
+        )}
+        {onExportPng && (
+          <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExportPng} aria-label="Download as PNG" title="Download as PNG">
+            <ImageDown className="size-4" />
           </button>
         )}
       </div>
@@ -219,40 +224,4 @@ export function curve(points: { x: number; y: number }[]) {
     d += `Q${p.x},${p.y} ${i === points.length - 2 ? `${n.x},${n.y}` : `${mx},${my}`}`;
   }
   return d;
-}
-
-export async function downloadSvg(svg: SVGSVGElement | null, filename: string, bg: string) {
-  if (!svg) return;
-  // SVG files name their fonts but don't carry them, so text is exported as outlines (with the
-  // real text kept underneath) and looks the same in any viewer. If that can't be done, each
-  // run of text is instead fixed to its on-screen length, which browsers honour.
-  let clone: SVGSVGElement;
-  try {
-    const { exportableSvg } = await import('../../lib/outlineText');
-    clone = await exportableSvg(svg);
-  } catch (err) {
-    console.warn('Exporting text as outlines failed; exporting it as text', err);
-    clone = svg.cloneNode(true) as SVGSVGElement;
-    const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])) as SVGTextContentElement[];
-    const live = runs(svg);
-    runs(clone).forEach((el, i) => {
-      const len = live[i]?.getComputedTextLength();
-      if (len) (el.setAttribute('textLength', len.toFixed(2)), el.setAttribute('lengthAdjust', 'spacingAndGlyphs'));
-    });
-  }
-  const vp = clone.querySelector('[data-viewport]');
-  vp?.removeAttribute('transform');
-  const w = clone.dataset.width ?? '800';
-  const h = clone.dataset.height ?? '600';
-  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  clone.setAttribute('width', w);
-  clone.setAttribute('height', h);
-  clone.setAttribute('viewBox', `-20 -20 ${Number(w) + 40} ${Number(h) + 40}`);
-  clone.style.background = bg;
-  const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }

@@ -3,10 +3,10 @@ import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
-import { OUTLINE_SAFE_TEXT } from '../../lib/outlineText';
+import { downloadPng, downloadSvg } from '../../lib/exportSvg';
 import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
-import { curve, downloadSvg, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
+import { curve, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
 
 /**
  * A UML-style class diagram, the notation data modellers already read (and the one LinkML
@@ -66,6 +66,8 @@ const ATTR_FONT = `12px ${FONT}`;
 // Relationship labels turn bold when highlighted, so they are sized for whichever weight is
 // wider (bold usually is, but not in every font or script).
 const LABEL_FONTS = [`11px ${FONT}`, `600 11px ${FONT}`];
+/** Every face the diagram draws with, so they can be loaded before measuring. */
+const DIAGRAM_FONTS = [TITLE_FONT, ATTR_FONT, `italic ${ATTR_FONT}`, ...LABEL_FONTS];
 const labelWidth = (s: string) => Math.max(...LABEL_FONTS.map((f) => textWidth(s, f)));
 const HEAD = 30;
 const TITLE_ROW = 16;
@@ -281,16 +283,31 @@ export function ClassDiagram({
   const [hover, setHover] = useState<string>();
   const [focused, setFocused] = useState<string>();
   const [current, setCurrent] = useState<string>();
-  // Text is measured to size the boxes, so lay out again once the web font has loaded.
+  // Text is measured to size the boxes, so lay out again whenever more of the web font loads
+  // (each script's subset of Inter loads when text in it is first drawn).
   const [fonts, setFonts] = useState(0);
   useEffect(() => {
+    const set = document.fonts;
+    if (!set) return;
     let live = true;
-    document.fonts?.ready.then(() => live && setFonts((n) => n + 1));
+    const bump = () => live && setFonts((n) => n + 1);
+    Promise.all(DIAGRAM_FONTS.map((f) => set.load(f).catch(() => []))).then(() => set.ready).then(bump);
+    set.addEventListener?.('loadingdone', bump);
     return () => {
       live = false;
+      set.removeEventListener?.('loadingdone', bump);
     };
   }, []);
-  const layout = useMemo(() => layoutDiagram(model, scope, options, label), [model, scope, options, label, fonts]);
+  // A font load that changes nothing keeps the same layout, so it doesn't refit a view the
+  // person has moved.
+  const last = useRef<{ key: string; layout: ReturnType<typeof layoutDiagram> }>(undefined);
+  const layout = useMemo(() => {
+    const next = layoutDiagram(model, scope, options, label);
+    const key = JSON.stringify(next);
+    if (last.current?.key === key) return last.current.layout;
+    last.current = { key, layout: next };
+    return next;
+  }, [model, scope, options, label, fonts]);
   const colours = useMemo(() => themeColours(), [view]);
   const pz = usePanZoom(box, layout, layout);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
@@ -328,6 +345,7 @@ export function ClassDiagram({
 
   const subs = layout.edges.filter((e) => e.kind === 'sub');
   const assocs = layout.edges.filter((e) => e.kind === 'assoc');
+  const slug = title.toLowerCase().replace(/\W+/g, '-');
   const name = (iri: string) => byIri.get(iri)?.title ?? label(iri);
   const summaryId = `${uid}-summary`;
   const listId = `${uid}-list`;
@@ -377,10 +395,10 @@ export function ClassDiagram({
             Go to details of {name(selected)}
           </a>
         )}
-        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${title.toLowerCase().replace(/\W+/g, '-')}.svg`, c.surface)}>
+        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${slug}.svg`, c.surface, DIAGRAM_FONTS)} onExportPng={() => downloadPng(svg.current, `${slug}.png`, c.surface, DIAGRAM_FONTS)}>
           {toolbar}
         </ZoomControls>
-        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" style={OUTLINE_SAFE_TEXT} data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
+        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
           <defs>
             <marker id={`${uid}-tri`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
               <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.muted} strokeWidth="1.3" />

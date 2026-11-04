@@ -422,138 +422,121 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await during?.();
     return readFileSync(await (await download).path(), 'utf8');
   }
-  // CSS declaring the same Inter files the export outlines, so text can be drawn to compare.
-  const interFaces = () =>
-    [
-      ['400', 'normal', '400-normal'],
-      ['600', 'normal', '600-normal'],
-      ['400', 'italic', '400-italic'],
-    ]
-      .map(([w, st, f]) => {
-        const data = readFileSync(`apps/web/node_modules/@fontsource/inter/files/inter-latin-${f}.woff`).toString('base64');
-        return `@font-face{font-family:Inter;font-weight:${w};font-style:${st};src:url(data:font/woff;base64,${data}) format('woff')}`;
-      })
-      .join('');
 
-  test("if the page couldn't load Inter, the export keeps the text the screen shows", async ({ page, consoleGuard }) => {
-    // The screen falls back to another font, so Inter's glyphs would be in the wrong places.
-    // (Only the page's own font loads fail; the export can still fetch the files.)
-    consoleGuard.allow(/Failed to load resource|net::ERR_FAILED/);
-    await page.route(/inter-.*\.woff2?(\?|$)/, (route) => (route.request().resourceType() === 'font' ? route.abort() : route.continue()));
-    await stub(page, [cls('Owner'), cls('Pet')]);
-    await page.goto(`${base}?view=diagram&hops=0`);
-    const d = page.getByTestId('class-diagram');
-    await expect(d.locator('[data-node]')).toHaveCount(2);
-    const svgText = await exportSvg(page, d);
-    expect(svgText).not.toContain('<use');
-    expect(svgText).toMatch(/<text[^>]*textLength[^>]*>Owner<\/text>/);
-  });
-
-  test('a diagram that changes while it is being exported is saved in one consistent state', async ({ page }) => {
-    const rel = 'isTheRegisteredKeeperOfThisParticularPet';
-    await stub(page, [cls('Owner', [], [{ property: NS + rel, kind: 'some', filler: NS + 'Pet' }]), cls('Pet')], [prop(rel)]);
-    await page.goto(`${base}?view=diagram&hops=0`);
-    const d = page.getByTestId('class-diagram');
-    await expect(d.locator('[data-node]')).toHaveCount(2);
-    // Hold the export's fonts back, and meanwhile select Owner, which makes its relationship
-    // label bold (wider).
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route(/inter-.*\.woff/, async (route) => (await held, route.continue()));
-    const svgText = await exportSvg(page, d, async () => {
-      await d.locator(`[data-node="${NS}Owner"]`).click();
-      await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
-      release();
-    });
-    // Every outlined run spans the same width as the text it was made from.
+  /**
+   * Opens an exported SVG on its own and, for every run of text fixed to its on-screen length,
+   * measures how long the file's embedded font draws it without that hint. The two match when
+   * the file reproduces what was on screen.
+   */
+  async function openExport(page: Page, svgText: string) {
     const viewer = await page.context().newPage();
-    await viewer.setContent(`<style>${interFaces()} [data-text-layer]{fill-opacity:1}</style>${svgText}`);
-    await viewer.evaluate(() => document.fonts.ready);
-    const pairs = await viewer.locator('[data-outline]').evaluateAll((els) =>
-      els.map((g) => [Math.round((g as SVGGraphicsElement).getBBox().width), Math.round((g.nextElementSibling as SVGGraphicsElement).getBBox().width), g.nextElementSibling!.textContent]),
-    );
-    expect(pairs.length).toBeGreaterThan(2);
-    for (const [outline, text, name] of pairs) expect(Math.abs(Number(outline) - Number(text)), String(name)).toBeLessThanOrEqual(2);
-    await viewer.close();
-  });
+    await viewer.setContent(`<body style="margin:0">${svgText}</body>`);
+    const runs = await viewer.locator('svg').first().evaluate(async (svg) => {
+      await document.fonts.ready;
+      const out: { text: string; fixed: number; natural: number; weight: string; style: string }[] = [];
+      for (const el of svg.querySelectorAll<SVGTextContentElement>('[textLength]')) {
+        const fixed = Number(el.getAttribute('textLength'));
+        el.removeAttribute('textLength');
+        const cs = getComputedStyle(el);
+        out.push({ text: el.textContent ?? '', fixed, natural: el.getComputedTextLength(), weight: cs.fontWeight, style: cs.fontStyle });
+        el.setAttribute('textLength', String(fixed));
+      }
+      return out;
+    });
+    return { viewer, runs };
+  }
+  // Within a pixel, or rounding over a long run in a fallback font (characters Inter lacks).
+  const mismatched = (runs: { text: string; fixed: number; natural: number }[]) => runs.filter((r) => Math.abs(r.fixed - r.natural) > Math.max(1, r.fixed * 0.002)).map((r) => `${r.text.slice(0, 40)}: ${r.natural} drawn, ${r.fixed} on screen`);
 
-  test('exported diagrams draw exactly the glyphs on screen, stay searchable and stay compact', async ({ page }) => {
-    // Kerned capitals, an arrow (which Inter would otherwise turn into one glyph), and enough
-    // attributes for the italic "+ 1 more" line.
-    const attrs = Array.from({ length: 13 }, (_, i) => ({ ...prop(`AVATAR->WAVE ${i}`, { domain: [NS + 'Kerned'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' }));
+  test('exported diagrams keep real text, carry the font and draw it as on screen', async ({ page }) => {
+    // Kerned capitals, arrows Inter draws as one glyph, and enough attributes for the italic
+    // "+ 1 more" line.
+    const attrs = Array.from({ length: 13 }, (_, i) => ({ ...prop(`AVATAR->WAVE ${i} => ok`, { domain: [NS + 'Kerned'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' }));
     await stub(page, [{ ...cls('Kerned'), label: 'AVATAR WAVE -> Tokyo' }], [], attrs);
     await page.goto(`${base}?view=diagram&hops=0`);
     const d = page.getByTestId('class-diagram');
     await expect(d.locator('[data-node]')).toHaveCount(1);
     await expect(d.locator('[data-node] text', { hasText: '+ 1 more' })).toHaveAttribute('font-style', 'italic');
-    const svgText = await exportSvg(page, d);
-    const faces = interFaces();
-    const viewer = await page.context().newPage();
-    await viewer.setContent('<body></body>');
-    // Draw the file twice: as exported (outlines), and with the outlines hidden and its text
-    // shown in the same Inter. They should match pixel for pixel, apart from anti-aliasing.
-    const result = await viewer.evaluate(
-      async ({ svgText, faces }) => {
-        const draw = async (markup: string) => {
-          const img = new Image();
-          img.src = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml' }));
-          await img.decode();
-          const c = document.createElement('canvas');
-          c.width = img.naturalWidth * 2;
-          c.height = img.naturalHeight * 2;
-          const ctx = c.getContext('2d')!;
-          ctx.fillStyle = '#fff';
-          ctx.fillRect(0, 0, c.width, c.height);
-          ctx.drawImage(img, 0, 0, c.width, c.height);
-          return ctx.getImageData(0, 0, c.width, c.height).data;
-        };
-        const style = `<style>${faces} [data-outline]{display:none} [data-text-layer]{fill-opacity:1}</style>`;
-        const asText = svgText.replace(/(<svg[^>]*>)/, `$1${style}`);
-        const [a, b] = await Promise.all([draw(svgText), draw(asText)]);
-        // Compare each outlined run of text on its own, so one wrong line can't hide in the total.
-        const host = document.createElement('div');
-        host.innerHTML = svgText;
-        document.body.append(host);
-        const svg = host.querySelector('svg')!;
-        const [vx, vy, vw] = svg.getAttribute('viewBox')!.split(' ').map(Number);
-        const k = (Number(svg.getAttribute('width')) / vw) * 2;
-        const width = Number(svg.getAttribute('width')) * 2;
-        const runs = [...svg.querySelectorAll('[data-outline] > g')].map((g) => {
-          const box = (g as SVGGraphicsElement).getBBox();
-          // From the run's own coordinates to the drawing's.
-          const sx = svg.getScreenCTM()!.inverse().multiply((g as SVGGraphicsElement).getScreenCTM()!);
-          const x0 = Math.floor((box.x * sx.a + sx.e - vx) * k) - 2;
-          const y0 = Math.floor((box.y * sx.d + sx.f - vy) * k) - 2;
-          let ink = 0;
-          let differ = 0;
-          for (let y = y0; y < y0 + box.height * k + 4; y++)
-            for (let x = x0; x < x0 + box.width * k + 4; x++) {
-              const i = (y * width + x) * 4;
-              const da = 765 - a[i] - a[i + 1] - a[i + 2];
-              const db = 765 - b[i] - b[i + 1] - b[i + 2];
-              if (da > 150 || db > 150) ink++;
-              if (Math.abs(da - db) > 300) differ++;
-            }
-          return { text: g.closest('[data-node], [data-edge]') ? (g.parentElement!.nextElementSibling?.textContent ?? '').slice(0, 30) : '', ink, differ, ratio: ink ? differ / ink : 0 };
-        });
-        return runs;
-      },
-      { svgText, faces },
-    );
-    expect(result.length).toBeGreaterThanOrEqual(14);
-    for (const r of result) expect(r.ink, r.text).toBeGreaterThan(50);
-    // Typically 0-3% of a line's ink pixels differ, from anti-aliasing (up to about 9% on an
-    // occasional line). A hyphen and arrowhead drawn where the screen shows one arrow glyph
-    // makes the typical line differ by about 7%, glyphs stretched to kerned widths by about
-    // 17%, and an italic line drawn upright by about 30%.
-    const ratios = result.map((r) => r.ratio).sort((x, y) => x - y);
-    expect(ratios[Math.floor(ratios.length / 2)], 'typical line').toBeLessThan(0.035);
-    for (const r of result) expect(r.ratio, r.text).toBeLessThan(0.18);
+    // The screen keeps Inter's normal ligatures and alternates, and uses its real italic.
+    const screen = await d.locator('svg[data-width]').evaluate((svg) => {
+      const cs = getComputedStyle(svg.querySelector('text')!);
+      return { ligatures: cs.fontVariantLigatures, features: cs.fontFeatureSettings, italic: [...document.fonts].some((f) => f.family.replace(/"/g, '') === 'Inter' && f.style === 'italic' && f.status === 'loaded') };
+    });
+    expect(screen).toEqual({ ligatures: 'normal', features: 'normal', italic: true });
 
-    // The real text is still in the file: the browser's find-in-page finds it.
-    await viewer.setContent(svgText);
+    const svgText = await exportSvg(page, d);
+    expect(svgText).toMatch(/@font-face\{font-family:Inter;font-weight:600;font-style:normal;unicode-range:[^;]+;src:url\(data:font\/woff2;base64,/);
+    expect(svgText).toMatch(/<(text|tspan)[^>]*>AVATAR WAVE -&gt; Tokyo</);
+    expect(svgText).not.toContain('<use');
+
+    const { viewer, runs } = await openExport(page, svgText);
+    expect(runs.length).toBeGreaterThanOrEqual(14);
+    expect(runs.map((r) => r.style)).toContain('italic');
+    expect(runs.map((r) => r.weight)).toContain('600');
+    expect(mismatched(runs)).toEqual([]);
+    // Its text can be found and selected.
     expect(await viewer.evaluate(() => (window as unknown as { find: (s: string) => boolean }).find('AVATAR WAVE'))).toBe(true);
+    expect(await viewer.evaluate(() => String(getSelection()))).toBe('AVATAR WAVE');
     await viewer.close();
+  });
+
+  test('exporting waits for the font, and saves one consistent state of a changing diagram', async ({ page }) => {
+    const rel = 'isTheRegisteredKeeperOfThisParticularPet';
+    await stub(page, [cls('Owner', [], [{ property: NS + rel, kind: 'some', filler: NS + 'Pet' }]), cls('Pet')], [prop(rel)]);
+    // Hold every Inter file back, so the page first draws (and measures) in a fallback font.
+    // (Where Inter is installed system-wide the fallback is Inter too, and this proves less.)
+    // The page's own font loads are released last, after the export has its copy.
+    let releaseExport!: () => void;
+    let releasePage!: () => void;
+    const exportHeld = new Promise<void>((r) => (releaseExport = r));
+    const pageHeld = new Promise<void>((r) => (releasePage = r));
+    await page.route(/inter-.*\.woff2?(\?|$)/, async (route) => {
+      const type = route.request().resourceType();
+      // (In development, scripts import the files' URLs as modules; those aren't held.)
+      if (type === 'font') await pageHeld;
+      else if (type !== 'script') await exportHeld;
+      await route.continue();
+    });
+    // (Held fonts hold back the load event too.)
+    await page.goto(`${base}?view=diagram&hops=0`, { waitUntil: 'domcontentloaded' });
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    expect(await page.evaluate(() => document.fonts.status)).toBe('loading');
+    // Export, and meanwhile select Owner, which makes its relationship label bold (wider); then
+    // let the fonts arrive.
+    const svgText = await exportSvg(page, d, async () => {
+      await d.locator(`[data-node="${NS}Owner"]`).click();
+      await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
+      releaseExport();
+      await page.waitForTimeout(500);
+      releasePage();
+    });
+    expect(svgText).toMatch(new RegExp(`<text[^>]*font-weight="600"[^>]*>${rel}\\b`));
+    // Every length in the file is Inter's, so the snapshot was taken after it loaded.
+    const { viewer, runs } = await openExport(page, svgText);
+    expect(runs.length).toBeGreaterThanOrEqual(3);
+    expect(mismatched(runs)).toEqual([]);
+    await viewer.close();
+    // And the page laid itself out again in Inter, matching the file.
+    const live = await d.locator('svg[data-width]').evaluate((svg) =>
+      [...svg.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])).map((t) => Math.round((t as SVGTextContentElement).getComputedTextLength())),
+    );
+    expect(live).toEqual(runs.map((r) => Math.round(r.fixed)));
+  });
+
+  test('a diagram can be saved as a PNG at twice its size', async ({ page }) => {
+    await stub(page, [cls('Owner'), cls('Pet')]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    const size = await d.locator('svg[data-width]').evaluate((svg) => [Number((svg as SVGSVGElement).dataset.width) + 40, Number((svg as SVGSVGElement).dataset.height) + 40]);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    const file = await download;
+    expect(file.suggestedFilename()).toMatch(/\.png$/);
+    const png = readFileSync(await file.path());
+    expect(png.subarray(1, 4).toString()).toBe('PNG');
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual(size.map((n) => n * 2));
   });
 
   test('exporting a large diagram stays compact and quick', async ({ page }) => {
@@ -572,10 +555,9 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     const started = Date.now();
     const svgText = await exportSvg(page, d);
     const took = Date.now() - started;
-    // Each glyph shape is stored once and reused; drawing every occurrence in full made the
-    // file about 70 times larger than the diagram's own markup.
-    expect(svgText.length / plain).toBeLessThan(8);
-    expect(took).toBeLessThan(10_000);
+    // The diagram's own markup, its text lengths and about 250 kB of embedded font.
+    expect(svgText.length).toBeLessThan(plain * 1.3 + 300_000);
+    expect(took).toBeLessThan(5_000);
   });
 
   test('a large ontology asks where to start, and can still draw everything to fit', async ({ page }) => {
@@ -639,14 +621,16 @@ test.describe('large and unusual ontologies (stubbed)', () => {
       { ...cls('Long', [], [{ property: NS + 'collaboratesWithAnotherOrganisationOnSharedProgrammes', kind: 'some', filler: NS + 'Long' }]), label: long },
       // CJK text is wider at the regular weight than the bold one in some fonts.
       { ...cls('Word', ['Long'], [{ property: NS + 'cjk', kind: 'some', filler: NS + 'Word' }]), label: word },
-      // Only the Arabic letter needs a font with Arabic; the rest is outlined.
-      { ...cls('Mixed', ['Long']), label: `ع${'i'.repeat(40)}` },
+      // Right-to-left text with Latin in it.
+      { ...cls('Mixed', ['Long']), label: `ع${'i'.repeat(150)}` },
+      // Inter draws "=>" as one arrow; measuring has to shape it the same way as the screen.
+      { ...cls('Arrows', ['Long']), label: 'a => b => c => d => e => f => g => h => i => j => k => l => m => n => o => p => q' },
     ];
     const attr = { ...prop('theFullRegisteredCharityNumberAsRecordedByTheNationalRegulator', { domain: [NS + 'Long'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' };
     await stub(page, classes, [prop('collaboratesWithAnotherOrganisationOnSharedProgrammes'), { ...prop('cjk'), label: '协调各地区合作伙伴开展志愿服务机会的组织'.repeat(3) }], [attr]);
     await page.goto(`${base}?view=diagram&hops=0`);
     const d = page.getByTestId('class-diagram');
-    await expect(d.locator('[data-node]')).toHaveCount(3);
+    await expect(d.locator('[data-node]')).toHaveCount(4);
     const overflow = () =>
       d.locator('svg[data-width]').evaluate((svg) => {
         const out: string[] = [];
@@ -681,47 +665,38 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
     expect(await overflow()).toEqual([]);
 
-    // The exported file draws its text as outlines, so it looks the same wherever it is opened,
-    // whatever fonts are available; only characters Inter lacks (here, CJK) are drawn as text.
+    // Saved and reopened where Inter can't be used (a viewer ignoring the embedded font),
+    // left-to-right text is held to its on-screen length, so it still fits. Right-to-left text
+    // isn't (Inkscape then draws nothing for it), so the Arabic label is left to the wrapping.
     const svgText = await exportSvg(page, d);
+    expect(svgText).toMatch(/<(text|tspan)(?![^>]*textLength)[^>]*>ع/);
     const viewer = await page.context().newPage();
     for (const font of ['DejaVu Serif', 'WenQuanYi Zen Hei Mono']) {
       await viewer.setContent(`<style>body{margin:0} svg *{font-family:'${font}' !important}</style>${svgText}`);
       const problems = await viewer.locator('svg').first().evaluate((svg) => {
         const out: string[] = [];
         const view = svg.getBoundingClientRect();
+        const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])).filter((t) => !/[֐-ࣿ]/.test(t.textContent ?? ''));
         const inside = (t: Element, box: DOMRect, what: string) => {
           const b = t.getBoundingClientRect();
-          const name = t.closest('[data-node], [data-edge]')?.getAttribute('aria-label')?.slice(0, 40) ?? t.textContent?.slice(0, 40);
-          if (b.width && (b.left < box.left - 1 || b.right > box.right + 1)) out.push(`${name} overflows ${what}`);
+          if (b.width && (b.left < box.left - 1 || b.right > box.right + 1)) out.push(`${t.textContent?.slice(0, 40)} overflows ${what}`);
         };
-        const drawn = svg.querySelectorAll('[data-outline] > g > *');
-        if (drawn.length < 50) out.push(`only ${drawn.length} outlined glyphs`);
-        // Latin text is only in the invisible text layer.
-        for (const t of svg.querySelectorAll('[data-outline] text')) if (/[A-Za-z]/.test(t.textContent ?? '')) out.push(`"${t.textContent?.slice(0, 40)}" drawn as text`);
-        for (const node of svg.querySelectorAll('[data-node]')) for (const t of node.querySelectorAll('[data-outline] > g > *')) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
+        for (const node of svg.querySelectorAll('[data-node]')) for (const t of runs(node)) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
         for (const edge of svg.querySelectorAll('[data-edge]')) {
           const rect = edge.querySelector('rect');
-          if (rect) for (const t of edge.querySelectorAll('[data-outline] > g > *')) inside(t, rect.getBoundingClientRect(), 'its label');
+          if (rect) for (const t of runs(edge)) inside(t, rect.getBoundingClientRect(), 'its label');
         }
-        for (const t of drawn) inside(t, view, 'the drawing');
+        for (const t of runs(svg)) inside(t, view, 'the drawing');
         return out;
       });
       expect(problems, font).toEqual([]);
     }
-    // Each outlined label spans the same width as the text on screen.
-    await viewer.setContent(svgText);
-    const widths = (root: Page | ReturnType<Page['locator']>, sel: string) => root.locator(sel).evaluateAll((els) => els.map((e) => Math.round((e as SVGGraphicsElement).getBBox().width)));
-    for (const [live, out] of [
-      [`[data-node="${NS}Long"] text`, `[data-node="${NS}Long"] [data-outline]`],
-      [`[data-edge="assoc"][data-source="${NS}Long"] text`, `[data-edge="assoc"][data-source="${NS}Long"] [data-outline]`],
-    ]) {
-      const shown = await widths(d, live);
-      const exported = await widths(viewer, out);
-      expect(exported.length).toBe(shown.length);
-      exported.forEach((w, i) => expect(Math.abs(w - shown[i]), `${out} #${i}`).toBeLessThanOrEqual(2));
-    }
     await viewer.close();
+    // In Inter, the file draws every label at its on-screen length.
+    const reopened = await openExport(page, svgText);
+    expect(reopened.runs.length).toBeGreaterThan(8);
+    expect(mismatched(reopened.runs)).toEqual([]);
+    await reopened.viewer.close();
     // The full names are still there for assistive technology.
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-label', new RegExp(`^${long}`));
     await expect(d.locator(`[data-node="${NS}Word"]`)).toHaveAttribute('aria-label', new RegExp(`^${word}`));
