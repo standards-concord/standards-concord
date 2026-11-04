@@ -356,7 +356,7 @@ export function ClassDiagram({
     setExportError(undefined);
     download(svg.current, `${slug}.${ext}`, colours.surface, DIAGRAM_FONTS).catch((err: unknown) => {
       console.warn(`Saving the diagram as ${ext.toUpperCase()} failed`, err);
-      setExportError(`Couldn't save the diagram as ${ext.toUpperCase()}${ext === 'png' ? ': it may be too large for this browser. Try SVG, or draw fewer classes.' : '.'}`);
+      setExportError(`Couldn't save the diagram as ${ext.toUpperCase()}. ${err instanceof Error ? err.message : ''}`.trim());
     });
   };
   const name = (iri: string) => byIri.get(iri)?.title ?? label(iri);

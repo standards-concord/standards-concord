@@ -567,6 +567,54 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual(size.map((n) => n * 2));
   });
 
+  test('the first PNG saved draws every label, in every script', async ({ page }) => {
+    // Straight after the page opens, before the file's embedded fonts have ever been used.
+    const labels = ['Οργανισμός εθελοντών', 'Добровольческая организация', 'Tổ chức tình nguyện', 'Cafe\u0301 nai\u0308ve', 'Plain Latin'];
+    await stub(page, labels.map((label, i) => ({ ...cls(`C${i}`), label })));
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(labels.length);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    const png = readFileSync(await (await download).path()).toString('base64');
+    // Where each title is drawn, in the drawing's coordinates (the file adds a 20 px margin).
+    const areas = await d.locator('svg[data-width]').evaluate((svg) => {
+      const m = (svg.querySelector('[data-viewport]') as SVGGElement).getScreenCTM()!.inverse();
+      return [...svg.querySelectorAll('[data-node] text[data-title]')].map((t) => {
+        const r = t.getBoundingClientRect();
+        const a = new DOMPoint(r.left, r.top).matrixTransform(m);
+        const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
+        return { text: t.textContent ?? '', x: a.x + 20, y: a.y + 20, w: b.x - a.x, h: b.y - a.y };
+      });
+    });
+    expect(areas).toHaveLength(labels.length);
+    const viewer = await page.context().newPage();
+    const blank = await viewer.evaluate(
+      async ({ png, areas }) => {
+        const img = new Image();
+        img.src = `data:image/png;base64,${png}`;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const k = 2;
+        return areas
+          .filter((a) => {
+            const px = ctx.getImageData(Math.floor(a.x * k), Math.floor(a.y * k), Math.ceil(a.w * k), Math.ceil(a.h * k)).data;
+            let ink = 0;
+            for (let i = 0; i < px.length; i += 4) if (Math.abs(px[i] - px[0]) + Math.abs(px[i + 1] - px[1]) + Math.abs(px[i + 2] - px[2]) > 150) ink++;
+            return ink < 20;
+          })
+          .map((a) => a.text);
+      },
+      { png, areas },
+    );
+    expect(blank).toEqual([]);
+    await viewer.close();
+  });
+
   test('a PNG too large for the browser is saved smaller, and one it cannot make says so', async ({ page }) => {
     // A browser that can't allocate canvases above a given size (as large canvases fail on
     // memory-constrained devices), and then one that can't encode any PNG at all.
@@ -726,12 +774,13 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         if (content.x < -6 || content.y < -6 || content.x + content.width > w + 1 || content.y + content.height > h + 1) out.push(`content ${JSON.stringify(content)} exceeds ${w}x${h}`);
         return out;
       });
-    expect(await overflow()).toEqual([]);
+    // (Polled: until every font has loaded, a fallback can draw text a little wider.)
+    await expect.poll(overflow).toEqual([]);
     // Selecting the class highlights its relationships, in bold.
     await d.locator(`[data-node="${NS}Long"]`).click();
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-pressed', 'true');
     await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
-    expect(await overflow()).toEqual([]);
+    await expect.poll(overflow).toEqual([]);
 
     // Saved and reopened, the file draws every label at its on-screen width, inside its box.
     const svgText = await exportSvg(page, d);

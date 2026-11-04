@@ -6,8 +6,8 @@
  * own @font-face rules, so a browser draws it as the page does. Text is fitted to its boxes by
  * measuring and wrapping on the page; nothing stretches it. A viewer that ignores embedded fonts
  * substitutes its own and may draw text wider (librsvg and Inkscape do). Characters Inter lacks
- * (CJK, Arabic, emoji) use the viewer's fonts. The PNG, rasterised here from the same SVG with
- * the same fonts, is the pixel-exact option.
+ * (CJK, Arabic, emoji) use the viewer's fonts. The PNG is rasterised here from the same SVG, once
+ * its fonts have loaded, so it looks the same wherever it is opened.
  */
 
 /** "U+0000-00FF,U+0131,U+04??" as [from, to] pairs. */
@@ -122,6 +122,7 @@ export async function exportableSvg(live: SVGSVGElement, bg: string, fonts: stri
   await frame();
 
   const clone = live.cloneNode(true) as SVGSVGElement;
+  const text = textAreas(live);
   const css = await embeddedFonts(clone.textContent ?? '', fonts).catch((err) => {
     console.warn('Could not embed the diagram font', err);
     return '';
@@ -140,7 +141,58 @@ export async function exportableSvg(live: SVGSVGElement, bg: string, fonts: stri
   clone.setAttribute('viewBox', `-20 -20 ${w + 40} ${h + 40}`);
   clone.removeAttribute('class');
   clone.style.background = bg;
-  return { svg: new XMLSerializer().serializeToString(clone), width: w + 40, height: h + 40 };
+  return { svg: new XMLSerializer().serializeToString(clone), width: w + 40, height: h + 40, text };
+}
+
+/** Where each run of text is drawn, in the exported file's coordinates (with its margin). */
+function textAreas(live: SVGSVGElement) {
+  const vp = live.querySelector<SVGGElement>('[data-viewport]');
+  const m = vp?.getScreenCTM()?.inverse();
+  if (!m) return [];
+  return [...live.querySelectorAll('text')]
+    .flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]))
+    .filter((t) => t.textContent?.trim())
+    .map((t) => {
+      const r = t.getBoundingClientRect();
+      const a = new DOMPoint(r.left, r.top).matrixTransform(m);
+      const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
+      return { x: a.x + 20, y: a.y + 20, w: b.x - a.x, h: b.y - a.y, ascii: /^[\x20-\x7e]*$/.test(t.textContent ?? '') };
+    })
+    .filter((a) => a.w > 1 && a.h > 1);
+}
+
+type Area = ReturnType<typeof textAreas>[number];
+
+/** Whether a sample of the text areas has ink in them (anything unlike its first pixel). */
+function drawn(ctx: CanvasRenderingContext2D, areas: Area[], k: number) {
+  // Labels in other scripts first (their fonts load separately), then an even spread of the rest.
+  const other = areas.filter((a) => !a.ascii).slice(0, 32);
+  const ascii = areas.filter((a) => a.ascii);
+  const sample = [...other, ...ascii.filter((_, i) => i % Math.ceil(ascii.length / (48 - other.length)) === 0)];
+  return sample.every((a) => {
+    const px = ctx.getImageData(Math.floor(a.x * k), Math.floor(a.y * k), Math.max(1, Math.ceil(a.w * k)), Math.max(1, Math.ceil(a.h * k))).data;
+    for (let i = 4; i < px.length; i += 4) if (Math.abs(px[i] - px[0]) + Math.abs(px[i + 1] - px[1]) + Math.abs(px[i + 2] - px[2]) > 150) return true;
+    return false;
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Draws the SVG image once its text is drawn. An SVG image loads its embedded fonts after it
+ * has decoded, drawing text blank until then, and nothing reports when they arrive, so this
+ * draws, checks the text areas for ink, and draws again until they have it.
+ */
+async function drawWhenReady(ctx: CanvasRenderingContext2D, img: HTMLImageElement, bg: string, k: number, areas: Area[], timeout = 5000) {
+  const until = performance.now() + timeout;
+  for (;;) {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.drawImage(img, 0, 0, ctx.canvas.width, ctx.canvas.height);
+    if (drawn(ctx, areas, k)) return;
+    if (performance.now() > until) throw new Error("The diagram's fonts didn't load in time. Try again.");
+    await sleep(50);
+  }
 }
 
 function save(blob: Blob, filename: string) {
@@ -168,12 +220,12 @@ export function pngScale(width: number, height: number) {
 }
 
 /**
- * The same drawing as a PNG. If the browser can't allocate or encode a canvas that large, it
- * tries again at half the scale, a few times, and then throws.
+ * The same drawing as a PNG, drawn once its fonts have loaded. If the browser can't allocate or
+ * encode a canvas that large, it tries again at half the scale, a few times, and then throws.
  */
 export async function downloadPng(live: SVGSVGElement | null, filename: string, bg: string, fonts: string[] = []) {
   if (!live) return;
-  const { svg, width, height } = await exportableSvg(live, bg, fonts);
+  const { svg, width, height, text } = await exportableSvg(live, bg, fonts);
   const img = new Image();
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
   try {
@@ -184,18 +236,16 @@ export async function downloadPng(live: SVGSVGElement | null, filename: string, 
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(width * scale));
       canvas.height = Math.max(1, Math.floor(height * scale));
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (ctx) {
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        await drawWhenReady(ctx, img, bg, canvas.width / width, text);
         const png = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
         if (png) return save(png, filename);
       }
       // Free the memory before trying smaller.
       canvas.width = canvas.height = 0;
     }
-    throw new Error('The browser could not create an image this large.');
+    throw new Error('This browser could not create an image this large. Try SVG, or draw fewer classes.');
   } finally {
     URL.revokeObjectURL(url);
   }
