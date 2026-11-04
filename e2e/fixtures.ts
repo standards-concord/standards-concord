@@ -49,6 +49,8 @@ export async function personas(request: APIRequestContext): Promise<Persona[]> {
 
 /** Sign the page's browser context in through the demo login, as a persona or a fresh tester. */
 export async function signIn(page: Page, as: { userId?: string; name?: string; role?: string } = {}) {
+  // Drop any earlier session first, so switching people mid-test can't leave two session cookies.
+  await page.context().clearCookies({ name: 'concord_session' });
   const r = await page.request.post('/api/auth/demo', { data: as });
   expect(r.ok(), `POST /api/auth/demo: ${r.status()} ${await r.text()}`).toBeTruthy();
   return (await r.json()) as { user: { id: string; name: string } };
@@ -75,4 +77,41 @@ export async function expectNoCrash(page: Page) {
 export async function settle(page: Page) {
   await page.waitForLoadState('networkidle').catch(() => {});
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+}
+
+/** Signs the page in as one of the simulated working-group members, by name (e.g. "Tom Okafor"). */
+export async function signInAsPersona(page: Page, name: string) {
+  const p = (await personas(page.request)).find((x) => x.name === name);
+  expect(p, `persona ${name}`).toBeTruthy();
+  return signIn(page, { userId: p!.id });
+}
+
+/** A short random suffix, so a test can make uniquely named things on the shared server (and on a retry). */
+export const uniq = () => Math.random().toString(36).slice(2, 7);
+
+/** A stand-in for the browser's speech recognition that "hears" one sentence when started. */
+export async function fakeSpeech(page: Page, heard: string) {
+  await page.addInitScript((text) => {
+    class FakeRecognition {
+      lang = 'en-GB';
+      continuous = false;
+      interimResults = false;
+      onresult: ((e: unknown) => void) | null = null;
+      onerror: ((e: unknown) => void) | null = null;
+      onend: (() => void) | null = null;
+      start() {
+        setTimeout(() => {
+          this.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: text } }] });
+        }, 50);
+      }
+      stop() {
+        setTimeout(() => this.onend?.(), 10);
+      }
+      abort() {
+        this.onend?.();
+      }
+    }
+    const w = window as unknown as { SpeechRecognition: unknown; webkitSpeechRecognition: unknown };
+    w.SpeechRecognition = w.webkitSpeechRecognition = FakeRecognition;
+  }, heard);
 }
