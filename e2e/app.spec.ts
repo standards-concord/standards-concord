@@ -37,7 +37,7 @@ test.describe('signed in', () => {
     await page.getByRole('button', { name: /E2E tester/ }).click();
     const menu = page.getByRole('navigation', { name: 'Account' });
     // Profile, one agents entry and Appearance, in that order.
-    await expect(menu.getByRole('link')).toHaveText(['Profile', 'Connect an agent', 'Appearance', 'Alpha walkthrough', 'Feedback admin']);
+    await expect(menu.getByRole('link')).toHaveText(['Profile', 'Connect an agent', 'Appearance', 'Alpha walkthrough']);
     // It's a plain list of links: focus starts on the first, Escape closes it and returns to the button.
     await expect(menu.getByRole('link', { name: 'Profile' })).toBeFocused();
     await page.keyboard.press('Escape');
