@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SparqStore } from '@sparq-org/sparq';
-import { buildSparql, newStep, updateStep, type BuilderModel } from './sparql-builder';
+import { buildSparql, isRequired, newStep, updateStep, type BuilderModel } from './sparql-builder';
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 const VOL = 'https://w3id.org/odi/volunteering#';
 const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
@@ -48,12 +50,30 @@ describe('buildSparql', () => {
     expect(query).toContain('FILTER(CONTAINS(LCASE(STR(?title)), "park \\"clean\\""))');
   });
 
-  it('compares numbers numerically and IRIs as IRIs', () => {
-    const age = { ...newStep(`${VOL}minimumAge`), filter: { op: 'gt' as const, value: '15' } };
-    const org = { ...newStep(`${VOL}offeredBy`), filter: { op: 'equals' as const, value: 'https://example.org/volunteering-data/greenSpacesTrust' } };
-    const { query } = buildSparql(model({ steps: [age, org] }), { prefixes });
+  it('compares by the property’s value type, not by what the value looks like', () => {
+    const age = { ...newStep(`${VOL}minimumAge`, 'number'), filter: { op: 'gt' as const, value: '15' } };
+    const org = { ...newStep(`${VOL}offeredBy`, 'resource'), filter: { op: 'equals' as const, value: 'https://example.org/volunteering-data/greenSpacesTrust' } };
+    const kind = { ...newStep(RDF_TYPE, 'resource'), filter: { op: 'equals' as const, value: 'vol:VolunteeringOpportunity' } };
+    // Text that looks like a number or a URL is still text.
+    const code = { ...newStep(`${VOL}charityNumber`, 'text'), filter: { op: 'equals' as const, value: '00123' } };
+    const site = { ...newStep(`${VOL}website`, 'text'), filter: { op: 'equals' as const, value: 'https://example.org/' } };
+    const { query } = buildSparql(model({ steps: [age, org, kind, code, site] }), { prefixes });
     expect(query).toContain('FILTER(?minimumAge > 15)');
     expect(query).toContain('FILTER(?offeredBy = <https://example.org/volunteering-data/greenSpacesTrust>)');
+    expect(query).toContain('FILTER(?type = vol:VolunteeringOpportunity)');
+    expect(query).toContain('FILTER(STR(?charityNumber) = "00123")');
+    expect(query).toContain('FILTER(STR(?website) = "https://example.org/")');
+  });
+
+  it('a filter deep in the tree makes the whole path to it required', () => {
+    const name = { ...newStep(`${RDFS}label`), filter: { op: 'contains' as const, value: 'trust' } };
+    const org = { ...newStep(`${VOL}offeredBy`, 'resource'), children: [name] };
+    const title = newStep(`${VOL}title`);
+    expect(isRequired(org)).toBe(true);
+    expect(isRequired(title)).toBe(false);
+    const { query } = buildSparql(model({ steps: [title, org] }), { prefixes });
+    expect(query).toContain('  ?volunteeringOpportunity vol:offeredBy ?offeredBy .\n  ?offeredBy rdfs:label ?offeredBy_label .\n  FILTER(CONTAINS(LCASE(STR(?offeredBy_label)), "trust"))');
+    expect(query).toContain('OPTIONAL {\n    ?volunteeringOpportunity vol:title ?title .');
   });
 
   it('counts instead of listing', () => {
@@ -85,7 +105,7 @@ describe('generated queries run on sparq', () => {
     const org = { ...newStep(`${VOL}offeredBy`), show: false, optional: false };
     const orgLabel = newStep(`${RDFS}label`);
     org.children = [orgLabel];
-    const age = { ...newStep(`${VOL}minimumAge`), filter: { op: 'gt' as const, value: '15' } };
+    const age = { ...newStep(`${VOL}minimumAge`, 'number'), filter: { op: 'gt' as const, value: '15' } };
     const { query, variables } = buildSparql(model({ steps: [title, org, age], orderBy: title.id }), { prefixes });
     const json = JSON.parse(store.queryJson(query)) as { results: { bindings: Record<string, { value: string }>[] } };
     const rows = json.results.bindings;
@@ -95,6 +115,21 @@ describe('generated queries run on sparq', () => {
     const { query: count } = buildSparql(model({ countOnly: true }), { prefixes });
     const n = JSON.parse(store.queryJson(count)).results.bindings[0].count.value;
     expect(Number(n)).toBeGreaterThanOrEqual(rows.length);
+    store.free();
+  });
+  it('nested filters only return matching records (the P1 from review)', async () => {
+    const store = await SparqStore.fromString(`${fixture('volunteering.ttl')}\n${fixture('volunteering-example-data.ttl')}`, 'turtle');
+    const title = newStep(`${VOL}title`);
+    const orgLabel = { ...newStep(`${RDFS}label`), filter: { op: 'contains' as const, value: 'green spaces' } };
+    const org = { ...newStep(`${VOL}offeredBy`, 'resource'), children: [orgLabel] };
+    const { query, variables } = buildSparql(model({ steps: [title, org] }), { prefixes });
+    const rows = (JSON.parse(store.queryJson(query)) as { results: { bindings: Record<string, { value: string }>[] } }).results.bindings;
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) expect(r[variables[orgLabel.id]]?.value).toBe('Green Spaces Trust');
+    // Text codes match as text.
+    const charity = { ...newStep(`${VOL}charityNumber`, 'text'), filter: { op: 'equals' as const, value: '1234567' } };
+    const orgs = buildSparql({ ...model(), rootClass: `${VOL}Organisation`, steps: [charity] }, { prefixes });
+    expect(JSON.parse(store.queryJson(orgs.query)).results.bindings).toHaveLength(1);
     store.free();
   });
 });

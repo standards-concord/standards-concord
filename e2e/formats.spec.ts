@@ -51,6 +51,19 @@ test.describe('Formats tab', () => {
     await expect(about).toContainText('ODI');
   });
 
+  test('a failed load shows the error, never the previous format’s text', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 500/);
+    await page.goto(`/o/${ontologyId}/source?format=turtle`);
+    await expect(page.getByTestId('source-code')).toContainText('@prefix');
+    await page.route(/format=jsonld/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) }));
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'JSON-LD' });
+    await expect(page.getByText('Couldn’t load JSON-LD')).toBeVisible();
+    await expect(page.getByTestId('source-code')).toHaveCount(0);
+    await page.unroute(/format=jsonld/);
+    await page.getByRole('button', { name: /retry|try again/i }).click();
+    await expect(page.getByTestId('source-code')).toContainText('"@context"');
+  });
+
   test('search, folding, copy and download work', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.goto(`/o/${ontologyId}/source?format=turtle`);

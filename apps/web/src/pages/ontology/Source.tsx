@@ -69,12 +69,13 @@ export function SourceTab() {
         <p className="mt-1 pl-6">{meta.note}</p>
       </details>
       <Card className="p-0">
-        {source.error && source.data === undefined ? (
-          <div className="p-4">
-            <ErrorCard error={source.error} onRetry={source.reload} />
-          </div>
-        ) : source.data === undefined || source.loading ? (
+        {/* Loading first: a request for a new format or version never shows the previous one's text or error. */}
+        {source.loading ? (
           <Loading label={`Serialising as ${meta.label}…`} />
+        ) : source.error || source.data === undefined ? (
+          <div className="p-4">
+            <ErrorCard error={source.error ?? new Error('No content')} onRetry={source.reload} title={`Couldn’t load ${meta.label}${ref === 'working' ? '' : ` for v${ref}`}`} />
+          </div>
         ) : (
           <CodeView code={source.data} language={FORMAT_LANGUAGE[format] ?? 'text'} ariaLabel={`${meta.label} source`} maxHeight={640} testId="source-code" />
         )}

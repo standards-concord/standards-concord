@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { ArrowRight, CornerDownRight, Plus, Trash2 } from 'lucide-react';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { FILTER_LABELS, newStep, updateStep, allSteps, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
+import { FILTER_LABELS, isRequired, newStep, updateStep, allSteps, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
 import { Button, Input, Select, Toggle } from '../ui';
 import { GROUP_LABELS, propertyOptions, type PropertyOption } from './schema';
 
@@ -12,19 +12,7 @@ import { GROUP_LABELS, propertyOptions, type PropertyOption } from './schema';
  * The generated SPARQL is shown beside it and can be opened in the editor.
  */
 
-function PropertySelect({
-  options,
-  value,
-  onChange,
-  placeholder,
-  ariaLabel,
-}: {
-  options: PropertyOption[];
-  value?: string;
-  onChange: (iri: string) => void;
-  placeholder?: string;
-  ariaLabel: string;
-}) {
+function PropertySelect({ options, value, onChange, placeholder, ariaLabel }: { options: PropertyOption[]; value?: string; onChange: (iri: string) => void; placeholder?: string; ariaLabel: string }) {
   const groups = (['suggested', 'general', 'annotation', 'other'] as const).map((g) => [g, options.filter((o) => o.group === g)] as const).filter(([, os]) => os.length);
   return (
     <Select value={value ?? ''} onChange={(e) => e.target.value && onChange(e.target.value)} aria-label={ariaLabel} className="w-auto! min-w-44!">
@@ -67,7 +55,8 @@ function StepRow({
   const opt = classFor(step.property);
   const isObject = opt?.kind === 'object';
   const childOptions = useMemo(() => propertyOptions(view, opt?.range, label), [view, opt?.range, label]);
-  const filtered = !!step.filter?.value.trim();
+  const required = isRequired(step);
+  const type = step.valueType ?? 'text';
   return (
     <li data-testid="builder-step" data-property={step.property}>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2">
@@ -75,7 +64,9 @@ function StepRow({
         <span className="text-sm text-muted">{depth > 0 ? 'whose' : 'with'}</span>
         <span className="text-sm font-medium">{opt?.label ?? label(step.property)}</span>
         {isObject && opt?.range && <span className="text-xs text-muted">({label(opt.range)})</span>}
-        <code className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-[var(--syn-variable)]">?{variables[step.id]}</code>
+        <code className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-subtle" title="This value’s name in the generated SPARQL">
+          ?{variables[step.id]}
+        </code>
         <span className="mx-1 h-5 w-px bg-line" />
         <Select
           value={step.filter?.op ?? ''}
@@ -83,7 +74,7 @@ function StepRow({
           aria-label="Filter"
           className="h-8 w-auto! text-xs"
         >
-          <option value="">any value</option>
+          <option value="">no condition</option>
           {(Object.keys(FILTER_LABELS) as FilterOp[]).map((op) => (
             <option key={op} value={op}>
               {FILTER_LABELS[op]}
@@ -94,15 +85,21 @@ function StepRow({
           <Input
             value={step.filter.value}
             onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
-            placeholder={isObject ? 'an IRI' : 'a value'}
+            placeholder={type === 'resource' ? 'prefix:name or https://…' : type === 'number' ? 'a number' : 'some text'}
+            inputMode={type === 'number' ? 'decimal' : undefined}
             aria-label="Filter value"
             className="h-8 w-40! text-xs"
           />
         )}
         <div className="ml-auto flex items-center gap-3">
-          <Toggle checked={step.show} onChange={(v) => onChange(step.id, (s) => ({ ...s, show: v }))} label={<span className="text-xs">Column</span>} />
-          <span title={filtered ? 'A filtered property is always required' : undefined}>
-            <Toggle checked={step.optional && !filtered} disabled={filtered} onChange={(v) => onChange(step.id, (s) => ({ ...s, optional: v }))} label={<span className="text-xs">Optional</span>} />
+          <Toggle checked={step.show} onChange={(v) => onChange(step.id, (s) => ({ ...s, show: v }))} label={<span className="text-xs">Show in results</span>} />
+          <span title={required ? 'Only records that meet the condition are kept, so they must have this' : 'Also keep records that have no value here'}>
+            <Toggle
+              checked={step.optional && !required}
+              disabled={required}
+              onChange={(v) => onChange(step.id, (s) => ({ ...s, optional: v }))}
+              label={<span className="text-xs">Keep records without it</span>}
+            />
           </span>
           <Button size="sm" variant="ghost" icon={Trash2} aria-label={`Remove ${opt?.label ?? 'property'}`} onClick={() => onChange(step.id, () => null)} />
         </div>
@@ -117,7 +114,7 @@ function StepRow({
               <CornerDownRight className="size-4 text-subtle" />
               <PropertySelect
                 options={childOptions}
-                onChange={(iri) => onChange(step.id, (s) => ({ ...s, children: [...s.children, newStep(iri)] }))}
+                onChange={(iri) => onChange(step.id, (s) => ({ ...s, children: [...s.children, newStep(iri, childOptions.find((o) => o.iri === iri)?.valueType)] }))}
                 placeholder={`Add a property of the ${opt?.range ? label(opt.range) : 'linked thing'}…`}
                 ariaLabel={`Add a property of ${opt?.label ?? 'the linked thing'}`}
               />
@@ -154,19 +151,16 @@ export function QueryBuilder({
     <div className="space-y-3" data-testid="query-builder">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Find every</span>
-        <Select
-          value={model.rootClass}
-          onChange={(e) => set({ rootClass: e.target.value, steps: [], orderBy: undefined })}
-          aria-label="Class to find"
-          className="w-auto! min-w-56!"
-        >
+        <Select value={model.rootClass} onChange={(e) => set({ rootClass: e.target.value, steps: [], orderBy: undefined })} aria-label="Class to find" className="w-auto! min-w-56!">
           {classes.map((c) => (
             <option key={c.iri} value={c.iri}>
               {label(c.iri)}
             </option>
           ))}
         </Select>
-        <Toggle checked={model.includeSubclasses} onChange={(v) => set({ includeSubclasses: v })} label={<span className="text-sm">including subclasses</span>} />
+        <span title="Also finds things whose type is a more specific class, following the ontology’s declared subclass links. This is not full OWL reasoning.">
+          <Toggle checked={model.includeSubclasses} onChange={(v) => set({ includeSubclasses: v })} label={<span className="text-sm">include more specific types</span>} />
+        </span>
       </div>
 
       <ul className="space-y-2">
@@ -177,42 +171,45 @@ export function QueryBuilder({
           <Plus className="size-4 text-subtle" />
           <PropertySelect
             options={rootOptions}
-            onChange={(iri) => set({ steps: [...model.steps, newStep(iri)] })}
+            onChange={(iri) => set({ steps: [...model.steps, newStep(iri, rootOptions.find((o) => o.iri === iri)?.valueType)] })}
             placeholder="Add a property to show or filter on…"
             ariaLabel="Add a property"
           />
         </li>
       </ul>
 
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line pt-3 text-sm">
-        <Toggle checked={model.countOnly} onChange={(v) => set({ countOnly: v })} label="Count only" />
-        <Toggle checked={model.distinct} onChange={(v) => set({ distinct: v })} label="No duplicates" disabled={model.countOnly} />
-        <label className="flex items-center gap-2">
-          <span className="text-muted">Sort by</span>
-          <Select value={model.orderBy ?? ''} onChange={(e) => set({ orderBy: e.target.value || undefined })} aria-label="Sort by" className="h-8 w-auto! text-xs" disabled={model.countOnly}>
-            <option value="">no order</option>
-            <option value="root">{label(model.rootClass)}</option>
-            {orderable.map((s) => (
-              <option key={s.id} value={s.id}>
-                ?{variables[s.id]}
-              </option>
-            ))}
-          </Select>
-          {model.orderBy && <Toggle checked={model.descending} onChange={(v) => set({ descending: v })} label={<span className="text-xs">Descending</span>} />}
-        </label>
-        <label className="flex items-center gap-2">
-          <span className="text-muted">Limit</span>
-          <Input
-            type="number"
-            min={1}
-            value={model.limit ?? ''}
-            onChange={(e) => set({ limit: e.target.value ? Number(e.target.value) : undefined })}
-            aria-label="Limit"
-            className="h-8 w-20! text-xs"
-            disabled={model.countOnly}
-          />
-        </label>
-      </div>
+      <details className="border-t border-line pt-3 text-sm" data-testid="builder-options">
+        <summary className="cursor-pointer text-muted hover:text-fg">More options: count, duplicates, sorting and limit</summary>
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <Toggle checked={model.countOnly} onChange={(v) => set({ countOnly: v })} label={`Just count the ${label(model.rootClass)} records`} />
+          <Toggle checked={model.distinct} onChange={(v) => set({ distinct: v })} label="Hide duplicate rows" disabled={model.countOnly} />
+          <label className="flex items-center gap-2">
+            <span className="text-muted">Sort by</span>
+            <Select value={model.orderBy ?? ''} onChange={(e) => set({ orderBy: e.target.value || undefined })} aria-label="Sort by" className="h-8 w-auto! text-xs" disabled={model.countOnly}>
+              <option value="">no order</option>
+              <option value="root">{label(model.rootClass)}</option>
+              {orderable.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {optionFor(s.property)?.label ?? variables[s.id]}
+                </option>
+              ))}
+            </Select>
+            {model.orderBy && <Toggle checked={model.descending} onChange={(v) => set({ descending: v })} label={<span className="text-xs">Descending</span>} />}
+          </label>
+          <label className="flex items-center gap-2">
+            <span className="text-muted">Limit</span>
+            <Input
+              type="number"
+              min={1}
+              value={model.limit ?? ''}
+              onChange={(e) => set({ limit: e.target.value ? Number(e.target.value) : undefined })}
+              aria-label="Limit"
+              className="h-8 w-20! text-xs"
+              disabled={model.countOnly}
+            />
+          </label>
+        </div>
+      </details>
     </div>
   );
 }

@@ -14,6 +14,8 @@ async function setEditor(page: Page, testId: string, text: string) {
 
 const results = (page: Page) => page.getByTestId('query-results');
 const run = (page: Page) => page.getByRole('button', { name: 'Run', exact: true }).click();
+const toggle = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
+const moreOptions = (page: Page) => page.getByTestId('builder-options').locator('summary').click();
 
 test.describe('Query tab', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -31,7 +33,7 @@ test.describe('Query tab', () => {
   });
 
   test('the visual builder runs its starting query over the sample data', async ({ page }) => {
-    await expect(page.getByRole('tab', { name: 'Visual builder' })).toHaveAttribute('aria-selected', 'true');
+    await expect(toggle(page, 'Visual builder')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByLabel('Class to find')).toHaveValue(/VolunteeringOpportunity$/);
     await expect(page.getByTestId('query-diagram')).toContainText('volunteering opportunity');
     await run(page);
@@ -47,36 +49,39 @@ test.describe('Query tab', () => {
     const diagram = page.getByTestId('query-diagram');
     await expect(diagram).toContainText('organisation');
     await expect(diagram).toContainText('?offeredBy_label');
+    await page.getByText('The SPARQL this builds').click();
     await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).toContainText('?offeredBy rdfs:label ?offeredBy_label');
 
     await run(page);
     await expect(results(page)).toContainText('Northvale Food Bank');
-    await expect(results(page).locator('th')).toHaveText(['?volunteeringOpportunity', '?title', '?offeredBy', '?offeredBy_label']);
+    // Builder results use readable headings, and show missing values as a dash.
+    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by', 'offered by › label']);
 
     // Filter the title: a filtered property becomes required.
     const title = page.getByTestId('builder-step').filter({ hasText: 'title' }).first();
     await title.getByLabel('Filter', { exact: true }).selectOption('contains');
     await title.getByLabel('Filter value').fill('PARK');
-    await expect(title.getByRole('switch', { name: 'Optional' })).toBeDisabled();
+    await expect(title.getByRole('switch', { name: 'Keep records without it' })).toBeDisabled();
     await run(page);
     await expect(results(page)).toContainText('1 row');
     await expect(results(page)).toContainText('Park clean-up');
     await expect(results(page)).not.toContainText('Saturday');
 
     // Hide a column.
-    await page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first().getByRole('switch', { name: 'Column' }).first().click();
+    await page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first().getByRole('switch', { name: 'Show in results' }).first().click();
     await run(page);
-    await expect(results(page).locator('th')).toHaveText(['?volunteeringOpportunity', '?title', '?offeredBy_label']);
+    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by › label']);
 
     // Remove the filter, sort descending, then count.
     await title.getByLabel('Filter', { exact: true }).selectOption('');
-    await page.getByLabel('Sort by').selectOption({ label: '?title' });
+    await moreOptions(page);
+    await page.getByLabel('Sort by').selectOption({ label: 'title' });
     await page.getByRole('switch', { name: 'Descending' }).click();
     await run(page);
     await expect(results(page).locator('tbody tr').first()).toContainText('Saturday food bank shift');
-    await page.getByRole('switch', { name: 'Count only' }).click();
+    await page.getByRole('switch', { name: /Just count/ }).click();
     await run(page);
-    await expect(results(page).locator('th')).toHaveText(['?count']);
+    await expect(results(page).locator('th')).toHaveText(['Number of volunteering opportunity records']);
     await expect(results(page).locator('tbody td')).toHaveText('2');
 
     // Removing a step removes it from the query.
@@ -84,7 +89,59 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('builder-step')).toHaveCount(1);
   });
 
+  test('a filter on a linked thing only returns records that match it', async ({ page }) => {
+    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
+    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
+    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
+    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
+    await name.getByLabel('Filter', { exact: true }).selectOption('contains');
+    await name.getByLabel('Filter value').fill('nothing matches this');
+    // The whole path to the condition is now required.
+    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
+    await run(page);
+    await expect(results(page)).toContainText('0 rows');
+    await name.getByLabel('Filter value').fill('northvale');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('changing the question marks the old answer as stale', async ({ page }) => {
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+    await expect(page.getByTestId('result-stale')).toHaveCount(0);
+    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
+    await expect(page.getByTestId('result-stale')).toBeVisible();
+    await page.getByTestId('result-stale').getByRole('button', { name: 'Run again' }).click();
+    await expect(page.getByTestId('result-stale')).toHaveCount(0);
+    await expect(results(page).locator('th')).toContainText(['minimum age']);
+
+    // The SHACL report goes stale when the data changes.
+    await toggle(page, 'Check data').click();
+    await page.getByRole('button', { name: 'Check', exact: true }).click();
+    await expect(page.getByTestId('shacl-report')).toBeVisible();
+    await page.getByTestId('data-editor').click();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.insertText('\n# edited\n');
+    await expect(page.getByTestId('report-stale')).toBeVisible();
+  });
+
+  test('drafts survive leaving the page', async ({ page }) => {
+    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
+    await toggle(page, 'SPARQL').click();
+    await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a ?y } LIMIT 1');
+    const url = page.url();
+    await page.getByRole('link', { name: 'Formats', exact: true }).click();
+    await page.goto(url);
+    await expect(page.getByTestId('sparql-editor')).toContainText('SELECT ?x WHERE { ?x a ?y } LIMIT 1');
+    await toggle(page, 'Visual builder').click();
+    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(1);
+    await page.getByText('The SPARQL this builds').click();
+    await page.getByRole('button', { name: 'Start over' }).click();
+    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(0);
+  });
+
   test('the builder hands its query to the SPARQL editor', async ({ page }) => {
+    await page.getByText('The SPARQL this builds').click();
     await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
     await expect(page).toHaveURL(/mode=sparql/);
     await expect(page.getByTestId('sparql-editor')).toContainText('a/rdfs:subClassOf* vol:VolunteeringOpportunity');
@@ -94,7 +151,7 @@ test.describe('Query tab', () => {
   });
 
   test('the SPARQL editor highlights, autocompletes and runs with Ctrl/⌘-Enter', async ({ page }) => {
-    await page.getByRole('tab', { name: 'SPARQL' }).click();
+    await toggle(page, 'SPARQL').click();
     const editor = page.getByTestId('sparql-editor');
     await expect(editor.locator('.tok-keyword', { hasText: 'SELECT' })).toBeVisible();
     await expect(editor.locator('.tok-variable').first()).toBeVisible();
@@ -114,10 +171,19 @@ test.describe('Query tab', () => {
     await expect(option).toContainText('volunteering opportunity');
     await option.click();
     await expect(editor).toContainText('# vol:VolunteeringOpportunity');
+
+    // Accepting a term whose prefix isn't declared adds the declaration, and labels find terms too.
+    await setEditor(page, 'sparql-editor', 'SELECT * WHERE { ?x a volunteering');
+    await page.keyboard.press('Control+Space');
+    const byLabel = page.locator('.cm-tooltip-autocomplete li', { hasText: 'volunteering opportunity → vol:VolunteeringOpportunity' });
+    await expect(byLabel).toBeVisible();
+    await byLabel.click();
+    await expect(editor).toContainText('PREFIX vol: <https://w3id.org/odi/volunteering#>');
+    await expect(editor).toContainText('?x a vol:VolunteeringOpportunity');
   });
 
   test('every query form: ASK, CONSTRUCT, examples and errors', async ({ page }) => {
-    await page.getByRole('tab', { name: 'SPARQL' }).click();
+    await toggle(page, 'SPARQL').click();
 
     await page.getByLabel('Example queries').selectOption({ label: 'Does every class have a label?' });
     await run(page);
@@ -147,32 +213,32 @@ test.describe('Query tab', () => {
   test('the sample data is highlighted and checked against SHACL', async ({ page }) => {
     // One workspace at a time: the data checker is behind "Check data".
     await expect(page.getByTestId('data-editor')).toHaveCount(0);
-    await page.getByRole('tab', { name: 'Check data' }).click();
+    await toggle(page, 'Check data').click();
     await expect(page).toHaveURL(/view=check/);
     await expect(page.getByTestId('query-builder')).toHaveCount(0);
     const data = page.getByTestId('data-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Check' }).click();
+    await page.getByRole('button', { name: 'Check', exact: true }).click();
     const report = page.getByTestId('shacl-report');
     await expect(report).toContainText(/\d+ problems?/);
     await expect(report).toContainText('saturday-shift');
 
     // Switching away and back keeps the report.
-    await page.getByRole('tab', { name: 'Query ontology' }).click();
-    await page.getByRole('tab', { name: 'Check data' }).click();
+    await toggle(page, 'Query ontology').click();
+    await toggle(page, 'Check data').click();
     await expect(report).toContainText('saturday-shift');
 
     // Editing the data changes what the builder finds.
     await data.click();
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
-    await page.getByRole('tab', { name: 'Query ontology' }).click();
+    await toggle(page, 'Query ontology').click();
     await run(page);
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');
   });
   test('long results are paginated', async ({ page }) => {
-    await page.getByRole('tab', { name: 'SPARQL' }).click();
+    await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
     await run(page);
     const table = results(page);

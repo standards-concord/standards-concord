@@ -107,6 +107,8 @@ function rdfParser(mode: Mode): StreamParser<RdfState> {
       const after = state.afterCaret;
       // The local part straight after a prefix (vol:|Opportunity).
       if (mode !== 'ntriples' && stream.pos > 0 && stream.string.charAt(stream.pos - 1) === ':' && stream.match(PN_LOCAL)) {
+        // A local name can't end with an unescaped dot: in "ex:o." the dot ends the statement.
+        while (stream.current().endsWith('.') && !stream.current().endsWith('\\.')) stream.backUp(1);
         state.afterCaret = false;
         return after ? 'datatype' : 'local';
       }

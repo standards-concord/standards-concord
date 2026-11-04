@@ -4,7 +4,7 @@ import { BookOpen, ChevronLeft, ChevronRight, Code2, Cpu, Download, Pencil, Play
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
 import { api } from '../../api';
-import { useAsync } from '../../lib/hooks';
+import { useAsync, useLocalStorage } from '../../lib/hooks';
 import { allTerms, makeLabeler } from '../../lib/ontology';
 import { buildSparql, newStep, type BuilderModel } from '../../lib/sparql-builder';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
@@ -25,15 +25,20 @@ import { useOntology } from './Layout';
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-type Result = { kind: 'rows'; vars: string[]; rows: Record<string, string>[] } | { kind: 'ask'; answer: boolean } | { kind: 'graph'; text: string; count: number };
+type ResultRows = { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; labels?: Record<string, string>; limit?: number };
+type Result = ResultRows | { kind: 'ask'; answer: boolean } | { kind: 'graph'; text: string; count: number };
 
 type Mode = 'builder' | 'sparql';
 type Target = 'ontology' | 'data';
 
-const EXAMPLE_DATA = (ns: string, prefix: string) => `@prefix ${prefix}: <${ns}> .
+/** Sample data for the demo (volunteering) ontology. Other ontologies start from an empty skeleton. */
+const DEMO_DATA = (ns: string, prefix: string) => `@prefix ${prefix}: <${ns}> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix ex: <https://example.org/data/> .
+
+# Example records. The Saturday shift's minimum age is deliberately written as
+# text ("sixteen") so that "Check" has a problem to find.
 
 ex:foodbank a ${prefix}:VolunteerInvolvingOrganisation ;
   rdfs:label "Northvale Food Bank" .
@@ -49,24 +54,32 @@ ex:park-clean-up a ${prefix}:VolunteeringOpportunity ;
   ${prefix}:minimumAge "14"^^xsd:nonNegativeInteger .
 `;
 
+const EMPTY_DATA = (ns: string, prefix: string) => `@prefix ${prefix}: <${ns}> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <https://example.org/data/> .
+
+# Add example records that use this ontology, for example:
+# ex:thing1 a ${prefix}:SomeClass ; rdfs:label "Thing one" .
+`;
+
 function short(v: string, prefixes: Record<string, string>) {
   for (const [p, ns] of Object.entries(prefixes)) if (v.startsWith(ns)) return `${p}:${v.slice(ns.length)}`;
   return v;
 }
 
-function csv(result: Extract<Result, { kind: 'rows' }>) {
+function csv(result: ResultRows) {
   const esc = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-  return [result.vars.join(','), ...result.rows.map((r) => result.vars.map((v) => esc(r[v] ?? '')).join(','))].join('\n');
+  return [result.vars.map((v) => result.labels?.[v] ?? v).join(','), ...result.rows.map((r) => result.vars.map((v) => esc(r[v] ?? '')).join(','))].join('\n');
 }
 
 function Segmented<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: { id: T; label: string; icon: typeof Code2 }[]; label: string }) {
   return (
-    <div className="inline-flex gap-1 rounded-lg border border-line-strong p-0.5" role="tablist" aria-label={label}>
+    <div className="inline-flex gap-1 rounded-lg border border-line-strong p-0.5" role="group" aria-label={label}>
       {options.map((o) => (
         <button
           key={o.id}
-          role="tab"
-          aria-selected={o.id === value}
+          type="button"
+          aria-pressed={o.id === value}
           onClick={() => onChange(o.id)}
           className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', o.id === value ? 'bg-accent text-accent-fg' : 'text-muted hover:text-fg')}
         >
@@ -130,12 +143,13 @@ export function QueryTab() {
   const [loadError, setLoadError] = useState<unknown>();
 
   const examples = useMemo(() => sparqlExamples(ontology.prefix, ontology.namespace), [ontology.prefix, ontology.namespace]);
-  const [query, setQuery] = useState(examples[0].query);
+  // Drafts survive leaving the page, per ontology and per browser.
+  const [query, setQuery] = useLocalStorage(`concord.query.${id}.sparql`, examples[0].query);
   const [target, setTarget] = useState<Target>('ontology');
   const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
-  const [data, setData] = useState(() => EXAMPLE_DATA(ontology.namespace, ontology.prefix));
+  const [data, setData] = useLocalStorage(`concord.query.${id}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
   const [report, setReportState] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
   const [checkError, setCheckError] = useState<unknown>();
 
@@ -151,17 +165,24 @@ export function QueryTab() {
   const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
 
   // Builder state: start from the first class that has instances in the sample data.
-  const [model, setModel] = useState<BuilderModel | null>(null);
+  const [model, setModel] = useLocalStorage<BuilderModel | null>(`concord.query.${id}.builder`, null);
   useEffect(() => {
-    if (!view.data || model) return;
-    const preferred = view.data.classes.find((c) => c.iri === `${ontology.namespace}VolunteeringOpportunity`) ?? view.data.classes.find((c) => !c.deprecated);
+    if (!view.data) return;
+    if (model && view.data.classes.some((c) => c.iri === model.rootClass)) return;
+    // Prefer a class the sample data has records of, so the first run finds something.
+    const counts = new Map<string, number>();
+    for (const m of data.matchAll(/\ba\s+([\w-]*:[\w-]+)/g)) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+    const live = view.data.classes.filter((c) => !c.deprecated);
+    const records = (iri: string) => counts.get(short(iri, view.data!.prefixes)) ?? 0;
+    const preferred = [...live].sort((a, b) => records(b.iri) - records(a.iri))[0];
     if (!preferred) return;
     // Start with the class's first attribute (e.g. its title) as a column, so the first run shows something readable.
     const attrs = propertyOptions(view.data, preferred.iri, makeLabeler(view.data)).filter((o) => o.group === 'suggested' && o.kind === 'data');
     const first = attrs.find((o) => /title|name/i.test(o.label)) ?? attrs[0];
-    const steps = first ? [newStep(first.iri)] : [];
+    const steps = first ? [newStep(first.iri, first.valueType)] : [];
     setModel({ rootClass: preferred.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 });
-  }, [view.data, model, ontology.namespace]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the ontology or a reset changes it
+  }, [view.data, model]);
   const allOptions = useMemo(() => (view.data ? propertyOptions(view.data, undefined, label) : []), [view.data, label]);
   const optionFor = useCallback((iri: string): PropertyOption | undefined => allOptions.find((o) => o.iri === iri), [allOptions]);
   const built = useMemo(
@@ -169,15 +190,34 @@ export function QueryTab() {
     [model, prefixes],
   );
 
-  // Autocomplete: every term as a prefixed name, with its label.
-  const completions = useMemo<Completion[]>(() => {
-    if (!view.data) return [];
-    return allTerms(view.data).flatMap((t) => {
-      const c = short(t.iri, view.data!.prefixes);
-      if (c === t.iri) return [];
-      return [{ label: c, detail: t.label, type: t.kind === 'class' ? 'class' : t.kind === 'individual' ? 'constant' : 'property', info: t.definition }];
-    });
-  }, [view.data]);
+  // Autocomplete: every term as a prefixed name, findable by its label too. Accepting
+  // one adds the PREFIX (or @prefix) declaration if the text doesn't have it yet.
+  const completionsFor = useCallback(
+    (lang: 'sparql' | 'turtle'): Completion[] => {
+      if (!view.data) return [];
+      const pfx = view.data.prefixes;
+      return allTerms(view.data).flatMap((t) => {
+        const c = short(t.iri, pfx);
+        if (c === t.iri) return [];
+        const p = c.slice(0, c.indexOf(':'));
+        const apply: Completion['apply'] = (v, _completion, from, to) => {
+          const doc = v.state.doc.toString();
+          const declared = lang === 'sparql' ? new RegExp(`PREFIX\\s+${p}:`, 'i').test(doc) : new RegExp(`@prefix\\s+${p}:`).test(doc);
+          const decl = lang === 'sparql' ? `PREFIX ${p}: <${pfx[p]}>\n` : `@prefix ${p}: <${pfx[p]}> .\n`;
+          v.dispatch({
+            changes: [...(declared ? [] : [{ from: 0, insert: decl }]), { from, to, insert: c }],
+            selection: { anchor: from + c.length + (declared ? 0 : decl.length) },
+          });
+        };
+        const type = t.kind === 'class' ? 'class' : t.kind === 'individual' ? 'constant' : 'property';
+        const base = { detail: t.label, type, info: t.definition, apply };
+        return [{ label: c, ...base }, ...(t.label ? [{ label: t.label, displayLabel: `${t.label} → ${c}`, ...base, detail: undefined, boost: -1 }] : [])];
+      });
+    },
+    [view.data],
+  );
+  const sparqlCompletions = useMemo(() => completionsFor('sparql'), [completionsFor]);
+  const turtleCompletions = useMemo(() => completionsFor('turtle'), [completionsFor]);
 
   useEffect(() => {
     if (!turtle.data) return;
@@ -220,10 +260,17 @@ export function QueryTab() {
 
   const activeQuery = mode === 'builder' ? (built?.query ?? '') : query;
   const effectiveTarget: Target = mode === 'builder' ? 'data' : target;
+  // Each answer remembers the question and data it came from, so a changed question never sits above an old answer.
+  const questionKey = `${mode}|${effectiveTarget}|${activeQuery}|${effectiveTarget === 'data' ? data : ''}`;
+  const [ranKey, setRanKey] = useState<string>();
+  const [checkedData, setCheckedData] = useState<string>();
+  const resultStale = !!result && ranKey !== questionKey;
+  const reportStale = !!report && checkedData !== data;
 
   const run = async () => {
     if (!storeRef.current) return;
     setQueryError(undefined);
+    setRanKey(questionKey);
     const t0 = performance.now();
     try {
       const s = await storeFor(effectiveTarget);
@@ -235,7 +282,21 @@ export function QueryTab() {
         setResult({ kind: 'graph', text, count: text.split('\n').filter((l) => l.trim()).length });
       } else {
         const json = JSON.parse(s.queryJson(activeQuery)) as { head: { vars: string[] }; results: { bindings: Record<string, { value: string }>[] } };
-        setResult({ kind: 'rows', vars: json.head.vars, rows: json.results.bindings.map((b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.value]))) });
+        const rows = json.results.bindings.map((b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.value])));
+        // Builder results get readable column headings: the class, or the property path.
+        let labels: Record<string, string> | undefined;
+        if (mode === 'builder' && built && model) {
+          labels = { [built.variables.root]: label(model.rootClass), count: `Number of ${label(model.rootClass)} records` };
+          const walk = (steps: typeof model.steps, path: string[]) => {
+            for (const st of steps) {
+              const name = [...path, optionFor(st.property)?.label ?? label(st.property)];
+              labels![built.variables[st.id]] = name.join(' › ');
+              walk(st.children, name);
+            }
+          };
+          walk(model.steps, []);
+        }
+        setResult({ kind: 'rows', vars: json.head.vars, rows, labels, limit: mode === 'builder' && !model?.countOnly ? model?.limit : undefined });
       }
     } catch (e) {
       setQueryError(e);
@@ -248,6 +309,7 @@ export function QueryTab() {
     const s = storeRef.current;
     if (!s || !shapes.data) return;
     setCheckError(undefined);
+    setCheckedData(data);
     try {
       // The ontology goes in the data graph too, so sh:class sees subclass relationships.
       const r = s.validate(`${turtle.data ?? ''}\n${data}`, shapes.data, 'turtle');
@@ -350,11 +412,26 @@ export function QueryTab() {
                     </Select>
                   </label>
                 </div>
-                <CodeEditor value={query} onChange={setQuery} language="sparql" onRun={run} completions={completions} ariaLabel="SPARQL query" minHeight={200} maxHeight={420} testId="sparql-editor" />
+                <CodeEditor
+                  value={query}
+                  onChange={setQuery}
+                  language="sparql"
+                  onRun={run}
+                  completions={sparqlCompletions}
+                  ariaLabel="SPARQL query"
+                  minHeight={200}
+                  maxHeight={420}
+                  testId="sparql-editor"
+                />
+                <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent, Ctrl/⌘-Space suggests terms.</p>
               </>
             ) : !view.data || !model || !built ? (
               view.error ? (
                 <InlineError error={view.error} />
+              ) : view.data && !view.data.classes.some((c) => !c.deprecated) ? (
+                <p className="rounded-md border border-dashed border-line-strong px-4 py-6 text-center text-sm text-muted" data-testid="builder-empty">
+                  This ontology has no classes yet, so there is nothing to build a query from. Use the SPARQL editor, or add classes first.
+                </p>
               ) : (
                 <Loading label="Reading the ontology’s classes…" />
               )
@@ -362,7 +439,7 @@ export function QueryTab() {
               <div className="space-y-4">
                 <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} />
                 <QueryDiagram model={model} variables={built.variables} label={label} optionFor={optionFor} />
-                <details className="group" open>
+                <details className="group">
                   <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted">
                     <BookOpen className="size-4" /> The SPARQL this builds
                   </summary>
@@ -379,6 +456,9 @@ export function QueryTab() {
                     >
                       Edit as SPARQL
                     </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setModel(null)}>
+                      Start over
+                    </Button>
                   </div>
                 </details>
               </div>
@@ -386,56 +466,77 @@ export function QueryTab() {
 
             {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
             {queryError ? <InlineError error={queryError} /> : null}
-            {result?.kind === 'ask' && (
-              <p className="text-sm" data-testid="query-answer">
-                Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
+            {resultStale && (
+              <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="result-stale">
+                The question or data changed since this ran.
+                <Button size="sm" icon={Play} onClick={run}>
+                  Run again
+                </Button>
               </p>
             )}
-            {result?.kind === 'graph' && (
-              <div className="space-y-1" data-testid="query-graph">
-                <p className="text-xs text-muted">
-                  {result.count} triple{result.count === 1 ? '' : 's'}
-                  {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
+            <div className={cx('space-y-3', resultStale && 'opacity-50')}>
+              {result?.kind === 'ask' && (
+                <p className="text-sm" data-testid="query-answer">
+                  Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
                 </p>
-                <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
-              </div>
-            )}
-            {result?.kind === 'rows' && (
-              <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
-                <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
-                  <span>
-                    {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+              )}
+              {result?.kind === 'graph' && (
+                <div className="space-y-1" data-testid="query-graph">
+                  <p className="text-xs text-muted">
+                    {result.count} triple{result.count === 1 ? '' : 's'}
                     {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
-                  </span>
-                  <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv(result))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
-                    <Download className="size-3" /> CSV
-                  </a>
+                  </p>
+                  <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
                 </div>
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr>
-                      {result.vars.map((v) => (
-                        <th key={v} className="px-3 py-1.5 font-medium font-mono text-[var(--syn-variable)]">
-                          ?{v}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
-                      <tr key={i} className="border-t border-line align-top">
+              )}
+              {result?.kind === 'rows' && (
+                <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
+                  <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
+                    <span>
+                      {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+                      {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
+                    </span>
+                    <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv(result))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
+                      <Download className="size-3" /> CSV
+                    </a>
+                  </div>
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr>
                         {result.vars.map((v) => (
-                          <td key={v} className="px-3 py-1.5 font-mono" title={r[v]}>
-                            {r[v] ? short(r[v], prefixes) : ''}
-                          </td>
+                          <th key={v} className={cx('px-3 py-1.5 font-medium', !result.labels?.[v] && 'font-mono text-[var(--syn-variable)]')} title={`?${v}`}>
+                            {result.labels?.[v] ?? `?${v}`}
+                          </th>
                         ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
-              </div>
-            )}
+                    </thead>
+                    <tbody>
+                      {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
+                        <tr key={i} className="border-t border-line align-top">
+                          {result.vars.map((v) => (
+                            <td key={v} className="px-3 py-1.5 font-mono" title={r[v] ?? 'No value'}>
+                              {r[v] !== undefined ? (
+                                short(r[v], prefixes)
+                              ) : (
+                                <span className="text-subtle" aria-label="No value">
+                                  —
+                                </span>
+                              )}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
+                </div>
+              )}
+              {result?.kind === 'rows' && result.limit && result.rows.length >= result.limit && (
+                <p className="text-xs text-warn" data-testid="limit-reached">
+                  Stopped at the limit of {result.limit} rows, so there may be more. Raise it under More options.
+                </p>
+              )}
+            </div>
           </div>
         </Card>
       ) : (
@@ -451,10 +552,19 @@ export function QueryTab() {
             }
           />
           <div className="space-y-3 p-4">
-            <CodeEditor value={data} onChange={setData} language="turtle" completions={completions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
+            <CodeEditor value={data} onChange={setData} language="turtle" completions={turtleCompletions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
+            <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</p>
             {checkError ? <InlineError error={checkError} /> : null}
+            {reportStale && (
+              <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="report-stale">
+                The data changed since this check.
+                <Button size="sm" icon={ShieldCheck} onClick={check}>
+                  Check again
+                </Button>
+              </p>
+            )}
             {report && (
-              <div className="space-y-2" data-testid="shacl-report">
+              <div className={cx('space-y-2', reportStale && 'opacity-50')} data-testid="shacl-report">
                 <p className="text-sm">
                   {report.conforms ? (
                     <Badge tone="ok">Conforms</Badge>
