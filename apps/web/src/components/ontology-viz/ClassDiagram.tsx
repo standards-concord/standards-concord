@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { cardText, isDatatype, type OntologyModel, type Slot } from '../../lib/ontologyModel';
+import { isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { cx } from '../ui';
 import { curve, downloadSvg, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
 
@@ -61,14 +61,30 @@ const ROW = 18;
 const PADX = 12;
 const MAX_ATTRS = 12;
 
-function typeName(iris: string[], expr: string | undefined, label: Labeler) {
-  if (expr) return expr;
-  if (!iris.length) return 'Literal';
-  return iris.map((i) => (isDatatype(i) ? i.replace(/^.*[#/]/, '') : label(i))).join(' | ');
+function typeName(iris: string[], exprs: string[], label: Labeler) {
+  const parts = [...iris.map((i) => (isDatatype(i) ? i.replace(/^.*[#/]/, '') : label(i))), ...exprs];
+  return parts.length ? parts.join(' and ') : 'Literal';
 }
 
 function slotLine(s: Slot, label: Labeler) {
-  return `${s.property.label ?? label(s.property.iri)} : ${typeName(s.range, s.rangeExpression, label)} [${cardText(s.min, s.max)}]`;
+  return `${s.property.label ?? label(s.property.iri)} : ${typeName(s.range, s.rangeExpressions, label)} [${s.conflict ? '⚠ conflict' : slotCard(s)}]`;
+}
+
+/**
+ * The classes an object property slot links to, each with the cardinality to draw: every
+ * named class in its (intersected) range at the slot's overall cardinality, plus each named
+ * class in a qualified constraint the range doesn't already cover (e.g. "at least one Dog").
+ */
+export function slotTargets(model: OntologyModel, s: Slot): { target: string; card: string }[] {
+  if (s.property.kind !== 'objectProperty') return [];
+  const out = new Map<string, string>();
+  for (const r of s.range) if (model.classes.has(r)) out.set(r, slotCard(s));
+  for (const q of s.qualified) {
+    if (q.implied || !q.filler || !model.classes.has(q.filler) || out.has(q.filler)) continue;
+    const card = q.kind === 'some' || q.kind === 'value' ? '1..*' : q.kind === 'min' ? `${q.n}..*` : q.kind === 'max' ? `0..${q.n}` : String(q.n);
+    out.set(q.filler, card);
+  }
+  return [...out].map(([target, card]) => ({ target, card }));
 }
 
 /** Classes within `hops` links of `focus`, following the relationships that are drawn. */
@@ -81,7 +97,7 @@ export function neighbourhood(model: OntologyModel, focus: string, hops: number,
   };
   for (const [c, ps] of model.parents) for (const p of ps) link(c, p);
   if (opts.associations)
-    for (const c of model.classes.keys()) for (const s of model.ownSlots(c)) if (s.property.kind === 'objectProperty') for (const r of s.range) link(c, r);
+    for (const c of model.classes.keys()) for (const s of model.ownSlots(c)) for (const t of slotTargets(model, s)) link(c, t.target);
   const seen = new Set([focus]);
   let frontier = [focus];
   for (let i = 0; i < hops; i++) {
@@ -132,10 +148,9 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
   if (opts.associations)
     for (const iri of nodes.keys())
       for (const s of model.ownSlots(iri)) {
-        if (s.property.kind !== 'objectProperty') continue;
-        for (const r of s.range) {
+        for (const { target: r, card } of slotTargets(model, s)) {
           if (!nodes.has(r)) continue;
-          const text = `${s.property.label ?? label(s.property.iri)}  ${cardText(s.min, s.max)}`;
+          const text = `${s.property.label ?? label(s.property.iri)}  ${card === 'conflict' ? '⚠ conflict' : card}`;
           const id = `assoc:${iri}:${s.property.iri}:${r}`;
           const e: DEdge = { id, kind: 'assoc', source: iri, target: r, label: text, property: s.property.iri, points: [] };
           if (r === iri) {

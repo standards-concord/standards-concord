@@ -4,6 +4,9 @@ import type { Labeler } from '../../lib/ontology';
 import type { OntologyModel } from '../../lib/ontologyModel';
 import { cx } from '../ui';
 
+const ROW_LIMIT = 400;
+const EXPAND_BUDGET = 1500;
+
 interface Row {
   key: string;
   iri: string;
@@ -46,7 +49,7 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
     if (!selected || !model.classes.has(selected)) return;
     setOpen((prev) => {
       const next = new Set(prev);
-      for (const path of model.paths(selected)) {
+      for (const path of model.paths(selected).paths) {
         let key = '';
         for (const iri of path.slice(0, -1)) {
           key = key ? `${key}/${iri}` : iri;
@@ -57,10 +60,18 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
     });
   }, [selected, model]);
 
-  const rows = useMemo(() => {
+  // Multiple inheritance can make a fully expanded tree far longer than the class count,
+  // so only this many rows are rendered at a time, with a button for more.
+  const [limit, setLimit] = useState(ROW_LIMIT);
+  const { rows, truncated } = useMemo(() => {
     const out: Row[] = [];
+    let truncated = false;
     const visit = (iri: string, level: number, parentKey: string | undefined, seen: Set<string>) => {
       if (matches && !matches.has(iri)) return;
+      if (out.length >= limit) {
+        truncated = true;
+        return;
+      }
       const key = parentKey ? `${parentKey}/${iri}` : iri;
       const kids = seen.has(iri) ? [] : (model.children.get(iri) ?? []).filter((k) => !matches || matches.has(k));
       const expanded = kids.length > 0 && (!!matches || open.has(key));
@@ -68,8 +79,8 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
       if (expanded) for (const k of kids) visit(k, level + 1, key, new Set([...seen, iri]));
     };
     for (const r of model.roots) visit(r, 1, undefined, new Set());
-    return out;
-  }, [model, open, matches]);
+    return { rows: out, truncated };
+  }, [model, open, matches, limit]);
 
   const activeKey = rows.find((r) => r.key === active)?.key ?? rows.find((r) => r.iri === selected)?.key ?? rows[0]?.key;
 
@@ -111,14 +122,24 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
     if (handled) e.preventDefault();
   };
 
+  // Expand breadth first, stopping once the expanded tree would pass EXPAND_BUDGET rows.
   const expandAll = () => {
     const keys = new Set<string>();
-    const visit = (iri: string, key: string, seen: Set<string>) => {
-      const kids = seen.has(iri) ? [] : (model.children.get(iri) ?? []);
-      if (kids.length) keys.add(key);
-      for (const k of kids) visit(k, `${key}/${k}`, new Set([...seen, iri]));
-    };
-    for (const r of model.roots) visit(r, r, new Set());
+    let rowsSoFar = model.roots.length;
+    let level: { iri: string; key: string; seen: Set<string> }[] = model.roots.map((r) => ({ iri: r, key: r, seen: new Set<string>() }));
+    while (level.length && rowsSoFar < EXPAND_BUDGET) {
+      const next: typeof level = [];
+      for (const n of level) {
+        const kids = n.seen.has(n.iri) ? [] : (model.children.get(n.iri) ?? []);
+        if (!kids.length) continue;
+        if (rowsSoFar + kids.length > EXPAND_BUDGET) break;
+        keys.add(n.key);
+        rowsSoFar += kids.length;
+        const seen = new Set([...n.seen, n.iri]);
+        for (const k of kids) next.push({ iri: k, key: `${n.key}/${k}`, seen });
+      }
+      level = next;
+    }
     setOpen(keys);
   };
 
@@ -187,6 +208,11 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
           );
         })}
       </ul>
+      {truncated && (
+        <button type="button" className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-accent hover:bg-surface-2" onClick={() => setLimit((n) => n + ROW_LIMIT)}>
+          Show more classes (first {rows.length} rows shown)
+        </button>
+      )}
     </div>
   );
 }
