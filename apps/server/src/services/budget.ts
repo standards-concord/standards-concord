@@ -33,3 +33,10 @@ export async function withTriageBudget<T>(user: { id: string; simulated?: boolea
     inFlight.delete(user.id);
   }
 }
+
+/** Whether `withTriageBudget` would run for this person right now (without using any of their budget). */
+export function triageBudgetAvailable(user: { id: string; simulated?: boolean }): boolean {
+  if (user.simulated || current.getStore() === user.id) return true;
+  const now = Date.now();
+  return !inFlight.has(user.id) && (recent.get(user.id) ?? []).filter((t) => now - t < triageBudget.windowMs).length < triageBudget.max;
+}

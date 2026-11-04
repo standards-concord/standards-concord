@@ -1,5 +1,6 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -578,5 +579,203 @@ describe('inline term edits', () => {
     const next = await edit(contributor, { termIri: SESSION, set: { comment: 'Sessions can repeat.', examples }, previous: { examples, comment: '' } });
     expect(next.status).toBe(201);
     expect(Object.keys(next.body.ops[0].set)).toEqual(['comment']);
+  });
+
+  /* Concurrency and budget: every change to a request is made under the ontology's lock, from its latest stored copy. */
+  const gate = () => {
+    let open!: () => void;
+    const p = new Promise<void>((resolve) => (open = resolve));
+    return { p, open };
+  };
+  const userOf = async (agent: Agent) => {
+    const { getUser } = await import('../src/services/users.js');
+    return getUser((await agent.get('/api/session')).body.user.id)!;
+  };
+
+  it('keeps the working-draft lock while a slow holder is alive, and stops a holder that lost it from writing', async () => {
+    const { withWorkingDraftLock, assertStillHeld, lockTiming } = await import('../src/services/repoLock.js');
+    const { get, put, remove } = await import('../src/db.js');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const saved = { ...lockTiming };
+    Object.assign(lockTiming, { heartbeatMs: 10, leaseMs: 80, waitMs: 150 });
+    const key = `working-draft-lock:${demoId}`;
+    try {
+      // A slow but live holder keeps renewing its lease, so it never looks abandoned to another process.
+      await withWorkingDraftLock({ id: demoId }, async () => {
+        await sleep(300);
+        expect(get<{ expiresAt: number }>('kv', key)!.expiresAt).toBeGreaterThan(Date.now());
+        assertStillHeld({ id: demoId });
+      });
+      expect(get('kv', key)).toBeUndefined();
+
+      // Another process's live lease: we wait, then give up, without touching it.
+      put('kv', { id: key, token: 'another-process', pid: 0, expiresAt: Date.now() + 60_000 });
+      await expect(withWorkingDraftLock({ id: demoId }, async () => 'got it')).rejects.toMatchObject({ status: 503 });
+      expect(get('kv', key)).toMatchObject({ token: 'another-process' });
+      remove('kv', key);
+
+      // A holder that stalled past its lease and was taken over can no longer write, and leaves its successor's lease alone.
+      const contributor = await login('contributor', 'Contributor Stalled');
+      const created = await edit(contributor, { termIri: SKILL, set: { examples: ['stalled'] }, submit: true });
+      const user = await userOf(contributor);
+      await expect(
+        withWorkingDraftLock({ id: demoId }, async () => {
+          put('kv', { id: key, token: 'successor', pid: 0, expiresAt: Date.now() + 60_000 });
+          return crsMod.withdraw(crsMod.getCR(created.body.id), user);
+        }),
+      ).rejects.toMatchObject({ status: 503 });
+      expect(crsMod.getCR(created.body.id).status).toBe('review');
+      expect(get('kv', key)).toMatchObject({ token: 'successor' });
+      remove('kv', key);
+    } finally {
+      Object.assign(lockTiming, saved);
+    }
+  });
+
+  it('never lets a slow AI revision undo a withdrawal or someone else’s edits', async () => {
+    const { llm } = await import('../src/llm/provider.js');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const original = llm.json;
+    let held = gate();
+    const spy = vi.spyOn(llm, 'json').mockImplementation(async function (this: typeof llm, call) {
+      if (call.task === 'revise') await held.p;
+      return original.call(llm, call as never) as never;
+    });
+    const revises = () => spy.mock.calls.filter(([c]) => c.task === 'revise').length;
+    try {
+      const contributor = await login('contributor', 'Contributor Slow AI');
+      const editorA = await login('editor', 'Editor Slow AI');
+      const editorB = await login('editor', 'Editor Quick');
+
+      // Withdrawn while the AI was revising: it stays withdrawn.
+      const first = await edit(contributor, { termIri: SKILL, set: { comment: 'Revise me.' }, submit: true });
+      const revising = editorA.post(`/api/change-requests/${first.body.id}/revise`).send({ instruction: 'Add a class Gadget' }).then((r) => r);
+      await vi.waitFor(() => expect(revises()).toBe(1));
+      expect((await contributor.post(`/api/change-requests/${first.body.id}/withdraw`)).status).toBe(200);
+      held.open();
+      expect((await revising).status).toBe(409);
+      expect(crsMod.getCR(first.body.id).status).toBe('withdrawn');
+
+      // Someone else rewrote the edits while the AI was revising: theirs are kept, and they still can't approve their own rewrite.
+      held = gate();
+      const second = await edit(contributor, { termIri: SKILL, set: { comment: 'Revise me too.' }, submit: true });
+      const revising2 = editorA.post(`/api/change-requests/${second.body.id}/revise`).send({ instruction: 'Add a class Gizmo' }).then((r) => r);
+      await vi.waitFor(() => expect(revises()).toBe(2));
+      const theirs = [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Editor B’s wording.' } }];
+      expect((await editorB.patch(`/api/change-requests/${second.body.id}`).send({ ops: theirs })).status).toBe(200);
+      held.open();
+      const late = await revising2;
+      expect(late.status).toBe(409);
+      expect(late.body.error).toMatch(/changed the edits while they were being revised/);
+      const stored = crsMod.getCR(second.body.id);
+      expect(stored.ops).toEqual(theirs);
+      expect(stored.revisedBy).toContain((await userOf(editorB)).id);
+      expect((await editorB.post(`/api/change-requests/${second.body.id}/reviews`).send({ decision: 'approve' })).body.governance.approvals).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('makes edits wait for a merge in progress, so a merge never commits edits nobody reviewed', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { put } = await import('../src/db.js');
+    const LOC = `${VOL}Location`;
+    const author = await login('contributor', 'Contributor Mid-merge');
+    const editor = await login('editor', 'Editor Mid-merge');
+    const before = (await author.get(termPath(LOC))).body;
+    const created = await edit(author, { termIri: LOC, set: { comment: 'Reviewed comment.' }, previous: { comment: before.comment ?? '' } });
+    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+
+    const held = gate();
+    const original = ontologyStore.working;
+    let calls = 0;
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (calls++ === 0) await held.p; // the merge's own re-check is slow
+      return original.call(ontologyStore, p);
+    });
+    try {
+      const merging = crsMod.merge(crsMod.getCR(created.body.id), await userOf(editor));
+      await vi.waitFor(() => expect(calls).toBeGreaterThan(0));
+      const patching = crsMod
+        .updateOps(crsMod.getCR(created.body.id), await userOf(author), { ops: [{ op: 'updateAnnotations', iri: LOC, set: { definition: 'Unreviewed definition.' } }] })
+        .then(() => 'saved', (err: { status?: number }) => err.status);
+      await sleep(50);
+      held.open();
+      expect((await merging).status).toBe('merged');
+      expect(await patching).toBe(409);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = (await author.get(termPath(LOC))).body;
+    expect(after.comment).toBe('Reviewed comment.');
+    expect(after.definition).toBe(before.definition);
+  });
+
+  it('merges a request approved after its vote without reopening the vote, but sends one that grew back to review', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const ORG = `${VOL}Session`;
+    const contributor = await login('contributor', 'Contributor Voted');
+    const steward = await login('steward', 'Steward Voted');
+    const stewardUser = await userOf(steward);
+    const current = (await contributor.get(termPath(ORG))).body.definition;
+
+    // Approved as major, after the vote passed: merging doesn't start another vote.
+    const voted = await edit(contributor, { termIri: ORG, set: { definition: 'A scheduled period of volunteering, possibly repeating.' }, previous: { definition: current }, definitionIntent: 'new-meaning' });
+    expect(voted.body.classification.level).toBe('major');
+    put('changeRequests', { ...crsMod.getCR(voted.body.id), status: 'approved', approvedAs: { level: 'major', confirmation: true } }, demoId);
+    const merged = await crsMod.merge(crsMod.getCR(voted.body.id), stewardUser);
+    expect(merged.status).toBe('merged');
+    expect((await contributor.get(termPath(ORG))).body.definition).toBe('A scheduled period of volunteering, possibly repeating.');
+
+    // Approved as a patch, but a major change on today's draft: back to review, nothing merged.
+    const now = (await contributor.get(termPath(ORG))).body.definition;
+    const grew = await edit(contributor, { termIri: ORG, set: { definition: 'An employment shift.' }, previous: { definition: now }, definitionIntent: 'new-meaning' });
+    put('changeRequests', { ...crsMod.getCR(grew.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    const back = await crsMod.merge(crsMod.getCR(grew.body.id), stewardUser);
+    expect(back.status).not.toBe('merged');
+    expect(back.status).not.toBe('approved');
+    expect(JSON.stringify(back.timeline)).toMatch(/back in review: on the latest draft this is a major change/);
+    expect((await contributor.get(termPath(ORG))).body.definition).toBe(now);
+  });
+
+  it('charges merges to the budget of whoever triggers them, and re-checks other requests without the LLM', async () => {
+    const { triageBudget } = await import('../src/services/budget.js');
+    const { llm } = await import('../src/llm/provider.js');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const saved = { ...triageBudget };
+    triageBudget.max = 1;
+    const spy = vi.spyOn(llm, 'json');
+    try {
+      const editor = await login('editor', 'Editor Spent');
+      const a = await login('contributor', 'Contributor Budget A');
+      const b = await login('contributor', 'Contributor Budget B');
+      const TC = `${VOL}TimeCommitment`;
+      const one = await edit(a, { termIri: TC, set: { examples: ['two hours a week'] }, submit: true });
+      expect((await editor.post(`/api/change-requests/${one.body.id}/retriage`)).status).toBe(200); // the editor's one allowance
+      put('changeRequests', { ...crsMod.getCR(one.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+      // A manual merge re-validates the change, so it needs budget too.
+      expect((await editor.post(`/api/change-requests/${one.body.id}/merge`)).status).toBe(429);
+      expect(crsMod.getCR(one.body.id).status).toBe('approved');
+
+      // An approval that would trigger an automatic merge: recorded, and the governance clock does the merge.
+      const LOC = `${VOL}Location`;
+      const two = await edit(b, { termIri: LOC, set: { examples: ['a village hall'] }, submit: true });
+      await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
+      expect(crsMod.getCR(one.body.id).status).toBe('merged');
+      spy.mockClear();
+      const approved = await editor.post(`/api/change-requests/${two.body.id}/reviews`).send({ decision: 'approve' });
+      expect(approved.status).toBe(200);
+      expect(approved.body.status).toBe('approved');
+      await editor.post('/api/simulation/clock').send({ advanceDays: 0.01 });
+      expect(crsMod.getCR(two.body.id).status).toBe('merged');
+      // Re-checking the other open requests after each merge used no LLM triage.
+      expect(spy.mock.calls.filter(([c]) => c.task === 'triage')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+      Object.assign(triageBudget, saved);
+    }
   });
 });

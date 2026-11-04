@@ -13,6 +13,7 @@ import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
+import { updateCR } from './changeRequests.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -210,12 +211,12 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
 
   // Mark change requests as released.
   for (const id of r.changeRequestIds) {
-    const cr = mustGet<ChangeRequest>('changeRequests', id);
-    cr.status = 'released';
-    cr.releaseId = r.id;
-    cr.statusSince = r.publishedAt;
-    cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
-    put('changeRequests', cr, cr.ontologyId);
+    await updateCR(mustGet<ChangeRequest>('changeRequests', id), (cr) => {
+      cr.status = 'released';
+      cr.releaseId = r.id;
+      cr.statusSince = r.publishedAt!;
+      cr.timeline.push({ at: r.publishedAt!, type: 'released', message: `released in ${r.version}` });
+    });
   }
 
   project.currentVersion = r.version;

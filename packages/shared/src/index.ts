@@ -510,6 +510,12 @@ export interface ChangeRequest {
   declaredLevel?: { level: ChangeLevel; rule: string; message: string; iri?: string };
   /** People other than the author who rewrote the edits; like the author, they can't give the independent approval. */
   revisedBy?: string[];
+  /**
+   * What the request was approved as. If, re-checked against the draft at merge
+   * time, it is a bigger change than this (or now rewords a definition), it goes
+   * back to review instead of merging.
+   */
+  approvedAs?: { level: ChangeLevel; confirmation: boolean };
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;
