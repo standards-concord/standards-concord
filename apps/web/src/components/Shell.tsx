@@ -98,9 +98,11 @@ function UserMenu() {
           <MenuLink to="/alpha" icon={<Compass className="size-4" />}>
             Alpha walkthrough
           </MenuLink>
-          <MenuLink to="/admin/feedback" icon={<Shield className="size-4" />}>
-            Feedback admin
-          </MenuLink>
+          {user.isPlatformAdmin && (
+            <MenuLink to="/admin/feedback" icon={<Shield className="size-4" />}>
+              Feedback admin
+            </MenuLink>
+          )}
           <button onClick={() => void logout()} className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-2">
             <LogOut className="size-4" /> Sign out
           </button>
