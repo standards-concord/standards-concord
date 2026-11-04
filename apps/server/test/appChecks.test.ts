@@ -217,7 +217,7 @@ describe('connected apps', () => {
 
   it('records results on the change request without autopilot', async () => {
     const run = await ciRun(created.token!);
-    expect((await run.post('baseline', 'passed')).stale).toBe(false);
+    expect((await run.post('baseline', 'passed', { commit: 'abc123' })).stale).toBe(false);
     const res = await run.post(minorId, 'passed', { runUrl: 'https://github.com/example/rota-planner/actions/runs/1', commit: 'abc123' });
     expect(res.autopilot!.action).toBe('none');
     const d = await detail(minorId);
@@ -233,6 +233,7 @@ describe('connected apps', () => {
 
   it('ignores unsafe links and bad outcomes', async () => {
     const run = await ciRun(created.token!);
+    await run.post('baseline', 'passed');
     const revision = run.p.targets.find((t) => t.changeRequestId === minorId)!.revision;
     expect((await report(created.token!, { target: minorId, revision, attempt: run.p.attempt, outcome: 'great' })).status).toBe(400);
     const res = await run.post(minorId, 'passed', { runUrl: 'javascript:alert(1)' });
@@ -243,6 +244,8 @@ describe('connected apps', () => {
   it('keeps the newest run’s result when results arrive late or twice', async () => {
     const older = await ciRun(created.token!);
     const newer = await ciRun(created.token!);
+    await older.post('baseline', 'passed');
+    await newer.post('baseline', 'passed');
     const revision = newer.p.targets.find((t) => t.changeRequestId === minorId)!.revision;
     expect((await report(created.token!, { target: minorId, revision, outcome: 'passed' })).status, 'attempt is required').toBe(400);
     expect((await report(created.token!, { target: minorId, revision, attempt: newer.p.attempt + 50, outcome: 'passed' })).status, 'attempt must have been issued').toBe(400);
@@ -268,6 +271,7 @@ describe('connected apps', () => {
 
   it('ignores a result for a version of the change that has since moved on', async () => {
     const run = await ciRun(created.token!);
+    await run.post('baseline', 'passed');
     touchWorkingDraft();
     const res = await run.post(minorId, 'failed');
     expect(res.stale).toBe(true);
@@ -331,6 +335,7 @@ describe('autopilot', () => {
     expect((await detail(crId)).governance.approvals).toBe(2);
 
     const oldRun = await ciRun(a.token!);
+    await oldRun.post('baseline', 'passed');
     touchWorkingDraft();
     // A run that started before the draft moved can't bring the approval back.
     expect((await oldRun.post(crId, 'passed')).stale).toBe(true);
@@ -433,10 +438,44 @@ describe('autopilot', () => {
     await fixed.post('baseline', 'passed', { commit: 'v3' });
     // The pass from before the break is for another version of the app: it doesn't count, and
     // the change is listed for testing again.
-    expect((await detail(crId)).governance.approvals).toBe(0);
+    const waiting = await detail(crId);
+    expect(waiting.governance.approvals).toBe(0);
+    // Shown as out of date, not as a current pass.
+    expect(waiting.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', current: false });
     expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
     expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
     expect((await detail(crId)).governance.approvals).toBe(1);
+  });
+
+  it('never pairs a change result with a working draft result from another version of the app', async () => {
+    const crId = await freshCR('Autopilot and app versions');
+    const tam = await login('reviewer', 'Reviewer Tam');
+    const a = await connect(tam, 'Tam’s app', { enabled: true });
+    // Run 1, commit A: passes the draft, fails the change.
+    const run1 = await ciRun(a.token!);
+    await run1.post('baseline', 'passed', { commit: 'A' });
+    await run1.post(crId, 'failed');
+    // Run 2 starts for commit B; run 3, still on commit A, finishes first.
+    const run2 = await ciRun(a.token!);
+    const run3 = await ciRun(a.token!);
+    await run3.post('baseline', 'passed', { commit: 'A' });
+    // Run 2's draft result is older than run 3's, and its pass on the change is from commit B.
+    expect((await run2.post('baseline', 'passed', { commit: 'B' })).stale).toBe(true);
+    await run2.post(crId, 'passed');
+    let d = await detail(crId);
+    expect(d.governance.approvals).toBe(0);
+    expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', current: false });
+    expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
+    // A change result can't come before the run's draft result, or claim another commit.
+    const run4 = await ciRun(a.token!);
+    expect((await report(a.token!, { target: crId, revision: run4.p.targets.find((t) => t.changeRequestId === crId)!.revision, attempt: run4.p.attempt, outcome: 'passed' })).status).toBe(409);
+    await run4.post('baseline', 'passed', { commit: 'A' });
+    expect((await report(a.token!, { target: crId, revision: run4.p.targets.find((t) => t.changeRequestId === crId)!.revision, attempt: run4.p.attempt, outcome: 'passed', commit: 'B' })).status).toBe(400);
+    // A whole run on commit A that passes counts.
+    expect((await run4.post(crId, 'passed')).autopilot!.action).toBe('approved');
+    d = await detail(crId);
+    expect(d.governance.approvals).toBe(1);
+    expect(d.appChecks!.find((c) => c.appId === a.id)).toMatchObject({ outcome: 'passed', current: true });
   });
 
   it('never overrides what the person said themselves', async () => {
@@ -557,6 +596,7 @@ describe('autopilot', () => {
       const project = getProject(demoId);
       const head = ontologyStore.head(project);
       const run = await pending(token, true);
+      await report(token, { target: 'baseline', revision: run.baseline.revision, attempt: run.attempt, outcome: 'passed' });
       const revision = run.targets.find((t) => t.changeRequestId === crId)!.revision;
 
       // Start the merge, and before it can commit, the app's failure comes in.

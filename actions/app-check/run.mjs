@@ -208,9 +208,12 @@ let exitCode = 0;
 // Always test the working draft first: if the app fails there, its results say nothing about the changes.
 const baseline = await check('Working draft', pending.baseline.source, { CONCORD_TARGET: 'baseline', CONCORD_REVISION: pending.baseline.revision });
 const attempt = pending.attempt;
-await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit });
-rows.push(['Working draft', '', baseline.outcome]);
-if (baseline.outcome !== 'passed') {
+const baselineReply = (await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit })).json();
+rows.push(['Working draft', '', baseline.outcome, baselineReply.stale ? 'superseded by a newer run, or the draft moved on' : '']);
+if (baselineReply.stale) {
+  // A newer run (or a newer working draft) has taken over: this run's results wouldn't count.
+  log('The working draft moved on, or a newer run already reported it, so this run stops here. The next run tests the changes.');
+} else if (baseline.outcome !== 'passed') {
   console.error(`::error::${pending.app.name} ${baseline.outcome === 'failed' ? 'fails' : 'could not be tested'} against the current working draft of ${pending.ontology.title}, so the proposed changes were not tested. ${baseline.summary}`);
   exitCode = 1;
 } else {

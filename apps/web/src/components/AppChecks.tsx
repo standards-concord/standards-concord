@@ -49,7 +49,7 @@ function Row({ c }: { c: AppCheckResult }) {
         <Badge tone={c.current ? o.tone : 'outline'} icon={o.icon}>
           {o.label}
         </Badge>
-        {!c.current && <span className="text-xs text-muted">on an earlier version, waiting for a new run</span>}
+        {!c.current && <span className="text-xs text-muted">out of date (the change, the working draft or the app has moved on), waiting for a new run</span>}
         {c.app.autopilot && <Badge tone="outline">Autopilot on</Badge>}
       </div>
       <p className="mt-0.5 text-xs text-muted">

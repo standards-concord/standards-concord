@@ -11,7 +11,7 @@ import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
-import { baselineRevision, createApp as createConnectedApp, reportAs, revisionOf } from './appChecks.js';
+import { baselineRevision, createApp as createConnectedApp, reportAs, revisionOf, startRunAs } from './appChecks.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
@@ -182,9 +182,11 @@ async function seedHistory() {
 async function seedConnectedApp(project: OntologyProject, owner: User, passesId: string, failsId: string) {
   const app = await createConnectedApp(project, owner, { name: 'CharityBase volunteer export', repo: 'charitybase-demo/volunteer-export', autopilot: { enabled: true, levels: ['patch', 'minor'], onFailure: 'report' } });
   const sim = 'Simulated CI run for the demo.';
-  await reportAs(app.id, { target: 'baseline', revision: baselineRevision(project), outcome: 'passed', summary: sim });
-  await reportAs(app.id, { target: passesId, revision: revisionOf(getCR(passesId)), outcome: 'passed', summary: `\`npm test\` passed. ${sim}` });
+  const attempt = startRunAs(app.id);
+  await reportAs(app.id, { attempt, target: 'baseline', revision: baselineRevision(project), outcome: 'passed', summary: sim });
+  await reportAs(app.id, { attempt, target: passesId, revision: revisionOf(getCR(passesId)), outcome: 'passed', summary: `\`npm test\` passed. ${sim}` });
   await reportAs(app.id, {
+    attempt,
     target: failsId,
     revision: revisionOf(getCR(failsId)),
     outcome: 'failed',

@@ -41,7 +41,13 @@ interface AppDoc extends ConnectedApp {
   /** Runs started so far (see pending()). */
   attempts?: number;
   /** What the most recent runs were asked to test: the baseline revision and each change's revision. */
-  runs?: { attempt: number; baseline: string; targets: Record<string, string> }[];
+  runs?: {
+    attempt: number;
+    baseline: string;
+    targets: Record<string, string>;
+    /** What this run found on the working draft, and with which app commit. Its change results are tied to it. */
+    reported?: { outcome: AppCheckOutcome; commit?: string };
+  }[];
   /**
    * The run from which the app has passed the current working draft without a break (same
    * draft, same app commit). Results for changes count only from this run on, so a result
@@ -227,7 +233,8 @@ function countsFrom(app: AppDoc, project = getProject(app.ontologyId)): number |
 function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = getProject(cr.ontologyId)): AppCheck | undefined {
   const from = countsFrom(app, project);
   const c = latestCheck(app.id, cr.id);
-  return from !== undefined && c?.revision === revision && (c.attempt ?? 0) >= from ? c : undefined;
+  // Only from a run that passed the working draft with the same app commit as the baseline in force.
+  return from !== undefined && c?.revision === revision && (c.attempt ?? 0) >= from && c.commit === app.baseline!.commit ? c : undefined;
 }
 
 /** Start a run: a new attempt number, and a record of exactly what this run is asked to test. */
@@ -337,10 +344,14 @@ export async function report(app: AppDoc, input: ReportInput) {
   const at = clock.iso();
 
   if (input.target === 'baseline') {
+    const commit = short(input.commit, 64);
+    if (run.reported && (run.reported.outcome !== outcome || run.reported.commit !== commit))
+      throw new HttpError(409, `Run ${attempt} already reported ${run.reported.outcome} for the working draft; a run reports it once`);
+    run.reported = { outcome, commit };
+    saveApp(app);
     const order = ordering(app.baseline, { revision, attempt, outcome }, baselineRevision(project));
     if (order !== 'newer') return { stale: order === 'stale', replay: order === 'replay' };
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
-    const commit = short(input.commit, 64);
     // Still passing the same draft with the same app: earlier results for changes still count.
     const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
     if (outcome === 'passed' && !unbroken) app.passingSince = attempt;
@@ -356,6 +367,11 @@ export async function report(app: AppDoc, input: ReportInput) {
   if (typeof input.target !== 'string') throw new HttpError(400, "target must be 'baseline' or a change request id");
   const cr = getCR(input.target);
   if (cr.ontologyId !== app.ontologyId) throw new HttpError(404, `change request ${input.target} not found`);
+  // A change's result means something only next to a pass on the working draft from the same run.
+  if (run.reported?.outcome !== 'passed')
+    throw new HttpError(409, `Report run ${attempt}'s result for the working draft first; change results only count from a run that passed it`);
+  const commit = run.reported.commit;
+  if (input.commit !== undefined && short(input.commit, 64) !== commit) throw new HttpError(400, `Run ${attempt} tested app commit ${commit ?? '(none)'} on the working draft`);
   const previous = latestCheck(app.id, cr.id);
   const order = ordering(previous, { revision, attempt, outcome }, revisionOf(cr, project));
   if (order !== 'newer') return { check: previous, stale: order === 'stale', replay: order === 'replay' };
@@ -368,7 +384,7 @@ export async function report(app: AppDoc, input: ReportInput) {
     outcome,
     summary,
     runUrl,
-    commit: short(input.commit, 64),
+    commit,
     attempt,
     at,
   };
@@ -393,10 +409,12 @@ export async function report(app: AppDoc, input: ReportInput) {
 }
 
 /** Report a result as an app, without its token (the demo's simulated CI). */
-export function reportAs(appId: string, input: Omit<ReportInput, 'attempt'>) {
-  const app = getAppDoc(appId);
-  return report(app, { ...input, attempt: pending(app, true).attempt });
+export function reportAs(appId: string, input: ReportInput) {
+  return report(getAppDoc(appId), input);
 }
+
+/** Start a run as an app, without its token (the demo's simulated CI). */
+export const startRunAs = (appId: string) => pending(getAppDoc(appId), true).attempt;
 
 /** Results for the change request page. */
 export function checksFor(cr: ChangeRequest): AppCheckResult[] {
@@ -409,7 +427,8 @@ export function checksFor(cr: ChangeRequest): AppCheckResult[] {
       const a = apps.get(c.appId)!;
       return {
         ...c,
-        current: c.revision === current,
+        // Counts only for this version of the change, from a run tied to the app's current baseline.
+        current: resultFor(a, cr, current, project)?.id === c.id,
         app: { id: a.id, name: a.name, repo: a.repo, ownerId: a.ownerId, owner: publicUser(getUser(a.ownerId)), autopilot: a.autopilot.enabled },
       };
     })
