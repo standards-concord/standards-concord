@@ -24,10 +24,12 @@ az network public-ip create -g "$RESOURCE_GROUP" -n concord-ip --sku Standard --
 ip=$(az network public-ip show -g "$RESOURCE_GROUP" -n concord-ip --query ipAddress -o tsv)
 host="$ip.sslip.io"
 
+# The firewall is (re)applied on every run, so a re-run after a failed launch still opens 80 and 443.
+az network nsg create -g "$RESOURCE_GROUP" -n concord-nsg -l "$LOCATION" -o none
+az network nsg rule create -g "$RESOURCE_GROUP" --nsg-name concord-nsg -n web --priority 100 \
+  --access Allow --protocol Tcp --destination-port-ranges 80 443 -o none
+
 if ! az vm show -g "$RESOURCE_GROUP" -n "$VM" -o none 2>/dev/null; then
-  az network nsg create -g "$RESOURCE_GROUP" -n concord-nsg -o none
-  az network nsg rule create -g "$RESOURCE_GROUP" --nsg-name concord-nsg -n web --priority 100 \
-    --access Allow --protocol Tcp --destination-port-ranges 80 443 -o none
   custom=$(mktemp)
   sed -e "s|__HOST__|$host|" -e "s|__IMAGE__|$IMAGE|" -e "s|__PUBLIC_URL__|$PUBLIC_URL|" \
     -e "s|__ADMIN_EMAILS__|$ADMIN_EMAILS|" "$here/cloud-init.sh" > "$custom"
@@ -35,7 +37,7 @@ if ! az vm show -g "$RESOURCE_GROUP" -n "$VM" -o none 2>/dev/null; then
   az vm create -g "$RESOURCE_GROUP" -n "$VM" --size "$VM_SIZE" \
     --image Canonical:ubuntu-24_04-lts:server:latest \
     --os-disk-size-gb 64 --storage-sku Premium_LRS \
-    --public-ip-address concord-ip --nsg concord-nsg \
+    --public-ip-address concord-ip --nsg concord-nsg --nsg-rule NONE \
     --admin-username concord --generate-ssh-keys \
     --assign-identity --role Contributor --scope "$(az group show -n "$RESOURCE_GROUP" --query id -o tsv)" \
     --custom-data "$custom" -o none

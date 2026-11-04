@@ -3,6 +3,7 @@ import { USE_CASE_SECTION_LABELS } from '@concord/shared';
 import { CircleCheck, Circle } from 'lucide-react';
 import { CqStatusChip } from './badges';
 import { Badge, ProgressBar, cx } from './ui';
+import { HighlightedCode } from './code/CodeView';
 import { pct, titleCase } from '../lib/format';
 
 type Key = keyof UseCaseSections;
@@ -193,7 +194,7 @@ export function CompetencyQuestions({ uc, highlight }: { uc: UseCase; highlight?
               {q.sparql && (
                 <details className="mt-1.5">
                   <summary className="cursor-pointer text-xs text-accent">SPARQL test</summary>
-                  <pre className="mt-1 overflow-x-auto rounded-md bg-surface-2 p-2 font-mono text-xs">{q.sparql}</pre>
+                  <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
                 </details>
               )}
             </li>

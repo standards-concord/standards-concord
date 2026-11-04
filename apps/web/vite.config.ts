@@ -6,6 +6,12 @@ const target = process.env.CONCORD_API ?? 'http://localhost:8787';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // sparq loads its WebAssembly from a URL relative to its own module. Vite's dev
+  // prebundler moves the module into node_modules/.vite/deps, where that URL
+  // falls through to index.html ("expected magic word 00 61 73 6d"). Serving
+  // sparq unbundled keeps the .wasm next to the module in dev; the production
+  // build already rewrites the URL to a hashed asset.
+  optimizeDeps: { exclude: ['@sparq-org/sparq'] },
   server: {
     port: 5173,
     proxy: {
