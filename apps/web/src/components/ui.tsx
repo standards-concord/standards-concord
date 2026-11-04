@@ -88,7 +88,7 @@ export function Spinner({ className }: { className?: string }) {
 
 export function Loading({ label = 'Loading…', className }: { label?: string; className?: string }) {
   return (
-    <div className={cx('flex items-center justify-center gap-2 py-12 text-sm text-muted', className)}>
+    <div role="status" aria-busy="true" className={cx('flex items-center justify-center gap-2 py-12 text-sm text-muted', className)}>
       <Spinner /> {label}
     </div>
   );
