@@ -4,6 +4,7 @@ import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
 import { createSession, sessionUser, upsertFederatedUser } from './services/users.js';
+import { clearTesterCookie, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -69,8 +70,9 @@ export function mountAuth(router: Router) {
     if (!g || !code || state !== req.cookies.oauth_state) throw new HttpError(400, 'Sign-in failed: invalid state. Please try again.');
     const tokens = await g.validateAuthorizationCode(code, req.cookies.oauth_verifier);
     const claims = arctic.decodeIdToken(tokens.idToken()) as { sub: string; name?: string; email?: string; picture?: string };
-    const user = await upsertFederatedUser({ provider: 'google', subject: claims.sub, name: claims.name ?? claims.email ?? 'Google user', email: claims.email, avatarUrl: claims.picture });
+    const user = await upsertFederatedUser({ provider: 'google', subject: claims.sub, name: claims.name ?? claims.email ?? 'Google user', email: claims.email, avatarUrl: claims.picture }, testerFor(req));
     setSessionCookie(res, user.id);
+    clearTesterCookie(req, res);
     res.redirect(`${config.webUrl}${safeReturn(req.cookies.oauth_return)}`);
   });
 
@@ -95,8 +97,9 @@ export function mountAuth(router: Router) {
       const emails = (await (await fetch('https://api.github.com/user/emails', { headers })).json().catch(() => [])) as { email: string; primary: boolean; verified: boolean }[];
       email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
     }
-    const user = await upsertFederatedUser({ provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
+    const user = await upsertFederatedUser({ provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url }, testerFor(req));
     setSessionCookie(res, user.id);
+    clearTesterCookie(req, res);
     res.redirect(`${config.webUrl}${safeReturn(req.cookies.oauth_return)}`);
   });
 }

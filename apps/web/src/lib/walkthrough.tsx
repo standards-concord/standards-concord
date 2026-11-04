@@ -1,9 +1,10 @@
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from 'react';
-import type { Role, User } from '@concord/shared';
+import type { Role, TesterRoleKey, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../api';
 import { useAsync, useLocalStorage } from './hooks';
 import { useSession } from './session';
 import { useDemoOntology } from './ontologies';
+import { TesterProvider } from './tester';
 
 export const STEPS = [
   { id: 'welcome', title: 'Welcome' },
@@ -62,7 +63,13 @@ export function WalkthroughProvider({ children }: { children: ReactNode }) {
     reloadDemo: demoState.reload,
     myRoles,
   };
-  return <C.Provider value={value}>{children}</C.Provider>;
+  // Only once they've picked a role in the demo, so a fresh account isn't recorded as a contributor by default.
+  const roleKey = session?.user && myRoles.length ? testerRoleFor(session.user, myRoles).key : undefined;
+  return (
+    <C.Provider value={value}>
+      <TesterProvider roleKey={roleKey}>{children}</TesterProvider>
+    </C.Provider>
+  );
 }
 
 export function useWalkthrough() {
@@ -74,7 +81,7 @@ export function useWalkthrough() {
 /* ------------------------------------------------------------------ roles */
 
 /** The five tester-facing roles the walkthrough offers. */
-export const TESTER_ROLES: { key: string; title: string; roles: Role[]; blurb: string }[] = [
+export const TESTER_ROLES: { key: TesterRoleKey; title: string; roles: Role[]; blurb: string }[] = [
   { key: 'steward', title: 'Ontology steward', roles: ['steward', 'owner', 'editor'], blurb: 'Run the process: triage requests, merge approved changes, cut releases, tune governance.' },
   { key: 'contributor', title: 'Domain expert / contributor', roles: ['contributor', 'reviewer'], blurb: 'Describe how you use the data, answer the interviewer, report problems.' },
   { key: 'member', title: 'Voting member', roles: ['member'], blurb: 'Review proposed changes and vote on the ones the policy puts to a vote.' },

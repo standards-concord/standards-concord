@@ -46,10 +46,25 @@ export function findByProvider(provider: AuthProvider, subject: string): User | 
   return list<User>('users').find((u) => u.providers.some((p) => p.provider === provider && p.subject === subject));
 }
 
-export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }) {
+/**
+ * Find or create the account for a Google or GitHub identity. `linkTo` is a demo
+ * tester account the person was already using: when the identity is new, it is
+ * attached to that account, so what they saved to its pod stays theirs.
+ */
+export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }, linkTo?: User) {
   const existing =
     findByProvider(p.provider, p.subject) ??
     (p.email ? list<User>('users').find((u) => !u.simulated && u.email && u.email.toLowerCase() === p.email!.toLowerCase()) : undefined);
+  if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
+    const linked = get<User>('users', linkTo.id);
+    if (linked) {
+      linked.providers.push({ provider: p.provider, subject: p.subject });
+      linked.name = p.name;
+      linked.email ??= p.email;
+      linked.avatarUrl ??= p.avatarUrl;
+      return put('users', linked);
+    }
+  }
   if (existing) {
     if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
     existing.avatarUrl ??= p.avatarUrl;

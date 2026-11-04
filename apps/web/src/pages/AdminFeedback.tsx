@@ -60,12 +60,12 @@ function Distribution({ q, subs }: { q: FeedbackQuestion; subs: FeedbackSubmissi
 
 function toCsv(subs: FeedbackSubmission[], qs: FeedbackQuestion[]) {
   const qIds = [...new Set([...qs.map((q) => q.id), ...subs.flatMap((s) => Object.keys(s.answers))])];
-  const head = ['id', 'createdAt', 'pathway', 'name', 'email', 'role', 'usedVoice', 'themes', ...qIds];
+  const head = ['id', 'createdAt', 'appVersion', 'sinceVersion', 'pathway', 'name', 'email', 'role', 'usedVoice', 'themes', ...qIds];
   const esc = (v: unknown) => {
     const s = v === undefined || v === null ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const rows = subs.map((s) => [s.id, s.createdAt, s.pathway, s.name, s.email, s.role, s.usedVoice, (s.themes ?? []).join('; '), ...qIds.map((q) => answerText(s.answers[q]))].map(esc).join(','));
+  const rows = subs.map((s) => [s.id, s.createdAt, s.appVersion, s.sinceVersion, s.pathway, s.name, s.email, s.role, s.usedVoice, (s.themes ?? []).join('; '), ...qIds.map((q) => answerText(s.answers[q]))].map(esc).join(','));
   return [head.join(','), ...rows].join('\n');
 }
 
@@ -153,14 +153,22 @@ export function AdminFeedbackPage() {
                 {data.map((s) => (
                   <Fragment key={s.id}>
                     <tr className="cursor-pointer border-b border-line align-top hover:bg-surface-2" onClick={() => setOpenId(openId === s.id ? undefined : s.id)}>
-                      <td className="px-4 py-2.5 whitespace-nowrap">{formatDate(s.createdAt, true)}</td>
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        {formatDate(s.createdAt, true)}
+                        {s.appVersion && (
+                          <span className="block text-xs text-muted">
+                            Version {s.appVersion}
+                            {s.sinceVersion && ` (last tested ${s.sinceVersion})`}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2.5">
                         {s.name || <span className="text-muted">Anonymous</span>}
                         {s.role && <span className="block text-xs text-muted">{s.role}</span>}
                       </td>
                       <td className="px-4 py-2.5">
                         <span className="inline-flex items-center gap-1">
-                          {s.pathway === 'structured' ? 'Guided' : 'General'}
+                          {s.pathway === 'structured' ? 'Guided' : s.pathway === 'changes' ? 'What’s changed' : 'General'}
                           {s.usedVoice && <Mic className="size-3.5 text-muted" aria-label="Used voice" />}
                         </span>
                       </td>

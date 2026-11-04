@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import type { ChatMessage, FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
-import { ArrowLeft, Heart, ListChecks, MessageCircle, Mic, Send } from 'lucide-react';
+import { ArrowLeft, Heart, History, KeyRound, ListChecks, MessageCircle, Mic, Send } from 'lucide-react';
 import { api, type FeedbackAnswers } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useWalkthrough } from '../lib/walkthrough';
+import { useTester } from '../lib/tester';
+import { VersionLine } from '../components/TesterStatus';
 import { dictationSupport } from '../lib/speech';
 import { Page } from '../components/Shell';
 import { ChatView } from '../components/ChatView';
-import { Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
+import { Badge, Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
 
 type Pathway = FeedbackSubmission['pathway'];
 
@@ -38,6 +40,11 @@ function QuickReplies({ q, onPick, current }: { q: FeedbackQuestion; onPick: (te
               {n}
             </button>
           ))}
+          {q.optional && (
+            <button onClick={() => onPick('Skip', '(skipped)')} className="h-9 rounded-lg border border-line-strong bg-surface px-3 text-sm text-muted transition-colors hover:border-accent">
+              Skip
+            </button>
+          )}
         </div>
         {(q.minLabel || q.maxLabel) && (
           <div className="mt-1 flex justify-between gap-4 text-[0.7rem] text-muted" style={{ maxWidth: nums.length * 42 }}>
@@ -121,8 +128,12 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
 export function FeedbackPage() {
   const { session } = useSession();
   const w = useWalkthrough();
-  const questions = useAsync(() => api.feedbackQuestions(), []);
+  const tester = useTester();
   const [pathway, setPathway] = useState<Pathway>();
+  // Returning testers can answer questions about what changed since the version they last tested.
+  const changeCount = tester.since ? tester.changes.filter((c) => c.type !== 'fix' || c.ask).length : 0;
+  const scope = pathway === 'changes' && tester.since ? { pathway, since: tester.since, role: tester.roleKey, version: tester.version } : { pathway };
+  const questions = useAsync(() => api.feedbackQuestions(scope), [scope.pathway, tester.since, tester.roleKey]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [answers, setAnswers] = useState<FeedbackAnswers>({});
   const [done, setDone] = useState(false);
@@ -132,14 +143,14 @@ export function FeedbackPage() {
   const [chatError, setChatError] = useState<unknown>();
   const [name, setName] = useState(session?.user?.simulated ? '' : (session?.user?.name ?? ''));
   const [email, setEmail] = useState(session?.user?.simulated ? '' : (session?.user?.email ?? ''));
-  const [submitted, setSubmitted] = useState<FeedbackSubmission>();
+  const [submitted, setSubmitted] = useState<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>();
   const voice = dictationSupport() !== 'none';
 
   const turn = async (p: Pathway, msgs: ChatMessage[], ans: FeedbackAnswers) => {
     setPending(true);
     setChatError(undefined);
     try {
-      const r = await api.feedbackChat({ pathway: p, messages: msgs, answers: ans });
+      const r = await api.feedbackChat({ ...scope, pathway: p, messages: msgs, answers: ans, ...(p === 'changes' && tester.since ? { since: tester.since, role: tester.roleKey, version: tester.version } : {}) });
       setMessages([...msgs, msg('assistant', r.reply)]);
       if (r.answers) setAnswers({ ...ans, ...r.answers });
       setDone(r.done);
@@ -174,12 +185,16 @@ export function FeedbackPage() {
       userId: session?.user?.id,
       name: name.trim() || undefined,
       email: email.trim() || undefined,
-      role: w.myRoles[0],
+      role: tester.roleKey ?? w.myRoles[0],
       pathway: pathway!,
       answers,
       transcript: messages,
       usedVoice,
+      appVersion: tester.version,
+      appCommit: tester.commit || undefined,
+      sinceVersion: tester.since,
     });
+    void tester.reloadMe();
     setSubmitted(s);
   });
 
@@ -190,6 +205,12 @@ export function FeedbackPage() {
           <Heart className="mx-auto size-8 text-accent" />
           <h1 className="mt-3 text-xl font-semibold">Thank you!</h1>
           <p className="mt-2 text-sm text-muted">Your feedback goes straight to the Open Data Institute team building Concord. It genuinely shapes what we build next.</p>
+          <p className="mt-3 flex items-start justify-center gap-1.5 text-xs text-muted" data-testid="feedback-saved">
+            <KeyRound className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            {submitted.savedTo
+              ? `A copy is saved to ${submitted.savedTo.kind === 'solid' ? 'your Solid pod' : 'your private storage'}, with the version you tested (${submitted.appVersion}).`
+              : `Sign in next time and we’ll keep a copy in your own pod, with the version you tested (${submitted.appVersion}).`}
+          </p>
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/">
               <Button>Back to the hub</Button>
@@ -211,11 +232,28 @@ export function FeedbackPage() {
             This is an early prototype, and your honest reactions matter more than polish. Type, or tap the microphone and just talk — whatever’s easier.
           </p>
         </div>
-        <div className="mx-auto grid max-w-3xl gap-4 sm:grid-cols-2">
+        <Card className="mx-auto mb-6 max-w-5xl p-4">
+          <VersionLine />
+        </Card>
+        <div className={cx('mx-auto grid gap-4', changeCount ? 'max-w-5xl sm:grid-cols-3' : 'max-w-3xl sm:grid-cols-2')}>
+          {changeCount > 0 && (
+            <button onClick={() => start('changes')} className="group text-left">
+              <Card className="h-full border-accent p-6 transition-shadow group-hover:shadow-md">
+                <History className="size-6 text-accent" />
+                <h2 className="mt-3 font-semibold">What’s changed since {tester.since}</h2>
+                <p className="text-xs text-muted">
+                  About {Math.max(2, Math.min(6, changeCount) + 1)} minutes · <Badge tone="accent">Recommended</Badge>
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  You’ve tested Concord before, so we’ll only ask about the {changeCount} change{changeCount === 1 ? '' : 's'} since then, and a couple of overall questions.
+                </p>
+              </Card>
+            </button>
+          )}
           <button onClick={() => start('structured')} className="group text-left">
             <Card className="h-full p-6 transition-shadow group-hover:border-accent group-hover:shadow-md">
               <ListChecks className="size-6 text-accent" />
-              <h2 className="mt-3 font-semibold">Guided feedback</h2>
+              <h2 className="mt-3 font-semibold">{changeCount ? 'Guided feedback on everything' : 'Guided feedback'}</h2>
               <p className="text-xs text-muted">About 8 minutes</p>
               <p className="mt-2 text-sm text-muted">A friendly assistant walks you through a short set of questions about each part of Concord.</p>
             </Card>
@@ -240,7 +278,7 @@ export function FeedbackPage() {
 
   const qs = questions.data ?? [];
   const current = qs.find((q) => q.id === nextQ);
-  const captured = qs.filter((q) => pathway === 'structured' || answers[q.id] !== undefined);
+  const captured = qs.filter((q) => pathway !== 'general' || answers[q.id] !== undefined);
   const answeredCount = qs.filter((q) => formatAnswer(answers[q.id]) !== '').length;
 
   return (
@@ -252,8 +290,8 @@ export function FeedbackPage() {
         <Card className="flex h-[calc(100vh-13rem)] min-h-[520px] flex-col p-4">
           <div className="flex items-center justify-between border-b border-line pb-3">
             <div>
-              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : 'Tell us something'}</h1>
-              {pathway === 'structured' && qs.length > 0 && <p className="text-xs text-muted">{answeredCount} of {qs.length} questions answered</p>}
+              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : pathway === 'changes' ? `What’s changed since ${tester.since}` : 'Tell us something'}</h1>
+              {pathway !== 'general' && qs.length > 0 && <p className="text-xs text-muted">{answeredCount} of {qs.length} questions answered</p>}
             </div>
             {current && <span className="text-xs text-muted">{current.section}</span>}
           </div>

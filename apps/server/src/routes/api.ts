@@ -11,7 +11,8 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
-import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
+import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
+import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor } from '../services/alpha.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -94,6 +95,7 @@ const PUBLIC_READS = [
   /^\/ontologies\/[^/]+\/terms\/.+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
+  /^\/alpha\/me$/,
   /^\/oauth\/requests\/[^/]+$/,
 ];
 
@@ -119,6 +121,7 @@ export function apiRouter(): Router {
   r.post('/auth/demo', async (req, res) => {
     demoOnly();
     const { userId, name, role } = req.body ?? {};
+    const testerBefore = testerFor(req);
     let user: User | undefined;
     if (userId) {
       user = getUser(String(userId));
@@ -132,10 +135,12 @@ export function apiRouter(): Router {
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
     setSessionCookie(res, user.id);
+    rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
 
   r.post('/auth/logout', (req, res) => {
+    clearTesterCookie(req, res);
     destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
@@ -496,25 +501,54 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ feedback --------------------------- */
-  r.get('/feedback/questions', (_req, res) => res.json(FEEDBACK_QUESTIONS));
+  const pathwayOf = (p: unknown): Pathway => (p === 'general' || p === 'changes' ? p : 'structured');
+  r.get('/feedback/questions', (req, res) =>
+    res.json(questionsFor({ pathway: pathwayOf(req.query.pathway), since: optStr(req.query.since), role: optStr(req.query.role), version: optStr(req.query.version) })),
+  );
   r.post('/feedback/chat', async (req, res) => {
     const b = req.body ?? {};
-    res.json(await feedbackChat({ pathway: b.pathway === 'general' ? 'general' : 'structured', messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [], answers: b.answers ?? {}, currentQuestionId: optStr(b.currentQuestionId) }));
+    res.json(
+      await feedbackChat({
+        pathway: pathwayOf(b.pathway),
+        messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [],
+        answers: b.answers ?? {},
+        currentQuestionId: optStr(b.currentQuestionId),
+        since: optStr(b.since),
+        role: optStr(b.role),
+        version: optStr(b.version),
+      }),
+    );
   });
   r.post('/feedback', async (req, res) => {
     const b = req.body ?? {};
     res.status(201).json(
-      await submitFeedback(req.user, {
-        pathway: b.pathway === 'general' ? 'general' : 'structured',
-        answers: b.answers ?? {},
-        transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
-        usedVoice: !!b.usedVoice,
-        name: optStr(b.name),
-        email: optStr(b.email),
-        role: optStr(b.role),
-        themes: Array.isArray(b.themes) ? b.themes : undefined,
-      }),
+      await submitFeedback(
+        req.user,
+        {
+          pathway: pathwayOf(b.pathway),
+          answers: b.answers ?? {},
+          transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
+          usedVoice: !!b.usedVoice,
+          name: optStr(b.name),
+          email: optStr(b.email),
+          role: optStr(b.role),
+          themes: Array.isArray(b.themes) ? b.themes : undefined,
+          appVersion: optStr(b.appVersion),
+          appCommit: optStr(b.appCommit),
+          sinceVersion: optStr(b.sinceVersion),
+        },
+        testerFor(req),
+      ),
     );
+  });
+
+  /* ------------------------------ alpha testing ------------------------ */
+  r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
+  r.post('/alpha/visit', async (req, res) => {
+    const tester = testerFor(req);
+    if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
+    const b = req.body ?? {};
+    res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
   });
   const feedbackAdmin = (req: Request) => {
     const user = requireUser(req);
