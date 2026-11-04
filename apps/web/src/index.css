@@ -681,11 +681,6 @@
   backdrop-filter: none;
 }
 
-/* The action banner sits on the accent colour, so its focus ring uses the text colour on it. */
-.overview-asks :focus-visible {
-  outline-color: var(--accent-fg);
-}
-
 /* Specification: links and section headings read like a W3C document. */
 [data-look='spec'] .page-eyebrow {
   font-family: var(--font-body);
@@ -773,6 +768,12 @@
 }
 [data-look='workbench'] .app-header .app-user-button:hover {
   background: color-mix(in srgb, var(--header-fg) 12%, transparent);
+}
+
+/* The action banner sits on the accent colour, so its focus ring uses the text colour on it.
+ * After the look rules, and more specific than them, so no look's focus colour wins here. */
+[data-look] .overview-asks :focus-visible {
+  outline-color: var(--accent-fg);
 }
 
 html,

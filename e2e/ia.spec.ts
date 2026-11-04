@@ -129,13 +129,15 @@ test.describe('progressive disclosure', () => {
     const asks = page.getByTestId('overview-asks');
     await expect(asks.getByRole('heading', { name: /waiting for you/ })).toBeVisible();
     const first = asks.getByRole('link').first();
-    await expect(first).toHaveText(/^(Review|Vote on|Triage|Merge|Revise) #\d+: /);
+    await expect(first).toHaveText(/^(Review|Vote on|Merge|Revise) #\d+: /);
     await first.click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/changes/`));
   });
 
   for (const look of ['odi', 'spec', 'civic', 'workbench', 'classic'])
-    test(`overview links are underlined and the action banner keeps a visible focus ring (${look})`, async ({ page }) => {
+    for (const scheme of ['light', 'dark'] as const)
+      test(`overview links are underlined and the action banner keeps a visible focus ring (${look}, ${scheme})`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
       await page.goto(`/o/${demo.id}?look=${look}`);
       await settle(page);
       // Links inside sentences never rely on colour alone.

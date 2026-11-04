@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
-import type { ChangeRequest, ChangeRequestStatus, Role } from '@concord/shared';
+import type { ChangeRequestStatus } from '@concord/shared';
+import { askOf } from '../../lib/asks';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { formatDate, plural, relativeTime } from '../../lib/format';
@@ -17,17 +18,6 @@ const proseLink = 'text-accent underline decoration-1 underline-offset-[0.18em] 
 
 /** Change requests still moving through the process, in the order people need to act on them. */
 const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs-work', 'approved'];
-
-/** What a change at this stage needs from someone with these roles, if anything. */
-function askOf(cr: ChangeRequest, roles: Role[], me?: string): string | undefined {
-  const has = (...r: Role[]) => r.some((x) => roles.includes(x));
-  if (cr.status === 'voting' && has('member', 'owner', 'steward')) return 'Vote on';
-  if (cr.status === 'review' && has('reviewer', 'editor', 'steward') && cr.authorId !== me) return 'Review';
-  if (cr.status === 'triage' && has('steward', 'owner')) return 'Triage';
-  if (cr.status === 'approved' && has('editor', 'steward')) return 'Merge';
-  if (cr.status === 'needs-work' && cr.authorId === me) return 'Revise';
-  return undefined;
-}
 
 /**
  * The ontology's front page. It reads top to bottom like a short report: what this is, what is
@@ -56,7 +46,7 @@ export function OverviewTab() {
     .filter((cr) => IN_PROGRESS.includes(cr.status))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
   const asks = inProgress.flatMap((cr) => {
-    const verb = askOf(cr, myRoles, me);
+    const verb = askOf(cr, o.governance, myRoles, me);
     return verb ? [{ cr, verb }] : [];
   });
 

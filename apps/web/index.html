@@ -15,6 +15,8 @@
         var look = 'odi';
         try {
           var stored = localStorage.getItem('concord-look');
+          // A preview build briefly saved choices under concord-look-2 (see src/lib/look.ts).
+          if (looks.indexOf(stored) < 0) stored = localStorage.getItem('concord-look-2');
           if (looks.indexOf(stored) >= 0) look = stored;
         } catch (e) {}
         var param = new URLSearchParams(location.search).get('look');

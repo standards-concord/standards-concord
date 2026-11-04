@@ -45,10 +45,20 @@ export function isLook(v: unknown): v is LookId {
   return LOOKS.some((l) => l.id === v);
 }
 
+// A preview build briefly saved choices under this key; carry them over (index.html does the same).
+const INTERIM_KEY = 'concord-look-2';
+
 export function storedLook(): LookId {
   try {
     const v = localStorage.getItem(KEY);
-    return isLook(v) ? v : DEFAULT_LOOK;
+    if (isLook(v)) return v;
+    const interim = localStorage.getItem(INTERIM_KEY);
+    if (isLook(interim)) {
+      localStorage.setItem(KEY, interim);
+      localStorage.removeItem(INTERIM_KEY);
+      return interim;
+    }
+    return DEFAULT_LOOK;
   } catch {
     return DEFAULT_LOOK;
   }

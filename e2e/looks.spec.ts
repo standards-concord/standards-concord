@@ -122,6 +122,35 @@ test.describe('looks', () => {
     expect(await look(page)).toBe('civic');
   });
 
+  test('a look saved under the interim key is carried over, before paint and in the app', async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem('seeded')) {
+        localStorage.removeItem('concord-look');
+        localStorage.setItem('concord-look-2', 'workbench');
+        sessionStorage.setItem('seeded', '1');
+      }
+      document.addEventListener('DOMContentLoaded', () => ((window as unknown as { bootLook?: string }).bootLook = document.documentElement.dataset.look));
+    });
+    await page.goto('/login');
+    expect(await page.evaluate(() => (window as unknown as { bootLook?: string }).bootLook)).toBe('workbench');
+    expect(await look(page)).toBe('workbench');
+    expect(await page.evaluate(() => [localStorage.getItem('concord-look'), localStorage.getItem('concord-look-2')])).toEqual(['workbench', null]);
+    await page.reload();
+    expect(await look(page)).toBe('workbench');
+  });
+
+  test('a valid original choice wins over an interim one', async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem('seeded')) {
+        localStorage.setItem('concord-look', 'civic');
+        localStorage.setItem('concord-look-2', 'workbench');
+        sessionStorage.setItem('seeded', '1');
+      }
+    });
+    await page.goto('/login');
+    expect(await look(page)).toBe('civic');
+  });
+
   for (const scheme of ['light', 'dark'] as const)
     test(`white avatar initials stay readable on every hue in the ODI look (${scheme})`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
