@@ -197,7 +197,7 @@ function ApprovalHistory({ r, userById }: { r: ReleaseDetail; userById: ReturnTy
             ? `The rules, approvals and vote as they stood when this release was ${verb} on ${formatDate(decidedAt, true)}. Later changes to the policy or members don’t change this record.`
             : `Concord didn’t keep a record of this decision when the release was ${verb}, so the rules and counts below apply today’s policy and members. They may not match what was required at the time.`}
         </p>
-        <ApprovalRecord g={r.governance} outcome={published ? 'approved' : 'rejected'} decidedAt={decidedAt} votes={r.votes} userById={userById} subject="release" />
+        <ApprovalRecord g={r.governance} outcome={published ? 'approved' : 'rejected'} decidedAt={decidedAt} votes={r.votes} userById={userById} subject="release" timing={recorded ? 'recorded' : 'unavailable'} />
       </div>
     </CollapsibleCard>
   );

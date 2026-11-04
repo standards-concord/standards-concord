@@ -94,11 +94,24 @@ export function Popover({
       setPlacement('bottom');
       return;
     }
+    // While the panel fills the screen, the page behind it doesn't scroll, so the panel can't be scrolled away.
+    let unlock: (() => void) | undefined;
+    const lockScroll = () => {
+      if (unlock) return;
+      const root = document.documentElement;
+      const prev = root.style.overflow;
+      root.style.overflow = 'hidden';
+      unlock = () => {
+        root.style.overflow = prev;
+        unlock = undefined;
+      };
+    };
     const place = () => {
       const panel = panelRef.current;
       const button = buttonRef.current;
       if (!panel || !button) return;
-      for (const k of ['transform', 'top', 'bottom', 'marginTop', 'marginBottom'] as const) panel.style[k] = '';
+      unlock?.();
+      for (const k of ['transform', 'position', 'top', 'bottom', 'left', 'right', 'marginTop', 'marginBottom', 'overscrollBehavior'] as const) panel.style[k] = '';
       // Measure the panel's natural height: the stylesheet's own cap (100vh - 8rem) collapses to nothing on
       // a very short screen and would make it look as if the panel fits. The inline cap set below replaces it.
       panel.style.maxHeight = 'none';
@@ -118,11 +131,25 @@ export function Popover({
       const room = Math.floor(up ? aboveRoom : below);
       const screen = vh - 2 * margin;
       if (r.height > room && room < 120 && screen > room) {
-        // Too little room on either side of the trigger (a very short or zoomed screen): use the whole
-        // viewport height instead, over the trigger, so nothing ends up off screen. The top is relative
-        // to the wrapper, the panel's offset parent.
-        const w = ref.current!.getBoundingClientRect();
-        Object.assign(panel.style, { top: `${margin - w.top}px`, bottom: 'auto', marginTop: '0', marginBottom: '0', maxHeight: `${screen}px` });
+        // Too little room on either side of the trigger (a very short or zoomed screen): fill the viewport
+        // instead, fixed to it, so nothing ends up off screen and scrolling stays inside the panel.
+        Object.assign(panel.style, {
+          position: 'fixed',
+          top: `${margin}px`,
+          left: `${margin}px`,
+          bottom: 'auto',
+          right: 'auto',
+          marginTop: '0',
+          marginBottom: '0',
+          transform: '',
+          maxHeight: `${screen}px`,
+          overscrollBehavior: 'contain',
+        });
+        // An ancestor with a transform or backdrop filter makes "fixed" relative to itself: correct for it.
+        const f = panel.getBoundingClientRect();
+        if (Math.abs(f.top - margin) > 0.5) panel.style.top = `${2 * margin - f.top}px`;
+        if (Math.abs(f.left - margin) > 0.5) panel.style.left = `${2 * margin - f.left}px`;
+        lockScroll();
         setPlacement('screen');
         return;
       }
@@ -132,7 +159,10 @@ export function Popover({
     };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    return () => {
+      window.removeEventListener('resize', place);
+      unlock?.();
+    };
   }, [open]);
   useEffect(() => {
     if (open) panelRef.current?.focus({ preventScroll: true });

@@ -72,8 +72,17 @@ test.describe('summaries, popups and disclosures', () => {
       await inView(vh);
       // Neither side of the trigger has room for the panel, so it takes the whole height instead.
       await expect(panel).toHaveAttribute('data-placement', 'screen');
+      // Scrolling past the end of the panel doesn't move the page behind it or carry the panel away.
+      const scrollY = await page.evaluate(() => window.scrollY);
+      await panel.hover({ force: true });
+      for (let i = 0; i < 5; i++) await page.mouse.wheel(0, 400);
+      await page.waitForTimeout(200);
+      expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+      await inView(vh);
       await page.keyboard.press('Escape');
       await expect(panel).toHaveCount(0);
+      // Closing it gives the page its scrolling back.
+      expect(await page.evaluate(() => document.documentElement.style.overflow)).toBe('');
     }
     // Back at a normal height, it sits next to its trigger again.
     await bubble.press('Enter');

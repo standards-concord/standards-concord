@@ -34,7 +34,8 @@ function pendingChanges(ontologyId: string) {
     .sort((a, b) => a.number - b.number);
 }
 
-export function releaseGovernance(r: Release) {
+/** Evaluate a release against today's policy. `until` leaves out votes cast after that time (a decision already made). */
+export function releaseGovernance(r: Release, until?: string) {
   const project = getProject(r.ontologyId);
   return evaluate({
     policy: project.governance,
@@ -45,7 +46,7 @@ export function releaseGovernance(r: Release) {
     reviewStartedAt: r.statusSince,
     authorId: r.createdBy,
     reviews: [],
-    votes: list<Vote>('votes', r.id),
+    votes: list<Vote>('votes', r.id).filter((v) => !until || v.at <= until),
     members: members(r.ontologyId),
     validationOk: true,
     now: clock.now(),
@@ -57,9 +58,12 @@ export function releaseApproval(r: Release): { governance: GovernanceEvaluation;
   const decided = r.status === 'published' || r.status === 'rejected';
   if (!decided) return { governance: releaseGovernance(r), approvalSource: 'live' };
   if (r.approval) return { governance: r.approval, approvalSource: 'recorded' };
+  // No record: re-evaluate with today's policy, but only with the votes cast before the decision.
+  const decidedAt = r.status === 'published' ? (r.publishedAt ?? r.statusSince) : r.statusSince;
+  const governance = releaseGovernance(r, decidedAt);
   // Releases are only drafted from merged changes, so a published release with none is the set-up release.
-  if (r.status === 'published' && !r.changeRequestIds.length) return { governance: releaseGovernance(r), approvalSource: 'bootstrap' };
-  return { governance: releaseGovernance(r), approvalSource: 'current-policy' };
+  if (r.status === 'published' && !r.changeRequestIds.length) return { governance, approvalSource: 'bootstrap' };
+  return { governance, approvalSource: 'current-policy' };
 }
 
 export function releaseDetail(r: Release): ReleaseDetail {

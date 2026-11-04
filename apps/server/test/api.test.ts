@@ -1,10 +1,11 @@
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
+import { members } from '../src/services/ontologies.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { releaseApproval, releaseGovernance } from '../src/services/releases.js';
-import type { Release } from '@concord/shared';
+import type { Release, Vote } from '@concord/shared';
 
 const app = createApp();
 type Agent = ReturnType<typeof request.agent>;
@@ -364,6 +365,25 @@ describe('release approval provenance', () => {
       const shown = releaseApproval(release({ status, approval: saved }));
       expect(shown.approvalSource).toBe('recorded');
       expect(shown.governance.requiredApprovals).toBe(42);
+    }
+  });
+
+  it('re-evaluates an unrecorded decision with only the votes cast before it, each person’s last vote counting', () => {
+    const decidedAt = '2026-11-02T12:00:00Z';
+    const probe = releaseGovernance(release({ id: 'rel_votes', level: 'major', status: 'voting' }));
+    const voterRoles = probe.rule.vote?.voterRoles ?? [];
+    expect(voterRoles.length, 'the demo policy votes on major releases').toBeGreaterThan(0);
+    const voters = members(demoId).filter((m) => m.roles.some((r) => voterRoles.includes(r)));
+    expect(voters.length).toBeGreaterThanOrEqual(2);
+    const [a, b] = voters;
+    const vote = (id: string, userId: string, choice: Vote['choice'], at: string): Vote => ({ id, subjectType: 'release', subjectId: 'rel_votes', userId, roles: ['member'], choice, at });
+    // a changes their mind before the decision (no, then yes); b only votes after it.
+    for (const v of [vote('v_a1', a.userId, 'no', '2026-11-01T09:00:00Z'), vote('v_a2', a.userId, 'yes', '2026-11-02T09:00:00Z'), vote('v_b', b.userId, 'no', '2026-11-03T09:00:00Z')])
+      put('votes', v, 'rel_votes');
+    for (const status of ['published', 'rejected'] as const) {
+      const { governance, approvalSource } = releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
+      expect(approvalSource).toBe('current-policy');
+      expect(governance.vote).toMatchObject({ cast: 1, yes: 1, no: 0 });
     }
   });
 });

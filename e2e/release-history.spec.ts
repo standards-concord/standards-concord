@@ -79,6 +79,8 @@ test.describe('release approval history', () => {
       publishedAt: past(1),
       approvalSource: 'recorded',
       votes: [
+        // The same person changed their mind: only the last vote before the decision is theirs.
+        { id: 'v0', subjectType: 'release', subjectId: base.id, userId: memberId, roles: ['member'], choice: 'no', at: past(3.5) },
         { id: 'v1', subjectType: 'release', subjectId: base.id, userId: memberId, roles: ['member'], choice: 'yes', at: voteAt },
         // Cast after the decision: not part of it.
         { id: 'v2', subjectType: 'release', subjectId: base.id, userId: 'late', roles: ['member'], choice: 'no', at: future() },
@@ -137,5 +139,52 @@ test.describe('release approval history', () => {
     await expect(page.getByTestId('approval-source')).toContainText('may not match what was required at the time');
     await expect(page.getByTestId('approval-record')).toContainText('Approved');
     await noLiveWording(page);
+  });
+
+  test('a recorded rejection says why, in the past tense, even when the vote itself passed', async ({ page }) => {
+    await serve(page, {
+      ...base,
+      status: 'rejected',
+      changeRequestIds: ['cr_x'],
+      publishedAt: undefined,
+      statusSince: past(1),
+      approvalSource: 'recorded',
+      votes: [],
+      governance: {
+        ...base.governance,
+        level: 'major',
+        rule: { ...base.governance.rule, minApprovals: 0, reviewPeriodDays: 3, vote: { voterRoles: ['member'], quorum: 0.5, threshold: 0.5, durationDays: 7 } },
+        requiredApprovals: 0,
+        approvals: 0,
+        reviewPeriodOver: true,
+        reviewPeriodEndsAt: past(2),
+        vote: { open: false, eligible: 2, cast: 2, yes: 2, no: 0, abstain: 0, quorumMet: true, thresholdMet: true },
+        vetoedBy: [],
+        unmet: ['ODI oversight must approve major changes.'],
+        next: 'Waiting for ODI oversight.',
+        outcome: 'rejected',
+      },
+    });
+    const reasons = page.getByRole('list', { name: 'Why it was rejected' });
+    await expect(reasons.getByRole('listitem')).toHaveText(['ODI oversight had to approve major changes.']);
+    const record = page.getByTestId('approval-record');
+    await expect(record).toContainText('quorum met');
+    await expect(record).toContainText('3 days, ended');
+    await noLiveWording(page);
+  });
+
+  test('the review period is only “ended” if it was over at the decision, and has no dates without a record', async ({ page }) => {
+    const governance = { ...base.governance, rule: { ...base.governance.rule, reviewPeriodDays: 3 }, reviewPeriodOver: false, reviewPeriodEndsAt: future() };
+    await serve(page, { ...base, status: 'published', changeRequestIds: ['cr_x'], publishedAt: past(1), approvalSource: 'recorded', votes: [], governance });
+    await page.getByRole('button', { name: /How this was approved/ }).click();
+    const record = page.getByTestId('approval-record');
+    await expect(record).toContainText('3 days, not over at the decision');
+    await expect(record).not.toContainText('ended');
+
+    await page.unrouteAll();
+    await serve(page, { ...base, status: 'published', changeRequestIds: ['cr_x'], publishedAt: past(1), approvalSource: 'current-policy', votes: [], governance: { ...governance, reviewPeriodOver: true } });
+    await page.getByRole('button', { name: /Approval, checked against today’s policy/ }).click();
+    await expect(page.getByTestId('approval-record')).toContainText('3 days (the actual review dates weren’t recorded)');
+    await expect(page.getByTestId('approval-record')).not.toContainText('Voting opened');
   });
 });
