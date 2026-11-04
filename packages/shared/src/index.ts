@@ -171,6 +171,8 @@ export interface OntologyProject {
   domain?: string;
   /** Example demo project for alpha testers. */
   demo?: boolean;
+  /** Everything this ontology publishes was approved as it was merged (older ones are checked once: see PublicHold). */
+  publishedWithApproval?: boolean;
 }
 
 export interface OntologySummary extends OntologyProject {
@@ -374,21 +376,44 @@ export type ChangeRequestOrigin =
   | { type: 'synthesis'; useCaseIds: string[] };
 
 /**
- * A statement the privacy clean-up took out of a published ontology (the
- * working draft or a release) because it may reveal a private use case or a
- * person: kept here, privately, so an owner or steward can put it back if it
- * was a false alarm.
+ * Versions of an ontology published before a person approved what goes
+ * public, held (their pages and downloads say they're being reviewed) until
+ * an owner or steward approves exactly what each publishes.
  */
-export interface WithheldStatement {
+export interface PublicHold {
   id: string;
   ontologyId: string;
-  /** "working" for the working draft, else a release version. */
+  /** 'draft' or a released version. */
+  versions: string[];
+  since: string;
+  approved?: { version: string; by: string; at: string; fingerprint: string }[];
+}
+/** What a steward reviews before approving a held version. */
+export interface PublicHoldReview {
   version: string;
+  /** Approving sends this back: it changes whenever what the version publishes does. */
+  fingerprint: string;
+  statements: number;
+  /** Statements and note lines that look like they name a use case or a person (hints, not verdicts). */
+  hints: { subject: string; predicate: string; object: string; kind: 'use case title' | 'name' }[];
+}
+
+export interface PublicationStatement {
   subject: string;
   predicate: string;
-  object: { value: string; language?: string; datatype?: string };
-  reason: 'credit' | 'use case title' | 'name';
-  at: string;
+  object: string;
+  /** Looks like it names a private use case or a person (a hint, not a verdict). */
+  hint?: 'use case title' | 'name';
+}
+/** Exactly what merging a request drafted from use cases would publish, for an editor to approve. */
+export interface Publication {
+  /** Approving sends this back: it changes whenever what would be published does. */
+  fingerprint: string;
+  title: string;
+  kgcl: string[];
+  statements: PublicationStatement[];
+  /** The title or edit list looks like it names something private. */
+  hints: { where: string; kind: 'use case title' | 'name' }[];
 }
 
 export interface PrivacyFinding {
@@ -510,13 +535,15 @@ export interface ChangeRequest {
   baseCommit?: string;
   mergedCommit?: string;
   /**
-   * What a merge would publish from the private use cases this was
-   * synthesised from (where, and what kind: never the text itself). Set when
-   * a merge is held back for it.
+   * Where what a merge would publish looks like it names a private use case
+   * or a person (where, and what kind: never the text itself). A hint for
+   * the editor approving it, set when a merge is held back.
    */
   privacyFindings?: PrivacyFinding[];
-  /** An editor confirmed nothing in this version of the request is private (it changes if the request does). */
-  privacyCleared?: { by: string; at: string; fingerprint: string };
+  /** An editor approved exactly what merging this request publishes (see needsPublicationApproval). */
+  privacyCleared?: { by: string; at: string; fingerprint: string; title: string; kgcl: string[] };
+  /** Merging stopped until an editor approves what it publishes. */
+  heldForPublication?: boolean;
   releaseId?: string;
   timeline: TimelineEvent[];
   createdAt: string;
@@ -550,6 +577,8 @@ export interface Release {
   status: 'draft' | 'voting' | 'published' | 'rejected';
   changeRequestIds: string[];
   notes: string;
+  /** Who wrote the notes, when a steward did; drafted notes have none. */
+  notesBy?: string;
   versionIRI: string;
   commit?: string;
   githubUrl?: string;
