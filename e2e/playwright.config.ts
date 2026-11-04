@@ -80,6 +80,7 @@ export default defineConfig({
             // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
             MEET_BOT_EMAIL: 'concord.bot@example.org',
             MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,
+            MEET_BOT_ALLOWED_INVITERS: '@example.org',
             RECALL_API_KEY: '',
           },
           stdout: 'ignore',

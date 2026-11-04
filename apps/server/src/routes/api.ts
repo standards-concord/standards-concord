@@ -277,6 +277,7 @@ export function apiRouter(): Router {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
   r.post('/ontologies/:id/meetings/bot', async (req, res) => {
+    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'send the co-lead bot into a call');
     res
       .status(201)
       .json(
@@ -286,6 +287,7 @@ export function apiRouter(): Router {
       );
   });
   r.post('/ontologies/:id/meetings/calendar', async (req, res) => {
+    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'schedule the co-lead bot');
     res.status(201).json(await meetBot.scheduleFromInvite(project(req), requireUser(req), str(req.body?.ics, 'ics', 2_000_000), { postPromptsToChat: req.body?.postPromptsToChat === true }));
   });
   r.get('/meet-bot', (_req, res) => res.json(meetBot.meetBotInfo()));
@@ -306,24 +308,24 @@ export function apiRouter(): Router {
   });
   r.get('/meetings/:id', (req, res) => res.json(meetings.getMeeting(String(req.params.id))));
   r.patch('/meetings/:id', async (req, res) => {
-    requireUser(req);
     const b = req.body ?? {};
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
-    res.json(await meetings.updateMeeting(meetings.getMeeting(String(req.params.id)), { postPromptsToChat: bool(b.postPromptsToChat), skip: bool(b.skip) }));
+    res.json(await meetings.updateMeeting(String(req.params.id), requireUser(req), { postPromptsToChat: bool(b.postPromptsToChat), skip: bool(b.skip), approve: bool(b.approve) }));
   });
   r.post('/meetings/:id/prompts/:index/post', async (req, res) => {
-    requireUser(req);
-    res.json(await meetings.postPrompt(meetings.getMeeting(String(req.params.id)), Number(req.params.index)));
+    const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireFacilitator(m, requireUser(req), 'post in the call’s chat');
+    res.json(await meetings.postPrompt(m.id, Number(req.params.index)));
   });
   r.post('/meetings/:id/analyse', async (req, res) => {
     requireUser(req);
     res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
   });
   r.post('/meetings/:id/end', async (req, res) => {
-    requireUser(req);
     const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireFacilitator(m, requireUser(req), 'end this call');
     meetings.stopSimulation(m.id);
-    res.json(await meetings.endLiveMeeting(m));
+    res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
     const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), requireUser(req));

@@ -5,9 +5,10 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, put, remove } from '../db.js';
 import { newId } from '../ids.js';
+import { withLock } from '../locks.js';
 import { parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
-import { findProject } from './ontologies.js';
-import { dispatchBot, emit, endLiveMeeting, lastLineTime, NO_BOT_PROVIDER, saveMeeting } from './meetings.js';
+import { findProject, rolesFor } from './ontologies.js';
+import { dispatchBot, emit, endLiveMeeting, FACILITATOR_ROLES, lastLineTime, meetingLock, NO_BOT_PROVIDER, saveMeeting } from './meetings.js';
 import { recall } from './recall.js';
 import { allUsers, logActivity } from './users.js';
 
@@ -19,8 +20,12 @@ import { allUsers, logActivity } from './users.js';
  * puts the call on the bot's calendar. The server reads that calendar as an
  * iCal feed (MEET_BOT_ICS_URL), files each upcoming call under an ontology, and
  * books a Recall.ai bot shortly before it starts. Moving or cancelling the
- * invite moves or cancels the bot. People can also upload a .ics invite on the
- * Meetings page, which schedules the same way without the email address.
+ * invite moves or cancels the bot.
+ *
+ * Only invites from the ontology's facilitators (or MEET_BOT_ALLOWED_INVITERS)
+ * book a bot straight away; anyone else's wait for a facilitator to approve, so
+ * a stranger can't send a paid bot into a call. People can also import a .ics
+ * invite on the Meetings page: a one-off import of the next two weeks' calls.
  */
 
 /** Calls further ahead than this aren't listed yet. */
@@ -46,27 +51,44 @@ export function meetBotInfo(): MeetBotInfo {
 }
 
 /* ------------------------------------------------------------------------ */
-/* Which ontology an invite is about                                          */
+/* Who invited the bot, and which ontology the call is about                  */
 /* ------------------------------------------------------------------------ */
 
 const words = (s: string) => ` ${s.toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+
+function splitInvite() {
+  const invite = config.meetBot.inviteEmail?.toLowerCase();
+  if (!invite?.includes('@')) return undefined;
+  const [local, domain] = invite.split('@');
+  return { local, domain };
+}
+
+/** The address the bot was invited as (its own, or a plus-address of it), if it was invited at all. */
+export function botAttendee(occ: Pick<CalendarOccurrence, 'attendees'>): string | undefined {
+  const inv = splitInvite();
+  if (!inv) return undefined;
+  return occ.attendees.find((a) => {
+    const [l, d] = a.split('@');
+    return d === inv.domain && (l === inv.local || l?.startsWith(`${inv.local}+`));
+  });
+}
 
 /**
  * In order: a plus-address on the invite (concord.bot+volunteering@gmail.com),
  * a tag in the title or description ("#volunteering" or "concord: volunteering"),
  * the one ontology whose title or slug the invite mentions, then the default.
+ * These only choose the ontology; they never authorise the bot.
  */
 export function routeOccurrence(occ: Pick<CalendarOccurrence, 'title' | 'description' | 'attendees'>): OntologyProject | undefined {
   const projects = list<OntologyProject>('ontologies');
   const bySlug = (tag: string) => findProject(tag.toLowerCase());
 
-  const invite = config.meetBot.inviteEmail?.toLowerCase();
-  if (invite?.includes('@')) {
-    const [local, domain] = invite.split('@');
+  const inv = splitInvite();
+  if (inv) {
     for (const a of occ.attendees) {
       const [aLocal, aDomain] = a.split('@');
-      if (aDomain !== domain || !aLocal?.startsWith(`${local}+`)) continue;
-      const p = bySlug(aLocal.slice(local.length + 1));
+      if (aDomain !== inv.domain || !aLocal?.startsWith(`${inv.local}+`)) continue;
+      const p = bySlug(aLocal.slice(inv.local.length + 1));
       if (p) return p;
     }
   }
@@ -88,47 +110,128 @@ export function routeOccurrence(occ: Pick<CalendarOccurrence, 'title' | 'descrip
   return projects.find((p) => p.demo) ?? (projects.length === 1 ? projects[0] : undefined);
 }
 
+const userByEmail = (email?: string) => (email ? allUsers().find((u) => u.email?.toLowerCase() === email) : undefined);
+
+/** May this organiser book the bot for this ontology without a facilitator approving it? */
+export function inviterAuthorised(organizer: string | undefined, project: OntologyProject) {
+  if (!organizer) return false;
+  const allowed = config.meetBot.allowedInviters;
+  if (allowed.includes(organizer) || allowed.some((a) => a.startsWith('@') && organizer.endsWith(a))) return true;
+  const u = userByEmail(organizer);
+  return !!u && (!!u.isPlatformAdmin || config.adminEmails.includes(organizer) || rolesFor(project.id, u.id).some((r) => FACILITATOR_ROLES.includes(r)));
+}
+
 /* ------------------------------------------------------------------------ */
-/* Calendar sync                                                             */
+/* Reading the calendar                                                       */
 /* ------------------------------------------------------------------------ */
 
+/** Errors about the feed never repeat its address: it is a secret, and the error is shown publicly. */
+export function sanitise(message: string) {
+  let out = message;
+  const url = config.meetBot.calendarIcsUrl;
+  if (url) out = out.split(url).join('[calendar address]');
+  return out.replace(/\b(?:https?|webcal|file):\/\/\S+/gi, '[calendar address]');
+}
+
+/** Checks MEET_BOT_ICS_URL before it is used. Returns a problem to report, if any. */
+export function feedProblem(url: string): string | undefined {
+  try {
+    const u = new URL(url.replace(/^webcal:/i, 'https:'));
+    if (!['https:', 'http:', 'file:'].includes(u.protocol)) return 'MEET_BOT_ICS_URL must be an https:// address (the calendar’s secret address in iCal format).';
+  } catch {
+    return 'MEET_BOT_ICS_URL is not a valid address. Paste the calendar’s secret address in iCal format, without quotes.';
+  }
+  return undefined;
+}
+
 async function readFeed(url: string) {
+  const problem = feedProblem(url);
+  if (problem) throw new Error(problem);
   if (url.startsWith('file:')) return fs.readFile(fileURLToPath(url), 'utf8');
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000), headers: { Accept: 'text/calendar' } });
-  if (!res.ok) throw new Error(`The calendar feed returned ${res.status}`);
+  let res: Response;
+  try {
+    res = await fetch(url.replace(/^webcal:/i, 'https:'), { signal: AbortSignal.timeout(20_000), headers: { Accept: 'text/calendar' } });
+  } catch {
+    throw new Error('Could not reach the calendar feed.');
+  }
+  if (!res.ok) throw new Error(`The calendar feed returned ${res.status}${res.status === 404 ? '. The secret address may have been reset; copy it again from the calendar’s settings' : ''}.`);
   const text = await res.text();
   if (!text.includes('BEGIN:VCALENDAR')) throw new Error('The calendar feed is not an iCal file. Use the “Secret address in iCal format” from the calendar’s settings.');
   return text;
 }
 
-const organizerUser = (email?: string) => (email ? allUsers().find((u) => u.email?.toLowerCase() === email) : undefined);
+/* ------------------------------------------------------------------------ */
+/* Keeping scheduled meetings in line with the calendar                        */
+/* ------------------------------------------------------------------------ */
+
+/** Drops a scheduled call, cancelling its booked bot first. If Recall.ai won't cancel, it is kept and retried. */
+async function cancelScheduled(meetingId: string): Promise<boolean> {
+  return meetingLock(meetingId, async () => {
+    const m = get<Meeting>('meetings', meetingId);
+    if (!m) return true;
+    if (m.bot?.botId) {
+      const r = await recall.cancelBot(m.bot.botId);
+      if (!r.ok) {
+        m.calendar = { ...m.calendar!, cancelPending: true };
+        m.bot = { ...m.bot, error: r.error };
+        saveMeeting(m);
+        return false;
+      }
+    }
+    remove('meetings', m.id);
+    return true;
+  });
+}
+
+const calendarMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite' && m.calendar);
 
 /**
- * Brings the scheduled meetings for one feed in line with its occurrences.
- * Calls that disappeared from the bot's calendar (cancelled, or the bot was
- * removed from the invite) are dropped, with their booked bot cancelled.
+ * Brings the scheduled meetings in line with a feed's occurrences. One meeting per
+ * occurrence, whichever way it arrived. Calls that disappeared from the bot's
+ * calendar (cancelled, or the bot was taken off the invite) are dropped, and so
+ * are weeks missing from a re-imported .ics of the same series.
  */
 async function reconcile(occs: CalendarOccurrence[], feed: 'calendar' | 'upload', opts: { now: Date; project?: OntologyProject; actor?: User; postPromptsToChat?: boolean }) {
-  const all = list<Meeting>('meetings').filter((m) => m.calendar?.feed === feed && (!opts.project || m.ontologyId === opts.project.id));
-  const byKey = new Map(all.map((m) => [m.calendar!.key, m]));
+  const byKey = new Map(calendarMeetings().map((m) => [m.calendar!.key, m]));
   const touched: Meeting[] = [];
+  const seen = new Set<string>();
 
   for (const occ of occs) {
     if (!occ.meetingUrl) continue;
+    // From the calendar, only invites the bot is on (and hasn't declined) count.
+    if (feed === 'calendar' && config.meetBot.inviteEmail) {
+      const me = botAttendee(occ);
+      if (!me || occ.attendeeStatus[me] === 'DECLINED') continue;
+    }
+    seen.add(occ.key);
     const existing = byKey.get(occ.key);
+
     if (!existing) {
       if (occ.end <= opts.now) continue;
       const project = opts.project ?? routeOccurrence(occ);
       if (!project) continue;
-      const by = opts.actor ?? organizerUser(occ.organizer);
+      const approved = feed === 'upload' || inviterAuthorised(occ.organizer, project);
+      const by = opts.actor ?? userByEmail(occ.organizer);
+      const postPromptsToChat = opts.postPromptsToChat ?? config.meetBot.postToChatDefault;
       const m = saveMeeting({
         id: newId('mtg'),
         ontologyId: project.id,
         title: occ.title,
         source: 'calendar-invite',
         meetingUrl: occ.meetingUrl,
-        calendar: { key: occ.key, feed, start: occ.start.toISOString(), end: occ.end.toISOString(), organizer: occ.organizer, recurring: occ.recurring },
-        postPromptsToChat: opts.postPromptsToChat ?? config.meetBot.postToChatDefault,
+        calendar: {
+          key: occ.key,
+          uid: occ.uid,
+          feed,
+          start: occ.start.toISOString(),
+          end: occ.end.toISOString(),
+          organizer: occ.organizer,
+          recurring: occ.recurring,
+          approval: approved ? 'approved' : 'pending',
+          approvedBy: approved ? by?.id : undefined,
+        },
+        postPromptsToChat,
+        chatModeAnnounced: postPromptsToChat,
         bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' },
         transcript: [],
         facilitatorPrompts: [],
@@ -140,36 +243,55 @@ async function reconcile(occs: CalendarOccurrence[], feed: 'calendar' | 'upload'
         ontologyId: project.id,
         actorId: by?.id,
         type: 'meeting.scheduled',
-        message: `${by ? '' : 'A calendar invite '}scheduled the co-lead bot for “${m.title}” on ${occ.start.toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+        message: approved
+          ? `${by ? '' : 'A calendar invite '}scheduled the co-lead bot for “${m.title}” on ${occ.start.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+          : `An invite from ${occ.organizer ?? 'an unknown organiser'} asks the co-lead bot to join “${m.title}”. A facilitator needs to approve it.`,
         link: `/o/${project.id}/meetings/${m.id}`,
       });
       touched.push(m);
       continue;
     }
-    touched.push(existing);
-    if (existing.status !== 'scheduled') continue;
-    const cal = existing.calendar!;
-    const moved = cal.start !== occ.start.toISOString() || existing.meetingUrl !== occ.meetingUrl;
-    if (!moved && existing.title === occ.title && cal.end === occ.end.toISOString()) continue;
-    if (moved && existing.bot?.botId) {
-      await recall.deleteBot(existing.bot.botId);
-      existing.bot = { provider: existing.bot.provider, status: 'scheduled' };
+
+    if (opts.project && existing.ontologyId !== opts.project.id) {
+      const other = findProject(existing.ontologyId);
+      throw new HttpError(409, `“${existing.title}” is already scheduled under ${other?.title ?? 'another ontology'}.`);
     }
-    existing.title = occ.title;
-    existing.meetingUrl = occ.meetingUrl;
-    existing.calendar = { ...cal, start: occ.start.toISOString(), end: occ.end.toISOString(), organizer: occ.organizer };
-    saveMeeting(existing);
-    emit(existing, { type: 'meeting', meeting: existing });
+    const updated = await meetingLock(existing.id, async () => {
+      const m = get<Meeting>('meetings', existing.id);
+      if (!m) return undefined;
+      // The calendar is the better source: it reports moves and cancellations.
+      if (feed === 'calendar' && m.calendar!.feed === 'upload') m.calendar!.feed = 'calendar';
+      if (m.status !== 'scheduled') return m;
+      const cal = m.calendar!;
+      const moved = cal.start !== occ.start.toISOString() || m.meetingUrl !== occ.meetingUrl;
+      if (!moved && m.title === occ.title && cal.end === occ.end.toISOString()) return saveMeeting(m);
+      if (moved && m.bot?.botId) {
+        const r = await recall.cancelBot(m.bot.botId);
+        // Keep the old booking (and retry) rather than lose track of a bot that may still join.
+        if (!r.ok) {
+          m.bot = { ...m.bot, error: r.error };
+          return saveMeeting(m);
+        }
+        m.bot = { provider: m.bot.provider, status: 'scheduled' };
+      }
+      m.title = occ.title;
+      m.meetingUrl = occ.meetingUrl;
+      m.calendar = { ...cal, start: occ.start.toISOString(), end: occ.end.toISOString(), organizer: occ.organizer, cancelPending: undefined };
+      return saveMeeting(m);
+    });
+    if (updated) {
+      emit(updated, { type: 'meeting', meeting: updated });
+      touched.push(updated);
+    }
   }
 
-  if (feed === 'calendar') {
-    const live = new Set(occs.filter((o) => o.meetingUrl).map((o) => o.key));
-    for (const m of all) {
-      if (m.status !== 'scheduled' || live.has(m.calendar!.key)) continue;
-      if (new Date(m.calendar!.end) <= opts.now) continue; // past; the dispatcher tidies it up
-      if (m.bot?.botId) await recall.deleteBot(m.bot.botId);
-      remove('meetings', m.id);
-    }
+  // Scheduled calls this feed no longer lists.
+  const uids = new Set(occs.map((o) => o.uid));
+  for (const m of calendarMeetings()) {
+    const cal = m.calendar!;
+    if (m.status !== 'scheduled' || seen.has(cal.key) || new Date(cal.end) <= opts.now) continue;
+    const gone = feed === 'calendar' ? cal.feed === 'calendar' : cal.feed === 'upload' && m.ontologyId === opts.project?.id && !!cal.uid && uids.has(cal.uid) && new Date(cal.start).getTime() < opts.now.getTime() + HORIZON_MS;
+    if (gone) await cancelScheduled(m.id);
   }
   return touched;
 }
@@ -178,20 +300,26 @@ async function reconcile(occs: CalendarOccurrence[], feed: 'calendar' | 'upload'
 export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastSync']> {
   const url = config.meetBot.calendarIcsUrl;
   if (!url) return undefined;
-  let state: SyncState;
-  try {
-    const occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
-    await reconcile(occs, 'calendar', { now });
-    state = { at: now.toISOString(), ok: true, events: occs.filter((o) => o.meetingUrl).length };
-  } catch (err) {
-    state = { at: now.toISOString(), ok: false, events: 0, error: (err as Error).message };
-    console.warn(`[meet-bot] calendar sync failed: ${state.error}`);
-  }
-  put('kv', { id: SYNC_KEY, ...state });
-  return state;
+  return withLock('meet-bot:calendar', async () => {
+    let state: SyncState;
+    try {
+      const occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
+      await reconcile(occs, 'calendar', { now });
+      state = { at: now.toISOString(), ok: true, events: occs.filter((o) => o.meetingUrl && (!config.meetBot.inviteEmail || botAttendee(o))).length };
+    } catch (err) {
+      state = { at: now.toISOString(), ok: false, events: 0, error: sanitise((err as Error).message) };
+      console.warn(`[meet-bot] calendar sync failed: ${state.error}`);
+    }
+    put('kv', { id: SYNC_KEY, ...state });
+    return state;
+  });
 }
 
-/** "Upload a calendar invite": schedules the bot for every call in a .ics file, under this ontology. */
+/**
+ * "Import calendar occurrences": schedules the bot for the calls in a .ics file
+ * over the next two weeks, under this ontology. A one-off import: later weeks of
+ * a series need another import, or an invite to the bot's address.
+ */
 export async function scheduleFromInvite(project: OntologyProject, user: User, ics: string, opts: { postPromptsToChat?: boolean; now?: Date } = {}) {
   const now = opts.now ?? new Date();
   let occs: CalendarOccurrence[];
@@ -202,7 +330,7 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
   }
   if (!occs.length) throw new HttpError(400, 'That invite has no calls in the next two weeks.');
   if (!occs.some((o) => o.meetingUrl)) throw new HttpError(400, 'That invite has no Google Meet link.');
-  const touched = await reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat });
+  const touched = await withLock('meet-bot:calendar', () => reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat }));
   await dispatchDue(now);
   return touched.map((m) => get<Meeting>('meetings', m.id) ?? m);
 }
@@ -211,68 +339,89 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
 /* Booking bots and ending calls                                             */
 /* ------------------------------------------------------------------------ */
 
-/** Books bots for calls starting soon, closes out calls that have finished. */
-export async function dispatchDue(now = new Date()) {
-  for (const m of list<Meeting>('meetings')) {
-    if (m.source !== 'calendar-invite' || !m.calendar) continue;
-    const start = new Date(m.calendar.start).getTime();
-    const end = new Date(m.calendar.end).getTime();
+/** One scheduled call: book its bot when it's due, go live when it starts, tidy up when it's over. Runs under the meeting's lock. */
+async function dispatchOne(meetingId: string, now: Date) {
+  return meetingLock(meetingId, async () => {
+    const m = get<Meeting>('meetings', meetingId);
+    if (!m || m.status !== 'scheduled' || !m.calendar) return;
+    const cal = m.calendar;
+    const start = new Date(cal.start).getTime();
+    const end = new Date(cal.end).getTime();
     const t = now.getTime();
-
-    if (m.status === 'scheduled') {
-      if (t >= end) {
-        if (m.calendar.skip) remove('meetings', m.id);
-        else {
-          m.status = 'error';
-          m.bot = { provider: m.bot?.provider ?? 'simulated', status: 'error', error: m.bot?.error ?? 'The call ended before the bot could join.' };
-          saveMeeting(m);
-        }
-        continue;
-      }
-      if (m.bot?.botId) {
-        // Booked: the call goes live when it starts (or when the first transcript line arrives).
-        if (t >= start) {
-          m.status = 'live';
-          m.bot = { ...m.bot, status: 'joining' };
-          saveMeeting(m);
-          emit(m, { type: 'meeting', meeting: m });
-        }
-        continue;
-      }
-      if (m.calendar.skip || t < start - BOOK_AHEAD_MS) continue;
-      if (!recall.enabled()) {
-        m.status = 'error';
-        m.bot = { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
-        saveMeeting(m);
-        emit(m, { type: 'meeting', meeting: m });
-        continue;
-      }
-      const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined);
-      // A failed booking is retried on the next tick until the call ends.
-      if (bot.status === 'error') m.bot = { provider: 'recall', status: 'scheduled', error: bot.error };
-      else if (t >= start) {
-        m.bot = bot;
-        m.status = 'live';
-      } else m.bot = { ...bot, status: 'scheduled' };
+    const changed = () => {
       saveMeeting(m);
       emit(m, { type: 'meeting', meeting: m });
-      continue;
-    }
+    };
 
-    if (m.status === 'live' && t > end) {
+    if (cal.cancelPending) {
+      const r = m.bot?.botId ? await recall.cancelBot(m.bot.botId) : ({ ok: true } as const);
+      if (r.ok) remove('meetings', m.id);
+      return;
+    }
+    if (t >= end) {
+      if (cal.skip || cal.approval === 'pending') remove('meetings', m.id);
+      else {
+        m.status = 'error';
+        m.bot = { provider: m.bot?.provider ?? 'simulated', status: 'error', error: m.bot?.error ?? 'The call ended before the bot could join.' };
+        changed();
+      }
+      return;
+    }
+    if (m.bot?.botId) {
+      // Booked: the call goes live when it starts (or when the first transcript line arrives).
+      if (t >= start) {
+        m.status = 'live';
+        m.bot = { ...m.bot, status: 'joining' };
+        changed();
+      }
+      return;
+    }
+    if (cal.skip || cal.approval === 'pending' || t < start - BOOK_AHEAD_MS) return;
+    if (!recall.enabled()) {
+      m.status = 'error';
+      m.bot = { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
+      changed();
+      return;
+    }
+    const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined);
+    // A failed booking is retried on the next tick until the call ends.
+    if (bot.status === 'error') m.bot = { provider: 'recall', status: 'scheduled', error: bot.error };
+    else if (t >= start) {
+      m.bot = bot;
+      m.status = 'live';
+    } else m.bot = { ...bot, status: 'scheduled' };
+    m.chatModeAnnounced = !!m.postPromptsToChat;
+    changed();
+  });
+}
+
+/** Books bots for calls starting soon, closes out calls that have finished. */
+export async function dispatchDue(now = new Date()) {
+  for (const m of calendarMeetings()) {
+    if (m.status === 'scheduled') await dispatchOne(m.id, now);
+    else if (m.status === 'live' && now.getTime() > new Date(m.calendar!.end).getTime()) {
+      const t = now.getTime();
+      const end = new Date(m.calendar!.end).getTime();
       const quietFor = t - (lastLineTime(m.id) ?? 0);
-      if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) await endLiveMeeting(m).catch((err) => console.warn(`[meet-bot] ending ${m.id}: ${(err as Error).message}`));
+      if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) await endLiveMeeting(m.id).catch((err) => console.warn(`[meet-bot] ending ${m.id}: ${(err as Error).message}`));
     }
   }
 }
 
 let lastSyncAt = 0;
+let ticking = false;
 
-/** Runs every minute from the server's clock loop. */
+/** Runs every minute from the server's clock loop. Overlapping ticks are skipped. */
 export async function meetBotTick(now = new Date()) {
-  if (config.meetBot.calendarIcsUrl && now.getTime() - lastSyncAt >= config.meetBot.calendarPollMs - 1000) {
-    lastSyncAt = now.getTime();
-    await syncCalendar(now);
+  if (ticking) return;
+  ticking = true;
+  try {
+    if (config.meetBot.calendarIcsUrl && now.getTime() - lastSyncAt >= config.meetBot.calendarPollMs - 1000) {
+      lastSyncAt = now.getTime();
+      await syncCalendar(now);
+    }
+    await dispatchDue(now);
+  } finally {
+    ticking = false;
   }
-  await dispatchDue(now);
 }

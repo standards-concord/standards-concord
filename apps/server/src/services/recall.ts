@@ -29,8 +29,8 @@ export const recall = {
    */
   async createBot(opts: { meetingUrl: string; webhookUrl: string; joinAt?: string; postPromptsToChat: boolean }) {
     const intro = opts.postPromptsToChat
-      ? `Hi, I'm ${config.meetBot.botName}. I'm listening to capture use cases and terms for the ontology, and I'll post the odd clarifying question here in the chat.`
-      : `Hi, I'm ${config.meetBot.botName}. I'm listening to capture use cases and terms for the ontology. My suggestions go to the facilitator in Concord, not this chat.`;
+      ? `Hi, I'm ${config.meetBot.botName}. I'm transcribing this call to capture use cases and terms for the ontology, and I'll post the odd clarifying question here in the chat.`
+      : `Hi, I'm ${config.meetBot.botName}. I'm transcribing this call to capture use cases and terms for the ontology. For now my suggestions go to the facilitator in Concord, not this chat; I'll say here if that changes.`;
     const res = await fetch(`${base()}/bot/`, {
       method: 'POST',
       headers: headers(),
@@ -49,9 +49,21 @@ export const recall = {
     return (await res.json()) as { id: string };
   },
 
-  /** Cancels a scheduled bot that hasn't joined yet (the invite was cancelled or moved). */
-  async deleteBot(botId: string) {
-    await fetch(`${base()}/bot/${botId}/`, { method: 'DELETE', headers: headers() }).catch(() => undefined);
+  /**
+   * Cancels a bot: a scheduled bot is deleted; once it is joining or in the call,
+   * Recall.ai refuses deletion and the bot is told to leave instead. Returns false
+   * (and the caller keeps the bot id, to retry) when neither worked.
+   */
+  async cancelBot(botId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      const del = await fetch(`${base()}/bot/${botId}/`, { method: 'DELETE', headers: headers() });
+      if (del.ok || del.status === 404) return { ok: true };
+      const leave = await fetch(`${base()}/bot/${botId}/leave_call/`, { method: 'POST', headers: headers() });
+      if (leave.ok) return { ok: true };
+      return { ok: false, error: `Recall.ai would not cancel the bot (${del.status}, then ${leave.status}).` };
+    } catch (err) {
+      return { ok: false, error: `Could not reach Recall.ai to cancel the bot: ${(err as Error).message}` };
+    }
   },
 
   async sendChat(botId: string, message: string): Promise<{ ok: true } | { ok: false; error: string }> {

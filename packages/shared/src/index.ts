@@ -346,6 +346,8 @@ export interface FacilitatorPrompt {
 export interface MeetingCalendarInfo {
   /** Stable key of this occurrence (event UID plus its start), used to avoid joining twice. */
   key: string;
+  /** The calendar event's UID (shared by every week of a series). */
+  uid?: string;
   feed: 'calendar' | 'upload';
   start: string;
   end: string;
@@ -354,6 +356,14 @@ export interface MeetingCalendarInfo {
   recurring: boolean;
   /** Set when someone told the bot to stay out of this occurrence. */
   skip?: boolean;
+  /**
+   * 'pending' when the invite came from someone who isn't a facilitator of the
+   * ontology (or on the allow-list): no bot is booked until a facilitator approves.
+   */
+  approval?: 'approved' | 'pending';
+  approvedBy?: string;
+  /** The call left the calendar but cancelling its booked bot failed; retried every minute. */
+  cancelPending?: boolean;
 }
 
 export interface Meeting {
@@ -368,6 +378,8 @@ export interface Meeting {
   calendar?: MeetingCalendarInfo;
   /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */
   postPromptsToChat?: boolean;
+  /** What the bot last told the call about posting in its chat (its join message, or a later notice). */
+  chatModeAnnounced?: boolean;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
   facilitatorPrompts: FacilitatorPrompt[];
@@ -387,6 +399,7 @@ export interface MeetBotInfo {
   calendarConnected: boolean;
   /** Default for "post prompts into the Meet chat" on calls that arrive by invite. */
   postToChatDefault: boolean;
+  /** The latest read of the bot's calendar. The error never contains the feed's secret address. */
   lastSync?: { at: string; ok: boolean; events: number; error?: string };
 }
 

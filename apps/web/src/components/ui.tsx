@@ -216,7 +216,7 @@ export function Field({ label, hint, children, className }: { label: ReactNode; 
   );
 }
 
-export function Toggle({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean }) {
+export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean; ariaLabel?: string }) {
   const id = useId();
   return (
     <span className="inline-flex items-center gap-2">
@@ -225,6 +225,7 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-label={ariaLabel}
         disabled={disabled}
         onClick={() => onChange(!checked)}
         className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-line-strong')}
@@ -336,6 +337,34 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       {active && <Check className="size-3" />}
       {children}
     </button>
+  );
+}
+
+/** A labelled choice of one option, shown as chips (a radio group to assistive technology). */
+export function Segmented<T extends string>({ label, value, onChange, options, className }: { label: string; value: T; onChange: (v: T) => void; options: { value: T; label: ReactNode; icon?: LucideIcon }[]; className?: string }) {
+  return (
+    <div role="radiogroup" aria-label={label} className={cx('flex flex-wrap gap-2', className)}>
+      {options.map((o) => {
+        const active = o.value === value;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(o.value)}
+            className={cx(
+              'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+              active ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',
+            )}
+          >
+            {Icon && <Icon className="size-3" aria-hidden />}
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -71,16 +71,16 @@ END:VEVENT`;
 }
 
 /** A one-off call. Times are UTC. */
-export function oneOff(o: InviteOpts & { uid?: string; start: string; end: string }) {
+export function oneOff(o: InviteOpts & { uid?: string; start: string; end: string; organizer?: string; partstat?: string }) {
   const meet = o.meet ?? 'https://meet.google.com/xyz-abcd-efg';
   const ics = (d: string) => d.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   return `BEGIN:VEVENT
 DTSTART:${ics(o.start)}
 DTEND:${ics(o.end)}
 DTSTAMP:20261001T120000Z
-ORGANIZER;CN=Tom Okafor:mailto:tom@example.org
+ORGANIZER;CN=Organiser:mailto:${o.organizer ?? 'tom@example.org'}
 UID:${o.uid ?? 'one-off-1@google.com'}
-ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;CN=${o.bot ?? 'concord.bot@example.org'}:mailto:${o.bot ?? 'concord.bot@example.org'}
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=${o.partstat ?? 'NEEDS-ACTION'};CN=${o.bot ?? 'concord.bot@example.org'}:mailto:${o.bot ?? 'concord.bot@example.org'}
 X-GOOGLE-CONFERENCE:${meet}
 DESCRIPTION:${o.description ?? ''}
 SUMMARY:${o.title ?? 'Use case workshop'}

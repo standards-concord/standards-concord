@@ -5,11 +5,11 @@ import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSqu
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
-import { Badge, Button, Card, CardHeader, Chip, EmptyState, ErrorCard, InlineError, Loading, Spinner, Toggle } from '../../components/ui';
+import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Segmented, Spinner, Toggle } from '../../components/ui';
 import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
-import { MeetingStatus } from './Meetings';
+import { ChatToggle, MeetingStatus, useCanFacilitate } from './Meetings';
 
 const SPEAKER_COLORS = ['#2563eb', '#c2410c', '#15803d', '#9333ea', '#be185d', '#0e7490', '#a16207', '#4f46e5'];
 
@@ -89,7 +89,8 @@ export function MeetingDetailPage() {
   }, [m.data?.transcript]);
 
   const analyse = useAction(async () => m.setData(await api.analyseMeeting(meetingId)));
-  const update = useAction(async (changes: { postPromptsToChat?: boolean; skip?: boolean }) => m.setData(await api.updateMeeting(meetingId, changes)));
+  const canFacilitate = useCanFacilitate();
+  const update = useAction(async (changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => m.setData(await api.updateMeeting(meetingId, changes)));
   const end = useAction(async () => m.setData(await api.endMeeting(meetingId)));
   const [posting, setPosting] = useState<number>();
   const postPrompt = useAction(async (i: number) => {
@@ -113,6 +114,7 @@ export function MeetingDetailPage() {
   const mt = m.data;
   const a = mt.analysis;
   // Posting into the meeting chat needs a bot in the call (or a simulated one).
+  const mayRun = canFacilitate(mt);
   const hasChat = mt.source === 'simulation' || mt.source === 'google-meet-bot' || mt.source === 'calendar-invite';
   const canPostNow = live && (mt.source === 'simulation' || (mt.bot?.provider === 'recall' && ['joining', 'in-call'].includes(mt.bot.status)));
 
@@ -127,7 +129,11 @@ export function MeetingDetailPage() {
         )}
         {scheduled && mt.calendar && (
           <p className="text-sm text-muted">
-            {mt.calendar.skip ? 'The bot is skipping this call.' : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The transcript streams in here live.`}
+            {mt.calendar.approval === 'pending'
+              ? `${mt.calendar.organizer ?? 'Someone'} invited the bot. It won’t join until one of the ontology’s owners, stewards or editors approves.`
+              : mt.calendar.skip
+                ? 'The bot is skipping this call.'
+                : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The host may need to admit it. The transcript streams in here live.`}
           </p>
         )}
         {!mt.transcript.length && !waitingBot && !scheduled && <p className="text-sm text-muted">No transcript yet.</p>}
@@ -148,10 +154,9 @@ export function MeetingDetailPage() {
   const promptsCard = (
     <Card>
       <CardHeader icon={Bot} title="Co-lead bot prompts" subtitle="Gaps and follow-up questions the bot raised" />
-      {hasChat && (live || scheduled) && (
+      {hasChat && mayRun && (live || scheduled) && (
         <div className="border-b border-line px-5 py-3">
-          <Toggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} label="Post prompts in the Meet chat" />
-          <p className="mt-1 pl-11 text-xs text-muted">{mt.postPromptsToChat ? 'Everyone in the call sees each new prompt in the chat.' : 'New prompts only show here. Post any of them with its button.'}</p>
+          <ChatToggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} />
         </div>
       )}
       <ul className="divide-y divide-line">
@@ -164,7 +169,7 @@ export function MeetingDetailPage() {
                 {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
               </p>
               {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
-              {!p.posted && canPostNow && (
+              {!p.posted && canPostNow && mayRun && (
                 <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
                   Post in the Meet chat
                 </Button>
@@ -218,10 +223,18 @@ export function MeetingDetailPage() {
           {mt.bot?.error && <p className="mt-1 text-sm text-danger">Bot error: {mt.bot.error}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {scheduled && mt.calendar && (
-            <Toggle checked={!mt.calendar.skip} onChange={(v) => void update.run({ skip: !v })} disabled={update.pending} label={mt.calendar.skip ? 'The bot will skip this call' : 'The bot will join this call'} />
+          {scheduled && mt.calendar && mayRun && mt.calendar.approval === 'pending' && (
+            <Button variant="primary" loading={update.pending} onClick={() => void update.run({ approve: true })}>
+              Approve the bot joining
+            </Button>
           )}
-          {live && (
+          {scheduled && mt.calendar && mayRun && mt.calendar.approval !== 'pending' && (
+            <span className="inline-flex items-center gap-2 text-sm">
+              <Toggle checked={!mt.calendar.skip} onChange={(v) => void update.run({ skip: !v })} disabled={update.pending} ariaLabel="Bot joins this call" />
+              <span aria-hidden>{mt.calendar.skip ? 'Skipping this call' : 'Bot joins this call'}</span>
+            </span>
+          )}
+          {live && mayRun && (
             <Button icon={PhoneOff} loading={end.pending} onClick={() => void end.run()}>
               End call and analyse
             </Button>
@@ -251,15 +264,22 @@ export function MeetingDetailPage() {
 
       {showViews && a ? (
         <>
-          <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="Meeting views">
-            {VIEWS.map(([key, label]) => (
-              <Chip key={key} active={view === key} onClick={() => setView(key)}>
-                {label}
-                {key === 'prompts' && <span className="text-subtle">{mt.facilitatorPrompts.length}</span>}
-                {key === 'extracted' && <span className="text-subtle">{a.useCases.length + a.terms.length + a.competencyQuestions.length + a.openQuestions.length}</span>}
-              </Chip>
-            ))}
-          </div>
+          <Segmented
+            className="mb-4"
+            label="Meeting views"
+            value={view}
+            onChange={setView}
+            options={VIEWS.map(([key, label]) => ({
+              value: key,
+              label: (
+                <>
+                  {label}
+                  {key === 'prompts' && <span className="text-subtle">{mt.facilitatorPrompts.length}</span>}
+                  {key === 'extracted' && <span className="text-subtle">{a.useCases.length + a.terms.length + a.competencyQuestions.length + a.openQuestions.length}</span>}
+                </>
+              ),
+            }))}
+          />
           {view === 'summary' && <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} onOpen={setView} />}
           {view === 'transcript' && transcriptCard}
           {view === 'prompts' && promptsCard}

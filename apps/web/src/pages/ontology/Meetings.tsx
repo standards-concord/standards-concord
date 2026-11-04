@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { Meeting, MeetBotInfo } from '@concord/shared';
 import { Bot, CalendarClock, CalendarPlus, ClipboardPaste, FileUp, Mail, Play, Plus, Radio, Repeat, Users, Video } from 'lucide-react';
@@ -7,14 +7,14 @@ import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
-import { Badge, Button, Card, CardHeader, Chip, CopyButton, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Textarea, Toggle } from '../../components/ui';
+import { Badge, Button, Card, CardHeader, CopyButton, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Segmented, Textarea, Toggle } from '../../components/ui';
 import { useOntology } from './Layout';
 
 export function MeetingStatus({ m }: { m: Meeting }) {
   if (m.status === 'scheduled')
     return (
       <Badge tone={m.calendar?.skip ? 'neutral' : 'accent'} icon={CalendarClock}>
-        {m.calendar?.skip ? 'Bot skipping' : m.bot?.botId ? 'Bot booked' : 'Scheduled'}
+        {m.calendar?.approval === 'pending' ? 'Needs approval' : m.calendar?.skip ? 'Bot skipping' : m.bot?.botId ? 'Bot booked' : 'Scheduled'}
       </Badge>
     );
   if (m.status === 'live' && m.bot?.status === 'joining')
@@ -75,14 +75,15 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
         <Field label="Title">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Working group call — 12 March" />
         </Field>
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="How to add the transcript">
-          <Chip active={source === 'file'} onClick={() => setSource('file')}>
-            <FileUp className="size-3" /> From a file
-          </Chip>
-          <Chip active={source === 'paste'} onClick={() => setSource('paste')}>
-            <ClipboardPaste className="size-3" /> Paste text
-          </Chip>
-        </div>
+        <Segmented
+          label="How to add the transcript"
+          value={source}
+          onChange={setSource}
+          options={[
+            { value: 'file', label: 'From a file', icon: FileUp },
+            { value: 'paste', label: 'Paste text', icon: ClipboardPaste },
+          ]}
+        />
         {source === 'file' ? (
           <Field label="Transcript file" hint="Google Meet / Gemini notes, .vtt, .srt, or plain “Speaker: text” lines.">
             <input
@@ -118,12 +119,20 @@ export function plusAddress(email: string, slug: string) {
 
 type BotMode = 'email' | 'link' | 'ics';
 
-function ChatToggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+/** Facilitators (owners, stewards, editors) and whoever added a call can run it. */
+export function useCanFacilitate() {
+  const { hasRole } = useOntology();
+  const { session } = useSession();
+  return (m?: Pick<Meeting, 'createdBy'>) => hasRole('owner', 'steward', 'editor') || (!!m && m.createdBy === session?.user?.id);
+}
+
+export function ChatToggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <div className="rounded-lg border border-line p-3">
-      <Toggle checked={checked} onChange={onChange} label="Post the bot’s prompts in the Meet chat" />
+      <Toggle checked={checked} onChange={onChange} disabled={disabled} label="Post prompts in the Meet chat automatically" />
       <p className="mt-1 pl-11 text-xs text-muted">
-        {checked ? 'Everyone in the call sees its follow-up questions in the chat.' : 'Its follow-up questions only show here, for the facilitator to raise. You can post any of them, or switch this on, during the call.'}
+        {checked ? 'Everyone in the call sees each new follow-up question in the chat.' : 'Follow-up questions show only in Concord, for the facilitator to raise or post one by one.'} The bot transcribes either way, and tells the call
+        when this changes. Agree it with the people in the call.
       </p>
     </div>
   );
@@ -162,7 +171,7 @@ function BotDialog({
     if (ms.length === 1) nav(`/o/${id}/meetings/${ms[0].id}`);
     else onScheduled();
   });
-  const address = bot?.inviteEmail ? plusAddress(bot.inviteEmail, ontology.slug) : undefined;
+  const preview = ics ? icsPreview(ics) : undefined;
   return (
     <Dialog
       open={open}
@@ -175,12 +184,12 @@ function BotDialog({
           </Button>
           {mode === 'link' && (
             <Button variant="primary" icon={Bot} loading={invite.pending} disabled={!valid} onClick={() => void invite.run()}>
-              Send the bot
+              Send the bot now
             </Button>
           )}
           {mode === 'ics' && (
             <Button variant="primary" icon={CalendarPlus} loading={schedule.pending} disabled={!ics} onClick={() => void schedule.run()}>
-              Schedule the bot
+              Import and schedule
             </Button>
           )}
         </>
@@ -190,46 +199,47 @@ function BotDialog({
         <p className="text-sm text-muted">
           The bot joins as a participant, transcribes the call and acts as a co-facilitator: it spots gaps in the use case and suggests follow-up questions. Let everyone in the call know it’s there.
         </p>
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="How to invite the bot">
-          <Chip active={mode === 'email'} onClick={() => setMode('email')}>
-            <Mail className="size-3" /> Invite by email
-          </Chip>
-          <Chip active={mode === 'link'} onClick={() => setMode('link')}>
-            <Video className="size-3" /> Paste a Meet link
-          </Chip>
-          <Chip active={mode === 'ics'} onClick={() => setMode('ics')}>
-            <CalendarPlus className="size-3" /> Upload an invite (.ics)
-          </Chip>
-        </div>
+        <Segmented
+          label="How to bring the bot in"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: 'email', label: 'Schedule through Google Calendar', icon: Mail },
+            { value: 'link', label: 'Join a call now', icon: Video },
+            { value: 'ics', label: 'Import calendar occurrences', icon: CalendarPlus },
+          ]}
+        />
 
         {mode === 'email' &&
-          (address ? (
+          (bot?.inviteEmail ? (
             <div className="space-y-3 text-sm">
-              <p>Add this address as a guest on the calendar invite, for one call or a whole recurring series:</p>
+              <p>Add the bot as a guest on the calendar invite, for one call or a whole recurring series, and put <strong>#{ontology.slug}</strong> in the invite’s title or description:</p>
               <div className="flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2">
                 <code className="min-w-0 flex-1 truncate font-mono text-[0.8rem]" data-testid="bot-invite-address">
-                  {address}
+                  {bot.inviteEmail}
                 </code>
-                <CopyButton text={address} label="Copy" />
+                <CopyButton text={bot.inviteEmail} label="Copy" />
               </div>
               <ul className="list-disc space-y-1 pl-5 text-xs text-muted">
-                <li>The bot joins each call when it starts. Moving or cancelling the invite moves or cancels the bot.</li>
+                <li>Concord checks the bot’s calendar every minute; Google can take a few minutes to pass on a new or changed invite. Calls show under Upcoming calls here.</li>
+                <li>Invites from this ontology’s owners, stewards and editors are booked automatically. Anyone else’s wait for one of them to approve.</li>
+                <li>Moving or cancelling the invite moves or cancels the bot. The host may need to admit it when it arrives.</li>
                 <li>
-                  This address files calls under {ontology.title}. The plain address <code className="font-mono">{bot!.inviteEmail}</code> works too: write <code className="font-mono">#{ontology.slug}</code> in the invite’s title or description.
+                  Alternatively, invite <code className="font-mono">{plusAddress(bot.inviteEmail, ontology.slug)}</code> instead of using the tag (check it reaches the bot with your calendar first).
                 </li>
-                <li>Upcoming calls show on this page. Switch the bot off for one, or have it post its prompts in the Meet chat.</li>
               </ul>
-              {!bot!.calendarConnected && <p className="rounded-lg bg-warn-soft p-2.5 text-xs text-warn">The bot’s calendar isn’t connected on this server yet, so invites aren’t picked up. Upload the invite (.ics) instead for now.</p>}
-              {bot!.lastSync && !bot!.lastSync.ok && <p className="rounded-lg bg-danger-soft p-2.5 text-xs text-danger">Couldn’t read the bot’s calendar: {bot!.lastSync.error}</p>}
+              {!bot.calendarConnected && <p className="rounded-lg bg-warn-soft p-2.5 text-xs text-warn">The bot’s calendar isn’t connected on this server yet, so invites aren’t picked up. Import the invite (.ics) instead for now.</p>}
+              {bot.lastSync && !bot.lastSync.ok && <p className="rounded-lg bg-danger-soft p-2.5 text-xs text-danger">Couldn’t read the bot’s calendar: {bot.lastSync.error}</p>}
             </div>
           ) : (
             <p className="rounded-lg bg-surface-2 p-3 text-sm text-muted">
-              This server doesn’t have an email address for the bot yet. Paste the Meet link, or upload the calendar invite (.ics) to schedule the bot for a call or a recurring series.
+              This server doesn’t have an email address for the bot yet. Send it into a call now, or import the calendar invite (.ics) to schedule it.
             </p>
           ))}
 
         {mode === 'link' && (
           <>
+            <p className="text-xs text-muted">The bot is sent straight away and joins within a minute or so. The host may need to admit it.</p>
             <Field label="Meet link">
               <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://meet.google.com/abc-defg-hij" inputMode="url" />
             </Field>
@@ -242,7 +252,10 @@ function BotDialog({
 
         {mode === 'ics' && (
           <>
-            <Field label="Calendar invite" hint="In Google Calendar, open the event, then ⋮ › Download as .ics, or use the invite.ics attached to the invitation email. Recurring series are scheduled call by call.">
+            <p className="text-xs text-muted">
+              A one-off import: the bot is scheduled for the calls in the next two weeks. Later changes to the invite aren’t picked up, so for a whole series, invite the bot’s address instead (or import again).
+            </p>
+            <Field label="Calendar invite" hint="In Google Calendar, open the event, then ⋮ › Download as .ics, or use the invite.ics attached to the invitation email.">
               <input
                 type="file"
                 accept=".ics,text/calendar"
@@ -256,7 +269,12 @@ function BotDialog({
                 }}
               />
             </Field>
-            {fileName && <p className="text-xs text-muted">{fileName}</p>}
+            {fileName && (
+              <p className="text-xs text-muted" data-testid="ics-preview">
+                {fileName}
+                {preview && <>: {preview}</>}
+              </p>
+            )}
             <ChatToggle checked={postToChat} onChange={setPostToChat} />
           </>
         )}
@@ -270,37 +288,80 @@ function BotDialog({
   );
 }
 
-function UpcomingCalls({ calls, onChange }: { calls: Meeting[]; onChange: () => void }) {
+/** "Working group call, weekly": a quick read of an .ics file before importing it. */
+function icsPreview(ics: string) {
+  const summary = ics.match(/^SUMMARY:(.*)$/m)?.[1]?.trim();
+  const weekly = /^RRULE:/m.test(ics);
+  if (!summary) return undefined;
+  return `“${summary}”${weekly ? ', a recurring series' : ''}`;
+}
+
+/** Where the bot stands for one upcoming call: what will happen, separate from the switch saying what should. */
+function BookingState({ m }: { m: Meeting }) {
+  if (m.calendar?.approval === 'pending') return <Badge tone="warn">Needs approval</Badge>;
+  if (m.calendar?.skip) return <Badge tone="neutral">Skipping</Badge>;
+  if (m.calendar?.cancelPending) return <Badge tone="danger">Cancelling the bot failed; retrying</Badge>;
+  if (m.bot?.provider === 'simulated') return <Badge tone="neutral" title={m.bot.error}>No bot provider on this server</Badge>;
+  if (m.bot?.botId) return <Badge tone="ok">Bot booked</Badge>;
+  if (m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Booking failed; retrying</Badge>;
+  return <Badge tone="outline">Books 15 min before</Badge>;
+}
+
+function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: () => void; bot?: MeetBotInfo }) {
   const { id } = useOntology();
-  const skip = useAction(async (m: Meeting, value: boolean) => {
-    await api.updateMeeting(m.id, { skip: value });
+  const { now } = useSession();
+  const canFacilitate = useCanFacilitate();
+  const update = useAction(async (m: Meeting, changes: { skip?: boolean; approve?: boolean }) => {
+    await api.updateMeeting(m.id, changes);
     onChange();
   });
   if (!calls.length) return null;
   return (
     <Card className="mb-6">
-      <CardHeader icon={CalendarClock} title="Upcoming calls" subtitle="From calendar invites. The bot joins each one when it starts." />
+      <CardHeader
+        icon={CalendarClock}
+        title="Upcoming calls"
+        subtitle={
+          <>
+            From calendar invites. The bot joins each one when it starts.
+            {bot?.lastSync && <> Calendar {bot.lastSync.ok ? 'checked' : 'check failed'} {relativeTime(bot.lastSync.at, now())}.</>}
+          </>
+        }
+      />
       <ul className="divide-y divide-line">
-        {calls.map((m) => (
-          <li key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
-            <Link to={`/o/${id}/meetings/${m.id}`} className="min-w-0 flex-1 hover:underline">
-              <div className="font-medium">{m.title}</div>
-              <div className="flex items-center gap-1 text-xs text-muted">
-                {formatDate(m.calendar?.start, true)}
-                {m.calendar?.recurring && (
-                  <>
-                    {' '}
-                    · <Repeat className="size-3" /> part of a series
-                  </>
-                )}
-              </div>
-            </Link>
-            <Toggle checked={!m.calendar?.skip} onChange={(v) => void skip.run(m, !v)} label={m.calendar?.skip ? 'Skipping' : 'Bot will join'} disabled={skip.pending} />
-          </li>
-        ))}
+        {calls.map((m) => {
+          const when = formatDate(m.calendar?.start, true);
+          const mine = canFacilitate(m);
+          return (
+            <li key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+              <Link to={`/o/${id}/meetings/${m.id}`} className="min-w-0 flex-1 hover:underline">
+                <div className="font-medium">{m.title}</div>
+                <div className="flex items-center gap-1 text-xs text-muted">
+                  {when}
+                  {m.calendar?.recurring && (
+                    <>
+                      {' '}
+                      · <Repeat className="size-3" /> part of a series
+                    </>
+                  )}
+                  {m.calendar?.organizer && <> · from {m.calendar.organizer}</>}
+                </div>
+              </Link>
+              <BookingState m={m} />
+              {mine && m.calendar?.approval === 'pending' && (
+                <Button size="sm" variant="primary" loading={update.pending} onClick={() => void update.run(m, { approve: true })}>
+                  Approve
+                </Button>
+              )}
+              {mine && m.calendar?.approval !== 'pending' && (
+                <Toggle checked={!m.calendar?.skip} onChange={(v) => void update.run(m, { skip: !v })} disabled={update.pending} ariaLabel={`Bot joins “${m.title}” on ${when}`} />
+              )}
+            </li>
+          );
+        })}
       </ul>
       <div className="px-5 pb-3">
-        <InlineError error={skip.error} />
+        <InlineError error={update.error} />
       </div>
     </Card>
   );
@@ -311,6 +372,9 @@ export function MeetingsTab() {
   const { session, now } = useSession();
   const nav = useNavigate();
   const list = useAsync(() => api.meetings(id), [id]);
+  const botInfo = useAsync(() => api.meetBot(), []);
+  const bot = botInfo.data ?? session?.meetBot;
+  const canFacilitate = useCanFacilitate()();
   const upcoming = (list.data ?? []).filter((m) => m.status === 'scheduled').sort((a, b) => (a.calendar?.start ?? '').localeCompare(b.calendar?.start ?? ''));
   const past = (list.data ?? []).filter((m) => m.status !== 'scheduled');
   const [dialog, setDialog] = useState<'upload' | 'bot'>();
@@ -319,7 +383,19 @@ export function MeetingsTab() {
     nav(`/o/${id}/meetings/${m.id}`);
   });
   const populated = !!list.data?.length;
-  const botBody = session?.meetBot.inviteEmail
+  // Invites arrive, move and get skipped by other people: keep the list current while it's open.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void list.reload();
+      void botInfo.reload();
+    }, 30_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  const botBody = !canFacilitate
+    ? 'The ontology’s owners, stewards and editors can bring the bot into a call.'
+    : bot?.inviteEmail
     ? 'Add its email address to a calendar invite, or paste a Meet link. It listens and raises gaps and follow-up questions live.'
     : 'It joins your Google Meet, listens, and raises gaps and follow-up questions live.';
 
@@ -344,7 +420,7 @@ export function MeetingsTab() {
           >
             <div role="menu" aria-label="Add meeting" className="flex flex-col">
               <MenuItem icon={FileUp} title="Upload a transcript" body="Google Meet, Gemini notes, .vtt or .srt" onClick={() => setDialog('upload')} />
-              <MenuItem icon={Video} title="Invite the co-lead bot" body={session?.meetBot.inviteEmail ? 'By email, Meet link or calendar invite' : 'Paste a Meet link or upload an invite'} onClick={() => setDialog('bot')} />
+              {canFacilitate && <MenuItem icon={Video} title="Invite the co-lead bot" body={bot?.inviteEmail ? 'Through Google Calendar, now, or from an .ics' : 'Join a call now, or from an .ics'} onClick={() => setDialog('bot')} />}
               <MenuItem icon={Play} title="Run a simulated meeting" body="A scripted call, with the bot co-facilitating" onClick={() => void simulate.run()} />
             </div>
           </Popover>
@@ -359,12 +435,13 @@ export function MeetingsTab() {
           body={botBody}
           onClick={() => setDialog('bot')}
           cta="Invite to a Meet"
+          disabled={!canFacilitate}
         />
         <ActionCard icon={Play} title="Run a simulated live meeting" body="Watch a scripted call unfold in real time, with the bot co-facilitating." onClick={() => void simulate.run()} cta="Start simulation" loading={simulate.pending} />
       </div>
       )}
       <InlineError error={simulate.error} />
-      <UpcomingCalls calls={upcoming} onChange={() => void list.reload()} />
+      <UpcomingCalls calls={upcoming} onChange={() => void list.reload()} bot={bot} />
       {list.error && !list.data ? (
         <ErrorCard error={list.error} onRetry={list.reload} />
       ) : !list.data ? (
@@ -396,7 +473,7 @@ export function MeetingsTab() {
         </Card>
       )}
       <UploadDialog open={dialog === 'upload'} onClose={() => setDialog(undefined)} />
-      {dialog === 'bot' && <BotDialog open onClose={() => setDialog(undefined)} onScheduled={() => void list.reload()} bot={session?.meetBot} ontology={ontology} />}
+      {dialog === 'bot' && <BotDialog open onClose={() => setDialog(undefined)} onScheduled={() => void list.reload()} bot={bot} ontology={ontology} />}
     </div>
   );
 }
@@ -413,14 +490,14 @@ function MenuItem({ icon: Icon, title, body, onClick }: { icon: typeof Bot; titl
   );
 }
 
-function ActionCard({ icon: Icon, title, body, cta, onClick, loading }: { icon: typeof Bot; title: string; body: string; cta: string; onClick: () => void; loading?: boolean }) {
+function ActionCard({ icon: Icon, title, body, cta, onClick, loading, disabled }: { icon: typeof Bot; title: string; body: string; cta: string; onClick: () => void; loading?: boolean; disabled?: boolean }) {
   return (
     <Card className="flex flex-col p-4">
       <Icon className="mb-2 size-5 text-accent" />
       <div className="text-sm font-semibold">{title}</div>
       <p className="mt-1 flex-1 text-xs text-muted">{body}</p>
       <div className="mt-3">
-        <Button size="sm" onClick={onClick} loading={loading}>
+        <Button size="sm" onClick={onClick} loading={loading} disabled={disabled}>
           {cta}
         </Button>
       </div>

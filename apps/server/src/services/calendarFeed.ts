@@ -19,6 +19,8 @@ export interface CalendarOccurrence {
   attendees: string[];
   organizer?: string;
   recurring: boolean;
+  /** The bot's own response to the invite, if the feed says (ACCEPTED, DECLINED, NEEDS-ACTION…). */
+  attendeeStatus: Record<string, string>;
 }
 
 const MEET_URL = /https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i;
@@ -43,23 +45,52 @@ const email = (v: unknown) =>
 
 const str = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v));
 
-function details(c: ICAL.Component) {
+type Details = {
+  title: string;
+  description: string;
+  meetingUrl?: string;
+  attendees: string[];
+  attendeeStatus: Record<string, string>;
+  organizer?: string;
+  cancelled: boolean;
+};
+
+function details(c: ICAL.Component): Details {
   const conference = c.getAllProperties().find((p) => p.name === 'x-google-conference')?.getFirstValue();
   const description = str(c.getFirstPropertyValue('description'));
   const location = str(c.getFirstPropertyValue('location'));
   const url = str(c.getFirstPropertyValue('url'));
+  const attendeeStatus: Record<string, string> = {};
+  for (const p of c.getAllProperties('attendee')) {
+    const e = email(p.getFirstValue());
+    if (e) attendeeStatus[e] = str(p.getParameter('partstat') ?? 'NEEDS-ACTION').toUpperCase();
+  }
   return {
-    title: str(c.getFirstPropertyValue('summary')).trim() || 'Calendar call',
+    title: str(c.getFirstPropertyValue('summary')).trim(),
     description,
     meetingUrl: findMeetUrl(str(conference), location, url, description),
-    attendees: c
-      .getAllProperties('attendee')
-      .map((p) => email(p.getFirstValue()))
-      .filter((e): e is string => !!e),
+    attendees: Object.keys(attendeeStatus),
+    attendeeStatus,
     organizer: email(c.getFirstPropertyValue('organizer')),
     cancelled: str(c.getFirstPropertyValue('status')).toUpperCase() === 'CANCELLED',
   };
 }
+
+/** A modified week of a series often repeats only what changed; the rest comes from the series. */
+function inherit(own: Details, series?: Details): Details {
+  if (!series) return own;
+  return {
+    title: own.title || series.title,
+    description: own.description || series.description,
+    meetingUrl: own.meetingUrl ?? series.meetingUrl,
+    attendees: own.attendees.length ? own.attendees : series.attendees,
+    attendeeStatus: own.attendees.length ? own.attendeeStatus : series.attendeeStatus,
+    organizer: own.organizer ?? series.organizer,
+    cancelled: own.cancelled,
+  };
+}
+
+const iso = (t: ICAL.Time) => t.toJSDate().toISOString();
 
 /** Occurrences that overlap [from, to). Cancelled occurrences and events without a start are left out. */
 export function parseOccurrences(ics: string, window: { from: Date; to: Date }): CalendarOccurrence[] {
@@ -83,33 +114,50 @@ export function parseOccurrences(ics: string, window: { from: Date; to: Date }):
   const out: CalendarOccurrence[] = [];
   const from = window.from.getTime();
   const to = window.to.getTime();
-  const add = (uid: string, item: ICAL.Event, start: ICAL.Time, end: ICAL.Time, original: ICAL.Time, recurring: boolean) => {
+  const add = (uid: string, d: Details, start: ICAL.Time, end: ICAL.Time, key: string, recurring: boolean) => {
     const s = start.toJSDate();
     const e = end.toJSDate();
-    if (e.getTime() <= from || s.getTime() >= to) return;
-    const d = details(item.component);
-    if (d.cancelled) return;
-    const { cancelled: _, ...rest } = d;
-    out.push({ key: recurring ? `${uid}@${original.toJSDate().toISOString()}` : uid, uid, start: s, end: e, recurring, ...rest });
+    if (e.getTime() <= from || s.getTime() >= to || d.cancelled) return;
+    out.push({
+      key,
+      uid,
+      start: s,
+      end: e,
+      recurring,
+      title: d.title || 'Calendar call',
+      description: d.description,
+      meetingUrl: d.meetingUrl,
+      attendees: d.attendees,
+      attendeeStatus: d.attendeeStatus,
+      organizer: d.organizer,
+    });
   };
 
   for (const [uid, { master, exceptions }] of byUid) {
-    if (!master) {
-      // An invite for a single changed instance of someone else's series.
-      for (const ex of exceptions) add(uid, ex, ex.startDate, ex.endDate ?? ex.startDate, ex.recurrenceId ?? ex.startDate, true);
-      continue;
+    const series = master ? details(master.component) : undefined;
+    // A cancelled series takes its modified weeks with it.
+    if (series?.cancelled) continue;
+    const recurring = !!master?.isRecurring() || !master;
+    // Modified weeks are judged by their actual dates, wherever they moved to.
+    const moved = new Set<string>();
+    for (const ex of exceptions) {
+      const original = ex.recurrenceId ?? ex.startDate;
+      moved.add(iso(original));
+      add(uid, inherit(details(ex.component), series), ex.startDate, ex.endDate ?? ex.startDate, `${uid}@${iso(original)}`, true);
     }
-    for (const ex of exceptions) master.relateException(ex);
+    if (!master) continue;
     if (!master.isRecurring()) {
-      add(uid, master, master.startDate, master.endDate ?? master.startDate, master.startDate, false);
+      add(uid, series!, master.startDate, master.endDate ?? master.startDate, uid, false);
       continue;
     }
+    const length = (master.endDate ?? master.startDate).toJSDate().getTime() - master.startDate.toJSDate().getTime();
     const it = master.iterator();
     for (let i = 0, next = it.next(); next && i < MAX_STEPS; i++, next = it.next()) {
-      // Moved instances can start before their original slot, so look a day past the window.
-      if (next.toJSDate().getTime() >= to + 86_400_000) break;
-      const occ = master.getOccurrenceDetails(next);
-      add(uid, occ.item, occ.startDate, occ.endDate, occ.recurrenceId, true);
+      if (next.toJSDate().getTime() >= to) break;
+      if (moved.has(iso(next))) continue;
+      const end = next.clone();
+      end.addDuration(ICAL.Duration.fromSeconds(Math.round(length / 1000)));
+      add(uid, series!, next, end, `${uid}@${iso(next)}`, recurring);
     }
   }
   return out.sort((a, b) => a.start.getTime() - b.start.getTime());

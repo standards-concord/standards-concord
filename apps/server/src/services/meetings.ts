@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
+import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
@@ -9,7 +9,8 @@ import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
-import { getProject } from './ontologies.js';
+import { getProject, rolesFor } from './ontologies.js';
+import { withLock } from '../locks.js';
 import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
@@ -18,6 +19,31 @@ export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
 export const listMeetings = (ontologyId: string) => list<Meeting>('meetings', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 export const saveMeeting = (m: Meeting) => put('meetings', m, m.ontologyId);
 const save = saveMeeting;
+
+/** Serialises changes to one meeting (bookings, webhooks, posting, skipping). */
+export const meetingLock = <T>(id: string, fn: () => Promise<T> | T) => withLock(`meeting:${id}`, fn);
+
+/** Applies a change to the latest stored copy of a meeting, under its lock, so concurrent updates aren't lost. */
+export function mutateMeeting(id: string, change: (m: Meeting) => void): Promise<Meeting> {
+  return meetingLock(id, () => {
+    const m = getMeeting(id);
+    change(m);
+    return save(m);
+  });
+}
+
+/** Roles that can run a call: bring the bot in, skip or approve calls, post in its chat. */
+export const FACILITATOR_ROLES: Role[] = ['owner', 'steward', 'editor'];
+
+export function canFacilitate(m: Pick<Meeting, 'ontologyId' | 'createdBy'>, user: User | undefined) {
+  if (!user) return false;
+  return !!user.isPlatformAdmin || m.createdBy === user.id || rolesFor(m.ontologyId, user.id).some((r) => FACILITATOR_ROLES.includes(r));
+}
+
+export function requireFacilitator(m: Meeting, user: User | undefined, action: string) {
+  if (!user) throw new HttpError(401, 'Sign in first');
+  if (!canFacilitate(m, user)) throw new HttpError(403, `Only the person who added this call, or the ontology's owners, stewards and editors, can ${action}`);
+}
 
 /** Live updates for the meeting page (SSE). */
 export const meetingEvents = new EventEmitter();
@@ -104,8 +130,9 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = getProject(m.ontologyId);
-  m.status = 'processing';
-  save(m);
+  m = await mutateMeeting(m.id, (x) => {
+    x.status = 'processing';
+  });
   emit(m, { type: 'status', status: m.status });
   const graph = await ontologyStore.working(project);
   const { value } = await llm.json<MeetingAnalysis>({
@@ -121,9 +148,10 @@ export async function analyseMeeting(m: Meeting): Promise<Meeting> {
     ],
     fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
   });
-  m.analysis = value;
-  m.status = 'analysed';
-  save(m);
+  m = await mutateMeeting(m.id, (x) => {
+    x.analysis = value;
+    x.status = 'analysed';
+  });
   emit(m, { type: 'status', status: m.status });
   logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   return m;
@@ -236,77 +264,123 @@ const lastLineAt = new Map<string, number>();
 export const lastLineTime = (meetingId: string) => lastLineAt.get(meetingId);
 
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
-export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGapLines?: number } = {}) {
-  m.transcript.push(line);
-  save(m);
+export async function onLiveLine(meetingId: string, line: TranscriptLine, opts: { minGapLines?: number } = {}) {
+  const m = await mutateMeeting(meetingId, (x) => {
+    x.transcript.push(line);
+  });
   lastLineAt.set(m.id, Date.now());
   emit(m, { type: 'line', line });
   const n = m.transcript.length;
   const gap = opts.minGapLines ?? 4;
   if (n - (lastPromptAt.get(m.id) ?? 0) < gap) return;
+  lastPromptAt.set(m.id, n);
   const prompt = await facilitate(m);
   if (!prompt) return;
-  lastPromptAt.set(m.id, n);
-  const fresh = getMeeting(m.id);
   const entry: FacilitatorPrompt = { at: clock.iso(), t: line.t, text: prompt, posted: false };
-  if (fresh.postPromptsToChat) await postToChat(fresh, entry);
-  fresh.facilitatorPrompts.push(entry);
-  // keep the in-memory object in sync for the caller
-  m.facilitatorPrompts = fresh.facilitatorPrompts;
-  save(fresh);
+  let index = -1;
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    index = x.facilitatorPrompts.push(entry) - 1;
+  });
   emit(fresh, { type: 'prompt', prompt: entry });
+  if (fresh.postPromptsToChat) await postPrompt(meetingId, index, { quiet: true });
 }
 
-/** Posts one prompt into the meeting's chat through the bot. Simulated calls pretend to. */
-async function postToChat(m: Meeting, p: FacilitatorPrompt) {
+/** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
+async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
   if (m.bot?.provider === 'recall') {
-    if (!m.bot.botId || !['joining', 'in-call'].includes(m.bot.status)) {
-      p.postError = 'The bot is not in the call, so it can’t post in the chat.';
-      return;
-    }
-    const r = await recall.sendChat(m.bot.botId, p.text);
-    if (!r.ok) {
-      p.postError = r.error;
-      return;
-    }
-  } else if (m.source !== 'simulation') {
-    p.postError = 'No meeting bot is connected to this call, so there is no chat to post in.';
-    return;
+    if (!m.bot.botId || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
+    return recall.sendChat(m.bot.botId, text);
   }
-  p.posted = true;
-  p.postedAt = clock.iso();
-  delete p.postError;
+  if (m.source === 'simulation') return { ok: true };
+  return { ok: false, error: 'No meeting bot is connected to this call, so there is no chat to post in.' };
 }
 
-/** "Post in the Meet chat" on one prompt the bot only suggested to the facilitator. */
-export async function postPrompt(m: Meeting, index: number) {
+const posting = new Set<string>();
+
+/** Posts one prompt into the meeting chat. Only that prompt is updated, on the latest copy of the meeting. */
+export async function postPrompt(meetingId: string, index: number, opts: { quiet?: boolean } = {}) {
+  const m = getMeeting(meetingId);
   const p = m.facilitatorPrompts[index];
   if (!p) throw new HttpError(404, 'No such prompt');
-  if (!p.posted) {
-    await postToChat(m, p);
-    save(m);
-    emit(m, { type: 'meeting', meeting: m });
+  if (p.posted) return m;
+  const key = `${meetingId}:${index}`;
+  if (posting.has(key)) throw new HttpError(409, 'That prompt is being posted already');
+  posting.add(key);
+  try {
+    const r = await sendToChat(m, p.text);
+    const fresh = await mutateMeeting(meetingId, (x) => {
+      const q = x.facilitatorPrompts[index];
+      if (r.ok) {
+        q.posted = true;
+        q.postedAt = clock.iso();
+        delete q.postError;
+      } else q.postError = r.error;
+    });
+    emit(fresh, { type: 'meeting', meeting: fresh });
+    if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
+    return fresh;
+  } finally {
+    posting.delete(key);
   }
-  if (p.postError) throw new HttpError(409, p.postError);
-  return m;
 }
 
-/** Meeting options people can change before or during a call. */
-export async function updateMeeting(m: Meeting, patch: { postPromptsToChat?: boolean; skip?: boolean }) {
-  if (patch.postPromptsToChat !== undefined) m.postPromptsToChat = patch.postPromptsToChat;
-  if (patch.skip !== undefined) {
-    if (!m.calendar) throw new HttpError(400, 'Only calls from a calendar invite can be skipped');
-    if (m.status !== 'scheduled') throw new HttpError(409, 'The bot has already joined this call. End it instead.');
-    m.calendar.skip = patch.skip;
-    // A bot already booked with Recall.ai for this call is cancelled; it is booked again if un-skipped.
-    if (patch.skip && m.bot?.botId) {
-      await recall.deleteBot(m.bot.botId);
-      m.bot = { provider: m.bot.provider, status: 'scheduled' };
+/**
+ * Tells the call when posting in its chat is switched on or off, so what the bot
+ * said when it joined stays true. Only once the bot is in the call; until then
+ * the next check (when it joins) does it.
+ */
+export async function announceChatMode(meetingId: string) {
+  const m = getMeeting(meetingId);
+  const want = !!m.postPromptsToChat;
+  if (m.source === 'simulation' || m.bot?.status !== 'in-call' || (m.chatModeAnnounced ?? false) === want) return;
+  const r = await sendToChat(
+    m,
+    want
+      ? `${config.meetBot.botName}: from now on I'll post follow-up questions here in the chat.`
+      : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
+  );
+  if (r.ok)
+    await mutateMeeting(meetingId, (x) => {
+      x.chatModeAnnounced = want;
+    });
+}
+
+/** Meeting options facilitators can change before or during a call. Every change is logged. */
+export async function updateMeeting(meetingId: string, user: User, patch: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) {
+  const before = getMeeting(meetingId);
+  requireFacilitator(before, user, 'change this call');
+  const changes: string[] = [];
+  const m = await meetingLock(meetingId, async () => {
+    const m = getMeeting(meetingId);
+    if (patch.postPromptsToChat !== undefined && patch.postPromptsToChat !== !!m.postPromptsToChat) {
+      m.postPromptsToChat = patch.postPromptsToChat;
+      changes.push(patch.postPromptsToChat ? 'switched on posting prompts in the Meet chat for' : 'switched off posting prompts in the Meet chat for');
     }
-  }
-  save(m);
+    if (patch.skip !== undefined || patch.approve !== undefined) {
+      if (!m.calendar) throw new HttpError(400, 'Only calls from a calendar invite can be skipped or approved');
+      if (m.status !== 'scheduled') throw new HttpError(409, 'The bot has already joined this call. End it instead.');
+    }
+    if (patch.approve && m.calendar!.approval === 'pending') {
+      m.calendar!.approval = 'approved';
+      m.calendar!.approvedBy = user.id;
+      changes.push('approved the co-lead bot joining');
+    }
+    if (patch.skip !== undefined && patch.skip !== !!m.calendar!.skip) {
+      // A bot already booked for this call is cancelled first; if that fails, nothing changes.
+      if (patch.skip && m.bot?.botId) {
+        const r = await recall.cancelBot(m.bot.botId);
+        if (!r.ok) throw new HttpError(502, `${r.error} The bot is still booked; try again.`);
+        m.bot = { provider: m.bot.provider, status: 'scheduled' };
+      }
+      m.calendar!.skip = patch.skip;
+      changes.push(patch.skip ? 'told the co-lead bot to skip' : 'told the co-lead bot to join');
+    }
+    return save(m);
+  });
+  for (const c of changes) logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} “${m.title}”`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   emit(m, { type: 'meeting', meeting: m });
-  return m;
+  if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
+  return getMeeting(meetingId);
 }
 
 async function facilitate(m: Meeting): Promise<string | undefined> {
@@ -383,6 +457,7 @@ export async function inviteBot(project: OntologyProject, user: User, title: str
     meetingUrl,
     postPromptsToChat: !!opts.postPromptsToChat,
     bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' },
+    chatModeAnnounced: !!opts.postPromptsToChat,
   });
   m.bot = await dispatchBot(m);
   save(m);
@@ -397,17 +472,26 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   const m = getMeeting(meetingId);
   const evt = body as { event?: string; data?: { data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } } };
   if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
-    if (m.bot) m.bot.status = 'in-call';
-    if (m.status === 'scheduled') m.status = 'live';
     const words = evt.data.data.words;
-    await onLiveLine(m, { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative });
+    let joined = false;
+    if (m.bot?.status !== 'in-call' || m.status === 'scheduled')
+      await mutateMeeting(m.id, (x) => {
+        joined = x.bot?.status !== 'in-call';
+        if (x.bot) x.bot.status = 'in-call';
+        if (x.status === 'scheduled') x.status = 'live';
+      });
+    await onLiveLine(m.id, { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative });
+    if (joined) await announceChatMode(m.id).catch(() => undefined);
   }
 }
 
-export async function endLiveMeeting(m: Meeting) {
-  if (m.bot?.provider === 'recall' && m.bot.botId) await recall.leave(m.bot.botId);
-  if (m.bot) m.bot.status = 'done';
-  save(m);
+export async function endLiveMeeting(meetingId: string) {
+  const m = await meetingLock(meetingId, async () => {
+    const m = getMeeting(meetingId);
+    if (m.bot?.provider === 'recall' && m.bot.botId && m.bot.status !== 'done') await recall.leave(m.bot.botId);
+    if (m.bot) m.bot.status = 'done';
+    return save(m);
+  });
   emit(m, { type: 'status', status: m.status, bot: m.bot });
   return m.transcript.length ? analyseMeeting(m) : m;
 }
@@ -448,12 +532,12 @@ export async function simulateCall(project: OntologyProject, user: User, title: 
     for (const line of SIMULATED_CALL) {
       if (!runningSimulations.has(m.id)) return;
       if (delay) await new Promise((r) => setTimeout(r, delay));
-      await onLiveLine(getMeeting(m.id), { ...line, t: getMeeting(m.id).transcript.length * 20 }, { minGapLines: 4 });
+      await onLiveLine(m.id, { ...line, t: getMeeting(m.id).transcript.length * 20 }, { minGapLines: 4 });
     }
     runningSimulations.delete(m.id);
-    const done = getMeeting(m.id);
-    done.bot = { provider: 'simulated', status: 'done' };
-    save(done);
+    const done = await mutateMeeting(m.id, (x) => {
+      x.bot = { provider: 'simulated', status: 'done' };
+    });
     emit(done, { type: 'status', status: done.status, bot: done.bot });
     await analyseMeeting(done);
   };

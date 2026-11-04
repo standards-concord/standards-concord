@@ -80,6 +80,16 @@ export const config = {
     calendarPollMs: Number(process.env.MEET_BOT_POLL_SECONDS ?? 60) * 1000,
     /** Ontology (slug or id) for invites that don't say which ontology they're about. */
     defaultOntology: process.env.MEET_BOT_DEFAULT_ONTOLOGY?.trim() || undefined,
+    /**
+     * Who may bring the bot into a call by inviting it, besides the ontology's owners,
+     * stewards and editors (matched by their Concord account's email). Comma-separated
+     * emails or @domains, e.g. "@theodi.org,kim@example.org". Invites from anyone
+     * else wait for a facilitator to approve them.
+     */
+    allowedInviters: (process.env.MEET_BOT_ALLOWED_INVITERS ?? '')
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean),
     /** Whether calls that arrive by invite post the bot's prompts into the Meet chat. */
     postToChatDefault: bool(process.env.MEET_BOT_POST_TO_CHAT, false),
   },
