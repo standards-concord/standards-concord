@@ -62,6 +62,22 @@ test.describe('class tree and class pages', () => {
     await expect(item(page, 'volunteer')).toBeVisible();
   });
 
+  test('tree rows carry their term names, and leaves have no expand or collapse control', async ({ page }) => {
+    await page.goto(base);
+    await settle(page);
+    await page.getByRole('button', { name: 'Expand all classes' }).click();
+    const items = tree(page).getByRole('treeitem');
+    expect(await items.count()).toBeGreaterThan(5);
+    // The tree is operated with the keyboard and by clicking rows; it holds no buttons, so no
+    // unnamed or disabled "Expand"/"Collapse" controls on leaves.
+    await expect(tree(page).getByRole('button')).toHaveCount(0);
+    for (const item of await items.all()) {
+      await expect(item).toHaveAccessibleName(/\w/);
+      const leaf = (await item.getAttribute('aria-expanded')) === null;
+      if (leaf) await expect(item).not.toHaveAccessibleName(/^(Expand|Collapse)$/);
+    }
+  });
+
   test('property and individual lists start collapsed, with counts, and open to show a selected term', async ({ page }) => {
     await page.goto(base);
     await settle(page);
@@ -418,6 +434,20 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         return `@font-face{font-family:Inter;font-weight:${w};font-style:${st};src:url(data:font/woff;base64,${data}) format('woff')}`;
       })
       .join('');
+
+  test("if the page couldn't load Inter, the export keeps the text the screen shows", async ({ page, consoleGuard }) => {
+    // The screen falls back to another font, so Inter's glyphs would be in the wrong places.
+    // (Only the page's own font loads fail; the export can still fetch the files.)
+    consoleGuard.allow(/Failed to load resource|net::ERR_FAILED/);
+    await page.route(/inter-.*\.woff2?(\?|$)/, (route) => (route.request().resourceType() === 'font' ? route.abort() : route.continue()));
+    await stub(page, [cls('Owner'), cls('Pet')]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    const svgText = await exportSvg(page, d);
+    expect(svgText).not.toContain('<use');
+    expect(svgText).toMatch(/<text[^>]*textLength[^>]*>Owner<\/text>/);
+  });
 
   test('a diagram that changes while it is being exported is saved in one consistent state', async ({ page }) => {
     const rel = 'isTheRegisteredKeeperOfThisParticularPet';

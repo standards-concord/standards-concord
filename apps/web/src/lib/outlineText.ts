@@ -90,6 +90,22 @@ export function addressable(run: Pick<SVGTextContentElement, 'textContent' | 'ge
   return [collapsed, collapsed.trimStart(), collapsed.trimEnd(), collapsed.trim()].find((t) => t.length === n);
 }
 
+/** Which code points the page has loaded Inter for, at this weight and style. */
+function interCoverage(weight: number, italic: boolean) {
+  const ranges: [number, number][] = [];
+  document.fonts.forEach((f) => {
+    if (f.family.replace(/["']/g, '') !== 'Inter' || f.status !== 'loaded' || Number(f.weight) !== weight || (f.style === 'italic') !== italic) return;
+    for (const part of f.unicodeRange.split(',')) {
+      const m = /U\+([0-9A-F?]+)(?:-([0-9A-F]+))?/i.exec(part.trim());
+      if (!m) continue;
+      const lo = parseInt(m[1].replace(/\?/g, '0'), 16);
+      const hi = m[2] ? parseInt(m[2], 16) : parseInt(m[1].replace(/\?/g, 'F'), 16);
+      ranges.push([lo, hi]);
+    }
+  });
+  return (cp: number) => ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
 function glyphFor(fonts: Font[], ch: string): { font: number; glyph: Glyph } | undefined {
   if (SHAPED.test(ch)) return undefined;
   const cp = ch.codePointAt(0)!;
@@ -148,6 +164,9 @@ export async function exportableSvg(live: SVGSVGElement): Promise<SVGSVGElement>
       const bold = Number(style.fontWeight) >= 550;
       const italic = style.fontStyle === 'italic' || style.fontStyle.startsWith('oblique');
       const face: Face = italic ? '400i' : bold ? '600' : '400';
+      // Only characters the browser is actually drawing in Inter can be outlined with Inter's
+      // glyphs; where the font didn't load, the screen shows a fallback in other positions.
+      const covered = /^\s*["']?Inter["']?\s*(,|$)/.test(style.fontFamily) ? interCoverage(bold ? 600 : 400, italic) : () => false;
       const faceFonts = italic && bold ? [] : (fonts.get(face) ?? []);
       const fill = style.fill;
       const g = document.createElementNS(SVG, 'g');
@@ -194,7 +213,7 @@ export async function exportableSvg(live: SVGSVGElement): Promise<SVGSVGElement>
         }
         left = Math.min(left, box.x);
         right = Math.max(right, box.x + box.width);
-        const hit = glyphFor(faceFonts, ch);
+        const hit = covered(ch.codePointAt(0)!) ? glyphFor(faceFonts, ch) : undefined;
         if (hit) {
           flush();
           // The glyph at its natural shape, from the left of where the browser put it.
