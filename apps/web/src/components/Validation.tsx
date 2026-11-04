@@ -47,31 +47,42 @@ function SummaryTile({ ok, warn, title, sub }: { ok: boolean; warn?: boolean; ti
 
 export function LintIssues({ report, label }: { report: ValidationReport; label: Labeler }) {
   if (!report.lint.length) return <p className="text-sm text-muted">No lint issues — the ontology follows the strict OWL profile’s best-practice rules.</p>;
+  const serious = report.lint.some((i) => i.severity !== 'info');
   return (
     <div className="space-y-4">
       {(['error', 'warning', 'info'] as IssueSeverity[]).map((sev) => {
         const items = report.lint.filter((i) => i.severity === sev);
         if (!items.length) return null;
         const { icon: Icon, cls, label: l } = SEV[sev];
+        const list = (
+          <ul className="divide-y divide-line rounded-lg border border-line">
+            {items.map((i, idx) => (
+              <li key={idx} className="flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <p>{i.message}</p>
+                  <p className="mt-0.5 text-xs text-muted">
+                    <code className="font-mono">{i.code}</code>
+                    {i.iri && <> · {label(i.iri)}</>}
+                  </p>
+                </div>
+                {i.reference && <Badge tone="outline">{i.reference}</Badge>}
+              </li>
+            ))}
+          </ul>
+        );
+        // Suggestions stay one click away when there are errors or warnings to deal with first.
+        if (sev === 'info' && serious)
+          return (
+            <Disclosure key={sev} tone="muted" heading={4} title={<span className={cx('inline-flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}><Icon className="size-3.5" /> {l} ({items.length})</span>}>
+              {list}
+            </Disclosure>
+          );
         return (
           <div key={sev}>
             <h4 className={cx('mb-1.5 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}>
               <Icon className="size-3.5" /> {l} ({items.length})
             </h4>
-            <ul className="divide-y divide-line rounded-lg border border-line">
-              {items.map((i, idx) => (
-                <li key={idx} className="flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-sm">
-                  <div className="min-w-0">
-                    <p>{i.message}</p>
-                    <p className="mt-0.5 text-xs text-muted">
-                      <code className="font-mono">{i.code}</code>
-                      {i.iri && <> · {label(i.iri)}</>}
-                    </p>
-                  </div>
-                  {i.reference && <Badge tone="outline">{i.reference}</Badge>}
-                </li>
-              ))}
-            </ul>
+            {list}
           </div>
         );
       })}
@@ -81,25 +92,22 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
 
 export function ReasonerResult({ report, label }: { report: ValidationReport; label: Labeler }) {
   const r = report.reasoner;
-  return (
-    <div className="space-y-2 text-sm">
-      <p className="flex items-center gap-2">
-        <Brain className="size-4 text-muted" />
-        {!r.available ? (
-          <span className="text-warn">The {r.engine} reasoner is not available; only structural checks ran.{r.error && ` (${r.error})`}</span>
-        ) : r.consistent ? (
-          <span>
-            <strong className="text-ok">Consistent.</strong> {r.unsatisfiable.length ? `${plural(r.unsatisfiable.length, 'unsatisfiable class', 'unsatisfiable classes')}.` : 'All classes are satisfiable.'}
-          </span>
-        ) : (
-          <strong className="text-danger">Inconsistent — no data could ever conform to this ontology.</strong>
-        )}
-        <span className="text-xs text-subtle">
-          {r.engine} · {r.durationMs} ms
-        </span>
-      </p>
+  const problem = !r.consistent || r.unsatisfiable.length > 0;
+  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0;
+  const verdict = !r.available ? (
+    <span className="text-warn">The {r.engine === 'structural' ? 'OWL' : r.engine} reasoner did not run; only structural checks ran.</span>
+  ) : r.consistent ? (
+    <span>
+      <strong className="text-ok">Consistent.</strong> {r.unsatisfiable.length ? `${plural(r.unsatisfiable.length, 'unsatisfiable class', 'unsatisfiable classes')}.` : 'All classes are satisfiable.'}
+    </span>
+  ) : (
+    <strong className="text-danger">Inconsistent — no data could ever conform to this ontology.</strong>
+  );
+  const detail = (
+    <div className="space-y-2">
+      {!r.available && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
       {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
-      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs">{r.explanation}</p>}
+      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
       {r.inferredSubClassOf.length > 0 && (
         <div>
           <p className="text-xs text-muted">Inferred (not asserted) subclass relations:</p>
@@ -114,6 +122,25 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
       )}
     </div>
   );
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="flex flex-wrap items-center gap-2">
+        <Brain className="size-4 text-muted" />
+        {verdict}
+        <span className="text-xs text-subtle">
+          {r.engine} · {r.durationMs} ms
+        </span>
+      </p>
+      {(hasDetail || (!r.available && r.error)) &&
+        (problem ? (
+          detail
+        ) : (
+          <Disclosure tone="muted" title={<span className="text-xs">Reasoner details</span>} summary={r.inferredSubClassOf.length ? plural(r.inferredSubClassOf.length, 'inferred relation') : undefined}>
+            {detail}
+          </Disclosure>
+        ))}
+    </div>
+  );
 }
 
 const PRINCIPLES = [
@@ -123,12 +150,15 @@ const PRINCIPLES = [
   { key: 'R', name: 'Reusable' },
 ] as const;
 
-export function FairChecks({ report }: { report: ValidationReport }) {
-  const [open, setOpen] = useState(false);
+/** `showAll` lists every check (failing first) with no inner toggle, for use inside a disclosure. */
+export function FairChecks({ report, showAll }: { report: ValidationReport; showAll?: boolean }) {
+  const [expanded, setOpen] = useState(false);
+  const open = showAll || expanded;
   const { checks, byPrinciple } = report.fair;
   const status = (c: (typeof checks)[number]) => c.status ?? (c.passed ? 'pass' : 'fail');
   const failed = checks.filter((c) => status(c) === 'fail');
-  const shown = open ? checks : failed.slice(0, 4);
+  const order = { fail: 0, 'not-checked': 1, pass: 2 } as const;
+  const shown = open ? [...checks].sort((a, b) => order[status(a)] - order[status(b)]) : failed.slice(0, 4);
   const skipped = checks.filter((c) => status(c) === 'not-checked').length;
   return (
     <div className="text-sm">
@@ -175,7 +205,7 @@ export function FairChecks({ report }: { report: ValidationReport }) {
         ))}
         {!shown.length && <li className="text-muted">All {checks.length - skipped} FAIR checks that could be run pass.</li>}
       </ul>
-      {checks.length > shown.length || open ? (
+      {!showAll && (checks.length > shown.length || open) ? (
         <button onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
           {open ? 'Show failing only' : `Show all ${checks.length} checks`}
@@ -236,7 +266,7 @@ export function CqResults({ report }: { report: ValidationReport }) {
 }
 
 /** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
-export function ValidationDetails({ report, label, openLint, lintNote }: { report: ValidationReport; label: Labeler; openLint?: boolean; lintNote?: ReactNode }) {
+export function ValidationDetails({ report, label, openLintKey, lintNote }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
   const infos = report.lint.length - errors - warnings;
@@ -250,18 +280,20 @@ export function ValidationDetails({ report, label, openLint, lintNote }: { repor
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" title="Lint findings" summary={lintSummary} defaultOpen={openLint || errors > 0 || warnings > 0}>
+        <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length}>
-          <FairChecks report={report} />
+        <Disclosure className="px-4 py-3" heading={4} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} keepMounted>
+          <FairChecks report={report} showAll />
         </Disclosure>
         <Disclosure
           className="px-4 py-3"
+          heading={4}
           title="Competency questions"
           summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
           defaultOpen={cqOk < report.competencyQuestions.length}
+          keepMounted
         >
           <CqResults report={report} />
         </Disclosure>

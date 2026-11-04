@@ -1,5 +1,5 @@
 import type { BuilderModel, PathStep } from '../../lib/sparql-builder';
-import { FILTER_LABELS } from '../../lib/sparql-builder';
+import { FILTER_LABELS, activeFilter, isRequired } from '../../lib/sparql-builder';
 import type { Labeler } from '../../lib/ontology';
 import type { PropertyOption } from './schema';
 
@@ -55,7 +55,8 @@ export function QueryDiagram({
       const opt = optionFor(s.property);
       const isObject = opt?.kind === 'object';
       const v = `?${variables[s.id] ?? ''}`;
-      const filter = s.filter?.value.trim() ? `${FILTER_LABELS[s.filter.op]} “${clip(s.filter.value, 14)}”` : undefined;
+      const f = activeFilter(s);
+      const filter = f ? `${FILTER_LABELS[f.op]} “${clip(f.value, 14)}”` : undefined;
       placed.push({
         id: s.id,
         parent,
@@ -66,7 +67,7 @@ export function QueryDiagram({
         kind: isObject ? 'object' : 'data',
         shown: s.show,
         edgeLabel: opt?.label ?? label(s.property),
-        optional: s.optional && !s.filter?.value.trim(),
+        optional: s.optional && !isRequired(s),
       });
     }
   };
@@ -77,7 +78,7 @@ export function QueryDiagram({
     x: PAD,
     y: PAD + ((rows - 1) / 2) * ROW,
     title: label(model.rootClass),
-    subtitle: `?${variables.root ?? ''}${model.includeSubclasses ? ' + subclasses' : ''}`,
+    subtitle: `?${variables.root ?? ''}${model.includeSubclasses ? ' + more specific' : ''}`,
     kind: 'root',
     shown: true,
   };

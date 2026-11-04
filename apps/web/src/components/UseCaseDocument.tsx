@@ -150,7 +150,7 @@ export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc:
         const todo = live ? g.keys.filter((k) => !keys.includes(k)) : [];
         if (!keys.length && !todo.length) return null;
         return (
-          <GroupSection key={g.title} title={g.title} count={keys.length} collapsible={collapsible} defaultOpen={gi === firstShown}>
+          <GroupSection key={g.title} title={g.title} filled={g.keys.filter((k) => isFilled(s[k])).length} total={g.keys.length} collapsible={collapsible} defaultOpen={gi === firstShown}>
             <div className="space-y-3">
               {keys.map((k) => {
                 const filled = isFilled(s[k]);
@@ -196,8 +196,16 @@ export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseC
                 <CqStatusChip status={q.status} />
               </div>
               {compact ? (
-                <Disclosure className="mt-1" tone="muted" title={<span className="text-xs">Example answer, terms and test</span>}>
-                  <CqDetail q={q} />
+                <Disclosure
+                  className="mt-1"
+                  tone="muted"
+                  title={
+                    <span className="text-xs">
+                      Example answer, terms and test<span className="sr-only"> for “{q.question}”</span>
+                    </span>
+                  }
+                >
+                  <CqDetail q={q} showTest />
                 </Disclosure>
               ) : (
                 <CqDetail q={q} />
@@ -251,7 +259,8 @@ export function CompletenessMeter({ value }: { value: number }) {
   );
 }
 
-function CqDetail({ q }: { q: UseCase['competencyQuestions'][number] }) {
+/** `showTest` shows the SPARQL test directly, for when the detail is already behind a disclosure. */
+function CqDetail({ q, showTest }: { q: UseCase['competencyQuestions'][number]; showTest?: boolean }) {
   return (
     <>
       {q.exampleAnswer && <p className="mt-1 text-xs text-muted">e.g. {q.exampleAnswer}</p>}
@@ -264,7 +273,13 @@ function CqDetail({ q }: { q: UseCase['competencyQuestions'][number] }) {
           ))}
         </div>
       ) : null}
-      {q.sparql && (
+      {q.sparql && showTest && (
+        <div className="mt-1.5">
+          <div className="text-xs font-medium text-muted">SPARQL test</div>
+          <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
+        </div>
+      )}
+      {q.sparql && !showTest && (
         <details className="mt-1.5">
           <summary className="cursor-pointer text-xs text-accent">SPARQL test</summary>
           <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
@@ -274,8 +289,22 @@ function CqDetail({ q }: { q: UseCase['competencyQuestions'][number] }) {
   );
 }
 
-/** A titled group of the use case document; collapsible on the read-only page. */
-function GroupSection({ title, count, collapsible, defaultOpen, children }: { title: string; count?: number; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
+/** A titled group of the use case document; collapsible on the read-only page. The heading stays a real heading either way. */
+function GroupSection({
+  title,
+  filled,
+  total,
+  collapsible,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  filled?: number;
+  total?: number;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
   if (!collapsible)
     return (
       <section>
@@ -286,12 +315,24 @@ function GroupSection({ title, count, collapsible, defaultOpen, children }: { ti
   return (
     <section>
       <Disclosure
+        heading={3}
         title={<span className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</span>}
-        summary={count !== undefined ? `${count} ${count === 1 ? 'section' : 'sections'}` : undefined}
+        summary={filled !== undefined && total !== undefined ? `${filled} of ${total} filled` : undefined}
         defaultOpen={defaultOpen}
+        keepMounted
       >
         {children}
       </Disclosure>
     </section>
   );
 }
+
+/** Sections filled out of the template's total, and the labels of those still empty, for progress summaries. */
+export function sectionProgress(uc: UseCase) {
+  const s = uc.sections ?? {};
+  const keys = SECTION_GROUPS.flatMap((g) => g.keys);
+  const missing = keys.filter((k) => !isFilled(s[k]));
+  return { filled: keys.length - missing.length, total: keys.length, missing: missing.map((k) => USE_CASE_SECTION_LABELS[k]) };
+}
+
+export const sectionLabel = (k: string) => USE_CASE_SECTION_LABELS[k as Key] ?? (k === 'competencyQuestions' ? 'Competency questions' : k === 'terms' ? 'Terms' : k);
