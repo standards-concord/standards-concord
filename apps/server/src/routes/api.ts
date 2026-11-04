@@ -149,7 +149,9 @@ export function apiRouter(): Router {
    */
   r.use((req, _res, next) => {
     if (req.user || (req.method !== 'GET' && req.method !== 'HEAD') || PUBLIC_READS.some((re) => re.test(req.path))) return next();
-    next(new HttpError(401, 'Sign in first'));
+    // Unknown paths still 404 (clients probe for optional features that way).
+    const known = (r.stack as unknown as { route?: { methods?: Record<string, boolean> }; match: (path: string) => boolean }[]).some((l) => l.route?.methods?.get && l.match(req.path));
+    next(known ? new HttpError(401, 'Sign in first') : undefined);
   });
 
   /* --------------------------- ontologies --------------------------- */

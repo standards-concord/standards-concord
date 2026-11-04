@@ -285,6 +285,8 @@ describe('anonymous access', () => {
     for (const path of ['/api/ontologies', `/api/ontologies/${demoId}/view`, `/api/ontologies/${demoId}/source`, '/api/governance/templates', '/api/feedback/questions', '/api/session']) {
       expect((await request(app).get(path)).status, path).toBe(200);
     }
+    // Paths that don't exist are still 404, not 401.
+    expect((await request(app).get('/api/no-such-thing/pending')).status).toBe(404);
     const detail = await request(app).get('/api/ontologies/volunteering');
     expect(detail.status).toBe(200);
     expect(detail.body.members).toEqual([]);
