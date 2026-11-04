@@ -35,6 +35,8 @@ export const config = {
       | 'simulated',
     model: process.env.LLM_MODEL ?? 'claude-opus-5-5',
     effort: (process.env.LLM_EFFORT ?? 'high') as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+    /** Questions the query assistant may send to Claude per day across the deployment; after that the offline helper answers. */
+    queryAssistantDailyLimit: Number(process.env.QUERY_ASSISTANT_DAILY_LIMIT ?? 300),
   },
 
   google: {

@@ -48,7 +48,7 @@ test.describe('Query tab', () => {
     const suggestions = page.getByTestId('query-suggestions');
     await expect(suggestions.getByRole('button')).toHaveCount(3);
     await suggestions.getByRole('button', { name: /^List every volunteering opportunity/ }).click();
-    await expect(chat(page)).toContainText('This lists every volunteering opportunity');
+    await expect(chat(page)).toContainText('This lists volunteering opportunity records');
     // The conversation has started, so the suggestions make way.
     await expect(suggestions).toHaveCount(0);
     await expect(page.getByTestId('query-chat-offline')).toBeVisible();
@@ -113,7 +113,7 @@ test.describe('Query tab', () => {
     await page.goto(url);
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
     await expect(chat(page).getByTestId('chat-message-user')).toContainText('List every volunteering opportunity with its minimum age');
-    await expect(chat(page)).toContainText('This lists every volunteering opportunity');
+    await expect(chat(page)).toContainText('This lists volunteering opportunity records');
     expect(await editorText(page)).toContain('vol:minimumAge');
     await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
@@ -129,6 +129,76 @@ test.describe('Query tab', () => {
     await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
     expect(await editorText(page)).toBe(start);
+  });
+
+  test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {
+    const start = await editorText(page);
+    await ask(page, 'List every volunteering opportunity');
+    expect(await editorText(page)).not.toBe(start);
+    await signIn(page, { name: 'E2E query, second person', role: 'editor' });
+    await page.reload();
+    await expect(page.getByTestId('sparq-ready')).toBeVisible({ timeout: 30_000 });
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    expect(await editorText(page)).toBe(start);
+  });
+
+  test('replies are plain text: no links or images load from them', async ({ page }) => {
+    const external: string[] = [];
+    page.on('request', (r) => r.url().includes('evil.example') && external.push(r.url()));
+    await page.route(/\/query-chat$/, (r) =>
+      r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'Done ![x](https://evil.example/x.png) [here](https://evil.example/)', query: 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 3', target: 'ontology', columns: [], simulated: false }) }),
+    );
+    await ask(page, 'List three classes');
+    await expect(chat(page)).toContainText('Done ![x](https://evil.example/x.png)');
+    await expect(chat(page).locator('img, a[href*="evil.example"]')).toHaveCount(0);
+    expect(external).toEqual([]);
+  });
+
+  test('the editor is locked while the assistant works, so its answer never replaces newer edits', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/query-chat$/, async (r) => {
+      await held;
+      await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'Here you go.', query: 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 3 # assistant', target: 'ontology', columns: [], simulated: false }) });
+    });
+    await chat(page).getByLabel('Your message').fill('List three classes');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('editor-locked')).toBeVisible();
+    await expect(page.getByLabel('Run against')).toBeDisabled();
+    await page.getByTestId('sparql-editor').click();
+    await page.keyboard.insertText('# typed while waiting');
+    expect(await editorText(page)).not.toContain('typed while waiting');
+    release();
+    await expect(page.getByTestId('editor-locked')).toHaveCount(0);
+    expect(await editorText(page)).toContain('# assistant');
+    await expect(results(page)).toContainText('3 rows');
+  });
+
+  test('when the assistant can’t change the query, the editor and results stay as they are', async ({ page }) => {
+    await run(page);
+    const before = await editorText(page);
+    await page.route(/\/query-chat$/, (r) =>
+      r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'The offline helper can only change queries it wrote itself.', query: 'SELECT * WHERE { ?s ?p ?o }', target: 'data', columns: [], simulated: true, unchanged: true, offlineReason: 'not-member' }) }),
+    );
+    await ask(page, 'Also show the title');
+    await expect(chat(page)).toContainText('can only change queries it wrote itself');
+    await expect(page.getByTestId('query-chat-offline')).toContainText('members of this ontology');
+    expect(await editorText(page)).toBe(before);
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    await expect(results(page)).toBeVisible();
+  });
+
+  test('results cut off by LIMIT say so, with a way to see them all', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    await expect(results(page)).toContainText('1 row');
+    const limited = page.getByTestId('result-limited');
+    await expect(limited).toContainText('there may be more');
+    await limited.getByRole('button', { name: 'Show all rows' }).click();
+    await expect(results(page)).toContainText('2 rows');
+    await expect(limited).toHaveCount(0);
+    expect(await editorText(page)).not.toContain('LIMIT');
   });
 
   test('changing the question marks the old answer as stale', async ({ page }) => {
@@ -189,9 +259,14 @@ test.describe('Query tab', () => {
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${a}`));
     await expect(editor).toContainText('draft A');
-    const stored = await page.evaluate(([idA, idB]) => [localStorage.getItem(`concord.query.${idA}.sparql`), localStorage.getItem(`concord.query.${idB}.sparql`)], [a.split('/')[2], b.id]);
-    expect(stored[0]).toContain('draft A');
-    expect(stored[1]).toContain('draft B');
+    // Drafts are kept per account and ontology.
+    const stored = await page.evaluate(
+      ([idA, idB]) => [idA, idB].map((o) => Object.keys(localStorage).filter((k) => k.endsWith(`.${o}.sparql`)).map((k) => localStorage.getItem(k))),
+      [a.split('/')[2], b.id],
+    );
+    expect(stored[0]).toHaveLength(1);
+    expect(stored[0][0]).toContain('draft A');
+    expect(stored[1][0]).toContain('draft B');
   });
 
   test('switching to an ontology that fails to load shows the error, not endless loading', async ({ page, consoleGuard }) => {

@@ -777,4 +777,8 @@ export interface QueryChatResponse {
   columns: { variable: string; label: string }[];
   /** True when the offline helper answered instead of Claude. */
   simulated: boolean;
+  /** The assistant didn't change the query (it couldn't, or shouldn't): leave the editor as it is. */
+  unchanged?: boolean;
+  /** Why the offline helper answered: no API key, not a member of the ontology, or the assistant's usage limit. */
+  offlineReason?: 'unavailable' | 'not-member' | 'limit';
 }

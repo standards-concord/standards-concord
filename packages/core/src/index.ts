@@ -26,7 +26,7 @@ export type { LintOptions } from './lint.js';
 export { fairCheck } from './fair.js';
 export { structuralReasoner, owlReasoner } from './reasoner.js';
 export type { OwlReasonerOptions } from './reasoner.js';
-export { runCompetencyQuestions, validate, sparqlSyntaxError } from './cq.js';
+export { runCompetencyQuestions, validate } from './cq.js';
 export type { CompetencyQuestion, ValidateOptions } from './cq.js';
 
 // Queries

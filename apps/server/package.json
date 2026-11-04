@@ -14,6 +14,7 @@
     "@concord/shared": "workspace:*",
     "@inrupt/solid-client-authn-node": "^5.0.1",
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@sparq-org/sparq": "0.1.5",
     "arctic": "^3.7.0",
     "cookie-parser": "^1.4.7",
     "express": "5",

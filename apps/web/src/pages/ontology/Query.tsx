@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router';
 import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Play, RotateCcw, Search, ShieldCheck, Sparkles, Table2 } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
-import type { ChatMessage, QueryTarget } from '@concord/shared';
+import type { ChatMessage, QueryChatResponse, QueryTarget } from '@concord/shared';
 import { api } from '../../api';
 import { useAsync, useLocalStorage } from '../../lib/hooks';
 import { allTerms, makeLabeler } from '../../lib/ontology';
@@ -91,6 +91,20 @@ function Segmented<T extends string>({ value, onChange, options, label }: { valu
 }
 
 const ROWS_PER_PAGE = 50;
+
+const OFFLINE_NOTE: Record<NonNullable<QueryChatResponse['offlineReason']>, string> = {
+  unavailable: 'Offline helper: Claude isn’t connected right now, so this matches your words to the ontology’s terms and refines its own queries step by step.',
+  'not-member': 'Offline helper: Claude writes queries for members of this ontology. This helper matches your words to the ontology’s terms instead.',
+  limit: 'Offline helper: the assistant has reached today’s usage limit, so this matches your words to the ontology’s terms instead.',
+};
+
+/** The query's final LIMIT (outside any subquery), if it has one. */
+const TRAILING_LIMIT = /\bLIMIT\s+(\d+)(\s+OFFSET\s+\d+)?\s*(#[^\n]*\s*)*$/i;
+const limitOf = (q: string) => {
+  const m = TRAILING_LIMIT.exec(q);
+  return m ? Number(m[1]) : undefined;
+};
+const withoutLimit = (q: string) => q.replace(TRAILING_LIMIT, (m) => m.replace(/\bLIMIT\s+\d+\s*/i, '')).trimEnd() + '\n';
 const FINDINGS_PER_PAGE = 20;
 
 /** Previous / next paging for long results, so a big answer doesn't flood the page. */
@@ -113,10 +127,26 @@ function Pager({ page, pageSize, total, onPage, label }: { page: number; pageSiz
 
 type Workspace = 'query' | 'check';
 
-/** One workspace per ontology: switching ontology starts fresh rather than carrying state across. */
+/**
+ * One workspace per ontology and account: switching either starts fresh rather
+ * than carrying a draft or conversation across (on a shared browser, the next
+ * person never sees, or sends on, the previous person's chat).
+ */
 export function QueryTab() {
   const { id } = useOntology();
-  return <QueryWorkspace key={id} />;
+  const { session, loading } = useSession();
+  const account = session?.user?.id ?? 'guest';
+  useEffect(() => {
+    // Drafts from before they were kept per account belong to nobody in particular: drop them.
+    try {
+      for (const k of Object.keys(localStorage)) if (k.startsWith(`concord.query.${id}.`)) localStorage.removeItem(k);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [id]);
+  // Wait for the session so a signed-in person's drafts open straight away, not a guest's first.
+  if (loading && !session) return <Loading className="py-12" />;
+  return <QueryWorkspace key={`${account}:${id}`} storageKey={`concord.query.${account}.${id}`} />;
 }
 
 /**
@@ -144,7 +174,7 @@ async function countRecords(data: string): Promise<{ byClass: Map<string, number
   return { byClass: counts, total };
 }
 
-function QueryWorkspace() {
+function QueryWorkspace({ storageKey }: { storageKey: string }) {
   const { id, ontology } = useOntology();
   const { session } = useSession();
   const [params, setParams] = useSearchParams();
@@ -169,13 +199,13 @@ function QueryWorkspace() {
 
   const examples = useMemo(() => sparqlExamples(ontology.prefix, ontology.namespace), [ontology.prefix, ontology.namespace]);
   // Drafts survive leaving the page, per ontology and per browser.
-  const [query, setQuery] = useLocalStorage(`concord.query.${id}.sparql`, examples[0].query);
+  const [query, setQuery] = useLocalStorage(`${storageKey}.sparql`, examples[0].query);
   // The dataset is part of the draft: a restored instance query must still run against the data.
-  const [target, setTarget] = useLocalStorage<Target>(`concord.query.${id}.target`, 'ontology');
+  const [target, setTarget] = useLocalStorage<Target>(`${storageKey}.target`, 'ontology');
   const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
-  const [data, setData] = useLocalStorage(`concord.query.${id}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
+  const [data, setData] = useLocalStorage(`${storageKey}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
   const [report, setReportState] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
   const [checkError, setCheckError] = useState<unknown>();
 
@@ -204,8 +234,8 @@ function QueryWorkspace() {
   const recordTotal = recordCounts?.total;
 
   // The query assistant's conversation, and the column headings it gave for the current query.
-  const [chat, setChat] = useLocalStorage<(ChatMessage & { simulated?: boolean })[]>(`concord.query.${id}.chat`, []);
-  const [columns, setColumns] = useLocalStorage<Columns>(`concord.query.${id}.columns`, []);
+  const [chat, setChat] = useLocalStorage<(ChatMessage & { simulated?: boolean; offlineReason?: QueryChatResponse['offlineReason'] })[]>(`${storageKey}.chat`, []);
+  const [columns, setColumns] = useLocalStorage<Columns>(`${storageKey}.columns`, []);
   const [asking, setAsking] = useState(false);
   const [chatError, setChatError] = useState<unknown>();
 
@@ -328,11 +358,14 @@ function QueryWorkspace() {
         target,
         dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
       });
-      setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated }]);
-      setQuery(r.query);
-      setTarget(r.target);
-      setColumns(r.columns);
-      await run({ query: r.query, target: r.target, columns: r.columns });
+      setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
+      // The editor is read-only while the assistant works, so its answer never replaces newer edits.
+      if (!r.unchanged) {
+        setQuery(r.query);
+        setTarget(r.target);
+        setColumns(r.columns);
+        await run({ query: r.query, target: r.target, columns: r.columns });
+      }
     } catch (e) {
       setChatError(e);
     } finally {
@@ -367,7 +400,7 @@ function QueryWorkspace() {
   const greeting: ChatMessage = {
     id: 'greeting',
     role: 'assistant',
-    content: `Tell me what you’d like to find in *${ontology.title}* and I’ll write the SPARQL and run it. Then ask for changes (“also show…”, “only the ones…”) or edit the query yourself.`,
+    content: `Tell me what you’d like to find in ${ontology.title} and I’ll write the SPARQL and run it. Then ask for changes (“also show…”, “only the ones…”) or edit the query yourself.`,
     at: '',
   };
   const lastReply = [...chat].reverse().find((m) => m.role === 'assistant');
@@ -443,6 +476,7 @@ function QueryWorkspace() {
                   userName={session?.user?.name}
                   placeholder="Describe what you want to find…"
                   error={chatError}
+                  plainText
                   quickReplies={
                     chat.length === 0 && suggestions.length ? (
                       <div className="flex flex-wrap gap-1.5" data-testid="query-suggestions">
@@ -457,7 +491,7 @@ function QueryWorkspace() {
                   footer={
                     lastReply?.simulated ? (
                       <p className="mt-1.5 text-xs text-muted" data-testid="query-chat-offline">
-                        Offline helper: it matches your words to the ontology’s terms. With Claude connected it can answer harder questions.
+                        {OFFLINE_NOTE[lastReply.offlineReason ?? 'unavailable']}
                       </p>
                     ) : null
                   }
@@ -471,7 +505,7 @@ function QueryWorkspace() {
                 subtitle="The assistant writes here, and you can edit it too: Ctrl/⌘-Space suggests terms, Ctrl/⌘-Enter runs."
                 icon={Code2}
                 actions={
-                  <Button variant="primary" icon={Play} onClick={() => void run()} disabled={!ready || !query.trim()}>
+                  <Button variant="primary" icon={Play} onClick={() => void run()} disabled={!ready || !query.trim() || asking}>
                     Run
                   </Button>
                 }
@@ -490,6 +524,7 @@ function QueryWorkspace() {
                     }}
                     aria-label="Example queries"
                     className="w-auto!"
+                    disabled={asking}
                   >
                     <option value="">Examples…</option>
                     {examples.map((x) => (
@@ -500,16 +535,22 @@ function QueryWorkspace() {
                   </Select>
                   <label className="ml-auto flex items-center gap-2 text-sm">
                     <span className="text-muted">Run against</span>
-                    <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!">
+                    <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!" disabled={asking}>
                       <option value="ontology">The ontology</option>
                       <option value="data">The ontology + sample data</option>
                     </Select>
                   </label>
                 </div>
+                {asking && (
+                  <p role="status" className="text-xs text-muted" data-testid="editor-locked">
+                    The assistant is writing the query, so the editor is locked until it answers.
+                  </p>
+                )}
                 <CodeEditor
                   value={query}
                   onChange={setQuery}
                   language="sparql"
+                  readOnly={asking}
                   onRun={() => void run()}
                   completions={sparqlCompletions}
                   ariaLabel="SPARQL query"
@@ -530,7 +571,7 @@ function QueryWorkspace() {
                   <Database className="size-3.5" />
                   {recordTotal > 0 ? (
                     <span>
-                      Runs over the ontology plus {recordTotal.toLocaleString()} sample {recordTotal === 1 ? 'record' : 'records'}.
+                      Runs over the ontology plus {recordTotal.toLocaleString()} sample {recordTotal === 1 ? 'record' : 'records'}. Records of a class include its subclasses where the query says so (via rdfs:subClassOf only, not full OWL reasoning).
                     </span>
                   ) : (
                     <span>There is no sample data yet, so questions about records will find nothing.</span>
@@ -606,6 +647,21 @@ function QueryWorkspace() {
                       </tbody>
                     </table>
                     <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
+                    {limitOf(query) === result.rows.length && !resultStale && (
+                      <p role="status" className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2 text-xs text-warn" data-testid="result-limited">
+                        These are the first {result.rows.length.toLocaleString()} rows: the query stops there, so there may be more.
+                        <Button
+                          size="sm"
+                          onClick={() => {
+                            const all = withoutLimit(query);
+                            setQuery(all);
+                            void run({ query: all, target, columns });
+                          }}
+                        >
+                          Show all rows
+                        </Button>
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

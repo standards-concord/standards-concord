@@ -213,6 +213,24 @@ ex:r3 a ex:Record ; ex:title "Three" .
     }
   });
 
+  it('"at least" and "at most" include the boundary; "more than" and "less than" exclude it', async () => {
+    const store = await storeFrom(`@prefix ex: <https://example.org/> .
+ex:a a ex:Record ; ex:title "Fourteen" ; ex:size 14 .
+ex:b a ex:Record ; ex:title "Fifteen" ; ex:size 15 .
+ex:c a ex:Record ; ex:title "Sixteen" ; ex:size 16 .
+`);
+    const run = (op: 'gt' | 'gte' | 'lt' | 'lte') => {
+      const steps = [title(), { ...newStep(`${EX}size`, 'number'), filter: { op, value: '15' } }];
+      const built = buildSparql({ rootClass: `${EX}Record`, includeSubclasses: false, steps, distinct: true, countOnly: false, descending: false }, { prefixes: { ex: EX } });
+      const rows = (JSON.parse(store.queryJson(built.query)) as { results: { bindings: Record<string, { value: string }>[] } }).results.bindings;
+      return rows.map((r) => r[built.variables[steps[0].id]]?.value).sort();
+    };
+    expect(run('gte')).toEqual(['Fifteen', 'Sixteen']);
+    expect(run('gt')).toEqual(['Sixteen']);
+    expect(run('lte')).toEqual(['Fifteen', 'Fourteen']);
+    expect(run('lt')).toEqual(['Fourteen']);
+  });
+
   it('a filter three relationships deep excludes non-matching and missing paths', async () => {
     const city = { ...newStep(`${EX}city`), filter: { op: 'equals' as const, value: 'Leeds' } };
     const steps = [title(), { ...newStep(`${EX}org`, 'resource'), children: [{ ...newStep(`${EX}address`, 'resource'), children: [city] }] }];

@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -230,51 +230,146 @@ describe('agents over MCP', () => {
 });
 
 describe('query assistant (offline helper)', () => {
-  const ask = async (agent: Agent, messages: { role: 'user' | 'assistant'; content: string }[], query = '') => {
+  type Reply = { reply: string; query: string; target: string; columns: { variable: string; label: string }[]; simulated: boolean; unchanged?: boolean; offlineReason?: string };
+  type Turn = { role: 'user' | 'assistant'; content: string };
+  beforeEach(async () => (await import('../src/services/queryChat.js')).resetQueryChatLimits());
+
+  const ask = async (agent: Agent, messages: Turn[], query = '') => {
     const res = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages, query, target: 'ontology' });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    return res.body as { reply: string; query: string; target: string; columns: { variable: string; label: string }[]; simulated: boolean };
+    return res.body as Reply;
+  };
+  /** Runs a conversation the way the page does: each answer's query goes back with the next message. */
+  const converse = async (agent: Agent, ...said: string[]) => {
+    const history: Turn[] = [];
+    let query = '';
+    const replies: Reply[] = [];
+    for (const text of said) {
+      history.push({ role: 'user', content: text });
+      const r = await ask(agent, history, query);
+      replies.push(r);
+      history.push({ role: 'assistant', content: r.reply });
+      if (!r.unchanged) query = r.query;
+    }
+    return replies;
   };
 
-  it('needs a signed-in person and a message', async () => {
+  it('needs a signed-in person and a message, and bounds what it is sent', async () => {
     expect((await request(app).post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(401);
     const agent = await login('contributor');
     expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [] })).status).toBe(400);
+    const long = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: 'x'.repeat(8001) });
+    expect(long.status).toBe(400);
+    const { boundedQueryChatRequest } = await import('../src/services/queryChat.js');
+    const b = boundedQueryChatRequest({
+      messages: Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `${i} ${'w'.repeat(3000)}` })).concat([{ role: 'user', content: 'latest' }]),
+      dataSummary: [{ classIri: 'x'.repeat(301), count: 1 }, { classIri: 'https://e.org/A', count: 2 }, { classIri: 'https://e.org/B', count: -1 }],
+    });
+    expect(b.messages.at(-1)).toEqual({ role: 'user', content: 'latest' });
+    expect(b.messages.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(8000);
+    expect(b.dataSummary).toEqual([{ classIri: 'https://e.org/A', count: 2 }]);
   });
 
-  it('writes, refines and counts, with queries that parse', async () => {
-    const { sparqlSyntaxError } = await import('@concord/core');
+  it('limits each person to one question at a time and a number per ten minutes', async () => {
+    const { QUERY_CHAT_LIMITS } = await import('../src/services/queryChat.js');
+    const agent = await login('contributor', 'Rate limited');
+    const one = [{ role: 'user' as const, content: 'Which classes have no definition?' }];
+    for (let i = 0; i < QUERY_CHAT_LIMITS.perUser; i++) await ask(agent, one);
+    const over = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: one, query: '', target: 'ontology' });
+    expect(over.status).toBe(429);
+  });
+
+  it('says why the offline helper answered', async () => {
+    const member = await login('contributor');
+    expect((await ask(member, [{ role: 'user', content: 'List every organisation' }])).offlineReason).toBe('unavailable');
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const provider = config.llm.provider;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const outsider = admitQueryChat('someone-else', false);
+      outsider.done();
+      expect(outsider).toMatchObject({ useClaude: false, offlineReason: 'not-member' });
+      const limit = config.llm.queryAssistantDailyLimit;
+      config.llm.queryAssistantDailyLimit = 0;
+      const spent = admitQueryChat('a-member', true);
+      spent.done();
+      expect(spent).toMatchObject({ useClaude: false, offlineReason: 'limit' });
+      config.llm.queryAssistantDailyLimit = limit;
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('writes, refines step by step and counts, keeping earlier filters', async () => {
     const agent = await login('contributor');
-    const first = await ask(agent, [{ role: 'user', content: 'List every volunteering opportunity' }]);
-    expect(first.simulated).toBe(true);
-    expect(first.target).toBe('data');
+    const [first, more, under, title, count] = await converse(
+      agent,
+      'List every volunteering opportunity',
+      'Also show the minimum age and who it is offered by',
+      'Only those with a minimum age under 15',
+      'Also show the title',
+      'How many are there?',
+    );
+    expect(first).toMatchObject({ simulated: true, target: 'data' });
     expect(first.query).toContain('vol:VolunteeringOpportunity');
-    expect(first.query).toContain('vol:title');
-    expect(await sparqlSyntaxError(first.query)).toBeUndefined();
     expect(first.columns.map((c) => c.label)).toContain('title');
-
-    const history = [
-      { role: 'user' as const, content: 'List every volunteering opportunity' },
-      { role: 'assistant' as const, content: first.reply },
-      { role: 'user' as const, content: 'Also show the minimum age and who it is offered by, only over 15' },
-    ];
-    const second = await ask(agent, history, first.query);
-    expect(second.query).toContain('vol:minimumAge');
-    expect(second.query).toContain('vol:offeredBy');
-    expect(second.query).toContain('FILTER(?minimumAge > 15)');
-    expect(await sparqlSyntaxError(second.query)).toBeUndefined();
-
-    const count = await ask(agent, [...history, { role: 'assistant', content: second.reply }, { role: 'user', content: 'How many organisations are there?' }]);
+    expect(first.query).toContain('LIMIT 100');
+    expect(first.reply).toContain('up to 100 rows');
+    expect(more.query).toContain('vol:minimumAge');
+    expect(more.query).toContain('vol:offeredBy');
+    expect(under.query).toContain('FILTER(?minimumAge < 15)');
+    expect(under.query).toContain('vol:offeredBy');
+    // A later refinement keeps the filter.
+    expect(title.query).toContain('FILTER(?minimumAge < 15)');
     expect(count.query).toContain('COUNT(DISTINCT');
-    expect(count.query).toContain('vol:Organisation');
-    expect(count.columns[0].label).toMatch(/Number of organisation/i);
+    expect(count.query).toContain('FILTER(?minimumAge < 15)');
+    expect(count.columns[0].label).toMatch(/Number of volunteering opportunity/i);
   });
 
-  it('answers questions about the model itself against the ontology', async () => {
+  it('"at least" includes the boundary, "remove" removes and "all of them" lifts the limit', async () => {
     const agent = await login('contributor');
-    const r = await ask(agent, [{ role: 'user', content: 'Which classes have no definition?' }]);
-    expect(r.target).toBe('ontology');
-    expect(r.query).toContain('FILTER NOT EXISTS');
+    const [, atLeast, removed, all] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with a minimum age of at least 16', 'Remove the minimum age', 'Show all of them');
+    expect(atLeast.query).toContain('FILTER(?minimumAge >= 16)');
+    expect(atLeast.reply).toContain('at least 16');
+    expect(removed.query).not.toContain('minimumAge');
+    expect(all.query).not.toContain('LIMIT');
+  });
+
+  it('a new question starts afresh, and questions about the model run against the ontology', async () => {
+    const agent = await login('contributor');
+    const [, model, orgs] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Which classes have no definition?', 'How many organisations are there?');
+    expect(model.target).toBe('ontology');
+    expect(model.query).toContain('FILTER NOT EXISTS');
+    expect(orgs.query).toContain('vol:Organisation');
+    expect(orgs.query).not.toContain('minimumAge');
+  });
+
+  it('never rewrites a query edited by hand', async () => {
+    const agent = await login('contributor');
+    const [first] = await converse(agent, 'List every volunteering opportunity');
+    const edited = first.query.replace('LIMIT 100', 'LIMIT 5');
+    const r = await ask(agent, [{ role: 'user', content: 'List every volunteering opportunity' }, { role: 'assistant', content: first.reply }, { role: 'user', content: 'Also show the minimum age' }], edited);
+    expect(r.unchanged).toBe(true);
+    expect(r.query).toBe(edited);
+    expect(r.reply).toMatch(/changed since/);
+  });
+
+  it('every answer passes the query policy: parsed and planned by sparq, never run', async () => {
+    const { queryProblem } = await import('../src/services/queryPolicy.js');
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y ?z } LIMIT 1')).toBeUndefined();
+    expect(queryProblem('ASK { ?s ?p ?o }')).toBeUndefined();
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y }')).toMatch(/doesn’t parse/);
+    expect(queryProblem('SELECT * WHERE { SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * FROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('INSERT DATA { <a:b> <a:c> <a:d> }')).toMatch(/read-only/);
+    // Keywords inside strings, IRIs and comments don't count.
+    expect(queryProblem('SELECT ?x WHERE { ?x <http://e.org/service> "SERVICE from" } # SERVICE')).toBeUndefined();
+    // Planning, not running: a query whose answer would be huge is checked instantly.
+    const values = Array.from({ length: 200 }, (_, i) => i).join(' ');
+    const t0 = performance.now();
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } VALUES ?b { ${values} } VALUES ?c { ${values} } VALUES ?d { ${values} } }`)).toBeUndefined();
+    expect(performance.now() - t0).toBeLessThan(500);
   });
 });
 

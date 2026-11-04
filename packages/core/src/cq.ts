@@ -24,18 +24,6 @@ export function withPrefixes(sparql: string, prefixes: Record<string, string>): 
   return lines.length ? lines.join('\n') + '\n' + sparql : sparql;
 }
 
-/** The parser's message when a SPARQL query doesn't parse (or uses an undeclared prefix), else undefined. */
-export async function sparqlSyntaxError(sparql: string): Promise<string | undefined> {
-  const ox = await import('oxigraph');
-  const Store = (ox as any).Store ?? (ox as any).default?.Store;
-  try {
-    new Store().query(sparql);
-    return undefined;
-  } catch (e) {
-    return (e as Error).message || String(e);
-  }
-}
-
 export async function runCompetencyQuestions(graph: OntologyGraph, cqs: CompetencyQuestion[]): Promise<CompetencyQuestionResult[]> {
   const ox = await import('oxigraph');
   const Store = (ox as any).Store ?? (ox as any).default?.Store;

@@ -17,7 +17,7 @@ export function TypingIndicator() {
   );
 }
 
-function Bubble({ m, userName, children }: { m: ChatMessage; userName?: string; children?: ReactNode }) {
+function Bubble({ m, userName, plainText, children }: { m: ChatMessage; userName?: string; plainText?: boolean; children?: ReactNode }) {
   const mine = m.role === 'user';
   if (m.role === 'system') return <p className="py-1 text-center text-xs text-muted">{m.content}</p>;
   return (
@@ -29,7 +29,7 @@ function Bubble({ m, userName, children }: { m: ChatMessage; userName?: string; 
       )}
       <div className={cx('max-w-[85%] min-w-0', mine && 'text-right')}>
         <div className={cx('inline-block rounded-2xl px-3.5 py-2.5 text-left', mine ? 'rounded-tr-sm bg-accent text-accent-fg' : 'rounded-tl-sm border border-line bg-surface')}>
-          {mine ? <p className="text-sm whitespace-pre-wrap">{m.content}</p> : <Markdown text={m.content} />}
+          {mine || plainText ? <p className="text-sm whitespace-pre-wrap">{m.content}</p> : <Markdown text={m.content} />}
         </div>
         {children && <div className="mt-2">{children}</div>}
       </div>
@@ -49,11 +49,13 @@ export interface ChatViewProps {
   voice?: boolean;
   bigMic?: boolean;
   error?: unknown;
+  /** Show the assistant's messages as plain text rather than Markdown (for replies built from untrusted input). */
+  plainText?: boolean;
   footer?: ReactNode;
   className?: string;
 }
 
-export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, voice = true, bigMic, error, footer, className }: ChatViewProps) {
+export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, voice = true, bigMic, error, footer, className, plainText }: ChatViewProps) {
   const [text, setText] = useState('');
   const [voiceUsed, setVoiceUsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -92,7 +94,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
     <div className={cx('flex min-h-0 flex-col', className)}>
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-1 py-4">
         {messages.map((m) => (
-          <Bubble key={m.id} m={m} userName={userName}>
+          <Bubble key={m.id} m={m} userName={userName} plainText={plainText}>
             {m === lastAssistant && !pending && quickReplies}
           </Bubble>
         ))}

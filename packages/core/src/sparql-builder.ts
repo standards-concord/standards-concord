@@ -8,7 +8,7 @@
 
 import type { IRI } from './types.js';
 
-export type FilterOp = 'contains' | 'equals' | 'notEquals' | 'gt' | 'lt' | 'startsWith' | 'regex';
+export type FilterOp = 'contains' | 'equals' | 'notEquals' | 'gt' | 'gte' | 'lt' | 'lte' | 'startsWith' | 'regex';
 
 export const FILTER_LABELS: Record<FilterOp, string> = {
   contains: 'contains',
@@ -16,7 +16,9 @@ export const FILTER_LABELS: Record<FilterOp, string> = {
   equals: 'is',
   notEquals: 'has a value other than',
   gt: 'is more than',
+  gte: 'is at least',
   lt: 'is less than',
+  lte: 'is at most',
   regex: 'matches regex',
 };
 
@@ -120,7 +122,7 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueTy
     case 'regex':
       return `REGEX(STR(${v}), ${literal(value)}, "i")`;
   }
-  const cmp = { equals: '=', notEquals: '!=', gt: '>', lt: '<' }[f.op];
+  const cmp = { equals: '=', notEquals: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' }[f.op];
   if (type === 'resource') {
     const iri = iriFor(value, compact, prefixes);
     if (iri && (f.op === 'equals' || f.op === 'notEquals')) return `${v} ${cmp} ${iri}`;
@@ -133,7 +135,7 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueTy
 
 /** Number properties compare numerically, through a number field. */
 export function usesNumberInput(type: ValueType, op: FilterOp): boolean {
-  return type === 'number' && (op === 'equals' || op === 'notEquals' || op === 'gt' || op === 'lt');
+  return type === 'number' && (op === 'equals' || op === 'notEquals' || op === 'gt' || op === 'gte' || op === 'lt' || op === 'lte');
 }
 
 /** Yes/no properties pick true or false. */
