@@ -196,7 +196,9 @@ async function check(label, source, extraEnv) {
 const rows = [];
 let pending;
 try {
-  pending = (await api('GET', `/api/app-checks/pending${recheck ? '?all=1' : ''}`)).json();
+  // Say which app commit this run tests: results carry over only between runs of the same commit.
+  const q = new URLSearchParams({ ...(recheck && { all: '1' }), ...(commit && { commit }) }).toString();
+  pending = (await api('GET', `/api/app-checks/pending${q ? `?${q}` : ''}`)).json();
 } catch (err) {
   fail(err.status === 401 ? 'Concord did not accept the app token. Create a new one on the App checks page.' : err.message);
 }

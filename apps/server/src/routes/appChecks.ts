@@ -44,7 +44,7 @@ export function mountAppChecks(r: Router) {
   // For an app's CI, authenticated with the app's token.
   r.get('/app-checks/pending', (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json(apps.pending(apps.appForToken(req.get('authorization')), req.query.all === '1' || req.query.all === 'true'));
+    res.json(apps.pending(apps.appForToken(req.get('authorization')), req.query.all === '1' || req.query.all === 'true', req.query.commit));
   });
   r.post('/app-checks', async (req, res) => {
     const app = apps.appForToken(req.get('authorization'));

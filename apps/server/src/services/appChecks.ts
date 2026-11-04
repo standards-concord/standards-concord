@@ -242,7 +242,11 @@ function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = g
 }
 
 /** Start a run: a new attempt number, and a record of exactly what this run is asked to test. */
-export function pending(app: AppDoc, all: boolean): PendingAppChecks {
+export function pending(app: AppDoc, all: boolean, commitParam?: unknown): PendingAppChecks {
+  // A result carries over to this run only if this run tests the same app commit as the one
+  // behind the draft result in force; otherwise this run's draft result will void it, so test again.
+  const commit = short(commitParam, 64);
+  const carriesOver = !!commit && commit === app.baseline?.commit;
   const project = getProject(app.ontologyId);
   const base = baselineRevision(project);
   const targets = listCRs(project.id)
@@ -264,7 +268,7 @@ export function pending(app: AppDoc, all: boolean): PendingAppChecks {
         page: `/o/${project.id}/changes/${cr.id}`,
         lastOutcome: last?.revision === revision ? last.outcome : undefined,
         // Done once it has a result that counts; 'error' means the run broke before testing anything.
-        done: !!counted && counted.outcome !== 'error',
+        done: carriesOver && !!counted && counted.outcome !== 'error',
       };
     })
     .filter((t) => all || !t.done)

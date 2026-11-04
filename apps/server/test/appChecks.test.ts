@@ -31,8 +31,9 @@ let seededMinorId: string;
 let majorId: string;
 
 const detail = async (id: string) => (await request(app).get(`/api/change-requests/${id}`)).body as ChangeRequestDetail;
-const pending = async (token: string, all = false) => {
-  const res = await request(app).get(`/api/app-checks/pending${all ? '?all=1' : ''}`).set('Authorization', `Bearer ${token}`);
+const pending = async (token: string, all = false, commit?: string) => {
+  const q = new URLSearchParams({ ...(all && { all: '1' }), ...(commit && { commit }) }).toString();
+  const res = await request(app).get(`/api/app-checks/pending${q ? `?${q}` : ''}`).set('Authorization', `Bearer ${token}`);
   expect(res.status, res.text).toBe(200);
   return res.body as PendingAppChecks;
 };
@@ -228,8 +229,11 @@ describe('connected apps', () => {
     expect(check.app.autopilot).toBe(false);
     expect(d.timeline.some((e) => e.type === 'app-check' && e.message.includes('Rota planner passed'))).toBe(true);
     expect(d.reviews.some((r) => r.autopilot)).toBe(false);
-    // Tested at this revision, so it drops off the list.
-    expect((await pending(created.token!)).targets.some((t) => t.changeRequestId === minorId)).toBe(false);
+    // Tested at this revision by this app commit, so it drops off the list for runs of that commit.
+    expect((await pending(created.token!, false, 'abc123')).targets.some((t) => t.changeRequestId === minorId)).toBe(false);
+    // A run of another commit, or one that doesn't say, tests it again.
+    expect((await pending(created.token!, false, 'def456')).targets.some((t) => t.changeRequestId === minorId)).toBe(true);
+    expect((await pending(created.token!)).targets.some((t) => t.changeRequestId === minorId)).toBe(true);
     expect((await pending(created.token!, true)).targets.find((t) => t.changeRequestId === minorId)?.lastOutcome).toBe('passed');
   });
 
@@ -748,6 +752,7 @@ console.log('ok', process.env.CONCORD_TARGET);
       GITHUB_RUN_ID: '42',
       GITHUB_REPOSITORY: 'example/single-site-map',
       GITHUB_SERVER_URL: 'https://github.com',
+      GITHUB_SHA: 'map-v1',
     });
     expect(res.code, res.out).toBe(0);
     // The vendored copy is put back afterwards.
@@ -764,10 +769,28 @@ console.log('ok', process.env.CONCORD_TARGET);
     expect(minor.appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
 
     // Nothing new to test on the next run.
-    const again = await runAction(dir, { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: 'node test.mjs', CONCORD_ONTOLOGY_PATH: 'data/volunteering.ttl' });
+    // Nothing new to test on the next run of the same app commit.
+    const again = await runAction(dir, { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: 'node test.mjs', CONCORD_ONTOLOGY_PATH: 'data/volunteering.ttl', CONCORD_COMMIT: 'map-v1' });
     expect(again.code, again.out).toBe(0);
     expect(again.out).toMatch(/0 change request\(s\) to test/);
+
   });
+
+  it('without a commit, every run tests the open changes again and autopilot’s yes stands', async () => {
+    const crId = await freshCR('Autopilot with commit-less runs');
+    const kai = await login('reviewer', 'Developer Kai');
+    const created = (await kai.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Commit-less app', autopilot: { enabled: true } })).body as ConnectedApp;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
+    // The app passes only this change, so autopilot doesn't approve (and merge) any other.
+    const number = (await detail(crId)).number;
+    const env = { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: `test "$CONCORD_TARGET" = baseline -o "$CONCORD_CHANGE_REQUEST" = ${number}`, CONCORD_MAX_CHANGES: '100' };
+    const first = await runAction(dir, env);
+    expect((await detail(crId)).governance.approvals, first.out).toBe(1);
+    const second = await runAction(dir, env);
+    expect(second.out).not.toMatch(/^0 change request\(s\) to test/m);
+    expect(second.out).toMatch(new RegExp(`#${number}: passed`));
+    expect((await detail(crId)).governance.approvals).toBe(1);
+  }, 60_000);
 
   it('fails the job and skips the changes when the working draft already breaks the app', async () => {
     const hal = await login('reviewer', 'Developer Hal');

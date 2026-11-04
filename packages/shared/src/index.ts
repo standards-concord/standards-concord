@@ -817,7 +817,7 @@ export interface SessionInfo {
  *  POST /api/apps/:id/token                          -> ConnectedApp (with a new token; the old one stops working)
  *  DELETE /api/apps/:id
  *  GET  /api/change-requests/:id/proposed?format=    -> text: the ontology as it would be with this change merged
- *  GET  /api/app-checks/pending?all=1                -> PendingAppChecks   (Bearer app token)
+ *  GET  /api/app-checks/pending?all=1&commit=sha     -> PendingAppChecks   (Bearer app token)
  *  POST /api/app-checks {target: 'baseline'|changeRequestId, revision, attempt, outcome, summary?, runUrl?, commit?}
  *                                                    -> { check?, stale, autopilot? }   (Bearer app token)
  *
