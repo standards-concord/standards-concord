@@ -10,7 +10,8 @@ import { writeNTriples } from './turtle.js';
 import type { OntologyGraph } from './graph.js';
 import { toManchester } from './manchester.js';
 import { toLinkML } from './linkml.js';
-import { toShacl } from './shacl.js';
+import { toShacl, toShaclc } from './shacl.js';
+import { toWrapperClasses, withWrapperImport } from './codegen.js';
 
 export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: string; extension: string }> = {
   turtle: { label: 'Turtle', mediaType: 'text/turtle', extension: 'ttl' },
@@ -20,9 +21,17 @@ export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: strin
   manchester: { label: 'Manchester syntax', mediaType: 'text/owl-manchester', extension: 'omn' },
   linkml: { label: 'LinkML (YAML)', mediaType: 'application/x-yaml', extension: 'linkml.yaml' },
   shacl: { label: 'SHACL shapes (Turtle)', mediaType: 'text/turtle', extension: 'shacl.ttl' },
+  shaclc: { label: 'SHACL compact syntax', mediaType: 'text/shaclc', extension: 'shaclc' },
+  typescript: { label: 'TypeScript classes', mediaType: 'application/typescript', extension: 'ts' },
+  javascript: { label: 'JavaScript classes', mediaType: 'text/javascript', extension: 'js' },
 };
 
-export async function serialize(graph: OntologyGraph, format: OutputFormat): Promise<string> {
+/**
+ * `name` names the generated classes' dataset wrapper (the project slug, so
+ * the app and the public module export the same names); without it the name
+ * comes from the ontology IRI.
+ */
+export async function serialize(graph: OntologyGraph, format: OutputFormat, opts: { name?: string } = {}): Promise<string> {
   switch (format) {
     case 'turtle': return graph.toTurtle();
     case 'ntriples': return writeNTriples(graph.store);
@@ -31,6 +40,10 @@ export async function serialize(graph: OntologyGraph, format: OutputFormat): Pro
     case 'manchester': return toManchester(graph);
     case 'linkml': return toLinkML(graph);
     case 'shacl': return toShacl(graph);
+    case 'shaclc': return toShaclc(graph);
+    case 'typescript': return (await toWrapperClasses(graph, { name: opts.name })).ts;
+    // Ready for a browser: @rdfjs/wrapper comes from a CDN (the npm package uses the bare import).
+    case 'javascript': return withWrapperImport((await toWrapperClasses(graph, { name: opts.name })).js);
     default: throw new Error(`unsupported format ${format as string}`);
   }
 }
