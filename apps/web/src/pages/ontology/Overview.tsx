@@ -12,7 +12,7 @@ import { Avatar, Button, Card, CardHeader, ErrorCard, Loading, Stat } from '../.
 import { useOntology } from './Layout';
 
 export function OverviewTab() {
-  const { id, ontology: o, label } = useOntology();
+  const { id, ontology: o, label, hasRole } = useOntology();
   const validation = useAsync(() => api.validation(id, 'working'), [id]);
   const loc = useLocation();
   const wantsHealth = loc.hash === '#health';
@@ -21,7 +21,10 @@ export function OverviewTab() {
   // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
   const healthKey = wantsHealth ? loc.key : undefined;
   useEffect(() => {
-    if (healthKey && validation.data) healthRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!healthKey || !validation.data) return;
+    // Move focus as well as the view, so keyboard and screen-reader users land on the report too.
+    healthRef.current?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    healthRef.current?.focus({ preventScroll: true });
   }, [healthKey, validation.data]);
   const members = o.members ?? [];
   return (
@@ -75,7 +78,7 @@ export function OverviewTab() {
           </Disclosure>
         </Card>
 
-        <div id="health" ref={healthRef} className="scroll-mt-20">
+        <div id="health" ref={healthRef} tabIndex={-1} className="scroll-mt-20 outline-none">
           <Card>
             <CardHeader icon={ShieldCheck} title="Health of the working draft" subtitle="Strict OWL lint, reasoner consistency, FAIR checks and competency-question tests." />
             <div className="p-5">
@@ -112,7 +115,7 @@ export function OverviewTab() {
             actions={
               <Link to={`/o/${id}/governance#roles`}>
                 <Button size="sm" variant="ghost">
-                  Manage
+                  {hasRole('owner', 'steward') ? 'Manage' : 'View members'}
                 </Button>
               </Link>
             }

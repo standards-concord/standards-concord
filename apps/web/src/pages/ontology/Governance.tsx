@@ -9,6 +9,7 @@ import { LevelBadge, RoleChips } from '../../components/badges';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, Input, Loading, Select, Toggle, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+import { alwaysRules, RuleList, ruleSummary } from '../../components/PolicyRules';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const ALL_ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -239,48 +240,8 @@ function Members() {
 const OWNERSHIP: Record<GovernancePolicy['ownership']['model'], string> = { single: 'Single owner', group: 'Group of owners' };
 const ODI: Record<GovernancePolicy['odiPrivilege'], string> = { none: 'no ODI privilege', veto: 'ODI can veto', 'final-say': 'ODI has the final say' };
 
-/**
- * One plain-language line per rule, following how the server actually evaluates it
- * (services/governance.ts): lazy consensus skips sign-offs and the vote for patch and minor
- * levels unless someone objects, any ODI privilege adds an ODI veto, and "final say" means ODI
- * must approve major changes and releases.
- */
-export function ruleSummary(r: ApprovalRule, level: ChangeLevel = 'minor', policy?: Pick<GovernancePolicy, 'odiPrivilege'>, kind: 'change' | 'release' = 'change'): string {
-  const lazySkips = r.lazyConsensus && level !== 'major';
-  const who = r.approverRoles.map(roleLabel).join(' or ') || 'anyone';
-  const parts: string[] = [];
-  if (r.minApprovals > 0) parts.push(lazySkips ? `no sign-off unless someone objects (then ${plural(r.minApprovals, 'sign-off')} from ${who})` : `${plural(r.minApprovals, 'sign-off')} from ${who}`);
-  else parts.push('no sign-off needed');
-  if (r.reviewPeriodDays > 0) parts.push(`${plural(r.reviewPeriodDays, 'day')} open for comment`);
-  if (r.lazyConsensus) parts.push('accepted if nobody objects');
-  if (r.vote) parts.push(`${lazySkips ? 'a vote only if someone objects' : 'a vote'} (${pct(r.vote.threshold)} in favour, ${pct(r.vote.quorum)} turnout)`);
-  const odi = policy && policy.odiPrivilege !== 'none';
-  if (odi && policy.odiPrivilege === 'final-say' && level === 'major') parts.push('ODI oversight must approve');
-  const veto = [...r.vetoRoles, ...(odi && !r.vetoRoles.includes('odi') ? (['odi'] as Role[]) : [])];
-  if (veto.length) parts.push(`${veto.map(roleLabel).join(' or ')} can block it`);
-  if (r.autoMerge) parts.push(kind === 'release' ? 'published automatically' : 'merged automatically');
-  return parts.join(' · ');
-}
-
-function RuleList({ rules, policy, label, kind = 'change' }: { rules: Record<ChangeLevel, ApprovalRule>; policy: GovernancePolicy; label: string; kind?: 'change' | 'release' }) {
-  return (
-    <ul className="space-y-1.5 text-sm" aria-label={label}>
-      {LEVELS.map((l) => (
-        <li key={l} className="flex items-start gap-2">
-          <LevelBadge level={l} className="mt-0.5 w-14 justify-center" />
-          <span>{ruleSummary(rules[l], l, policy, kind)}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function PolicySummary({ policy, preview }: { policy: GovernancePolicy; preview?: boolean }) {
-  const always = [
-    policy.odiPrivilege === 'veto' && 'ODI oversight can veto any change or release',
-    policy.odiPrivilege === 'final-say' && 'ODI oversight can veto anything and must approve major changes and releases',
-    policy.requireValidation && 'changes that fail validation can never be approved',
-  ].filter(Boolean) as string[];
+  const always = alwaysRules(policy);
   return (
     <Card className="p-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -364,7 +325,8 @@ export function GovernanceTab() {
   const [saved, setSaved] = useState(false);
   useEffect(() => setPolicy(ontology.governance), [ontology.governance]);
   const dirty = useMemo(() => JSON.stringify(policy) !== JSON.stringify(ontology.governance), [policy, ontology.governance]);
-  const canEdit = hasRole('owner', 'steward');
+  // Only owners can save a policy (the server checks the same), so only they get the edit controls.
+  const canEdit = hasRole('owner');
   const save = useAction(async () => {
     await api.setGovernance(id, policy);
     await reload();
@@ -413,7 +375,7 @@ export function GovernanceTab() {
           ) : null}
         </div>
       </div>
-      {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can view the policy; only owners and stewards can change it.</p>}
+      {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can read the policy; only the ontology’s owners can change it.</p>}
       {editing && <p className="rounded-lg bg-accent-soft px-4 py-2.5 text-sm">Editing the policy. Nothing changes for anyone until you save; the summary below previews your edits.</p>}
       <InlineError error={save.error} />
 

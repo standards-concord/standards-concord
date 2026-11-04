@@ -7,7 +7,7 @@ export function AppearancePage() {
   return (
     <Page>
       <PageHeader title="Appearance" subtitle="Choose how Concord looks. Your choice is saved in this browser." />
-      <LookPicker />
+      <LookPicker level={2} />
     </Page>
   );
 }

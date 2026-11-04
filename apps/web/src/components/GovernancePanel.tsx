@@ -161,7 +161,7 @@ export function GovernancePanel({
                 </span>
               </div>
               <ProgressBar value={g.approvals / g.requiredApprovals} tone={g.approvals >= g.requiredApprovals ? 'ok' : 'accent'} />
-              <p className="mt-1 text-xs text-muted">From: {rule.approverRoles.map(roleLabel).join(', ') || 'anyone'}</p>
+              <p className="mt-1 text-xs text-muted">From: {rule.approverRoles.map(roleLabel).join(', ') || 'no role (the policy names no approvers)'}</p>
             </div>
           )}
 

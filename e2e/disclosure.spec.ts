@@ -32,6 +32,18 @@ test.describe('summaries, popups and disclosures', () => {
     }
   });
 
+  test('detailed validation never says a plain “Passed” when the reasoner did not run', async ({ page }) => {
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { errors: number; incomplete?: string[] } };
+    test.skip(!o.health?.incomplete?.length, 'the reasoner ran here, so a plain pass is honest');
+    await page.goto(`/o/${demo.id}#health`);
+    await settle(page);
+    const health = page.locator('#health');
+    await expect(health).toBeFocused();
+    await expect(health.getByText('Not run', { exact: true })).toBeVisible();
+    await expect(health.getByText('Passed', { exact: true })).toHaveCount(0);
+    if (!o.health!.errors) await expect(health.getByText('Available checks passed, reasoning incomplete')).toBeVisible();
+  });
+
   test('popups take focus, return it on Escape, and close when tabbing away', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     const bubble = page.getByRole('button', { name: /^Lifecycle stage: / });

@@ -75,7 +75,9 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
   // The section you're in always shows, even if it isn't one your role normally needs.
   const hidden = SECTIONS.filter((s) => s.roles && !canSee(s.roles) && s !== current);
   const shown = showAll ? SECTIONS : SECTIONS.filter((s) => !hidden.includes(s));
-  const canToggle = showAll ? SECTIONS.some((s) => s.roles && !canSee(s.roles)) : hidden.length > 0;
+  // Sections this role doesn't usually need: the toggle names them, and shows or hides them.
+  const extra = SECTIONS.filter((s) => s.roles && !canSee(s.roles));
+  const canToggle = extra.length > 0 && (showAll || hidden.length > 0);
   const activeTab = TAB_ALIASES[segment] ?? segment;
   const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
   useEffect(() => {
@@ -109,11 +111,14 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
           <button
             type="button"
             aria-pressed={showAll}
-            title={showAll ? 'Show only the sections your role usually needs' : `Also show: ${hidden.map((s) => s.label).join(', ')}`}
+            aria-describedby={`${id}-more-sections`}
             onClick={() => setShowAll(!showAll)}
-            className="ml-auto self-center rounded-pill px-2.5 py-1 text-xs whitespace-nowrap text-muted hover:bg-surface-2 hover:text-fg"
+            className="ml-auto self-center rounded-pill px-2.5 py-1 text-xs whitespace-nowrap text-muted hover:bg-surface-2 hover:text-fg aria-pressed:bg-surface-2 aria-pressed:text-fg"
           >
-            {showAll ? 'Fewer sections' : 'All sections'}
+            Show all sections{' '}
+            <span id={`${id}-more-sections`} className="text-subtle">
+              ({extra.map((s) => s.label).join(', ')})
+            </span>
           </button>
         )}
       </nav>

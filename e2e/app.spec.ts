@@ -35,9 +35,16 @@ test.describe('signed in', () => {
   test('Profile shows who you are and how you sign in, with the WebID and pod folded away', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: /E2E tester/ }).click();
-    const menu = page.getByRole('menu');
+    const menu = page.getByRole('navigation', { name: 'Account' });
     // Profile, one agents entry and Appearance, in that order.
     await expect(menu.getByRole('link')).toHaveText(['Profile', 'Connect an agent', 'Appearance', 'Alpha walkthrough', 'Feedback admin']);
+    // It's a plain list of links: focus starts on the first, Escape closes it and returns to the button.
+    await expect(menu.getByRole('link', { name: 'Profile' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /E2E tester/ })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(menu.getByRole('link', { name: 'Profile' })).toBeFocused();
     await menu.getByRole('link', { name: 'Profile' }).click();
     await expect(page).toHaveURL(/\/settings$/);
     await expect(page.getByRole('heading', { name: 'Profile', level: 1 })).toBeVisible();

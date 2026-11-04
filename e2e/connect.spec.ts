@@ -77,7 +77,7 @@ test.describe('Connect page', () => {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`codex mcp add concord --url ${baseURL}/mcp`);
   });
 
-  test('each ontology has a Connect an agent page under Explore, with no tool list', async ({ page, baseURL }) => {
+  test('each ontology has a Connect an agent page under Explore, with no tool list and the same agent management', async ({ page, baseURL }) => {
     await signIn(page);
     await page.goto('/o/volunteering/browse');
     const explore = page.getByRole('navigation', { name: 'Explore pages' });
@@ -89,7 +89,9 @@ test.describe('Connect page', () => {
     await expect(page.getByTestId('mcp-url')).toHaveText(`${baseURL}/mcp`);
     await expect(page.getByText('MCP tools')).toHaveCount(0);
     for (const name of TOOL_NAMES) await expect(page.getByText(name, { exact: true })).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Create token' })).toHaveCount(0);
+    // The same hub as the account menu's page: your agents and tokens are here too.
+    await expect(page.getByRole('button', { name: 'Create token' })).toBeVisible();
+    await expect(page.getByTestId('connections')).toBeVisible();
     // Cross-link to the reports, which live under Requirements.
     await page.getByRole('link', { name: 'See agent reports' }).click();
     await expect(page).toHaveURL(/\/o\/volunteering\/agents$/);
@@ -123,7 +125,7 @@ test.describe('Connect page', () => {
     await page.goto('/');
     // The account menu has a single agents entry.
     await page.getByRole('button', { name: /Agent owner/ }).click();
-    const menu = page.getByRole('menu');
+    const menu = page.getByRole('navigation', { name: 'Account' });
     await expect(menu.getByRole('link', { name: 'Connect an agent' })).toHaveAttribute('href', '/connect');
     await expect(menu.getByRole('link', { name: 'Connected agents' })).toHaveCount(0);
     await menu.getByRole('link', { name: 'Connect an agent' }).click();
@@ -138,7 +140,7 @@ test.describe('Connect page', () => {
     // A personal token can be made and revoked here.
     await yours.getByRole('textbox', { name: 'Token name' }).fill('CI job');
     await yours.getByRole('button', { name: 'Create token' }).click();
-    await expect(yours.getByText('Copy your token now')).toBeVisible();
+    await expect(yours.getByText('Copy “CI job” now')).toBeVisible();
     const row = yours.getByRole('listitem').filter({ hasText: 'CI job' });
     await expect(row).toBeVisible();
     page.once('dialog', (d) => void d.accept());
@@ -153,6 +155,54 @@ test.describe('Connect page', () => {
     await tokenLink.click();
     await expect(page).toHaveURL(/\/connect#tokens$/);
     await expect(page.locator('#tokens')).toBeInViewport();
+  });
+
+  test('old Settings links keep their place even when signed out', async ({ page }) => {
+    await page.goto('/settings#tokens');
+    await expect(page).toHaveURL(/\/connect#tokens$/);
+    await page.goto('/settings#agents');
+    await expect(page).toHaveURL(/\/connect#agents$/);
+    await page.goto('/settings#appearance');
+    await expect(page).toHaveURL(/\/appearance$/);
+    // Any page behind sign-in keeps its #section in the return address.
+    await page.goto('/settings#webid');
+    await expect(page).toHaveURL(/\/login\?next=%2Fsettings%23webid$/);
+  });
+
+  test('a new token is shown once, can be dismissed, and disappears when it is revoked', async ({ page }) => {
+    await signIn(page, { name: 'Token tester' });
+    await page.goto('/connect#tokens');
+    const tokens = page.locator('#tokens');
+    await expect(tokens).toBeFocused();
+    await expect(tokens).toContainText('acts as you, with everything your account can do, and doesn’t expire');
+    await tokens.getByRole('textbox', { name: 'Token name' }).fill('First');
+    await tokens.getByRole('button', { name: 'Create token' }).click();
+    await expect(page.getByTestId('new-token')).toContainText('Copy “First” now');
+    await expect(page.getByRole('status')).toHaveText('Created token “First”. Copy it now.');
+    await page.getByRole('button', { name: 'I’ve saved it' }).click();
+    await expect(page.getByTestId('new-token')).toHaveCount(0);
+
+    await tokens.getByRole('textbox', { name: 'Token name' }).fill('Second');
+    await tokens.getByRole('button', { name: 'Create token' }).click();
+    await expect(page.getByTestId('new-token')).toContainText('Copy “Second” now');
+    page.once('dialog', (d) => void d.accept());
+    await tokens.getByRole('button', { name: 'Revoke Second' }).click();
+    await expect(page.getByTestId('new-token')).toHaveCount(0);
+    await expect(page.getByRole('status')).toHaveText('Revoked token “Second”.');
+    await expect(tokens.getByRole('button', { name: 'Revoke First' })).toBeVisible();
+  });
+
+  test('each ontology’s Connect an agent tab is the same hub, with connected agents and tokens', async ({ page, request }) => {
+    await signIn(page, { name: 'Hub tester' });
+    await page.goto('/o/volunteering/connect');
+    const jump = page.getByRole('navigation', { name: 'On this page' });
+    await expect(jump.getByRole('link')).toHaveText(['Connect an agent', 'Connected agents', 'Personal tokens']);
+    await expect(page.getByTestId('connections')).toBeVisible();
+    await jump.getByRole('link', { name: 'Personal tokens' }).click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/connect#tokens$/);
+    await expect(page.locator('#tokens')).toBeFocused();
+    await expect(page.locator('#tokens')).toBeInViewport();
+    void request;
   });
 
   test('old Settings links to agents, tokens and appearance still land in the right place', async ({ page }) => {

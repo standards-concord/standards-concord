@@ -197,6 +197,9 @@ test.describe('progressive disclosure', () => {
     // Patch and minor only go to a vote if someone objects; major always does.
     await expect(changes.getByRole('listitem').nth(0)).toContainText('a vote only if someone objects');
     await expect(changes.getByRole('listitem').nth(2)).not.toContainText('only if someone objects');
+    // Silence only decides patch and minor changes; a major change still needs its sign-offs and vote.
+    await expect(changes.getByRole('listitem').nth(0)).toContainText('accepted if nobody objects');
+    await expect(changes.getByRole('listitem').nth(2)).not.toContainText('accepted if nobody objects');
     await page.getByRole('button', { name: /ODI stewarded/ }).click();
     await expect(changes.getByRole('listitem').nth(2)).toContainText('ODI oversight must approve');
     await expect(changes.getByRole('listitem').nth(0)).toContainText(/ODI oversight can block it/);
@@ -271,6 +274,17 @@ test.describe('progressive disclosure', () => {
     await page.reload();
     await settle(page);
     await expect(page.getByRole('tab', { name: /Discussion/ })).toHaveAttribute('aria-selected', 'true');
+    // Keyboard: one tab stop, and the arrow keys, Home and End move between views.
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('tabindex', '-1');
+    await tabs.getByRole('tab', { name: /Discussion/ }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toBeFocused();
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('End');
+    await expect(tabs.getByRole('tab', { name: /Discussion/ })).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(tabs.getByRole('tab', { name: /Checks/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(page).toHaveURL(/view=checks/);
     // No raw ISO timestamps leak into the page.
     await expect(page.locator('main')).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });

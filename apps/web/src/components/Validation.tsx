@@ -14,6 +14,13 @@ const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string
   info: { icon: Info, cls: 'text-muted', label: 'Suggestions' },
 };
 
+/** One-word-ish verdict that never claims more than was checked: without the reasoner, a pass covers only the checks that ran. */
+export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'reasoner'>, style: 'title' | 'inline' = 'title'): string {
+  if (!report.passed) return style === 'title' ? 'Failing' : 'failing';
+  if (!report.reasoner.available) return style === 'title' ? 'Available checks passed, reasoning incomplete' : 'passing, reasoner not run';
+  return style === 'title' ? 'Passed' : 'passing';
+}
+
 export function ValidationSummary({ report }: { report: ValidationReport }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
@@ -21,7 +28,7 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
   const r = report.reasoner;
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      <SummaryTile ok={report.passed} title={report.passed ? 'Passed' : 'Failing'} sub="Overall validation" />
+      <SummaryTile ok={report.passed} warn={report.passed && !r.available} title={validationVerdict(report)} sub="Overall validation" />
       <SummaryTile ok={r.consistent && !r.unsatisfiable.length} title={!r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'} sub={`Reasoner (${r.engine})`} warn={!r.available} />
       <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
       <div className="rounded-lg border border-line p-3">

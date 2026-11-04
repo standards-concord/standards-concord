@@ -9,32 +9,14 @@ import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Lo
 
 /** The signed-in person's agent access, shown under the connect instructions: OAuth connections and personal tokens. */
 
-function TokenCreator({ onCreated }: { onCreated?: (t: AgentToken) => void }) {
+function TokenCreator({ onCreate, pending }: { onCreate: (name: string) => void; pending: boolean }) {
   const [name, setName] = useState('My coding agent');
-  const [created, setCreated] = useState<AgentToken>();
-  const create = useAction(async () => {
-    const t = await api.createAgentToken(name.trim() || 'Agent');
-    setCreated(t);
-    onCreated?.(t);
-  });
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-2">
-        <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" aria-label="Token name" />
-        <Button variant="primary" icon={KeyRound} loading={create.pending} onClick={() => void create.run()}>
-          Create token
-        </Button>
-      </div>
-      <InlineError error={create.error} />
-      {created?.token && (
-        <div className="rounded-lg border border-warn/40 bg-warn-soft p-3">
-          <p className="mb-2 text-sm font-medium">Copy your token now — it won’t be shown again.</p>
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded bg-surface px-2 py-1.5 font-mono text-xs">{created.token}</code>
-            <CopyButton text={created.token} label="Copy" />
-          </div>
-        </div>
-      )}
+    <div className="flex flex-wrap gap-2">
+      <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" aria-label="Token name" />
+      <Button variant="primary" icon={KeyRound} loading={pending} onClick={() => onCreate(name.trim() || 'Agent')}>
+        Create token
+      </Button>
     </div>
   );
 }
@@ -48,7 +30,7 @@ export function ConnectedAgents() {
     await connections.reload();
   });
   return (
-    <div id="agents" className="scroll-mt-20">
+    <div id="agents" tabIndex={-1} className="scroll-mt-20 outline-none">
       <Card>
         <CardHeader icon={Bot} title="Connected agents" subtitle="Apps you’ve allowed to use Concord as you, such as Claude, Claude Code or Codex." />
         {connections.error && !connections.data ? (
@@ -67,7 +49,7 @@ export function ConnectedAgents() {
                     Connected {formatDate(c.createdAt)} · {c.lastUsedAt ? `last used ${relativeTime(c.lastUsedAt, now())}` : 'not used yet'}
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" icon={Unplug} disabled={disconnect.pending} onClick={() => confirm(`Disconnect “${c.clientName}”? It will need to sign in again.`) && void disconnect.run(c.id)}>
+                <Button size="sm" variant="ghost" icon={Unplug} aria-label={`Disconnect ${c.clientName}`} disabled={disconnect.pending} onClick={() => confirm(`Disconnect “${c.clientName}”? It will need to sign in again.`) && void disconnect.run(c.id)}>
                   Disconnect
                 </Button>
               </li>
@@ -83,20 +65,47 @@ export function ConnectedAgents() {
   );
 }
 
-/** Personal tokens for headless agents: create, list and revoke. */
+/** Personal tokens for headless agents: create, list and revoke. A new token is shown once, until it's dismissed or revoked. */
 export function PersonalTokens() {
   const { now } = useSession();
   const tokens = useAsync(() => api.agentTokens(), []);
-  const revoke = useAction(async (id: string) => {
-    await api.deleteAgentToken(id);
+  const [created, setCreated] = useState<AgentToken>();
+  const [status, setStatus] = useState('');
+  const create = useAction(async (name: string) => {
+    const t = await api.createAgentToken(name);
+    setCreated(t);
+    setStatus(`Created token “${t.name}”. Copy it now.`);
+    await tokens.reload();
+  });
+  const revoke = useAction(async (t: AgentToken) => {
+    await api.deleteAgentToken(t.id);
+    if (created?.id === t.id) setCreated(undefined);
+    setStatus(`Revoked token “${t.name}”.`);
     await tokens.reload();
   });
   return (
-    <div id="tokens" className="scroll-mt-20">
+    <div id="tokens" tabIndex={-1} className="scroll-mt-20 outline-none">
       <Card>
         <CardHeader icon={KeyRound} title="Personal tokens" subtitle="Only for agents that can’t open a browser to sign in, such as CI jobs. Send it as an Authorization: Bearer header." />
-        <div className="p-5">
-          <TokenCreator onCreated={() => void tokens.reload()} />
+        <div className="space-y-3 p-5">
+          <p className="text-xs text-muted">A token acts as you, with everything your account can do, and doesn’t expire. Revoke it here when the agent no longer needs it.</p>
+          <TokenCreator onCreate={(name) => void create.run(name)} pending={create.pending} />
+          <InlineError error={create.error} />
+          {created?.token && (
+            <div className="rounded-lg border border-warn/40 bg-warn-soft p-3" data-testid="new-token">
+              <p className="mb-2 text-sm font-medium">Copy “{created.name}” now. It won’t be shown again.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded bg-surface px-2 py-1.5 font-mono text-xs">{created.token}</code>
+                <CopyButton text={created.token} label="Copy" />
+                <Button size="sm" variant="ghost" onClick={() => setCreated(undefined)}>
+                  I’ve saved it
+                </Button>
+              </div>
+            </div>
+          )}
+          <p role="status" className="sr-only">
+            {status}
+          </p>
         </div>
         {tokens.error && !tokens.data ? (
           <div className="px-5 pb-5">
@@ -105,7 +114,7 @@ export function PersonalTokens() {
         ) : !tokens.data ? (
           <Loading />
         ) : (
-          <ul className="divide-y divide-line border-t border-line">
+          <ul className="divide-y divide-line border-t border-line" aria-label="Your personal tokens">
             {tokens.data.map((t) => (
               <li key={t.id} className="flex items-center gap-3 px-5 py-3 text-sm">
                 <div className="min-w-0 flex-1">
@@ -114,7 +123,7 @@ export function PersonalTokens() {
                     <code className="font-mono">{t.prefix}…</code> · created {formatDate(t.createdAt)} · {t.lastUsedAt ? `last used ${relativeTime(t.lastUsedAt, now())}` : 'never used'}
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" icon={Trash2} disabled={revoke.pending} onClick={() => confirm(`Revoke “${t.name}”? Agents using it will lose access.`) && void revoke.run(t.id)}>
+                <Button size="sm" variant="ghost" icon={Trash2} aria-label={`Revoke ${t.name}`} disabled={revoke.pending} onClick={() => confirm(`Revoke “${t.name}”? Agents using it will lose access.`) && void revoke.run(t)}>
                   Revoke
                 </Button>
               </li>

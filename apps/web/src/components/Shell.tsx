@@ -45,11 +45,25 @@ function UserMenu() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // A disclosure of ordinary links: focus moves to the first link, Escape closes and returns to the button,
+  // and clicking outside or tabbing away closes it.
   useEffect(() => {
     if (!open) return;
+    panelRef.current?.querySelector<HTMLElement>('a, button')?.focus();
     const h = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
     document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
+    document.addEventListener('keydown', k);
+    return () => {
+      document.removeEventListener('mousedown', h);
+      document.removeEventListener('keydown', k);
+    };
   }, [open]);
   const user = session?.user;
   // In the demo, say which tester role this persona plays, e.g. "Alpha tester (Voting member)".
@@ -73,8 +87,14 @@ function UserMenu() {
     nav('/login');
   };
   return (
-    <div className="relative" ref={ref}>
-      <button onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
+    <div
+      className="relative"
+      ref={ref}
+      onBlur={(e) => {
+        if (open && e.relatedTarget && !ref.current?.contains(e.relatedTarget as Node)) setOpen(false);
+      }}
+    >
+      <button ref={buttonRef} onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-expanded={open} aria-controls="account-menu">
         <Avatar name={user.name} src={user.avatarUrl} size={30} />
         <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
         {testerRole && <span className="app-header-muted hidden text-sm whitespace-nowrap text-muted lg:inline">({testerRole})</span>}
@@ -86,7 +106,7 @@ function UserMenu() {
         <ChevronDown className="app-header-muted hidden size-3.5 text-muted lg:inline" />
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
+        <nav id="account-menu" ref={panelRef} aria-label="Account" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
           <div className="border-b border-line px-4 py-3">
             <div className="truncate text-sm font-medium">{user.name}</div>
             {testerRole && <div className="truncate text-xs text-muted">Trying Concord as: {testerRole}</div>}
@@ -111,7 +131,7 @@ function UserMenu() {
           <button onClick={() => void logout()} className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-2">
             <LogOut className="size-4" /> Sign out
           </button>
-        </div>
+        </nav>
       )}
     </div>
   );
@@ -205,7 +225,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <DemoBanner />
       <main className="flex-1">{children}</main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data lives in your own Solid pod.
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod where the server has one.
       </footer>
       <WalkthroughDock />
     </div>

@@ -7,6 +7,7 @@ import { useSession } from '../../lib/session';
 import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
+import { PolicyGlance } from '../../components/PolicyRules';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading } from '../../components/ui';
@@ -101,16 +102,17 @@ export function ReleaseDetailPage() {
                 </p>
               </Card>
               {/* One click reveals the whole approval history: the panel's own details start open. */}
-              <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release">
-                <div className="p-5">
+              <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release" keepMounted>
+                <div className="space-y-4 p-5">
                   <GovernancePanel g={g} userById={userById} subject="release" detailsOpen />
+                  <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" />
                 </div>
               </CollapsibleCard>
             </>
           ) : (
             <Card>
               <CardHeader icon={Scale} title="Release approval" />
-              <div className="p-5">
+              <div className="space-y-4 p-5">
                 <GovernancePanel
                   g={g}
                   userById={userById}
@@ -147,6 +149,7 @@ export function ReleaseDetailPage() {
                     </div>
                   }
                 />
+                <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" />
               </div>
             </Card>
           )}

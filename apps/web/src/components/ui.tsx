@@ -52,14 +52,15 @@ export function Card({ className, children, as: As = 'div' }: { className?: stri
   return <As className={cx('ui-card rounded-xl border border-line bg-surface', className)}>{children}</As>;
 }
 
-export function CardHeader({ title, subtitle, actions, icon: Icon }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon }) {
+export function CardHeader({ title, subtitle, actions, icon: Icon, level = 3 }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon; level?: 2 | 3 | 4 }) {
+  const H = `h${level}` as const;
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
       <div className="min-w-0">
-        <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
+        <H className="ui-card-title flex items-center gap-2 text-sm font-semibold">
           {Icon && <Icon className="size-4 text-muted" />}
           {title}
-        </h3>
+        </H>
         {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}

@@ -1,4 +1,4 @@
-import { Link, Navigate, useLocation } from 'react-router';
+import { Link } from 'react-router';
 import { Bot, Lock, LogIn, UserRound } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
@@ -11,12 +11,9 @@ import { Avatar, Badge, Button, Card, CardHeader, CopyButton, PageHeader } from 
 /** The signed-in person's profile: who they are, how they sign in, and where their private data lives. */
 export function SettingsPage() {
   const { session } = useSession();
-  const { hash } = useLocation();
   const u = session?.user;
   if (!u) return null;
-  // Agents, tokens and appearance used to live here; old links still land in the right place.
-  const moved = { '#agents': '/connect#agents', '#tokens': '/connect#tokens', '#appearance': '/appearance' }[hash];
-  if (moved) return <Navigate to={moved} replace />;
+  const solidOn = session?.solid?.enabled ?? false;
 
   return (
     <Page>
@@ -37,7 +34,7 @@ export function SettingsPage() {
         </Card>
 
         <Card>
-          <CardHeader icon={LogIn} title="Ways to sign in" subtitle="Each of these opens this same Concord account. Linking another one gives you a second way in; it doesn’t share your Concord data with it." />
+          <CardHeader level={2} icon={LogIn} title="Ways to sign in" subtitle="Each of these opens this same Concord account. Linking another one gives you a second way in; it doesn’t share your Concord data with it." />
           <ul className="divide-y divide-line">
             {u.providers.map((p) => (
               <li key={p.provider + p.subject} className="flex items-center gap-3 px-5 py-3 text-sm">
@@ -67,11 +64,20 @@ export function SettingsPage() {
           )}
         </Card>
 
-        <CollapsibleCard id="webid" icon={Lock} title="Your WebID and Solid pod" subtitle="Where your private data lives. Concord set this up for you; there’s nothing you need to do." keepMounted>
+        <CollapsibleCard
+          id="webid"
+          icon={Lock}
+          level={2}
+          title="Your WebID and Solid pod"
+          subtitle={
+            solidOn
+              ? 'Private data, such as interview transcripts, is saved to your own Solid pod. If the pod can’t be reached, it’s kept in Concord’s private storage instead. Concord set this up for you.'
+              : 'This server runs without a Solid server, so private data, such as interview transcripts, is kept in Concord’s private storage.'
+          }
+          keepMounted
+        >
           <div className="space-y-4 p-5">
-            <p className="text-sm text-muted">
-              Your private data, such as interview transcripts, lives in your own Solid pod rather than in Concord’s database. Your WebID is the web address that identifies you to your pod and to other Solid apps.
-            </p>
+            <p className="text-sm text-muted">Your WebID is the web address that identifies you to your pod and to other Solid apps.</p>
             <div>
               <div className="mb-1 text-xs font-medium text-muted">WebID</div>
               <div className="flex items-center gap-2">
@@ -90,7 +96,6 @@ export function SettingsPage() {
                 </div>
               </div>
             )}
-            {session?.solid && !session.solid.enabled && <p className="text-xs text-warn">This server is running without a Solid server, so private data is kept in local private storage instead.</p>}
           </div>
         </CollapsibleCard>
 

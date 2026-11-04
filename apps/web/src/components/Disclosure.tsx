@@ -210,7 +210,10 @@ export function Disclosure({
   );
 }
 
-/** A card whose body is collapsed behind its header; the header can show a one-line summary. */
+/**
+ * A card whose body is collapsed behind its header. The toggle sits inside the heading (the accordion
+ * pattern); the subtitle and the closed-state summary sit outside it and describe the toggle.
+ */
 export function CollapsibleCard({
   title,
   subtitle,
@@ -221,6 +224,7 @@ export function CollapsibleCard({
   openKey,
   keepMounted,
   id,
+  level = 3,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -231,22 +235,38 @@ export function CollapsibleCard({
   openKey?: unknown;
   keepMounted?: boolean;
   id?: string;
+  /** Heading level, so cards follow the page's heading structure. */
+  level?: HeadingLevel;
 }) {
   const [open, setOpen] = useOpenState(defaultOpen, openKey);
   const bodyId = useId();
+  const descId = useId();
+  const H = `h${level}` as const;
+  const hasDesc = !!subtitle || (!!summary && !open);
   return (
     <section id={id} className="ui-card scroll-mt-20 rounded-xl border border-line bg-surface">
-      <button type="button" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((o) => !o)} className="flex w-full items-start gap-3 px-5 py-4 text-left">
-        <div className="min-w-0 flex-1">
-          <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
-            {Icon && <Icon className="size-4 text-muted" />}
-            {title}
-          </h3>
-          {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
-          {summary && !open && <div className="mt-1.5 text-sm text-fg/85">{summary}</div>}
-        </div>
-        {open ? <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted" /> : <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted" />}
-      </button>
+      <div className="px-5 py-4">
+        <H className="ui-card-title m-0 text-sm font-semibold">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={bodyId}
+            aria-describedby={hasDesc ? descId : undefined}
+            onClick={() => setOpen((o) => !o)}
+            className="flex w-full items-center gap-2 text-left"
+          >
+            {Icon && <Icon className="size-4 shrink-0 text-muted" />}
+            <span className="min-w-0 flex-1">{title}</span>
+            {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
+          </button>
+        </H>
+        {hasDesc && (
+          <div id={descId}>
+            {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
+            {summary && !open && <div className="mt-1.5 text-sm text-fg/85">{summary}</div>}
+          </div>
+        )}
+      </div>
       {(open || keepMounted) && (
         <div id={bodyId} className="border-t border-line" hidden={!open}>
           {children}

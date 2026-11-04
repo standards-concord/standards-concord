@@ -66,7 +66,7 @@ test.describe('looks', () => {
 
     // The user menu links to the picker, and Profile no longer repeats it.
     await page.getByRole('button', { name: /Look tester/ }).click();
-    await expect(page.getByRole('menu').getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/appearance');
+    await expect(page.getByRole('navigation', { name: 'Account' }).getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/appearance');
     await page.goto('/settings');
     await expect(page.getByRole('heading', { name: 'Profile', level: 1 })).toBeVisible();
     await expect(page.getByRole('radiogroup', { name: 'Visual style' })).toHaveCount(0);
@@ -205,8 +205,8 @@ test.describe('looks', () => {
       const headerBg = await page.locator('.app-header').evaluate((el) => getComputedStyle(el).backgroundColor);
       // Account menu: its items use page colours, not the masthead's.
       await page.getByRole('button', { name: /Masthead tester/ }).click();
-      const item = page.getByRole('menu').getByRole('link', { name: 'Appearance' });
-      const [itemColor, menuBg] = await item.evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el.closest('[role=menu]')!).backgroundColor]);
+      const item = page.getByRole('navigation', { name: 'Account' }).getByRole('link', { name: 'Appearance' });
+      const [itemColor, menuBg] = await item.evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el.closest('#account-menu')!).backgroundColor]);
       expect(await ratio(itemColor, menuBg), 'menu item contrast').toBeGreaterThanOrEqual(4.5);
       await page.keyboard.press('Escape');
       if (/rgba\(.*, 0?\.\d+\)$/.test(headerBg)) return; // translucent classic header: covered by the token test

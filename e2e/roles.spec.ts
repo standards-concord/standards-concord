@@ -27,7 +27,7 @@ test.describe('role-based views', () => {
       const button = page.getByRole('button', { name: /Role tester/ });
       await expect(button).toContainText(`Role tester(${title})`);
       await button.click();
-      await expect(page.getByRole('menu')).toContainText(`Trying Concord as: ${title}`);
+      await expect(page.getByRole('navigation', { name: 'Account' })).toContainText(`Trying Concord as: ${title}`);
     });
 
   test('on a phone the role is still part of the account button’s name', async ({ page }) => {
@@ -44,7 +44,7 @@ test.describe('role-based views', () => {
       await page.goto(`/o/${demo.id}`);
       await settle(page);
       expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
-      await expect(page.getByRole('button', { name: 'All sections' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Show all sections/ })).toHaveCount(0);
     }
   });
 
@@ -54,11 +54,11 @@ test.describe('role-based views', () => {
     await settle(page);
     expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes']);
 
-    // "All sections" brings it back, and the choice is remembered.
-    const toggle = page.getByRole('button', { name: 'All sections' });
+    // "Show all sections" names what it adds, brings it back, and is remembered.
+    const toggle = page.getByRole('button', { name: 'Show all sections (Governance)' });
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    await expect(toggle).toHaveAttribute('title', 'Also show: Governance');
     await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
     expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
     await page.reload();
     await settle(page);
@@ -67,9 +67,10 @@ test.describe('role-based views', () => {
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
     await expect(page.getByRole('heading', { name: 'Governance', exact: true, level: 2 })).toBeVisible();
 
-    // "Fewer sections" goes back to the role's view.
+    // Pressing it again goes back to the role's view.
     await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Overview' }).click();
-    await page.getByRole('button', { name: 'Fewer sections' }).click();
+    await page.getByRole('button', { name: /Show all sections/ }).click();
+    await expect(page.getByRole('button', { name: /Show all sections/ })).toHaveAttribute('aria-pressed', 'false');
     expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes']);
 
     // A link straight to Governance opens it, and the nav shows where you are.
@@ -87,5 +88,54 @@ test.describe('role-based views', () => {
       await settle(page);
       expect(await sectionNames(page)).not.toContain('Governance');
     }
+  });
+
+  test('people without the Governance tab read the policy where they review and vote', async ({ page }) => {
+    await signIn(page, { name: 'Reader', role: 'member' });
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string }[];
+    await page.goto(`/o/${demo.id}/changes/${crs[0].id}`);
+    await settle(page);
+    const glance = page.getByRole('button', { name: /How changes are decided/ });
+    await expect(glance).toHaveAttribute('aria-expanded', 'false');
+    await glance.click();
+    const rules = page.getByRole('list', { name: 'What each kind of change needs' });
+    await expect(rules.getByRole('listitem')).toHaveCount(3);
+    await expect(page.getByRole('link', { name: 'Read the full policy' })).toHaveAttribute('href', `/o/${demo.id}/governance`);
+    await page.getByRole('link', { name: 'Who holds which role' }).click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance#roles$`));
+    await expect(page.getByRole('button', { name: /Members and roles/ })).toHaveAttribute('aria-expanded', 'true');
+
+    // Readers can view the policy but not edit it, and the Overview says "View members" rather than "Manage".
+    await expect(page.getByRole('button', { name: 'Edit policy' })).toHaveCount(0);
+    await expect(page.getByText('You can read the policy; only the ontology’s owners can change it.')).toBeVisible();
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    await expect(page.getByRole('link', { name: 'View members' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Manage', exact: true })).toHaveCount(0);
+  });
+
+  test('a release decision links the release rules too', async ({ page }) => {
+    await signIn(page, { name: 'Release reader', role: 'contributor' });
+    const releases = (await (await page.request.get(`/api/ontologies/${demo.id}/releases`)).json()) as { id: string }[];
+    test.skip(!releases.length, 'the demo has no releases');
+    await page.goto(`/o/${demo.id}/releases/${releases[0].id}`);
+    await settle(page);
+    const approved = page.getByRole('button', { name: /How this was approved/ });
+    if (await approved.count()) await approved.click();
+    await page.getByRole('button', { name: /How releases are decided/ }).click();
+    await expect(page.getByRole('list', { name: 'What each kind of release needs' }).getByRole('listitem')).toHaveCount(3);
+  });
+
+  test('only owners get Edit policy, matching what the server accepts', async ({ page }) => {
+    // Editors run changes but can't change the policy.
+    await signIn(page, { name: 'Editor tester', role: 'editor' });
+    await page.goto(`/o/${demo.id}/governance`);
+    await settle(page);
+    await expect(page.getByRole('button', { name: 'Edit policy' })).toHaveCount(0);
+    // A tester who picks steward also owns the demo, as the steward walkthrough tasks expect.
+    await signIn(page, { name: 'Steward tester', role: 'steward' });
+    await page.goto(`/o/${demo.id}/governance`);
+    await settle(page);
+    await expect(page.getByRole('button', { name: 'Edit policy' })).toBeVisible();
   });
 });
