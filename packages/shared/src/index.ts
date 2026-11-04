@@ -515,9 +515,11 @@ export interface ChangeRequest {
    * time, it is a bigger change than this (or now rewords a definition), it goes
    * back to review instead of merging.
    */
-  approvedAs?: { level: ChangeLevel; confirmation: boolean };
+  approvedAs?: { level: ChangeLevel; confirmation: boolean; voted?: boolean };
   /** Whose action approved it for an automatic merge that is waiting for their triage budget; the merge is charged to them. */
   autoMergeBy?: string;
+  /** Bumped on every write; a merge only lands if the revision it checked is still current. */
+  rev?: number;
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;

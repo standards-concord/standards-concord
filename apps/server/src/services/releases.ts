@@ -14,7 +14,7 @@ import { HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { updateCR } from './changeRequests.js';
-import { withWorkingDraftLock } from './repoLock.js';
+import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -163,10 +163,16 @@ function publishable(r: Release) {
 
 export async function publishRelease(r: Release, actor: User | undefined): Promise<Release> {
   if (actor) requireRole(r.ontologyId, actor, ['steward', 'owner'], 'publish releases');
+  // Holding the working-draft lock from reading the draft to committing the
+  // release, so no merge can land in between (and be erased by the release).
+  return withWorkingDraftLock(getProject(r.ontologyId), () => publishNow(r, actor));
+}
+
+async function publishNow(r: Release, actor: User | undefined): Promise<Release> {
   const can = publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
   const project = getProject(r.ontologyId);
-  const working = await ontologyStore.working(project);
+  const { graph: working, head: base } = await ontologyStore.workingAt(project);
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
   const stamped = stampRelease(working, {
     version: r.version,
@@ -205,8 +211,9 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
-  // Under the working-draft lock, so no merge commits in between.
-  r.commit = await withWorkingDraftLock(project, () => ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }));
+  assertStillHeld(project);
+  // Only lands if the draft is still the one released (see ontologyStore.advanceTo).
+  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, base);
   r.status = 'published';
   r.publishedAt = clock.iso();
   r.statusSince = r.publishedAt;

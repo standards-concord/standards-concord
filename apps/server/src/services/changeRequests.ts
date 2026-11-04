@@ -55,9 +55,15 @@ const save = (cr: ChangeRequest) =>
   // The lease check and the write are one transaction, so the lease can't lapse between them.
   transaction(() => {
     assertStillHeld({ id: cr.ontologyId });
-    cr.updatedAt = clock.iso();
-    return put('changeRequests', cr, cr.ontologyId);
+    return stamp(cr);
   });
+
+/** Writes a request, bumping its revision (a merge only lands if the revision it checked is still current). */
+function stamp(cr: ChangeRequest) {
+  cr.rev = (getCR(cr.id).rev ?? 0) + 1;
+  cr.updatedAt = clock.iso();
+  return put('changeRequests', cr, cr.ontologyId);
+}
 
 /** Replace `cr`'s contents with the stored copy, in place, so callers holding it see the latest. */
 function refresh(cr: ChangeRequest): ChangeRequest {
@@ -283,7 +289,8 @@ export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}
   } catch (err) {
     const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
     result.validation = {
-      lint: [{ severity: 'error', code: 'change-not-applicable', message }],
+      // An edit that no longer applies, or (anything else) a check that couldn't run: either way, not validated.
+      lint: [{ severity: 'error', code: err instanceof ChangeOpError ? 'change-not-applicable' : 'triage-failed', message }],
       fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
       reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
       competencyQuestions: [],
@@ -496,8 +503,10 @@ async function advanceNow(cr: ChangeRequest, by?: User): Promise<ChangeRequest> 
     }
     const g = governanceFor(cr);
     if (g.outcome === cr.status) break;
-    // Approved stays approved (a passed vote isn't reopened) unless something now blocks it: a request for changes, an objection, a veto, failed validation.
-    if (cr.status === 'approved' && g.outcome !== 'needs-work' && g.outcome !== 'rejected') break;
+    // Approved stays approved (a passed vote isn't reopened) unless something
+    // now blocks it: a request for changes, a veto, failed validation, or an
+    // objection that sends it to a vote it hasn't had.
+    if (cr.status === 'approved' && !approvalLost(cr, g.outcome)) break;
     if (cr.status === 'needs-work' && g.outcome !== 'rejected') {
       // needs-work only leaves via an explicit resubmit/revision, or once the blockers clear
       if (g.outcome === 'needs-work') break;
@@ -511,9 +520,9 @@ async function advanceNow(cr: ChangeRequest, by?: User): Promise<ChangeRequest> 
       'needs-work': `needs work — ${g.unmet[0] ?? ''}`,
       review: 'returned to review',
     };
+    const voted = cr.status === 'voting';
     setStatus(cr, g.outcome, messages[g.outcome] ?? g.outcome);
-    if (g.outcome !== 'approved') cr.approvedAs = undefined;
-    if (g.outcome === 'approved') cr.approvedAs = { level: cr.classification?.level ?? 'minor', confirmation: needsConfirmation(cr) };
+    cr.approvedAs = g.outcome === 'approved' ? { level: cr.classification?.level ?? 'minor', confirmation: needsConfirmation(cr), voted } : undefined;
     logActivity({ ontologyId: cr.ontologyId, type: `cr.${g.outcome}`, message: `#${cr.number} ${cr.title} → ${g.outcome}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
   save(cr);
@@ -569,38 +578,33 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
   if (cr.status !== 'approved' || JSON.stringify(cr.ops) !== opsKey) throw new HttpError(409, 'This request changed while it was being merged, so it was not merged.');
   const { graph: working, head } = await ontologyStore.workingAt(project);
   if (head !== base) throw new HttpError(409, 'The working draft changed while this was being merged, so it was not merged. Try again.');
-  const applicable = !cr.validation?.lint.some((i) => i.code === 'change-not-applicable');
-  if (applicable) {
-    const blocked = mergeBlocker(cr);
-    if (blocked) {
-      cr.approvedAs = undefined;
-      setStatus(cr, blocked.status, blocked.message);
-      save(cr);
-      return blocked.status === 'review' ? advanceNow(cr) : cr;
-    }
+  // The revision this merge checked: it only lands if nobody has changed the request since.
+  const checkedRev = cr.rev;
+  const notApplicable = cr.validation?.lint.find((i) => i.code === 'change-not-applicable');
+  if (notApplicable) return draftMovedOn(cr, notApplicable.message);
+  const blocked = mergeBlocker(cr);
+  if (blocked) {
+    cr.approvedAs = undefined;
+    setStatus(cr, blocked.status, blocked.message);
+    save(cr);
+    return blocked.status === 'review' ? advanceNow(cr) : cr;
   }
   let after: OntologyGraph;
   try {
     after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
   } catch (err) {
-    // The draft moved on underneath this request: approvals given for the old
-    // draft no longer count, and it needs revising before it can be approved again.
-    cr.opsUpdatedAt = clock.iso();
-    cr.approvedAs = undefined;
-    setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}. Earlier approvals no longer count`);
-    return save(cr);
+    return draftMovedOn(cr, (err as Error).message);
   }
-  assertStillHeld(project);
-  // Only lands if the draft is still at `base`, so a holder that stalled past its lease can't overwrite a newer commit.
-  const commit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: author?.name ?? 'Concord' }, base);
-  // The commit has landed, so record it, onto the latest copy, whatever the lease says now.
-  transaction(() => {
+  // The draft moves, and the request is marked merged, in one transaction, and
+  // only if neither the draft nor the request has changed since they were checked.
+  await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: author?.name ?? 'Concord' }, base, (commit) => {
     const latest = refresh(cr);
+    if (latest.rev !== checkedRev || latest.status !== 'approved')
+      throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
     latest.mergedCommit = commit;
     latest.autoMergeBy = undefined;
     setStatus(latest, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
-    latest.updatedAt = clock.iso();
-    put('changeRequests', latest, latest.ontologyId);
+    stamp(latest);
   });
   if (project.stage === 'discovery') {
     project.stage = 'drafting';
@@ -610,13 +614,31 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
   return cr;
 }
 
+/** The draft moved on underneath this request: approvals given for the old draft no longer count, and it needs revising before it can be approved again. */
+function draftMovedOn(cr: ChangeRequest, why: string) {
+  cr.opsUpdatedAt = clock.iso();
+  cr.approvedAs = undefined;
+  setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${why}. Earlier approvals no longer count`);
+  return save(cr);
+}
+
+/** Whether governance's current outcome for an approved request takes the approval away. */
+function approvalLost(cr: ChangeRequest, outcome: ChangeRequestStatus) {
+  if (outcome === 'needs-work' || outcome === 'rejected') return true;
+  // Governance can't see a vote that already closed, so "voting" only counts if it never had one (e.g. a late objection under lazy consensus).
+  return outcome === 'voting' && !cr.approvedAs?.voted;
+}
+
 /** Why an approved request, just re-checked against the latest draft, can't be merged now (or undefined if it can). */
 function mergeBlocker(cr: ChangeRequest): { status: ChangeRequestStatus; message: string } | undefined {
   if (!validationPassed(cr.validation))
     return { status: 'needs-work', message: 'needs work: combined with the changes merged since it was approved, it fails validation (see the validation panel)' };
-  // A blocking review or veto added after approval still counts.
   const g = governanceFor(cr);
-  if (g.outcome === 'needs-work' || g.outcome === 'rejected') return { status: g.outcome, message: g.outcome === 'rejected' ? 'rejected (vetoed)' : `needs work — ${g.unmet[0] ?? ''}` };
+  if (cr.approvedAs && approvalLost(cr, g.outcome))
+    return {
+      status: g.outcome,
+      message: g.outcome === 'rejected' ? 'rejected (vetoed)' : g.outcome === 'voting' ? `vote opened: ${g.next}` : `needs work — ${g.unmet[0] ?? ''}`,
+    };
   const level = cr.classification?.level ?? 'minor';
   const was = cr.approvedAs;
   if (!was) {

@@ -855,6 +855,129 @@ describe('inline term edits', () => {
     const { graph, head } = await ontologyStore.workingAt(project);
     const stale = ontologyStore.log(project, 2)[1].sha;
     await expect(ontologyStore.commitWorking(project, graph, 'stale writer', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
+    // Even a no-op against the stale base is refused, rather than reported as committed.
+    const staleGraph = await ontologyStore.at(project, 'working').then(() => import('@concord/core')).then(async ({ OntologyGraph }) => OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project, stale)));
+    await expect(ontologyStore.commitWorking(project, staleGraph, 'stale no-op', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
+    await expect(ontologyStore.writeRelease(project, '9.9.9', graph, {}, 'stale release', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
     expect(ontologyStore.head(project)).toBe(head);
+    expect(ontologyStore.versions(project)).not.toContain('9.9.9');
+  });
+
+  it('never lands a merge if the request changed after it was checked, even by a writer that ignored the lock', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const { put } = await import('../src/db.js');
+    const { newId } = await import('../src/ids.js');
+    const contributor = await login('contributor', 'Contributor Fenced');
+    const editor = await login('editor', 'Editor Fenced');
+    const steward = await userOf(await login('steward', 'Steward Fenced'));
+    const editorId = (await userOf(editor)).id;
+    // What another process does after this merger's lease lapsed: it only touches the database.
+    const meddle: Record<string, (id: string) => void> = {
+      withdraw: (id) => put('changeRequests', { ...crsMod.getCR(id), status: 'withdrawn', rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId),
+      'request changes': (id) => {
+        put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorId, roles: ['editor'], decision: 'request-changes', at: new Date().toISOString() }, id);
+        put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+      },
+      patch: (id) => put('changeRequests', { ...crsMod.getCR(id), ops: [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Unreviewed.' } }], rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId),
+    };
+    for (const [what, fn] of Object.entries(meddle)) {
+      const created = await edit(contributor, { termIri: `${VOL}Role`, set: { examples: [`fenced ${what}`] }, submit: true });
+      put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+      const head = ontologyStore.head(getProject(demoId));
+      const original = ontologyStore.commitWorking;
+      const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async function (this: typeof ontologyStore, ...args) {
+        fn(created.body.id); // lands just before the merge's commit
+        return original.apply(ontologyStore, args);
+      });
+      try {
+        await expect(crsMod.merge(crsMod.getCR(created.body.id), steward), what).rejects.toMatchObject({ status: 409 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(ontologyStore.head(getProject(demoId)), what).toBe(head);
+      expect(crsMod.getCR(created.body.id).status, what).not.toBe('merged');
+    }
+  });
+
+  it('does not commit when the merge-time checks could not run', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const { put } = await import('../src/db.js');
+    const contributor = await login('contributor', 'Contributor Flaky');
+    const created = await edit(contributor, { termIri: `${VOL}Role`, set: { comment: 'Checked or not at all.' }, submit: true });
+    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    const head = ontologyStore.head(getProject(demoId));
+    const spy = vi.spyOn(ontologyStore, 'working').mockRejectedValueOnce(new Error('transient read failure'));
+    try {
+      const result = await crsMod.merge(crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Flaky')));
+      expect(result.status).not.toBe('merged');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(ontologyStore.head(getProject(demoId))).toBe(head);
+  });
+
+  it('sends an approved request to a vote when a late objection asks for one', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { getProject, updateProject } = await import('../src/services/ontologies.js');
+    const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
+    const { put } = await import('../src/db.js');
+    const project = getProject(demoId);
+    const saved = project.governance;
+    updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
+    try {
+      const contributor = await login('contributor', 'Contributor Objected');
+      const editor = await login('editor', 'Editor Objector');
+      const created = await edit(contributor, { termIri: `${VOL}Role`, set: { editorialNote: 'Objected to later.' } });
+      put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+      const objected = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ decision: 'object', comment: 'Let us vote on it.' });
+      expect(objected.body.status).toBe('voting');
+      expect((await editor.post(`/api/change-requests/${created.body.id}/merge`)).status).toBe(409);
+      // A request already approved by a vote is not sent to another one by the same rule.
+      const voted = await edit(contributor, { termIri: `${VOL}Role`, set: { comment: 'Voted through.' } });
+      put('changeRequests', { ...crsMod.getCR(voted.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+      await editor.post(`/api/change-requests/${voted.body.id}/reviews`).send({ decision: 'object' });
+      expect(crsMod.getCR(voted.body.id).status).not.toBe('voting');
+    } finally {
+      updateProject({ ...getProject(demoId), governance: saved });
+    }
+  });
+
+  it('publishes a release from the draft as it is once nothing else is changing it, so a merge just before is kept', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const releases = await import('../src/services/releases.js');
+    const { withWorkingDraftLock } = await import('../src/services/repoLock.js');
+    const { put, list } = await import('../src/db.js');
+    const steward = await login('steward', 'Steward Release');
+    const stewardUser = await userOf(steward);
+    const contributor = await login('contributor', 'Contributor Release');
+    const created = await edit(contributor, { termIri: `${VOL}Agent`, set: { comment: 'Merged while the release waited.' } });
+    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    await steward.post(`/api/ontologies/${demoId}/releases`).send({});
+    const pending = list<{ id: string; status: string; ontologyId: string }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
+    // Treated as ready to publish (its vote, if it needs one, is beside the point here).
+    const draft = put('releases', { ...pending, status: 'draft' }, demoId);
+
+    // A merge is under way (holding the lock) when the release is asked for.
+    let finish!: () => void;
+    const finishing = new Promise<void>((resolve) => (finish = resolve));
+    let started!: () => void;
+    const inside = new Promise<void>((resolve) => (started = resolve));
+    const merging = withWorkingDraftLock({ id: demoId }, async () => {
+      started();
+      await finishing;
+      return crsMod.merge(crsMod.getCR(created.body.id), stewardUser);
+    });
+    await inside;
+    const publishing = releases.publishRelease(draft as never, stewardUser);
+    await sleep(50);
+    finish();
+    expect((await merging).status).toBe('merged');
+    const published = await publishing;
+    expect(published.status).toBe('published');
+    expect((await contributor.get(termPath(`${VOL}Agent`))).body.comment).toBe('Merged while the release waited.');
   });
 });
