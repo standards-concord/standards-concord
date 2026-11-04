@@ -55,11 +55,17 @@ Curated from the official registry. Once the official entry is live, email partn
 - Static bearer tokens are not accepted for listing, which is one reason for the OAuth work.
 - What ChatGPT's connector needs from the OAuth server, all of which Concord does (covered by `apps/server/test/oauth.test.ts`):
   - Discovery: protected resource metadata with `resource` and `authorization_servers`, and authorization server metadata with S256 PKCE.
-  - Registration: a client ID metadata document at `https://chatgpt.com/oauth/client.json` (Concord treats it as a public client and ignores any client assertion), or dynamic client registration.
-  - Callbacks: `https://chatgpt.com/connector_platform_oauth_redirect` or the per-app `https://chatgpt.com/connector/oauth/{callback_id}`. Either works, because redirect URIs come from the client's own registration.
-  - The `resource` parameter on both the authorization and token requests.
+  - Registration: a client ID metadata document, or dynamic client registration (`none` or `client_secret_post`).
+  - Which document and callback: because Concord doesn't advertise `authorization_response_iss_parameter_supported`, ChatGPT uses its callback-specific client ID `https://chatgpt.com/oauth/{callback_id}/client.json` with the callback `https://chatgpt.com/connector/oauth/{callback_id}`. The stable `https://chatgpt.com/oauth/client.json` (callback `https://chatgpt.com/connector_platform_oauth_redirect`) is only used with servers that advertise it. Both work: redirect URIs must exactly match the document.
+  - Token authentication: ChatGPT's documents list the methods it can use (`none` and `private_key_jwt`). It picks from the overlap with Concord's metadata, which advertises `none` and `client_secret_post`, so it uses `none` with PKCE.
+  - The `resource` parameter on both the authorization and token requests, and OIDC scopes on the authorization request.
   - Refresh tokens.
-- Concord doesn't advertise `authorization_response_iss_parameter_supported`, even though its consent page returns `iss`, because some error redirects from the SDK don't include it. ChatGPT then uses its per-app callback, which works the same.
+- Concord doesn't advertise `authorization_response_iss_parameter_supported`, even though its consent page returns `iss`, because some error redirects from the SDK don't include it.
+- Client authentication rules Concord enforces:
+  - A metadata-document client is accepted only if its document allows `none`: `none` is in `token_endpoint_auth_methods_supported`, or, with no list, `token_endpoint_auth_method` is `none` or absent. A client that requires `private_key_jwt` is refused rather than downgraded, so a stolen refresh token can't be used without the client's key.
+  - Requests carrying `client_assertion` or `client_assertion_type` get `invalid_client`, because Concord can't check them.
+  - Registration with any method other than `none` or `client_secret_post` is refused.
+- The consent page only vouches for what Concord checked. A metadata-document client shows "Identified by" the host that served its document. A registered client's name and website are labelled as its own claims. Either way, the host that receives access is shown prominently.
 
 ## Other directories
 
@@ -74,7 +80,7 @@ Curated from the official registry. Once the official entry is live, email partn
 
 - Claude: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Concord&connectorUrl=<url>` opens the prefilled dialog. Connectors added there also appear in Claude Code when it is signed in with a Claude account.
 - Claude Code: no deep link adds a server (`claude-cli://open` only prefills a prompt), so the page shows `claude mcp add --transport http concord <url>`.
-- ChatGPT: no link prefills a custom MCP server, so the page shows the server URL to copy and opens `https://chatgpt.com/plugins`, where the person chooses *+* → *Add custom MCP server*, pastes the URL and picks OAuth. Some individual plans need Developer mode (Settings → Apps → Advanced) first, and workspace admins may have to allow custom servers. This is a private connection for that person, separate from the OpenAI directory listing below.
+- ChatGPT: no link prefills a custom MCP server, so the page shows the server URL to copy and opens `https://chatgpt.com/plugins`, where the person chooses *+* → *Add custom MCP server*, pastes the URL under *Connection*, picks OAuth and chooses *Create as a plugin*. They then install the new plugin (signing in to Concord when asked) and pick it with `@` in a chat. Some individual plans need Developer mode (Settings → Apps → Advanced) first, and workspace admins may have to allow custom servers. This is a private connection for that person, separate from the OpenAI directory listing below.
 - Codex: no deep link exists; the page shows `codex mcp add concord --url <url>` and `codex mcp login concord`.
 - Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=concord&config=<base64 {"url":...}>`.
 - VS Code: `vscode:mcp/install?<url-encoded {"name":"concord","type":"http","url":...}>`.

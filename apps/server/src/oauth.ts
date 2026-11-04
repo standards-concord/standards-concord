@@ -53,6 +53,8 @@ interface ClientDoc {
   info: OAuthClientInformationFull;
   /** Client ID Metadata Documents are cached for a day. */
   fetchedAt?: number;
+  /** Which version of the metadata-document checks admitted it; older cache entries are checked again. */
+  checks?: number;
 }
 interface PendingRequest {
   id: string;
@@ -197,7 +199,24 @@ export function validateClientMetadata(doc: unknown): { ok: true; info: OAuthCli
   return { ok: true, info: { ...(doc as object), ...m } as OAuthClientInformationFull };
 }
 
+/**
+ * Whether a client metadata document lets the client authenticate with `none`. ChatGPT lists every method
+ * it can use in token_endpoint_auth_methods_supported (no order) and a preference in the singular field; a
+ * document that names neither is a public client, since a metadata document can't carry a shared secret.
+ */
+export function allowsPublicClient(doc: Record<string, unknown>): boolean {
+  const list = doc.token_endpoint_auth_methods_supported;
+  if (list !== undefined) return Array.isArray(list) && list.includes('none');
+  const one = doc.token_endpoint_auth_method;
+  return one === undefined || one === 'none';
+}
+
+/** Token endpoint authentication Concord supports; also what the authorization server metadata advertises. */
+const AUTH_METHODS = ['none', 'client_secret_post'];
+
 const CIMD_FRESH = 24 * 60 * 60;
+/** Bump when fetchClientMetadata starts refusing something it used to accept. */
+const CIMD_CHECKS = 2;
 /** After a failed refresh (network error, timeout, 5xx), a cached document may be used this much longer, then never. */
 const CIMD_STALE_GRACE = 60 * 60;
 
@@ -231,7 +250,10 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
     return { kind: 'invalid' };
   }
   if (!doc || typeof doc !== 'object' || doc.client_id !== clientId) return { kind: 'invalid' };
-  // Metadata documents describe public clients: no secret is ever issued.
+  // Concord only takes metadata-document clients as public clients (PKCE, no client authentication). That is
+  // only safe when the document says the client may work that way: a client that insists on private_key_jwt
+  // is refused rather than quietly downgraded, so a leaked refresh token can't be used without its key.
+  if (!allowsPublicClient(doc)) return { kind: 'invalid' };
   const checked = validateClientMetadata({ ...doc, token_endpoint_auth_method: 'none' });
   if (!checked.ok) return { kind: 'invalid' };
   return { kind: 'ok', info: { ...checked.info, client_id: clientId, client_secret: undefined } };
@@ -241,11 +263,11 @@ const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
     const doc = get<ClientDoc>('oauthClients', clientId);
     if (!clientId.startsWith('https://')) return doc?.info;
-    const age = doc?.fetchedAt ? now() - doc.fetchedAt : Infinity;
+    const age = doc?.fetchedAt && doc.checks === CIMD_CHECKS ? now() - doc.fetchedAt : Infinity;
     if (doc && age < CIMD_FRESH) return doc.info;
     const r = await fetchClientMetadata(clientId);
     if (r.kind === 'ok') {
-      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now() });
+      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now(), checks: CIMD_CHECKS });
       return r.info;
     }
     if (r.kind === 'invalid') {
@@ -256,6 +278,9 @@ const clientsStore: OAuthRegisteredClientsStore = {
     return doc && age < CIMD_FRESH + CIMD_STALE_GRACE ? doc.info : undefined;
   },
   registerClient(client) {
+    const method = client.token_endpoint_auth_method;
+    if (method !== undefined && !AUTH_METHODS.includes(method))
+      throw new InvalidClientMetadataError(`token_endpoint_auth_method ${method} is not supported; use none (with PKCE) or client_secret_post`);
     const checked = validateClientMetadata(client);
     if (!checked.ok) throw new InvalidClientMetadataError(checked.reason);
     const info = { ...checked.info, ...client } as OAuthClientInformationFull;
@@ -428,6 +453,7 @@ export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
     clientName: clientName(client),
     clientUri: client.client_uri,
     logoUri: client.logo_uri,
+    publisher: client.client_id.startsWith('https://') ? new URL(client.client_id).host : undefined,
     redirectHost: redirect.host,
     localRedirect: ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname),
     resource: p.resource,
@@ -554,6 +580,14 @@ function routerFor(origin: string): Router {
   r.get('/.well-known/oauth-protected-resource', cors, (_req, res) =>
     res.json({ resource: mcpUrlFor(origin), authorization_servers: [`${origin}/`], resource_name: 'Concord', resource_documentation: `${origin}/connect`, bearer_methods_supported: ['header'] }),
   );
+  // Concord has no private_key_jwt support. A client that sends an assertion expects it to be checked, so
+  // refuse it outright rather than ignore it and treat the request as unauthenticated.
+  const noAssertions = (req: Request, res: Response, next: NextFunction) => {
+    const body = req.body as Record<string, unknown> | undefined;
+    if (body?.client_assertion === undefined && body?.client_assertion_type === undefined) return next();
+    res.status(401).json({ error: 'invalid_client', error_description: 'Client assertions (private_key_jwt) are not supported. Authenticate with none (PKCE) or client_secret_post.' });
+  };
+  for (const path of ['/token', '/revoke']) r.post(path, cors, express.urlencoded({ extended: false }), noAssertions);
   r.use(
     mcpAuthRouter({
       provider,

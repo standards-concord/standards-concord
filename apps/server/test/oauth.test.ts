@@ -444,8 +444,11 @@ describe('client metadata documents and redirect safety', () => {
   const authorizeUrl = (clientId: string, redirect: string) =>
     `/authorize?${new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, code_challenge: pkce().challenge, code_challenge_method: 'S256', state: 's' })}`;
 
-  /** Runs a whole sign-in the way ChatGPT's connector does: resource and scopes on both legs, a client assertion it may send, and refresh. */
-  async function chatgptFlow(clientId: string, redirect: string, tokenAuth: Record<string, string> = {}) {
+  /**
+   * Runs a whole sign-in the way ChatGPT's connector does: resource on the authorization and token requests,
+   * OIDC scopes on the authorization request, PKCE, then a refresh. Returns the client's tokens.
+   */
+  async function chatgptFlow(clientId: string, redirect: string, tokenAuth: Record<string, string> = {}, consent: Record<string, unknown> = {}) {
     const { verifier, challenge } = pkce();
     const resource = `${origin}/mcp`;
     const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: 'cgpt', resource, scope: 'openid email profile' });
@@ -453,47 +456,163 @@ describe('client metadata documents and redirect safety', () => {
     expect(start.status, JSON.stringify(start.body)).toBe(302);
     const id = new URL(start.headers.location).searchParams.get('request')!;
     const agent = await signedIn('ChatGPT user');
-    expect((await agent.get(`/api/oauth/requests/${id}`)).body).toMatchObject({ clientName: 'ChatGPT', redirectHost: 'chatgpt.com' });
+    expect((await agent.get(`/api/oauth/requests/${id}`)).body).toMatchObject({ clientName: 'ChatGPT', redirectHost: 'chatgpt.com', ...consent });
     const back = new URL((await agent.post(`/api/oauth/requests/${id}/approve`).send({})).body.redirect);
     expect(back.origin + back.pathname).toBe(redirect);
     expect(back.searchParams.get('iss')).toBe(`${origin}/`);
     expect(back.searchParams.get('state')).toBe('cgpt');
-    const t = await token({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, client_id: clientId, redirect_uri: redirect, resource, ...tokenAuth });
+    const code = back.searchParams.get('code')!;
+    const t = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: clientId, redirect_uri: redirect, resource, ...tokenAuth });
     expect(t.status, JSON.stringify(t.body)).toBe(200);
     expect((await tools(t.body.access_token)).status).toBe(200);
     const r = await token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: clientId, resource, ...tokenAuth });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect((await tools(r.body.access_token)).status).toBe(200);
+    return r.body as OAuthTokens;
   }
 
-  it('works with ChatGPT signing in through its client metadata document, on either callback', async () => {
-    const id = 'https://chatgpt.com/oauth/client.json';
-    docs.set(id, {
-      client_id: id,
-      client_name: 'ChatGPT',
-      client_uri: 'https://chatgpt.com',
-      logo_uri: 'https://chatgpt.com/favicon.ico',
-      redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect', 'https://chatgpt.com/connector/oauth/cb_123abc'],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'private_key_jwt',
-      token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
-      jwks_uri: 'https://chatgpt.com/oauth/jwks.json',
-      scope: 'openid email profile',
-    });
-    // Concord treats it as a public client; an assertion ChatGPT sends anyway is ignored rather than refused.
-    await chatgptFlow(id, 'https://chatgpt.com/connector/oauth/cb_123abc', { client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: 'eyJhbGciOiJSUzI1NiJ9.e30.sig' });
-    await chatgptFlow(id, 'https://chatgpt.com/connector_platform_oauth_redirect');
+  /**
+   * ChatGPT's metadata documents, as OpenAI describes them: every method it can use, in no order, plus a
+   * preferred one. The stable document only lists the stable callback; a callback-specific document is used
+   * with authorization servers that don't advertise issuer identification in responses.
+   */
+  const CGPT_STABLE = 'https://chatgpt.com/oauth/client.json';
+  const CGPT_CALLBACK = 'https://chatgpt.com/oauth/cb_123abc/client.json';
+  const CGPT_AUTH = { methods: ['none', 'private_key_jwt'], preferred: 'private_key_jwt' };
+  const cgptDoc = (clientId: string, redirect: string, { methods, preferred }: { methods?: unknown; preferred?: unknown } = CGPT_AUTH) => ({
+    client_id: clientId,
+    client_name: 'ChatGPT',
+    client_uri: 'https://chatgpt.com',
+    redirect_uris: [redirect],
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+    ...(methods === undefined ? {} : { token_endpoint_auth_methods_supported: methods }),
+    ...(preferred === undefined ? {} : { token_endpoint_auth_method: preferred }),
+    jwks_uri: 'https://chatgpt.com/oauth/jwks.json',
+    scope: 'openid email profile',
+  });
+  const assertion = { client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: 'eyJhbGciOiJSUzI1NiJ9.e30.sig' };
+
+  it('leads ChatGPT to its callback-specific client and to public-client authentication', async () => {
+    const meta = (await request(base).get('/.well-known/oauth-authorization-server')).body;
+    // No issuer identification in responses, so ChatGPT uses its callback-specific client ID and callback.
+    expect(meta.authorization_response_iss_parameter_supported).toBeUndefined();
+    expect(meta.client_id_metadata_document_supported).toBe(true);
+    expect(meta.code_challenge_methods_supported).toContain('S256');
+    // ChatGPT picks from the intersection with what it can do: that leaves only none.
+    expect(meta.token_endpoint_auth_methods_supported.filter((m: string) => ['none', 'private_key_jwt'].includes(m))).toEqual(['none']);
   });
 
-  it('works with ChatGPT registering itself (dynamic client registration), public or with a secret', async () => {
-    for (const method of ['none', 'client_secret_post']) {
-      const reg = await request(base)
-        .post('/register')
-        .send({ client_name: 'ChatGPT', redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: method, scope: 'openid email profile' });
-      expect(reg.status, method).toBe(201);
-      await chatgptFlow(reg.body.client_id, 'https://chatgpt.com/connector_platform_oauth_redirect', reg.body.client_secret ? { client_secret: reg.body.client_secret } : {});
+  it('works with ChatGPT through its callback-specific metadata document', async () => {
+    docs.set(CGPT_CALLBACK, cgptDoc(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc'));
+    await chatgptFlow(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc', {}, { publisher: 'chatgpt.com' });
+  });
+
+  it('works with ChatGPT through its stable metadata document too', async () => {
+    docs.set(CGPT_STABLE, cgptDoc(CGPT_STABLE, 'https://chatgpt.com/connector_platform_oauth_redirect'));
+    await chatgptFlow(CGPT_STABLE, 'https://chatgpt.com/connector_platform_oauth_redirect', {}, { publisher: 'chatgpt.com' });
+  });
+
+  it('refuses a callback the metadata document does not list', async () => {
+    docs.set(CGPT_CALLBACK, cgptDoc(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc'));
+    for (const wrong of ['https://chatgpt.com/connector_platform_oauth_redirect', 'https://chatgpt.com/connector/oauth/cb_other', 'https://chatgpt.com.evil.example/connector/oauth/cb_123abc']) {
+      expect((await request(base).get(authorizeUrl(CGPT_CALLBACK, wrong))).status, wrong).toBe(400);
     }
+  });
+
+  it('refuses a code redeemed by a different client', async () => {
+    docs.set(CGPT_CALLBACK, cgptDoc(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc'));
+    docs.set(CGPT_STABLE, cgptDoc(CGPT_STABLE, 'https://chatgpt.com/connector_platform_oauth_redirect'));
+    const { verifier, challenge } = pkce();
+    const redirect = 'https://chatgpt.com/connector/oauth/cb_123abc';
+    const q = new URLSearchParams({ response_type: 'code', client_id: CGPT_CALLBACK, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', resource: `${origin}/mcp` });
+    const id = new URL((await request(base).get(`/authorize?${q}`)).headers.location).searchParams.get('request')!;
+    const back = new URL((await (await signedIn()).post(`/api/oauth/requests/${id}/approve`).send({})).body.redirect);
+    const res = await token({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, client_id: CGPT_STABLE, redirect_uri: redirect, resource: `${origin}/mcp` });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('invalid_grant');
+  });
+
+  it('refuses a metadata document that does not allow public-client authentication', async () => {
+    const cases: [string, unknown, unknown][] = [
+      ['private-key-only', ['private_key_jwt'], 'private_key_jwt'],
+      ['preference-only', undefined, 'private_key_jwt'],
+      ['secret-only', ['client_secret_basic'], undefined],
+      ['not-a-list', 'none', undefined],
+    ];
+    for (const [label, methods, preferred] of cases) {
+      const cid = `https://chatgpt.com/oauth/${label}/client.json`;
+      const redirect = `https://chatgpt.com/connector/oauth/${label}`;
+      docs.set(cid, cgptDoc(cid, redirect, { methods, preferred }));
+      const res = await request(base).get(authorizeUrl(cid, redirect));
+      expect(res.status, label).toBe(400);
+      expect(res.body.error, label).toBe('invalid_client');
+    }
+    // A document that names no method at all is a public client (it can't carry a secret).
+    const bare = 'https://chatgpt.com/oauth/bare/client.json';
+    docs.set(bare, cgptDoc(bare, 'https://chatgpt.com/connector/oauth/bare', {}));
+    expect((await request(base).get(authorizeUrl(bare, 'https://chatgpt.com/connector/oauth/bare'))).status).toBe(302);
+  });
+
+  it('checks a document cached by the old rules again, and drops it if it now fails', async () => {
+    const cid = 'https://chatgpt.com/oauth/cached-old/client.json';
+    const redirect = 'https://chatgpt.com/connector/oauth/cached-old';
+    docs.set(cid, cgptDoc(cid, redirect, { methods: ['private_key_jwt'], preferred: 'private_key_jwt' }));
+    // As the earlier code stored it: rewritten to none, with no record of which checks admitted it.
+    put('oauthClients', { id: cid, info: { client_id: cid, client_name: 'ChatGPT', redirect_uris: [redirect], token_endpoint_auth_method: 'none' }, fetchedAt: Math.floor(Date.now() / 1000) });
+    expect((await request(base).get(authorizeUrl(cid, redirect))).status).toBe(400);
+    expect(get('oauthClients', cid)).toBeUndefined();
+  });
+
+  it('refuses client assertions instead of ignoring them', async () => {
+    docs.set(CGPT_CALLBACK, cgptDoc(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc'));
+    const tokens = await chatgptFlow(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc');
+    for (const extra of [assertion, { client_assertion: 'not-a-jwt' }, { client_assertion_type: assertion.client_assertion_type }] as Record<string, string>[]) {
+      const res = await token({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: CGPT_CALLBACK, resource: `${origin}/mcp`, ...extra });
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('invalid_client');
+    }
+    const revoke = await request(base).post('/revoke').type('form').send({ token: tokens.refresh_token!, client_id: CGPT_CALLBACK, ...assertion });
+    expect(revoke.status).toBe(401);
+    // Refused requests did not use up or revoke the refresh token.
+    expect((await token({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: CGPT_CALLBACK, resource: `${origin}/mcp` })).status).toBe(200);
+  });
+
+  it('works with ChatGPT registering itself, public or with a secret, and checks the secret', async () => {
+    const redirect = 'https://chatgpt.com/connector_platform_oauth_redirect';
+    const reg = (method?: string) =>
+      request(base)
+        .post('/register')
+        .send({ client_name: 'ChatGPT', redirect_uris: [redirect], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: 'openid email profile', ...(method ? { token_endpoint_auth_method: method } : {}) });
+    const pub = await reg('none');
+    expect(pub.status).toBe(201);
+    expect(pub.body.client_secret).toBeUndefined();
+    await chatgptFlow(pub.body.client_id, redirect);
+    const conf = await reg('client_secret_post');
+    expect(conf.status).toBe(201);
+    const tokens = await chatgptFlow(conf.body.client_id, redirect, { client_secret: conf.body.client_secret });
+    for (const auth of [{}, { client_secret: 'wrong' }] as Record<string, string>[]) {
+      const res = await token({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: conf.body.client_id, resource: `${origin}/mcp`, ...auth });
+      expect(res.status, JSON.stringify(auth)).toBe(400);
+      expect(res.body.error).toBe('invalid_client');
+    }
+    for (const method of ['private_key_jwt', 'client_secret_basic', 'tls_client_auth']) {
+      const res = await reg(method);
+      expect(res.status, method).toBe(400);
+      expect(res.body.error).toBe('invalid_client_metadata');
+    }
+  });
+
+  it('does not vouch for a registered app that borrows another app’s name and website', async () => {
+    const reg = await request(base)
+      .post('/register')
+      .send({ client_name: 'ChatGPT', client_uri: 'https://chatgpt.com', redirect_uris: ['https://chatgpt.com.evil.example/connector/oauth/x'], token_endpoint_auth_method: 'none' });
+    expect(reg.status).toBe(201);
+    const res = await request(base).get(authorizeUrl(reg.body.client_id, 'https://chatgpt.com.evil.example/connector/oauth/x'));
+    const id = new URL(res.headers.location).searchParams.get('request')!;
+    const info = (await (await signedIn()).get(`/api/oauth/requests/${id}`)).body;
+    expect(info).toMatchObject({ clientName: 'ChatGPT', clientUri: 'https://chatgpt.com', redirectHost: 'chatgpt.com.evil.example' });
+    expect(info.publisher).toBeUndefined();
   });
 
   it('accepts a valid metadata document and shows its name on the consent page', async () => {

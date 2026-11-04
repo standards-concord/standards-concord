@@ -529,8 +529,11 @@ export interface ReleaseDetail extends Release {
 export interface OAuthRequestInfo {
   id: string;
   clientName: string;
+  /** Name, website and logo come from the app itself and are not checked. */
   clientUri?: string;
   logoUri?: string;
+  /** For apps identified by a metadata document URL: the host that published it, which Concord did check. */
+  publisher?: string;
   /** Where the person is sent back to, e.g. localhost:33418 for Claude Code. */
   redirectHost: string;
   localRedirect: boolean;
