@@ -1285,7 +1285,11 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     const outsider = await login('contributor');
     // Newly saved results say where they came from: the request's own test is shown.
     const fresh = await outsider.get(`/api/change-requests/${cr.id}`);
-    expect(fresh.text).toContain('own-harmless');
+    const shown = fresh.body.validation.competencyQuestions as { source?: string; sparql: string; rows: Record<string, string>[] }[];
+    const own = shown.find((r) => r.sparql.includes('urn:OwnKind'));
+    expect(own?.source).toBe('@request');
+    expect(JSON.stringify(own?.rows)).toContain('own-harmless');
+    expect(shown.some((r) => r.sparql.includes('UntaggedKind'))).toBe(true);
     // As saved before sources were recorded: no source on any result.
     const saved = get<ChangeRequest>('changeRequests', cr.id)!;
     put('changeRequests', { ...saved, validation: { ...saved.validation!, competencyQuestions: saved.validation!.competencyQuestions.map(({ source: _s, ...r }) => r) } }, demoId);
