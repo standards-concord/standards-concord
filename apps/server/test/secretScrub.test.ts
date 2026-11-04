@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -113,6 +113,35 @@ describe('scrubbing old client secrets from the database files', () => {
     expect(owed()).toBe(false);
     expect(scrubRetryPending()).toBe(false);
     expect(bytes().includes(c.secret)).toBe(false);
+  });
+
+  it('gives up at once, without throwing, if another connection holds the write lock when completion is recorded', () => {
+    legacyClient();
+    migrateClientSecrets();
+    expect(owed()).toBe(false);
+    const late = legacyClient();
+    // What hashing `late` on lookup records: the hash in place of the secret, and one more scrub owed.
+    const doc = get<{ id: string; info: Record<string, unknown> }>('oauthClients', late.id)!;
+    const { client_secret: _s, ...info } = doc.info;
+    put('oauthClients', { ...doc, info, secretHash: createHash('sha256').update(late.secret).digest('hex') });
+    const before = state()!;
+    put('kv', { ...before, owed: before.owed + 1 });
+    const writer = new DatabaseSync(file);
+    const lockedAfterScrub = () => {
+      const ok = scrubFreeSpace();
+      writer.exec('BEGIN IMMEDIATE'); // another process takes the write lock just before we record completion
+      return ok;
+    };
+    const t = Date.now();
+    expect(scrubIfOwed(lockedAfterScrub)).toBe(false);
+    expect(Date.now() - t).toBeLessThan(1000);
+    writer.exec('ROLLBACK');
+    writer.close();
+    expect(owed()).toBe(true);
+    // Ordinary requests still wait for locks as usual afterwards.
+    expect((openDb().prepare('PRAGMA busy_timeout').get() as { timeout: number }).timeout).toBe(5000);
+    expect(scrubIfOwed()).toBe(true);
+    expect(bytes().includes(late.secret)).toBe(false);
   });
 
   it('does not stall the server while another connection blocks the scrub', async () => {

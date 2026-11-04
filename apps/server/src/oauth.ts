@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction } from './db.js';
+import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -321,15 +321,24 @@ const scrubState = (): ScrubState => get<ScrubState>('kv', SCRUB) ?? { id: SCRUB
 
 /** Scrub old copies of secrets from the database files if that is owed. True once nothing is owed. */
 export function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): boolean {
-  const before = scrubState();
-  if (before.scrubbed >= before.owed) return true;
-  const generation = before.owed;
-  if (!scrub()) return false;
-  transaction(() => {
-    const now = scrubState();
-    put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
-  });
-  return scrubState().scrubbed >= scrubState().owed;
+  // All of it, the bookkeeping included, gives up at once if another connection holds a lock: the work
+  // stays owed and the scheduler tries again later, so it never stalls requests or throws out of a timer.
+  try {
+    return withoutWaiting(() => {
+      const before = scrubState();
+      if (before.scrubbed >= before.owed) return true;
+      const generation = before.owed;
+      if (!scrub()) return false;
+      transaction(() => {
+        const now = scrubState();
+        put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
+      });
+      const after = scrubState();
+      return after.scrubbed >= after.owed;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -774,13 +783,16 @@ function looseOAuthPath(path: string): boolean {
   // Decode %XX byte by byte, without ever failing on malformed sequences, until nothing changes (catches
   // any depth of encoding). Then drop what isn't printable ASCII: overlong UTF-8, NULs and other bytes
   // that some decoder somewhere might turn into a slash or nothing.
+  // Dropping bytes can join the pieces of a new escape (%25%00%32%66 → %2f), so both happen in each pass.
+  // A path still changing after the last pass is treated as a near-miss rather than let through.
   let p = path;
-  for (let i = 0; i < 32; i++) {
-    const next = p.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+  for (let i = 0; ; i++) {
+    const next = p.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).replace(/[^\x20-\x7e]/g, '');
     if (next === p) break;
+    if (i === 64) return true;
     p = next;
   }
-  p = p.replace(/[^\x20-\x7e]/g, '').replace(/\\/g, '/').toLowerCase();
+  p = p.replace(/\\/g, '/').toLowerCase();
   const segments: string[] = [];
   for (const s of p.split('/')) {
     const seg = s.split(';')[0].trim();
