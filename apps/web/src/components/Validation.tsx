@@ -273,6 +273,9 @@ export function CqResults({ report }: { report: ValidationReport }) {
 }
 
 /** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
+/** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
+const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
+
 export function ValidationDetails({ report, label, openLintKey, lintNote }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
@@ -287,11 +290,11 @@ export function ValidationDetails({ report, label, openLintKey, lintNote }: { re
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
+        <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" heading={4} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} keepMounted>
+        <Disclosure className="px-4 py-3" heading={4} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
           <FairChecks report={report} showAll />
         </Disclosure>
         <Disclosure
@@ -300,6 +303,7 @@ export function ValidationDetails({ report, label, openLintKey, lintNote }: { re
           title="Competency questions"
           summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
           defaultOpen={cqOk < report.competencyQuestions.length}
+          failures={report.competencyQuestions.filter((q) => !q.satisfied).map((q) => q.question)}
           keepMounted
         >
           <CqResults report={report} />

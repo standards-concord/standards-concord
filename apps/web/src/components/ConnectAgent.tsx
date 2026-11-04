@@ -185,9 +185,20 @@ export function ConnectAgent() {
           {CLIENTS.map((c) => (
             <button
               key={c.id}
+              type="button"
               role="radio"
               aria-checked={client === c.id}
+              tabIndex={client === c.id ? 0 : -1}
               onClick={() => choose(c.id)}
+              onKeyDown={(e) => {
+                // A radio group: one tab stop, and the arrow keys move and select, like the Appearance picker.
+                const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+                if (!step) return;
+                e.preventDefault();
+                const i = (CLIENTS.findIndex((x) => x.id === client) + step + CLIENTS.length) % CLIENTS.length;
+                choose(CLIENTS[i].id);
+                (e.currentTarget.parentElement?.children[i] as HTMLElement | undefined)?.focus();
+              }}
               className={cx(
                 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors',
                 client === c.id ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong hover:bg-surface-2',

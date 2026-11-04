@@ -64,6 +64,24 @@ test.describe('Connect page', () => {
     for (const name of TOOL_NAMES) await expect(page.getByText(name, { exact: true })).toHaveCount(0);
   });
 
+  test('the app picker is a radio group: one tab stop and arrow keys', async ({ page }) => {
+    await page.goto('/connect');
+    const group = page.getByRole('radiogroup', { name: 'Which app are you connecting?' });
+    const radios = group.getByRole('radio');
+    const checked = group.getByRole('radio', { checked: true });
+    await expect(checked).toHaveAttribute('tabindex', '0');
+    expect(await group.locator('[role=radio][tabindex="0"]').count()).toBe(1);
+    const first = await checked.innerText();
+    await checked.focus();
+    await page.keyboard.press('ArrowRight');
+    const moved = group.getByRole('radio', { checked: true });
+    await expect(moved).toBeFocused();
+    expect(await moved.innerText()).not.toBe(first);
+    await page.keyboard.press('ArrowLeft');
+    await expect(group.getByRole('radio', { checked: true })).toHaveText(first);
+    expect(await radios.count()).toBeGreaterThan(2);
+  });
+
   test('copy buttons copy the command', async ({ page, context, baseURL }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.goto('/connect');

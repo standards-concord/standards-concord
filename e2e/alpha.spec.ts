@@ -151,3 +151,26 @@ test('the floating walkthrough panel follows a tester around the app', async ({ 
   await panel.getByRole('button', { name: 'Full view' }).click();
   await expect(page).toHaveURL(/\/alpha$/);
 });
+
+test('on a short screen the steps menu opens upwards and stays on screen', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 560 });
+  await page.goto('/alpha');
+  await page.getByRole('button', { name: 'Let’s start' }).click();
+  const contributor = page.getByRole('region', { name: 'Domain expert / contributor' });
+  await contributor.getByRole('button').first().click();
+  await contributor.getByRole('button').nth(1).click();
+  await expect(page.getByText(/The demo ontology is/)).toBeVisible();
+  await page.getByRole('button', { name: 'Keep the guide open while I explore' }).click();
+  const panel = page.getByRole('complementary').filter({ hasText: 'Alpha walkthrough' });
+  const trigger = panel.getByRole('button', { name: 'All walkthrough steps' });
+  await trigger.click();
+  const menu = panel.getByRole('dialog', { name: 'All walkthrough steps' });
+  await expect(menu).toBeVisible();
+  const box = (await menu.boundingBox())!;
+  const t = (await trigger.boundingBox())!;
+  // Fully inside the viewport, vertically as well as sideways.
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y + box.height).toBeLessThanOrEqual(560);
+  // Near the bottom of the screen there's more room above the trigger, so it opens upwards.
+  if (t.y > 560 / 2) await expect(menu).toHaveAttribute('data-placement', 'top');
+});

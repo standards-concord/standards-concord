@@ -7,8 +7,12 @@ import { cx } from './ui';
  * the detail one click away, so nothing is removed but less is on screen at once.
  */
 
-/** Opens when `defaultOpen` turns true later (e.g. new failures arrive) or when `openKey` changes to a new truthy value (e.g. a link to this section is followed again). */
-function useOpenState(defaultOpen: boolean, openKey: unknown) {
+/**
+ * Opens when `defaultOpen` turns true later (e.g. new failures arrive), when `openKey` changes to a new truthy
+ * value (e.g. a link to this section is followed again), or when `failures` gains an entry it didn't have
+ * before, even if the person closed it while older failures were showing.
+ */
+function useOpenState(defaultOpen: boolean, openKey: unknown, failures?: string[]) {
   const [open, setOpen] = useState(defaultOpen);
   const prevDefault = useRef(defaultOpen);
   useEffect(() => {
@@ -18,6 +22,14 @@ function useOpenState(defaultOpen: boolean, openKey: unknown) {
   useEffect(() => {
     if (openKey !== undefined && openKey !== null && openKey !== false) setOpen(true);
   }, [openKey]);
+  const seen = useRef(new Set(failures ?? []));
+  const signature = (failures ?? []).join('\u0000');
+  useEffect(() => {
+    const now = failures ?? [];
+    if (now.some((f) => !seen.current.has(f))) setOpen(true);
+    seen.current = new Set(now);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
   return [open, setOpen] as const;
 }
 
@@ -46,6 +58,8 @@ export function Popover({
 }) {
   const [open, setOpen] = useState(false);
   const [shift, setShift] = useState(0);
+  const [above, setAbove] = useState(false);
+  const [maxH, setMaxH] = useState<number>();
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -71,23 +85,36 @@ export function Popover({
     };
   }, [open]);
 
-  // Keep the panel inside the viewport, and move focus into it so keyboard users land on its content.
+  // Keep the panel inside the viewport: nudge it sideways, open it upwards when there's more room above
+  // (e.g. a trigger near the bottom of a short screen), and cap its height to the room it has.
   useLayoutEffect(() => {
     if (!open) {
       setShift(0);
+      setAbove(false);
+      setMaxH(undefined);
       return;
     }
     const place = () => {
       const panel = panelRef.current;
-      if (!panel) return;
+      const button = buttonRef.current;
+      if (!panel || !button) return;
       panel.style.transform = '';
+      panel.style.maxHeight = '';
       const r = panel.getBoundingClientRect();
+      const b = button.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
+      const vh = window.innerHeight;
       const margin = 8;
       let dx = 0;
       if (r.right > vw - margin) dx = vw - margin - r.right;
       if (r.left + dx < margin) dx = margin - r.left;
       setShift(dx);
+      const gap = 8;
+      const below = vh - b.bottom - gap - margin;
+      const aboveRoom = b.top - gap - margin;
+      const up = r.height > below && aboveRoom > below;
+      setAbove(up);
+      setMaxH(Math.max(120, Math.floor(up ? aboveRoom : below)));
     };
     place();
     window.addEventListener('resize', place);
@@ -127,9 +154,11 @@ export function Popover({
           aria-modal="false"
           aria-label={label}
           tabIndex={-1}
-          style={shift ? { transform: `translateX(${shift}px)` } : undefined}
+          data-placement={above ? 'top' : 'bottom'}
+          style={{ ...(shift ? { transform: `translateX(${shift}px)` } : {}), ...(maxH ? { maxHeight: `min(32rem, ${maxH}px)` } : {}) }}
           className={cx(
-            'absolute z-40 mt-2 max-h-[min(32rem,calc(100vh-8rem))] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-line bg-surface p-4 text-sm shadow-xl outline-none',
+            'absolute z-40 max-h-[min(32rem,calc(100vh-8rem))] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-line bg-surface p-4 text-sm shadow-xl outline-none',
+            above ? 'bottom-full mb-2' : 'mt-2',
             align === 'right' ? 'right-0' : 'left-0',
             panelClassName,
           )}
@@ -155,6 +184,7 @@ export function Disclosure({
   heading,
   className,
   tone,
+  failures,
 }: {
   title: ReactNode;
   /** Shown with the title, e.g. a count or a one-line verdict. */
@@ -172,8 +202,10 @@ export function Disclosure({
   heading?: HeadingLevel;
   className?: string;
   tone?: 'muted';
+  /** Identifiers of the current failures inside; a new one reopens the section. */
+  failures?: string[];
 }) {
-  const [open, setOpen] = useOpenState(defaultOpen, openKey);
+  const [open, setOpen] = useOpenState(defaultOpen, openKey, failures);
   const id = useId();
   const button = (
     <button
