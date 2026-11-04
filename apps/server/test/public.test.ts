@@ -314,9 +314,10 @@ describe('review fixes', () => {
     expect(a.get('https://other.org/x#Thing')).toBe('Thing-2');
     expect(a.get('https://other.org/x#main')).toBe('term-main-2');
     expect(new Set(a.values()).size).toBe(a.size);
-    // #Café and a literal #Caf%C3%A9 are the same once encoded: the literal one (the URI form) keeps it.
-    expect(a.get(`${NS}Caf%C3%A9`)).toBe('Caf%C3%A9');
-    expect(a.get(`${NS}Café`)).toBe('Café-2');
+    // #Café and a literal #Caf%C3%A9 are the same once encoded. Browsers rewrite #Café
+    // as #Caf%C3%A9, so Café keeps that href and the literal one is numbered.
+    expect(a.get(`${NS}Café`)).toBe('Café');
+    expect(a.get(`${NS}Caf%C3%A9`)).toBe('Caf%C3%A9-2');
     expect(new Set([...a.values()].map(fragment)).size, 'hrefs are distinct').toBe(a.size);
 
     // The page's own ids step aside: #main and #sec-classes are the terms.
@@ -426,6 +427,22 @@ describe('re-review fixes', () => {
       secrets,
     );
     expect(dropped).toEqual(['SecretPilot', 'AnnRecord']);
+    // Single-word titles, and titles inside longer names, are caught in labels and local names too.
+    const inside = redactOps(
+      [
+        { op: 'addClass', localName: 'NHS', label: 'nhs', definition: 'x' },
+        { op: 'addClass', localName: 'SecretPilotRecord', label: 'secret pilot record', definition: 'x' },
+        { op: 'addClass', localName: 'Record', label: 'secret pilot record', definition: 'x' },
+        { op: 'renameTerm', iri: 'https://w3id.org/odi/volunteering#NHS', newLocalName: 'HealthService' },
+      ],
+      secrets,
+    );
+    expect(inside.dropped).toEqual(['NHS', 'SecretPilotRecord', 'Record']);
+    // Removing a revealing name is still allowed.
+    expect(inside.ops).toEqual([{ op: 'renameTerm', iri: 'https://w3id.org/odi/volunteering#NHS', newLocalName: 'HealthService' }]);
+    // One-letter titles are redacted as written, not every letter of that kind.
+    const x = secretsFor([{ ...base, authorId: ann.id, sections: { name: 'X' } }]);
+    expect(redactText('Project X, x-axis, X.', x)).toBe('Project a use case, x-axis, a use case.');
     expect(ops).toEqual([{ op: 'addClass', localName: 'Respite', label: 'respite', definition: 'Wanted by a participant for a use case.', altLabels: ['break'], editorialNote: 'From a use case' }]);
   });
 
@@ -502,11 +519,19 @@ describe('re-review fixes', () => {
 
       // A valid snapshot is history: only the page is re-rendered from it.
       forget();
-      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'k', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
+      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'demo-aggregation', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
       await refreshReleasePages();
       expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases[0].title).toBe('Kept as released');
       expect(fs.readFileSync(page, 'utf8')).toContain('Kept as released');
       expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
+
+      // ...unless it holds a use case that was never public (only the demo's fixed ones are).
+      forget();
+      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'uc_real', ref: 'UC-9', title: 'PRIVATE_SNAPSHOT_TITLE', status: 'closed' }] }));
+      await refreshReleasePages();
+      expect(fs.readFileSync(snap, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
+      expect(fs.readFileSync(page, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
+      expect(fs.readFileSync(snap, 'utf8')).toContain('Aggregate volunteering opportunities across platforms');
     } finally {
       fs.writeFileSync(page, original.page);
       fs.writeFileSync(snap, original.snap);
@@ -517,9 +542,12 @@ describe('re-review fixes', () => {
 
   it('removes contributor names and use case titles that older versions wrote into the RDF', async () => {
     const project = findProject('volunteering')!;
+    // Merges wrote users' names; a credit an editor added for someone else stays.
+    await createUser({ name: 'Leaky Name', provider: 'github', subject: 'leaky-name' });
+    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
     const leak = (ttl: string) =>
-      `${ttl}\n<https://w3id.org/odi/volunteering#Volunteer> <http://purl.org/dc/terms/contributor> "Leaky Name" ; <http://purl.org/dc/terms/source> "use cases: Leaky Title" ; <http://www.w3.org/2004/02/skos/core#editorialNote> "Needed by the use case “Leaky Title”" .\n`;
+      `${ttl}\n<https://w3id.org/odi/volunteering#Volunteer> <http://purl.org/dc/terms/contributor> "Leaky Name", "Explicitly credited editor" ; <http://purl.org/dc/terms/source> "use cases: Leaky Title" ; <http://www.w3.org/2004/02/skos/core#editorialNote> "Needed by the use case “Leaky Title”" .\n`;
     // In the working draft...
     const working = await ontologyStore.working(project);
     const dirty = await OntologyGraph.fromTurtle(leak(await working.toTurtle()));
@@ -541,5 +569,97 @@ describe('re-review fixes', () => {
     // Editorial notes keep their meaning, and hand-written sources stay.
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Needed by a use case (see source).');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('NCVO definition of formal volunteering');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Explicitly credited editor');
+  });
+});
+
+describe('third review fixes', () => {
+  const NS = 'https://w3id.org/odi/volunteering#';
+
+  it('re-checks a change request queued before redaction existed when it merges', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Pending Person', provider: 'github', subject: 'queued-leak' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'PENDING_SECRET_TITLE' } });
+    const cr = await synthesise(project, tester, [uc.id]);
+    // As older versions stored it: the title in the source, the definition and a label.
+    const ops = [
+      { op: 'addClass', localName: 'QueuedThing', label: 'queued thing', definition: 'Needed for PENDING_SECRET_TITLE by Pending Person.', source: ['use cases: PENDING_SECRET_TITLE'] },
+      { op: 'addClass', localName: 'PendingSecretTitleRecord', label: 'PENDING_SECRET_TITLE record', definition: 'x' },
+    ];
+    put('changeRequests', { ...getCR(cr.id), ops, status: 'approved' }, cr.ontologyId);
+    const merged = await merge(getCR(cr.id), undefined);
+    expect(merged.status).toBe('merged');
+    const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
+    expect(ttl).toContain('QueuedThing');
+    expect(ttl).not.toContain('PENDING_SECRET_TITLE');
+    expect(ttl).not.toContain('Pending Person');
+    expect(ttl).not.toContain('PendingSecretTitleRecord');
+    expect(merged.timeline.some((e) => /left out PendingSecretTitleRecord/.test(e.message))).toBe(true);
+    // The commit is published with the ontology, so it names no one; signed-in history still does.
+    const head = ontologyStore.log(project, 1)[0];
+    expect(head.author).toBe('Concord');
+    expect(head.subject).not.toContain('PENDING_SECRET_TITLE');
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'History reader', role: 'contributor' });
+    const history = (await agent.get('/api/ontologies/volunteering')).body.history as { author: string; subject: string }[];
+    expect(history.find((h) => h.subject.startsWith(`#${cr.number} `))?.author).toBe('Pending Person');
+  });
+
+  it('keeps a renamed use case\'s old title out of revisions', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Re Namer', provider: 'github', subject: 'rename-leak' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'Original Confidential' }, terms: [{ label: 'Respite Break', kind: 'class' }] });
+    const cr = await synthesise(project, tester, [uc.id]);
+    updateUseCase(listUseCases(project.id).find((u) => u.id === uc.id)!, tester, { sections: { name: 'Renamed Case' } });
+    const revised = await revise(getCR(cr.id), tester, 'Add a class Pilot Note for the Original Confidential study.');
+    expect(JSON.stringify(revised.ops)).toContain('PilotNote');
+    expect(JSON.stringify(revised.ops)).not.toMatch(/Original Confidential/i);
+  });
+
+  it('cleans what synthesised requests wrote into earlier releases, their notes and the changelog, release by release', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Legacy Author', provider: 'github', subject: 'legacy-leak' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'LEGACY_SECRET' } });
+    const cr = await synthesise(project, tester, [uc.id]);
+    put('changeRequests', { ...getCR(cr.id), status: 'released', ops: [{ op: 'updateAnnotations', iri: `${NS}Volunteer`, set: { comment: 'x' } }] }, cr.ontologyId);
+    const dir = ontologyStore.dir(project);
+    const rel = path.join(dir, 'releases', '1.0.0');
+    const broken = path.join(dir, 'releases', '9.9.9');
+    const release = (await import('../src/db.js')).list<{ id: string; version: string; notes: string; changeRequestIds: string[]; ontologyId: string }>('releases', project.id).find((r) => r.version === '1.0.0')!;
+    const saved = { ttl: fs.readFileSync(path.join(rel, 'ontology.ttl'), 'utf8'), notes: release.notes, changelog: fs.existsSync(path.join(dir, 'CHANGELOG.md')) ? fs.readFileSync(path.join(dir, 'CHANGELOG.md'), 'utf8') : undefined };
+    try {
+      // Model-written text from that request, in a comment and an example.
+      fs.writeFileSync(
+        path.join(rel, 'ontology.ttl'),
+        `${saved.ttl}\n<${NS}Volunteer> <http://www.w3.org/2000/01/rdf-schema#comment> "Raised in LEGACY_SECRET by Legacy Author." ; <http://www.w3.org/2004/02/skos/core#example> "LEGACY_SECRET example" .\n`,
+      );
+      fs.writeFileSync(path.join(rel, 'RELEASE_NOTES.md'), '# Notes\n\n- #1 Changes for LEGACY_SECRET\n');
+      fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), '# Changelog\n\n- Changes for LEGACY_SECRET\n');
+      put('releases', { ...release, notes: 'Changes for LEGACY_SECRET', changeRequestIds: [...release.changeRequestIds, cr.id] }, project.id);
+      // A release that can't be read doesn't stop the others being cleaned.
+      fs.mkdirSync(broken, { recursive: true });
+      fs.writeFileSync(path.join(broken, 'ontology.ttl'), 'this is @@ not turtle');
+      ontologyStore.forgetReleases(project);
+      fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+      await refreshReleasePages();
+      for (const url of ['/def/volunteering/1.0.0.ttl', '/def/volunteering/1.0.0']) {
+        const text = (await request(app).get(url)).text;
+        expect(text, url).not.toContain('LEGACY_SECRET');
+        expect(text, url).not.toContain('Legacy Author');
+      }
+      expect(fs.readFileSync(path.join(rel, 'RELEASE_NOTES.md'), 'utf8')).not.toContain('LEGACY_SECRET');
+      expect(fs.readFileSync(path.join(dir, 'CHANGELOG.md'), 'utf8')).not.toContain('LEGACY_SECRET');
+      // Not recorded as done, so the unreadable release is tried again next time.
+      expect(JSON.parse(fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8'))['cleanup:volunteering']).toBeUndefined();
+    } finally {
+      fs.rmSync(broken, { recursive: true, force: true });
+      fs.writeFileSync(path.join(rel, 'ontology.ttl'), saved.ttl);
+      fs.rmSync(path.join(rel, 'RELEASE_NOTES.md'), { force: true });
+      if (saved.changelog !== undefined) fs.writeFileSync(path.join(dir, 'CHANGELOG.md'), saved.changelog);
+      put('releases', release, project.id);
+      ontologyStore.forgetReleases(project);
+      fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+      await refreshReleasePages();
+    }
   });
 });

@@ -1,5 +1,6 @@
 import {
   applyChangeOps,
+  scrubGeneratedProvenance,
   ChangeOpError,
   classifyChange,
   compactIRI,
@@ -35,8 +36,8 @@ import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
-import { getUser, logActivity, publicUser } from './users.js';
-import { redactOps, secretsFor } from './redact.js';
+import { getUser, logActivity, publicUser, userNames } from './users.js';
+import { redactOps, redactText, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -412,14 +413,20 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   try {
     // No author: dcterms:contributor would publish the requester's name on every new term.
     // Who asked for each change stays in the change request and the commit.
-    after = applyChangeOps(working, cr.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    // Requests queued before redaction existed are checked again here, so a merge can't publish them.
+    const secrets = secretsOf(cr);
+    const redacted = secrets ? redactOps(cr.ops, secrets) : { ops: cr.ops, dropped: [] };
+    if (redacted.dropped.length) cr.timeline.push(ev('comment', `left out ${redacted.dropped.join(', ')} when merging: the name would publish a use case title or a person's name`));
+    after = applyChangeOps(working, redacted.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    scrubGeneratedProvenance(after, { generatedContributors: userNames() });
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);
   }
-  cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
-    name: author?.name ?? 'Concord',
-  });
+  // Commits are published with the ontology, so they carry no names: the change request records who asked.
+  const secrets = secretsOf(cr);
+  const message = `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`;
+  cr.mergedCommit = await ontologyStore.commitWorking(project, after, secrets ? redactText(message, secrets) : message, { name: 'Concord' });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
   if (project.stage === 'discovery') {
     project.stage = 'drafting';
@@ -442,6 +449,10 @@ export async function withdraw(cr: ChangeRequest, actor: User) {
 }
 
 export async function revise(cr: ChangeRequest, actor: User, instruction: string) {
+  // A request drafted from use cases keeps their titles and authors out of the revision,
+  // including titles they had before a rename (secretsOf includes those).
+  const secrets = secretsOf(cr);
+  const hide = (text: string) => (secrets ? redactText(text, secrets) : text);
   const project = getProject(cr.ontologyId);
   const working = await ontologyStore.working(project);
   const c = (iri: string) => compactIRI(iri, working.prefixes);
@@ -457,7 +468,7 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
     messages: [
       {
         role: 'user',
-        content: `Ontology:\n${ontologyDigest(working)}\n\nChange request #${cr.number}: ${cr.title}\n${cr.description}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
+        content: `Ontology:\n${ontologyDigest(working)}\n\nChange request #${cr.number}: ${hide(cr.title)}\n${hide(cr.description)}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
       },
     ],
     fallback: () => {
@@ -467,9 +478,8 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
   });
   const compiled = value.terms.length ? proposalToOps(working, value.terms, `change request #${cr.number}`) : { ops: cr.ops, warnings: ['The offline assistant could not revise these edits; please edit them directly.'] };
   // A request drafted from use cases keeps their titles and authors out of the revision too.
-  if (cr.origin.type === 'synthesis' && cr.origin.useCaseIds.length) {
-    const ucs = cr.origin.useCaseIds.map((id) => get<UseCase>('useCases', id)).filter((u): u is UseCase => !!u);
-    const redacted = redactOps(compiled.ops, secretsFor(ucs));
+  if (secrets) {
+    const redacted = redactOps(compiled.ops, secrets);
     compiled.ops = redacted.ops;
     if (redacted.dropped.length) compiled.warnings = [...compiled.warnings, `Left out ${redacted.dropped.join(', ')}: the name would publish a use case title or a person's name.`];
   }
@@ -488,4 +498,17 @@ export async function tick(): Promise<number> {
     if (after.status !== before) changed++;
   }
   return changed;
+}
+
+/**
+ * Commits are authored by "Concord" (they're published), so for signed-in
+ * users the history names whoever opened the change request each commit merged.
+ */
+export function withRequesters<T extends { author: string; subject: string }>(ontologyId: string, log: T[]): T[] {
+  const crs = new Map(list<ChangeRequest>('changeRequests', ontologyId).map((c) => [c.number, c]));
+  return log.map((e) => {
+    const n = /^#(\d+)\b/.exec(e.subject)?.[1];
+    const name = n ? getUser(crs.get(Number(n))?.authorId ?? '')?.name : undefined;
+    return name ? { ...e, author: name } : e;
+  });
 }

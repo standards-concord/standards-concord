@@ -17,8 +17,11 @@ const UI_ID = /^(main|(tab|sec|uc|req)-.*)$/;
 export function termAnchors(view: OntologyView, namespace: string): Map<string, string> {
   const all: TermView[] = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals];
   const own = (t: TermView) => namespace.length > 0 && t.iri.startsWith(namespace) && t.iri.length > namespace.length;
-  // Own terms first, so they win their exact fragment; then a stable order.
-  const ordered = [...all].sort((a, b) => Number(own(b)) - Number(own(a)) || a.iri.localeCompare(b.iri));
+  // Own terms first, so they win their exact fragment. Among them, a name
+  // already holding "%" goes last: browsers rewrite #Café as #Caf%C3%A9, so
+  // that href must stay with Café rather than a term literally named Caf%C3%A9.
+  const pct = (t: TermView) => Number(t.iri.includes('%'));
+  const ordered = [...all].sort((a, b) => Number(own(b)) - Number(own(a)) || pct(a) - pct(b) || a.iri.localeCompare(b.iri));
   const out = new Map<string, string>();
   const used = new Set<string>();
   for (const t of ordered) {

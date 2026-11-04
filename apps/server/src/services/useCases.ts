@@ -10,7 +10,7 @@ import type {
 } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
@@ -58,6 +58,9 @@ export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'
 }
 
 function saveUseCase(u: UseCase) {
+  // A renamed use case keeps its old titles, so redaction still recognises them.
+  const before = get<UseCase>('useCases', u.id)?.sections.name?.trim();
+  if (before && before !== u.sections.name?.trim() && !u.formerTitles?.includes(before)) u.formerTitles = [...(u.formerTitles ?? []), before];
   u.completeness = completeness(u);
   u.updatedAt = clock.iso();
   return put('useCases', u, u.ontologyId);

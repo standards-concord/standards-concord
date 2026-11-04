@@ -279,6 +279,8 @@ export interface UseCase {
   completeness: number;
   /** Where the private interview transcript lives (Solid pod resource URL). */
   transcriptUrl?: string;
+  /** Titles it had before, still kept out of anything published. */
+  formerTitles?: string[];
   createdAt: string;
   updatedAt: string;
 }

@@ -131,6 +131,15 @@ export const ontologyStore = {
     return this.head(project);
   },
 
+  /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): string {
+    const dir = repoDir(project);
+    fs.writeFileSync(path.join(dir, name), content);
+    git(dir, ['add', name]);
+    if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    return this.head(project);
+  },
+
   /** Drops cached released graphs, after their files were rewritten. */
   forgetReleases(project: Pick<OntologyProject, 'slug'>) {
     for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);

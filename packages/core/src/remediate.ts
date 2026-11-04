@@ -11,10 +11,15 @@ import { P } from './graph.js';
  *   - the offline synthesiser's editorial note “Needed by the use case “…””
  *     and definition suffix “, as described in the use case “…”.”
  * Only these generated forms are touched, so nothing an editor wrote by hand
- * changes. Contributors on the ontology itself (its metadata) are kept.
- * Returns how many triples changed.
+ * changes. A term-level contributor is removed only when it is one of
+ * `generatedContributors` (the names merges wrote: Concord's users), so a
+ * credit an editor added for someone else stays. Contributors on the ontology
+ * itself (its metadata) are always kept. Returns how many triples changed.
  */
-export function scrubGeneratedProvenance(g: OntologyGraph): number {
+const norm = (s: string) => s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+
+export function scrubGeneratedProvenance(g: OntologyGraph, opts: { generatedContributors?: Iterable<string> } = {}): number {
+  const generated = new Set([...(opts.generatedContributors ?? [])].map(norm).filter(Boolean));
   const s = g.store;
   const header = g.ontologyIRI;
   let changed = 0;
@@ -25,7 +30,7 @@ export function scrubGeneratedProvenance(g: OntologyGraph): number {
     changed++;
   };
   for (const q of literalQuads(P.contributor)) {
-    if (q.subject.value === header) continue;
+    if (q.subject.value === header || !generated.has(norm(q.object.value))) continue;
     s.removeQuad(q);
     changed++;
   }
@@ -38,6 +43,31 @@ export function scrubGeneratedProvenance(g: OntologyGraph): number {
   for (const q of literalQuads(P.definition)) {
     const next = q.object.value.replace(/, as described in the use case “[^”]*”\./g, '.');
     if (next !== q.object.value) replace(q, next);
+  }
+  return changed;
+}
+
+/** Predicates that credit people on purpose; rewriteLiterals leaves them alone. */
+const CREDITS = new Set([P.contributor, 'http://purl.org/dc/terms/creator', 'http://purl.org/dc/terms/publisher', 'http://purl.org/dc/elements/1.1/creator', 'http://purl.org/dc/elements/1.1/contributor']);
+
+/**
+ * Rewrites the literal values of the given subjects (never the ontology's own
+ * metadata, nor credits). Returns how many triples changed.
+ */
+export function rewriteLiterals(g: OntologyGraph, subjects: Iterable<string>, rewrite: (value: string) => string): number {
+  const s = g.store;
+  let changed = 0;
+  for (const iri of new Set(subjects)) {
+    if (iri === g.ontologyIRI) continue;
+    for (const q of s.getQuads(DataFactory.namedNode(iri), null, null, null)) {
+      if (q.object.termType !== 'Literal' || CREDITS.has(q.predicate.value)) continue;
+      const lit = q.object as Literal;
+      const next = rewrite(lit.value);
+      if (next === lit.value) continue;
+      s.removeQuad(q);
+      s.addQuad(q.subject, q.predicate, DataFactory.literal(next, lit.language || lit.datatype), q.graph);
+      changed++;
+    }
   }
   return changed;
 }

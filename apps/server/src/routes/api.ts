@@ -182,7 +182,7 @@ export function apiRouter(): Router {
     const p = project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...forCaller(req, await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
+    res.json({ ...forCaller(req, await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {

@@ -1,3 +1,4 @@
+import { redactText, secretsOf } from './redact.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -62,11 +63,17 @@ export function releaseDetail(r: Release): ReleaseDetail {
   };
 }
 
+/** Release notes are published: a request synthesised from use cases never names them or their authors. */
+const published = (c: ChangeRequest, text: string) => {
+  const secrets = secretsOf(c);
+  return secrets ? redactText(text, secrets) : text;
+};
+
 /** Release notes grouped by level, from the merged change requests. */
 function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
-    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${c.title}${c.kgcl?.length ? `\n${c.kgcl.slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
+    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${c.kgcl?.length ? `\n${c.kgcl.slice(0, 6).map((k) => `  - \`${published(c, k)}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
       ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
@@ -203,7 +210,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
+  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }); // Published commits carry no names.
   r.status = 'published';
   r.publishedAt = clock.iso();
   r.statusSince = r.publishedAt;
