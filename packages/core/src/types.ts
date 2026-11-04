@@ -18,7 +18,10 @@ export type OutputFormat =
   | 'jsonld'
   | 'manchester'
   | 'linkml'
-  | 'shacl';
+  | 'shacl'
+  | 'shaclc'
+  | 'typescript'
+  | 'javascript';
 
 export type PropertyCharacteristic =
   | 'functional'

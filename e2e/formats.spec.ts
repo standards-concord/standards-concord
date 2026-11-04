@@ -13,6 +13,8 @@ const FORMATS = [
   { tab: 'Manchester', id: 'manchester', language: 'manchester', text: 'Prefix:', tokens: ['tok-meta', 'tok-iri', 'tok-name'] },
   { tab: 'LinkML', id: 'linkml', language: 'yaml', text: 'classes:', tokens: ['tok-attr'] },
   { tab: 'SHACL', id: 'shacl', language: 'turtle', text: '@prefix sh:', tokens: ['tok-meta', 'tok-iri', 'tok-name'] },
+  { tab: 'SHACLC', id: 'shaclc', language: 'shaclc', text: 'shape volsh:ApplicationShape -> vol:Application', tokens: ['tok-meta', 'tok-keyword', 'tok-prefix', 'tok-name'] },
+  { tab: 'Classes', id: 'typescript', language: 'typescript', text: 'export class AccessibilityFeature extends TermWrapper', tokens: ['tok-keyword', 'tok-string'] },
 ] as const;
 
 test.describe('Formats tab', () => {

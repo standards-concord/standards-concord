@@ -71,7 +71,7 @@ function buildServer(user: User, agentName: string) {
     'get_ontology',
     {
       title: 'Get ontology source',
-      description: `Get an ontology in a given format. Formats: ${Object.keys(FORMAT_INFO).join(', ')}. LinkML is useful for generating code (pydantic, TypeScript, JSON Schema).`,
+      description: `Get an ontology in a given format. Formats: ${Object.keys(FORMAT_INFO).join(', ')}. LinkML is useful for generating code (pydantic, TypeScript, JSON Schema); typescript and javascript are ready-made @rdfjs/wrapper classes for every SHACL shape (also importable from the public URL, e.g. /def/<slug>/<version>.js); shaclc is the readable form of the SHACL shapes.`,
       inputSchema: { ontology: ontologyArg, format: z.enum(Object.keys(FORMAT_INFO) as [OutputFormat, ...OutputFormat[]]).default('turtle'), version: z.string().optional().describe('Released version such as 1.2.0; default is the working draft') },
       annotations: { readOnlyHint: true },
     },
