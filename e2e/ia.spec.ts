@@ -61,8 +61,9 @@ test.describe('progressive disclosure', () => {
     await expect(page.locator('#health').getByText(/No lint issues|Errors \(|Warnings \(|Suggestions \(/).first()).toBeVisible();
   });
 
-  test('the overview keeps lint, FAIR and competency-question detail one click away', async ({ page, request }) => {
-    const report = await (await request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json();
+  test('the overview keeps lint, FAIR and competency-question detail one click away', async ({ page }) => {
+    // The page's own request context carries the signed-in session; validation needs it.
+    const report = await (await page.request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json();
     await page.goto(`/o/${demo.id}`);
     await settle(page);
     const health = page.locator('#health');
