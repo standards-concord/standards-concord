@@ -48,7 +48,7 @@ test.describe('Formats tab', () => {
     await expect(about.getByText('stored in git')).toBeVisible();
     await page.getByLabel('Format', { exact: true }).selectOption({ label: 'LinkML' });
     await expect(about).toContainText('About LinkML');
-    await expect(about).toContainText('ODI');
+    await expect(about).toContainText('YAML');
   });
 
   test('a failed load shows the error, never the previous format’s text', async ({ page, consoleGuard }) => {
