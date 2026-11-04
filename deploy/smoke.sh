@@ -35,6 +35,8 @@ post 'interview turn' 200 "/api/interviews/$iv/messages" '{"content":"We need to
 post 'change request' 201 "/api/ontologies/$id/change-requests" '{"title":"Smoke test: add a label","description":"Raised by deploy/smoke.sh; safe to reject.","kind":"editorial"}'
 check 'meetings list' 200 "$base/api/ontologies/$id/meetings"
 check 'MCP needs a token' 401 -X POST -H 'Content-Type: application/json' -d '{}' "$base/mcp"
+check 'public ontology page' 200 "$base/def/volunteering"
+check 'version IRI as Turtle' 200 -H 'Accept: text/turtle' "$base/def/volunteering/1.0.0"
 post 'sign out' 200 /api/auth/logout '{}'
 
 [ "$fails" = 0 ] && echo "All checks passed." || { echo "$fails check(s) failed."; exit 1; }
