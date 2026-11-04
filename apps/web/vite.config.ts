@@ -18,7 +18,8 @@ export default defineConfig({
       '/api': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
       '/mcp': { target, changeOrigin: true },
-      '/def': { target, changeOrigin: false },
+      // Public ontology pages; the regex keeps app routes such as /definitions out.
+      '^/def/': { target, changeOrigin: false },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
