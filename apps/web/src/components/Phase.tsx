@@ -53,7 +53,7 @@ export function PhaseBubble({
     <Popover
       label={ariaLabel}
       align={align}
-      className={cx('px-2.5 py-0.5 text-xs font-medium', BUBBLE[tone])}
+      className={cx('ui-badge px-2.5 py-0.5 text-xs font-medium', BUBBLE[tone])}
       trigger={
         <>
           <span className={cx('size-1.5 rounded-full', tone === 'neutral' ? 'bg-muted' : 'bg-current')} aria-hidden />
@@ -193,7 +193,7 @@ function healthState(o: OntologySummary) {
 export function HealthChip({ o }: { o: OntologySummary }) {
   const { tone, label, Icon } = healthState(o);
   return (
-    <span className={cx('inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium', BUBBLE[tone])}>
+    <span className={cx('ui-badge inline-flex items-center gap-1 rounded-pill px-2.5 py-0.5 text-xs font-medium', BUBBLE[tone])}>
       <Icon className="size-3.5" aria-hidden />
       {label}
     </span>
