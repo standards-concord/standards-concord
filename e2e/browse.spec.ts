@@ -442,6 +442,16 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(page.getByRole('button', { name: /^Show more classes/ })).toHaveCount(0);
   });
 
+  test('long class names wrap instead of being cut off', async ({ page }) => {
+    const long = 'Organisation that coordinates volunteering opportunities across several regional partners';
+    await stub(page, [{ ...cls('Long'), label: long }]);
+    await page.goto(base);
+    const row = tree(page).getByRole('treeitem', { name: new RegExp(`^${long}`) });
+    await expect(row).toBeVisible();
+    const clipped = await row.evaluate((el) => [...el.querySelectorAll('span')].some((s) => s.scrollWidth > s.clientWidth + 1));
+    expect(clipped).toBe(false);
+  });
+
   test('classes in a subclass cycle still appear in the tree', async ({ page }) => {
     await stub(page, [cls('Root'), cls('A', ['B']), cls('B', ['A'])]);
     await page.goto(`${base}?term=${encodeURIComponent(NS + 'B')}`);

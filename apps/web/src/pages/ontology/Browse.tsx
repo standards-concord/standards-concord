@@ -325,7 +325,7 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
                 <button
                   onClick={() => onSelect(p.iri)}
                   className={cx(
-                    'block w-full truncate rounded-md px-2 py-1 text-left text-sm',
+                    'block w-full rounded-md px-2 py-1 text-left text-sm leading-snug break-words',
                     selected === p.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2',
                     p.deprecated && 'line-through opacity-70',
                   )}

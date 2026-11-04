@@ -206,7 +206,7 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
               >
                 {r.hasKids ? r.expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : <span className="size-1.5 rounded-full bg-current opacity-40" />}
               </span>
-              <span className={cx('min-w-0 flex-1 truncate py-1', c.deprecated && 'text-muted line-through')}>{name(r.iri)}</span>
+              <span className={cx('min-w-0 flex-1 py-1 leading-snug break-words', c.deprecated && 'text-muted line-through')}>{name(r.iri)}</span>
               {r.count > 0 && (
                 <span className="text-[0.65rem] text-subtle" aria-label={`${r.count} subclasses`}>
                   {r.count}
