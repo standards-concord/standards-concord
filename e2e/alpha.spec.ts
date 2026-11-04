@@ -59,9 +59,14 @@ test('a tester can go through the whole walkthrough', async ({ page, request }) 
   await expect(page.getByText(`1 of ${count} done`)).toBeVisible();
   // The suggestion moves on to the next task, and the list shows the first as done.
   await expect(next.getByRole('link').first()).not.toHaveText(firstLabel);
-  await expect(tasks.first().getByRole('button', { name: 'Mark not done' })).toBeVisible();
-  await tasks.nth(1).getByRole('button', { name: 'Mark done' }).click();
+  // Done tasks move to their own list, apart from the ones still to try.
+  const doneList = page.getByRole('list', { name: 'Done' });
+  const todoList = page.getByRole('list', { name: 'Still to try' });
+  await expect(doneList.getByRole('button', { name: 'Mark not done' })).toHaveCount(1);
+  await expect(todoList.getByRole('button', { name: 'Mark not done' })).toHaveCount(0);
+  await todoList.getByRole('button', { name: 'Mark done' }).first().click();
   await expect(page.getByText(`2 of ${count} done`)).toBeVisible();
+  await expect(doneList.getByRole('listitem')).toHaveCount(2);
   await page.getByRole('button', { name: 'Next: simulate the others' }).click();
 
   // 4. Simulate the others: their activity appears and the clock moves.
@@ -129,8 +134,16 @@ test('the floating walkthrough panel follows a tester around the app', async ({ 
   // The floating guide shows one suggested task, with the rest on request.
   await expect(panel.getByRole('group', { name: 'Suggested next task' })).toBeVisible();
   await expect(panel.getByRole('button', { name: /Choose another task/ })).toHaveAttribute('aria-expanded', 'false');
+  // The step chooser is in a menu rather than always on screen.
+  await panel.getByRole('button', { name: 'All walkthrough steps' }).click();
+  await expect(panel.getByRole('dialog', { name: 'All walkthrough steps' }).getByRole('button')).toHaveCount(5);
+  await page.keyboard.press('Escape');
   await panel.getByRole('button', { name: 'Close walkthrough' }).click();
   await expect(panel).toHaveCount(0);
+  // Closed, the guide still names the next task and how far through the tester is.
+  const pill = page.getByRole('button', { name: /^Walkthrough: Try next: .+\. Open the guide$/ });
+  await expect(pill).toBeVisible();
+  await expect(pill).toContainText(/\d+\/\d+ tasks/);
   await page.getByRole('button', { name: /Walkthrough/ }).click();
   await expect(panel).toBeVisible();
   await panel.getByRole('button', { name: 'Full view' }).click();

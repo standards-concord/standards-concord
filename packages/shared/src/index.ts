@@ -183,7 +183,17 @@ export interface OntologySummary extends OntologyProject {
     releases: number;
     members: number;
   };
-  health?: { passed: boolean; errors: number; warnings: number; fairScore: number; consistent: boolean };
+  health?: {
+    passed: boolean;
+    errors: number;
+    warnings: number;
+    fairScore: number;
+    consistent: boolean;
+    /** Checks that could not run, e.g. the OWL reasoner when only structural checks ran. Absent on older summaries. */
+    incomplete?: string[];
+    /** Which reasoner produced `consistent`; 'structural' means the OWL DL reasoner did not run. */
+    reasoner?: string;
+  };
 }
 
 /* ------------------------------------------------------------------------ */
