@@ -10,6 +10,7 @@ import { formatDate, roleLabel } from '../lib/format';
 import { Logo } from './badges';
 import { Avatar, Button, cx } from './ui';
 import { WalkthroughDock } from './Walkthrough';
+import { Popover } from './Disclosure';
 
 function OntologySwitcher() {
   const { data } = useOntologies();
@@ -136,20 +137,30 @@ function DemoBanner() {
             switch role
           </button>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 text-muted" title="Simulated governance clock">
-            <Clock className="size-3.5" />
-            {formatDate(new Date(now()).toISOString(), true)}
-            {offsetDays > 0 && <span className="text-xs">(+{offsetDays}d)</span>}
-          </span>
-          <Button size="sm" variant="ghost" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(1)} className="h-7" title="Fast-forward the simulated clock by one day">
-            1 day
-          </Button>
-          <Button size="sm" variant="ghost" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(7)} className="h-7" title="Fast-forward the simulated clock by seven days">
-            7 days
-          </Button>
-          {clock.error ? <span className="text-xs text-danger">Couldn’t change the clock</span> : null}
-        </div>
+        <Popover
+          label="Simulated clock. Show fast-forward controls"
+          align="right"
+          className="px-2 py-0.5 text-muted hover:bg-surface/60 hover:text-fg"
+          trigger={
+            <>
+              <Clock className="size-3.5" aria-hidden />
+              {formatDate(new Date(now()).toISOString(), true)}
+              {offsetDays > 0 && <span className="text-xs">(+{offsetDays}d)</span>}
+            </>
+          }
+        >
+          <p className="font-medium">Simulated governance clock</p>
+          <p className="mt-1 text-xs text-muted">Review periods and votes run on this clock. Fast-forward it to see what happens when deadlines pass. Everyone in the demo shares it.</p>
+          <div className="mt-3 flex gap-2">
+            <Button size="sm" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(1)} title="Fast-forward the simulated clock by one day">
+              1 day
+            </Button>
+            <Button size="sm" icon={FastForward} disabled={clock.pending} onClick={() => void clock.run(7)} title="Fast-forward the simulated clock by seven days">
+              7 days
+            </Button>
+          </div>
+          {clock.error ? <p className="mt-2 text-xs text-danger">Couldn’t change the clock</p> : null}
+        </Popover>
       </div>
     </div>
   );

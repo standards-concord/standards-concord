@@ -97,3 +97,8 @@ export function download(filename: string, content: string, type = 'text/plain')
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/** The public, dereferenceable page for an ontology (latest release) or one version of it. Served by the API server, not the app. */
+export function publicPageUrl(slug: string, version?: string): string {
+  return `/def/${encodeURIComponent(slug)}${version ? `/${encodeURIComponent(version)}` : ''}`;
+}

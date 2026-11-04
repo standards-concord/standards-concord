@@ -6,6 +6,7 @@ import { mountAuth, sessionMiddleware } from './auth.js';
 import { config } from './config.js';
 import { HttpError } from './db.js';
 import { mcpHandler } from './mcp.js';
+import { publicRouter } from './public/routes.js';
 import { apiRouter } from './routes/api.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
@@ -32,11 +33,13 @@ export function createApp(): express.Express {
 
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
   app.use('/api', apiRouter());
+  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {
     app.use(express.static(config.webDist, { index: false, maxAge: '1h' }));
-    app.get(/^(?!\/(api|auth|mcp|people)\b).*/, (_req, res) => res.sendFile(path.join(config.webDist, 'index.html')));
+    app.get(/^(?!\/(api|auth|mcp|people|def)\b).*/, (_req, res) => res.sendFile(path.join(config.webDist, 'index.html')));
   }
 
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {

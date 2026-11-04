@@ -59,4 +59,15 @@ test.describe('with the backend', () => {
     await page.goto(`/o/${demo.id}/source?format=turtle`);
     await expect(page.getByTestId('source-code').locator('.tok-iri').first()).toBeVisible();
   });
+
+  test('the public ontology page and content negotiation work through Vercel', async ({ page, request }) => {
+    await page.goto('/def/volunteering');
+    await expect(page.getByRole('heading', { level: 1 })).toContainText(/Volunteering/i);
+    await expect(page.getByRole('tablist', { name: 'Sections' })).toBeVisible();
+    await page.getByRole('tab', { name: /Use cases and requirements/ }).click();
+    await expect(page.getByRole('heading', { name: 'Use cases', exact: true })).toBeVisible();
+    const ttl = await request.get('/def/volunteering', { headers: { Accept: 'text/turtle' } });
+    expect(ttl.headers()['content-type']).toContain('text/turtle');
+    expect(await ttl.text()).toContain('owl:Ontology');
+  });
 });

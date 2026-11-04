@@ -1,5 +1,6 @@
 import { OntologyGraph, validate, type OntologyGraph as Graph } from '@concord/core';
 import type { ValidationReport } from '@concord/core/types';
+import { fairContext } from './fairResolution.js';
 import type {
   ChangeRequest,
   GovernancePolicy,
@@ -141,10 +142,13 @@ export function competencyTests(ontologyId: string) {
     .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));
 }
 
-export function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string }[]) {
+export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string }[]) {
+  const fair = await fairContext(graph.ontologyIRI);
+  const r = fair.resolution;
+  key += r ? `:${+r.rdf}${+r.html}` : '';
   let p = validationCache.get(key);
   if (!p) {
-    p = validate(graph, { cqs, reasoner: 'owl' });
+    p = validate(graph, { cqs, reasoner: 'owl', fair });
     validationCache.set(key, p);
     p.catch(() => validationCache.delete(key));
   }

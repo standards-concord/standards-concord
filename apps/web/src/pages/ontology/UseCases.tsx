@@ -7,10 +7,11 @@ import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { pct, relativeTime } from '../../lib/format';
-import { SourceBadge } from '../../components/badges';
 import { UseCaseStatusBadge, VisibilityBadge } from '../../components/UseCaseSharing';
-import { Badge, Button, Card, Chip, EmptyState, ErrorCard, InlineError, Loading, ProgressBar, cx } from '../../components/ui';
+import { Badge, Button, Card, Chip, EmptyState, ErrorCard, InlineError, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+
+const SOURCE_LABEL: Record<string, string> = { chat: 'From an interview', meeting: 'From a meeting', agent: 'From an agent', form: 'From a form' };
 
 export function useStartInterview(ontologyId: string) {
   const nav = useNavigate();
@@ -35,6 +36,10 @@ export function UseCasesTab() {
     [list.data, session?.user?.id],
   );
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Picking use cases to draft changes from is a mode, so the list stays plain the rest of the time.
+  // Private use cases are never drafted from directly, so they can't be picked.
+  const [selecting, setSelecting] = useState(false);
+  const selectable = shown.filter((u) => u.visibility !== 'private');
   const start = useStartInterview(id);
   const synth = useAction(async () => {
     const cr = await api.synthesise(id, selected.size ? [...selected] : undefined);
@@ -58,15 +63,45 @@ export function UseCasesTab() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button icon={Sparkles} loading={synth.pending} disabled={!list.data?.length} onClick={() => void synth.run()} title="Draft a change request proposing ontology changes from the selected use cases">
-            Synthesise ontology changes{selected.size ? ` from ${selected.size} selected` : ''}
-          </Button>
+          {selecting ? (
+            <>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setSelecting(false);
+                  setSelected(new Set());
+                }}
+              >
+                Cancel
+              </Button>
+              <Button icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing ontology changes from the selected use cases">
+                {selected.size ? `Draft changes from ${selected.size} selected` : 'Draft changes from all'}
+              </Button>
+            </>
+          ) : (
+            <Button icon={Sparkles} disabled={!list.data?.length} onClick={() => setSelecting(true)} title="Choose use cases and let the platform draft ontology changes from them">
+              Draft changes
+            </Button>
+          )}
           <Button variant="primary" icon={MessageSquarePlus} loading={start.pending} onClick={() => void start.run()} className={cx(highlight && 'ring-4 ring-accent/30')}>
             Describe a use case
           </Button>
         </div>
       </div>
       <InlineError error={start.error || synth.error} />
+      {selecting && list.data?.length ? (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-accent-soft px-4 py-2 text-sm">
+          <span>Choose the use cases to draft changes from, or draft from all of them. Private use cases are left out.</span>
+          <button className="font-medium text-accent hover:underline" onClick={() => setSelected(new Set(selectable.map((u) => u.id)))}>
+            Select all
+          </button>
+          {selected.size > 0 && (
+            <button className="font-medium text-accent hover:underline" onClick={() => setSelected(new Set())}>
+              Clear
+            </button>
+          )}
+        </div>
+      ) : null}
       {!!docs.data?.length && (
         <div className="mb-4 flex flex-wrap items-center gap-2 text-sm" aria-label="Use cases and requirements documents">
           <FileText className="size-4 text-muted" />
@@ -113,15 +148,12 @@ export function UseCasesTab() {
             const cqs = uc.competencyQuestions.length;
             return (
               <Card key={uc.id} className={cx('flex items-start gap-3 p-4', selected.has(uc.id) && 'border-accent')}>
-                <input
-                  type="checkbox"
-                  className="mt-1 size-4 accent-[var(--accent)] disabled:opacity-40"
-                  checked={selected.has(uc.id)}
-                  onChange={() => toggle(uc.id)}
-                  disabled={isPrivate}
-                  title={isPrivate ? 'Private use cases are not used directly; publish an anonymised version first' : undefined}
-                  aria-label={`Select UC-${uc.number} for synthesis`}
-                />
+                {selecting &&
+                  (isPrivate ? (
+                    <span className="mt-1 size-4 shrink-0" title="Private use cases are not used directly; publish an anonymised version first" />
+                  ) : (
+                    <input type="checkbox" className="mt-1 size-4 accent-[var(--accent)]" checked={selected.has(uc.id)} onChange={() => toggle(uc.id)} aria-label={`Select UC-${uc.number} ${uc.sections.name || 'use case'}`} />
+                  ))}
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs text-muted">UC-{uc.number}</span>
@@ -130,21 +162,12 @@ export function UseCasesTab() {
                     </Link>
                     <UseCaseStatusBadge status={uc.status} version={uc.resolution?.version} />
                     <VisibilityBadge visibility={uc.visibility} anonymous={uc.anonymous} />
-                    <SourceBadge source={uc.source} />
                     {isPrivate && uc.anonymisation?.status === 'proposed' && <Badge tone="warn">Anonymised version waiting for you</Badge>}
                   </div>
-                  {uc.sections.goal && <p className="mt-1 line-clamp-2 text-sm text-muted">{uc.sections.goal}</p>}
-                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-                    <span className="flex items-center gap-2">
-                      <ProgressBar value={uc.completeness} className="w-24" tone={uc.completeness >= 0.7 ? 'ok' : 'accent'} /> {pct(uc.completeness)} complete
-                    </span>
-                    <span>
-                      {cqs} competency question{cqs === 1 ? '' : 's'} · {uc.terms.length} terms
-                    </span>
-                    <span>
-                      {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · {relativeTime(uc.updatedAt, now())}
-                    </span>
-                  </div>
+                  {uc.sections.goal && <p className="mt-1 line-clamp-1 text-sm text-muted">{uc.sections.goal}</p>}
+                  <p className="mt-1 text-xs text-subtle">
+                    {SOURCE_LABEL[uc.source] ?? uc.source} · {pct(uc.completeness)} complete · {cqs} competency question{cqs === 1 ? '' : 's'} · {uc.terms.length} terms · {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · updated {relativeTime(uc.updatedAt, now())}
+                  </p>
                 </div>
                 {uc.status === 'draft' && uc.source === 'chat' && uc.authorId === session?.user?.id && (
                   <Button size="sm" variant="ghost" onClick={() => void start.run(uc.id)}>

@@ -38,6 +38,10 @@ export function UseCaseDetailPage() {
   const author = u.anonymous ? undefined : userById(u.authorId);
   const set = (x: UseCaseDetail) => uc.setData(x);
   const isPrivate = u.visibility === 'private';
+  const canContinue = u.source === 'chat' && u.status === 'draft' && u.can.changeVisibility;
+  const canDraft = !isPrivate && u.can.edit && !['closed', 'archived', 'out-of-scope'].includes(u.status);
+  // Drafting changes is the next step once the working group has accepted the use case.
+  const draftIsNext = canDraft && ['accepted', 'in-progress'].includes(u.status);
 
   return (
     <div>
@@ -62,7 +66,7 @@ export function UseCaseDetailPage() {
                 <AnonymisedVersion uc={u} onChange={set} ontologyId={id} />
               </div>
             )}
-            <UseCaseDocument uc={u} />
+            <UseCaseDocument uc={u} collapsible />
           </Card>
           <TraceCard uc={u} onChange={set} />
         </div>
@@ -76,14 +80,15 @@ export function UseCaseDetailPage() {
           <Card className="space-y-4 p-5">
             <CompletenessMeter value={u.completeness} />
             <div className="flex flex-col gap-2">
-              {!isPrivate && u.can.edit && !['closed', 'archived', 'out-of-scope'].includes(u.status) && (
-                <Button variant="primary" icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing the ontology changes this use case needs">
-                  Synthesise ontology changes
+              {/* The main action depends on where the use case is: finish the interview, or draft changes once accepted. */}
+              {canContinue && (
+                <Button variant="primary" icon={MessageSquareText} loading={start.pending} onClick={() => void start.run(u.id)}>
+                  Continue the interview
                 </Button>
               )}
-              {u.source === 'chat' && u.status === 'draft' && u.can.changeVisibility && (
-                <Button icon={MessageSquareText} loading={start.pending} onClick={() => void start.run(u.id)}>
-                  Continue the interview
+              {canDraft && (
+                <Button variant={draftIsNext ? 'primary' : 'secondary'} icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()} title="Draft a change request proposing the ontology changes this use case needs">
+                  Draft changes
                 </Button>
               )}
               {u.can.edit && u.status !== 'archived' && (
