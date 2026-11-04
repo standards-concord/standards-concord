@@ -14,7 +14,7 @@ import { blankNode, canonical, literal, nn, objects, readList, typedLit } from '
 import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
-import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
+import { codeModel, derivesFrom, disjointDatatypes, type PropertyInfo } from './codemodel.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -28,8 +28,18 @@ export interface PropShape {
   hasValue?: Term;
   /** The value type is only the property's global range (from its domain), not a restriction on this class. */
   fromRange?: boolean;
-  /** Further value types the values must also have, none narrower than another (from several `only` restrictions or a range). */
+  /**
+   * Further value types the values must also have, none narrower than another
+   * (from several `only` restrictions or a range). Each is checked by a
+   * property shape of its own.
+   */
   alsoTypes?: { cls?: string; datatype?: string }[];
+  /**
+   * Further datatypes the values must also have, whose value spaces may overlap
+   * the main datatype's: SHACL can only require one datatype IRI of a literal,
+   * so these aren't checked, and a note says so.
+   */
+  unchecked?: string[];
   qualified: { shape: { cls?: string; datatype?: string }; min?: number; max?: number }[];
 }
 
@@ -48,6 +58,8 @@ export interface DerivedShapes {
   propertyInfo: Map<string, PropertyInfo>;
   /** Datatypes the ontology defines, and the datatypes each is based on. */
   datatypeBases: Map<string, string[]>;
+  /** Constraints the shapes can't express. */
+  notes: string[];
   /** IRI of the shapes graph (`<ontology>/shapes`), when the ontology has an IRI. */
   shapesIRI?: string;
   shapesNs: string;
@@ -70,6 +82,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
   const own = v.classes.filter((k) => !k.deprecated && k.iri.startsWith(graph.namespace));
   const ownIris = new Set(own.map((k) => k.iri));
   const shapes: DerivedNodeShape[] = [];
+  const notes: string[] = [];
   // Whether type `a` is narrower than or equal to `b`: a subclass, or a derived datatype.
   const bases = datatypeBases(graph);
   const supers = new Map(v.classes.map((k) => [k.iri, k.superClasses]));
@@ -103,6 +116,17 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
     for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? [], narrowerOrEqual);
+    // Two datatypes neither of which is narrower: separate shapes are right when their value spaces are disjoint
+    // (no value can have both, as OWL says), but would reject the overlap of two that may overlap.
+    for (const ps of byPath.values()) {
+      if (!ps.datatype || !ps.alsoTypes) continue;
+      const overlapping = ps.alsoTypes.filter((t) => t.datatype && !disjointDatatypes(ps.datatype!, t.datatype, bases));
+      if (!overlapping.length) continue;
+      ps.alsoTypes = ps.alsoTypes.filter((t) => !overlapping.includes(t));
+      if (!ps.alsoTypes.length) delete ps.alsoTypes;
+      ps.unchecked = overlapping.map((t) => t.datatype!);
+      notes.push(`<${k.iri}> <${ps.path}>: values must also be ${ps.unchecked.map((d) => `<${d}>`).join(', ')}, but SHACL can only require one datatype of a value, so only <${ps.datatype}> is checked.`);
+    }
     shapes.push({
       iri: `${shapesNs}${localName(k.iri)}Shape`,
       targetClass: k.iri,
@@ -117,6 +141,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       ...v.datatypeProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: false, range: p.range }]),
     ]),
     datatypeBases: bases,
+    notes,
     shapesIRI: graph.ontologyIRI ? `${ont}/shapes` : undefined,
     shapesNs,
     prefixes: { ...graph.prefixes, sh: SH, [`${pref}sh`]: shapesNs },
@@ -210,8 +235,11 @@ function datatypeBases(graph: OntologyGraph): Map<string, string[]> {
 
 export async function toShacl(graph: OntologyGraph): Promise<string> {
   const derived = deriveShapes(graph);
-  return writeTurtle(shaclStore(derived), derived.prefixes, { ontologyIRI: derived.shapesIRI });
+  return noteLines(derived.notes) + (await writeTurtle(shaclStore(derived), derived.prefixes, { ontologyIRI: derived.shapesIRI }));
 }
+
+/** Notes as comment lines, for the top of the Turtle or SHACLC shapes. */
+const noteLines = (notes: string[]) => notes.map((n) => `# Note: ${commentLine(n)}\n`).join('');
 
 export interface ShaclcOptions {
   /**
@@ -254,8 +282,9 @@ export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): 
   const header = opts.extended
     ? `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax with shaclc-write's extended syntax.\n`
     : `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax.\n# Shape names and the shapes graph's label are in the Turtle shapes (.shacl.ttl); SHACLC has no place for them.\n`;
+  const notes = noteLines(derived.notes);
   const body = restore(explicitDatatypes(rawUnicodeEscapes(text), new Store(quads), prefixes));
-  const out = header + body + (body.endsWith('\n') ? '' : '\n');
+  const out = header + notes + body + (body.endsWith('\n') ? '' : '\n');
 
   // Check: the SHACLC must parse back to exactly the shapes it was written from.
   const back = new Store(await parseShaclc(out, Boolean(opts.extended)));
@@ -518,19 +547,15 @@ function addOnlyType(ps: PropShape, t: ValueType, narrowerOrEqual: (a: ValueType
   const cur: ValueType | undefined = ps.datatype ? { datatype: ps.datatype } : ps.cls ? { cls: ps.cls } : undefined;
   const fromRange = ps.fromRange;
   delete ps.fromRange;
-  const set = (x: ValueType) => {
-    delete ps.cls;
-    delete ps.datatype;
-    Object.assign(ps, x);
-  };
-  if (!cur || narrowerOrEqual(t, cur)) return set(t);
-  if (narrowerOrEqual(cur, t)) return;
-  if (ps.alsoTypes?.some((x) => narrowerOrEqual(x, t))) return;
-  ps.alsoTypes = (ps.alsoTypes ?? []).filter((x) => !narrowerOrEqual(t, x));
-  if (fromRange) {
-    set(t);
-    ps.alsoTypes.push(cur);
-  } else ps.alsoTypes.push(t);
+  // Every type that applies, in order of preference: the restrictions in order, then the range's.
+  const all = [...(cur && !fromRange ? [cur] : []), ...(ps.alsoTypes ?? []), t, ...(cur && fromRange ? [cur] : [])];
+  // Keep only the narrowest: drop a type when another is narrower, or equivalent and earlier.
+  const minimal = all.filter((x, i) => !all.some((y, j) => j !== i && narrowerOrEqual(y, x) && (!narrowerOrEqual(x, y) || j < i)));
+  delete ps.cls;
+  delete ps.datatype;
+  Object.assign(ps, minimal[0]);
+  if (minimal.length > 1) ps.alsoTypes = minimal.slice(1);
+  else delete ps.alsoTypes;
 }
 
 function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, range: string[], narrowerOrEqual: (a: ValueType, b: ValueType) => boolean): void {

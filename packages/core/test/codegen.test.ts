@@ -106,6 +106,16 @@ e:WC a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:wp ; o
 e:wp a owl:DatatypeProperty ; rdfs:range xsd:integer .
 e:WD a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:wq ; owl:allValuesFrom xsd:string ] , [ a owl:Restriction ; owl:onProperty e:wq ; owl:allValuesFrom xsd:integer ] .
 e:wq a owl:DatatypeProperty .
+e:SA1 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:minLength 1 ] ) ] .
+e:SB3 a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:maxLength 3 ] ) ] .
+e:SZ a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype e:SA1 ; owl:withRestrictions ( [ xsd:maxLength 3 ] ) ] ,
+  [ a rdfs:Datatype ; owl:onDatatype e:SB3 ; owl:withRestrictions ( [ xsd:minLength 1 ] ) ] .
+e:XC a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:xs ; owl:allValuesFrom e:SA1 ] ,
+  [ a owl:Restriction ; owl:onProperty e:xs ; owl:allValuesFrom e:SB3 ] , [ a owl:Restriction ; owl:onProperty e:xs ; owl:allValuesFrom e:SZ ] .
+e:xs a owl:DatatypeProperty .
+e:XN a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:xn ; owl:allValuesFrom xsd:nonNegativeInteger ] ,
+  [ a owl:Restriction ; owl:onProperty e:xn ; owl:allValuesFrom xsd:nonPositiveInteger ] .
+e:xn a owl:DatatypeProperty .
 `;
 const edge = () => OntologyGraph.fromTurtle(EDGE);
 
@@ -210,7 +220,17 @@ describe('SHACL compact syntax', () => {
     expect(wq.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value).sort()).toEqual([NS.xsd + 'integer', NS.xsd + 'string']);
     const wp = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#wp'), null)[0];
     expect(shapes.getObjects(wp, DataFactory.namedNode(SH + 'datatype'), null).map((o) => o.value)).toEqual([NS.xsd + 'byte']);
-    await toShaclc(await edge()); // and SHACLC says the same
+    // Three types that reduce to one (SZ) give one shape.
+    const xs = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xs'), null);
+    expect(xs.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value)).toEqual(['https://example.org/e#SZ']);
+    // Datatypes that may overlap (0 is both non-negative and non-positive): only the first is checked, and a note says so,
+    // as SHACL would otherwise reject the overlap.
+    const xn = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xn'), null);
+    expect(xn.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null))).toHaveLength(1);
+    const ttl = await toShacl(await edge());
+    expect(ttl).toMatch(/^# Note: <https:\/\/example\.org\/e#XN> <https:\/\/example\.org\/e#xn>: values must also be <http:\/\/www\.w3\.org\/2001\/XMLSchema#non(Positive|Negative)Integer>, but SHACL can only require one datatype/m);
+    const shaclc = await toShaclc(await edge()); // and SHACLC says the same
+    expect(shaclc).toMatch(/^# Note: <https:\/\/example\.org\/e#XN>/m);
   });
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -350,11 +370,15 @@ describe('Generated JavaScript classes', () => {
     expect(cls('TC').extends).toBeUndefined();
     expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken"\)/);
     // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
-    expect(mod.notes).toEqual([
+    expect(mod.notes).toEqual(expect.arrayContaining([
       expect.stringMatching(/^UC <https:\/\/example\.org\/e#up>: values must be both <http:\/\/www\.w3\.org\/2001\/XMLSchema#string> and <http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>/),
       // Two restrictions on the same class: the same.
       expect.stringMatching(/^WD <https:\/\/example\.org\/e#wq>: values must be all of <http:\/\/www\.w3\.org\/2001\/XMLSchema#(string|integer)>, <http:\/\/www\.w3\.org\/2001\/XMLSchema#(string|integer)>/),
-    ]);
+      expect.stringMatching(/^XN <https:\/\/example\.org\/e#xn>: values must be all of/),
+    ]));
+    expect(mod.notes).toHaveLength(3);
+    // Three restrictions, one narrower than both others (SZ derives from SA1 and SB3), reduce to it, with no note.
+    expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#SZ"\)/);
     // Two restrictions on the same class narrow too: xsd:byte within xsd:integer.
     expect(mod.ts).toMatch(/export class WC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#byte"\)/);
     // A datatype with several definitions (an alias and a restriction) derives from each: e:MyToken2 narrows xsd:string.

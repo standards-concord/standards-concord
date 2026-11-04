@@ -131,6 +131,32 @@ export function derivesFrom(a: string, b: string, bases: Map<string, string[]> =
   return false;
 }
 
+/** The primitive datatypes `dt` derives from (those with no base of their own). */
+function datatypeRoots(dt: string, bases: Map<string, string[]>): Set<string> {
+  const roots = new Set<string>();
+  const seen = new Set([dt]);
+  for (const todo = [dt]; todo.length; ) {
+    const x = todo.pop()!;
+    const xsd = x.startsWith(NS.xsd) ? XSD_BASE[x.slice(NS.xsd.length)] : undefined;
+    const up = [...(bases.get(x) ?? []), ...(xsd ? [NS.xsd + xsd] : [])];
+    if (!up.length) roots.add(x);
+    for (const y of up) if (!seen.has(y)) seen.add(y), todo.push(y);
+  }
+  return roots;
+}
+
+/**
+ * Whether no value can have both datatypes: they derive from different XML
+ * Schema primitive datatypes (xsd:string and xsd:decimal, say), whose value
+ * spaces are disjoint. Anything else may overlap.
+ */
+export function disjointDatatypes(a: string, b: string, bases: Map<string, string[]> = new Map()): boolean {
+  const ra = datatypeRoots(a, bases);
+  const rb = datatypeRoots(b, bases);
+  const known = [...ra, ...rb].every((r) => r.startsWith(NS.xsd) && !(r.slice(NS.xsd.length) in XSD_BASE));
+  return known && ![...ra].some((r) => rb.has(r));
+}
+
 export interface PropertyInfo {
   objectProperty: boolean;
   range: string[];
@@ -290,8 +316,8 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
         // A type that only comes from the global range never widens an inherited one: the inherited type is
         // preferred unless the range is narrower. A restriction on this class is preferred over what it inherits.
         out.set(ps.path, !prev ? own : ps.fromRange || !statedType(ps) ? merge(prev, own, where) : merge(own, prev, where));
-        if (ps.alsoTypes?.length) {
-          const all = [ps.datatype ?? ps.cls, ...ps.alsoTypes.map((t) => t.datatype ?? t.cls)].map((x) => `<${x}>`);
+        if (ps.alsoTypes?.length || ps.unchecked?.length) {
+          const all = [ps.datatype ?? ps.cls, ...(ps.alsoTypes ?? []).map((t) => t.datatype ?? t.cls), ...(ps.unchecked ?? [])].map((x) => `<${x}>`);
           notes.add(`${where} <${ps.path}>: values must be all of ${all.join(', ')}, which one accessor can't express; it uses ${all[0]}.`);
         }
       }
