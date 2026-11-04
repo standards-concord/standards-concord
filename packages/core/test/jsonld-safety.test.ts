@@ -154,6 +154,8 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
     const gc = vm.runInNewContext('gc') as () => void;
     gc();
     const before = process.memoryUsage().heapUsed;
+    // Substrings made with slice(), as readers that return parts of their input do. (N3 copies its literals, so
+    // a document read with it doesn't show the problem: checked, it passes with or without the copy.)
     for (let i = 0; i < 20; i++) {
       const source = `https://example.org/heap${i}-${Math.random()}#` + 'x'.repeat(2_000_000);
       expect(isSafeNamespace(source.slice(0, source.indexOf('#') + 1))).toBe(true);
