@@ -8,7 +8,7 @@ Where Concord's MCP server can be listed, what each listing needs, and who does 
 
 | Where | How people install | Status | Survives a domain change? |
 | --- | --- | --- | --- |
-| Concord's own `/connect` page | *Add to Claude* button, one-line commands for Claude Code and Codex, Cursor and VS Code links | Done | Yes: it always shows its own address |
+| Concord's own `/connect` page | *Add to Claude* button, steps for ChatGPT (custom MCP server), one-line commands for Claude Code and Codex, Cursor and VS Code links | Done | Yes: it always shows its own address |
 | Claude Code plugin marketplace (this repo) | `/plugin marketplace add jeswr/standards-concord`, then `/plugin install concord@concord` | Done | Partly: run the script and merge; installs move when they update (Claude Code leaves auto-update off for third-party marketplaces, so people run `/plugin marketplace update concord` or turn it on), then sign in again |
 | Codex plugin marketplace (this repo) | `codex plugin marketplace add jeswr/standards-concord`, then install from Plugins in the Codex app | Done | Partly, as above |
 | Official MCP Registry | Discovered by MCP clients and directories that read the registry | Publishes from CI on merge | Yes: CI publishes a new version |
@@ -53,6 +53,13 @@ Curated from the official registry. Once the official entry is live, email partn
 - Domain verification: set `OPENAI_APPS_CHALLENGE` on the backend (via `deploy/azure/set-key.sh`) to the token OpenAI gives; Concord serves it at `/.well-known/openai-apps-challenge`.
 - Also needed: website, support, privacy policy and terms URLs; a test account without MFA; five positive and three negative test cases; a short video walkthrough; release notes. The example prompts above work as positive cases. Negative cases: asking it to delete an ontology, to merge a change request without review, or to act on a private ontology the account can't see.
 - Static bearer tokens are not accepted for listing, which is one reason for the OAuth work.
+- What ChatGPT's connector needs from the OAuth server, all of which Concord does (covered by `apps/server/test/oauth.test.ts`):
+  - Discovery: protected resource metadata with `resource` and `authorization_servers`, and authorization server metadata with S256 PKCE.
+  - Registration: a client ID metadata document at `https://chatgpt.com/oauth/client.json` (Concord treats it as a public client and ignores any client assertion), or dynamic client registration.
+  - Callbacks: `https://chatgpt.com/connector_platform_oauth_redirect` or the per-app `https://chatgpt.com/connector/oauth/{callback_id}`. Either works, because redirect URIs come from the client's own registration.
+  - The `resource` parameter on both the authorization and token requests.
+  - Refresh tokens.
+- Concord doesn't advertise `authorization_response_iss_parameter_supported`, even though its consent page returns `iss`, because some error redirects from the SDK don't include it. ChatGPT then uses its per-app callback, which works the same.
 
 ## Other directories
 
@@ -67,6 +74,7 @@ Curated from the official registry. Once the official entry is live, email partn
 
 - Claude: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Concord&connectorUrl=<url>` opens the prefilled dialog. Connectors added there also appear in Claude Code when it is signed in with a Claude account.
 - Claude Code: no deep link adds a server (`claude-cli://open` only prefills a prompt), so the page shows `claude mcp add --transport http concord <url>`.
+- ChatGPT: no link prefills a custom MCP server, so the page shows the server URL to copy and opens `https://chatgpt.com/plugins`, where the person chooses *+* → *Add custom MCP server*, pastes the URL and picks OAuth. Some individual plans need Developer mode (Settings → Apps → Advanced) first, and workspace admins may have to allow custom servers. This is a private connection for that person, separate from the OpenAI directory listing below.
 - Codex: no deep link exists; the page shows `codex mcp add concord --url <url>` and `codex mcp login concord`.
 - Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=concord&config=<base64 {"url":...}>`.
 - VS Code: `vscode:mcp/install?<url-encoded {"name":"concord","type":"http","url":...}>`.
