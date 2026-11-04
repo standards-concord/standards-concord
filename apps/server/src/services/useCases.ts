@@ -22,7 +22,6 @@ import { ontologyStore } from './ontologyStore.js';
 import { proposalToOps, toLocalName } from './proposals.js';
 import { solid, transcriptToTurtle } from './solid.js';
 import { logActivity } from './users.js';
-import { redactOps, redactText, secretsFor } from './redact.js';
 
 /* ------------------------------------------------------------------------ */
 /* Use cases                                                                 */
@@ -353,18 +352,16 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     ],
     fallback: () => heuristicSynthesis(graph.view().classes.map((c) => c.label?.toLowerCase() ?? ''), ucs),
   });
-  // The ontology is published, but use cases may be private: its annotations
-  // cite use cases only by their (sign-in only) link, never their title or
-  // author, and the title (which reaches release notes) is redacted too.
-  const secrets = secretsFor(ucs);
+  // The ontology is published, but use cases may be private: its annotations cite use cases only by
+  // their (sign-in only) link. Nothing here is rewritten: the request is published only once an editor
+  // approves exactly what it publishes (approvePublication in changeRequests.ts).
   const sources = ucs.map((u) => `${config.publicUrl}/o/${encodeURIComponent(project.slug)}/use-cases/${encodeURIComponent(u.id)}`);
-  const redacted = redactOps(proposalToOps(graph, value.terms, sources).ops, secrets);
   const cr = await createChangeRequest(project, actor, {
-    title: redactText(value.title, secrets),
-    description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${redacted.dropped.length ? `\n\n**Left out.** ${redacted.dropped.join(', ')}: the name would publish a use case title or a person's name, so add it by hand with a neutral name.` : ''}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
+    title: value.title,
+    description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
     kind: 'feature',
     origin: { type: 'synthesis', useCaseIds: ucs.map((u) => u.id) },
-    ops: redacted.ops,
+    ops: proposalToOps(graph, value.terms, sources).ops,
     tests: value.competencyQuestionTests,
     analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
   });

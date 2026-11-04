@@ -17,6 +17,94 @@ import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
+/**
+ * A request drafted from use cases (which may be private) is published only
+ * as an editor approved it: this shows exactly what merging it would publish,
+ * highlights what looks like a use case title or a person's name (a hint,
+ * never a verdict), and approves that exact version.
+ */
+function PublicationApproval({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
+  const { hasRole, userById } = useOntology();
+  const pub = useAsync(() => api.publication(cr.id), [cr.id, cr.opsUpdatedAt, cr.title, cr.status, cr.privacyCleared?.fingerprint]);
+  const approve = useAction(async (fingerprint: string) => {
+    try {
+      onUpdate(await api.approvePublication(cr.id, fingerprint));
+    } finally {
+      // Changed since it was shown (409) or approved: either way, show what is there now.
+      await pub.reload();
+    }
+  });
+  const p = pub.data;
+  const approved = !!p && cr.privacyCleared?.fingerprint === p.fingerprint;
+  const hinted = p ? p.hints.length + p.statements.filter((st) => st.hint).length : 0;
+  const kind = (k: 'use case title' | 'name') => (k === 'name' ? 'a person’s name' : 'a use case title');
+  return (
+    <Card>
+      <CardHeader icon={ShieldCheck} title="What this publishes" subtitle="Drafted from use cases, which may be private. An editor approves exactly this before it is merged." />
+      <div className="space-y-3 p-5 text-sm" data-testid="publication">
+        {pub.error && !p ? (
+          <ErrorCard title="Couldn’t work out what this publishes" error={pub.error} onRetry={() => void pub.reload()} />
+        ) : !p ? (
+          <Loading label="Working out what this publishes…" />
+        ) : (
+          <>
+            {approved ? (
+              <p className="rounded-lg bg-ok-soft p-2.5 text-ok" data-testid="publication-approved">
+                Approved by {userById(cr.privacyCleared!.by)?.name ?? 'an editor'} {relativeTime(cr.privacyCleared!.at, Date.now())}. Any change needs approving again.
+              </p>
+            ) : hinted ? (
+              <p className="rounded-lg bg-warn-soft p-2.5 text-warn" role="note">
+                {plural(hinted, 'item')} may name a use case or a person (highlighted). The check can miss things, so read it all.
+              </p>
+            ) : (
+              <p className="text-muted">Nothing below looks private, but the check can miss things, so read it all.</p>
+            )}
+            <dl className="space-y-2">
+              <div>
+                <dt className="text-xs font-medium text-muted">Title (in the commit and the release notes)</dt>
+                <dd className={cx('mt-0.5 break-words', p.hints.some((h) => h.where === 'the title') && 'rounded bg-warn-soft px-1')}>{p.title}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-muted">Statements added to the public ontology ({p.statements.length})</dt>
+                <dd>
+                  <ul className="mt-1 max-h-72 space-y-1 overflow-auto">
+                    {p.statements.map((st, i) => (
+                      <li key={i} data-statement data-hint={st.hint ?? undefined} className={cx('break-words rounded px-1 font-mono text-xs', st.hint && 'bg-warn-soft')}>
+                        {st.subject} · {st.predicate} · <span className="font-sans">{st.object}</span>
+                        {st.hint && <span className="sr-only"> (may be {kind(st.hint)})</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+              {p.kgcl.length > 0 && (
+                <div>
+                  <dt className="text-xs font-medium text-muted">Edit list (in the commit and the release notes)</dt>
+                  <dd>
+                    <ul className="mt-1 space-y-0.5 font-mono text-xs">
+                      {p.kgcl.map((k, i) => (
+                        <li key={i} className="break-words">
+                          {k}
+                        </li>
+                      ))}
+                    </ul>
+                  </dd>
+                </div>
+              )}
+            </dl>
+            {!approved && hasRole('editor', 'steward', 'owner') && (
+              <Button variant="primary" icon={Check} loading={approve.pending} onClick={() => void approve.run(p.fingerprint)}>
+                Approve exactly this for publishing
+              </Button>
+            )}
+            <InlineError error={approve.error} />
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
   const { hasRole, myRoles } = useOntology();
   const { session } = useSession();
@@ -54,23 +142,10 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
       {(cr.status === 'review' || cr.status === 'voting' || cr.status === 'triage' || cr.status === 'needs-work' || cr.status === 'draft') && (
         <Textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Add a comment (optional for approvals, helpful for objections)…" />
       )}
-      {cr.status === 'needs-work' && !!cr.privacyFindings?.length && (
-        <div className="rounded-lg border border-warn/40 bg-warn-soft p-3 text-sm" data-testid="privacy-hold">
-          <p className="font-medium">Held back: this would publish something from a private use case</p>
-          <ul className="mt-1 list-disc pl-5 text-muted">
-            {cr.privacyFindings.map((f) => (
-              <li key={`${f.where}-${f.kind}`}>
-                {f.kind === 'name' ? 'A person’s name' : 'A use case title'} in {f.where}
-              </li>
-            ))}
-          </ul>
-          <p className="mt-1.5 text-muted">Edit the change to leave it out, or, if it isn’t private, an editor can confirm and merge it.</p>
-          {hasRole('editor', 'steward', 'owner') && (
-            <Button size="sm" className="mt-2" loading={act.pending} onClick={() => void act.run(() => api.confirmNothingPrivate(cr.id))}>
-              Nothing here is private: merge
-            </Button>
-          )}
-        </div>
+      {cr.heldForPublication && cr.status === 'needs-work' && (
+        <p className="rounded-lg border border-warn/40 bg-warn-soft p-3 text-sm" data-testid="publication-hold">
+          Held before merging until an editor approves exactly what it publishes (under “What this publishes”).
+        </p>
       )}
       {(cr.status === 'draft' || cr.status === 'needs-work') && canEdit && (
         <Button variant="primary" icon={Send} className="w-full" loading={act.pending} onClick={() => void act.run(() => api.submitChangeRequest(cr.id))}>
@@ -473,6 +548,7 @@ export function ChangeRequestPage() {
         </div>
 
         <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+          {cr.origin.type === 'synthesis' && !['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status) && <PublicationApproval cr={cr} onUpdate={state.setData} />}
           <Card>
             <CardHeader icon={Scale} title="Decision" subtitle={`${ontology.governance.name} · ${plural(cr.reviews.filter((r) => r.decision !== 'comment').length, 'review')}`} />
             <div className="p-5">

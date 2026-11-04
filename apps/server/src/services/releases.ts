@@ -1,4 +1,4 @@
-import { allSecrets, publishableLines, publishableNotes, redactText, revealing, secretsOf } from './redact.js';
+import { needsPublicationApproval } from './changeRequests.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -13,6 +13,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
+import { holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -63,24 +64,14 @@ export function releaseDetail(r: Release): ReleaseDetail {
   };
 }
 
-/** Release notes are published: a request synthesised from use cases never names them or their authors. */
-// A request an editor confirmed publishes nothing private is published as it is.
-const notesSecrets = (c: ChangeRequest) => (c.privacyCleared ? undefined : secretsOf(c));
-const published = (c: ChangeRequest, text: string) => {
-  const secrets = notesSecrets(c);
-  if (!secrets) return text;
-  const redacted = redactText(text, secrets);
-  return revealing(redacted, secrets) ? 'Changes from use cases' : redacted;
-};
-const publishedEdits = (c: ChangeRequest) => {
-  const secrets = notesSecrets(c);
-  return secrets ? publishableLines(c.kgcl ?? [], secrets) : (c.kgcl ?? []);
-};
-
-/** What a release's notes must not publish: the secrets of every synthesised request it includes. */
-export function releaseSecrets(r: Pick<Release, 'changeRequestIds'>) {
-  return allSecrets(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)).map((c) => (c ? notesSecrets(c) : undefined)));
-}
+/**
+ * Release notes are published. A request drafted from use cases appears in
+ * them only as an editor approved it (the title and edit list they approved,
+ * byte for byte); one merged without that approval, before it existed,
+ * appears without its title or edits. Nothing is rewritten.
+ */
+const published = (c: ChangeRequest, text: string) => (!needsPublicationApproval(c) ? text : (c.privacyCleared?.title ?? 'Changes from use cases'));
+const publishedEdits = (c: ChangeRequest) => (!needsPublicationApproval(c) ? (c.kgcl ?? []) : (c.privacyCleared?.kgcl ?? []));
 
 /** Release notes grouped by level, from the merged change requests. */
 function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
@@ -127,6 +118,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   r.version = bumpVersion(project.currentVersion, r.level);
   r.versionIRI = versionIRI(project, r.version);
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
+  // Notes a steward wrote are theirs to publish; drafted ones are rebuilt as the release is published.
+  r.notesBy = notes !== undefined && actor ? actor.id : undefined;
   save(r);
   if (!existing) {
     logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
@@ -211,8 +204,9 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
       console.warn(`[release] migration script: ${(err as Error).message}`);
     }
   }
-  // Notes drafted before redaction existed (or edited by hand) are checked again as they're published.
-  r.notes = publishableNotes(r.notes, releaseSecrets(r));
+  // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
+  // never reaches the page); notes a steward wrote are published as they wrote them.
+  if (!r.notesBy) r.notes = draftNotes(project, r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id)), r.level, r.version);
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
   // The use case snapshot always goes in, so the release never shows live data;
   // a rendering failure only costs the stored page (served pages render on request).
@@ -225,6 +219,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
+  // Made from a working draft still waiting for approval: it waits too.
+  holdReleaseIfDraftHeld(project, r.version);
   r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }); // Published commits carry no names.
   r.status = 'published';
   r.publishedAt = clock.iso();

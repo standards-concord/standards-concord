@@ -412,3 +412,19 @@ describe('public Browse', () => {
     expect(html).toContain('role="status" aria-live="polite" data-search-status');
   });
 });
+
+describe('public reports and versions waiting for approval', () => {
+  it('shows no term from a version that is waiting for a steward’s approval', async () => {
+    const project = findProject('volunteering')!;
+    const { put: store, remove: drop } = await import('../src/db.js');
+    store('kv', { id: `public-hold:${project.id}`, ontologyId: project.id, versions: ['draft', '1.0.0'], since: new Date().toISOString() });
+    try {
+      const page = await request(app).get(`${URL}?term=${encodeURIComponent(TERM)}&version=1.0.0`);
+      expect(page.status).toBe(404);
+      expect(page.text).not.toContain('volunteering opportunity');
+      expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(TERM)}&version=1.0.0`)).status).toBe(404);
+    } finally {
+      drop('kv', `public-hold:${project.id}`);
+    }
+  });
+});

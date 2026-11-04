@@ -4,6 +4,7 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  Publication,
   ActivityItem,
   AgentReport,
   AgentToken,
@@ -27,7 +28,7 @@ import type {
   OntologyView,
   OutputFormat,
   PublicReport,
-  WithheldStatement,
+  PublicHoldReview,
   Release,
   ReleaseDetail,
   Role,
@@ -216,10 +217,11 @@ export const api = {
   publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
   acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
   dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
-  confirmNothingPrivate: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/confirm-nothing-private`),
-  withheld: (id: string) => get<WithheldStatement[]>(`/api/ontologies/${e(id)}/withheld`),
-  restoreWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/restore`),
-  dismissWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/dismiss`),
+  publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
+  approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
+  publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
+  approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
+  publicHoldTurtleUrl: (id: string, version: string) => `/api/ontologies/${e(id)}/public-holds/${e(version)}/turtle`,
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),

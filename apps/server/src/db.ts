@@ -19,7 +19,6 @@ export type Collection =
   | 'changeRequests'
   | 'publicReports'
   | 'reportNonces'
-  | 'withheld'
   | 'reviews'
   | 'votes'
   | 'releases'

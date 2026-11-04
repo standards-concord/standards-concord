@@ -1,26 +1,20 @@
-import type { ChangeOp } from '@concord/core/types';
 import type { ChangeRequest, UseCase } from '@concord/shared';
-import { createHash } from 'node:crypto';
 import { get, list } from '../db.js';
 import { getUser } from './users.js';
 
 /**
- * Keeps use case titles and contributor names out of the ontology, which is
- * published (the public page, every download, GitHub) while use cases may be
- * private. Used wherever drafted edits come from use cases (synthesis, AI
- * revisions), and again at merge, release and startup clean-up, so nothing
- * stored before these checks existed can slip through.
+ * Spots use case titles and people's names in text, to highlight them for
+ * the person approving what goes public (a change drafted from use cases, or
+ * a version published before approvals existed). A hint, never a verdict:
+ * nothing is published, held or rewritten because of what this finds, since
+ * no matcher catches every way a name can be written. redactText is used
+ * only on what a model is shown, never on anything published.
  *
  * Secrets are matched by their words, however either side is written
- * (SecretPilot, secret_pilot-record, "Secret  Pilot record", MacDonald), and
- * wherever they appear: in free text the whole word or identifier holding one
- * is replaced with "a use case" or "a participant" (never inside a
- * replacement already made, so running it again changes nothing); names
- * (labels, alternative labels, local names, edit lists) holding one are left
- * out. Titles made only of common words ("a", "use", "record", "the plan")
- * are not treated as secret: they reveal nothing and would mangle ordinary
- * text. People's names always are, but a one-letter or common-word name
- * ("An", "Will") only as written.
+ * (SecretPilot, secret_pilot-record, "Secret  Pilot record", MacDonald).
+ * Titles made only of common words ("a", "use", "record", "the plan") are
+ * not looked for: they'd highlight ordinary text. People's names always are,
+ * but a one-letter or common-word name ("An", "Will") only as written.
  */
 export interface Secret {
   /** The words, as first written. */
@@ -50,8 +44,6 @@ const NAME_WORDS = new Set(
 );
 const plain = (w: string) => COMMON.has(w.toLowerCase()) || NAME_WORDS.has(w.toLowerCase());
 
-/** Letters and digits only, lower case, accents removed: what a name is however it's written. */
-export const foldName = (text: string) => fold(text);
 const fold = (text: string) =>
   text
     .normalize('NFKD')
@@ -140,9 +132,6 @@ export function secretsOf(cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>): Sec
     : list<UseCase>('useCases', cr.ontologyId);
   return secretsFor(ucs);
 }
-
-/** Several sets of secrets as one. */
-export const allSecrets = (xs: (Secrets | undefined)[]): Secrets => ({ titles: xs.flatMap((x) => x?.titles ?? []), people: xs.flatMap((x) => x?.people ?? []) });
 
 const PLACEHOLDERS = [
   ['a', 'use', 'case'],
@@ -265,90 +254,4 @@ export function findSecrets(text: string | undefined, s: Secrets): ('use case ti
       if (!secret.strict && key.length >= 5 && folded.includes(key)) found.add(kind);
     }
   return [...found];
-}
-
-const TEXT_FIELDS = ['definition', 'comment', 'editorialNote', 'reason', 'title', 'description'] as const;
-const LIST_FIELDS = ['altLabels', 'examples'] as const;
-
-/**
- * Redacts drafted edits: free text is rewritten, alternative labels and
- * examples that name a use case or a person are dropped, and a new term whose
- * label or local name would do so is left out altogether (listed in `dropped`
- * so the change request can say why).
- */
-export function redactOps(ops: ChangeOp[], s: Secrets): { ops: ChangeOp[]; dropped: string[] } {
-  const dropped: string[] = [];
-  const out: ChangeOp[] = [];
-  for (const op of ops) {
-    const o = structuredClone(op) as Record<string, unknown>;
-    // Only names this edit would publish: removing, renaming or deprecating an existing term stays possible.
-    if ([o.label, o.localName, o.newLocalName].some((n) => typeof n === 'string' && revealing(n, s))) {
-      dropped.push(String(o.newLocalName ?? o.localName ?? o.label));
-      continue;
-    }
-    const scrub = (rec: Record<string, unknown>) => {
-      for (const f of TEXT_FIELDS) if (typeof rec[f] === 'string') rec[f] = redactText(rec[f] as string, s);
-      // Alternative labels are names, checked however they're written; examples may hold either.
-      for (const f of LIST_FIELDS) if (Array.isArray(rec[f])) rec[f] = (rec[f] as unknown[]).filter((v) => typeof v !== 'string' || !revealing(v, s));
-      if (Array.isArray(rec.source)) rec.source = (rec.source as unknown[]).filter((v) => typeof v !== 'string' || !/^use cases?:/i.test(v));
-      else if (typeof rec.source === 'string' && /^use cases?:/i.test(rec.source)) delete rec.source;
-      if (typeof rec.label === 'string' && revealing(rec.label, s)) delete rec.label;
-    };
-    scrub(o);
-    if (o.set && typeof o.set === 'object') scrub(o.set as Record<string, unknown>);
-    out.push(o as unknown as ChangeOp);
-  }
-  return { ops: out, dropped };
-}
-
-/** Lines of an edit list (KGCL) or notes, safe to publish: redacted, and any line still naming a secret (in an identifier, say) left out. */
-export function publishableLines(lines: string[], s: Secrets): string[] {
-  if (!s.titles.length && !s.people.length) return lines;
-  return lines
-    .filter((l) => !matches(l.normalize('NFKC'), s).some((m) => m.partial))
-    .map((l) => redactText(l, s))
-    .filter((l) => !revealing(l, s));
-}
-
-/** Release notes, safe to publish. */
-export function publishableNotes(notes: string, s: Secrets): string {
-  if (!s.titles.length && !s.people.length) return notes;
-  const out = publishableLines(notes.split('\n'), s).join('\n');
-  return out === notes ? notes : out;
-}
-
-/** Where a change request would publish a secret: its title, every text and name in its edits, and its edit list. */
-export function privacyFindings(cr: Pick<ChangeRequest, 'title' | 'ops' | 'kgcl'>, s: Secrets): { where: string; kind: 'use case title' | 'name' }[] {
-  const out = new Map<string, { where: string; kind: 'use case title' | 'name' }>();
-  const check = (where: string, text: unknown) => {
-    if (typeof text !== 'string') return;
-    for (const kind of findSecrets(text, s)) out.set(`${where}|${kind}`, { where, kind });
-  };
-  check('title', cr.title);
-  for (const op of cr.ops) {
-    const r = op as unknown as Record<string, unknown>;
-    const term = String(r.newLocalName ?? r.localName ?? r.iri ?? r.classIri ?? op.op);
-    const walk = (value: unknown, field: string) => {
-      if (typeof value === 'string') check(field === 'localName' || field === 'newLocalName' ? `name ${term}` : `${field} of ${term}`, value);
-      else if (Array.isArray(value)) value.forEach((v) => walk(v, field));
-      else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, k);
-    };
-    for (const [k, v] of Object.entries(r)) if (k !== 'op') walk(v, k);
-  }
-  (cr.kgcl ?? []).forEach((line) => check('edit list', line));
-  return [...out.values()];
-}
-
-/** Changes whenever what a request would publish does, so a confirmation covers exactly what was checked. */
-export const publicationFingerprint = (cr: Pick<ChangeRequest, 'title' | 'ops' | 'kgcl'>) =>
-  createHash('sha256').update(JSON.stringify([cr.title, cr.ops, cr.kgcl ?? []])).digest('base64url');
-
-/** Text with every line that names a secret left out (nothing is rewritten). */
-export function withholdLines(text: string, s: Secrets): string {
-  if (!s.titles.length && !s.people.length) return text;
-  const out = text
-    .split('\n')
-    .filter((l) => !findSecrets(l, s).length)
-    .join('\n');
-  return out === text ? text : out;
 }

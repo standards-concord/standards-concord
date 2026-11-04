@@ -93,6 +93,8 @@ export async function createProject(
     prefix,
     ontologyIRI: graph.ontologyIRI,
     stage: input.seedTurtle ? 'drafting' : 'discovery',
+    // Made under the approval rules: nothing it publishes predates them.
+    publishedWithApproval: true,
     currentVersion: '0.0.0',
     ownerIds: [owner.id],
     governance: template(input.governanceTemplate),

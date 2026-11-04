@@ -1,18 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { DataFactory, type Literal, type Quad } from 'n3';
-import { bumpVersion, FORMAT_INFO, generatedProvenanceTitles, npmPackage, scrubGeneratedProvenance, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
+import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
-import type { ChangeRequest, OntologyProject, Release, UseCase, WithheldStatement } from '@concord/shared';
+import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put, remove } from '../db.js';
-import { newId } from '../ids.js';
-import { findSecrets, foldName, secretsFor, withholdLines, words } from '../services/redact.js';
-import { getUser } from '../services/users.js';
+import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
-import { ONTOLOGY_FILE, ontologyStore } from '../services/ontologyStore.js';
+import { ontologyStore } from '../services/ontologyStore.js';
+import { holdLegacy, isHeld } from './holds.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
@@ -213,7 +210,7 @@ function readPageState(): Record<string, string> {
 
 /**
  * Brings every ontology's published release pages up to date with the current
- * renderer, and removes provenance that older versions wrote into the RDF.
+ * renderer, and holds what older versions published without approval.
  *
  * Runs at startup. An ontology whose pages weren't written by this renderer
  * (PAGE_GENERATOR, tracked in the data directory, so page content can't fake
@@ -229,17 +226,11 @@ function readPageState(): Record<string, string> {
 export async function refreshReleasePages(): Promise<void> {
   const state = readPageState();
   for (const project of list<OntologyProject>('ontologies')) {
-    const cleanupKey = `cleanup:${project.slug}`;
-    if (state[cleanupKey] !== CLEANUP_VERSION) {
-      try {
-        const { complete } = await remediateProvenance(project);
-        // Pages are rendered again after every clean-up run, whatever it changed.
-        delete state[project.slug];
-        // Runs once: an incomplete clean-up is tried again at the next start.
-        if (complete) state[cleanupKey] = CLEANUP_VERSION;
-      } catch (err) {
-        console.warn(`[public] could not clean ${project.slug}: ${(err as Error).message}`);
-      }
+    // What older versions published without anyone approving it is held until a steward does (holds.ts).
+    try {
+      holdLegacy(project);
+    } catch (err) {
+      console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
     const versions = new Set(ontologyStore.versions(project));
     const releases = publishedReleases(project.id).filter((r) => versions.has(r.version));
@@ -287,300 +278,6 @@ export async function refreshReleasePages(): Promise<void> {
   }
 }
 
-/** Bump when the clean-up below changes, so it runs once more on every ontology. */
-const CLEANUP_VERSION = 'privacy clean-up 5';
-
-/**
- * What the clean-up has learned, kept privately so a run that stops half way
- * (or a later run) still knows it: the use case titles generated provenance
- * recorded, the names in credits it withheld, and the formats it had to take
- * down and must regenerate.
- */
-interface CleanupState {
-  id: string;
-  titles: string[];
-  names: string[];
-  pendingFormats: Record<string, string[]>;
-}
-const cleanupStateKey = (project: OntologyProject) => `privacy-cleanup:${project.id}`;
-
-const SOURCE = 'http://purl.org/dc/terms/source';
-const P_CONTRIBUTOR = 'http://purl.org/dc/terms/contributor';
-const CREDIT_PREDICATES = new Set([P_CONTRIBUTOR, 'http://purl.org/dc/terms/creator', 'http://purl.org/dc/elements/1.1/creator', 'http://purl.org/dc/elements/1.1/contributor']);
-
-/** Whether a stored snapshot holds only what may be published: nothing for a real ontology yet, the fixed fictional use cases for the demo. */
-export function publishableSnapshot(project: OntologyProject, version: string, data: PublishedRequirements): PublishedRequirements | undefined {
-  if (!project.demo) return !data.useCases.length && !data.document ? undefined : { useCases: [], snapshotMissing: true };
-  const canonical = validSnapshot(JSON.parse(snapshotFile(releaseRequirements(project, version))));
-  return JSON.stringify(canonical) === JSON.stringify(data) ? undefined : releaseRequirements(project, version);
-}
-
-/**
- * Takes out of every published ontology (the working draft and each release
- * on disk, every format, notes and snapshots) what older versions of Concord
- * could publish from private use cases and the people behind changes. Nothing
- * is rewritten: a statement that may reveal something is withheld whole (kept
- * privately as a WithheldStatement, so an owner or steward can put it back).
- *
- *   1. Everything is read and learned before anything is changed: the titles
- *      generated provenance recorded, and the credits merges wrote. Credits a
- *      merge wrote are recognised by the term itself: a literal
- *      dcterms:contributor on a term whose dcterms:source names the request
- *      that created it ("<slug>#<n>") and that request's author (or a request
- *      or author that no longer exists), or on a term generated from use
- *      cases. The names in them are then treated as private too.
- *   2. Generated provenance is removed (it's in fixed forms), those credits
- *      are withheld, and so is any other text on any term that names a use
- *      case title or one of those people, however it's written. Credits no
- *      merge wrote were given on purpose, and stay.
- *   3. Every format of every release is regenerated from the cleaned graph; one
- *      that can't be is taken down and tried again on every run until it can.
- *   4. Release notes and the changelog lose any line that names one.
- * Returns whether everything was checked and written: only then is the
- * clean-up recorded as done.
- */
-async function remediateProvenance(project: OntologyProject): Promise<{ complete: boolean }> {
-  const crs = list<ChangeRequest>('changeRequests', project.id);
-  const byNumber = new Map(crs.map((c) => [c.number, c]));
-  const dir = ontologyStore.dir(project);
-  let complete = true;
-  const state: CleanupState = { titles: [], names: [], pendingFormats: {}, ...get<CleanupState>('kv', cleanupStateKey(project)), id: cleanupStateKey(project) };
-  const warn = (what: string, err: unknown) => {
-    complete = false;
-    console.warn(`[public] could not ${what} for ${project.slug}: ${(err as Error).message}`);
-  };
-
-  // 1. Read every graph, and learn from all of them before changing any.
-  const graphs: { version: string; graph: OntologyGraph }[] = [];
-  try {
-    graphs.push({ version: 'working', graph: (await ontologyStore.working(project)).clone() });
-  } catch (err) {
-    warn('read the working draft', err);
-  }
-  ontologyStore.forgetReleases(project);
-  const versions = ontologyStore.versions(project);
-  for (const version of versions) {
-    try {
-      graphs.push({ version, graph: (await ontologyStore.at(project, version)).clone() });
-    } catch (err) {
-      warn(`read release ${version}`, err);
-    }
-  }
-  const sourceRef = new RegExp(`^${project.slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#(\\d+)$`);
-  /** The literal credits on a term that a merge (not a person) wrote. */
-  const generatedCredits = (g: OntologyGraph, subject: string, generatedProvenance: boolean) => {
-    const credits = g.store.getQuads(DataFactory.namedNode(subject), DataFactory.namedNode(P_CONTRIBUTOR), null, null).filter((q) => q.object.termType === 'Literal');
-    if (!credits.length) return [];
-    if (generatedProvenance) return credits;
-    const refs = g.store
-      .getQuads(DataFactory.namedNode(subject), DataFactory.namedNode(SOURCE), null, null)
-      .map((q) => sourceRef.exec(q.object.value)?.[1])
-      .filter((n): n is string => !!n);
-    return credits.filter((q) =>
-      refs.some((n) => {
-        const cr = byNumber.get(Number(n));
-        const author = cr && getUser(cr.authorId);
-        return !author || author.name.normalize('NFKC').trim() === q.object.value.normalize('NFKC').trim();
-      }),
-    );
-  };
-  const tainted = new Map<OntologyGraph, Set<string>>();
-  const generated = new Map<OntologyGraph, Set<string>>();
-  for (const { graph } of graphs) {
-    const provenance = generatedProvenanceTitles(graph);
-    generated.set(graph, new Set(provenance.keys()));
-    const marked = new Set(provenance.keys());
-    for (const titles of provenance.values()) state.titles.push(...titles);
-    for (const subject of new Set(graph.store.getSubjects(null, null, null).filter((t) => t.termType === 'NamedNode').map((t) => t.value))) {
-      if (subject === graph.ontologyIRI) continue;
-      const credits = generatedCredits(graph, subject, marked.has(subject));
-      if (credits.length) marked.add(subject);
-      state.names.push(...credits.map((q) => q.object.value));
-    }
-    tainted.set(graph, marked);
-  }
-  state.titles = [...new Set(state.titles)];
-  state.names = [...new Set(state.names)];
-  put('kv', state);
-
-  // What may not be published: every title the ontology's use cases have had, those learned above, and
-  // the names of the people who wrote the use cases or were credited by a merge. A title that is also
-  // the ontology's own vocabulary (a term named "Volunteering" in a volunteering ontology) reveals nothing.
-  const vocabulary = new Set<string>();
-  const working = graphs.find((x) => x.version === 'working')?.graph;
-  if (working) {
-    const view = working.view();
-    for (const t of [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.individuals]) {
-      if (tainted.get(working)?.has(t.iri)) continue;
-      for (const name of [t.label ?? '', t.iri.replace(/^.*[#/]/, '')]) {
-        vocabulary.add(foldName(name));
-        for (const w of words(name)) vocabulary.add(foldName(w));
-      }
-    }
-  }
-  const all = secretsFor(list<UseCase>('useCases', project.id), { titles: state.titles, people: state.names });
-  const secrets = { ...all, titles: all.titles.filter((t) => !vocabulary.has(foldName(t.words.join('')))) };
-
-  // 2. Clean each graph.
-  const withheld: WithheldStatement[] = [];
-  const withhold = (version: string, g: OntologyGraph, q: Quad, reason: WithheldStatement['reason']) => {
-    g.store.removeQuad(q);
-    const o = q.object as Literal;
-    withheld.push({
-      id: newId('whd'),
-      ontologyId: project.id,
-      version,
-      subject: q.subject.value,
-      predicate: q.predicate.value,
-      object: { value: o.value, language: o.language || undefined, datatype: o.language ? undefined : o.datatype?.value },
-      reason,
-      at: clock.iso(),
-    });
-  };
-  const clean = (version: string, g: OntologyGraph) => {
-    let n = 0;
-    const credits = new Set<Quad>();
-    for (const subject of tainted.get(g) ?? []) for (const q of generatedCredits(g, subject, !!generated.get(g)?.has(subject))) credits.add(q);
-    for (const q of credits) {
-      withhold(version, g, q, 'credit');
-      n++;
-    }
-    n += scrubGeneratedProvenance(g);
-    for (const q of g.store.getQuads(null, null, null, null)) {
-      if (q.subject.termType !== 'NamedNode' || q.subject.value === g.ontologyIRI || q.object.termType !== 'Literal') continue;
-      // A credit no merge wrote was given on purpose, and stays.
-      if (CREDIT_PREDICATES.has(q.predicate.value)) continue;
-      const found = findSecrets(q.object.value, secrets);
-      if (!found.length) continue;
-      withhold(version, g, q, found[0]);
-      n++;
-    }
-    return n;
-  };
-
-  const files: Record<string, Record<string, string | null>> = {};
-  for (const { version, graph } of graphs) {
-    try {
-      const changed = clean(version, graph);
-      if (version === 'working') {
-        if (changed) await ontologyStore.commitWorking(project, graph, 'Withhold contributor names and use case titles from annotations', { name: 'Concord' });
-        continue;
-      }
-      const out: Record<string, string | null> = {};
-      if (changed) out[ONTOLOGY_FILE] = await graph.toTurtle();
-      // 3. Every other format, from the cleaned graph: those on disk, and any taken down before.
-      const pending = new Set(state.pendingFormats[version] ?? []);
-      for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
-        if (format === 'turtle') continue;
-        const name = `ontology.${FORMAT_INFO[format].extension}`;
-        const file = path.join(dir, 'releases', version, name);
-        const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
-        if (current === undefined && !pending.has(name)) continue;
-        try {
-          const fresh = await serialize(graph, format, { name: project.slug });
-          if (fresh !== current) out[name] = fresh;
-          pending.delete(name);
-        } catch (err) {
-          // It can't be checked or replaced: take it down rather than keep publishing what it may hold, and try again next time.
-          if (current !== undefined) out[name] = null;
-          pending.add(name);
-          warn(`regenerate ${version} as ${format} (taken down until it can be)`, err);
-        }
-      }
-      if (pending.size) state.pendingFormats[version] = [...pending];
-      else delete state.pendingFormats[version];
-      const snapshot = readSnapshot(project, version);
-      if (snapshot.state === 'ok') {
-        const replacement = publishableSnapshot(project, version, snapshot.data);
-        if (replacement) out[REQUIREMENTS_SNAPSHOT] = snapshotFile(replacement);
-      }
-      if (Object.keys(out).length) files[version] = out;
-    } catch (err) {
-      warn(`clean ${version}`, err);
-    }
-  }
-
-  // 4. Notes: a line naming a title or a person is left out.
-  for (const release of list<Release>('releases', project.id)) {
-    try {
-      const notes = withholdLines(release.notes, secrets);
-      if (notes !== release.notes) {
-        release.notes = notes;
-        put('releases', release, release.ontologyId);
-      }
-      const file = path.join(dir, 'releases', release.version, 'RELEASE_NOTES.md');
-      if (versions.includes(release.version) && fs.existsSync(file)) {
-        const before = fs.readFileSync(file, 'utf8');
-        const after = withholdLines(before, secrets);
-        if (after !== before) files[release.version] = { ...files[release.version], 'RELEASE_NOTES.md': after };
-      }
-    } catch (err) {
-      warn(`clean the notes of ${release.version}`, err);
-    }
-  }
-  if (Object.keys(files).length) {
-    try {
-      ontologyStore.updateReleaseFiles(project, files, `Withhold contributor names and use case titles from releases (${Object.keys(files).join(', ')})`);
-    } catch (err) {
-      warn('write releases', err);
-    }
-    ontologyStore.forgetReleases(project);
-  }
-  try {
-    const changelog = path.join(dir, 'CHANGELOG.md');
-    if (fs.existsSync(changelog)) {
-      const before = fs.readFileSync(changelog, 'utf8');
-      const after = withholdLines(before, secrets);
-      if (after !== before) ontologyStore.updateRepoFile(project, 'CHANGELOG.md', after, 'Withhold use case titles from the changelog');
-    }
-  } catch (err) {
-    warn('clean the changelog', err);
-  }
-  for (const w of withheld) put('withheld', w, project.id);
-  put('kv', state);
-  if (Object.keys(state.pendingFormats).length) complete = false;
-  return { complete };
-}
-
-/** Statements withheld from an ontology's public views, waiting for an owner or steward. */
-export const listWithheld = (ontologyId: string) => list<WithheldStatement>('withheld', ontologyId).sort((a, b) => a.version.localeCompare(b.version) || a.subject.localeCompare(b.subject));
-
-/** Puts a withheld statement back where it was taken from (an owner or steward decided it's fine to publish). */
-export async function restoreWithheld(project: OntologyProject, id: string): Promise<void> {
-  const w = get<WithheldStatement>('withheld', id);
-  if (!w || w.ontologyId !== project.id) throw new HttpError(404, 'Nothing withheld with that id');
-  const object = DataFactory.literal(w.object.value, w.object.language || (w.object.datatype ? DataFactory.namedNode(w.object.datatype) : undefined));
-  const quad = DataFactory.quad(DataFactory.namedNode(w.subject), DataFactory.namedNode(w.predicate), object);
-  if (w.version === 'working') {
-    const g = (await ontologyStore.working(project)).clone();
-    g.store.addQuad(quad);
-    await ontologyStore.commitWorking(project, g, 'Restore a statement the privacy clean-up withheld', { name: 'Concord' });
-  } else {
-    ontologyStore.forgetReleases(project);
-    const g = (await ontologyStore.at(project, w.version)).clone();
-    g.store.addQuad(quad);
-    const out: Record<string, string> = { [ONTOLOGY_FILE]: await g.toTurtle() };
-    for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
-      const name = `ontology.${FORMAT_INFO[format].extension}`;
-      if (format !== 'turtle' && fs.existsSync(path.join(ontologyStore.dir(project), 'releases', w.version, name))) out[name] = await serialize(g, format, { name: project.slug });
-    }
-    ontologyStore.updateReleaseFiles(project, { [w.version]: out }, `Restore a statement the privacy clean-up withheld from ${w.version}`);
-    ontologyStore.forgetReleases(project);
-    // Its page is rendered again at the next refresh.
-    const pages = readPageState();
-    delete pages[project.slug];
-    fs.mkdirSync(config.dataDir, { recursive: true });
-    fs.writeFileSync(pageStateFile(), `${JSON.stringify(pages, null, 2)}\n`);
-  }
-  remove('withheld', id);
-}
-
-/** Keeps a statement withheld for good (it's forgotten here). */
-export function dismissWithheld(project: OntologyProject, id: string) {
-  const w = get<WithheldStatement>('withheld', id);
-  if (w && w.ontologyId === project.id) remove('withheld', id);
-}
-
 /**
  * The site's own address. PUBLIC_URL wins when it is set, so a forged
  * X-Forwarded-Host can't change the links on a page; otherwise (local
@@ -597,6 +294,19 @@ function notFound(res: Response, message: string, home?: string) {
     .type('html')
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Not found</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}a{color:#aab6ff}}</style></head><body><h1>Not found</h1><p>${escapeHtml(message)}</p>${home ? `<p><a href="${escapeHtml(home)}">Go to the latest version</a></p>` : ''}</body></html>`,
+    );
+}
+
+/** A version waiting for a steward to approve what it publishes (holds.ts): it says so, and serves none of it. */
+function held(res: Response, project: OntologyProject, version: string, format: PublicFormat) {
+  const what = version === 'draft' ? 'The working draft' : `Version ${version}`;
+  const message = `${what} of ${project.title} is being reviewed before it is published again.`;
+  res.status(503).set('Cache-Control', 'no-store').set('Retry-After', '86400');
+  if (format !== 'html') return void res.type('text/plain').send(`${message}\n`);
+  res
+    .type('html')
+    .send(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Being reviewed</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}}</style></head><body><h1>Being reviewed</h1><p>${escapeHtml(message)}</p><p>Older versions of this site published changes without anyone approving them first, so a steward is checking it.</p></body></html>`,
     );
 }
 
@@ -630,6 +340,8 @@ async function serve(req: Request, res: Response) {
 
   const format = last.format ?? negotiate(req, res);
   if (!format) return;
+  // Published before anyone approved what goes public: nothing of it is served until a steward does.
+  if (isHeld(project.id, version)) return held(res, project, version, format);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');
     const input = await pageInput(project, version, base);

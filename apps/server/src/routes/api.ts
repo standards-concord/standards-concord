@@ -37,7 +37,7 @@ import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
-import { dismissWithheld, listWithheld, restoreWithheld } from '../public/routes.js';
+import { approveHold, heldTurtle, listHolds } from '../public/holds.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -409,22 +409,23 @@ export function apiRouter(): Router {
     res.json({ ok: true });
   });
 
-  /* ----------------- statements withheld by the clean-up -------------- */
-  // What the privacy clean-up took out of the published ontology: owners and stewards decide what goes back.
+  /* --------------- versions waiting for publication approval ------------- */
+  // Published before anyone approved what goes public: owners and stewards review each and approve exactly what it publishes.
   const steward = (req: Request) => {
     const p = project(req);
-    requireRole(p.id, requireUser(req), ['owner', 'steward'], 'review what was withheld from the public page');
-    return p;
+    const user = requireUser(req);
+    requireRole(p.id, user, ['owner', 'steward'], 'review versions waiting for approval');
+    return { p, user };
   };
-  r.get('/ontologies/:id/withheld', (req, res) => {
-    res.json(listWithheld(steward(req).id));
+  r.get('/ontologies/:id/public-holds', async (req, res) => {
+    res.set('Cache-Control', 'no-store').json(await listHolds(steward(req).p));
   });
-  r.post('/ontologies/:id/withheld/:wid/restore', async (req, res) => {
-    await restoreWithheld(steward(req), String(req.params.wid));
-    res.json({ ok: true });
+  r.get('/ontologies/:id/public-holds/:version/turtle', (req, res) => {
+    res.set('Cache-Control', 'no-store').type('text/turtle').send(heldTurtle(steward(req).p, String(req.params.version)));
   });
-  r.post('/ontologies/:id/withheld/:wid/dismiss', (req, res) => {
-    dismissWithheld(steward(req), String(req.params.wid));
+  r.post('/ontologies/:id/public-holds/:version/approve', (req, res) => {
+    const { p, user } = steward(req);
+    approveHold(p, user, String(req.params.version), req.body?.fingerprint);
     res.json({ ok: true });
   });
 
@@ -434,9 +435,15 @@ export function apiRouter(): Router {
     res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status));
   });
 
-  // A request held back because it would publish something from private use cases: an editor confirms it doesn't.
-  r.post('/change-requests/:id/confirm-nothing-private', async (req, res) => {
-    const cr = await crs.confirmNothingPrivate(crs.getCR(String(req.params.id)), requireUser(req));
+  // A request drafted from use cases is published only as an editor approved it: what it would publish, then the approval of exactly that.
+  r.get('/change-requests/:id/publication', async (req, res) => {
+    requireUser(req);
+    const cr = crs.getCR(String(req.params.id));
+    if (!crs.needsPublicationApproval(cr)) throw new HttpError(404, 'This request doesn’t need its publication approved');
+    res.set('Cache-Control', 'no-store').json(await crs.publicationPreview(cr));
+  });
+  r.post('/change-requests/:id/approve-publication', async (req, res) => {
+    const cr = await crs.approvePublication(crs.getCR(String(req.params.id)), requireUser(req), req.body?.fingerprint);
     res.json(crs.detail(cr));
   });
 

@@ -1,6 +1,5 @@
 import {
   applyChangeOps,
-  scrubGeneratedProvenance,
   ChangeOpError,
   classifyChange,
   compactIRI,
@@ -19,6 +18,8 @@ import type {
   ChangeRequestOrigin,
   ChangeRequestStatus,
   OntologyProject,
+  Publication,
+  PublicationStatement,
   Review,
   TimelineEvent,
   UseCase,
@@ -37,7 +38,8 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
-import { privacyFindings, publicationFingerprint, redactOps, redactText, secretsOf } from './redact.js';
+import { createHash } from 'node:crypto';
+import { findSecrets, redactText, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -327,6 +329,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
 export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?: string; description?: string; ops?: ChangeOp[] }) {
   if (cr.authorId !== actor.id) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'edit this change request');
   if (['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status)) throw new HttpError(409, `Cannot edit a ${cr.status} request`);
+  // An approval of what it publishes covers exactly what was approved: a new title or new edits need a new one.
+  if ((patch.title && patch.title !== cr.title) || patch.ops) cr.privacyCleared = undefined;
   if (patch.title) cr.title = patch.title;
   if (patch.description !== undefined) cr.description = patch.description;
   if (patch.ops) {
@@ -402,19 +406,87 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
   return cr;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Publication approval                                                     */
+/* ------------------------------------------------------------------------ */
+
 /**
- * An editor confirms that what a held-back request would publish isn't
- * private (a false alarm, or something already public), then merges it. The
- * confirmation covers this exact version: any later edit needs another.
+ * The ontology is published, but use cases may be private, and nothing can
+ * reliably spot every name or title in text. So a request drafted from use
+ * cases publishes only what a person approved: an editor is shown exactly
+ * what merging it would publish (its title and edit list, which also go into
+ * the commit and the release notes, and every statement it adds) and approves
+ * those exact bytes. Any change afterwards needs a new approval. Name
+ * matching only highlights what looks private; it never decides.
  */
-export async function confirmNothingPrivate(cr: ChangeRequest, actor: User): Promise<ChangeRequest> {
-  requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'confirm a change request publishes nothing private');
-  if (cr.status !== 'needs-work' || !cr.privacyFindings?.length) throw new HttpError(409, 'This request isn’t held back for privacy');
-  cr.privacyCleared = { by: actor.id, at: clock.iso(), fingerprint: publicationFingerprint(cr) };
-  cr.timeline.push(ev('comment', 'confirmed nothing in it is private', actor.id));
-  setStatus(cr, 'approved', 'approved again after the privacy check', actor.id);
-  save(cr);
-  return merge(cr, actor);
+export const needsPublicationApproval = (cr: Pick<ChangeRequest, 'origin'>) => cr.origin.type === 'synthesis';
+
+const NT = /^(<[^>]*>|_:\S+) <([^>]*)> (.*) \.$/;
+const localOf = (iri: string) => iri.replace(/^<|>$/g, '').replace(/^.*[#/]/, '') || iri;
+function readable(object: string): string {
+  const lit = /^"((?:[^"\\]|\\.)*)"/.exec(object);
+  if (lit) return JSON.parse(`"${lit[1]}"`) as string;
+  return object.startsWith('<') ? localOf(object) : object;
+}
+
+/** What merging this request now would publish, worked out exactly as merge() does it. */
+async function publicationOf(cr: ChangeRequest, project = getProject(cr.ontologyId)) {
+  const working = await ontologyStore.working(project);
+  const date = clock.iso().slice(0, 10);
+  // No author: dcterms:contributor would publish the requester's name on every new term.
+  const after = applyChangeOps(working, cr.ops, { date, source: `${project.slug}#${cr.number}` }).graph;
+  const added = diffOntologies(working, after).addedNTriples;
+  const kgcl = toKGCL(cr.ops, after.prefixes);
+  // Today's date isn't part of what's approved: a request approved today and merged tomorrow is the same.
+  const stable = added.map((t) => t.split(`"${date}"`).join('"DATE"')).sort();
+  const fingerprint = createHash('sha256').update(JSON.stringify([cr.title, kgcl, stable])).digest('base64url');
+  return { fingerprint, title: cr.title, kgcl, added, after };
+}
+
+/** For the editor approving it: what would be published, with what looks private highlighted. */
+export async function publicationPreview(cr: ChangeRequest): Promise<Publication> {
+  const p = await publicationOf(cr);
+  const secrets = secretsOf(cr);
+  const hint = (text: string) => (secrets ? findSecrets(text, secrets)[0] : undefined);
+  const statements = p.added.map((t) => {
+    const m = NT.exec(t);
+    const st: PublicationStatement = m ? { subject: localOf(m[1]), predicate: localOf(m[2]), object: readable(m[3]) } : { subject: '', predicate: '', object: t };
+    const h = hint(st.object) ?? hint(st.subject);
+    return h ? { ...st, hint: h } : st;
+  });
+  const hints: Publication['hints'] = [];
+  const t = hint(p.title);
+  if (t) hints.push({ where: 'the title', kind: t });
+  for (const line of p.kgcl) {
+    const k = hint(line);
+    if (k) hints.push({ where: `the edit list (${line.slice(0, 60)})`, kind: k });
+  }
+  return { fingerprint: p.fingerprint, title: p.title, kgcl: p.kgcl, statements, hints };
+}
+
+/**
+ * An editor approves exactly what they were shown. If the request changed
+ * since (its edits, its title, or the draft it merges into), the fingerprint
+ * they send no longer matches and nothing is approved.
+ */
+export async function approvePublication(cr: ChangeRequest, actor: User, fingerprint: unknown): Promise<ChangeRequest> {
+  requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'approve what a change request publishes');
+  if (!needsPublicationApproval(cr)) throw new HttpError(409, 'This request doesn’t need its publication approved');
+  if (cr.status !== 'draft' && !OPEN.includes(cr.status)) throw new HttpError(409, `This request is ${cr.status}`);
+  if (typeof fingerprint !== 'string' || !fingerprint) throw new HttpError(400, 'Say which version you reviewed (its fingerprint)');
+  const p = await publicationOf(cr);
+  if (p.fingerprint !== fingerprint) throw new HttpError(409, 'This request changed after you reviewed it. Review what it publishes again.');
+  cr.privacyCleared = { by: actor.id, at: clock.iso(), fingerprint, title: p.title, kgcl: p.kgcl };
+  cr.timeline.push(ev('comment', 'approved exactly what this request publishes', actor.id));
+  const held = cr.heldForPublication;
+  cr.heldForPublication = undefined;
+  cr.privacyFindings = undefined;
+  if (held && cr.status === 'needs-work') {
+    setStatus(cr, 'approved', 'approved again once its publication was approved', actor.id);
+    save(cr);
+    return merge(cr, actor);
+  }
+  return save(cr);
 }
 
 /** Merge into the working draft. Re-applies the edits on the current head (a rebase). */
@@ -422,35 +494,26 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
   if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   const project = getProject(cr.ontologyId);
-  const author = getUser(cr.authorId);
-  const working = await ontologyStore.working(project);
-  let after: OntologyGraph;
-  // The ontology is published, but use cases may be private. A request drafted from them is checked
-  // here (including ones queued before these checks existed), and held back rather than rewritten:
-  // a person edits it, or confirms nothing in it is private, before it's published.
-  const secrets = secretsOf(cr);
-  if (secrets) {
-    const findings = privacyFindings(cr, secrets);
-    if (findings.length && cr.privacyCleared?.fingerprint !== publicationFingerprint(cr)) {
-      cr.privacyFindings = findings;
-      const what = [...new Set(findings.map((f) => (f.kind === 'name' ? 'a person’s name' : 'a use case title')))].join(' and ');
-      setStatus(cr, 'needs-work', `held back before merging: it would publish ${what} (in ${findings.map((f) => f.where).join(', ')}). Edit it, or an editor can confirm nothing in it is private.`);
-      return save(cr);
-    }
-  }
-  cr.privacyFindings = undefined;
+  let p: Awaited<ReturnType<typeof publicationOf>>;
   try {
-    // No author: dcterms:contributor would publish the requester's name on every new term.
-    // Who asked for each change stays in the change request.
-    after = applyChangeOps(working, cr.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
-    scrubGeneratedProvenance(after);
+    p = await publicationOf(cr, project);
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);
   }
+  // Drafted from use cases: published only as an editor approved it, byte for byte.
+  if (needsPublicationApproval(cr) && cr.privacyCleared?.fingerprint !== p.fingerprint) {
+    const pv = await publicationPreview(cr);
+    cr.privacyFindings = [...pv.hints, ...pv.statements.filter((st) => st.hint).map((st) => ({ where: `${st.predicate} of ${st.subject}`, kind: st.hint! }))];
+    cr.heldForPublication = true;
+    cr.privacyCleared = undefined;
+    setStatus(cr, 'needs-work', 'held back before merging: it was drafted from use cases, so an editor must approve exactly what it publishes first.');
+    return save(cr);
+  }
+  cr.privacyFindings = undefined;
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
-  const title = cr.title;
-  cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: 'Concord' });
+  cr.kgcl = p.kgcl;
+  cr.mergedCommit = await ontologyStore.commitWorking(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
   if (project.stage === 'discovery') {
     project.stage = 'drafting';
@@ -501,12 +564,7 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
     },
   });
   const compiled = value.terms.length ? proposalToOps(working, value.terms, `change request #${cr.number}`) : { ops: cr.ops, warnings: ['The offline assistant could not revise these edits; please edit them directly.'] };
-  // A request drafted from use cases keeps their titles and authors out of the revision too.
-  if (secrets) {
-    const redacted = redactOps(compiled.ops, secrets);
-    compiled.ops = redacted.ops;
-    if (redacted.dropped.length) compiled.warnings = [...compiled.warnings, `Left out ${redacted.dropped.join(', ')}: the name would publish a use case title or a person's name.`];
-  }
+  // Nothing is rewritten: a request drafted from use cases is published only once an editor approves exactly what it publishes.
   cr.timeline.push(ev('ai-analysis', `AI revision requested by ${actor.name}: “${instruction}”. ${value.rationale}`, actor.id));
   if (value.competencyQuestionTests.length) cr.tests = value.competencyQuestionTests;
   cr.warnings = compiled.warnings;
