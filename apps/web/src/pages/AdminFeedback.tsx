@@ -13,10 +13,10 @@ function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
   return Array.isArray(v) ? v.join('; ') : String(v);
 }
 
-/** The tester's opt-in public summary: its issue, or where it is in the queue, with a retry when it gave up. */
+/** The tester's opt-in public summary: its issue, or where it is in the queue, with actions when it needs an administrator. */
 function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
   const [state, setState] = useState(p.state);
-  const retry = useAction(async () => setState((await api.retryFeedbackPublication(p.id!)).state));
+  const resolve = useAction(async (action: 'check' | 'repost') => setState((await api.resolveFeedbackPublication(p.id!, action)).state));
   return (
     <span className="block text-xs" onClick={(e) => e.stopPropagation()} title={p.summary}>
       {p.issue ? (
@@ -26,12 +26,19 @@ function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication
       ) : (
         <span className="text-muted">Public summary: {state}</span>
       )}
-      {state === 'failed' && (
-        <Button size="sm" variant="ghost" loading={retry.pending} onClick={() => void retry.run()} title={p.lastError}>
-          Retry
-        </Button>
+      {state === 'needs-admin' && (
+        <span className="mt-1 block">
+          {p.lastError && <span className="block text-muted">{p.lastError}</span>}
+          {p.marker && <span className="block text-muted">Search GitHub for {p.marker} before posting again.</span>}
+          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('check')}>
+            Check GitHub again
+          </Button>
+          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('repost')}>
+            Post again
+          </Button>
+        </span>
       )}
-      <InlineError error={retry.error} />
+      <InlineError error={resolve.error} />
     </span>
   );
 }

@@ -640,7 +640,12 @@ export const PUBLIC_NOTICE =
   'Only the summary below is posted, exactly as shown, as a GitHub issue on the Concord repository, which may be public. Your answers, name, email, role and the conversation are not posted. Don’t include names, organisations or other details that identify anyone. Links and email addresses are removed.';
 export const PUBLIC_SUMMARY_MAX = 500;
 
-export type FeedbackPublicationState = 'queued' | 'sending' | 'unknown' | 'filed' | 'duplicate' | 'failed' | 'withdrawing' | 'withdrawn';
+/**
+ * queued → sending → filed; a send whose outcome is unknown → unknown (searched for, never re-posted
+ * automatically) → filed or needs-admin. Withdrawal: → withdrawing (if it may be posted) → withdrawn,
+ * which is terminal.
+ */
+export type FeedbackPublicationState = 'queued' | 'sending' | 'unknown' | 'filed' | 'needs-admin' | 'withdrawing' | 'withdrawn';
 
 export interface FeedbackPublicationStatus {
   state: FeedbackPublicationState;
@@ -651,6 +656,8 @@ export interface FeedbackPublicationStatus {
   id?: string;
   summary?: string;
   lastError?: string;
+  /** The hidden marker to look for on GitHub before posting again (needs-admin only). */
+  marker?: string;
 }
 
 /**

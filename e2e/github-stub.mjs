@@ -14,13 +14,14 @@ http
       const url = new URL(req.url ?? '/', 'http://stub');
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
       if (req.method === 'GET' && url.pathname === '/__issues') return send(res, 200, issues);
+      if (req.method === 'GET' && url.pathname === '/user') return send(res, 200, { login: 'concord-e2e-bot' });
       const list = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues$/);
       const one = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
-      if (list && req.method === 'GET') return send(res, 200, issues.map((i) => ({ number: i.number, html_url: i.html_url, body: i.body })));
+      if (list && req.method === 'GET') return send(res, 200, [...issues].reverse().map((i) => ({ number: i.number, html_url: i.html_url, title: i.title, body: i.body, created_at: i.created_at, user: { login: 'concord-e2e-bot' } })));
       if (list && req.method === 'POST') {
         const number = issues.length + 1;
         const html_url = `https://github.com/${list[1]}/${list[2]}/issues/${number}`;
-        issues.push({ number, html_url, state: 'open', repo: `${list[1]}/${list[2]}`, authorized: req.headers.authorization === 'Bearer e2e-feedback-token', ...JSON.parse(data) });
+        issues.push({ number, html_url, state: 'open', created_at: new Date().toISOString(), repo: `${list[1]}/${list[2]}`, authorized: req.headers.authorization === 'Bearer e2e-feedback-token', ...JSON.parse(data) });
         return send(res, 201, { number, html_url });
       }
       if (one && req.method === 'PATCH' && issues[Number(one[3]) - 1]) {

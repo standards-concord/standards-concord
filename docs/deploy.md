@@ -50,7 +50,7 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google. Create an OAuth client (Web application) in Google Cloud with redirect URI `<vercel-url>/auth/google/callback`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Sign in with GitHub. Create an OAuth app with callback URL `<vercel-url>/auth/github/callback`. |
 | `GITHUB_PUBLISH_TOKEN`, `GITHUB_PUBLISH_OWNER` | Push each ontology's git history and release tags to a GitHub repository on release. |
-| `FEEDBACK_GITHUB_TOKEN` | Lets testers opt in to posting a short summary of their feedback as a GitHub issue (see [public feedback summaries](feedback-issues.md)). A fine-grained token for this one repository with **Issues: Read and write**. Optional: `FEEDBACK_GITHUB_REPO` (default `jeswr/standards-concord`), `FEEDBACK_ISSUES_PER_HOUR` (default 30, rolling, shared by all server processes). |
+| `FEEDBACK_GITHUB_TOKEN` | Lets testers opt in to posting a short summary of their feedback as a GitHub issue (see [public feedback summaries](feedback-issues.md)). A fine-grained token for this one repository with **Issues: Read and write**. Optional: `FEEDBACK_GITHUB_REPO` (default `jeswr/standards-concord`), `FEEDBACK_ISSUES_PER_HOUR` (default 10, rolling, shared by all server processes). |
 | `RECALL_API_KEY` | The live Google Meet co-facilitator bot (Recall.ai). Its webhook comes in through Vercel. |
 | `OPENAI_API_KEY` with `STT_PROVIDER=openai` | Voice feedback in browsers without built-in speech recognition (Firefox). |
 | `DEMO_MODE`, `ALLOW_PUBLIC_RESET` | Demo sign-in and the simulated working group (on by default); whether any tester can reset the shared demo (off). |

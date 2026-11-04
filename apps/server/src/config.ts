@@ -67,8 +67,8 @@ export const config = {
     repo: process.env.FEEDBACK_GITHUB_REPO || 'jeswr/standards-concord',
     /** Overridable for tests. */
     apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
-    /** Cap on new issues in any rolling hour, across all server processes; the rest are posted later. */
-    perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 30),
+    /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
+    perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
   },
 
   meetBot: {

@@ -12,7 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
-import { checkPublicSummary, issuesEnabled, processWithin, publicationFor, queuePublication, retryPublication, status, withdrawPublication } from '../services/feedbackIssues.js';
+import { checkPublicSummary, issuesEnabled, processWithin, publicationFor, queuePublication, resolvePublication, marker, status, withdrawPublication } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -522,17 +522,15 @@ export function apiRouter(): Router {
     if (summary === undefined) return void res.status(201).json(sub);
     // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
     const { withdrawToken } = queuePublication(sub.id, summary);
-    const queued = publicationFor(sub.id);
-    // A duplicate waits on the original's issue.
-    await processWithin(queued.duplicateOf ?? queued.id);
-    res.status(201).json({ ...sub, publication: { ...status(publicationFor(sub.id)), withdrawToken } });
+    await processWithin(sub.id);
+    res.status(201).json({ ...sub, publication: { ...status(publicationFor(sub.id)!), withdrawToken } });
   });
   r.post('/feedback/:id/publication/withdraw', async (req, res) => {
     res.json(await withdrawPublication(String(req.params.id), req.body?.token));
   });
-  r.post('/feedback/publications/:id/retry', (req, res) => {
+  r.post('/feedback/:id/publication/resolve', (req, res) => {
     feedbackAdmin(req);
-    res.json(retryPublication(String(req.params.id)));
+    res.json(resolvePublication(String(req.params.id), req.body?.action === 'repost' ? 'repost' : 'check'));
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
@@ -545,7 +543,7 @@ export function apiRouter(): Router {
     res.json(
       listFeedback().map((s) => {
         const pub = publicationFor(s.id);
-        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError } } : s;
+        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError, marker: pub.state === 'needs-admin' ? marker(pub.pubId) : undefined } } : s;
       }),
     );
   });

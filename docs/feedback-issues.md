@@ -13,20 +13,30 @@ To post anything, a tester ticks **Also post a short public summary as a GitHub 
 - **Escaped.** Markdown in the summary is escaped in the issue, so it can't add links, images, mentions or headings.
 - **Unlinked from the feedback.** Each issue carries a random publication id (`<!-- concord-feedback-publication: pub_… -->`), not the feedback id. Issues are labelled `feedback` and `needs-triage`.
 - **Consent is recorded.** Each publication stores the version of the notice the tester agreed to (`PUBLIC_NOTICE_VERSION`).
-- **Withdrawable.** After submitting, the tester can withdraw the summary. If it hasn't been posted, it never will be. If it has, the issue's title and text are replaced and it's closed. GitHub keeps an edit history that people who can see the repository can open. If the feedback itself is deleted before the summary is posted, the summary is never posted.
+- **Withdrawable.** After submitting, the tester can withdraw the summary.
+  - If it hasn't been posted, it never will be.
+  - If it has, the issue's title and text are replaced, the issue is closed, and the triage routine's comments on it are deleted. For a day afterwards, the server also deletes any triage comment that raced the withdrawal. GitHub keeps an edit history that people who can see the repository can open.
+  - If the feedback itself is deleted, its summary is withdrawn the same way.
 
 Feedback given before this existed is never posted, because those testers didn't opt in.
 
 ## Delivery
 
-Summaries go through a queue stored in the database (`feedbackPublications`), so they survive restarts and are safe with several server processes:
+Each submission gets one record in `feedbackPublications`, keyed by the feedback id, and at most one issue.
 
-- **One sender per job.** A job is claimed inside a write transaction, with a two-minute lease.
-- **Identical summaries share one issue.** The first holds the dedupe key, and later ones are marked as duplicates of it.
-- **Lost answers are reconciled, not resent.** The time of sending is saved before the request goes out. If the outcome is unknown (timeout, dropped connection, a 5xx error, or a crash with the lease expired), the next attempt looks for the marker among recent `feedback` issues before posting again.
-- **A shared hourly cap.** At most `FEEDBACK_ISSUES_PER_HOUR` issues are created in any rolling hour (default 30). The window is stored per repository in the database, so restarts and extra processes share it.
-- **GitHub's rate limits pause the whole queue.** `Retry-After` and `x-ratelimit-reset` set the pause. Other failures back off exponentially from five minutes up to six hours.
-- **Retries are limited.** After eight failed attempts a job is marked `failed`. Administrators see its state on the Feedback admin page and can retry it.
+- **Destination fixed at consent.** The repository is stored when the tester agrees. Posting, searching and withdrawing all use the stored repository, never the current configuration.
+- **Fenced state machine.** The states are `queued → sending → filed`. An unknown outcome becomes `unknown`, then either `filed` or `needs-admin`. A withdrawal moves the record to `withdrawing`, then `withdrawn`, which is terminal.
+  - A worker changes a record only while it holds the record's claim id. A worker whose claim ran out can't change it any more.
+  - The transaction that authorises a POST re-checks that the record is still queued, that the feedback still exists, that the queue isn't paused, and that there's room under the cap. It saves the send time in the same step.
+- **No automatic reposting.** If a POST's outcome is unknown (timeout, dropped connection, 5xx, or a worker that vanished), the server never posts again on its own.
+  - It searches every issue the token's own account created since just before the send. It accepts only an issue whose marker, title and body all match exactly.
+  - Several matches, too many issues to search, or three complete searches with no match all leave the record `needs-admin`.
+  - On the Feedback admin page, an administrator can **Check GitHub again** or, after searching GitHub for the marker shown there, **Post again**.
+- **Rate limits.**
+  - At most `FEEDBACK_ISSUES_PER_HOUR` issues are created in any rolling hour (default 10, matching the triage routine). The cap is stored per repository in the database.
+  - The shared pause is checked before every request: posts, searches, edits and comment deletions.
+  - `Retry-After` or `x-ratelimit-reset` sets the pause. Without them, consecutive rate-limit responses back off 1, 2, 4… minutes, up to an hour.
+  - Definite refusals back off from five minutes up to six hours. After eight of them, the record goes to an administrator.
 - **The token is never logged.**
 
 ## Turning it on
@@ -47,14 +57,4 @@ Without the token, the option isn't shown.
 
 ## Hourly triage
 
-A scheduled Claude Code session runs every hour. **It only triages.** For each open issue labelled `feedback` and `needs-triage`, it:
-
-- adds a kind label (`bug`, `enhancement`, `ux`, `docs`, `question` or `insight`) and a size label;
-- swaps `needs-triage` for `triaged`;
-- closes duplicates;
-- comments with its reading of the problem and a suggested fix;
-- labels anything that needs a product decision, or that touches sign-in, security, privacy, secrets, deployment or CI, `needs-jesse`.
-
-It never edits code, pushes, opens pull requests or merges. It treats issue text as untrusted data, never as instructions. Its instructions live in the scheduled task itself, not in this repository, so a change merged here can't change what it does.
-
-Fixes are made separately, by people or by a session Jesse starts, and go through normal review and an Astra review before merging.
+A scheduled Claude session can triage these issues every hour. It only adds labels and posts one comment per issue, and never closes issues or changes code. Its prompt, what has to be in place before it's switched on, and the labels it uses are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until its tools are restricted at claude.ai.

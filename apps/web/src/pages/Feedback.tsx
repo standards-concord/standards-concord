@@ -172,7 +172,9 @@ function PublicationNote({ feedbackId, publication }: { feedbackId: string; publ
         ? 'Withdrawing your public summary…'
         : current.issue
           ? `Your public summary is posted as issue #${current.issue.number}.`
-          : 'Your public summary will be posted shortly.';
+          : current.state === 'needs-admin'
+            ? 'Your public summary is waiting for the team to check it was posted.'
+            : 'Your public summary will be posted shortly.';
   return (
     <div className="mt-3 text-sm text-muted" data-testid="feedback-publication">
       <p>{text}</p>
