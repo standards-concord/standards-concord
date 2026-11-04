@@ -36,7 +36,7 @@ export function useOntology() {
 export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
   // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
-  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query'], ['connect', 'Connect an agent']] },
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate'], ['connect', 'Connect an agent']] },
   // What agents report is requirements input, next to use cases and meetings.
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
@@ -125,7 +125,9 @@ export function OntologyLayout() {
 
   const ctx = useMemo<OntologyCtx | undefined>(() => {
     const o = state.data;
-    if (!o) return undefined;
+    // While another ontology loads, the previous one's data is still here: wait rather than pair
+    // the new id with the old ontology's metadata (pages key drafts and defaults on both).
+    if (!o || (o.id !== id && o.slug !== id)) return undefined;
     const uid = session?.user?.id;
     const myRoles = o.members?.find((m) => m.userId === uid)?.roles ?? [];
     const users = new Map((o.members ?? []).map((m) => [m.userId, m.user]));
@@ -141,7 +143,9 @@ export function OntologyLayout() {
     };
   }, [state.data, state.reload, view, id, session?.user?.id, session?.user?.isPlatformAdmin]);
 
-  if (state.error && !state.data)
+  // No context for this ontology and its request has failed (even if a previous ontology's data
+  // is still held): show the error with Retry rather than loading forever.
+  if (state.error && !state.loading && !ctx)
     return (
       <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
         <ErrorCard error={state.error} onRetry={state.reload} />
