@@ -142,6 +142,49 @@ describe('ontology model: cardinality semantics', () => {
     expect(slot(m, 'Owner', 'p')!.conflict).toBeTruthy();
   });
 
+  it('flags contradictory qualified counts on a datatype', async () => {
+    const ttl = `@prefix : <${NS}> . @prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      <https://example.org/t> a owl:Ontology . :p a owl:DatatypeProperty .
+      :Owner a owl:Class ; rdfs:subClassOf
+        [ a owl:Restriction ; owl:onProperty :p ; owl:onDataRange xsd:integer ; owl:minQualifiedCardinality "2"^^xsd:nonNegativeInteger ] ,
+        [ a owl:Restriction ; owl:onProperty :p ; owl:onDataRange xsd:integer ; owl:maxQualifiedCardinality "1"^^xsd:nonNegativeInteger ] .`;
+    const m = buildModel((await OntologyGraph.fromTurtle(ttl)).view());
+    const s = slot(m, 'Owner', 'p')!;
+    expect(s.conflict).toBeTruthy();
+    expect(s.targets.find((t) => t.filler.endsWith('#integer'))).toMatchObject({ min: 2, max: 1 });
+  });
+
+  const disjointPets = () => [cls('Animal'), { ...cls('Cat', { sup: ['Animal'] }), disjointWith: [I('Dog')] }, cls('Dog', { sup: ['Animal'] })];
+
+  it('still sees disjoint types when a broader restriction is also stated, in any order', () => {
+    const functionalP = prop('p', { domain: [I('Owner')], characteristics: ['functional'] });
+    const rs = [r('p', 'some', 'Animal'), r('p', 'some', 'Cat'), r('p', 'some', 'Dog')];
+    for (const order of [rs, [rs[1], rs[0], rs[2]], [rs[2], rs[1], rs[0]]]) {
+      const m = model([...disjointPets(), cls('Owner', { r: order })], [functionalP]);
+      expect(slot(m, 'Owner', 'p')!.conflict).toBeTruthy();
+    }
+  });
+
+  it('adds up disjoint minimums against a maximum on a broader type', () => {
+    const m = model([...disjointPets(), cls('Owner', { r: [r('p', 'min', 'Cat', 2), r('p', 'min', 'Dog', 2), r('p', 'max', 'Animal', 3)] })], [prop('p', { domain: [I('Owner')] })]);
+    const s = slot(m, 'Owner', 'p')!;
+    expect(s.min).toBe(4);
+    expect(s.targets.find((t) => t.filler === I('Animal'))).toMatchObject({ min: 4, max: 3 });
+    expect(s.conflict).toBeTruthy();
+  });
+
+  it('works out functional properties the same way whatever the order, even through a cycle', () => {
+    const props = [prop('a', { domain: [I('Owner')], superProperties: [I('b'), I('z')] }), prop('b', { domain: [I('Owner')], superProperties: [I('a')] }), prop('z', { characteristics: ['functional'] })];
+    for (const rs of [
+      [r('a', 'min', undefined, 2), r('b', 'min', undefined, 2)],
+      [r('b', 'min', undefined, 2), r('a', 'min', undefined, 2)],
+    ]) {
+      const m = model([cls('Owner', { r: rs })], rs[0].property === I('a') ? props : [...props].reverse());
+      expect(slot(m, 'Owner', 'a')!.conflict).toBeTruthy();
+      expect(slot(m, 'Owner', 'b')!.conflict).toBeTruthy();
+    }
+  });
+
   it('flags a qualified minimum above a maximum that covers it', () => {
     const m = model([...animals, cls('Owner', { r: [r('hasPet', 'min', 'Cat', 3), r('hasPet', 'max', 'Animal', 2)] })], [hasPet]);
     expect(slot(m, 'Owner', 'hasPet')!.conflict).toMatch(/at least 3/);
@@ -215,6 +258,22 @@ describe('ontology model: intersections', () => {
   });
 });
 
+describe('ontology model: unknown properties and cycles', () => {
+  it('keeps the warning for an intersection that uses an undeclared property', async () => {
+    const ttl = `@prefix : <${NS}> . @prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      <https://example.org/t> a owl:Ontology . :Known a owl:Class .
+      :Owner a owl:Class ; rdfs:subClassOf [ owl:intersectionOf ( :Known [ a owl:Restriction ; owl:onProperty :p ; owl:minCardinality "2"^^xsd:nonNegativeInteger ] ) ] .`;
+    const m = buildModel((await OntologyGraph.fromTurtle(ttl)).view());
+    expect(m.unsummarised(I('Owner'))).toHaveLength(1);
+  });
+
+  it('gives a subclass cycle with no other parent a place in the hierarchy', () => {
+    const m = model([cls('Root'), cls('A', { sup: ['B'] }), cls('B', { sup: ['A'] })], []);
+    expect(m.roots).toContain(I('Root'));
+    expect(m.roots.filter((x) => x === I('A') || x === I('B'))).toHaveLength(1);
+  });
+});
+
 describe('ontology model: performance', () => {
   it('derives slots quickly for a deep hierarchy with many restrictions', () => {
     const fillers = Array.from({ length: 10 }, (_, i) => cls(`F${i}`));
@@ -224,9 +283,26 @@ describe('ontology model: performance', () => {
     const t = performance.now();
     for (const c of m.classes.keys()) m.ownSlots(c);
     m.incoming(I('F0'));
-    // About 65 ms locally; it took about 2 s before restrictions were merged level by level.
+    // Tens of milliseconds locally; it took about 2 s when every restriction was compared with every other.
     expect(performance.now() - t).toBeLessThan(400);
     expect(slotCard(slot(m, 'C399', 'p')!)).toBe('1..*');
+  });
+
+  it('derives slots quickly when every level adds new properties', () => {
+    const props = [];
+    const chain = [];
+    for (let i = 0; i < 400; i++) {
+      const own = Array.from({ length: 10 }, (_, j) => prop(`p${i}x${j}`, { domain: [I(`C${i}`)], range: [I('F')] }));
+      props.push(...own);
+      chain.push(cls(`C${i}`, { sup: i ? [`C${i - 1}`] : [], r: own.slice(0, 3).map((p) => ({ property: p.iri, kind: 'some' as const, filler: I('F') })) }));
+    }
+    const m = model([cls('F'), ...chain], props);
+    const t = performance.now();
+    for (const c of m.classes.keys()) m.ownSlots(c);
+    m.incoming(I('F'));
+    // Tens of milliseconds locally; building every inherited slot at every level took about 3 s.
+    expect(performance.now() - t).toBeLessThan(400);
+    expect(m.allSlots(I('C399')).flatMap((g) => g.slots)).toHaveLength(4000);
   });
 });
 

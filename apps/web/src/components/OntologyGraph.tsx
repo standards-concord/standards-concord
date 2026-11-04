@@ -32,7 +32,6 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
   const ref = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const [ready, setReady] = useState(false);
-  const [animated, setAnimated] = useState<{ layout?: boolean; centre?: boolean }>({});
   const [zoom, setZoom] = useState(1);
   const [layout, setLayout] = useState<GraphLayout>('hierarchy');
   const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS);
@@ -172,6 +171,13 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
         if (p) onSelectRef.current?.(p);
       });
       cy.on('zoom', () => setZoom(cy.zoom()));
+      // Count drawn frames on the element, so tests can tell an animation (many frames) from
+      // an immediate change (one or two) without relying on what the code says it did.
+      let frames = 0;
+      cy.on('render', () => {
+        const host = ref.current?.parentElement;
+        if (host) host.dataset.frames = String(++frames);
+      });
       // Fitting a handful of nodes would blow them up; keep text at a readable size.
       const clampFit = () => {
         if (cy.zoom() > 1.15) {
@@ -204,7 +210,6 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
           ? { name: 'cose', padding: 30, animate: !reduce, animationDuration: 400, nodeRepulsion: () => 9000, idealEdgeLength: () => 110, randomize: false }
           : { name: 'concentric', padding: 30, animate: !reduce, animationDuration: 300, concentric: (n: { id: () => string }) => 10 - model.depth(n.id()), levelWidth: () => 1, minNodeSpacing: 30 };
     cy.layout(opts as never).run();
-    setAnimated((a) => ({ ...a, layout: !reduce }));
   }, [layout, ready, positions, model]);
 
   // Selection: highlight the neighbourhood and bring it into view.
@@ -228,7 +233,6 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
       const reduce = prefersReducedMotion();
       if (reduce) cy.center(n);
       else cy.animate({ center: { eles: n }, duration: 300 });
-      setAnimated((a) => ({ ...a, centre: !reduce }));
     }
   }, [selected, ready, elements]);
 
@@ -275,9 +279,6 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
         data-testid="ontology-graph"
         data-ready={ready ? 'true' : 'false'}
         data-motion={prefersReducedMotion() ? 'reduced' : 'full'}
-        // Whether the last layout and recentring were animated, for the reduced-motion tests.
-        data-layout-animated={animated.layout === undefined ? undefined : String(animated.layout)}
-        data-centre-animated={animated.centre === undefined ? undefined : String(animated.centre)}
       >
         {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
         <div ref={ref} className="size-full" />

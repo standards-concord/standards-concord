@@ -442,6 +442,24 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(page.getByRole('button', { name: /^Show more classes/ })).toHaveCount(0);
   });
 
+  test('classes in a subclass cycle still appear in the tree', async ({ page }) => {
+    await stub(page, [cls('Root'), cls('A', ['B']), cls('B', ['A'])]);
+    await page.goto(`${base}?term=${encodeURIComponent(NS + 'B')}`);
+    await expect(tree(page).getByRole('treeitem', { name: /^B\b/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(tree(page).getByRole('treeitem', { name: /^Root\b/ })).toBeVisible();
+  });
+
+  test('every diagram edge of a contradictory property shows the conflict', async ({ page }) => {
+    const classes = [cls('Animal'), { ...cls('Cat', ['Animal']), disjointWith: [NS + 'Dog'] }, cls('Dog', ['Animal']), cls('Owner', [], [
+      { property: NS + 'hasPet', kind: 'some', filler: NS + 'Cat' },
+      { property: NS + 'hasPet', kind: 'some', filler: NS + 'Dog' },
+    ])];
+    await stub(page, classes, [prop('hasPet', { characteristics: ['functional'] })]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    for (const target of ['Cat', 'Dog']) await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Owner"][data-target="${NS}${target}"]`)).toContainText('conflict');
+  });
+
   test('contradictions and qualified constraints are shown, not merged', async ({ page }) => {
     const classes = [
       cls('Animal'),
@@ -490,20 +508,36 @@ test.describe('large and unusual ontologies (stubbed)', () => {
 });
 
 test.describe('reduced motion', () => {
+  // The graph counts the frames it draws: an animation draws many, an immediate change one or two.
+  const framesDuring = async (page: Page, action: () => Promise<void>) => {
+    const g = page.getByTestId('ontology-graph');
+    await page.waitForTimeout(800);
+    const before = Number(await g.getAttribute('data-frames'));
+    await action();
+    await page.waitForTimeout(800);
+    return Number(await g.getAttribute('data-frames')) - before;
+  };
+
   for (const motion of ['reduce', 'no-preference'] as const) {
     test(`the graph ${motion === 'reduce' ? 'does not animate' : 'animates'} with reduced motion ${motion === 'reduce' ? 'on' : 'off'}`, async ({ page }) => {
-      const animated = String(motion !== 'reduce');
       await page.emulateMedia({ reducedMotion: motion });
       await page.goto(`${base}?view=graph`);
       const g = page.getByTestId('ontology-graph');
       await expect(g).toHaveAttribute('data-ready', 'true');
       await expect(g).toHaveAttribute('data-motion', motion === 'reduce' ? 'reduced' : 'full');
-      await page.getByRole('combobox', { name: 'Graph layout' }).selectOption('force');
-      await expect(g).toHaveAttribute('data-layout-animated', animated);
-      // Selecting a class recentres on it.
       await page.getByRole('button', { name: 'Terms' }).click();
-      await tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click();
-      await expect(g).toHaveAttribute('data-centre-animated', animated);
+      const layout = await framesDuring(page, () => page.getByRole('combobox', { name: 'Graph layout' }).selectOption('radial').then(() => {}));
+      // Selecting a class recentres on it.
+      const centre = await framesDuring(page, () => tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click());
+      if (motion === 'reduce') {
+        // Two frames locally: the change and a redraw.
+        expect(layout).toBeLessThanOrEqual(3);
+        expect(centre).toBeLessThanOrEqual(3);
+      } else {
+        // Eight to eleven frames locally.
+        expect(layout).toBeGreaterThanOrEqual(6);
+        expect(centre).toBeGreaterThanOrEqual(6);
+      }
       await expectNoCrash(page);
     });
   }

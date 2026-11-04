@@ -74,11 +74,12 @@ function slotLine(s: Slot, label: Labeler) {
 
 /**
  * The classes an object property slot links to, each with its own bounds: the range classes,
- * plus any class named in a qualified restriction (e.g. "0..1 Cat" and "1..* Dog").
+ * plus any class named in a qualified restriction (e.g. "0..1 Cat" and "1..* Dog"). If the
+ * property's constraints contradict each other, every edge shows the conflict.
  */
 export function slotTargets(model: OntologyModel, s: Slot): { target: string; card: string }[] {
   if (s.property.kind !== 'objectProperty') return [];
-  return s.targets.filter((t) => model.classes.has(t.filler)).map((t) => ({ target: t.filler, card: t.conflict ? 'conflict' : cardText(t.min, t.max) }));
+  return s.targets.filter((t) => model.classes.has(t.filler)).map((t) => ({ target: t.filler, card: s.conflict || t.conflict ? 'conflict' : cardText(t.min, t.max) }));
 }
 
 /** Classes within `hops` links of `focus`, following the relationships that are drawn. */
