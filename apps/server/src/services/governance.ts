@@ -182,10 +182,34 @@ export function effectiveRule(policy: GovernancePolicy, level: ChangeLevel, kind
   return base;
 }
 
+/**
+ * Order of decisions: by the sequence number a change request gives each review and vote, which the
+ * clock can't disturb; older ones without it (and releases' votes) by time, before any that have one.
+ */
+export const decisionOrder = (a: { seq?: number; at: string }, b: { seq?: number; at: string }) => (a.seq ?? 0) - (b.seq ?? 0) || a.at.localeCompare(b.at);
+
+/**
+ * Which reviews of a change request count in its current round, and which are stale.
+ *
+ * Each person's latest decision counts if it was given in the current round. A round moves on when the
+ * author resubmits or the edits change, so approvals and requests for changes from an earlier round stop
+ * counting and the reviewer is asked again (as GitHub dismisses stale reviews). An objection is different:
+ * it is a formal position the author can't dismiss, so it stands until the objector changes their review.
+ */
+export function reviewsInRound<T extends Review>(reviews: T[], round: number, roundOf: (r: T) => number): { counted: T[]; stale: Set<string> } {
+  const ordered = reviews.map((r, i) => ({ r, i, n: roundOf(r) })).sort((a, b) => a.n - b.n || decisionOrder(a.r, b.r) || a.i - b.i);
+  const latest = new Map<string, { r: T; n: number }>();
+  for (const x of ordered) if (x.r.decision !== 'comment') latest.set(x.r.userId, x);
+  const counted = [...latest.values()].filter((x) => x.n === round || x.r.decision === 'object').map((x) => x.r);
+  const keep = new Set(counted.map((r) => r.id));
+  const stale = new Set(ordered.filter((x) => x.r.decision !== 'comment' && x.n !== round && !keep.has(x.r.id)).map((x) => x.r.id));
+  return { counted, stale };
+}
+
 /** Latest review per person (a later approval supersedes an earlier request for changes). */
 function latestReviews(reviews: Review[]): Review[] {
   const byUser = new Map<string, Review>();
-  for (const r of [...reviews].sort((a, b) => a.at.localeCompare(b.at))) {
+  for (const r of [...reviews].sort(decisionOrder)) {
     if (r.decision === 'comment') continue;
     byUser.set(r.userId, r);
   }
@@ -233,7 +257,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
       .filter((m) => m.roles.some((role) => r.vote!.voterRoles.includes(role)) && !m.roles.every((x) => x === 'agent'))
       .map((m) => m.userId);
     const latestVotes = new Map<string, Vote>();
-    for (const v of [...input.votes].sort((a, b) => a.at.localeCompare(b.at))) if (eligibleIds.includes(v.userId)) latestVotes.set(v.userId, v);
+    for (const v of [...input.votes].sort(decisionOrder)) if (eligibleIds.includes(v.userId)) latestVotes.set(v.userId, v);
     const vs = [...latestVotes.values()];
     const yes = vs.filter((v) => v.choice === 'yes').length;
     const no = vs.filter((v) => v.choice === 'no').length;

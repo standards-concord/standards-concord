@@ -80,7 +80,10 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Votes on a release | ❌ | Needs a release level whose rule votes; same pattern as the change vote |
 | An objection from a veto role rejects the change | ✅ | governance-flow |
 | Lazy consensus and ODI final say outcomes | ❌ | Policy text is checked (ia); outcomes are covered by API tests only |
-| Resubmit after "request changes" | 🔜 | The next PR fixes Resubmit (it used to bounce straight back to Needs work) and adds the regression test |
+| Resubmit after "request changes" starts a new review round: earlier approvals and requests for changes stop counting (objections stand), reviewers are asked again; reviewers can approve from Needs work | ✅ | change-requests (API: `review-rounds.test.ts`, `governance.test.ts`) |
+| A veto, a request for changes or a lost approval after approval stops the merge; decisions wait while a merge is under way | ✅ | API only: `review-rounds.test.ts` (the race needs a paused merge, which a browser can't arrange) |
+| Decisions name the round they were made on; one made on an older version is refused | ✅ | API: `review-rounds.test.ts` (the page always sends the round on screen) |
+| Authors can't request changes to or object to their own edits | ✅ | API: `review-rounds.test.ts` |
 | Ownership transfer (owner decides) | ✅ | governance-flow |
 | Ownership transfer by member vote or ODI approval | ❌ | |
 | Simulated participants and clock | ✅ | alpha, ia, account |
@@ -125,6 +128,12 @@ Each fix has a test that fails without it.
 | The chat box was named by its placeholder, so its name changed to "Listening…" while dictating | Stable `aria-label` | requirements: "answers can be spoken" |
 | Feedback answer fields had no names | Named after their question | feedback: "guided feedback…" |
 | Section tabs could open the wrong page after a quick click (stale remembered page; the ia.spec flake) | The target is looked up at click time | ia: "each section remembers the page you were last on" |
-| Resubmit did nothing after "request changes" | Next PR: earlier requests for changes become stale on resubmit; reviewers can approve from Needs work | Next PR (change-requests) |
+| Resubmit did nothing after "request changes" (the old review sent it straight back to Needs work) | Resubmitting starts a new review round, like GitHub dismissing stale reviews; reviewers can approve from Needs work | change-requests: "resubmitting starts a new review round…"; review-rounds.test.ts, governance.test.ts |
+| An approved request stayed approved, and could be merged, after an owner's veto or after its only approver switched to an objection; a veto during a merge was overtaken by it | Approval needs governance to still say "approved" (unless a vote passed); merges go through #28's lock and revision check | review-rounds.test.ts |
+| Saving the same edits again, even with keys in another order, reset everyone's reviews and could erase a ballot | Only a real change to the edits (compared in canonical form) starts a new round; votes stay with the edits they were cast on | review-rounds.test.ts |
+| A decision made on a page showing an older version landed in the new round | Decisions carry the round they were made on, and a mismatch is a 409 | review-rounds.test.ts |
+| New edits made during review inherited the old review period | A real edit starts its own review period | review-rounds.test.ts |
+| An author could request changes on their own request and resubmit, to reset everyone's reviews | Writers can't request changes or object to their own edits | review-rounds.test.ts |
+| With the clock moved back, an earlier approval hid a later veto | Decisions are ordered by a per-request sequence number, not the clock | governance.test.ts |
 | Buttons nested in links (Hub, Shell, Feedback, Walkthrough, OAuth consent, Overview) | Routed to the IA thread, after #37 | |
 | Browse tree leaves expose disabled, unnamed Collapse/Expand buttons | Routed to PR #9, which replaces the tree | |

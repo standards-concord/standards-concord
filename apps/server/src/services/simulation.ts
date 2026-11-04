@@ -5,13 +5,13 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, list, put } from '../db.js';
+import { clearAll, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
-import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, submit, tick as crTick } from './changeRequests.js';
+import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasCurrentReview, hasCurrentVote, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -239,6 +239,17 @@ function scriptedReaction(p: PersonaSpec, cr: ChangeRequest): { decision: 'appro
   }
 }
 
+/** Run a persona's decision; false if it no longer applies (the request changed meanwhile, or they may not make it). */
+async function decided(fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    return true;
+  } catch (err) {
+    if (err instanceof HttpError && (err.status === 409 || err.status === 403)) return false;
+    throw err;
+  }
+}
+
 async function personaReaction(p: PersonaSpec, cr: ChangeRequest, compact: (iri: string) => string) {
   const { value } = await llm.json({
     task: 'persona',
@@ -281,16 +292,15 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       const g = governanceFor(cr);
       const roles = rolesFor(ontologyId, u.id);
       if (cr.status === 'voting') {
-        if (!canVote(g.rule, roles) || list<{ userId: string; at: string }>('votes', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
+        if (!canVote(g.rule, roles) || hasCurrentVote(cr, u.id)) continue;
         const r = await personaReaction(p, cr, compact);
-        await addVote(cr, u, r.vote, r.comment);
-        actions++;
+        // The reaction is to the version read above: if it changed while the persona thought, skip it.
+        if (await decided(() => addVote(cr, u, r.vote, r.comment, cr.round ?? 1))) actions++;
       } else {
-        const reviewed = list<{ userId: string; at: string }>('reviews', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
-        if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
+        // A review from an earlier round (before a resubmission or new edits) no longer counts, so ask again.
+        if (hasCurrentReview(cr, u.id) || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
         const r = await personaReaction(p, cr, compact);
-        await addReview(cr, u, r.decision, r.comment);
-        actions++;
+        if (await decided(() => addReview(cr, u, r.decision, r.comment, cr.round ?? 1))) actions++;
       }
     }
   }
