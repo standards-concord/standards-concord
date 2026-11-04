@@ -147,7 +147,7 @@ test.describe('Query tab', () => {
   test('the sample data is highlighted and checked against SHACL', async ({ page }) => {
     const data = page.getByTestId('data-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Check' }).click();
+    await page.getByRole('button', { name: 'Check', exact: true }).click();
     const report = page.getByTestId('shacl-report');
     await expect(report).toContainText(/\d+ problems?/);
     await expect(report).toContainText('saturday-shift');

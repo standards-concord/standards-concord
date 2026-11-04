@@ -72,6 +72,18 @@ async function show(c: Ctx, url: string) {
   await c.d.clearHighlight();
 }
 
+/** On a change request: the level badge opens the classification reasons; validation is in the Checks view. */
+async function showClassificationAndChecks(c: Ctx) {
+  if (await c.d.click(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge')) {
+    await ringAround(c, /Rule-based semantic versioning classification/);
+    await sleep(3000);
+    await c.d.page.keyboard.press('Escape');
+    await c.d.clearHighlight();
+  }
+  await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
+  await ringAround(c, /^Validation$/);
+}
+
 /** Rings the card or section that contains some text. */
 async function ringAround(c: Ctx, text: string | RegExp, tag?: string) {
   const el = await c.d.find(c.d.page.getByText(text), `text ${text}`);
@@ -199,12 +211,10 @@ export const actions: Record<string, Action> = {
     const link = c.d.page.getByRole('main').locator(`a[href*="/changes/"]`);
     if (!(await c.d.click(link, 'the first change request'))) return;
     await sleep(500);
-    await ringAround(c, /Rule-based semantic versioning classification|Classification/);
-    await sleep(3500);
-    await ringAround(c, /^Validation$/);
+    await showClassificationAndChecks(c);
   },
   async 'highlight-governance-card'(c) {
-    await ringAround(c, /^Governance$/);
+    await ringAround(c, /^Decision$/);
   },
   async 'open-governance'(c) {
     await c.d.goto(o(c, '/governance'));
@@ -368,9 +378,7 @@ export const actions: Record<string, Action> = {
     }
     await c.d.goto(o(c, `/changes/${cr.id}`));
     await sleep(500);
-    await ringAround(c, /Rule-based semantic versioning classification|Classification/);
-    await sleep(3000);
-    await ringAround(c, /^Validation$/);
+    await showClassificationAndChecks(c);
   },
   async 'open-app-checks'(c) {
     await c.d.goto(o(c, '/apps'));
@@ -410,9 +418,11 @@ export const actions: Record<string, Action> = {
     } finally {
       await api.dispose();
     }
-    await c.d.goto(o(c, `/changes/${cr.id}`));
+    // App checks are in the change request's Checks view; the autopilot vote is in Discussion.
+    await c.d.goto(o(c, `/changes/${cr.id}?view=checks`));
     await ringAround(c, /^App checks$/);
     await sleep(3000);
+    await c.d.click(c.d.page.getByRole('tab', { name: /Discussion/ }), 'the Discussion tab');
     await c.d.highlight(c.d.page.getByText('Autopilot', { exact: true }), 'the Autopilot badge', 'autopilot voted yes');
   },
   async 'land-upstream'(c) {
