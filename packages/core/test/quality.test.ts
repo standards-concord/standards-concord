@@ -89,7 +89,7 @@ describe('lint', () => {
 describe('fairCheck', () => {
   it('the fixture scores 1.0', async () => {
     const r = fairCheck(await loadFixture());
-    expect(r.checks.filter((c) => !c.passed)).toEqual([]);
+    expect(r.checks.filter((c) => c.status === 'fail')).toEqual([]);
     expect(r.score).toBe(1);
     expect(r.checks.length).toBeGreaterThanOrEqual(12);
     expect(new Set(r.checks.map((c) => c.principle))).toEqual(new Set(['F', 'A', 'I', 'R']));
@@ -101,7 +101,21 @@ describe('fairCheck', () => {
     const failed = r.checks.filter((c) => !c.passed).map((c) => c.id);
     for (const id of ['F1-persistent-iri', 'F1-version-iri', 'F2-title', 'R1.1-license', 'R1.2-provenance-agents', 'F4-prefix-namespace']) expect(failed).toContain(id);
     expect(r.score).toBeLessThan(0.5);
-    expect(r.checks.find((c) => c.id === 'A1-content-negotiation')!.passed).toBe(true);
+    expect(r.checks.find((c) => c.id === 'A1-rdf')!.status).toBe('not-checked');
+  });
+
+  it('scores each principle equally and leaves unchecked items out', async () => {
+    const g = await loadFixture();
+    const offline = fairCheck(g);
+    expect(offline.byPrinciple.A.total).toBe(1);
+    const unresolved = fairCheck(g, { resolution: { rdf: false, html: false } });
+    expect(unresolved.byPrinciple.A).toEqual({ passed: 1, total: 3, score: 1 / 3 });
+    // Only A drops: (1 + 1/3 + 1 + 1) / 4
+    expect(unresolved.score).toBeCloseTo((3 + 1 / 3) / 4, 3);
+    const resolved = fairCheck(g, { resolution: { rdf: true, html: true } });
+    expect(resolved.score).toBe(1);
+    const sum = Object.values(unresolved.byPrinciple).reduce((a, p) => a + p.score, 0);
+    expect(unresolved.score).toBeCloseTo(sum / 4, 3);
   });
 });
 

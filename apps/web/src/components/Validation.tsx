@@ -114,29 +114,69 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
   );
 }
 
+const PRINCIPLES = [
+  { key: 'F', name: 'Findable' },
+  { key: 'A', name: 'Accessible' },
+  { key: 'I', name: 'Interoperable' },
+  { key: 'R', name: 'Reusable' },
+] as const;
+
 export function FairChecks({ report }: { report: ValidationReport }) {
   const [open, setOpen] = useState(false);
-  const failed = report.fair.checks.filter((c) => !c.passed);
-  const shown = open ? report.fair.checks : failed.slice(0, 4);
+  const { checks, byPrinciple } = report.fair;
+  const status = (c: (typeof checks)[number]) => c.status ?? (c.passed ? 'pass' : 'fail');
+  const failed = checks.filter((c) => status(c) === 'fail');
+  const shown = open ? checks : failed.slice(0, 4);
+  const skipped = checks.filter((c) => status(c) === 'not-checked').length;
   return (
     <div className="text-sm">
+      {/* Reports saved before per-principle scoring have no breakdown. */}
+      {byPrinciple && <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {PRINCIPLES.map(({ key, name }) => {
+          const p = byPrinciple[key];
+          return (
+            <div key={key} className="rounded-lg border border-line p-2">
+              <div className="flex items-baseline justify-between gap-1">
+                <span className="text-xs font-medium">{name}</span>
+                <span className="text-xs tabular-nums text-muted">
+                  {p.passed}/{p.total}
+                </span>
+              </div>
+              <ProgressBar className="mt-1.5" value={p.score} tone={p.score >= 0.8 ? 'ok' : p.score >= 0.5 ? 'warn' : 'danger'} />
+            </div>
+          );
+        })}
+      </div>}
+      <p className="mb-3 text-xs text-muted">
+        The FAIR score is the average of these four, so each principle counts equally. Each check follows a FOOPS! test (Garijo, Corcho and Poveda-Villalón, 2021).
+        {skipped > 0 && ` ${plural(skipped, 'check')} could not be run here and ${skipped === 1 ? 'is' : 'are'} left out.`}
+      </p>
       <ul className="space-y-1.5">
         {shown.map((c) => (
           <li key={c.id} className="flex items-start gap-2">
-            {c.passed ? <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" /> : <CircleX className="mt-0.5 size-4 shrink-0 text-danger" />}
+            {status(c) === 'pass' ? (
+              <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" />
+            ) : status(c) === 'fail' ? (
+              <CircleX className="mt-0.5 size-4 shrink-0 text-danger" />
+            ) : (
+              <Info className="mt-0.5 size-4 shrink-0 text-muted" />
+            )}
             <span className="min-w-0">
               <span className="mr-1.5 rounded bg-surface-2 px-1 font-mono text-[0.7rem]">{c.principle}</span>
               <span className="font-medium">{c.title}</span>
-              <span className="block text-xs text-muted">{c.message}</span>
+              <span className="block text-xs text-muted">
+                {c.message}
+                {c.reference && <span className="text-subtle"> · {c.reference}</span>}
+              </span>
             </span>
           </li>
         ))}
-        {!shown.length && <li className="text-muted">All {report.fair.checks.length} FAIR checks pass.</li>}
+        {!shown.length && <li className="text-muted">All {checks.length - skipped} FAIR checks that could be run pass.</li>}
       </ul>
-      {report.fair.checks.length > shown.length || open ? (
+      {checks.length > shown.length || open ? (
         <button onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-          {open ? 'Show failing only' : `Show all ${report.fair.checks.length} checks`}
+          {open ? 'Show failing only' : `Show all ${checks.length} checks`}
         </button>
       ) : null}
     </div>
