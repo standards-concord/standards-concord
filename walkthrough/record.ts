@@ -122,7 +122,7 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
     // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
     await context.addInitScript('globalThis.__name ??= (f) => f;');
-    await guardContext(context);
+    await guardContext(context, outside);
     await context.addInitScript({ path: path.join(HERE, 'stage', 'overlay.js') });
     // The browser's clock agrees with the server's, and runs normally from there.
     if (!argv.hub) await context.clock.setSystemTime(new Date(EPOCH));

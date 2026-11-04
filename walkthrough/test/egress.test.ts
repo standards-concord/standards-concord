@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import dgram from 'node:dgram';
 import { existsSync, mkdtempSync } from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +28,8 @@ let browser: Browser;
 const outside = new Set<string>();
 
 let aConnections = 0;
+const aUpgrades: string[] = [];
+const aRequests: string[] = [];
 const listen = (h: http.RequestListener) =>
   new Promise<[http.Server, string]>((r) => {
     const s = http.createServer(h).listen(0, '127.0.0.1', () => r([s, `http://127.0.0.1:${(s.address() as AddressInfo).port}`]));
@@ -45,6 +48,7 @@ beforeAll(async () => {
     else res.end('ok');
   });
   [a, A] = await listen((req, res) => {
+    aRequests.push(req.url ?? '');
     if (req.url === '/chain') res.writeHead(302, { location: `${B}/hop` }).end();
     else if (req.url === '/events') res.writeHead(302, { location: `${C}/events` }).end();
     else res.writeHead(200, { 'content-type': 'text/html' }).end('<p>page</p>');
@@ -52,6 +56,11 @@ beforeAll(async () => {
   a.on('connection', () => aConnections++);
   // A minimal WebSocket handshake on A, so an allowed ws:// connection can open.
   a.on('upgrade', (req, socket) => {
+    aUpgrades.push(req.url ?? '');
+    if (req.url === '/refuse') {
+      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
     const accept = createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
   });
@@ -179,10 +188,22 @@ describe.runIf(run)('egress proxy', () => {
       });
     // With the recording's guard, pages have no RTCPeerConnection at all…
     const guarded = await browser.newContext();
-    await guardContext(guarded);
+    const blocked = new Set<string>();
+    await guardContext(guarded, blocked);
     const page = await guarded.newPage();
     await page.goto(`${A}/`);
     expect(await page.evaluate(tryRtc, stun)).toBe('blocked');
+    // …and an attempt is reported even when the page swallows the error.
+    expect([...blocked].some((b) => b.startsWith('webrtc: RTCPeerConnection'))).toBe(true);
+    blocked.clear();
+    await page.evaluate(() => {
+      try {
+        new RTCPeerConnection();
+      } catch {
+        /* swallowed */
+      }
+    });
+    await expect.poll(() => blocked.size).toBe(1);
     await guarded.close();
     // …and even without it, the launch policy keeps WebRTC from sending UDP directly.
     const bare = await browser.newContext();
@@ -229,5 +250,108 @@ describe.runIf(run)('egress proxy', () => {
     expect(await page2.evaluate((u) => fetch(u).then(() => 'loaded', () => 'failed'), other)).toBe('failed');
     expect(missing.has(other)).toBe(true);
     await offline.close();
+  });
+  describe('raw requests', () => {
+    const port = () => new URL(A).port;
+    const handshake = (path: string, host: string) =>
+      `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`;
+
+    /** Opens a CONNECT tunnel to target, sends payload, and returns everything the proxy sends back. */
+    const tunnel = (target: string, payload: Buffer | string) =>
+      new Promise<string>((resolve) => {
+        const sock = net.connect(Number(new URL(egress.url).port), '127.0.0.1', () => sock.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`));
+        let got = '';
+        let sent = false;
+        sock.on('data', (d) => {
+          got += d.toString('latin1');
+          if (!sent && got.includes('\r\n\r\n')) {
+            sent = true;
+            sock.write(payload);
+          }
+        });
+        const done = () => resolve(got);
+        sock.on('close', done);
+        sock.on('error', done);
+        setTimeout(() => {
+          sock.destroy();
+          done();
+        }, 1500);
+      });
+
+    /** Sends a request straight to the proxy (not over CONNECT). */
+    const direct = (text: string) =>
+      new Promise<string>((resolve) => {
+        const sock = net.connect(Number(new URL(egress.url).port), '127.0.0.1', () => sock.write(text));
+        let got = '';
+        sock.on('data', (d) => (got += d.toString('latin1')));
+        const done = () => resolve(got);
+        sock.on('close', done);
+        sock.on('error', done);
+        setTimeout(() => {
+          sock.destroy();
+          done();
+        }, 1500);
+      });
+
+    it('lets a WebSocket handshake through a tunnel to an allowed http: origin', async () => {
+      const got = await tunnel(`127.0.0.1:${port()}`, handshake('/socket', `127.0.0.1:${port()}`));
+      expect(got).toContain('101 Switching Protocols');
+    });
+
+    it('refuses tunnels whose Host has user info or a path, or that are not HTTP', async () => {
+      const before = aUpgrades.length;
+      for (const host of [`denied.invalid@127.0.0.1:${port()}`, `127.0.0.1:${port()}/bad`]) {
+        const got = await tunnel(`127.0.0.1:${port()}`, handshake('/socket', host));
+        expect(got).not.toContain('101');
+      }
+      expect(await tunnel(`127.0.0.1:${port()}`, `hello\r\nHost: 127.0.0.1:${port()}\r\n\r\n`)).toContain('400 Bad Request');
+      expect(aUpgrades.length).toBe(before);
+      expect([...outside].some((o) => o.includes('Host: denied.invalid@'))).toBe(true);
+      expect([...outside].some((o) => o.startsWith('unparseable request'))).toBe(true);
+    });
+
+    it('checks every request on a plain tunnel, not just the first', async () => {
+      const got = await tunnel(`127.0.0.1:${port()}`, `GET /first HTTP/1.1\r\nHost: 127.0.0.1:${port()}\r\n\r\nGET /second HTTP/1.1\r\nHost: denied.invalid\r\n\r\n`);
+      expect(got).toMatch(/^HTTP\/1\.1 200 Connection Established\r\n\r\nHTTP\/1\.1 200 /);
+      expect(got).toContain('403');
+      expect(aRequests).toContain('/first');
+      expect(aRequests).not.toContain('/second');
+      expect(outside.has(`http://127.0.0.1:${port()} (Host: denied.invalid)`)).toBe(true);
+    });
+
+    it('lets Playwright’s own API requests (which tunnel plain HTTP) reach an allowed origin', async () => {
+      const page = await browser.newPage();
+      expect((await page.request.get(`${A}/api-request`)).status()).toBe(200);
+      expect(aRequests).toContain('/api-request');
+      await page.close();
+    });
+
+    it('passes nothing after the handshake unless the server switches protocols', async () => {
+      const got = await tunnel(`127.0.0.1:${port()}`, handshake('/refuse', `127.0.0.1:${port()}`) + 'GET /smuggled HTTP/1.1\r\nHost: denied.invalid\r\n\r\n');
+      expect(got).toContain('403');
+      expect(aRequests).not.toContain('/smuggled');
+    });
+
+    it('refuses bytes that only look like TLS', async () => {
+      egress.allow(`https://127.0.0.1:${new URL(B).port}`);
+      const got = await tunnel(`127.0.0.1:${new URL(B).port}`, Buffer.concat([Buffer.from([0x16]), Buffer.from('GET / HTTP/1.1\r\n\r\n')]));
+      expect(got).not.toContain('ok');
+      expect([...outside].some((o) => o.includes('not a TLS ClientHello'))).toBe(true);
+    });
+
+    it('accepts direct ws: upgrades to an allowed http: origin, and refuses wss: and unparseable ones', async () => {
+      expect(await direct(handshake(`ws://127.0.0.1:${port()}/socket`, `127.0.0.1:${port()}`))).toContain('101 Switching Protocols');
+      const before = aUpgrades.length;
+      expect(await direct(handshake(`wss://127.0.0.1:${port()}/socket`, `127.0.0.1:${port()}`))).toContain('403');
+      expect(aUpgrades.length).toBe(before);
+      expect(outside.has(`wss://127.0.0.1:${port()}`)).toBe(true);
+      await direct(handshake('ws://[bad/socket', `127.0.0.1:${port()}`));
+      expect([...outside].some((o) => o.startsWith('unparseable'))).toBe(true);
+    });
+
+    it('refuses a forwarded request with user info in its Host', async () => {
+      const got = await direct(`GET ${A}/ HTTP/1.1\r\nHost: denied.invalid@127.0.0.1:${port()}\r\nConnection: close\r\n\r\n`);
+      expect(got).toMatch(/^HTTP\/1\.1 (400|403)/);
+    });
   });
 });
