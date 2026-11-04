@@ -17,6 +17,9 @@ title: Concord: designing data standards together
     [then: action], also above a paragraph, runs once that paragraph has been spoken.
     Actions are defined in scenes.ts; `pnpm walkthrough --list-actions` lists them.
   - [pause: 1.5] holds for a moment in silence.
+  - [if: jsClasses] above a paragraph keeps it only when the hub has that feature;
+    [if: !jsClasses] only when it doesn't. Use it so the intro and outro promise only
+    what the recorded scenes show.
   - Pronunciations for the voice (OWL, SHACL, SPARQL…) are in lexicon.json.
 
   Writing for the ear
@@ -33,7 +36,12 @@ title: Concord: designing data standards together
 Hi, and welcome to Concord. It's a prototype from the Open Data Institute for designing data standards together, in the open.
 
 [do: open-hub]
-In about eight minutes I'll show you what Concord is for, how a standard grows from a conversation into a published release, and then the part I enjoy most: building an app against one of these standards with a coding agent.
+[if: jsClasses]
+In about nine minutes I'll show you what Concord is for, how a standard grows from a conversation into a published release, and then the part I enjoy most: building an app against one of these standards with a coding agent.
+
+[do: open-hub]
+[if: !jsClasses]
+In about four minutes I'll show you what Concord is for, and how a standard grows from a conversation into a published release.
 
 [do: point-hub-card]
 This is the hub. Each card is a standard that a community looks after. We'll follow the volunteering standard, which describes volunteering opportunities, the organisations that offer them, and the people who give their time.
@@ -213,6 +221,11 @@ It's one line again: the import goes back to the main standard. The app works ex
 ## Wrapping up {#outro}
 
 [do: outro-card]
+[if: jsClasses]
 That's Concord. Rigorous, open standards that grow from the people who use them, with governance that doesn't need a meeting, and room for developers to keep building while the standard catches up.
+
+[do: outro-card]
+[if: !jsClasses]
+That's Concord. Rigorous, open standards that grow from the people who use them, with governance that doesn't need a meeting.
 
 It's an early prototype, and we'd love your feedback. Try it yourself at the link below, and thanks for watching.

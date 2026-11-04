@@ -87,6 +87,28 @@ describe('the real script', () => {
   });
 });
 
+describe('conditional paragraphs', () => {
+  const doc = `## Intro {#intro}
+
+[do: open-hub]
+[if: jsClasses]
+Long tour with the developer story.
+
+[do: open-hub]
+[if: !jsClasses]
+Short tour.
+
+Always said.
+`;
+  it('keeps only the paragraphs whose features match', () => {
+    const n = parseNarration(doc);
+    const withClasses = selectScenes(n, new Set(['jsClasses'])).kept[0].steps.map((s) => s.text);
+    const without = selectScenes(n, new Set()).kept[0].steps.map((s) => s.text);
+    expect(withClasses).toEqual(['Long tour with the developer story.', 'Always said.']);
+    expect(without).toEqual(['Short tour.', 'Always said.']);
+  });
+});
+
 describe('helpers', () => {
   it('diffs lines with context', () => {
     const rows = lineDiff('a\nb\nc\nd\ne\nf\ng', 'a\nb\nc\nD\ne\nf\ng', 1);

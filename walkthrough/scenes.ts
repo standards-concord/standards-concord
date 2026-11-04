@@ -67,6 +67,35 @@ const CHAPTERS: Record<string, { eyebrow: string; title: string; sub?: string; a
 
 const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
 
+/** What each format view must contain for the narration about it to be true. */
+const FORMAT_MARKERS: Record<string, RegExp> = { turtle: /@prefix|owl:Class/, linkml: /classes:/, shacl: /sh:NodeShape/, shaclc: /^\s*shape\s/m, typescript: /\bclass\s+\w+/ };
+
+async function apiJson(c: Ctx, p: string): Promise<any> {
+  const res = await c.api.get(`${c.hub}${p}`);
+  if (!res.ok()) {
+    c.d.warn(`GET ${p}: HTTP ${res.status()}`);
+    return undefined;
+  }
+  return res.json();
+}
+
+/** Checks the format view shows what the narration says it does. */
+async function claimFormat(c: Ctx, format: string) {
+  const marker = FORMAT_MARKERS[format];
+  if (!marker) return;
+  const ok = await c.d.page
+    .waitForFunction((src) => new RegExp(src[0], src[1]).test(document.querySelector('main')?.textContent ?? ''), [marker.source, marker.flags], { timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false);
+  c.d.claim(ok, `the ${format} view shows ${format} (${marker})`);
+}
+
+/** The app is showing opportunities, and the hours feature where the story says it should. */
+async function claimAppWorks(c: Ctx, withHours: boolean) {
+  await c.d.claimVisible(c.d.page.locator('.card'), 'the sample app lists opportunities');
+  if (withHours) await c.d.claimVisible(c.d.page.locator('.pill.hours'), 'the sample app shows hours given');
+}
+
 const STAND_IN = 'Preview: this hub doesn’t serve generated classes yet, so a stand-in module with the same shape is used';
 
 /** Opens the sample app, labelling it if it runs on stand-in classes. */
@@ -161,6 +190,10 @@ export const actions: Record<string, Action> = {
     if (!(await c.d.click(card, 'the volunteering card'))) await c.d.goto(o(c));
   },
   async 'highlight-health'(c) {
+    // "Strict OWL, and a reasoner keeps them logically consistent."
+    const v = await apiJson(c, `/api/ontologies/${c.ontology.id}/validation`);
+    c.d.claim(v?.reasoner?.consistent === true, 'the reasoner reports the working draft consistent');
+    c.d.claim(v && !(v.lint ?? []).some((i: any) => i.severity === 'error'), 'strict lint has no errors');
     await ringAround(c, 'Health of the working draft');
   },
   async 'highlight-members'(c) {
@@ -176,6 +209,7 @@ export const actions: Record<string, Action> = {
   },
   async 'open-formats'(c, format = 'turtle') {
     await c.d.goto(o(c, `/source?format=${format}`));
+    await claimFormat(c, format);
     await sleep(800);
     await c.d.scroll(320, 1600);
   },
@@ -183,6 +217,7 @@ export const actions: Record<string, Action> = {
     const name = FORMAT_TABS[format] ?? new RegExp(format, 'i');
     await c.d.scroll(-2000, 400);
     await c.d.click(c.d.page.getByRole('tab', { name }), `the ${format} format tab`);
+    await claimFormat(c, format);
     await sleep(700);
     await c.d.scroll(260, 1400);
   },
@@ -191,6 +226,8 @@ export const actions: Record<string, Action> = {
   },
   async 'run-query'(c) {
     await c.d.click(c.d.page.getByRole('button', { name: /^Run$/ }), 'the Run button');
+    // "The results come straight back."
+    await c.d.claimVisible(c.d.page.locator('[data-testid="query-results"] tbody tr'), 'the query returns rows', 20_000);
     await sleep(800);
     await c.d.scroll(380, 1500);
   },
@@ -223,6 +260,7 @@ export const actions: Record<string, Action> = {
   },
   async 'open-releases'(c) {
     await c.d.goto(o(c, '/releases'));
+    await c.d.claimVisible(c.d.page.getByRole('main').getByText(/\b\d+\.\d+\.\d+\b/), 'a release with a semantic version');
   },
   async chapter(c, name) {
     const ch = CHAPTERS[name];
@@ -279,6 +317,7 @@ export const actions: Record<string, Action> = {
     const r = await mcpCall(c, 'search_terms', { ontology: c.ontology.slug, query: 'hours' }, `ontology: "${c.ontology.slug}", query: "hours"`);
     await c.term.result(c.shown(summariseTerms(r.json) || r.text));
     const hit = Array.isArray(r.json) ? r.json[0] : undefined;
+    c.d.claim(/hoursPerWeek/i.test(JSON.stringify(r.json ?? r.text)), 'the search finds hours per week');
     const term = hit?.id ?? 'vol:hoursPerWeek';
     const g = await mcpCall(c, 'get_term', { ontology: c.ontology.slug, term }, `ontology: "${c.ontology.slug}", term: "${term}"`);
     await c.term.result(c.shown(compactJson(g.json, ['label', 'definition', 'domain', 'range']) || g.text), { max: 6 });
@@ -292,6 +331,7 @@ export const actions: Record<string, Action> = {
     await c.term.say("Rather than block on the working group, I'll create a development fork of the standard and add the term there.");
     const r = await mcpCall(c, 'create_fork', { ontology: c.ontology.slug, name: FORK_NAME, purpose: 'Log the hours volunteers give in Helping Hands' }, `ontology: "${c.ontology.slug}", name: "${FORK_NAME}"`);
     const j = r.json ?? {};
+    c.d.claim(j.fork || j.id, 'create_fork made a fork');
     c.state.fork = { id: j.id, slug: (j.fork as string | undefined)?.split('/')[1] ?? j.slug ?? FORK_NAME, iri: j.iri, appUrl: j.appUrl, js: j.importUrls?.js ?? j.importUrls?.javascript };
     await c.term.result(c.shown(compactJson(j, ['fork', 'version', 'iri', 'appUrl']) || r.text), { max: 6 });
   },
@@ -301,12 +341,15 @@ export const actions: Record<string, Action> = {
     const r = await mcpCall(c, 'edit_fork', { fork, terms: FORK_TERM_LIST, message: 'Add VolunteeringActivity for logging volunteer hours' }, `fork: "${c.ontology.slug}/${c.state.fork?.slug ?? FORK_NAME}", terms: [${names}]`);
     const j = r.json ?? {};
     const added = Array.isArray(j.added) ? j.added.map((t: any) => `+ ${t.term ?? t.iri}  (${t.kind ?? t.change ?? ''})`).join('\n') : '';
+    c.d.claim(Array.isArray(j.added) && j.added.length, 'edit_fork added the new terms');
+    c.d.claim(j.validation?.passed !== false, 'the fork still validates after the edit');
     const valid = j.validation ? `\nValidation: ${j.validation.passed === false ? 'failed' : 'passed'}${j.validation.consistent === false ? ' (inconsistent)' : ''}` : '';
     await c.term.result(c.shown((added ? added + valid : '') || r.text), { max: 8 });
   },
   async 'open-fork-page'(c) {
     const url = c.state.fork?.appUrl ? c.state.fork.appUrl.replace(c.shownHub, c.hub) : o(c, `/forks/${c.state.fork?.slug ?? FORK_NAME}`);
     await c.d.goto(url.startsWith('http') ? url : `${c.hub}${url}`);
+    await c.d.claimVisible(c.d.page.getByRole('main').getByText(/VolunteeringActivity|volunteering activity/i), 'the fork page lists the new class');
   },
   async 'claude-proposes-fork'(c) {
     await c.term.open();
@@ -314,6 +357,7 @@ export const actions: Record<string, Action> = {
     const r = await mcpCall(c, 'propose_fork', { fork, title: 'Record the hours volunteers give', description: 'Helping Hands needs to record time volunteers actually gave, per opportunity, to show impact. hoursPerWeek on TimeCommitment is expected time, not given time.' }, `fork: "${c.state.fork?.slug ?? FORK_NAME}"`);
     const cr = r.json?.changeRequest ?? r.json ?? {};
     if (cr.id) c.state.changeRequest = { id: cr.id, url: cr.url, number: cr.number };
+    c.d.claim(cr.id, 'propose_fork opened a change request');
     await c.term.result(c.shown(compactJson(cr, ['number', 'title', 'status', 'level', 'validationPassed', 'url']) || r.text), { max: 6 });
   },
   async 'claude-proposes-change'(c) {
@@ -325,12 +369,14 @@ export const actions: Record<string, Action> = {
     );
     const j = r.json ?? {};
     if (j.id) c.state.changeRequest = { id: j.id, url: j.url, number: j.number };
+    c.d.claim(j.id, 'propose_change opened a change request');
     await c.term.result(c.shown(compactJson(j, ['number', 'title', 'status', 'level', 'url']) || r.text), { max: 6 });
   },
   async 'show-fork-module'(c) {
     const url = forkJsUrl(c);
     await c.d.goto(url, { settle: false });
     await sleep(500);
+    c.d.claim(/class VolunteeringActivity\b/.test((await c.d.page.textContent('body').catch(() => '')) ?? ''), 'the fork module has a VolunteeringActivity class');
     await c.d.page.evaluate(() => (window as any).find?.('class VolunteeringActivity')).catch(() => {});
   },
   async 'claude-switches-import'(c) {
@@ -353,6 +399,8 @@ export const actions: Record<string, Action> = {
   },
   async 'open-app-feature'(c) {
     await gotoApp(c);
+    await claimAppWorks(c, true);
+    await c.d.claimVisible(c.d.page.locator('#impact'), 'a running total at the top');
     await sleep(400);
     await c.d.highlight(c.d.page.locator('.pill.hours'), 'hours given');
     await sleep(2200);
@@ -365,7 +413,17 @@ export const actions: Record<string, Action> = {
     await sleep(300);
     await c.d.type(card.getByRole('spinbutton', { name: 'Hours' }), '2', 'the hours field', 6);
     await sleep(300);
+    const impact = c.d.page.locator('#impact');
+    const hoursOf = async () => Number(((await impact.textContent().catch(() => '')) ?? '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? NaN);
+    const before = await hoursOf();
     await c.d.click(card.getByRole('button', { name: 'Save' }), 'the Save button', { settle: false });
+    // "The totals update straight away."
+    let after = before;
+    for (let i = 0; i < 20 && after === before; i++) {
+      await sleep(100);
+      after = await hoursOf();
+    }
+    c.d.claim(after === before + 2, `the running total goes up by 2 hours (${before} → ${after})`);
     await sleep(500);
     await c.d.highlight(c.d.page.locator('#impact'), 'updated');
   },
@@ -378,6 +436,10 @@ export const actions: Record<string, Action> = {
       await c.d.goto(o(c, '/changes'));
       return;
     }
+    // "Classified as a minor change, because it only adds terms, and the validation has passed."
+    const detail = await apiJson(c, `/api/change-requests/${cr.id}`);
+    c.d.claim(detail?.classification?.level === 'minor', `the change is classified minor (got ${detail?.classification?.level})`);
+    c.d.claim(detail?.validation?.passed === true, 'validation passed on the proposed change');
     await c.d.goto(o(c, `/changes/${cr.id}`));
     await sleep(500);
     await ringAround(c, /Rule-based semantic versioning classification|Classification/);
@@ -431,7 +493,11 @@ export const actions: Record<string, Action> = {
   async 'land-upstream'(c) {
     const cr = c.state.changeRequest;
     if (!cr) return c.d.warn('No change request to land');
+    const published = async () => ((await apiJson(c, `/api/ontologies/${c.ontology.id}/releases`)) ?? []).filter((r: any) => r.status === 'published').length;
+    const before = await published();
     await landChange(c, cr.id);
+    const after = await published();
+    c.d.claim(after > before, 'a new release was published');
     await c.d.goto(o(c, '/releases'));
   },
   async 'new-session-check'(c) {
@@ -462,6 +528,8 @@ export const actions: Record<string, Action> = {
     await c.term.say('Switched to the released standard. The fork is no longer needed.');
     await sleep(1200);
     await gotoApp(c);
+    // "The app works exactly as before."
+    await claimAppWorks(c, true);
   },
   async 'outro-card'(c) {
     await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: 'Try it: standards-concord.vercel.app/alpha' }, 0);

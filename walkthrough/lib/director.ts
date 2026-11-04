@@ -18,7 +18,35 @@ export class Director {
   constructor(
     readonly page: Page,
     private readonly strict: boolean,
-  ) {}
+  ) {
+    // A script error on screen is a broken shot, even if every click landed.
+    page.on('pageerror', (e) => this.note(`Page error on ${page.url()}: ${e.message.split('\n')[0]}`));
+  }
+
+  /** Records a warning without throwing (for events that arrive outside a step). */
+  note(msg: string) {
+    this.warnings.push(msg);
+    console.warn(`  ! ${msg}`);
+  }
+
+  /**
+   * Checks something the narration claims (a query returned rows, validation passed).
+   * A recording where an action ran but its claimed outcome didn't happen must not publish.
+   */
+  claim(ok: unknown, msg: string) {
+    if (!ok) this.warn(`Narrated outcome not shown: ${msg}`);
+    return !!ok;
+  }
+
+  /** Waits for something to appear as the narration claims, or warns. */
+  async claimVisible(target: Locator, msg: string, timeout = 10_000) {
+    const ok = await target
+      .first()
+      .waitFor({ state: 'visible', timeout })
+      .then(() => true)
+      .catch(() => false);
+    return this.claim(ok, msg);
+  }
 
   warn(msg: string) {
     this.warnings.push(msg);
@@ -28,7 +56,8 @@ export class Director {
 
   /** Navigates and waits for the app to settle (no spinners, fonts loaded). */
   async goto(url: string, opts: { settle?: boolean; keepCard?: boolean } = {}) {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    const res = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    if (res && res.status() >= 400) this.warn(`${url} answered HTTP ${res.status()}`);
     await this.settle(opts.settle !== false);
     // A chapter card carries across navigation; unless asked to keep it, fade it out now.
     if (!opts.keepCard) await this.page.evaluate(() => (window as any).__wt?.hideChapter()).catch(() => {});

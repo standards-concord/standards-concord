@@ -29,6 +29,7 @@ import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
 import { actions, type Ctx } from './scenes.ts';
 import { vendorModule } from './lib/vendor.ts';
+import { serveFonts } from './lib/fonts.ts';
 
 const HERE = import.meta.dirname;
 const ALL_FEATURES = ['forks', 'jsClasses', 'shaclc', 'appChecks', 'connectPage'];
@@ -74,6 +75,9 @@ if (argv.publish) {
   if (argv.draft || argv.check) throw new Error('--publish records the real thing: drop --draft/--check');
 }
 
+/** "Now", as far as the recorded hub and browser are concerned, so dates on screen never drift. */
+const EPOCH = '2026-11-23T10:00:00Z';
+
 const log = (s: string) => console.log(s);
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
@@ -96,13 +100,18 @@ async function main() {
   await mkdir(argv.out!, { recursive: true });
 
   // 1. Boot Concord (unless recording an existing hub) and find out what it can do.
-  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev' }));
+  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev', epoch: EPOCH }));
   const hub = (argv.hub ?? concord!.web).replace(/\/$/, '');
   const shownHub = argv['shown-hub']!.replace(/\/$/, '');
   try {
     const browser = await chromium.launch({ headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars'] });
+    const chromiumVersion = browser.version();
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
+    // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
+    await context.addInitScript('globalThis.__name ??= (f) => f;');
     await context.addInitScript({ path: path.join(HERE, 'stage', 'overlay.js') });
+    // The browser's clock agrees with the server's, and runs normally from there.
+    if (!argv.hub) await context.clock.setSystemTime(new Date(EPOCH));
     const page = await context.newPage();
     const api = page.request;
     const local = [hub, concord?.api].filter(Boolean) as string[];
@@ -167,6 +176,9 @@ async function main() {
     const shims = new Set<string>();
     const outside = new Set<string>();
     await guardNetwork(context, { allowed: [hub, concord?.api, stat.url].filter(Boolean) as string[], outside });
+    // Registered after the guard, so it answers font requests first (Playwright runs the newest route first).
+    const fonts = { fetched: new Set<string>(), missing: new Set<string>() };
+    await serveFonts(context, { dir: path.join(HERE, 'fonts'), offline: !!argv.publish, ...fonts });
     await routeModules(page, { hub, api: concord?.api, shownHub, noShims: !!argv['no-shims'], shims });
 
     // Warm up: compile pages in the dev server and fill caches so nothing loads on camera.
@@ -206,7 +218,8 @@ async function main() {
       }
       stat.close();
       await browser.close();
-      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], warnings: d.warnings }, null, 2));
+      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
+      if (fonts.fetched.size) log(`\n⚠ ${fonts.fetched.size} web font file(s) weren't in walkthrough/fonts/ and were fetched live. Commit them so recordings stay offline.`);
       log(`\nChecked ${kept.length} scenes: ${d.warnings.length ? `${d.warnings.length} warning(s)` : 'all steps worked'}.`);
       if (d.warnings.length) process.exitCode = 1;
       return;
@@ -220,6 +233,7 @@ async function main() {
       log(`▶ ${scene.id}`);
       chapters.push({ at: cap.now(), title: scene.title });
       for (const step of scene.steps) {
+        cap.check();
         const clip = clips.get(step);
         const start = cap.now();
         if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
@@ -258,12 +272,15 @@ async function main() {
       skipped,
       shims: [...shims],
       outsideRequests: [...outside],
+      fontsFetchedLive: [...fonts.fetched],
+      fontsMissing: [...fonts.missing],
+      toolchain: await toolchain(chromiumVersion),
       warnings: d.warnings,
       captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };
     await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify(report, null, 2));
-    if (argv.publish && (d.warnings.length || shims.size || outside.size)) {
-      throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s). See report.json.`);
+    if (argv.publish && (d.warnings.length || shims.size || outside.size || fonts.missing.size)) {
+      throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s), ${fonts.missing.size} missing font file(s). See report.json.`);
     }
     log(`\nDone: ${out} (${fmt(seconds)})`);
     if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
@@ -354,13 +371,13 @@ async function detectFeatures(hub: string, mcp: McpClient, ontologyId: string): 
  * being recorded, the stage server, or a route below is blocked and reported. The app's
  * web fonts are the one exception, so the video shows the real typography.
  */
-const ALLOWED_OUTSIDE = [/^https:\/\/fonts\.(googleapis|gstatic)\.com\//];
-
+/** Lets the browser reach only these exact origins (scheme, host and port); everything else is blocked and reported. */
 async function guardNetwork(context: import('@playwright/test').BrowserContext, o: { allowed: string[]; outside: Set<string> }) {
+  const allowed = new Set(o.allowed.map((a) => new URL(a).origin));
   await context.route(/^https?:\/\//, async (route) => {
-    const url = route.request().url();
-    if (o.allowed.some((a) => url.startsWith(a)) || ALLOWED_OUTSIDE.some((r) => r.test(url))) return route.fallback();
-    o.outside.add(new URL(url).origin);
+    const origin = new URL(route.request().url()).origin;
+    if (allowed.has(origin)) return route.fallback();
+    o.outside.add(origin);
     return route.abort('blockedbyclient');
   });
 }
@@ -401,6 +418,13 @@ async function routeModules(page: import('@playwright/test').Page, o: { hub: str
     }
     return route.fulfill({ status: 404, body: 'Not found' });
   });
+}
+
+/** Versions of everything that affects the pixels and the sound, for comparing recordings. */
+async function toolchain(chromiumVersion: string) {
+  const { execFile } = await import('node:child_process');
+  const out = (cmd: string, args: string[]) => new Promise<string>((r) => execFile(cmd, args, (_e, stdout) => r(String(stdout ?? '').split('\n')[0].trim())));
+  return { node: process.version, chromium: chromiumVersion, ffmpeg: await out('ffmpeg', ['-version']), os: await out('sh', ['-c', '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -sr']) };
 }
 
 main().catch((e) => {

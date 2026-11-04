@@ -31,6 +31,9 @@ export class Capture {
   private stderr = '';
   /** The most frames' worth of bytes ever queued for ffmpeg at once (it fell behind). */
   peakBacklogBytes = 0;
+  /** Past this much queued video, give up rather than run the machine out of memory. */
+  static maxBacklogBytes = 1024 * 1024 * 1024;
+  private overrun?: Error;
 
   constructor(
     private readonly page: Page,
@@ -83,12 +86,26 @@ export class Capture {
       this.written++;
     }
     this.peakBacklogBytes = Math.max(this.peakBacklogBytes, this.ffmpeg.stdin.writableLength);
+    if (this.peakBacklogBytes > Capture.maxBacklogBytes && !this.overrun) {
+      this.overrun = new Error(`The video encoder fell more than ${Math.round(Capture.maxBacklogBytes / 1048576)} MB behind; record on a faster machine`);
+      clearInterval(this.timer);
+      this.ffmpeg.stdin.destroy();
+    }
+  }
+
+  /** Throws if capture had to stop early; scenes call this between steps so a run fails fast. */
+  check() {
+    if (this.overrun) throw this.overrun;
   }
 
   async stop() {
     if (this.timer) clearInterval(this.timer);
     this.pump();
     await this.cdp?.send('Page.stopScreencast').catch(() => {});
+    if (this.overrun) {
+      await this.done?.catch(() => {});
+      throw this.overrun;
+    }
     this.ffmpeg?.stdin?.end();
     await this.done;
     return this.written / this.opts.fps;

@@ -1,6 +1,6 @@
 # Narrated walkthrough video
 
-Records a narrated tour of Concord (about eight minutes) as an MP4, from an editable script. Runs are repeatable, not frame-identical: the same scenes play in the same order with the same words, but demo ids, dates and the voice's delivery can differ slightly between recordings. Re-run it after each release and the video shows that release.
+Records a narrated tour of Concord as an MP4, from an editable script: about nine minutes with the developer story, about four without it. Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
 pnpm walkthrough                        # voice from the environment (see below)
@@ -11,7 +11,7 @@ pnpm walkthrough --strict               # fail on UI drift (a button that's gone
 pnpm walkthrough --publish              # a release video: strict, no stand-ins, no outside requests, a real voice
 ```
 
-It boots its own offline Concord (fresh demo data, simulated AI) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Output lands in `walkthrough/out/`:
+It boots its own offline Concord (fresh demo data, simulated AI, no FAIR lookups on the internet, a clock fixed to start at 23 November 2026, seeded ids) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Output lands in `walkthrough/out/`:
 
 | File | What |
 | --- | --- |
@@ -36,11 +36,13 @@ Let's look inside. The Browse page shows the classes and their relationships…
 
 - `## Title {#id}` starts a scene and a video chapter. `requires=forks,jsClasses` records the scene only when the hub has those features; `unless=forks` marks a fallback.
 - Each paragraph is one narration clip. `[do: action args]` above a paragraph runs as it starts, while it's spoken; `[then: action]` above a paragraph runs after it's spoken; `[pause: 1.5]` holds in silence.
+- `[if: jsClasses]` above a paragraph keeps it only when the hub has that feature, and `[if: !jsClasses]` only when it doesn't. The intro and outro use it so they promise only what the recorded scenes show.
 - The next paragraph starts once both the narration and the actions have finished, so timing takes care of itself: rewrite a sentence and the video re-times around it.
 - Voices are cached in `walkthrough/.cache/voice/` by their exact words, so after an edit only the changed paragraphs are sent to the voice service.
 - Words the voice might say wrongly (SHACL, SPARQL, ODI…) go in [lexicon.json](lexicon.json). Captions keep the written spelling.
 - Captions are split into short phrases (at most 84 characters, broken at commas where possible). With ElevenLabs they are timed from the voice's own character timestamps; other voices fall back to an estimate from text length (`report.json` says which).
 - `pnpm walkthrough --list-actions` lists the actions. To add one, add a function to `actions` in scenes.ts. Use the `Director` helpers (`click`, `type`, `highlight`, `chapter`…): they move a visible pointer and fail softly, so a renamed button gives a warning, not a ruined recording.
+- When the narration claims an outcome ("the results come straight back", "validation has passed", "the totals update"), the action checks it with `d.claim(...)` or `d.claimVisible(...)`. An action that ran but didn't produce what the words say is a warning, so `--strict` and `--publish` fail on it. Pages that answer with an HTTP error, and script errors in the page, are warnings too.
 
 When the app changes, run `pnpm walkthrough --draft --strict`. It takes a few minutes and fails on the first step that no longer works; CI does the same on every pull request that touches the walkthrough.
 
@@ -50,7 +52,7 @@ The script is written to be listened to, so the voice matters. In order of prefe
 
 | `--voice` | Service | Key | Notes |
 | --- | --- | --- | --- |
-| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording is about 8,000 characters, within the Starter plan. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. A fixed seed makes re-voicing more repeatable, though not identical. |
+| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording is about 8,000 characters, within the Starter plan. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
 | `openai` | OpenAI `gpt-4o-mini-tts` | `OPENAI_API_KEY` | Very good, and steerable with a style brief (`DEFAULT_STYLE` in lib/tts.ts). Default voice `sage`. |
 | `google` | Google Cloud Chirp 3 HD | `GOOGLE_TTS_API_KEY`, or `GOOGLE_TTS_USE_GCLOUD=1` | Good, and cheapest. Default voice `en-GB-Chirp3-HD-Charon`. |
 | `say` | macOS `say` | none | Quick local drafts only. |
@@ -58,7 +60,7 @@ The script is written to be listened to, so the voice matters. In order of prefe
 
 With no `--voice`, the first provider whose key is set is used, then `say` on a Mac, then `silent`. Keys come from the environment; if a chosen provider's key is missing and you're at a terminal, it asks without echoing. Keys are never written to disk or to the output.
 
-`--voice-id`, `--model` and `--rate 0.95` fine-tune the voice. Changing any of them, or the output format, re-voices everything. Requests time out after two minutes and are retried on network errors, rate limits and server errors.
+`--voice-id`, `--model` and `--rate 0.95` fine-tune the voice. Changing any of them, the output format or the voice settings in lib/tts.ts re-voices everything. Requests time out after two minutes and are retried on network errors, rate limits and server errors.
 
 ## What's real and what's scripted
 
@@ -72,7 +74,9 @@ Some scenes need platform features that may not be on every hub: development for
 
 The developer story is about generated JavaScript classes, so its scenes require `jsClasses`. In a draft against a hub that can't serve them yet, the sample app is given a stand-in module with the same shape ([sample-app/fallback/volunteering.js](sample-app/fallback/volunteering.js)), the app is captioned "Preview: … stand-in module" on screen, the scenes that show the hub's own Classes pages are skipped, and the run ends with a warning. `--no-shims` (and `--publish`) refuse stand-ins, so a published video simply leaves the developer story out until the hub has the feature.
 
-During a recording the browser may only reach the hub being recorded, the local stage server and Google Fonts (which the app's stylesheet loads). Anything else is blocked and listed in `report.json`; `--publish` fails if there was any. CDN modules (n3, @rdfjs/wrapper) are always served from local bundles so recordings work offline.
+During a recording the browser may only reach the exact origins of the hub being recorded and the local stage server. Anything else is blocked and listed in `report.json`; `--publish` fails if there was any. CDN modules (n3, @rdfjs/wrapper) are served from local bundles, and the web fonts the app loads from Google Fonts are served from [fonts/](fonts/), so a recording needs no network. If the app starts using a font that isn't there yet, a normal run fetches it once and saves it (commit the new files); a `--publish` run refuses instead.
+
+`report.json` lists the Node, Chromium, ffmpeg and OS versions used, for comparing two recordings. GitHub's `ubuntu-24.04` runner image is updated weekly and its ffmpeg comes from apt, so those can change between releases; the report says when they did.
 
 ## Recording against another hub
 
@@ -85,4 +89,4 @@ During a recording the browser may only reach the hub being recorded, the local 
 - Add `ELEVENLABS_API_KEY` as a repository secret for the narration. Without a voice key, release runs are skipped with a notice. Set the repository variable `ELEVENLABS_OUTPUT_FORMAT` to change the audio format.
 - The recording job has read-only access and doesn't keep the checkout's credentials; a separate job with write access only attaches the files.
 - Each release also carries `walkthrough-voice.tar.gz`, the approved narration audio. The next release restores it, so only paragraphs whose words or voice settings changed are re-voiced, however long ago the last release was.
-- The runner is pinned to `ubuntu-24.04`, and Node packages, Playwright and its Chromium come from the lockfile.
+- The runner is pinned to `ubuntu-24.04`, and Node packages, Playwright and its Chromium come from the lockfile. See above for what that does and doesn't pin.

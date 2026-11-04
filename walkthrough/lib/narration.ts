@@ -10,6 +10,8 @@
  *   The paragraph that is spoken. One paragraph is one narration clip.
  *
  *   [pause: 1.5]                    a silent hold, in seconds
+ *   [if: jsClasses,!forks]          keeps the paragraph below only when the hub has (or,
+ *                                   with !, lacks) those features
  *
  * Paragraphs with no [do:] keep the screen as it is. A [do:] with no paragraph after it
  * runs on its own, silently. HTML comments are notes for editors and are ignored.
@@ -29,6 +31,8 @@ export interface Step {
   after: Action[];
   /** Extra silent hold at the end of the step, in seconds. */
   pause: number;
+  /** Features this step needs ("x") or must not have ("!x"). */
+  when?: string[];
 }
 
 export interface Scene {
@@ -47,7 +51,7 @@ export interface Narration {
 }
 
 const HEADING = /^##\s+(.+?)\s*(?:\{([^}]*)\})?\s*$/;
-const DIRECTIVE = /^\[(do|then|pause):\s*(.*?)\]\s*$/;
+const DIRECTIVE = /^\[(do|then|pause|if):\s*(.*?)\]\s*$/;
 
 function slug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -88,7 +92,7 @@ export function parseNarration(source: string): Narration {
 
   const scenes: Scene[] = [];
   let scene: Scene | undefined;
-  let pending: { actions: Action[]; after: Action[] } = { actions: [], after: [] };
+  let pending: { actions: Action[]; after: Action[]; when?: string[] } = { actions: [], after: [] };
   let para: string[] = [];
 
   const flushPara = () => {
@@ -99,7 +103,7 @@ export function parseNarration(source: string): Narration {
     const text = para.join(' ').replace(/\s+/g, ' ').trim();
     para = [];
     if (!text && !pending.actions.length && !pending.after.length) return;
-    scene.steps.push({ text, actions: pending.actions, after: pending.after, pause: 0 });
+    scene.steps.push({ text, actions: pending.actions, after: pending.after, pause: 0, ...(pending.when ? { when: pending.when } : {}) });
     pending = { actions: [], after: [] };
   };
 
@@ -127,6 +131,10 @@ export function parseNarration(source: string): Narration {
         const last = scene.steps.at(-1);
         if (last) last.pause += secs;
         else scene.steps.push({ text: '', actions: [], after: [], pause: secs });
+      } else if (d[1] === 'if') {
+        const when = d[2].split(',').map((x) => x.trim()).filter(Boolean);
+        if (!when.length) throw new Error('Empty [if:] directive');
+        pending.when = [...(pending.when ?? []), ...when];
       } else if (d[1] === 'do') {
         pending.actions.push(parseAction(d[2]));
       } else {
@@ -255,7 +263,7 @@ export function selectScenes(n: Narration, features: Set<string>, only?: string[
     const present = s.unless.filter((f) => features.has(f));
     if (missing.length) skipped.push({ id: s.id, reason: `needs ${missing.join(', ')}` });
     else if (present.length) skipped.push({ id: s.id, reason: `fallback not needed (${present.join(', ')} available)` });
-    else kept.push(s);
+    else kept.push({ ...s, steps: s.steps.filter((st) => (st.when ?? []).every((w) => (w.startsWith('!') ? !features.has(w.slice(1)) : features.has(w)))) });
   }
   return { kept, skipped };
 }
