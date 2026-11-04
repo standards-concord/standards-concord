@@ -310,7 +310,7 @@ async function serve(req: Request, res: Response) {
   if (!format && wantsShaclProfile(req)) {
     res.vary('Accept');
     res.vary('Accept-Profile');
-    if (!acceptsRepresentation(req.get('Accept'), 'text/turtle', { profile: SHACL_PROFILE })) {
+    if (!acceptsRepresentation(req.get('Accept'), 'text/turtle', { profile: SHACL_PROFILE, charset: 'utf-8' })) {
       res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
       return;
     }

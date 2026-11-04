@@ -63,22 +63,35 @@ export const BODY_LIMITS = { ms: Number(process.env.VALIDATE_BODY_MS ?? 20_000) 
 
 /**
  * Takes a place in the validator before the body is read (validationPool.ts),
- * so uploads held in memory are bounded overall and per client, and gives it
- * back when the response ends or the client goes away.
+ * so uploads held in memory are bounded overall and per client. Clients are
+ * grouped as the rate limiter groups them (IPv6 by /56). The place is given
+ * back once the response has ended and any validation it started has
+ * stopped; a client that goes away cancels that validation.
  */
 const admission = (req: Request, res: Response, next: NextFunction) => {
-  const place = admit(`ip:${clientIp(req)}`);
+  const place = admit(`ip:${ipKeyGenerator(clientIp(req))}`);
   if (!place.ok) {
     cors(res);
     // Don't read what they're sending; close the connection after answering.
     res.set('Connection', 'close').set('Retry-After', '5');
     return void res.status(place.status).json({ error: place.message });
   }
-  res.on('close', place.release);
+  const controller = new AbortController();
+  res.locals.signal = controller.signal;
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+    const job = res.locals.job as Promise<unknown> | undefined;
+    if (job) job.then(place.release, place.release);
+    else place.release();
+  });
   next();
 };
 
-/** Reads the body as text, answering for itself when it can't, or when it takes too long to arrive. */
+/**
+ * Reads the body as text, answering for itself when it can't, or when it
+ * takes too long to arrive. If the client goes away first, the timer and the
+ * request stream (with any decompressor) are dropped at once.
+ */
 const readBody = (req: Request, res: Response, next: NextFunction) => {
   const timer = setTimeout(() => {
     if (res.headersSent) return;
@@ -86,9 +99,18 @@ const readBody = (req: Request, res: Response, next: NextFunction) => {
     res.set('Connection', 'close').status(408).json({ error: `The data took longer than ${BODY_LIMITS.ms / 1000} s to arrive.` });
     res.on('finish', () => req.destroy());
   }, BODY_LIMITS.ms);
+  const gone = () => {
+    clearTimeout(timer);
+    if (!req.complete) {
+      req.unpipe();
+      req.destroy();
+    }
+  };
+  res.once('close', gone);
   express.text({ type: () => true, limit: VALIDATION_LIMITS.bytes })(req, res, (err?: unknown) => {
     clearTimeout(timer);
-    if (res.headersSent) return;
+    res.off('close', gone);
+    if (res.headersSent || res.destroyed) return;
     if (!err) return next();
     cors(res);
     const e = err as { type?: string; status?: number; message?: string };
@@ -97,11 +119,14 @@ const readBody = (req: Request, res: Response, next: NextFunction) => {
   });
 };
 
-function formatOf(req: Request, text: string): DataFormat | undefined {
+const UNSUPPORTED = `Unsupported data format. Send one of: ${ACCEPT_POST}, or add ?format=turtle (or jsonld, ntriples, nquads, trig, rdfxml).`;
+
+/** The format named by ?format or the Content-Type; "sniff" when the body has to say; undefined when unsupported. */
+function declaredFormat(req: Request): DataFormat | 'sniff' | undefined {
   const asked = typeof req.query.format === 'string' ? req.query.format : undefined;
   if (asked) return asked in DATA_FORMATS ? (asked as DataFormat) : undefined;
   const type = (req.get('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
-  if (UNLABELLED.has(type)) return sniffDataFormat(text);
+  if (UNLABELLED.has(type)) return 'sniff';
   return dataFormatForMediaType(type);
 }
 
@@ -129,6 +154,7 @@ const target = (req: Request, res: Response, next: NextFunction) => {
   if (!version) return fail(404, `${project.title} has no version “${requested}”.`);
   const wants = req.accepts(['application/json', 'text/turtle']);
   if (!wants) return fail(406, 'Reports are available as application/json or text/turtle.');
+  if (!declaredFormat(req)) return void res.status(415).set('Connection', 'close').set('Accept-Post', ACCEPT_POST).json({ error: UNSUPPORTED });
   res.locals.target = { project, version, wants: wants as Target['wants'] } satisfies Target;
   next();
 };
@@ -137,16 +163,16 @@ async function validate(req: Request, res: Response) {
   const { project, version, wants } = res.locals.target as Target;
   const text = typeof req.body === 'string' ? req.body : '';
   if (!text.trim()) return void res.status(400).set('Accept-Post', ACCEPT_POST).json({ error: `Send the data to validate in the request body, as one of: ${ACCEPT_POST}.` });
-  const format = formatOf(req, text);
-  if (!format) {
-    return void res
-      .status(415)
-      .set('Accept-Post', ACCEPT_POST)
-      .json({ error: `Unsupported data format. Send one of: ${ACCEPT_POST}, or add ?format=turtle (or jsonld, ntriples, nquads, trig, rdfxml).` });
-  }
+  const declared = declaredFormat(req);
+  const format = declared === 'sniff' ? sniffDataFormat(text) : declared;
+  if (!format) return void res.status(415).set('Accept-Post', ACCEPT_POST).json({ error: UNSUPPORTED });
   const base = typeof req.query.base === 'string' && /^https?:\/\//.test(req.query.base) ? req.query.base : undefined;
   const self = `${origin(req)}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}/${version}`;
-  const { body, turtle } = await validateDataAgainst(project, version, text, { format, baseIRI: base, shapesUrl: `${self}.shacl.ttl`, turtle: wants === 'text/turtle' });
+  const job = validateDataAgainst(project, version, text, { format, baseIRI: base, shapesUrl: `${self}.shacl.ttl`, turtle: wants === 'text/turtle', signal: res.locals.signal as AbortSignal });
+  // The client's place is held until this has stopped (see admission).
+  res.locals.job = job;
+  const { body, turtle } = await job;
+  if (res.destroyed) return;
   res.set('Link', `<${self}.shacl.ttl>; rel="describedby"; type="text/turtle"; profile="http://www.w3.org/ns/shacl#"`);
   if (wants === 'text/turtle') return void res.type('text/turtle; charset=utf-8').send(turtle ?? '');
   res.json(body);
@@ -169,6 +195,8 @@ export function validationRouter(): Router {
     try {
       await validate(req, res);
     } catch (err) {
+      // The client went away and its validation was cancelled: nobody to answer.
+      if (res.destroyed || res.headersSent) return;
       if (err instanceof DataError) {
         if (err.status === 503) res.set('Retry-After', '5');
         return void res.status(err.status).json({ error: err.message });

@@ -1,13 +1,14 @@
 import { Parser, Store } from 'n3';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { BODY_LIMITS, RATE_LIMITS } from '../src/public/validate.js';
-import { admit, POOL_LIMITS } from '../src/services/validationPool.js';
+import { gzipSync } from 'node:zlib';
+import { admit, POOL_LIMITS, poolState } from '../src/services/validationPool.js';
 
 const app = createApp();
 const SH = 'http://www.w3.org/ns/shacl#';
@@ -221,11 +222,19 @@ describe('POST to the ontology IRI validates data', () => {
     afterAll(() => new Promise((r) => server.close(r)));
 
     // Every request comes from 127.0.0.1, one client (localhost can be ::1 instead).
-    /** Starts a POST whose body never finishes arriving. */
-    const trickle = () => {
-      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/def/volunteering', headers: { 'Content-Type': 'text/turtle', 'Content-Length': '100000' } });
+    const open: http.ClientRequest[] = [];
+    afterEach(() => {
+      for (const r of open.splice(0)) r.destroy();
+    });
+    const local = () => request(`http://127.0.0.1:${port}`);
+    /** Starts a POST that sends `first` and then, unless `rest` is given, never finishes. */
+    const send = (first: string | Buffer, headers: Record<string, string> = {}, rest?: string | Buffer) => {
+      const length = rest === undefined ? 100_000 : Buffer.byteLength(first) + Buffer.byteLength(rest);
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/def/volunteering', headers: { 'Content-Type': 'text/turtle', 'Content-Length': String(length), ...headers } });
+      open.push(req);
       req.on('error', () => {});
-      req.write(PREFIXES);
+      req.write(first);
+      if (rest !== undefined) req.end(rest);
       const answer = new Promise<{ status: number; body: string }>((resolve) =>
         req.on('response', (res) => {
           let body = '';
@@ -235,23 +244,71 @@ describe('POST to the ontology IRI validates data', () => {
       );
       return { req, answer };
     };
+    const trickle = () => send(PREFIXES);
+    /** Waits until every place is free and no job is waiting or running. */
+    const idle = async (ms = 3000) => {
+      for (let i = 0; i < ms / 10; i++) {
+        const st = poolState();
+        if (!st.admitted && !st.queued && !st.running) return st;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      return poolState();
+    };
+    const bigData = (n: number) => {
+      let big = PREFIXES;
+      for (let i = 0; i < n; i++) big += `ex:r${i} a vol:Role ; vol:title "r" .\n`;
+      return big;
+    };
 
     it('lets one client hold two at once, and gives them back when it goes away', async () => {
       const a = trickle();
       const b = trickle();
       await new Promise((r) => setTimeout(r, 100));
-      const third = await request(`http://127.0.0.1:${port}`).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID);
+      const third = await local().post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID);
       expect(third.status).toBe(429);
       expect(third.body.error).toMatch(/already have 2 validations in progress/);
       expect(third.headers['retry-after']).toBe('5');
       a.req.destroy();
       b.req.destroy();
-      let ok = 0;
-      for (let i = 0; i < 5 && ok !== 200; i++) {
-        ok = (await request(`http://127.0.0.1:${port}`).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status;
-        if (ok !== 200) await new Promise((r) => setTimeout(r, 50));
+      expect(await idle()).toEqual({ admitted: 0, queued: 0, running: 0 });
+      expect((await local().post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status).toBe(200);
+    });
+
+    it('cancels the validations of a client that goes away, and only then gives its places back', async () => {
+      const before = POOL_LIMITS.perClient;
+      POOL_LIMITS.perClient = 10;
+      try {
+        const data = bigData(12_000);
+        // Fill both workers and the queue, then hang up on all of them as they are being checked.
+        const sent = Array.from({ length: POOL_LIMITS.workers + POOL_LIMITS.queue }, () => send(data.slice(0, 10), {}, data.slice(10)));
+        for (let i = 0; i < 100 && poolState().running < POOL_LIMITS.workers; i++) await new Promise((r) => setTimeout(r, 10));
+        expect(poolState().running).toBe(POOL_LIMITS.workers);
+        for (const s of sent) s.req.destroy();
+        // Far sooner than the jobs could finish: they were stopped, not waited for.
+        expect(await idle(300)).toEqual({ admitted: 0, queued: 0, running: 0 });
+      } finally {
+        POOL_LIMITS.perClient = before;
       }
-      expect(ok).toBe(200);
+      expect((await local().post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status).toBe(200);
+    });
+
+    it('drops a compressed upload as soon as its client goes away', async () => {
+      const gz = gzipSync(bigData(2000));
+      const { req } = send(gz.subarray(0, gz.length >> 1), { 'Content-Encoding': 'gzip', 'Content-Length': String(gz.length) });
+      for (let i = 0; i < 100 && !poolState().admitted; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(poolState().admitted).toBe(1);
+      req.destroy();
+      expect(await idle()).toEqual({ admitted: 0, queued: 0, running: 0 });
+    });
+
+    it('answers 415 for a format it can’t read without taking a place', async () => {
+      const places = Array.from({ length: POOL_LIMITS.workers + POOL_LIMITS.queue }, (_, i) => admit(`test:${i}`));
+      try {
+        expect((await post('/def/volunteering', '%PDF-1.4', 'application/pdf')).status).toBe(415);
+        expect((await post('/def/volunteering?format=csv', VALID)).status).toBe(415);
+      } finally {
+        for (const p of places) if (p.ok) p.release();
+      }
     });
 
     it('turns everyone away while every place is taken, without reading their data', async () => {
@@ -285,8 +342,7 @@ describe('POST to the ontology IRI validates data', () => {
       const before = { wait: POOL_LIMITS.queueWaitMs, perClient: POOL_LIMITS.perClient };
       POOL_LIMITS.queueWaitMs = 0;
       POOL_LIMITS.perClient = 10;
-      let big = PREFIXES;
-      for (let i = 0; i < 3000; i++) big += `ex:r${i} a vol:Role ; vol:title "r" .\n`;
+      const big = bigData(3000);
       try {
         const answers = await Promise.all(Array.from({ length: POOL_LIMITS.workers + 1 }, () => post('/def/volunteering', big)));
         const statuses = answers.map((r) => r.status);
@@ -359,6 +415,17 @@ describe('the SHACL profile of the ontology IRI', () => {
       .set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
     expect(otherProfile.status).toBe(200);
     expect(otherProfile.text).toMatch(/sh:NodeShape/);
+    // charset is matched like profile: the shapes are UTF-8.
+    const refusedWithCharset = await request(app)
+      .get('/def/volunteering/1.0.0')
+      .set('Accept', 'text/turtle;profile="http://www.w3.org/ns/shacl#";charset=utf-8;q=0, text/turtle;q=1')
+      .set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(refusedWithCharset.status).toBe(406);
+    const utf8Only = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle;charset=utf-8').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(utf8Only.status).toBe(200);
+    expect(utf8Only.text).toMatch(/sh:NodeShape/);
+    const latin1Only = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle;charset=iso-8859-1').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(latin1Only.status).toBe(406);
   });
 
   it('refuses the profile in a type it is not available in', async () => {

@@ -53,6 +53,8 @@ export interface ValidateOptions {
   shapesUrl?: string;
   /** Also write the SHACL validation report in Turtle. */
   turtle?: boolean;
+  /** Aborted when the caller goes away: the job is dropped or its worker stopped. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -73,7 +75,7 @@ export async function validateDataAgainst(project: OntologyProject, version: str
     baseIRI: opts.baseIRI ?? DEFAULT_DATA_BASE,
     maxTriples: VALIDATION_LIMITS.triples,
     turtle: !!opts.turtle,
-  });
+  }, opts.signal);
   const count = (s: string) => outcome.results.filter((r) => r.severity === s).length;
   const body: DataValidation = {
     ontology: graph.ontologyIRI || project.ontologyIRI,

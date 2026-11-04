@@ -53,14 +53,14 @@ describe('reading data', () => {
   });
 
   it('stops parsing at the cap, in every format', async () => {
-    // Past the cap the data is broken (or, for JSON-LD, needs a remote context): a 413, not a 400, shows the parser never read that far.
+    // Past the cap the data is broken: a 413, not a 400, shows the parser never read that far. (JSON-LD is counted exactly after expansion, before any triples are made.)
     const n = 5000;
     const tail = ' this is not RDF <<<';
     const nt = Array.from({ length: n }, (_, i) => `<https://e/s${i}> <https://e/p> "${i}" .`).join('\n');
     const cases: [string, Parameters<typeof parseData>[1]][] = [
       [`<https://e/a> <https://e/p> ${Array.from({ length: n }, (_, i) => i).join(', ')} .${tail}`, 'turtle'],
       [nt + tail, 'ntriples'],
-      [`{"@context": {"p": "https://e/p"}, "@graph": [${Array.from({ length: n }, (_, i) => `{"@id": "https://e/s${i}", "p": ${i}}`).join(',')}, {"@context": "https://remote.example/", "@id": "https://e/x", "p": 1}]}`, 'jsonld'],
+      [`{"@context": {"p": "https://e/p"}, "@graph": [${Array.from({ length: n }, (_, i) => `{"@id": "https://e/s${i}", "p": ${i}}`).join(',')}]}`, 'jsonld'],
       [`<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:e="https://e/">${Array.from({ length: n }, (_, i) => `<rdf:Description rdf:about="https://e/s${i}"><e:p>${i}</e:p></rdf:Description>`).join('')}<unclosed`, 'rdfxml'],
     ];
     for (const [text, format] of cases) {
@@ -68,6 +68,32 @@ describe('reading data', () => {
       expect(err, format).toBeInstanceOf(DataError);
       expect([format, err.status, err.message]).toEqual([format, 413, 'The data has more than 2 triples, the limit.']);
     }
+  });
+
+  it('counts JSON-LD triples with its contexts applied', async () => {
+    const ctx = { p: 'https://e/p', blob: { '@id': 'https://e/blob', '@type': '@json' }, items: { '@id': 'https://e/items', '@container': '@list' } };
+    // A large @json literal is one triple, however many keys it has inside.
+    const blob = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`k${i}`, i]));
+    const one = await parseData(JSON.stringify({ '@context': ctx, '@id': 'https://e/a', blob }), 'jsonld', { maxTriples: 1 });
+    expect(one).toHaveLength(1);
+    // A list from the context makes two triples per item, plus the link to it.
+    const list = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', items: Array.from({ length: 10 }, (_, i) => i) });
+    expect(await parseData(list, 'jsonld', { maxTriples: 21 })).toHaveLength(21);
+    expect((await parseData(list, 'jsonld', { maxTriples: 20 }).catch((e) => e)).status).toBe(413);
+    // Arrays nested in arrays are flattened into one set of values.
+    const nested = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', p: [[1, [2, [3]]]] });
+    expect(await parseData(nested, 'jsonld', { maxTriples: 3 })).toHaveLength(3);
+    expect((await parseData(nested, 'jsonld', { maxTriples: 2 }).catch((e) => e)).status).toBe(413);
+  });
+
+  it('refuses deeply nested JSON before expanding it', async () => {
+    let deep = '1';
+    for (let i = 0; i < 5000; i++) deep = `{"https://e/p": ${deep}}`;
+    const t = performance.now();
+    const err = await parseData(deep, 'jsonld').catch((e) => e);
+    expect(err.status).toBe(400);
+    expect(err.message).toMatch(/nested more than 64 levels/);
+    expect(performance.now() - t).toBeLessThan(1000);
   });
 
   it('parses data split across chunks, including multi-byte characters', async () => {

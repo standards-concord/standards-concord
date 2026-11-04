@@ -11,7 +11,8 @@ import type { ValidationJob, ValidationOutcome, WorkerReply } from './validation
  *
  * Callers reserve a place with admit() before they read a request body, so
  * the number of bodies held in memory is bounded too (workers + queue), and
- * one client can hold at most perClient of those places.
+ * one client can hold at most perClient of those places. A place is given
+ * back only once its job has stopped: a caller that goes away cancels it.
  */
 
 export const POOL_LIMITS = {
@@ -123,9 +124,15 @@ function pump() {
   }
 }
 
-export function runValidation(job: Omit<ValidationJob, 'id'>): Promise<ValidationOutcome> {
+/**
+ * Runs a validation in a worker. Aborting `signal` (the caller went away)
+ * takes a waiting job out of the queue, or stops the worker running it, so
+ * cancelled work never holds a place.
+ */
+export function runValidation(job: Omit<ValidationJob, 'id'>, signal?: AbortSignal): Promise<ValidationOutcome> {
+  if (signal?.aborted) return Promise.reject(new Error('The validation was cancelled'));
   if (queue.length >= POOL_LIMITS.queue) return Promise.reject(new DataError(503, 'The validator is busy. Try again in a moment.'));
-  return new Promise((resolve, reject) => {
+  return new Promise<ValidationOutcome>((resolve, reject) => {
     const pending: Pending = { job: { ...job, id: nextId++ }, resolve, reject };
     // Waiting counts towards the caller's time too: a job that can't start soon is turned away.
     pending.wait = setTimeout(() => {
@@ -136,6 +143,24 @@ export function runValidation(job: Omit<ValidationJob, 'id'>): Promise<Validatio
     }, POOL_LIMITS.queueWaitMs);
     pending.wait.unref();
     queue.push(pending);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        const cancelled = new Error('The validation was cancelled');
+        const i = queue.indexOf(pending);
+        if (i >= 0) {
+          queue.splice(i, 1);
+          clearTimeout(pending.wait);
+          return reject(cancelled);
+        }
+        const slot = slots.find((s) => s.current?.job.id === pending.job.id);
+        if (slot) retire(slot, cancelled);
+      },
+      { once: true },
+    );
     pump();
   });
 }
+
+/** Places taken and jobs waiting or running, for tests and health checks. */
+export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length });

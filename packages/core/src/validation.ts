@@ -174,35 +174,61 @@ async function feed(
   if (!ended) throw new Error('the parser stopped before the end of the data');
 }
 
-/** Never fetches: a remote @context would let anyone make this server request any URL. */
-const NO_REMOTE_DOCUMENTS = {
-  load: async (url: string): Promise<never> => {
-    throw new DataError(400, `Remote JSON-LD contexts are not fetched (${url}). Put the context inline in the document.`);
-  },
-};
+/** JSON nested deeper than this is refused: real data is far shallower, and expansion recurses. */
+export const MAX_JSON_DEPTH = 64;
+
+/** How deeply JSON is nested, without recursion (so it can't overflow the stack), stopping once past `limit`. */
+function jsonDepth(doc: unknown, limit: number): number {
+  let deepest = 0;
+  const stack: [unknown, number][] = [[doc, 1]];
+  while (stack.length) {
+    const [node, depth] = stack.pop()!;
+    if (!node || typeof node !== 'object') continue;
+    deepest = Math.max(deepest, depth);
+    if (deepest > limit) return deepest;
+    for (const child of Array.isArray(node) ? node : Object.values(node)) if (child && typeof child === 'object') stack.push([child, depth + 1]);
+  }
+  return deepest;
+}
 
 /**
- * At most how many triples a JSON-LD document can make: one for each value of
- * each property and each @type, two for each list item. (Contexts only
- * rename, coerce or drop values; they don't multiply them.) Walks the parsed
- * JSON without recursion, so deep nesting can't overflow the stack.
+ * How many triples an expanded JSON-LD document makes, at most. Expanded
+ * JSON-LD has every context applied (terms, coercion, @json literals,
+ * context-defined lists and indexes are all explicit), so this counts what
+ * toRDF will emit: one triple per property value and per @type, and two per
+ * list item. @json and other literal values are never looked inside.
  */
-export function jsonLdTripleBound(doc: unknown): number {
+export function expandedTripleCount(expanded: unknown): number {
   let count = 0;
-  const stack: unknown[] = [doc];
+  // Node objects (and arrays of them) still to count.
+  const stack: unknown[] = [expanded];
+  const isObject = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+  /** A property's values: each makes one triple; lists add two per item; nested nodes are counted in turn. */
+  const values = (vs: unknown) => {
+    for (const v of Array.isArray(vs) ? vs : [vs]) {
+      count++;
+      if (!isObject(v) || '@value' in v) continue;
+      if ('@list' in v) {
+        const items = Array.isArray(v['@list']) ? v['@list'] : [v['@list']];
+        for (const item of items) {
+          count += 2;
+          if (isObject(item) && !('@value' in item)) stack.push(item);
+        }
+      } else stack.push(v);
+    }
+  };
   while (stack.length) {
     const node = stack.pop();
     if (Array.isArray(node)) {
       for (const x of node) stack.push(x);
       continue;
     }
-    if (!node || typeof node !== 'object') continue;
-    for (const [key, value] of Object.entries(node)) {
-      if (key === '@context') continue;
-      const values = Array.isArray(value) ? value : [value];
-      if (key === '@list') count += 2 * values.length + 1;
-      else if (key === '@type' || !key.startsWith('@')) count += values.length;
-      if (key !== '@type' && key !== '@id' && key !== '@value' && key !== '@language' && key !== '@direction') stack.push(value);
+    if (!isObject(node) || '@value' in node) continue;
+    for (const [key, v] of Object.entries(node)) {
+      if (key === '@type') count += Array.isArray(v) ? v.length : 1;
+      else if (key === '@graph' || key === '@included') stack.push(v);
+      else if (key === '@reverse' && isObject(v)) for (const rv of Object.values(v)) values(rv);
+      else if (!key.startsWith('@')) values(v);
     }
   }
   return count;
@@ -231,19 +257,27 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
       } catch (err) {
         throw new DataError(400, `The data is not valid JSON: ${(err as Error).message}`);
       }
-      // The parser holds back a top-level @graph or array until the document ends
-      // (a later @id could name the graph), so bound the output before parsing.
-      if (jsonLdTripleBound(doc) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
-      doc = undefined;
-      // A streaming parser, so expansion stops at the triple cap rather than after the whole document.
-      const { JsonLdParser } = await import('jsonld-streaming-parser');
-      const parser = new JsonLdParser({ baseIRI, documentLoader: NO_REMOTE_DOCUMENTS as never });
+      if (jsonDepth(doc, MAX_JSON_DEPTH) > MAX_JSON_DEPTH) throw new DataError(400, `The JSON is nested more than ${MAX_JSON_DEPTH} levels deep, the limit.`);
+      const jsonld = (await import('jsonld')).default;
+      let remote: string | undefined;
+      const options = {
+        base: baseIRI,
+        // Never fetch: a remote @context would let anyone make this server request any URL.
+        documentLoader: async (url: string) => {
+          remote = url;
+          throw new Error('remote documents are not loaded');
+        },
+      };
       try {
-        return await feed(parser as never, text, emit);
+        // Expand first: with every context applied, the triples it will make can be
+        // counted exactly, and refused before any are made.
+        const expanded = await jsonld.expand(doc as object, options as never);
+        doc = undefined;
+        if (expandedTripleCount(expanded) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
+        const nquads = (await jsonld.toRDF(expanded as unknown as object, { ...options, format: 'application/n-quads' } as never)) as unknown as string;
+        return streamN3(nquads, 'N-Quads', undefined, emit);
       } catch (err) {
-        // The loader's refusal comes back wrapped by the context parser.
-        const remote = /Remote JSON-LD contexts are not fetched \(([^)]*)\)/.exec(String((err as Error)?.message ?? err));
-        if (remote && !(err instanceof DataError)) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote[1]}). Put the context inline in the document.`);
+        if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
         throw err;
       }
     }
