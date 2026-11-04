@@ -1,5 +1,6 @@
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
 import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitMerge, MessageSquareText, Pencil, Users, Combine, type LucideIcon } from 'lucide-react';
+import { PenLine } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
 
@@ -56,6 +57,8 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
       return { icon: Users, label: 'From a meeting' };
     case 'agent':
       return { icon: Bot, label: origin.agentName ? `From agent ${origin.agentName}` : 'From a coding agent' };
+    case 'term-edit':
+      return { icon: PenLine, label: 'Edited on the term page' };
     case 'bug-report':
       return { icon: Bug, label: 'Bug report' };
     case 'synthesis':

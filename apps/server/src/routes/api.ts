@@ -11,6 +11,7 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
+import { proposeTermEdit } from '../services/termEdits.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
@@ -386,6 +387,11 @@ export function apiRouter(): Router {
       origin: { type: 'bug-report' },
       naturalLanguage: `Bug report${termIri ? ` about <${termIri}>` : ''}: ${title}\n\n${description}`,
     });
+    res.status(201).json(crs.detail(cr));
+  });
+
+  r.post('/ontologies/:id/term-edits', async (req, res) => {
+    const cr = await proposeTermEdit(project(req), requireUser(req), req.body ?? {});
     res.status(201).json(crs.detail(cr));
   });
 

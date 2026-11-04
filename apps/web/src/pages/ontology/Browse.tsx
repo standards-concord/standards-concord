@@ -2,13 +2,15 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
 import type { ClassView } from '@concord/core/types';
-import { Bug, ChevronDown, ChevronRight, Circle, Network, ListTree, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, PenLine, ChevronRight, Circle, Network, ListTree, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
 import { compactIri } from '../../lib/format';
 import { OntologyGraph } from '../../components/OntologyGraph';
 import { BugReportDialog } from '../../components/BugReport';
+import { ProposedEditNotice, TermEditForm } from '../../components/TermEdit';
+import type { ChangeRequestDetail } from '@concord/shared';
 import { Badge, Button, Card, CopyButton, EmptyState, ErrorCard, Input, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -88,10 +90,30 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
   const { id, label, view } = useOntology();
   const term = useAsync(() => api.term(id, iri), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [proposed, setProposed] = useState<ChangeRequestDetail>();
+  useEffect(() => {
+    setEditing(false);
+    setProposed(undefined);
+  }, [iri]);
   if (term.error && !term.data) return <ErrorCard error={term.error} onRetry={term.reload} />;
   if (!term.data) return <Loading />;
   const t: TermDetail = term.data;
   const prefixes = view.data?.prefixes;
+  if (editing)
+    return (
+      <Card className="p-5">
+        <TermEditForm
+          term={t}
+          termLabel={t.label ?? label(t.iri)}
+          onCancel={() => setEditing(false)}
+          onProposed={(cr) => {
+            setEditing(false);
+            setProposed(cr);
+          }}
+        />
+      </Card>
+    );
   return (
     <Card className="p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -108,10 +130,16 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
             <CopyButton text={t.iri} variant="ghost" />
           </div>
         </div>
-        <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
-          Report a problem with this term
-        </Button>
+        <div className="flex flex-wrap gap-1">
+          <Button size="sm" variant="ghost" icon={PenLine} onClick={() => setEditing(true)}>
+            Edit
+          </Button>
+          <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
+            Report a problem with this term
+          </Button>
+        </div>
       </div>
+      {proposed && <ProposedEditNotice cr={proposed} onDismiss={() => setProposed(undefined)} />}
 
       {t.deprecated && t.replacedBy && (
         <p className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-sm">

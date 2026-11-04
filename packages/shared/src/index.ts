@@ -353,10 +353,33 @@ export interface Meeting {
 
 export type ChangeRequestKind = 'feature' | 'bug' | 'gap' | 'editorial' | 'deprecation';
 
+/** Annotation fields that can be edited inline on a term's page. */
+export const TERM_EDIT_FIELDS = ['label', 'definition', 'comment', 'altLabels', 'examples', 'editorialNote'] as const;
+export type TermEditField = (typeof TERM_EDIT_FIELDS)[number];
+export type TermEditValues = Partial<{ label: string; definition: string; comment: string; altLabels: string[]; examples: string[]; editorialNote: string }>;
+
+/**
+ * POST /api/ontologies/:id/term-edits. Opens an editorial change request with
+ * the changed fields; nothing is written to the working draft until it is
+ * approved and merged under the ontology's governance policy.
+ */
+export type TermEditInput = {
+  termIri: string;
+  /** New values for the fields being edited. An empty string or list removes the field. */
+  set: TermEditValues;
+  /** The values the editor started from, so a concurrent change is refused (409) rather than overwritten. */
+  previous?: TermEditValues;
+  /** Why the change is needed, for reviewers. */
+  reason?: string;
+  /** Submit for review straight away; otherwise the request stays a draft for its author. */
+  submit?: boolean;
+};
+
 export type ChangeRequestOrigin =
   | { type: 'chat'; useCaseId?: string }
   | { type: 'meeting'; meetingId: string }
   | { type: 'agent'; agentName?: string; reportId?: string }
+  | { type: 'term-edit'; termIri: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] };

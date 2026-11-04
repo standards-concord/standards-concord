@@ -30,6 +30,7 @@ import type {
   ReleaseDetail,
   Role,
   SessionInfo,
+  TermEditInput,
   TermView,
   TranscriptLine,
   UseCase,
@@ -210,6 +211,7 @@ export const api = {
   createChangeRequest: (id: string, body: NewChangeRequestInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/change-requests`, body),
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
+  proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),

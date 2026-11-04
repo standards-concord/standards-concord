@@ -293,3 +293,66 @@ describe('anonymous access', () => {
     expect(detail.body.history).toEqual([]);
   });
 });
+
+describe('inline term edits', () => {
+  const SKILL = 'https://w3id.org/odi/volunteering#Skill';
+  const termPath = () => `/api/ontologies/${demoId}/terms/${encodeURIComponent(SKILL)}`;
+
+  it('opens an editorial change request with only the changed fields, leaving the working draft alone', async () => {
+    const contributor = await login('contributor', 'Contributor Kit');
+    const before = (await contributor.get(termPath())).body;
+    const definition = `${before.definition} It is something a volunteer can offer or develop.`;
+    const res = await contributor.post(`/api/ontologies/${demoId}/term-edits`).send({
+      termIri: SKILL,
+      set: { definition, label: before.label, altLabels: [' competence ', 'competence', ''] },
+      previous: { definition: before.definition, label: before.label, altLabels: before.altLabels ?? [] },
+      reason: 'Say who has skills.',
+      submit: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.kind).toBe('editorial');
+    expect(res.body.origin).toEqual({ type: 'term-edit', termIri: SKILL });
+    expect(res.body.status).toBe('review');
+    expect(res.body.title).toMatch(/definition and alternative labels of “/);
+    expect(res.body.description).toMatch(/Say who has skills\./);
+    expect(res.body.ops).toEqual([{ op: 'updateAnnotations', iri: SKILL, set: { definition, altLabels: ['competence'] } }]);
+    expect(res.body.classification.level).toBe('patch');
+    expect(res.body.validation.passed).toBe(true);
+    // Nothing changes until the change request is approved and merged.
+    expect((await contributor.get(termPath())).body.definition).toBe(before.definition);
+
+    // Working group: a patch needs one editor or steward sign-off and a day open for comment.
+    const editor = await login('editor', 'Editor Ines');
+    const approved = await editor.post(`/api/change-requests/${res.body.id}/reviews`).send({ decision: 'approve' });
+    expect(approved.body.governance.approvals).toBe(1);
+    await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
+    expect((await editor.get(`/api/change-requests/${res.body.id}`)).body.status).toBe('merged');
+    const after = (await contributor.get(termPath())).body;
+    expect(after.definition).toBe(definition);
+    expect(after.altLabels).toEqual(['competence']);
+  });
+
+  it('keeps a draft when not submitted, and classifies removing a definition as major', async () => {
+    const contributor = await login('contributor', 'Contributor Lou');
+    const res = await contributor.post(`/api/ontologies/${demoId}/term-edits`).send({ termIri: SKILL, set: { definition: '' } });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('draft');
+    expect(res.body.ops[0].set).toEqual({ definition: '' });
+    expect(res.body.classification.level).toBe('major');
+  });
+
+  it('refuses no-op, empty-label, unknown-term, stale and anonymous edits', async () => {
+    const contributor = await login('contributor', 'Contributor Mo');
+    const current = (await contributor.get(termPath())).body;
+    const post = (body: object) => contributor.post(`/api/ontologies/${demoId}/term-edits`).send(body);
+    expect((await post({ termIri: SKILL, set: { label: current.label } })).status).toBe(400);
+    expect((await post({ termIri: SKILL, set: { label: '   ' } })).status).toBe(400);
+    expect((await post({ termIri: SKILL, set: { altLabels: 'not a list' } })).status).toBe(400);
+    expect((await post({ termIri: 'https://w3id.org/odi/volunteering#NoSuchTerm', set: { label: 'x' } })).status).toBe(404);
+    const stale = await post({ termIri: SKILL, set: { comment: 'New comment' }, previous: { comment: 'Something someone else replaced' } });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toMatch(/changed since you opened the editor/);
+    const anon = await request(app).post(`/api/ontologies/${demoId}/term-edits`).send({ termIri: SKILL, set: { comment: 'x' } });
+    expect(anon.status).toBe(401);
+  });
+});
