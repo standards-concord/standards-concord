@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Play, RotateCcw, Search, ShieldCheck, Sparkles, Table2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Loader2, Play, RotateCcw, Search, ShieldCheck, Sparkles, Square, Table2 } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
 import type { ChatMessage, QueryChatResponse, QueryTarget } from '@concord/shared';
@@ -10,6 +10,8 @@ import { allTerms, makeLabeler } from '../../lib/ontology';
 import { insertTerm } from '../../lib/prefixes';
 import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
+import { MAX_ROWS, QueryRunner, QueryStopped, type RunResult } from '../../lib/queryRunner';
+import { limitOf, withoutLimit } from '../../lib/sparqlLimit';
 import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
 import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
@@ -28,8 +30,7 @@ import { useOntology } from './Layout';
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-type ResultRows = { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; labels?: Record<string, string> };
-type Result = ResultRows | { kind: 'ask'; answer: boolean } | { kind: 'graph'; text: string; count: number };
+type Result = (RunResult & { kind: 'ask' | 'graph' }) | (Extract<RunResult, { kind: 'rows' }> & { labels?: Record<string, string> });
 
 type Target = QueryTarget;
 type Columns = { variable: string; label: string }[];
@@ -98,13 +99,6 @@ const OFFLINE_NOTE: Record<NonNullable<QueryChatResponse['offlineReason']>, stri
   limit: 'Offline helper: the assistant has reached today’s usage limit, so this matches your words to the ontology’s terms instead.',
 };
 
-/** The query's final LIMIT (outside any subquery), if it has one. */
-const TRAILING_LIMIT = /\bLIMIT\s+(\d+)(\s+OFFSET\s+\d+)?\s*(#[^\n]*\s*)*$/i;
-const limitOf = (q: string) => {
-  const m = TRAILING_LIMIT.exec(q);
-  return m ? Number(m[1]) : undefined;
-};
-const withoutLimit = (q: string) => q.replace(TRAILING_LIMIT, (m) => m.replace(/\bLIMIT\s+\d+\s*/i, '')).trimEnd() + '\n';
 const FINDINGS_PER_PAGE = 20;
 
 /** Previous / next paging for long results, so a big answer doesn't flood the page. */
@@ -146,7 +140,7 @@ export function QueryTab() {
   }, [id]);
   // Wait for the session so a signed-in person's drafts open straight away, not a guest's first.
   if (loading && !session) return <Loading className="py-12" />;
-  return <QueryWorkspace key={`${account}:${id}`} storageKey={`concord.query.${account}.${id}`} />;
+  return <QueryWorkspace key={`${account}:${id}`} account={account} storageKey={`concord.query.${account}.${id}`} />;
 }
 
 /**
@@ -174,9 +168,9 @@ async function countRecords(data: string): Promise<{ byClass: Map<string, number
   return { byClass: counts, total };
 }
 
-function QueryWorkspace({ storageKey }: { storageKey: string }) {
+function QueryWorkspace({ storageKey, account }: { storageKey: string; account: string }) {
   const { id, ontology } = useOntology();
-  const { session } = useSession();
+  const { session, setSession } = useSession();
   const [params, setParams] = useSearchParams();
   const setParam = (k: string, v: string) => {
     const n = new URLSearchParams(params);
@@ -192,8 +186,12 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
   const turtle = useAsync(() => api.source(id, 'turtle'), [id]);
   const shapes = useAsync(() => api.source(id, 'shacl'), [id]);
   const view = useAsync(() => api.view(id), [id]);
+  // The ontology store on this thread loads the ontology (the "triples loaded" badge) and checks data with SHACL.
   const storeRef = useRef<SparqStore | null>(null);
-  const dataStoreRef = useRef<{ key: string; store: SparqStore } | null>(null);
+  // Queries run in a worker that Cancel and the time limit can stop.
+  const runnerRef = useRef<QueryRunner | null>(null);
+  const runner = () => (runnerRef.current ??= new QueryRunner());
+  const [running, setRunning] = useState(false);
   const [ready, setReady] = useState<{ ms: number; triples: number } | null>(null);
   const [loadError, setLoadError] = useState<unknown>();
 
@@ -236,6 +234,8 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
   // The query assistant's conversation, and the column headings it gave for the current query.
   const [chat, setChat] = useLocalStorage<(ChatMessage & { simulated?: boolean; offlineReason?: QueryChatResponse['offlineReason'] })[]>(`${storageKey}.chat`, []);
   const [columns, setColumns] = useLocalStorage<Columns>(`${storageKey}.columns`, []);
+  // Where the offline helper's last query came from, so it can keep refining it however long the chat gets.
+  const [offlineState, setOfflineState] = useLocalStorage<unknown>(`${storageKey}.offlineState`, null);
   const [asking, setAsking] = useState(false);
   const [chatError, setChatError] = useState<unknown>();
 
@@ -278,8 +278,6 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
         if (cancelled) return s.free();
         storeRef.current?.free();
         storeRef.current = s;
-        dataStoreRef.current?.store.free();
-        dataStoreRef.current = null;
         setReady({ ms: Math.round(performance.now() - t0), triples: s.countQuads(null, null, null) });
       })
       .catch((e) => !cancelled && setLoadError(e));
@@ -290,21 +288,10 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
   useEffect(
     () => () => {
       storeRef.current?.free();
-      dataStoreRef.current?.store.free();
+      runnerRef.current?.dispose();
     },
     [],
   );
-
-  const storeFor = async (t: Target): Promise<SparqStore | null> => {
-    if (t === 'ontology') return storeRef.current;
-    const key = `${turtle.data ?? ''}\n${data}`;
-    if (dataStoreRef.current?.key === key) return dataStoreRef.current.store;
-    const { SparqStore } = await sparqModule();
-    const store = SparqStore.fromStringSync(key, 'turtle');
-    dataStoreRef.current?.store.free();
-    dataStoreRef.current = { key, store };
-    return store;
-  };
 
   // Each answer remembers the question and data it came from, so a changed question never sits above an old answer.
   const keyFor = (q: string, t: Target) => `${t}|${q}|${t === 'data' ? data : ''}`;
@@ -316,33 +303,30 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
 
   /** Runs the editor's query, or the one the assistant just wrote (state hasn't caught up yet). */
   const run = async (next?: { query: string; target: Target; columns: Columns }) => {
-    if (!storeRef.current) return;
+    if (!ready || !turtle.data) return;
     const q = next?.query ?? query;
     const t = next?.target ?? target;
     const cols = next?.columns ?? columns;
     setQueryError(undefined);
     setRanKey(keyFor(q, t));
-    const t0 = performance.now();
+    setRunning(true);
     try {
-      const s = await storeFor(t);
-      if (!s) return;
-      const form = queryForm(q);
-      if (form === 'ask') setResult({ kind: 'ask', answer: s.queryBoolean(q) });
-      else if (form === 'construct' || form === 'describe') {
-        const text = s.queryQuadsString(q);
-        setResult({ kind: 'graph', text, count: text.split('\n').filter((l) => l.trim()).length });
-      } else {
-        const json = JSON.parse(s.queryJson(q)) as { head: { vars: string[] }; results: { bindings: Record<string, { value: string }>[] } };
-        const rows = json.results.bindings.map((b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.value])));
+      const { result: r, ms } = await runner().run({ source: t === 'data' ? `${turtle.data}\n${data}` : turtle.data, query: q, form: queryForm(q) });
+      if (r.kind === 'rows') {
         // The assistant's readable headings, for the columns this query still has.
-        const labels = Object.fromEntries(cols.filter((c) => json.head.vars.includes(c.variable)).map((c) => [c.variable, c.label]));
-        setResult({ kind: 'rows', vars: json.head.vars, rows, labels: Object.keys(labels).length ? labels : undefined });
-      }
+        const labels = Object.fromEntries(cols.filter((c) => r.vars.includes(c.variable)).map((c) => [c.variable, c.label]));
+        setResult({ ...r, labels: Object.keys(labels).length ? labels : undefined });
+      } else setResult(r);
+      setQueryMs(ms);
     } catch (e) {
+      // A newer run replaced this one: that run reports its own outcome.
+      if (e instanceof QueryStopped && e.reason === 'cancelled' && runnerRef.current?.running) return;
       setQueryError(e);
       setResult(null);
+      setQueryMs(undefined);
+    } finally {
+      if (!runnerRef.current?.running) setRunning(false);
     }
-    setQueryMs(Math.round(performance.now() - t0));
   };
 
   const ask = async (text: string) => {
@@ -352,15 +336,23 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
     setAsking(true);
     setChatError(undefined);
     try {
+      // This conversation belongs to one account: never send it on under another one signed in from another tab.
+      const now = await api.session();
+      if ((now.user?.id ?? 'guest') !== account) {
+        setSession(now);
+        throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
+      }
       const r = await api.queryChat(id, {
         messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
         query,
         target,
         dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
+        offlineState: offlineState ?? undefined,
       });
       setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
       // The editor is read-only while the assistant works, so its answer never replaces newer edits.
       if (!r.unchanged) {
+        setOfflineState(r.offlineState ?? null);
         setQuery(r.query);
         setTarget(r.target);
         setColumns(r.columns);
@@ -375,8 +367,10 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
 
   /** The refresh button: clears the conversation and puts the starting query back. */
   const startOver = () => {
+    runnerRef.current?.cancel();
     setChat([]);
     setColumns([]);
+    setOfflineState(null);
     setChatError(undefined);
     setQuery(examples[0].query);
     setTarget('ontology');
@@ -505,9 +499,15 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
                 subtitle="The assistant writes here, and you can edit it too: Ctrl/⌘-Space suggests terms, Ctrl/⌘-Enter runs."
                 icon={Code2}
                 actions={
-                  <Button variant="primary" icon={Play} onClick={() => void run()} disabled={!ready || !query.trim() || asking}>
-                    Run
-                  </Button>
+                  running ? (
+                    <Button icon={Square} onClick={() => runnerRef.current?.cancel()} data-testid="query-cancel">
+                      Cancel
+                    </Button>
+                  ) : (
+                    <Button variant="primary" icon={Play} onClick={() => void run()} disabled={!ready || !query.trim() || asking}>
+                      Run
+                    </Button>
+                  )
                 }
               />
               <div className="space-y-3 p-4">
@@ -582,11 +582,19 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
                 </p>
               )}
               {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
+              {running && (
+                <p role="status" className="flex items-center gap-2 text-sm text-muted" data-testid="query-running">
+                  <Loader2 className="size-4 animate-spin" aria-hidden /> Running the query…
+                  <Button size="sm" variant="ghost" icon={Square} onClick={() => runnerRef.current?.cancel()}>
+                    Cancel
+                  </Button>
+                </p>
+              )}
               {queryError ? <InlineError error={queryError} /> : null}
-              {resultStale && (
+              {resultStale && !running && (
                 <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="result-stale">
                   The question or data changed since this ran.
-                  <Button size="sm" icon={Play} onClick={() => void run()}>
+                  <Button size="sm" icon={Play} onClick={() => void run()} disabled={asking}>
                     Run again
                   </Button>
                 </p>
@@ -601,7 +609,8 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
                 {result?.kind === 'graph' && (
                   <div className="space-y-1" data-testid="query-graph">
                     <p className="text-xs text-muted">
-                      {result.count} triple{result.count === 1 ? '' : 's'}
+                      {result.count.toLocaleString()} triple{result.count === 1 ? '' : 's'}
+                      {result.truncated ? ` (showing the first ${MAX_ROWS.toLocaleString()})` : ''}
                       {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                     </p>
                     <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
@@ -611,7 +620,7 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
                   <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
                     <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
                       <span>
-                        {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+                        {result.total > result.rows.length ? `Showing the first ${result.rows.length.toLocaleString()} of ${result.total.toLocaleString()} rows` : `${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`}
                         {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                       </span>
                       <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
@@ -647,11 +656,12 @@ function QueryWorkspace({ storageKey }: { storageKey: string }) {
                       </tbody>
                     </table>
                     <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
-                    {limitOf(query) === result.rows.length && !resultStale && (
+                    {limitOf(query) === result.total && !resultStale && (
                       <p role="status" className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2 text-xs text-warn" data-testid="result-limited">
                         These are the first {result.rows.length.toLocaleString()} rows: the query stops there, so there may be more.
                         <Button
                           size="sm"
+                          disabled={asking || running}
                           onClick={() => {
                             const all = withoutLimit(query);
                             setQuery(all);

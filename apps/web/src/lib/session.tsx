@@ -45,6 +45,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
+  // Another tab may have signed in or out: check quietly when this tab comes back into view,
+  // so pages holding one account's drafts never carry on under another account.
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  useEffect(() => {
+    const check = () => {
+      if (document.visibilityState !== 'visible') return;
+      void api
+        .session()
+        .then((s) => {
+          if (s.user?.id !== sessionRef.current?.user?.id) setSession(s);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('focus', check);
+    document.addEventListener('visibilitychange', check);
+    return () => {
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [setSession]);
+
   const now = useCallback(() => {
     if (!session) return Date.now();
     const base = Date.parse(session.now);
@@ -62,4 +84,13 @@ export function useSession() {
   const c = useContext(Ctx);
   if (!c) throw new Error('useSession outside SessionProvider');
   return c;
+}
+
+/** Drafts this browser keeps for an account (query drafts and query-assistant chats): removed on sign-out. */
+export function forgetAccountDrafts(userId: string) {
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith(`concord.query.${userId}.`)) localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable */
+  }
 }

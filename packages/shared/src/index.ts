@@ -767,6 +767,8 @@ export interface QueryChatRequest {
   target: QueryTarget;
   /** How many sample records of each class the user's (browser-only) data has. Counts only, never the data. */
   dataSummary?: { classIri: string; count: number }[];
+  /** The offline helper's own record of its last query, as it returned it (checked against the ontology and the query before use). */
+  offlineState?: unknown;
 }
 
 export interface QueryChatResponse {
@@ -781,4 +783,6 @@ export interface QueryChatResponse {
   unchanged?: boolean;
   /** Why the offline helper answered: no API key, not a member of the ontology, or the assistant's usage limit. */
   offlineReason?: 'unavailable' | 'not-member' | 'limit';
+  /** The offline helper's record of the query it wrote, to send back with the next message. */
+  offlineState?: unknown;
 }

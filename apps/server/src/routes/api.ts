@@ -191,7 +191,7 @@ export function apiRouter(): Router {
     const user = requireUser(req);
     const p = project(req);
     const body = boundedQueryChatRequest(req.body);
-    const gate = admitQueryChat(user.id, !!user.isPlatformAdmin || rolesFor(p.id, user.id).length > 0);
+    const gate = admitQueryChat(user.id, p.id, !!user.isPlatformAdmin || rolesFor(p.id, user.id).length > 0);
     try {
       const graph = await ontologyStore.at(p, undefined);
       const answer = await queryChat(graph, body, { useClaude: gate.useClaude });

@@ -25,5 +25,7 @@ export default defineConfig({
       '^/def/': { target, changeOrigin: false },
     },
   },
+  // The query worker loads sparq with a dynamic import, which needs module workers.
+  worker: { format: 'es' },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
 });

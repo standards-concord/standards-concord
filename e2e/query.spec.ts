@@ -201,6 +201,79 @@ test.describe('Query tab', () => {
     expect(await editorText(page)).not.toContain('LIMIT');
   });
 
+  test('queries run in the background: Cancel stops one, and one that runs too long is stopped', async ({ page }) => {
+    // The worker reads the time limit when it is first used.
+    await page.evaluate(() => ((window as unknown as { __concordQueryTimeLimitMs: number }).__concordQueryTimeLimitMs = 1500));
+    const slow = 'SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i FILTER(STR(?c) = CONCAT(STR(?f), STR(?i), "x")) }';
+    await setEditor(page, 'sparql-editor', slow);
+    await run(page);
+    await expect(page.getByTestId('query-running')).toBeVisible();
+    // The page stays responsive while it runs.
+    await page.getByLabel('Example queries').focus();
+    await page.getByTestId('query-cancel').click();
+    await expect(page.getByRole('alert')).toContainText('cancelled');
+    await expect(page.getByTestId('query-running')).toHaveCount(0);
+
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('took too long', { timeout: 10_000 });
+    // A fresh worker answers the next query.
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('a LIMIT hidden behind a comment still counts as a limit', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT # one row\n1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    await expect(page.getByTestId('result-limited')).toBeVisible();
+  });
+
+  test('Show all rows is disabled while the assistant is answering', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/query-chat$/, async (r) => {
+      await held;
+      await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'No change.', query: '', target: 'data', columns: [], simulated: true, unchanged: true }) });
+    });
+    await chat(page).getByLabel('Your message').fill('Also show the title');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('result-limited').getByRole('button', { name: 'Show all rows' })).toBeDisabled();
+    release();
+    await expect(page.getByTestId('result-limited').getByRole('button', { name: 'Show all rows' })).toBeEnabled();
+  });
+
+  test('signing out removes this account’s drafts and chats from the browser', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity');
+    const mine = () => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect((await mine()).length).toBeGreaterThan(0);
+    await page.locator('.app-user-button').click();
+    await page.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+    expect(await mine()).toEqual([]);
+  });
+
+  test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
+    await ask(page, 'List every volunteering opportunity');
+    // Another tab signs in as someone else (the session cookie is shared).
+    const other = await context.newPage();
+    await signIn(other, { name: 'E2E query, other tab', role: 'editor' });
+    await other.close();
+    let sent = 0;
+    await page.route(/\/query-chat$/, (r) => {
+      sent++;
+      return r.continue();
+    });
+    await chat(page).getByLabel('Your message').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    // The page notices, drops to the new account's own (empty) workspace, and nothing was sent.
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    expect(sent).toBe(0);
+  });
+
   test('changing the question marks the old answer as stale', async ({ page }) => {
     await ask(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('2 rows');

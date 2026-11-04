@@ -3,8 +3,9 @@ import type { ClassView, PropertyView } from '@concord/core/types';
 import type { QueryChatRequest, QueryChatResponse, QueryTarget } from '@concord/shared';
 import { ontologyDigest } from '../llm/context.js';
 import { QUERY_ASSISTANT } from '../llm/prompts.js';
+import { z } from 'zod';
 import { config } from '../config.js';
-import { HttpError } from '../db.js';
+import { get, HttpError, put } from '../db.js';
 import { llm } from '../llm/provider.js';
 import { QueryChatSchema } from '../llm/schemas.js';
 import { MAX_QUERY_LENGTH, queryProblem } from './queryPolicy.js';
@@ -21,8 +22,8 @@ import { MAX_QUERY_LENGTH, queryProblem } from './queryPolicy.js';
 
 type Draft = Omit<QueryChatResponse, 'simulated' | 'offlineReason'>;
 
-/** Strips our own delimiters from user-controlled text so it can't close a data block early. */
-const fence = (text: string) => text.replace(/<\/?(ontology|current_query|conversation|sample_counts)>/gi, '');
+/** Escapes anything in user-written text that could read as one of our delimiters (opening or closing, any spacing), so it can't end a data block early. */
+export const fenceForPrompt = (text: string) => text.replace(/<(?=\s*\/|\s*(?:ontology|current_query|conversation|sample_counts)\b)/gi, '&lt;');
 
 function conversation(req: QueryChatRequest) {
   return req.messages.map((m) => `${m.role === 'user' ? 'Person' : 'Assistant'}: ${m.content}`).join('\n');
@@ -68,15 +69,34 @@ function checked(req: QueryChatRequest, d: Draft): Draft {
 export const QUERY_CHAT_LIMITS = { perUser: 30, windowMs: 10 * 60_000, messages: 12, messageChars: 1000, conversationChars: 8000, summaryEntries: 100, classIriChars: 300 };
 const recent = new Map<string, number[]>();
 const busy = new Set<string>();
-const today = { day: '', claude: 0 };
+
+/**
+ * Today's Claude-backed questions, per person, per ontology and for the whole
+ * deployment, kept in the database so a restart doesn't reset them. Checked
+ * and counted in one synchronous step, so concurrent requests can't both take
+ * the last one.
+ */
+function takeClaudeAllowance(day: string, userId: string, ontologyId: string): boolean {
+  const L = config.llm.queryAssistant;
+  const scopes = [
+    [`query-assistant:${day}:user:${userId}`, L.perUserPerDay],
+    [`query-assistant:${day}:ontology:${ontologyId}`, L.perOntologyPerDay],
+    [`query-assistant:${day}:all`, L.perDay],
+  ] as const;
+  const used = scopes.map(([id]) => get<{ id: string; count: number }>('kv', id)?.count ?? 0);
+  if (scopes.some(([, max], i) => used[i] >= max)) return false;
+  scopes.forEach(([id], i) => put('kv', { id, count: used[i] + 1 }, `query-assistant:${day}`));
+  return true;
+}
 
 /**
  * Admits one question from this person: at most one at a time and
  * QUERY_CHAT_LIMITS.perUser per ten minutes (429 otherwise). Claude answers
- * for members of the ontology while the deployment's daily budget lasts;
- * everyone else gets the offline helper. Call `done()` when the answer is sent.
+ * for members of the ontology while today's allowances last (per person, per
+ * ontology and for the deployment); otherwise the offline helper answers.
+ * Call `done()` when the answer is sent.
  */
-export function admitQueryChat(userId: string, isMember: boolean): { useClaude: boolean; offlineReason?: QueryChatResponse['offlineReason']; done: () => void } {
+export function admitQueryChat(userId: string, ontologyId: string, isMember: boolean): { useClaude: boolean; offlineReason?: QueryChatResponse['offlineReason']; done: () => void } {
   if (busy.has(userId)) throw new HttpError(429, 'Still answering your previous question');
   const now = Date.now();
   const mine = (recent.get(userId) ?? []).filter((t) => now - t < QUERY_CHAT_LIMITS.windowMs);
@@ -85,12 +105,9 @@ export function admitQueryChat(userId: string, isMember: boolean): { useClaude: 
   busy.add(userId);
   const done = () => busy.delete(userId);
 
-  const day = new Date(now).toISOString().slice(0, 10);
-  if (today.day !== day) (today.day = day), (today.claude = 0);
   if (config.llm.provider !== 'anthropic') return { useClaude: false, offlineReason: 'unavailable', done };
   if (!isMember) return { useClaude: false, offlineReason: 'not-member', done };
-  if (today.claude >= config.llm.queryAssistantDailyLimit) return { useClaude: false, offlineReason: 'limit', done };
-  today.claude += 1;
+  if (!takeClaudeAllowance(new Date(now).toISOString().slice(0, 10), userId, ontologyId)) return { useClaude: false, offlineReason: 'limit', done };
   return { useClaude: true, done };
 }
 
@@ -98,7 +115,6 @@ export function admitQueryChat(userId: string, isMember: boolean): { useClaude: 
 export function resetQueryChatLimits() {
   recent.clear();
   busy.clear();
-  today.day = '';
 }
 
 /** The request, cut to the sizes the assistant accepts (400 when the query itself is too long to send). */
@@ -123,7 +139,9 @@ export function boundedQueryChatRequest(body: unknown): QueryChatRequest {
     .filter((d): d is { classIri: string; count: number } => !!d && typeof d.classIri === 'string' && d.classIri.length <= L.classIriChars && Number.isInteger(d.count) && d.count >= 0)
     .slice(0, L.summaryEntries)
     .map((d) => ({ classIri: d.classIri, count: d.count }));
-  return { messages, query, target: b.target === 'data' ? 'data' : 'ontology', dataSummary };
+  // The offline helper's record of its last query: checked properly later, only bounded here.
+  const offlineState = b.offlineState !== undefined && JSON.stringify(b.offlineState).length <= 20_000 ? b.offlineState : undefined;
+  return { messages, query, target: b.target === 'data' ? 'data' : 'ontology', dataSummary, offlineState };
 }
 
 export interface QueryChatOptions {
@@ -138,10 +156,10 @@ export async function queryChat(graph: OntologyGraph, req: QueryChatRequest, opt
 
   // Everything from the ontology and the conversation is data written by people, not instructions.
   const context = [
-    `<ontology>\n${fence(ontologyDigest(graph)).slice(0, 40_000)}\n</ontology>`,
-    `<sample_counts>\n${fence(dataLine(req, view.prefixes))}\n</sample_counts>`,
-    `<current_query target="${req.target}">\n${fence(req.query.trim()) || '(empty)'}\n</current_query>`,
-    `<conversation>\n${fence(conversation(req))}\n</conversation>`,
+    `<ontology>\n${fenceForPrompt(ontologyDigest(graph)).slice(0, 40_000)}\n</ontology>`,
+    `<sample_counts>\n${fenceForPrompt(dataLine(req, view.prefixes))}\n</sample_counts>`,
+    `<current_query target="${req.target}">\n${fenceForPrompt(req.query.trim()) || '(empty)'}\n</current_query>`,
+    `<conversation>\n${fenceForPrompt(conversation(req))}\n</conversation>`,
   ].join('\n\n');
   const call = (messages: { role: 'user' | 'assistant'; content: string }[], task: string) =>
     llm.json({ task, system: QUERY_ASSISTANT, schema: QueryChatSchema, effort: 'medium', maxTokens: 2500, messages, fallback: () => offlineQuery(view, req) });
@@ -222,38 +240,91 @@ function ancestors(view: OntologyView, iri: string): Set<string> {
   return out;
 }
 
-function ontologyQuestion(view: OntologyView, text: string): Draft | undefined {
+type OntologyQuestion = 'no-definition' | 'properties' | 'classes';
+
+function ontologyQuestion(text: string): OntologyQuestion | undefined {
+  if (/\b(without|missing|no|lack\w*)\b.*\bdefinitions?\b/.test(text)) return 'no-definition';
+  if (/\bpropert(y|ies)\b|\brelationships?\b/.test(text)) return 'properties';
+  if (/\b(classes|class hierarchy|types of thing|kinds of thing)\b/.test(text)) return 'classes';
+  return undefined;
+}
+
+function ontologyDraft(q: OntologyQuestion): Draft {
   const pfx = `PREFIX rdfs: <${NS.rdfs}>\nPREFIX owl: <${NS.owl}>\nPREFIX skos: <${NS.skos}>\n`;
-  if (/\b(without|missing|no|lack\w*)\b.*\bdefinitions?\b/.test(text))
+  if (q === 'no-definition')
     return {
       reply: 'Here are the classes that have no definition yet.',
       target: 'ontology',
       query: `${pfx}\nSELECT ?class ?label WHERE {\n  ?class a owl:Class .\n  FILTER(isIRI(?class))\n  OPTIONAL { ?class rdfs:label ?label }\n  FILTER NOT EXISTS { ?class skos:definition ?definition }\n}\nORDER BY ?label`,
       columns: [{ variable: 'class', label: 'Class' }, { variable: 'label', label: 'Label' }],
     };
-  if (/\bpropert(y|ies)\b|\brelationships?\b/.test(text))
+  if (q === 'properties')
     return {
       reply: 'Here are the ontology’s properties with their labels, domains and ranges.',
       target: 'ontology',
       query: `${pfx}\nSELECT ?property ?label ?domain ?range WHERE {\n  VALUES ?type { owl:ObjectProperty owl:DatatypeProperty }\n  ?property a ?type .\n  OPTIONAL { ?property rdfs:label ?label }\n  OPTIONAL { ?property rdfs:domain ?domain }\n  OPTIONAL { ?property rdfs:range ?range }\n}\nORDER BY ?label`,
       columns: [{ variable: 'property', label: 'Property' }, { variable: 'label', label: 'Label' }, { variable: 'domain', label: 'Domain' }, { variable: 'range', label: 'Range' }],
     };
-  if (/\b(classes|class hierarchy|types of thing|kinds of thing)\b/.test(text))
-    return {
-      reply: 'Here are the ontology’s classes with their labels and definitions.',
-      target: 'ontology',
-      query: `${pfx}\nSELECT ?class ?label ?definition WHERE {\n  ?class a owl:Class .\n  FILTER(isIRI(?class))\n  OPTIONAL { ?class rdfs:label ?label }\n  OPTIONAL { ?class skos:definition ?definition }\n}\nORDER BY ?label`,
-      columns: [{ variable: 'class', label: 'Class' }, { variable: 'label', label: 'Label' }, { variable: 'definition', label: 'Definition' }],
-    };
-  return undefined;
+  return {
+    reply: 'Here are the ontology’s classes with their labels and definitions.',
+    target: 'ontology',
+    query: `${pfx}\nSELECT ?class ?label ?definition WHERE {\n  ?class a owl:Class .\n  FILTER(isIRI(?class))\n  OPTIONAL { ?class rdfs:label ?label }\n  OPTIONAL { ?class skos:definition ?definition }\n}\nORDER BY ?label`,
+    columns: [{ variable: 'class', label: 'Class' }, { variable: 'label', label: 'Label' }, { variable: 'definition', label: 'Definition' }],
+  };
 }
 
 /** What the offline helper has built so far: a list of records, or a fixed question about the model. */
-type OfflineState = { kind: 'records'; cls: ClassView; model: BuilderModel } | { kind: 'ontology'; draft: Draft };
+type OfflineState = { kind: 'records'; cls: ClassView; model: BuilderModel } | { kind: 'ontology'; question: OntologyQuestion };
+type RecordsState = Extract<OfflineState, { kind: 'records' }>;
+
+/** The same, as sent to the browser and back: plain JSON, checked against the ontology on its return. */
+const FILTER_OPS = ['contains', 'equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'startsWith', 'regex'] as const;
+const WireStep: z.ZodType<PathStep> = z.lazy(() =>
+  z.object({
+    id: z.string().max(40),
+    property: z.string().max(500),
+    valueType: z.enum(['text', 'number', 'boolean', 'resource']).optional(),
+    optional: z.boolean(),
+    show: z.boolean(),
+    filter: z.object({ op: z.enum(FILTER_OPS), value: z.string().max(200) }).optional(),
+    children: z.array(WireStep).max(5),
+  }),
+);
+const WireState = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('records'),
+    classIri: z.string().max(500),
+    model: z.object({ steps: z.array(WireStep).max(30), countOnly: z.boolean(), orderBy: z.string().max(40).optional(), descending: z.boolean(), limit: z.number().int().positive().max(100_000).optional() }),
+  }),
+  z.object({ kind: z.literal('ontology'), question: z.enum(['no-definition', 'properties', 'classes']) }),
+]);
+
+function toWire(state: OfflineState): z.infer<typeof WireState> {
+  if (state.kind === 'ontology') return state;
+  const { steps, countOnly, orderBy, descending, limit } = state.model;
+  return { kind: 'records', classIri: state.cls.iri, model: { steps, countOnly, orderBy, descending, limit } };
+}
+
+/** The state the browser sent back, if it is well formed and only uses this ontology's terms. */
+function fromWire(ctx: Ctx, raw: unknown): OfflineState | undefined {
+  const parsed = WireState.safeParse(raw);
+  if (!parsed.success) return undefined;
+  const w = parsed.data;
+  if (w.kind === 'ontology') return w;
+  const cls = ctx.classes.find((c) => c.iri === w.classIri);
+  if (!cls) return undefined;
+  const known = new Set([RDFS_LABEL, ...propsFor(ctx.view, cls).all.map((p) => p.iri)]);
+  const ok = (steps: PathStep[], depth: number): boolean => steps.every((s) => (depth ? s.property === RDFS_LABEL : known.has(s.property)) && s.children.length <= (depth ? 0 : 1) && ok(s.children, depth + 1));
+  if (!ok(w.model.steps, 0)) return undefined;
+  return { kind: 'records', cls, model: { rootClass: cls.iri, includeSubclasses: true, distinct: true, ...w.model } };
+}
 
 /** "also…", "only…", "remove…": the message changes the previous query rather than asking a new question. */
 const REFINE = /^\s*(also|and|only|just|now|but|then|plus|add|include|remove|drop|hide|without|exclude|except|sort|order|filter|limit|show only|make it|instead)\b|\b(as well|too|instead|those|them|these)\b/i;
 const REMOVE = /\b(remove|drop|hide|without|exclude|no longer show|don['’]?t show|do not show|leave out|take out)\b/i;
+/** "only those offered by …", "where …": a condition, which must become a filter or the message is declined. */
+const CONDITION = /\b(only|just)\s+(those|the ones|ones|records|items|where|whose|with|that|which|if)\b|\b(where|whose)\b/i;
+const FILTER_HELP = 'Offline, I can filter on a quoted phrase in the name (only those called “park”) or on a number (only those with a minimum age under 15). For anything else, edit the query directly.';
 
 const NUMBER_OPS: [RegExp, FilterOp][] = [
   [/\b(at least|no less than|minimum of|or more)\b/i, 'gte'],
@@ -283,29 +354,30 @@ function stepFor(p: PropertyView): PathStep {
   return step;
 }
 
-function startRecords(ctx: Ctx, cls: ClassView, text: string): OfflineState {
+function startRecords(ctx: Ctx, cls: ClassView, text: string): { state: RecordsState; filtered: boolean } {
   const { all, nameProp } = propsFor(ctx.view, cls);
   const mentioned = all.filter((p) => mentions(text, labelOf(p)));
   const chosen = [...new Set([...(nameProp ? [nameProp] : []), ...mentioned])];
   const steps = chosen.map(stepFor);
   if (!nameProp) steps.unshift(newStep(RDFS_LABEL));
   const model: BuilderModel = { rootClass: cls.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 };
-  const state: OfflineState = { kind: 'records', cls, model };
-  applyFilters(ctx, state, text);
-  return state;
+  const state: RecordsState = { kind: 'records', cls, model };
+  const { filtered } = applyFilters(ctx, state, text);
+  return { state, filtered };
 }
 
-/** Number and text filters, counting, sorting and the row limit, from one message. Returns whether anything changed. */
-function applyFilters(ctx: Ctx, state: Extract<OfflineState, { kind: 'records' }>, text: string): boolean {
+/** Number and text filters, counting, sorting and the row limit, from one message. */
+function applyFilters(ctx: Ctx, state: RecordsState, text: string): { changed: boolean; filtered: boolean } {
   const { model, cls } = state;
   const { all, nameProp } = propsFor(ctx.view, cls);
   const propOf = (s: PathStep) => all.find((p) => p.iri === s.property);
   let changed = false;
+  let filtered = false;
 
   // "called 'X'", "containing "X"": a text filter on the name column.
   const quoted = /["“'‘]([^"”'’]{2,})["”'’]/.exec(text)?.[1];
   const textStep = model.steps.find((s) => s.property === nameProp?.iri) ?? model.steps.find((s) => s.property === RDFS_LABEL);
-  if (quoted && textStep) (textStep.filter = { op: 'contains', value: quoted }), (changed = true);
+  if (quoted && textStep) (textStep.filter = { op: 'contains', value: quoted }), (filtered = true);
 
   // "with a minimum age of at least 16": a number filter, on the number property named, or the only one shown.
   const num = /(-?\d+(?:\.\d+)?)/.exec(text.replace(/\b(first|top|limit(?: to)?)\s+\d+/gi, ''));
@@ -318,15 +390,16 @@ function applyFilters(ctx: Ctx, state: Extract<OfflineState, { kind: 'records' }
       if (named) model.steps.push((step = stepFor(named)));
       else if (numberSteps.length === 1) step = numberSteps[0];
     }
-    if (step) (step.filter = { op, value: num[1] }), (changed = true);
+    if (step) (step.filter = { op, value: num[1] }), (filtered = true);
   }
+  changed = filtered;
 
   if (/\bhow many\b|\bcount\b|\bnumber of\b/i.test(text)) (model.countOnly = true), (changed = true);
   else if (model.countOnly && /\b(list|show|which)\b/i.test(text)) (model.countOnly = false), (changed = true);
 
   if (/\b(all of them|everything|every one|all results|all records|all rows|no limit|without (a |the )?limit|remove the limit)\b/i.test(text)) (model.limit = undefined), (changed = true);
   const limit = /\b(?:first|top|limit(?: to)?)\s+(\d{1,5})\b/i.exec(text);
-  if (limit) (model.limit = Number(limit[1])), (changed = true);
+  if (limit) (model.limit = Math.max(1, Number(limit[1]))), (changed = true);
 
   const sort = /\b(?:sort|order)(?:ed)? by (?:the |its )?([\w ’'-]+?)(?:\s+(descending|ascending|highest first|lowest first|newest first|oldest first))?[.?!]?$/i.exec(text.trim());
   if (sort) {
@@ -334,44 +407,58 @@ function applyFilters(ctx: Ctx, state: Extract<OfflineState, { kind: 'records' }
     if (step) (model.orderBy = step.id), (changed = true);
     if (sort[2]) (model.descending = /descending|highest|newest/i.test(sort[2])), (changed = true);
   }
-  return changed;
+  return { changed, filtered };
 }
 
-/** Applies one message to the previous state. `refined` is false when it started a new question. */
-function step(ctx: Ctx, prev: OfflineState | undefined, text: string): { state?: OfflineState; refined: boolean; understood: boolean; why?: string } {
-  const refining = !!prev && prev.kind === 'records' && REFINE.test(text);
-  // "also…" after a question about the model: there is no list to change.
-  if (prev?.kind === 'ontology' && REFINE.test(text) && !mentionedClass(ctx, text))
-    return { state: prev, refined: true, understood: false, why: 'That last question was about the model itself, so there’s no list of records to change. Ask for records first, for example “List every …”.' };
-  if (!refining) {
-    const ontology = ontologyQuestion(ctx.view, normalise(text));
-    const cls = mentionedClass(ctx, text);
-    if (ontology && !cls) return { state: { kind: 'ontology', draft: ontology }, refined: false, understood: true };
-    if (cls) return { state: startRecords(ctx, cls, text), refined: false, understood: true };
-    if (ontology) return { state: { kind: 'ontology', draft: ontology }, refined: false, understood: true };
-    if (!prev || prev.kind !== 'records') {
-      const top = [...ctx.classes].sort((a, b) => (ctx.counts.get(b.iri) ?? 0) - (ctx.counts.get(a.iri) ?? 0))[0];
-      return top ? { state: startRecords(ctx, top, text), refined: false, understood: true } : { refined: false, understood: false };
+type Step = { state: OfflineState; refined: false } | { state: OfflineState; refined: true } | { declined: string };
+
+/** Applies one message to the previous state: a new question starts afresh; a refinement changes it, or is declined. */
+function step(ctx: Ctx, prev: OfflineState | undefined, text: string): Step {
+  const cls = mentionedClass(ctx, text);
+  const refining = REFINE.test(text);
+  if (refining && !cls) {
+    if (!prev) return { declined: 'The offline helper can only change queries it wrote itself, and it didn’t write the one in the editor (or it has been changed since). Edit it directly, or ask a new question such as “List every …”.' };
+    if (prev.kind === 'ontology') return { declined: 'That last question was about the model itself, so there’s no list of records to change. Ask for records first, for example “List every …”.' };
+  }
+  if (!refining || !prev || prev.kind !== 'records') {
+    const ontology = ontologyQuestion(normalise(text));
+    if (ontology && !cls) return { state: { kind: 'ontology', question: ontology }, refined: false };
+    let start = cls;
+    if (!start && (!prev || prev.kind !== 'records')) start = [...ctx.classes].sort((a, b) => (ctx.counts.get(b.iri) ?? 0) - (ctx.counts.get(a.iri) ?? 0))[0];
+    if (start) {
+      const { state, filtered } = startRecords(ctx, start, text);
+      if (CONDITION.test(text) && !filtered) return { declined: `I couldn’t turn the condition in that into a filter. ${FILTER_HELP}` };
+      return { state, refined: false };
     }
   }
   // A refinement of the previous list.
-  const state = structuredClone(prev) as Extract<OfflineState, { kind: 'records' }>;
+  const state = structuredClone(prev) as RecordsState;
+  state.cls = (prev as RecordsState).cls;
   const { all } = propsFor(ctx.view, state.cls);
-  const named = all.filter((p) => mentions(text, labelOf(p)));
   let changed = false;
+  let filtered = false;
   if (REMOVE.test(text)) {
     const after = text.slice(REMOVE.exec(text)!.index);
-    const gone = new Set(all.filter((p) => mentions(after, labelOf(p))).map((p) => p.iri));
-    if (/\b(filter|condition|restriction)s?\b/i.test(after)) for (const s of state.model.steps) if (s.filter) delete s.filter, (changed = true);
-    const before = state.model.steps.length;
-    state.model.steps = state.model.steps.filter((s) => !gone.has(s.property));
-    changed ||= state.model.steps.length !== before;
-    if (!state.model.steps.length) state.model.steps = [newStep(RDFS_LABEL)];
+    const named = new Set(all.filter((p) => mentions(after, labelOf(p))).map((p) => p.iri));
+    if (/\b(filters?|conditions?|restrictions?)\b/i.test(after)) {
+      // "remove the minimum age filter": that condition only; "remove the filters": all of them. Columns stay.
+      for (const s of state.model.steps) if (s.filter && (!named.size || named.has(s.property))) delete s.filter, (changed = true);
+    } else {
+      const before = state.model.steps.length;
+      state.model.steps = state.model.steps.filter((s) => !named.has(s.property));
+      changed = state.model.steps.length !== before;
+      if (!state.model.steps.length) state.model.steps = [newStep(RDFS_LABEL)];
+      if (!state.model.steps.some((s) => s.id === state.model.orderBy)) state.model.orderBy = state.model.steps[0].id;
+    }
   } else {
-    for (const p of named) if (!state.model.steps.some((s) => s.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
+    for (const p of all.filter((p) => mentions(text, labelOf(p)))) if (!state.model.steps.some((s) => s.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
+    const r = applyFilters(ctx, state, text);
+    changed ||= r.changed;
+    filtered = r.filtered;
   }
-  changed = applyFilters(ctx, state, text) || changed;
-  return { state, refined: true, understood: changed };
+  if (CONDITION.test(text) && !REMOVE.test(text) && !filtered) return { declined: `I couldn’t turn the condition in that into a filter, so I haven’t changed the query. ${FILTER_HELP}` };
+  if (!changed) return { declined: 'I couldn’t tell what to change. Try “also show …”, “only those with … over 10”, “remove …”, or “all of them”.' };
+  return { state, refined: true };
 }
 
 function mentionedClass(ctx: Ctx, text: string): ClassView | undefined {
@@ -379,7 +466,7 @@ function mentionedClass(ctx: Ctx, text: string): ClassView | undefined {
 }
 
 function render(ctx: Ctx, state: OfflineState): Draft {
-  if (state.kind === 'ontology') return state.draft;
+  if (state.kind === 'ontology') return { ...ontologyDraft(state.question), offlineState: toWire(state) };
   const { model, cls } = state;
   const { all } = propsFor(ctx.view, cls);
   const { query, variables } = buildSparql(model, { prefixes: { ...ctx.view.prefixes, rdfs: NS.rdfs } });
@@ -399,29 +486,26 @@ function render(ctx: Ctx, state: OfflineState): Draft {
   const reply = model.countOnly
     ? `This counts the ${labelOf(cls)} records${where} in your sample data, including subclasses.`
     : `This lists ${labelOf(cls)} records${where}, showing ${shown.join(', ')}${sorted}${model.limit ? `, up to ${model.limit} rows (ask for “all of them” to remove the limit)` : ''}.`;
-  return { reply, query, target: 'data', columns };
+  return { reply, query, target: 'data', columns, offlineState: toWire(state) };
 }
 
 /**
- * Builds the query from the conversation, one message at a time: a message
- * that names a class (or asks about the model) starts a new question, and
- * "also…", "only…", "remove…" refine the previous one. A refinement only
- * applies when the editor still holds the helper's previous query; it never
- * rewrites a query that was edited by hand or written by Claude.
+ * Builds the query from the latest message and the helper's own record of its
+ * previous query (sent back by the browser, so it survives however long the
+ * conversation gets). A message that names a class or asks about the model
+ * starts a new question; "also…", "only…", "remove…" refine the previous one,
+ * but only while the editor still holds exactly that query: the helper never
+ * rewrites a query edited by hand or written by Claude, and declines what it
+ * can't do rather than quietly dropping part of the request.
  */
 export function offlineQuery(view: OntologyView, req: QueryChatRequest): Draft {
   const ctx: Ctx = { view, classes: view.classes.filter((c) => !c.deprecated), counts: new Map((req.dataSummary ?? []).map((d) => [d.classIri, d.count])) };
   if (!ctx.classes.length) return unchanged(req, 'This ontology has no classes yet, so there is nothing to query. Add some classes first, or write SPARQL in the editor.');
-  const said = req.messages.filter((m) => m.role === 'user').map((m) => m.content);
-  let state: OfflineState | undefined;
-  for (const text of said.slice(0, -1)) state = step(ctx, state, text).state ?? state;
-  const previous = state ? render(ctx, state) : undefined;
-  const latest = step(ctx, state, said.at(-1) ?? '');
-  if (!latest.state) return unchanged(req, 'I couldn’t match that to anything in this ontology. Try naming a class or a property, or write SPARQL in the editor.');
-  if (latest.refined) {
-    if (!previous || previous.query.trim() !== req.query.trim())
-      return unchanged(req, 'The offline helper can only change queries it wrote itself, and the one in the editor has been changed since. Edit it directly, ask a new question, or start over.');
-    if (!latest.understood) return unchanged(req, latest.why ?? 'I couldn’t tell what to change. Try “also show …”, “only those with … over 10”, “remove …”, or “all of them”.');
-  }
-  return render(ctx, latest.state);
+  const latest = req.messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+  const sent = fromWire(ctx, req.offlineState);
+  // The record only counts while the editor still holds the query it describes.
+  const prev = sent && render(ctx, sent).query.trim() === req.query.trim() ? sent : undefined;
+  const next = step(ctx, prev, latest);
+  if ('declined' in next) return unchanged(req, next.declined);
+  return render(ctx, next.state);
 }

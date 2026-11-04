@@ -128,7 +128,9 @@ ASK {
 }
 
 /** SELECT, ASK, CONSTRUCT or DESCRIBE, looking past PREFIX/BASE declarations and comments. */
-export function queryForm(query: string): 'select' | 'ask' | 'construct' | 'describe' | 'unknown' {
+export type QueryForm = 'select' | 'ask' | 'construct' | 'describe' | 'unknown';
+
+export function queryForm(query: string): QueryForm {
   let q = query.replace(/^\s*#.*$/gm, '');
   for (;;) {
     const next = q.replace(/^\s*(PREFIX\s+[^\s:]*:\s*<[^>]*>|BASE\s*<[^>]*>)/i, '');
