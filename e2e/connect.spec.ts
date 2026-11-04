@@ -24,6 +24,9 @@ test.describe('Connect page', () => {
     await pick('Claude Code');
     await expect(page.getByTestId('install-claude-code')).toContainText(`claude mcp add --transport http concord ${mcp}`);
     await expect(page.getByTestId('install-claude')).toHaveCount(0);
+    await pick('ChatGPT');
+    await expect(page.getByTestId('install-chatgpt')).toContainText(mcp);
+    await expect(page.getByTestId('open-chatgpt')).toHaveAttribute('href', 'https://chatgpt.com/plugins');
     await pick('Codex');
     await expect(page.getByTestId('install-codex')).toContainText(`codex mcp add concord --url ${mcp}`);
     await expect(page.getByTestId('install-codex')).toContainText('codex mcp login concord');

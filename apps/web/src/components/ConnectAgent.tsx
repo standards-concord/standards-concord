@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ExternalLink, Package } from 'lucide-react';
-import { claudeCodeCommand, claudeCodePluginCommands, claudeConnectorLink, codexCommand, codexLoginCommand, codexPluginCommand, cursorLink, mcpUrl, vscodeLink } from '../lib/install';
+import { CHATGPT_PLUGINS_URL, claudeCodeCommand, claudeCodePluginCommands, claudeConnectorLink, codexCommand, codexLoginCommand, codexPluginCommand, cursorLink, mcpUrl, vscodeLink } from '../lib/install';
 import { CopyButton, cx } from './ui';
 
 const origin = () => (typeof location !== 'undefined' ? location.origin : '');
@@ -33,9 +33,10 @@ function TerminalMark({ label, bg }: { label: string; bg: string }) {
   );
 }
 
-type ClientId = 'claude' | 'claude-code' | 'codex' | 'cursor' | 'vscode';
+type ClientId = 'claude' | 'chatgpt' | 'claude-code' | 'codex' | 'cursor' | 'vscode';
 const CLIENTS: { id: ClientId; name: string; logo: ReactNode }[] = [
   { id: 'claude', name: 'Claude', logo: <ClaudeMark /> },
+  { id: 'chatgpt', name: 'ChatGPT', logo: <TerminalMark label="G" bg="#10a37f" /> },
   { id: 'claude-code', name: 'Claude Code', logo: <TerminalMark label=">_" bg="#b4532a" /> },
   { id: 'codex', name: 'Codex', logo: <TerminalMark label="cx" bg="#111" /> },
   { id: 'cursor', name: 'Cursor', logo: <TerminalMark label="Cu" bg="#3b3b3b" /> },
@@ -76,6 +77,27 @@ function ClientSteps({ client, url }: { client: ClientId; url: string }) {
           <Step n={3}>
             <p>Use it in Claude on the web, desktop or mobile, and in Claude Code when you’re signed in with your Claude account.</p>
           </Step>
+        </ol>
+      );
+    case 'chatgpt':
+      return (
+        <ol className="space-y-4" data-testid="install-chatgpt">
+          <Step n={1}>
+            <p>Copy Concord’s server URL:</p>
+            <Command code={url} label="Copy" />
+          </Step>
+          <Step n={2}>
+            <p>
+              Open ChatGPT’s Plugins page, choose <em>+</em> then <em>Add custom MCP server</em>. Name it Concord, paste the URL, pick <em>OAuth</em> for authentication and create it.
+            </p>
+            <a href={CHATGPT_PLUGINS_URL} target="_blank" rel="noreferrer" className={cx(linkButton, 'bg-accent text-accent-fg shadow-sm hover:bg-accent-hover')} data-testid="open-chatgpt">
+              Open ChatGPT <ExternalLink className="size-3.5" />
+            </a>
+            <p className="text-xs">
+              If you don’t see that option, look under Settings → Apps → Advanced, where some plans need <em>Developer mode</em> turned on first. In a Business or Enterprise workspace, an admin may have to allow custom MCP servers.
+            </p>
+          </Step>
+          <Step n={3}>{signIn}</Step>
         </ol>
       );
     case 'claude-code':

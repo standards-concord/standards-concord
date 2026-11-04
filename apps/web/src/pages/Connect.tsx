@@ -13,7 +13,7 @@ export function ConnectPage() {
       <PageHeader
         eyebrow="Agents"
         title="Connect your agent to Concord"
-        subtitle="Let Claude, Claude Code, Codex or your editor read Concord’s ontologies, check data against them and report what’s missing."
+        subtitle="Let Claude, ChatGPT, Claude Code, Codex or your editor read Concord’s ontologies, check data against them and report what’s missing."
       />
       <Card className="p-5">
         <ConnectAgent />
