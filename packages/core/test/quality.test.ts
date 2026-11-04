@@ -292,6 +292,19 @@ describe('owlReasoner (sparq OWL 2 DL)', () => {
     expect(directInferred(g, entailed, new Set())).toEqual([[X('Extra'), X('C5')]]);
     expect(performance.now() - t0).toBeLessThan(3000);
   });
+  it('keeps inferred parents of classes that are equivalent to each other', async () => {
+    // Round 2 of the reduction walked A -> B -> A through the equivalence and took A's own
+    // inferred parent for an asserted one, so A ≡ B with A, B ⊑ P (via a domain) gave nothing.
+    const g = await T(`
+      ex:Parent a owl:Class . ex:Other a owl:Class . ex:rel a owl:ObjectProperty ; rdfs:domain ex:Parent .
+      ex:A a owl:Class ; owl:equivalentClass ex:B ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:rel ; owl:someValuesFrom ex:Other ] .
+      ex:B a owl:Class .`);
+    const E = (l: string) => `https://example.org/t#${l}`;
+    expect(directInferred(g, [[E('A'), E('Parent')], [E('B'), E('Parent')]], new Set())).toEqual([[E('A'), E('Parent')], [E('B'), E('Parent')]]);
+    const r = await owlReasoner(g);
+    expect(r.checked).toBe('complete');
+    expect(r.inferredSubClassOf).toEqual(expect.arrayContaining([[E('A'), E('Parent')], [E('B'), E('Parent')]]));
+  });
   it('falls back to the structural checks, saying why, when the ontology is outside OWL 2 DL', async () => {
     const r = await owlReasoner(await T('ex:partOf a owl:ObjectProperty, owl:TransitiveProperty . ex:Thing1 a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:partOf ; owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .'));
     expect(r).toMatchObject({ engine: 'structural', available: false });

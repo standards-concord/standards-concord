@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { OntologyGraph } from '@concord/core';
+import { reasonInWorker } from '../src/reasoner/pool.js';
 
 const fixture = readFileSync(new URL('../../../packages/core/fixtures/volunteering.ttl', import.meta.url), 'utf8');
 
 describe('reasoner worker pool', () => {
   it('reasons in the worker, one job at a time, with the same result for each', async () => {
-    const { reasonInWorker } = await import('../src/reasoner/pool.js');
     const g = await OntologyGraph.fromTurtle(fixture);
     const [a, b] = await Promise.all([reasonInWorker(g), reasonInWorker(g)]);
     expect(a).toMatchObject({ engine: 'sparq', available: true, checked: 'complete', consistent: true, unsatisfiable: [] });
@@ -14,20 +14,14 @@ describe('reasoner worker pool', () => {
   });
 
   // A reasoner that never answers must not hold up a validation, and must not count as a pass.
-  it('stops a job that runs too long and reports no verdict, then keeps working', async () => {
-    vi.resetModules();
-    vi.stubEnv('REASONER_TIMEOUT_MS', '1');
-    try {
-      const { reasonInWorker } = await import('../src/reasoner/pool.js');
-      const g = await OntologyGraph.fromTurtle(fixture);
-      const r = await reasonInWorker(g);
-      expect(r).toMatchObject({ available: false, checked: 'none' });
-      expect(r.error).toMatch(/took longer than/);
-    } finally {
-      vi.unstubAllEnvs();
-      vi.resetModules();
-    }
-    const { reasonInWorker } = await import('../src/reasoner/pool.js');
-    expect((await reasonInWorker(await OntologyGraph.fromTurtle(fixture))).checked).toBe('complete');
+  // It also used to take the next job down with it: the stopped worker's exit failed every
+  // pending job, including the healthy one already queued on its replacement ("stopped (exit 1)").
+  it('stops a job that runs too long and reports no verdict, and the next job in the same pool still gets one', async () => {
+    const g = await OntologyGraph.fromTurtle(fixture);
+    const [slow, next] = await Promise.all([reasonInWorker(g, { timeoutMs: 1 }), reasonInWorker(g)]);
+    expect(slow).toMatchObject({ available: false, checked: 'none' });
+    expect(slow.error).toMatch(/took longer than/);
+    expect(next.error).toBeUndefined();
+    expect(next.checked).toBe('complete');
   });
 });

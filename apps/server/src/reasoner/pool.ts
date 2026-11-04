@@ -10,7 +10,7 @@ import type { ReasonerResult } from '@concord/core/types';
 
 const TIMEOUT_MS = Number(process.env.REASONER_TIMEOUT_MS ?? 60_000);
 
-type Pending = { resolve: (r: ReasonerResult) => void; graph: OntologyGraph; started: number };
+type Pending = { resolve: (r: ReasonerResult) => void; graph: OntologyGraph; started: number; worker: Worker };
 let worker: Worker | undefined;
 const pending = new Map<number, Pending>();
 let nextId = 1;
@@ -20,8 +20,9 @@ const noVerdict = (graph: OntologyGraph, started: number, error: string): Reason
   ...structuralReasoner(graph), available: false, checked: 'none', error, durationMs: Math.round(performance.now() - started),
 });
 
-function failAll(error: string) {
-  for (const [id, p] of pending) { pending.delete(id); p.resolve(noVerdict(p.graph, p.started, error)); }
+/** Fails the jobs running on worker w (only that worker's: a replaced worker exits after its successor has started). */
+function failJobsOn(w: Worker, error: string) {
+  for (const [id, p] of pending) if (p.worker === w) { pending.delete(id); p.resolve(noVerdict(p.graph, p.started, error)); }
 }
 
 function spawn(): Worker {
@@ -32,15 +33,15 @@ function spawn(): Worker {
     pending.delete(id);
     p.resolve(result ?? noVerdict(p.graph, p.started, `the OWL reasoner failed: ${error}`));
   });
-  w.on('error', (e: Error) => { if (worker === w) worker = undefined; failAll(`the OWL reasoner crashed: ${e.message}`); });
-  w.on('exit', (code) => { if (worker === w) worker = undefined; failAll(`the OWL reasoner stopped (exit ${code})`); });
+  w.on('error', (e: Error) => { if (worker === w) worker = undefined; failJobsOn(w, `the OWL reasoner crashed: ${e.message}`); });
+  w.on('exit', (code) => { if (worker === w) worker = undefined; failJobsOn(w, `the OWL reasoner stopped (exit ${code})`); });
   // Held only while a job is waiting (see run), so an idle reasoner never keeps the server or
   // a test process alive. Unref after the listeners: adding a 'message' listener refs again.
   w.unref();
   return w;
 }
 
-async function run(graph: OntologyGraph): Promise<ReasonerResult> {
+async function run(graph: OntologyGraph, timeoutMs: number): Promise<ReasonerResult> {
   const started = performance.now();
   const turtle = await graph.toTurtle();
   const w = (worker ??= spawn());
@@ -51,18 +52,18 @@ async function run(graph: OntologyGraph): Promise<ReasonerResult> {
       w.unref();
       if (worker === w) worker = undefined;
       void w.terminate();
-      resolve(noVerdict(graph, started, `the OWL reasoner took longer than ${Math.round(TIMEOUT_MS / 1000)} s and was stopped`));
-    }, TIMEOUT_MS);
+      resolve(noVerdict(graph, started, `the OWL reasoner took longer than ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`} and was stopped`));
+    }, timeoutMs);
     timer.unref();
-    pending.set(id, { graph, started, resolve: (r) => { clearTimeout(timer); if (pending.size === 0) w.unref(); resolve(r); } });
+    pending.set(id, { graph, started, worker: w, resolve: (r) => { clearTimeout(timer); if (pending.size === 0) w.unref(); resolve(r); } });
     w.ref();
     w.postMessage({ id, turtle });
   });
 }
 
 /** OWL 2 DL reasoning (sparq) in the reasoner worker; queued so one job runs at a time. */
-export function reasonInWorker(graph: OntologyGraph): Promise<ReasonerResult> {
-  const job = tail.then(() => run(graph));
+export function reasonInWorker(graph: OntologyGraph, opts: { timeoutMs?: number } = {}): Promise<ReasonerResult> {
+  const job = tail.then(() => run(graph, opts.timeoutMs ?? TIMEOUT_MS));
   tail = job.catch(() => undefined);
   return job;
 }

@@ -55,7 +55,7 @@ test.describe('OWL reasoning with sparq', () => {
     const check = health.getByRole('button', { name: 'Check again in this browser' });
     const status = health.getByRole('status');
     await check.click();
-    await expect(status).toContainText("The draft has changed since this page loaded, so this can't be compared with the server's result. Reload to compare.");
+    await expect(status).toContainText("This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.");
     await expect(status).not.toContainText('Same result as the server.');
 
     mode = 'tampered';

@@ -4,6 +4,7 @@ import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/c
 import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Cpu, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
+import { checkedOf, compareWithServer } from '../lib/reasonerCompare';
 import { Badge, ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { Disclosure } from './Disclosure';
@@ -100,17 +101,6 @@ function timing(r: ReasonerReport) {
   return r.checkMs !== undefined ? `${r.engine} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${r.engine} · ${r.durationMs} ms`;
 }
 
-const checkedOf = (r: ReasonerReport) => r.checked ?? (r.available ? 'complete' : 'none');
-const sorted = (xs: string[]) => [...xs].sort().join(' ');
-
-/** Whether two reasoner runs agree: verdict, how far each got, unsatisfiable classes and inferred relations. */
-const sameResult = (a: ReasonerReport, b: ReasonerReport) =>
-  a.available === b.available &&
-  checkedOf(a) === checkedOf(b) &&
-  a.consistent === b.consistent &&
-  sorted(a.unsatisfiable) === sorted(b.unsatisfiable) &&
-  sorted(a.inferredSubClassOf.map(([x, y]) => `${x}<${y}`)) === sorted(b.inferredSubClassOf.map(([x, y]) => `${x}<${y}`));
-
 /** The working draft's Turtle and the revision it is. */
 export type DraftLoader = () => Promise<{ turtle: string; revision?: string }>;
 
@@ -119,19 +109,22 @@ export type DraftLoader = () => Promise<{ turtle: string; revision?: string }>;
  * draft's Turtle, and compares the result with the server's when both are for the same revision.
  */
 function BrowserCheck({ server, revision, load, label }: { server: ReasonerReport; revision?: string; load: DraftLoader; label: Labeler }) {
-  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; sameRevision?: boolean; error?: string }>({ status: 'idle' });
+  // The revision the browser checked is kept, not a "same revision" flag, so the comparison
+  // stays right when the server's report is reloaded for a newer revision.
+  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; checkedRevision?: string; error?: string }>({ status: 'idle' });
   const run = async () => {
     setState({ status: 'running' });
     try {
       const draft = await load();
       const { reasonInBrowser } = await import('../lib/reasonInBrowser');
       const r = await reasonInBrowser(draft.turtle);
-      setState({ status: 'done', r, sameRevision: !!revision && draft.revision === revision });
+      setState({ status: 'done', r, checkedRevision: draft.revision });
     } catch (e) {
       setState({ status: 'error', error: (e as Error).message });
     }
   };
   const r = state.r;
+  const comparison = r && compareWithServer(r, state.checkedRevision, server, revision);
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs">
       <button type="button" onClick={run} disabled={state.status === 'running'} className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-surface-2 disabled:opacity-60">
@@ -154,9 +147,9 @@ function BrowserCheck({ server, revision, load, label }: { server: ReasonerRepor
                       : 'consistent, all classes satisfiable'}
             </strong>{' '}
             ({timing(r)}).{' '}
-            {!state.sameRevision ? (
-              <span className="text-warn">The draft has changed since this page loaded, so this can't be compared with the server's result. Reload to compare.</span>
-            ) : sameResult(r, server) ? (
+            {comparison === 'other-revision' ? (
+              <span className="text-warn">This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.</span>
+            ) : comparison === 'same' ? (
               'Same result as the server.'
             ) : (
               <span className="text-warn">The server's result for the same revision differs.</span>

@@ -345,6 +345,8 @@ export function directInferred(graph: OntologyGraph, entailed: [string, string][
     let x: number | undefined = a;
     while (x !== undefined) {
       for (const p of told[x] ?? []) {
+        // Back at a through an equivalence: that's a's own (inferred) parent, not a told one.
+        if (p === a) continue;
         if (p === b) return true;
         if (has(p, b)) {
           if (!equiv(p, a)) return true;
