@@ -12,11 +12,15 @@
  *   exactly that origin's host[:port]. Node's HTTP parser reads them, so every request
  *   on a kept-alive connection is checked.
  * - A CONNECT tunnel names only host:port, so its first bytes decide its scheme. A TLS
- *   ClientHello may only go to an allowed https: origin; what follows is encrypted, so
- *   the proxy can't see further (the browser checks the certificate against the name).
+ *   tunnel may only go to an allowed https: origin, and must open with a complete,
+ *   well-formed ClientHello naming that host (SNI; none for an IP address). What follows
+ *   is encrypted, so the proxy can't see further: the browser checks the server's
+ *   certificate against that name, but a server holding certificates for several names
+ *   could still be asked for another one inside TLS.
  * - Any other tunnel is plain HTTP, so it may only go to an allowed http: origin, and the
  *   proxy parses it itself: each request on it must be for that origin, with a matching
  *   Host, exactly as above.
+ * - A request must carry exactly one Host header; a CONNECT inside a tunnel is refused.
  * - A WebSocket handshake (over a tunnel, or sent straight to the proxy as a ws: URL) is
  *   held to the same rules. Nothing after it is passed on until the server answers
  *   101 Switching Protocols; after that the connection carries WebSocket frames.
@@ -52,9 +56,62 @@ function authority(host: string | undefined, protocol: string): string | undefin
   }
 }
 
-/** A TLS record carrying a ClientHello: content type 22, version 3.x, a length, handshake type 1. */
-function isClientHello(b: Buffer) {
-  return b.length >= 6 && b[0] === TLS_HANDSHAKE && b[1] === 3 && b[2] <= 4 && b.readUInt16BE(3) > 0 && b[5] === 1;
+/**
+ * Reads a TLS ClientHello from the start of a tunnel: the whole first record, which must
+ * hold the whole handshake message. Returns 'more' until enough bytes have arrived, the
+ * server name it asks for (or null if none), or 'bad' if it isn't a well-formed ClientHello.
+ * The browser always sends its ClientHello in one record (it is well under 16 KB).
+ */
+export function readClientHello(b: Buffer): 'more' | 'bad' | { serverName: string | null } {
+  if (b.length < 5) return 'more';
+  if (b[0] !== TLS_HANDSHAKE || b[1] !== 3 || b[2] > 4) return 'bad';
+  const recordLength = b.readUInt16BE(3);
+  if (recordLength < 4 || recordLength > 16384) return 'bad';
+  if (b.length < 5 + recordLength) return 'more';
+  const r = b.subarray(5, 5 + recordLength);
+  if (r[0] !== 1) return 'bad';
+  const length = r.readUIntBE(1, 3);
+  if (4 + length !== r.length) return 'bad';
+  let i = 4;
+  const need = (n: number) => {
+    if (i + n > r.length) throw new Error('short');
+  };
+  try {
+    need(2 + 32);
+    i += 2 + 32; // version, random
+    need(1);
+    i += 1 + r[i]; // session id
+    need(2);
+    i += 2 + r.readUInt16BE(i); // cipher suites
+    need(1);
+    i += 1 + r[i]; // compression methods
+    if (i === r.length) return { serverName: null };
+    need(2);
+    const end = i + 2 + r.readUInt16BE(i);
+    i += 2;
+    if (end !== r.length) return 'bad';
+    let serverName: string | null = null;
+    while (i < end) {
+      need(4);
+      const type = r.readUInt16BE(i);
+      const len = r.readUInt16BE(i + 2);
+      i += 4;
+      need(len);
+      if (type === 0) {
+        // server_name: a list holding one host_name.
+        if (serverName !== null || len < 5) return 'bad';
+        const list = r.readUInt16BE(i);
+        const nameType = r[i + 2];
+        const nameLength = r.readUInt16BE(i + 3);
+        if (list !== len - 2 || nameType !== 0 || nameLength !== len - 5) return 'bad';
+        serverName = r.subarray(i + 5, i + 5 + nameLength).toString('latin1');
+      }
+      i += len;
+    }
+    return i === end ? { serverName } : 'bad';
+  } catch {
+    return 'bad';
+  }
 }
 
 const connectTo = (hostPort: string, onConnect: () => void) => {
@@ -109,6 +166,8 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
       if (!hostPort || !plain.has(hostPort)) return { refuse: `${url.protocol}//${url.host}` };
       path = `${url.pathname}${url.search}`;
     }
+    const hosts = req.rawHeaders.filter((_, k) => k % 2 === 0 && /^host$/i.test(req.rawHeaders[k])).length;
+    if (hosts > 1) return { refuse: `http://${hostPort} (${hosts} Host headers)` };
     const host = req.headers.host;
     if (authority(host, 'http:') !== hostPort) return { refuse: `http://${hostPort} (Host: ${host ?? 'none'})` };
     return { hostPort, path };
@@ -186,19 +245,34 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
   };
 
   // Plain-text tunnels are parsed here, request by request, rather than passed through.
-  const tunnels = http.createServer(forward);
+  const tunnels = http.createServer({ requireHostHeader: false }, forward);
   tunnels.on('upgrade', upgrade);
   tunnels.on('clientError', clientError);
+  // A CONNECT inside a tunnel would open a tunnel the outer check never saw.
+  tunnels.on('connect', (req, client: net.Socket) => {
+    blocked(`http://${(client as TunnelSocket)[TUNNEL]} (CONNECT ${String(req.url).slice(0, 100)} inside a tunnel)`);
+    client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+  });
 
   /** Reads the first bytes of a tunnel to learn its scheme, then sends it on its way. */
   const inspect = (client: TunnelSocket, hostPort: string, head: Buffer) => {
     let buf = head;
+    let decided = false;
+    const hostname = hostPort.slice(0, hostPort.lastIndexOf(':')).replace(/^\[|\]$/g, '');
+    const isIp = net.isIP(hostname) !== 0;
     const decide = () => {
-      if (!buf.length || (buf[0] === TLS_HANDSHAKE && buf.length < 6)) return false;
-      client.pause();
+      if (!buf.length) return false;
       if (buf[0] === TLS_HANDSHAKE) {
+        const hello = readClientHello(buf);
+        if (hello === 'more') return false;
+        decided = true;
+        client.pause();
         if (!tls.has(hostPort)) blocked(`https://${hostPort}`);
-        else if (!isClientHello(buf)) blocked(`https://${hostPort} (not a TLS ClientHello)`);
+        else if (hello === 'bad') blocked(`https://${hostPort} (not a well-formed TLS ClientHello)`);
+        // The name the browser asks the server for must be the one the tunnel was allowed for
+        // (browsers send none for an IP address).
+        else if (isIp ? hello.serverName !== null : hello.serverName?.toLowerCase() !== hostname.toLowerCase())
+          blocked(`https://${hostPort} (TLS server name ${hello.serverName ?? 'none'})`);
         else {
           const first = buf;
           const upstream = connectTo(hostPort, () => {
@@ -214,6 +288,8 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
         client.destroy();
         return true;
       }
+      decided = true;
+      client.pause();
       if (!plain.has(hostPort)) {
         blocked(`http://${hostPort}`);
         client.destroy();
@@ -231,9 +307,18 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
       if (decide()) client.off('data', onData);
     };
     client.on('data', onData);
+    // A tunnel that sent something but closed before it could be checked is a refusal too.
+    const ended = () => {
+      if (decided) return;
+      decided = true;
+      if (buf.length) blocked(`${hostPort} (closed after ${buf.length} byte(s), before they could be checked)`);
+      client.destroy();
+    };
+    client.on('end', ended);
+    client.on('close', ended);
   };
 
-  const server = http.createServer(forward);
+  const server = http.createServer({ requireHostHeader: false }, forward);
   server.on('connect', (req, client: net.Socket, head) => {
     const hostPort = authority(req.url, 'https:');
     if (!hostPort || (!tls.has(hostPort) && !plain.has(hostPort))) {

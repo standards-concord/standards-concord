@@ -3,13 +3,14 @@ import dgram from 'node:dgram';
 import { existsSync, mkdtempSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import tls from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { Browser } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { guardContext, hasChromium, launchBrowser } from '../lib/browser.ts';
-import { startEgressProxy, type Egress } from '../lib/egress.ts';
+import { guardContext, guardedPage, hasChromium, launchBrowser } from '../lib/browser.ts';
+import { readClientHello, startEgressProxy, type Egress } from '../lib/egress.ts';
 import { fontFile, serveFonts } from '../lib/fonts.ts';
 
 // These need Playwright's Chromium. The walkthrough CI job installs it and sets
@@ -51,6 +52,14 @@ beforeAll(async () => {
     aRequests.push(req.url ?? '');
     if (req.url === '/chain') res.writeHead(302, { location: `${B}/hop` }).end();
     else if (req.url === '/events') res.writeHead(302, { location: `${C}/events` }).end();
+    else if (req.url === '/early')
+      // WebRTC from the very first inline script, and from a fresh iframe, with the errors swallowed.
+      res
+        .writeHead(200, { 'content-type': 'text/html' })
+        .end(
+          '<html><head><script>try { new RTCPeerConnection() } catch {}</script></head><body>' +
+            '<iframe srcdoc="<script>try { new RTCPeerConnection() } catch {}</script>"></iframe></body></html>',
+        );
     else res.writeHead(200, { 'content-type': 'text/html' }).end('<p>page</p>');
   });
   a.on('connection', () => aConnections++);
@@ -190,7 +199,7 @@ describe.runIf(run)('egress proxy', () => {
     const guarded = await browser.newContext();
     const blocked = new Set<string>();
     await guardContext(guarded, blocked);
-    const page = await guarded.newPage();
+    const page = await guardedPage(guarded, blocked);
     await page.goto(`${A}/`);
     expect(await page.evaluate(tryRtc, stun)).toBe('blocked');
     // …and an attempt is reported even when the page swallows the error.
@@ -204,6 +213,38 @@ describe.runIf(run)('egress proxy', () => {
       }
     });
     await expect.poll(() => blocked.size).toBe(1);
+    // Page code can't silence the report: it comes from the debugger, not the page.
+    blocked.clear();
+    await page.evaluate(() => {
+      (globalThis as any).__playwright__binding__ = () => {};
+      (globalThis as any).__playwright__binding__controller__ = { callBinding: () => {} };
+      try {
+        new RTCPeerConnection();
+      } catch {
+        /* swallowed */
+      }
+    });
+    await expect.poll(() => blocked.size).toBe(1);
+    // Nor forge one: a script of its own under the replacement's name doesn't count.
+    blocked.clear();
+    await page.evaluate(() => {
+      try {
+        (0, eval)("throw new Error('forged')\n//# sourceURL=concord-walkthrough-no-webrtc.js");
+      } catch {
+        /* swallowed */
+      }
+    });
+    await page.waitForTimeout(200);
+    expect(blocked.size).toBe(0);
+    // The first inline script and a fresh iframe are covered too.
+    blocked.clear();
+    await page.goto(`${A}/early`);
+    await expect.poll(() => [...blocked].filter((b) => b.startsWith('webrtc: RTCPeerConnection')).length).toBeGreaterThanOrEqual(2);
+    // A page the recording didn't open itself is closed and reported.
+    blocked.clear();
+    const [popup] = await Promise.all([guarded.waitForEvent('page'), page.evaluate(() => void window.open('about:blank'))]);
+    await expect.poll(() => popup.isClosed()).toBe(true);
+    expect([...blocked].some((b) => b.startsWith('unexpected page'))).toBe(true);
     await guarded.close();
     // …and even without it, the launch policy keeps WebRTC from sending UDP directly.
     const bare = await browser.newContext();
@@ -213,7 +254,7 @@ describe.runIf(run)('egress proxy', () => {
     await bare.close();
     udp.close();
     expect(packets).toBe(0);
-  });
+  }, 30_000);
 
   it('downloads a missing font outside the browser, and refuses to when offline', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'wt-fonts-'));
@@ -332,11 +373,74 @@ describe.runIf(run)('egress proxy', () => {
       expect(aRequests).not.toContain('/smuggled');
     });
 
+    /** The ClientHello Node's TLS client sends for a server name. */
+    const clientHello = (servername?: string) =>
+      new Promise<Buffer>((resolve) => {
+        const srv = net.createServer((sock) => {
+          sock.once('data', (d) => {
+            resolve(d as Buffer);
+            sock.destroy();
+            srv.close();
+          });
+        });
+        srv.listen(0, '127.0.0.1', () => {
+          const c = tls.connect({ host: '127.0.0.1', port: (srv.address() as AddressInfo).port, servername, rejectUnauthorized: false });
+          c.on('error', () => {});
+        });
+      });
+
+    it('reads the server name from a real ClientHello, and rejects partial or fake ones', async () => {
+      const hello = await clientHello('denied.test');
+      expect(readClientHello(hello)).toEqual({ serverName: 'denied.test' });
+      expect(readClientHello(await clientHello())).toEqual({ serverName: null });
+      expect(readClientHello(hello.subarray(0, 40))).toBe('more');
+      expect(readClientHello(Buffer.from([0x16, 3, 3, 0, 1, 1]))).toBe('bad');
+      const broken = Buffer.from(hello);
+      broken.writeUInt16BE(broken.readUInt16BE(3) - 1, 3);
+      expect(readClientHello(broken.subarray(0, broken.length - 1))).toBe('bad');
+    });
+
+    it('refuses a TLS tunnel whose server name is not the host it was opened to', async () => {
+      const bPort = new URL(B).port;
+      egress.allow(`https://localhost:${bPort}`);
+      const got = await tunnel(`localhost:${bPort}`, await clientHello('denied.test'));
+      expect(got).not.toContain('ok');
+      expect(outside.has(`https://localhost:${bPort} (TLS server name denied.test)`)).toBe(true);
+      // The right name goes through (B isn't a TLS server, so it just answers 400 to the bytes).
+      const before = outside.size;
+      await tunnel(`localhost:${bPort}`, await clientHello('localhost'));
+      expect(outside.size).toBe(before);
+    });
+
+    it('reports a tunnel that closes before its first bytes can be checked', async () => {
+      const bPort = new URL(B).port;
+      await new Promise<void>((resolve) => {
+        const sock = net.connect(Number(new URL(egress.url).port), '127.0.0.1', () => sock.write(`CONNECT localhost:${bPort} HTTP/1.1\r\nHost: localhost:${bPort}\r\n\r\n`));
+        sock.once('data', () => sock.end(Buffer.from([0x16, 3, 3])));
+        sock.on('close', () => resolve());
+      });
+      await expect.poll(() => [...outside].some((o) => o.startsWith(`localhost:${bPort} (closed after 3 byte(s)`))).toBe(true);
+    });
+
+    it('refuses requests without a Host, with two, or a CONNECT inside a tunnel', async () => {
+      expect(await direct(`GET ${A}/no-host HTTP/1.1\r\nConnection: close\r\n\r\n`)).toContain('403');
+      expect(await tunnel(`127.0.0.1:${port()}`, `GET /no-host HTTP/1.1\r\nConnection: close\r\n\r\n`)).toContain('403');
+      expect(outside.has(`http://127.0.0.1:${port()} (Host: none)`)).toBe(true);
+      const before = aUpgrades.length;
+      const two = handshake('/socket', `127.0.0.1:${port()}`).replace('\r\n\r\n', `\r\nHost: denied.invalid\r\n\r\n`);
+      expect(await tunnel(`127.0.0.1:${port()}`, two)).toContain('403');
+      expect(aUpgrades.length).toBe(before);
+      expect(outside.has(`http://127.0.0.1:${port()} (2 Host headers)`)).toBe(true);
+      expect(await tunnel(`127.0.0.1:${port()}`, `CONNECT 127.0.0.1:${new URL(C).port} HTTP/1.1\r\nHost: 127.0.0.1:${new URL(C).port}\r\n\r\n`)).toContain('403');
+      expect([...outside].some((o) => o.includes('inside a tunnel'))).toBe(true);
+      expect(aRequests).not.toContain('/no-host');
+    });
+
     it('refuses bytes that only look like TLS', async () => {
       egress.allow(`https://127.0.0.1:${new URL(B).port}`);
       const got = await tunnel(`127.0.0.1:${new URL(B).port}`, Buffer.concat([Buffer.from([0x16]), Buffer.from('GET / HTTP/1.1\r\n\r\n')]));
       expect(got).not.toContain('ok');
-      expect([...outside].some((o) => o.includes('not a TLS ClientHello'))).toBe(true);
+      expect([...outside].some((o) => o.includes('not a well-formed TLS ClientHello'))).toBe(true);
     });
 
     it('accepts direct ws: upgrades to an allowed http: origin, and refuses wss: and unparseable ones', async () => {

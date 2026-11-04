@@ -21,7 +21,7 @@ import { parseArgs } from 'node:util';
 import type { Route } from '@playwright/test';
 import { Capture } from './lib/capture.ts';
 import { Director, sleep } from './lib/director.ts';
-import { guardContext, launchBrowser } from './lib/browser.ts';
+import { guardContext, guardedPage, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
 import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
@@ -126,7 +126,7 @@ async function main() {
     await context.addInitScript({ path: path.join(HERE, 'stage', 'overlay.js') });
     // The browser's clock agrees with the server's, and runs normally from there.
     if (!argv.hub) await context.clock.setSystemTime(new Date(EPOCH));
-    const page = await context.newPage();
+    const page = await guardedPage(context, outside);
     const api = page.request;
     const local = [hub, concord?.api].filter(Boolean) as string[];
     await context.addInitScript(presentation, { local, shown: shownHub });
