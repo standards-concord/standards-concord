@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
 import { DataFactory, Parser, Store } from 'n3';
+import * as wrapper from '@rdfjs/wrapper';
 import { NS, OntologyGraph, applyChangeOps, npmPackage, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '../src/index.js';
+import { canonical } from '../src/rdf.js';
+import { RESERVED_CLASSES } from '../src/codemodel.js';
 import { X, baseOntology, loadFixture } from './helpers.js';
 
 const VOL = 'https://w3id.org/odi/volunteering#';
@@ -12,28 +15,87 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 /** Generated code is written inside the package so it resolves @rdfjs/wrapper and n3 from node_modules. */
 const GEN = path.join(here, '..', '.gen', 'test');
 
+/** Blank-node-insensitive set of triples, for comparing graphs. */
+function triples(store: Store, drop: string[] = []): string[] {
+  for (const p of drop) for (const q of store.getQuads(null, DataFactory.namedNode(p), null, null)) store.removeQuad(q);
+  return store
+    .getQuads(null, null, null, null)
+    .filter((q) => q.subject.termType !== 'BlankNode')
+    .map((q) => `${canonical(store, q.subject as any)} <${q.predicate.value}> ${canonical(store, q.object as any)}`)
+    .sort();
+}
+const turtleShapes = async (g: OntologyGraph) => new Store(new Parser().parse(await toShacl(g)));
+/** Turtle shapes with blank qualified value shapes named the way SHACLC names them, for comparison. */
+const SH = NS.sh;
+const STANDARD_DROPPED = [SH + 'codeIdentifier', SH + 'name', NS.rdfs + 'label', NS.dcterms + 'source'];
+
+/** Edge cases from review: unsafe local names, quoted datatype names, colliding names, odd hierarchies. */
+const EDGE = `
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix e: <https://example.org/e#> .
+@prefix o: <https://example.org/o#> .
+<https://example.org/e> a owl:Ontology ; dcterms:title "*/ globalThis.__reviewMarker = 42; /*" ;
+  vann:preferredNamespacePrefix "e" ; vann:preferredNamespaceUri "https://example.org/e#" ; owl:versionInfo "1.0.0" .
+e:A a owl:Class ; rdfs:label "a */ globalThis.__labelMarker = 1; /*" ;
+  rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:note ; owl:hasValue "use xsd:anyURI here" ] ,
+                  [ a owl:Restriction ; owl:onProperty e:p ; owl:someValuesFrom e:BShape ] .
+e:A-p-B a owl:Class .
+e:BShape a owl:Class .
+e:C a owl:Class .
+<https://example.org/e#star*> a owl:DatatypeProperty ; rdfs:domain e:A ; rdfs:range xsd:string .
+e:link a owl:DatatypeProperty ; rdfs:domain e:A ; rdfs:range xsd:anyURI .
+e:note a owl:DatatypeProperty ; rdfs:range xsd:string .
+e:p a owl:ObjectProperty ; rdfs:range e:C .
+e:LiteralAs a owl:Class .
+e:label a owl:DatatypeProperty ; rdfs:domain e:LiteralAs ; rdfs:range xsd:string .
+e:Parent a owl:Class .
+e:Child a owl:Class ; rdfs:subClassOf e:Parent .
+e:name a owl:DatatypeProperty ; rdfs:domain e:Parent ; rdfs:range xsd:string .
+o:name a owl:DatatypeProperty ; rdfs:domain e:Child ; rdfs:range xsd:integer .
+e:tag a owl:DatatypeProperty ; rdfs:domain e:Parent ; rdfs:range xsd:string .
+e:Narrow a owl:Class ; rdfs:subClassOf e:Parent , [ a owl:Restriction ; owl:onProperty e:tag ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
+e:Left a owl:Class . e:Right a owl:Class .
+e:Both a owl:Class ; rdfs:subClassOf e:Left , e:Right .
+e:left a owl:DatatypeProperty ; rdfs:domain e:Left ; rdfs:range xsd:string .
+e:right a owl:DatatypeProperty ; rdfs:domain e:Right ; rdfs:range xsd:string .
+e:X a owl:Class ; rdfs:subClassOf e:Y .
+e:Y a owl:Class ; rdfs:subClassOf e:X .
+e:y a owl:DatatypeProperty ; rdfs:domain e:Y ; rdfs:range xsd:string .
+`;
+const edge = () => OntologyGraph.fromTurtle(EDGE);
+
 describe('SHACL compact syntax', () => {
-  it('writes the same shapes in SHACLC', async () => {
+  it('writes the same shapes in standard SHACLC', async () => {
     const text = await toShaclc(await loadFixture());
-    expect(text).toMatch(/^BASE <https:\/\/w3id\.org\/odi\/volunteering\/shapes>/);
+    expect(text).toMatch(/^# SHACL shapes for Volunteering Ontology, in SHACL compact syntax\.\n/);
+    expect(text).toContain('BASE <https://w3id.org/odi/volunteering/shapes>');
     expect(text).toContain('PREFIX vol: <https://w3id.org/odi/volunteering#>');
-    expect(text).toMatch(/shape volsh:ApplicationShape -> vol:Application[\s\S]*?\{[\s\S]*?vol:submittedBy vol:Person \[1\.\.1\] \./);
+    expect(text).toMatch(/shape volsh:ApplicationShape -> vol:Application \{[\s\S]*?vol:submittedBy vol:Person \[1\.\.1\] \./);
     expect(text).toContain('vol:submittedAt xsd:dateTime [0..1] .');
     // Datatypes outside the short-form list are written explicitly, so they don't read back as classes.
     expect(text).toContain('vol:joiningUrl datatype=xsd:anyURI .');
     expect(text).not.toContain('codeIdentifier');
+    expect(text).not.toContain('sh:name');
   });
 
-  it('round-trips to the Turtle shapes (less sh:codeIdentifier)', async () => {
+  it('parses with a strict SHACLC parser to exactly the Turtle shapes, less what SHACLC has no place for', async () => {
     const g = await loadFixture();
     const { parse } = await import('shaclc-parse');
-    const fromC = new Store(parse(await toShaclc(g), { extendedSyntax: true }) as any);
-    const fromT = new Store(new Parser().parse(await toShacl(g)));
-    for (const q of fromT.getQuads(null, DataFactory.namedNode(NS.sh + "codeIdentifier"), null, null)) fromT.removeQuad(q);
-    const shapes = (s: Store) => s.getSubjects(DataFactory.namedNode(NS.rdf + 'type'), DataFactory.namedNode(NS.sh + 'NodeShape'), null).map((x) => x.value).sort();
-    expect(shapes(fromC)).toEqual(shapes(fromT));
-    // Same triple count: nothing is lost in the compact form.
-    expect(fromC.size).toBe(fromT.size);
+    const fromC = new Store(parse(await toShaclc(g)) as any); // no extended syntax
+    expect(triples(fromC)).toEqual(triples(await turtleShapes(g), STANDARD_DROPPED));
+  });
+
+  it('keeps shape names and the label in the extended dialect', async () => {
+    const g = await loadFixture();
+    const text = await toShaclc(g, { extended: true });
+    expect(text).toContain('sh:name "application"@en');
+    const { parse } = await import('shaclc-parse');
+    const fromC = new Store(parse(text, { extendedSyntax: true }) as any);
+    expect(triples(fromC)).toEqual(triples(await turtleShapes(g), [SH + 'codeIdentifier']));
   });
 
   it('names qualified value shapes so SHACLC can refer to them', async () => {
@@ -44,6 +106,19 @@ describe('SHACL compact syntax', () => {
     const text = await toShaclc(g);
     expect(text).toContain('ex:worksFor qualifiedValueShape=exsh:Employee-worksFor-Charity qualifiedMinCount=1 .');
     expect(text).toMatch(/shape exsh:Employee-worksFor-Charity \{\s+class=ex:Charity \.\s+\}/);
+  });
+
+  it('keeps meaning with unsafe local names, datatype names inside strings and colliding shape names', async () => {
+    const g = await edge();
+    const text = await toShaclc(g); // throws if the output would parse to different shapes
+    // ex:star* would read as a path: the namespace is written in full instead.
+    expect(text).toContain('<https://example.org/e#star*>');
+    expect(text).not.toMatch(/e:star\*/);
+    expect(text).toContain('hasValue="use xsd:anyURI here"');
+    expect(text).toContain('<https://example.org/e#link> datatype=xsd:anyURI .');
+    // The qualified shape for A / p / BShape doesn't take the name of the shape for class A-p-B.
+    expect(text).toContain('qualifiedValueShape=esh:A-p-BShape2');
+    expect(text).toMatch(/shape esh:A-p-BShape -> <https:\/\/example\.org\/e#A-p-B> \{\s*\}/);
   });
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -134,6 +209,67 @@ describe('Generated JavaScript classes', () => {
     expect(mod.ts).toContain('export class Thing extends TermWrapper');
     expect(mod.datasetClass).toBe('ExampleDataset');
   });
+
+  it('never lets ontology text out of a code comment', async () => {
+    const mod = await toWrapperClasses(await edge(), { name: 'edge', sourceUrl: 'https://example.org/*/x' });
+    expect(mod.js).not.toContain('*/ globalThis');
+    mkdirSync(GEN, { recursive: true });
+    const file = path.join(GEN, `edge-inject-${process.pid}.mjs`);
+    writeFileSync(file, mod.js);
+    try {
+      const m = await import(file);
+      expect(m.EdgeDataset).toBeTypeOf('function');
+      expect((globalThis as any).__reviewMarker).toBeUndefined();
+      expect((globalThis as any).__labelMarker).toBeUndefined();
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
+
+  it('keeps class names clear of everything the module imports', () => {
+    for (const name of Object.keys(wrapper)) expect(RESERVED_CLASSES.has(name), name).toBe(true);
+  });
+
+  it('handles awkward hierarchies: clashing names, narrower subclasses, two superclasses and cycles', async () => {
+    const mod = await toWrapperClasses(await edge(), { name: 'edge' });
+    const cls = (n: string) => mod.classes.find((c) => c.name === n)!;
+    // A class called LiteralAs can't shadow the helper.
+    expect(cls('LiteralAs_')).toBeTruthy();
+    expect(mod.ts).toMatch(/export class LiteralAs_ extends TermWrapper/);
+    // Child inherits e:name as `name`, so o:name gets another name.
+    expect(cls('Child').extends).toBe('Parent');
+    expect(cls('Child').properties).toEqual(expect.arrayContaining([{ name: 'name', path: 'https://example.org/e#name' }, { name: 'name2', path: 'https://example.org/o#name' }]));
+    // Narrow restricts tag to exactly one, which can't override Parent's Set: it stands alone with a single-valued tag.
+    expect(cls('Narrow').extends).toBeUndefined();
+    expect(mod.ts).toMatch(/export class Narrow extends TermWrapper[\s\S]*?get tag\(\): string \{/);
+    // Both keeps the second superclass's property.
+    expect(cls('Both').properties.map((p) => p.name).sort()).toEqual(['left', 'right']);
+    // The X/Y cycle still gives a loadable order.
+    expect(mod.ts.indexOf('export class Y ')).toBeLessThan(mod.ts.indexOf('export class X extends Y'));
+
+    mkdirSync(GEN, { recursive: true });
+    const dir = path.join(GEN, `edge-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}');
+      writeFileSync(path.join(dir, 'index.js'), mod.js);
+      writeFileSync(path.join(dir, 'index.d.ts'), mod.dts);
+      writeFileSync(path.join(dir, 'source.ts'), mod.ts);
+      const m = await import(path.join(dir, 'index.js'));
+      const store = new Store(new Parser().parse('<https://x/l> <https://example.org/e#label> "hello" . <https://x/c> <https://example.org/e#name> "n" ; <https://example.org/o#name> 3 .'));
+      expect([...new m.LiteralAs_('https://x/l', store, DataFactory).label]).toEqual(['hello']);
+      const child = new m.Child('https://x/c', store, DataFactory);
+      expect([...child.name]).toEqual(['n']);
+      expect([...child.name2]).toEqual([3]);
+      expect(new m.X('https://x/x', store, DataFactory)).toBeInstanceOf(m.Y);
+      writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, module: 'nodenext', moduleResolution: 'nodenext', target: 'es2022', noEmit: true, types: [] }, files: ['source.ts', 'index.d.ts'] }));
+      execFileSync(path.join(here, '..', 'node_modules', '.bin', 'tsc'), ['-p', dir], { stdio: 'pipe' });
+    } catch (err: any) {
+      throw new Error(`${err.message}\n${err.stdout?.toString() ?? ''}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('packages the classes as an npm tarball', async () => {
     const g = await loadFixture();

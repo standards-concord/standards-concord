@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
+import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -24,6 +24,7 @@ export { PUBLIC_BASE };
  *   /def/<slug>/<version>.js    JavaScript classes for every SHACL node shape (@rdfjs/wrapper), to import from a browser
  *                               (?deps=bare imports "@rdfjs/wrapper" by name instead of from a CDN); also .ts and .d.ts
  *   /def/<slug>/<version>.tgz   the same classes as an npm package: npm install <this URL>
+ *   /def/<slug>/<version>.shaclc  standard SHACL compact syntax (?syntax=extended keeps shape names)
  *
  * Browsers get the HTML page; anything asking for RDF (or JavaScript, or
  * SHACLC) gets that (Vary: Accept). Responses allow any origin, so an app on
@@ -302,9 +303,11 @@ export async function sendFormat(req: Request, res: Response, o: SendFormatOptio
     return;
   }
   const info = FORMAT_INFO[o.format];
+  // ?syntax=extended keeps shape names and labels, in shaclc-write's extended SHACLC.
+  const text = o.format === 'shaclc' && req.query.syntax === 'extended' ? await toShaclc(o.graph, { extended: true }) : await serialize(o.graph, o.format);
   res.type(`${info.mediaType}; charset=utf-8`);
   res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
-  res.send(await serialize(o.graph, o.format));
+  res.send(text);
 }
 
 export function publicRouter(): Router {

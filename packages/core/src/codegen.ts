@@ -17,7 +17,8 @@ import path from 'node:path';
 import { NS, RDF_TYPE, localName } from './ns.js';
 import { literal, nn, typedLit } from './rdf.js';
 import type { OntologyGraph } from './graph.js';
-import { codeIdentifiers, deriveShapes, identifierFrom, type DerivedShapes } from './shacl.js';
+import { deriveShapes, type DerivedShapes } from './shacl.js';
+import { codeModel, identifierFrom, JS_KEYWORDS, RESERVED_CLASSES, THING, type CodeModel } from './codemodel.js';
 
 const SH = NS.sh;
 const XSD = NS.xsd;
@@ -81,94 +82,67 @@ export function withWrapperImport(code: string, specifier: string = WRAPPER_CDN)
 const EXACT_WRITERS = new Set([XSD + 'string', XSD + 'boolean', XSD + 'integer', XSD + 'double', NS.rdf + 'langString']);
 
 /**
- * The shapes the converter works from: one class per derived node shape, with
- * sh:codeIdentifier on every shape, one property shape per path, class-valued
+ * The shapes the converter works from, one per class in the code model (see
+ * codemodel.ts): sh:codeIdentifier on every shape and property, the declared
+ * accessors only (inherited ones come from the base class), class-valued
  * properties pointing (sh:node) at the shape of their class, and sh:and for
- * the first named superclass so subclasses extend their parent's class.
+ * the base class.
  */
-function converterShapes(derived: DerivedShapes, graph: OntologyGraph): { store: Store; classes: GeneratedClass[]; thing?: GeneratedClass; datatypes: Map<string, Map<string, string>> } {
-  const v = graph.view();
-  const ids = codeIdentifiers(derived);
+function converterShapes(derived: DerivedShapes): { store: Store; model: CodeModel; classes: GeneratedClass[]; thing?: GeneratedClass; datatypes: Map<string, Map<string, string>> } {
+  const model = codeModel(derived, derived.propertyInfo);
   const store = new Store();
   const add = (s: any, p: string, o: any) => store.addQuad(s, nn(p), o);
   const int = (n: number) => typedLit(String(n), XSD + 'integer');
-  const byClass = new Map(derived.shapes.map((s) => [s.targetClass, s]));
-  const objectProps = new Set(v.objectProperties.map((p) => p.iri));
-  const ranges = new Map([...v.objectProperties, ...v.datatypeProperties].map((p) => [p.iri, p.range]));
+  const thingShape = `${derived.shapesNs}__Thing`;
   const classes: GeneratedClass[] = [];
   const datatypes = new Map<string, Map<string, string>>();
-  // Values whose class has no shape of its own (an external or anonymous class) are wrapped as Thing.
-  const used = new Set(ids.classes.values());
-  let thingName = 'Thing';
-  while (used.has(thingName)) thingName = `${thingName}_`;
-  const thingShape = `${derived.shapesNs}__Thing`;
-  let needThing = false;
 
-  // Paths an ancestor already declares are inherited, not redeclared (a narrower type would not be assignable in TypeScript).
-  const inheritedPaths = (shapeIri: string, seen = new Set<string>()): Set<string> => {
-    const out = new Set<string>();
-    const s = derived.shapes.find((x) => x.iri === shapeIri);
-    const parent = s?.superClasses.map((c) => byClass.get(c)).find(Boolean);
-    if (!parent || seen.has(parent.iri)) return out;
-    seen.add(parent.iri);
-    for (const p of parent.properties) out.add(p.path);
-    for (const p of inheritedPaths(parent.iri, seen)) out.add(p);
-    return out;
-  };
-
-  for (const s of derived.shapes) {
-    const shape = nn(s.iri);
-    const name = ids.classes.get(s.iri)!;
+  for (const c of model.classes) {
+    const shape = nn(c.shapeIRI);
     add(shape, RDF_TYPE, nn(SH + 'NodeShape'));
-    add(shape, SH + 'targetClass', nn(s.targetClass));
-    add(shape, SH + 'codeIdentifier', literal(name));
-    const parent = s.superClasses.map((c) => byClass.get(c)).find(Boolean);
-    if (parent) {
+    add(shape, SH + 'targetClass', nn(c.targetClass));
+    add(shape, SH + 'codeIdentifier', literal(c.name));
+    if (c.base) {
       const list = DataFactory.blankNode();
       add(shape, SH + 'and', list);
-      add(list, NS.rdf + 'first', nn(parent.iri));
+      add(list, NS.rdf + 'first', nn(c.base));
       add(list, NS.rdf + 'rest', nn(NS.rdf + 'nil'));
     }
-    const inherited = inheritedPaths(s.iri);
-    const gen: GeneratedClass = { name, classIRI: s.targetClass, shapeIRI: s.iri, extends: parent ? ids.classes.get(parent.iri) : undefined, properties: [] };
     const dts = new Map<string, string>();
-    for (const ps of s.properties) {
-      if (inherited.has(ps.path)) continue;
-      const prop = ids.properties.get(s.iri)!.get(ps.path)!;
+    for (const p of c.declared) {
       const b = DataFactory.blankNode();
       add(shape, SH + 'property', b);
-      add(b, SH + 'path', nn(ps.path));
-      add(b, SH + 'codeIdentifier', literal(prop));
-      add(b, SH + 'name', literal(localName(ps.path)));
-      const range = ranges.get(ps.path) ?? [];
-      const cls = ps.cls ?? (ps.datatype ? undefined : objectProps.has(ps.path) && range.length === 1 ? range[0] : undefined);
-      const datatype = ps.datatype ?? (!cls && !objectProps.has(ps.path) && range.length === 1 ? range[0] : undefined);
-      if (cls || (!datatype && objectProps.has(ps.path))) {
-        const target = cls && byClass.get(cls);
-        if (target) add(b, SH + 'node', nn(target.iri));
-        else {
-          add(b, SH + 'node', nn(thingShape));
-          needThing = true;
-        }
-      } else if (datatype) {
-        add(b, SH + 'datatype', nn(datatype));
-        dts.set(ps.path, datatype);
+      add(b, SH + 'path', nn(p.path));
+      add(b, SH + 'codeIdentifier', literal(p.name));
+      add(b, SH + 'name', literal(p.name));
+      if (p.node) add(b, SH + 'node', nn(p.node === THING ? thingShape : p.node));
+      else if (p.datatype) {
+        add(b, SH + 'datatype', nn(p.datatype));
+        dts.set(p.path, p.datatype);
       }
-      if (ps.minCount !== undefined) add(b, SH + 'minCount', int(ps.minCount));
-      if (ps.maxCount !== undefined) add(b, SH + 'maxCount', int(ps.maxCount));
-      gen.properties.push({ name: prop, path: ps.path });
+      if (p.minCount !== undefined) add(b, SH + 'minCount', int(p.minCount));
+      if (p.maxCount !== undefined) add(b, SH + 'maxCount', int(p.maxCount));
     }
-    datatypes.set(name, dts);
-    classes.push(gen);
+    datatypes.set(c.name, dts);
+    classes.push({
+      name: c.name,
+      classIRI: c.targetClass,
+      shapeIRI: c.shapeIRI,
+      extends: c.base ? model.byShape.get(c.base)!.name : undefined,
+      properties: [...c.effective.values()].map((p) => ({ name: p.name, path: p.path })),
+    });
   }
   let thing: GeneratedClass | undefined;
-  if (needThing) {
+  if (model.thingName) {
     add(nn(thingShape), RDF_TYPE, nn(SH + 'NodeShape'));
-    add(nn(thingShape), SH + 'codeIdentifier', literal(thingName));
-    thing = { name: thingName, classIRI: NS.owl + 'Thing', shapeIRI: thingShape, properties: [] };
+    add(nn(thingShape), SH + 'codeIdentifier', literal(model.thingName));
+    thing = { name: model.thingName, classIRI: NS.owl + 'Thing', shapeIRI: thingShape, properties: [] };
   }
-  return { store, classes, thing, datatypes };
+  return { store, model, classes, thing, datatypes };
 }
+
+/** Text for a code comment: nothing in it can end the comment or the line. */
+export const commentSafe = (s: string) => s.replace(/\*\//g, '*\u2215').replace(/[\r\n\u2028\u2029]+/g, ' ');
 
 /** A writer for a typed literal, for datatypes the converter's built-in mappings would get wrong. */
 const LITERAL_WRITER = `/** Writes a value as a literal of the given datatype (dates in ISO 8601). */
@@ -198,7 +172,7 @@ function quietly<T>(fn: () => T): T {
  */
 export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOptions = {}): Promise<GeneratedModule> {
   const derived = deriveShapes(graph);
-  const { store, classes, thing, datatypes } = converterShapes(derived, graph);
+  const { store, model, classes, thing, datatypes } = converterShapes(derived);
   const meta = graph.view().metadata;
   const ontology = { iri: graph.ontologyIRI || undefined, versionIRI: meta.versionIRI, version: opts.version ?? meta.versionInfo, namespace: graph.namespace };
 
@@ -212,18 +186,9 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
   for (const [iri, m] of models) registry.set(iri, { shape: m, fileName: m.codeIdentifier, codeIdentifier: m.codeIdentifier, prefix: '' });
   const generator = new ClassGenerator('', registry);
 
-  // Parents before children: a class must be defined before a class that extends it.
+  // The model lists bases before the classes that extend them; Thing has no base.
   const all = thing ? [thing, ...classes] : classes;
-  const ordered: GeneratedClass[] = [];
-  const placed = new Set<string>();
-  const place = (c: GeneratedClass) => {
-    if (placed.has(c.name)) return;
-    placed.add(c.name);
-    const parent = c.extends && all.find((x) => x.name === c.extends);
-    if (parent) place(parent);
-    ordered.push(c);
-  };
-  all.forEach(place);
+  const ordered = all;
 
   const wrapperImports = new Set<string>(['DatasetWrapper']);
   let needsWriter = false;
@@ -256,11 +221,11 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     if (/\bILangString\b/.test(text)) needsLangString = true;
     const doc = c === thing
       ? `/** Any resource. Values whose class has no class of its own here are wrapped as ${c.name}. */`
-      : `/** <${c.classIRI}>${labelOf(graph, c.classIRI)} */`;
+      : `/** ${commentSafe(`<${c.classIRI}>${labelOf(graph, c.classIRI)}`)} */`;
     bodies.push(`${doc}\n${text}`);
   }
 
-  const datasetClass = uniqueName(`${identifierFrom(opts.name ?? defaultName(graph), 'pascal')}Dataset`, new Set(all.map((c) => c.name)));
+  const datasetClass = uniqueName(`${identifierFrom(opts.name ?? defaultName(graph), 'pascal')}Dataset`, new Set([...model.taken, ...RESERVED_CLASSES, ...JS_KEYWORDS]));
   const reservedGetters = new Set(['size', 'add', 'delete', 'has', 'match', 'dataset', 'factory', 'named', 'subjectsOf', 'objectsOf', 'instancesOf', 'matchSubjectsOf', 'matchObjectsOf', 'constructor']);
   const getterNames = new Set<string>();
   const getters = classes.map((c) => {
@@ -268,15 +233,15 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     if (reservedGetters.has(g)) g = `${g}_`;
     g = uniqueName(g, getterNames);
     getterNames.add(g);
-    return `  /** Every instance of <${c.classIRI}> in the dataset. */\n  get ${g}(): Iterable<${c.name}> {\n    return this.instancesOf(${JSON.stringify(c.classIRI)}, ${c.name});\n  }`;
+    return `  /** Every instance of ${commentSafe(`<${c.classIRI}>`)} in the dataset. */\n  get ${g}(): Iterable<${c.name}> {\n    return this.instancesOf(${JSON.stringify(c.classIRI)}, ${c.name});\n  }`;
   });
   const dataset = `/** Finds the instances of every class above in an RDF/JS dataset. */\nexport class ${datasetClass} extends DatasetWrapper {\n${getters.join('\n\n')}\n}`;
 
   const header = [
     `/**`,
-    ` * ${meta.title ?? ontology.iri ?? 'Ontology'}${ontology.version ? ` ${ontology.version}` : ''}: classes for every SHACL node shape.`,
-    ...(opts.sourceUrl ? [` * Source: ${opts.sourceUrl}`] : []),
-    ...(ontology.versionIRI ? [` * Version IRI: ${ontology.versionIRI}`] : []),
+    ` * ${commentSafe(`${meta.title ?? ontology.iri ?? 'Ontology'}${ontology.version ? ` ${ontology.version}` : ''}`)}: classes for every SHACL node shape.`,
+    ...(opts.sourceUrl ? [` * Source: ${commentSafe(opts.sourceUrl)}`] : []),
+    ...(ontology.versionIRI ? [` * Version IRI: ${commentSafe(ontology.versionIRI)}`] : []),
     ` * Generated by Concord with @theodi/shacl-converter ${CONVERTER_VERSION} over @rdfjs/wrapper ${WRAPPER_VERSION}. Do not edit.`,
     ` *`,
     ` * Usage: const data = new ${datasetClass}(dataset, factory); for (const x of data.${getters.length ? /get (\w+)\(/.exec(getters[0])![1] : 'thing'}) { ... }`,

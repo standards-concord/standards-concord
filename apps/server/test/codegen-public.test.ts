@@ -25,9 +25,19 @@ describe('SHACL compact syntax at the ontology IRI', () => {
       const res = await req;
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toMatch(/^text\/shaclc/);
-      expect(res.text).toMatch(/^BASE </);
+      expect(res.text).toMatch(/^# SHACL shapes for /);
+      expect(res.text).toMatch(/^BASE </m);
       expect(res.text).toMatch(/shape volsh:VolunteeringOpportunityShape -> vol:VolunteeringOpportunity/);
     }
+  });
+});
+
+describe('extended SHACLC', () => {
+  it('keeps shape names with ?syntax=extended', async () => {
+    const plain = await request(app).get('/def/volunteering/1.0.0.shaclc');
+    expect(plain.text).not.toContain('sh:name');
+    const ext = await request(app).get('/def/volunteering/1.0.0.shaclc?syntax=extended');
+    expect(ext.text).toContain('sh:name "volunteering opportunity"@en');
   });
 });
 

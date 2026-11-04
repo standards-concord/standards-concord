@@ -8,10 +8,12 @@ import { Store } from 'n3';
 import type { Term } from 'n3';
 import type { Restriction } from './types.js';
 import { NS, RDF_TYPE, localName } from './ns.js';
-import { blankNode, literal, nn, objects, readList, typedLit } from './rdf.js';
+import { blankNode, canonical, literal, nn, objects, readList, typedLit } from './rdf.js';
 import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
+import { codeModel, type PropertyInfo } from './codemodel.js';
+export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
 
@@ -36,6 +38,8 @@ export interface DerivedNodeShape {
 }
 
 export interface DerivedShapes {
+  /** Object or datatype property, and its declared range, for every property in the ontology. */
+  propertyInfo: Map<string, PropertyInfo>;
   /** IRI of the shapes graph (`<ontology>/shapes`), when the ontology has an IRI. */
   shapesIRI?: string;
   shapesNs: string;
@@ -85,6 +89,10 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
     });
   }
   return {
+    propertyInfo: new Map<string, PropertyInfo>([
+      ...v.objectProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: true, range: p.range }]),
+      ...v.datatypeProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: false, range: p.range }]),
+    ]),
     shapesIRI: graph.ontologyIRI ? `${ont}/shapes` : undefined,
     shapesNs,
     prefixes: { ...graph.prefixes, sh: SH, [`${pref}sh`]: shapesNs },
@@ -103,7 +111,7 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
   const out = new Store();
   const int = (n: number) => typedLit(String(n), NS.xsd + 'integer');
   const add = (s: Term, p: string, o: Term) => out.addQuad(s as any, nn(p), o as any);
-  const ids = opts.codeIdentifiers === false ? undefined : codeIdentifiers(derived);
+  const model = opts.codeIdentifiers === false ? undefined : codeModel(derived, derived.propertyInfo);
 
   if (derived.shapesIRI) {
     const sh = nn(derived.shapesIRI);
@@ -117,13 +125,15 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
     add(shape, RDF_TYPE, nn(SH + 'NodeShape'));
     add(shape, SH + 'targetClass', nn(s.targetClass));
     if (s.label) add(shape, SH + 'name', literal(s.label, 'en'));
-    if (ids) add(shape, SH + 'codeIdentifier', literal(ids.classes.get(s.iri)!));
+    const cls = model?.byShape.get(s.iri);
+    if (cls) add(shape, SH + 'codeIdentifier', literal(cls.name));
 
     for (const ps of s.properties) {
       const b = blankNode();
       add(shape, SH + 'property', b);
       add(b, SH + 'path', nn(ps.path));
-      if (ids) add(b, SH + 'codeIdentifier', literal(ids.properties.get(s.iri)!.get(ps.path)!));
+      const accessor = cls?.effective.get(ps.path)?.name;
+      if (accessor) add(b, SH + 'codeIdentifier', literal(accessor));
       if (ps.datatype) add(b, SH + 'datatype', nn(ps.datatype));
       if (ps.cls) add(b, SH + 'class', nn(ps.cls));
       if (ps.minCount !== undefined) add(b, SH + 'minCount', int(ps.minCount));
@@ -153,27 +163,84 @@ export async function toShacl(graph: OntologyGraph): Promise<string> {
   return writeTurtle(shaclStore(derived), derived.prefixes, { ontologyIRI: derived.shapesIRI });
 }
 
+export interface ShaclcOptions {
+  /**
+   * Use shaclc-write's extended syntax to keep what standard SHACLC can't say
+   * (shape names, the shapes graph's label). Off by default: the standard
+   * output parses with any SHACLC parser.
+   */
+  extended?: boolean;
+}
+
 /**
  * SHACL compact syntax (SHACLC) for the same shapes, which is far easier to
- * read than Turtle. Written with shaclc-write; statements the compact grammar
- * can't express (shape names, qualified value shapes, the shapes graph's
- * label) use its extended syntax, so nothing is lost. sh:codeIdentifier is
- * left out, as it is only there for code generation.
+ * read than Turtle. Written with shaclc-write, then parsed back with
+ * shaclc-parse and compared with the shapes it came from, so what is served
+ * always means the same as the Turtle shapes (less what the header says is
+ * left out). sh:codeIdentifier is left out, as it is only there for code
+ * generation.
  */
-export async function toShaclc(graph: OntologyGraph): Promise<string> {
+export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): Promise<string> {
   const derived = deriveShapes(graph);
   const store = shaclStore(derived, { codeIdentifiers: false });
   nameQualifiedShapes(store, derived.shapesNs);
-  const prefixes = Object.fromEntries(Object.entries(derived.prefixes).filter(([p]) => p));
+  // Standard SHACLC has no place for shape names or the shapes graph's label and source.
+  const dropped = opts.extended ? [] : [SH + 'name', NS.rdfs + 'label', NS.dcterms + 'source'];
+  for (const p of dropped) for (const q of store.getQuads(null, nn(p), null, null)) store.removeQuad(q);
+
   const { write } = await import('shaclc-write');
+  const { parse } = await import('shaclc-parse');
+  const iris = namedIris(store);
+  // A prefix is only used when every IRI it would abbreviate is safe to abbreviate (ex:p* would read as a path).
+  const prefixes = Object.fromEntries(
+    Object.entries(derived.prefixes).filter(([p, ns]) => p && iris.every((iri) => !iri.startsWith(ns) || SAFE_LOCAL.test(iri.slice(ns.length)))),
+  );
   const { text } = await write(store.getQuads(null, null, null, null) as any, {
     prefixes,
-    extendedSyntax: true,
+    extendedSyntax: Boolean(opts.extended),
     // Without an ontology IRI there is no BASE to write.
     requireBase: Boolean(derived.shapesIRI),
   });
-  const out = explicitDatatypes(text, store, prefixes);
-  return out.endsWith('\n') ? out : `${out}\n`;
+  const header = opts.extended
+    ? `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax with shaclc-write's extended syntax.\n`
+    : `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax.\n# Shape names and the shapes graph's label are in the Turtle shapes (.shacl.ttl); SHACLC has no place for them.\n`;
+  const out = header + explicitDatatypes(text, store, prefixes) + (text.endsWith('\n') ? '' : '\n');
+
+  // Check: the SHACLC must parse back to exactly the shapes it was written from.
+  const back = new Store(parse(out, { extendedSyntax: Boolean(opts.extended) }) as any);
+  const diff = graphDifference(store, back);
+  if (diff) throw new Error(`SHACLC output would change the shapes (${diff}); use the Turtle shapes instead`);
+  return out;
+}
+
+const commentLine = (s: string) => s.replace(/[\r\n\u2028\u2029]+/g, ' ');
+
+/** A local name that is safe to write after a prefix in SHACLC (no path operators, escapes or trailing dots). */
+const SAFE_LOCAL = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+
+function namedIris(store: Store): string[] {
+  const out = new Set<string>();
+  for (const q of store.getQuads(null, null, null, null)) for (const t of [q.subject, q.predicate, q.object]) if (t.termType === 'NamedNode') out.add(t.value);
+  return [...out];
+}
+
+/** Blank-node-insensitive comparison of two graphs: undefined when equal, else a short description. */
+function graphDifference(a: Store, b: Store): string | undefined {
+  const key = (s: Store) =>
+    new Set(
+      s
+        .getQuads(null, null, null, null)
+        .filter((q) => q.subject.termType !== 'BlankNode')
+        .map((q) => `${canonical(s, q.subject as Term)} <${q.predicate.value}> ${canonical(s, q.object as Term)}`),
+    );
+  const ka = key(a);
+  const kb = key(b);
+  const missing = [...ka].filter((k) => !kb.has(k));
+  const extra = [...kb].filter((k) => !ka.has(k));
+  if (!missing.length && !extra.length && a.size === b.size) return undefined;
+  return [missing.length ? `missing ${missing[0]}` : '', extra.length ? `extra ${extra[0]}` : '', a.size !== b.size ? `${a.size} vs ${b.size} triples` : '']
+    .filter(Boolean)
+    .join('; ');
 }
 
 /**
@@ -186,16 +253,55 @@ const SHORT_FORM_DATATYPES = new Set([
   NS.rdf + 'langString',
 ]);
 
-/** Writes other datatypes (xsd:anyURI, xsd:date, custom datatypes) as `datatype=…`, so they read back as datatypes, not classes. */
+/**
+ * Writes other datatypes (xsd:anyURI, xsd:date, custom datatypes) as
+ * `datatype=…`, so they read back as datatypes, not classes. Only whole
+ * tokens outside string literals, in property lines, are touched; the
+ * round-trip check in toShaclc catches anything else.
+ */
 function explicitDatatypes(text: string, store: Store, prefixes: Record<string, string>): string {
-  const dts = new Set(store.getObjects(null, nn(SH + 'datatype'), null).map((o) => o.value));
-  let out = text;
-  for (const dt of dts) {
+  const tokens = new Set<string>();
+  for (const dt of new Set(store.getObjects(null, nn(SH + 'datatype'), null).map((o) => o.value))) {
     if (SHORT_FORM_DATATYPES.has(dt)) continue;
-    const all = { ...prefixes, xsd: NS.xsd, rdf: NS.rdf };
-    const [p, ns] = Object.entries(all).filter(([, ns]) => dt.startsWith(ns)).sort((a, b) => b[1].length - a[1].length)[0] ?? [];
-    const tokens = [`<${dt}>`, ...(p !== undefined && ns ? [`${p}:${dt.slice(ns.length)}`] : [])];
-    for (const t of tokens) out = out.replace(new RegExp(`(?<=^\\t+\\S+(?: [^\\n]*)? )${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= |$)`, 'gm'), `datatype=${t}`);
+    tokens.add(`<${dt}>`);
+    for (const [p, ns] of Object.entries({ ...prefixes, xsd: NS.xsd, rdf: NS.rdf })) if (dt.startsWith(ns)) tokens.add(`${p}:${dt.slice(ns.length)}`);
+  }
+  if (!tokens.size) return text;
+  return text
+    .split('\n')
+    .map((line) => (/^\t/.test(line) ? rewriteTokens(line, tokens) : line))
+    .join('\n');
+}
+
+/** Prefixes `datatype=` to whole tokens in `tokens`, skipping string literals and the first token (the path). */
+function rewriteTokens(line: string, tokens: Set<string>): string {
+  let out = '';
+  let i = 0;
+  let first = true;
+  while (i < line.length) {
+    const c = line[i];
+    if (c === '"' || c === "'") {
+      const long = line.startsWith(c.repeat(3), i);
+      const end = long ? c.repeat(3) : c;
+      let j = i + end.length;
+      while (j < line.length && !line.startsWith(end, j)) j += line[j] === '\\' ? 2 : 1;
+      j = Math.min(line.length, j + end.length);
+      out += line.slice(i, j);
+      i = j;
+      first = false;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      out += c;
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < line.length && !/[\s"']/.test(line[j])) j++;
+    const tok = line.slice(i, j);
+    out += !first && tokens.has(tok) ? `datatype=${tok}` : tok;
+    first = false;
+    i = j;
   }
   return out;
 }
@@ -203,18 +309,20 @@ function explicitDatatypes(text: string, store: Store, prefixes: Record<string, 
 /**
  * SHACLC can only refer to a qualified value shape by IRI, so each anonymous
  * one becomes a named node shape (e.g. volsh:Employee-worksFor-Charity),
- * written as its own `shape` block. The constraint is unchanged.
+ * written as its own `shape` block. The constraint is unchanged. Names never
+ * reuse an IRI already in the graph.
  */
 function nameQualifiedShapes(store: Store, shapesNs: string): void {
-  const taken = new Set<string>();
+  const taken = new Set(namedIris(store));
   for (const q of store.getQuads(null, nn(SH + 'qualifiedValueShape'), null, null)) {
     if (q.object.termType !== 'BlankNode') continue;
     const owner = store.getSubjects(nn(SH + 'property'), q.subject, null)[0];
     const path = store.getObjects(q.subject, nn(SH + 'path'), null)[0];
     const filler = [...store.getObjects(q.object, nn(SH + 'class'), null), ...store.getObjects(q.object, nn(SH + 'datatype'), null)][0];
     const parts = [owner ? localName(owner.value).replace(/Shape$/, '') : 'Shape', path ? localName(path.value) : 'value', filler ? localName(filler.value) : 'value'];
-    let iri = `${shapesNs}${parts.join('-')}`;
-    for (let n = 2; taken.has(iri); n++) iri = `${shapesNs}${parts.join('-')}-${n}`;
+    const stem = `${shapesNs}${parts.map((x) => x.replace(/[^A-Za-z0-9_]/g, '_') || 'x').join('-')}`;
+    let iri = stem;
+    for (let n = 2; taken.has(iri); n++) iri = `${stem}${n}`;
     taken.add(iri);
     const named = nn(iri);
     for (const inner of store.getQuads(q.object, null, null, null)) {
@@ -225,70 +333,6 @@ function nameQualifiedShapes(store: Store, shapesNs: string): void {
     store.addQuad(q.subject, q.predicate, named);
     store.addQuad(named, nn(RDF_TYPE), nn(SH + 'NodeShape'));
   }
-}
-
-/* ------------------------------------------------------------------------ */
-/* Code identifiers                                                          */
-/* ------------------------------------------------------------------------ */
-
-/**
- * Members of @rdfjs/wrapper's TermWrapper (a wrapped node is also an RDF/JS
- * term), plus names the ODI shacl-converter reserves. An accessor can't use them.
- */
-const RESERVED_MEMBERS = new Set([
-  'constructor', 'dataset', 'factory', 'original', 'termType', 'value', 'equals', 'language', 'direction',
-  'datatype', 'subject', 'predicate', 'object', 'graph', 'type', 'toString', 'prototype',
-]);
-/** Names a generated class can't take (the base classes, and words JavaScript reserves). */
-const RESERVED_CLASSES = new Set(['TermWrapper', 'DatasetWrapper', 'Object', 'Set', 'Map', 'Date', 'String', 'Number', 'Boolean', 'Symbol', 'Array', 'Function', 'Promise', 'Error']);
-const JS_KEYWORDS = new Set(('break case catch class const continue debugger default delete do else enum export extends false finally for function if ' +
-  'implements import in instanceof interface let new null package private protected public return static super switch this throw true try typeof var void while with yield await').split(' '));
-
-/** A valid identifier from an IRI local name: letters, digits and underscores, not starting with a digit. */
-export function identifierFrom(name: string, style: 'pascal' | 'camel'): string {
-  const words = name.split(/[^A-Za-z0-9]+/).filter(Boolean);
-  let id = words.map((w, i) => (i === 0 ? w : w[0].toUpperCase() + w.slice(1))).join('') || 'unnamed';
-  id = style === 'pascal' ? id[0].toUpperCase() + id.slice(1) : id[0].toLowerCase() + id.slice(1);
-  if (/^[0-9]/.test(id)) id = `_${id}`;
-  return id;
-}
-
-export interface CodeIdentifiers {
-  /** Shape IRI → class name. */
-  classes: Map<string, string>;
-  /** Shape IRI → property path → accessor name. */
-  properties: Map<string, Map<string, string>>;
-}
-
-/** Stable, unique class and accessor names for every derived shape. */
-export function codeIdentifiers(derived: DerivedShapes): CodeIdentifiers {
-  const classes = new Map<string, string>();
-  const used = new Set<string>();
-  for (const s of derived.shapes) {
-    let id = identifierFrom(localName(s.targetClass), 'pascal');
-    if (RESERVED_CLASSES.has(id) || JS_KEYWORDS.has(id)) id = `${id}_`;
-    let n = 2;
-    const base = id;
-    while (used.has(id)) id = `${base}${n++}`;
-    used.add(id);
-    classes.set(s.iri, id);
-  }
-  const properties = new Map<string, Map<string, string>>();
-  for (const s of derived.shapes) {
-    const names = new Map<string, string>();
-    const taken = new Set<string>();
-    for (const ps of s.properties) {
-      let id = identifierFrom(localName(ps.path), 'camel');
-      if (RESERVED_MEMBERS.has(id) || JS_KEYWORDS.has(id)) id = `${id}_`;
-      let n = 2;
-      const base = id;
-      while (taken.has(id)) id = `${base}${n++}`;
-      taken.add(id);
-      names.set(ps.path, id);
-    }
-    properties.set(s.iri, names);
-  }
-  return { classes, properties };
 }
 
 function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, range: string[]): void {
