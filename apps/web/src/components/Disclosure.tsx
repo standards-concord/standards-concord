@@ -57,7 +57,8 @@ export function Popover({
   panelClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [above, setAbove] = useState(false);
+  const [placement, setPlacement] = useState<'top' | 'bottom' | 'screen'>('bottom');
+  const above = placement === 'top';
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -90,15 +91,17 @@ export function Popover({
   // haven't changed (a width-only resize), which a state update would skip.
   useLayoutEffect(() => {
     if (!open) {
-      setAbove(false);
+      setPlacement('bottom');
       return;
     }
     const place = () => {
       const panel = panelRef.current;
       const button = buttonRef.current;
       if (!panel || !button) return;
-      panel.style.transform = '';
-      panel.style.maxHeight = '';
+      for (const k of ['transform', 'top', 'bottom', 'marginTop', 'marginBottom'] as const) panel.style[k] = '';
+      // Measure the panel's natural height: the stylesheet's own cap (100vh - 8rem) collapses to nothing on
+      // a very short screen and would make it look as if the panel fits. The inline cap set below replaces it.
+      panel.style.maxHeight = 'none';
       const r = panel.getBoundingClientRect();
       const b = button.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
@@ -112,9 +115,20 @@ export function Popover({
       const below = vh - b.bottom - gap - margin;
       const aboveRoom = b.top - gap - margin;
       const up = r.height > below && aboveRoom > below;
-      setAbove(up);
-      // Never taller than the room actually there; the panel scrolls inside. A tiny floor keeps it usable when there's almost none.
-      panel.style.maxHeight = `min(32rem, ${Math.max(40, Math.floor(up ? aboveRoom : below))}px)`;
+      const room = Math.floor(up ? aboveRoom : below);
+      const screen = vh - 2 * margin;
+      if (r.height > room && room < 120 && screen > room) {
+        // Too little room on either side of the trigger (a very short or zoomed screen): use the whole
+        // viewport height instead, over the trigger, so nothing ends up off screen. The top is relative
+        // to the wrapper, the panel's offset parent.
+        const w = ref.current!.getBoundingClientRect();
+        Object.assign(panel.style, { top: `${margin - w.top}px`, bottom: 'auto', marginTop: '0', marginBottom: '0', maxHeight: `${screen}px` });
+        setPlacement('screen');
+        return;
+      }
+      setPlacement(up ? 'top' : 'bottom');
+      // Never taller than the room actually there; the panel scrolls inside.
+      panel.style.maxHeight = `min(32rem, ${Math.max(0, room)}px)`;
     };
     place();
     window.addEventListener('resize', place);
@@ -154,7 +168,7 @@ export function Popover({
           aria-modal="false"
           aria-label={label}
           tabIndex={-1}
-          data-placement={above ? 'top' : 'bottom'}
+          data-placement={placement}
           className={cx(
             'absolute z-40 max-h-[min(32rem,calc(100vh-8rem))] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-line bg-surface p-4 text-sm shadow-xl outline-none',
             above ? 'bottom-full mb-2' : 'mt-2',

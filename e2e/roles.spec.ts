@@ -124,17 +124,17 @@ test.describe('role-based views', () => {
     test.skip(!releases.length, 'the demo has no releases');
     await page.goto(`/o/${demo.id}/releases/${releases[0].id}`);
     await settle(page);
-    const approved = page.getByRole('button', { name: /How this was approved/ });
-    // A published release shows today's rules as "Current release policy", outside its approval history.
-    const glance = page.getByRole('button', { name: (await approved.count()) ? /Current release policy/ : /How releases are decided/ });
-    await glance.click();
+    const detail = (await (await page.request.get(`/api/releases/${releases[0].id}`)).json()) as { status: string; approvalSource: string };
+    const decided = detail.status === 'published' || detail.status === 'rejected';
+    // A decided release shows today's rules as "Current release policy", outside its own record.
+    await page.getByRole('button', { name: decided ? /Current release policy/ : /How releases are decided/ }).click();
     await expect(page.getByRole('list', { name: 'What each kind of release needs' }).getByRole('listitem')).toHaveCount(3);
-    const { approvalSource } = (await (await page.request.get(`/api/releases/${releases[0].id}`)).json()) as { approvalSource: string };
-    if ((await approved.count()) && approvalSource !== 'bootstrap') {
-      await approved.click();
-      // Inside, the approval details show straight away, with no second toggle.
+    if (decided && detail.approvalSource !== 'bootstrap') {
+      const history = page.getByRole('button', { name: /How this was approved|Why this was rejected|checked against today’s policy/ });
+      if ((await history.getAttribute('aria-expanded')) !== 'true') await history.click();
+      // Inside, the read-only record shows straight away, with no second toggle.
       await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
-      await expect(page.getByRole('heading', { name: 'Approval details' })).toBeVisible();
+      await expect(page.getByTestId('approval-record')).toBeVisible();
     }
   });
 

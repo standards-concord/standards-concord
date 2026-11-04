@@ -7,6 +7,7 @@ import { useSession } from '../../lib/session';
 import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
+import { ApprovalRecord } from '../../components/ApprovalRecord';
 import { PolicyGlance } from '../../components/PolicyRules';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
@@ -105,6 +106,14 @@ export function ReleaseDetailPage() {
               </Card>
               <ApprovalHistory r={r} userById={userById} />
             </>
+          ) : r.status === 'rejected' ? (
+            <>
+              <Card className="p-5">
+                <p className="text-sm text-muted">This release attempt was rejected. Draft a new release to try again.</p>
+                <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" title="Current release policy" className="mt-4 border-t border-line pt-3" />
+              </Card>
+              <ApprovalHistory r={r} userById={userById} />
+            </>
           ) : (
             <Card>
               <CardHeader icon={Scale} title="Release approval" />
@@ -131,16 +140,10 @@ export function ReleaseDetailPage() {
                           {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on releases at this level.</p>}
                         </>
                       )}
-                      {r.status !== 'rejected' ? (
-                        <>
-                          <Button variant="primary" icon={Rocket} className="w-full" loading={act.pending} disabled={!canPublish} onClick={() => void act.run(() => api.publishRelease(r.id))}>
-                            Publish v{r.version}
-                          </Button>
-                          {!canPublish && <p className="text-xs text-muted">A steward or owner publishes releases once approval conditions are met.</p>}
-                        </>
-                      ) : (
-                        <p className="text-sm text-muted">This release attempt was rejected. Draft a new release to try again.</p>
-                      )}
+                      <Button variant="primary" icon={Rocket} className="w-full" loading={act.pending} disabled={!canPublish} onClick={() => void act.run(() => api.publishRelease(r.id))}>
+                        Publish v{r.version}
+                      </Button>
+                      {!canPublish && <p className="text-xs text-muted">A steward or owner publishes releases once approval conditions are met.</p>}
                       <InlineError error={act.error} />
                     </div>
                   }
@@ -156,9 +159,9 @@ export function ReleaseDetailPage() {
 }
 
 /**
- * How a published release was approved. It shows the evaluation recorded when it was published, so
- * changing the policy or members later doesn't rewrite its history. Releases from before that record
- * existed say plainly that they're checked against today's rules.
+ * How a decided (published or rejected) release was approved or turned down, read-only. It shows the
+ * evaluation recorded at the decision, so later policy or membership changes don't rewrite it. Older
+ * releases without that record say plainly that they're checked against today's rules.
  */
 function ApprovalHistory({ r, userById }: { r: ReleaseDetail; userById: ReturnType<typeof useOntology>['userById'] }) {
   if (r.approvalSource === 'bootstrap')
@@ -169,22 +172,32 @@ function ApprovalHistory({ r, userById }: { r: ReleaseDetail; userById: ReturnTy
         </p>
       </CollapsibleCard>
     );
+  const published = r.status === 'published';
+  const decidedAt = published ? r.publishedAt : r.statusSince;
+  const verb = published ? 'published' : 'rejected';
   const recorded = r.approvalSource === 'recorded';
+  const title = recorded
+    ? published
+      ? 'How this was approved'
+      : 'Why this was rejected'
+    : published
+      ? 'Approval, checked against today’s policy'
+      : 'Rejection, checked against today’s policy';
   return (
-    // One click reveals the whole approval history: the panel's own details start open.
     <CollapsibleCard
       icon={Scale}
-      title={recorded ? 'How this was approved' : 'Approval, checked against today’s policy'}
-      summary={recorded ? `Recorded when it was published on ${formatDate(r.publishedAt)}` : 'No record was kept when this was published'}
+      title={title}
+      summary={recorded ? `Recorded when it was ${verb} on ${formatDate(decidedAt)}` : `No record was kept when this was ${verb}`}
+      defaultOpen={!published}
       keepMounted
     >
       <div className="space-y-4 p-5">
         <p className="text-xs text-muted" data-testid="approval-source">
           {recorded
-            ? `The approvals, review period and vote as they stood when this release was published on ${formatDate(r.publishedAt, true)}. Later changes to the policy or members don’t change this record.`
-            : 'Concord didn’t keep a record of this release’s approval when it was published, so this applies today’s policy and members. It may not match what was required at the time.'}
+            ? `The rules, approvals and vote as they stood when this release was ${verb} on ${formatDate(decidedAt, true)}. Later changes to the policy or members don’t change this record.`
+            : `Concord didn’t keep a record of this decision when the release was ${verb}, so the rules and counts below apply today’s policy and members. They may not match what was required at the time.`}
         </p>
-        <GovernancePanel g={r.governance} userById={userById} subject="release" detailsOpen />
+        <ApprovalRecord g={r.governance} outcome={published ? 'approved' : 'rejected'} decidedAt={decidedAt} votes={r.votes} userById={userById} subject="release" />
       </div>
     </CollapsibleCard>
   );

@@ -518,11 +518,12 @@ test.describe('progressive disclosure', () => {
       await expect(page.getByText('Version IRI:')).toBeVisible();
       return;
     }
-    await expect(page.getByText('Next:', { exact: true })).toBeVisible();
-    // One click reveals the approval history, with no second "Approval details" toggle inside it.
+    // One click reveals the read-only record: no further toggles, and nothing about what happens next.
+    const record = page.getByTestId('approval-record');
+    await expect(record).toContainText('Approved');
+    await expect(record.getByText(/Rules applied to this/)).toBeVisible();
+    await expect(page.getByText('Next:', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: 'Approval details' })).toBeVisible();
-    await expect(page.getByText(/Rules for a .* release/)).toBeVisible();
     await page.getByRole('button', { name: /Technical details/ }).click();
     await expect(page.getByText('Version IRI:')).toBeVisible();
   });

@@ -53,6 +53,35 @@ test.describe('summaries, popups and disclosures', () => {
     await expect(page.getByRole('button', { name: /Ontology details/ })).toBeFocused();
   });
 
+  test('on a very short screen a popup uses the whole height rather than going off screen', async ({ page }) => {
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const bubble = page.getByRole('button', { name: /^Lifecycle stage: / });
+    const panel = page.getByRole('dialog', { name: /^Lifecycle stage/ });
+    const inView = async (vh: number) => {
+      const box = (await panel.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(vh);
+    };
+    for (const vh of [100, 60]) {
+      await page.setViewportSize({ width: 1000, height: vh });
+      // The sticky header covers most of a screen this short, so use the keyboard rather than a click.
+      await bubble.focus();
+      await bubble.press('Enter');
+      await expect(panel).toBeVisible();
+      await inView(vh);
+      // Neither side of the trigger has room for the panel, so it takes the whole height instead.
+      await expect(panel).toHaveAttribute('data-placement', 'screen');
+      await page.keyboard.press('Escape');
+      await expect(panel).toHaveCount(0);
+    }
+    // Back at a normal height, it sits next to its trigger again.
+    await bubble.press('Enter');
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await expect(panel).not.toHaveAttribute('data-placement', 'screen');
+    await inView(800);
+  });
+
   test('detailed validation never says a plain “Passed” when the reasoner did not run', async ({ page }) => {
     const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { errors: number; incomplete?: string[] } };
     test.skip(!o.health?.incomplete?.length, 'the reasoner ran here, so a plain pass is honest');

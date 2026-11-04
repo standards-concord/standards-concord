@@ -3,6 +3,8 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { releaseApproval, releaseGovernance } from '../src/services/releases.js';
+import type { Release } from '@concord/shared';
 
 const app = createApp();
 type Agent = ReturnType<typeof request.agent>;
@@ -333,5 +335,35 @@ describe('anonymous access', () => {
     const agent = await login('contributor', 'Validator');
     expect((await agent.get(`/api/ontologies/${demoId}/validation`)).status).toBe(200);
     expect((await agent.post('/api/simulation/step').send({ ontologyId: demoId })).status).toBe(200);
+  });
+});
+
+describe('release approval provenance', () => {
+  const release = (over: Partial<Release>): Release => ({
+    id: 'rel_test',
+    ontologyId: demoId,
+    version: '9.9.9',
+    level: 'minor',
+    status: 'draft',
+    changeRequestIds: ['cr_test'],
+    notes: '',
+    versionIRI: 'https://example.org/9.9.9',
+    createdBy: 'system',
+    createdAt: '2026-11-01T00:00:00Z',
+    statusSince: '2026-11-01T00:00:00Z',
+    ...over,
+  });
+
+  it('labels every decided release, rejected as well as published', () => {
+    expect(releaseApproval(release({ status: 'voting' })).approvalSource).toBe('live');
+    expect(releaseApproval(release({ status: 'rejected' })).approvalSource).toBe('current-policy');
+    expect(releaseApproval(release({ status: 'published' })).approvalSource).toBe('current-policy');
+    expect(releaseApproval(release({ status: 'published', changeRequestIds: [] })).approvalSource).toBe('bootstrap');
+    const saved = { ...releaseGovernance(release({ status: 'voting' })), requiredApprovals: 42 };
+    for (const status of ['published', 'rejected'] as const) {
+      const shown = releaseApproval(release({ status, approval: saved }));
+      expect(shown.approvalSource).toBe('recorded');
+      expect(shown.governance.requiredApprovals).toBe(42);
+    }
   });
 });
