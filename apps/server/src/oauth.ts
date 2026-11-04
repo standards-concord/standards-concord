@@ -29,7 +29,7 @@ import { getUser, userForAgentToken } from './services/users.js';
  *    a code, swaps it for an access token and a rotating refresh token.
  *
  * So `claude mcp add --transport http concord https://<host>/mcp` is all an
- * agent needs: no token to copy. Personal tokens (Settings → Agent tokens)
+ * agent needs: no token to copy. Personal tokens (Connect an agent → Personal tokens)
  * still work for headless agents such as CI.
  *
  * Every URL is built for the domain the request came in on, as long as that
@@ -393,7 +393,7 @@ export const provider: OAuthServerProvider = {
         extra: { userId: grant.userId, agentName: grant.clientName, grantId: grant.id },
       };
     }
-    // Personal tokens from Settings, for agents that can't do a browser sign-in.
+    // Personal tokens from the Connect an agent page, for agents that can't do a browser sign-in.
     const personal = userForAgentToken(token);
     if (personal) return { token, clientId: 'personal-token', scopes: [], extra: { userId: personal.user.id, agentName: personal.tokenName } };
     throw new InvalidTokenError('Invalid access token');

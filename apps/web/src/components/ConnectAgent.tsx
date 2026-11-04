@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ExternalLink, Package } from 'lucide-react';
 import { CHATGPT_PLUGINS_URL, claudeCodeCommand, claudeCodePluginCommands, claudeConnectorLink, codexCommand, codexLoginCommand, codexPluginCommand, cursorLink, mcpUrl, vscodeLink } from '../lib/install';
+import { useSession } from '../lib/session';
 import { CopyButton, cx } from './ui';
 
 const origin = () => (typeof location !== 'undefined' ? location.origin : '');
@@ -164,6 +165,7 @@ function ClientSteps({ client, url }: { client: ClientId; url: string }) {
  */
 export function ConnectAgent() {
   const url = mcpUrl(origin());
+  const signedIn = !!useSession().session?.user;
   const [client, setClient] = useState<ClientId>(remembered);
   const choose = (c: ClientId) => {
     setClient(c);
@@ -233,9 +235,9 @@ export function ConnectAgent() {
           <div className="space-y-1.5">
             <div className="text-xs font-medium text-fg">Agents that can’t open a browser</div>
             <p className="text-xs">
-              For CI jobs and other headless agents, create a personal token in{' '}
-              <Link to="/settings#tokens" className="text-accent hover:underline">
-                Settings
+              For CI jobs and other headless agents, create a{' '}
+              <Link to={signedIn ? '/connect#tokens' : `/login?next=${encodeURIComponent('/connect#tokens')}`} className="text-accent hover:underline">
+                personal token
               </Link>{' '}
               and send it as an <code className="font-mono">Authorization: Bearer</code> header.
             </p>

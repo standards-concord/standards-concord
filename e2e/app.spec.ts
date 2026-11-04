@@ -23,7 +23,7 @@ test.describe('signed in', () => {
     await signIn(page, { name: 'E2E tester', role: 'steward' });
   });
 
-  for (const path of ['/', '/settings', '/feedback', '/alpha']) {
+  for (const path of ['/', '/settings', '/connect', '/appearance', '/feedback', '/alpha']) {
     test(`page ${path} opens`, async ({ page }) => {
       await page.goto(path);
       await settle(page);
@@ -31,6 +31,36 @@ test.describe('signed in', () => {
       await expect(page.locator('main')).not.toBeEmpty();
     });
   }
+
+  test('Profile shows who you are and how you sign in, with the WebID and pod folded away', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /E2E tester/ }).click();
+    const menu = page.getByRole('menu');
+    // Profile, one agents entry and Appearance, in that order.
+    await expect(menu.getByRole('link')).toHaveText(['Profile', 'Connect an agent', 'Appearance', 'Alpha walkthrough', 'Feedback admin']);
+    await menu.getByRole('link', { name: 'Profile' }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByRole('heading', { name: 'Profile', level: 1 })).toBeVisible();
+    await expect(page.getByText('E2E tester').last()).toBeVisible();
+
+    // "Ways to sign in" explains itself and lists this account's sign-in.
+    await expect(page.getByRole('heading', { name: 'Ways to sign in' })).toBeVisible();
+    await expect(page.getByText('Each of these opens this same Concord account.')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Linked sign-in providers' })).toHaveCount(0);
+
+    // The WebID and pod are one click away, not on show.
+    const webid = page.getByRole('button', { name: /Your WebID and Solid pod/ });
+    await expect(webid).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByText('WebID', { exact: true })).toBeHidden();
+    await webid.click();
+    await expect(webid).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByText('WebID', { exact: true })).toBeVisible();
+    await expect(page.locator('#webid code').first()).toContainText('http');
+
+    // Pointers to where agents and appearance went.
+    await expect(page.getByRole('link', { name: 'Connect an agent' })).toHaveAttribute('href', '/connect#agents');
+    await expect(page.getByRole('main').getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/appearance');
+  });
 
   test('every ontology section and page opens', async ({ page, request }) => {
     const demo = await demoOntology(request);

@@ -55,7 +55,10 @@ test.describe('Connect page', () => {
     await expect(page.getByTestId('plugin-install')).toContainText('codex plugin marketplace add jeswr/standards-concord');
     await expect(page.getByTestId('plugin-update-note')).toContainText('/plugin marketplace update concord');
     await expect(page.getByTestId('plugin-update-note')).toContainText('sign in again');
-    await expect(page.getByTestId('advanced-setup').getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#tokens');
+    // Signed out, the token link asks you to sign in first and comes back here.
+    await expect(page.getByTestId('advanced-setup').getByRole('link', { name: 'personal token' })).toHaveAttribute('href', `/login?next=${encodeURIComponent('/connect#tokens')}`);
+    await expect(page.getByRole('heading', { name: 'Your agents' })).toHaveCount(0);
+    await expect(page.getByText('You’ll sign in to Concord when your agent first connects.')).toBeVisible();
 
     // The page no longer lists the MCP tools.
     for (const name of TOOL_NAMES) await expect(page.getByText(name, { exact: true })).toHaveCount(0);
@@ -115,11 +118,54 @@ test.describe('Connect page', () => {
     await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
   });
 
-  test('the account menu links to the connect page and connected agents', async ({ page }) => {
+  test('one Connect an agent page holds the setup, connected agents and personal tokens', async ({ page }) => {
+    await signIn(page, { name: 'Agent owner' });
+    await page.goto('/');
+    // The account menu has a single agents entry.
+    await page.getByRole('button', { name: /Agent owner/ }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu.getByRole('link', { name: 'Connect an agent' })).toHaveAttribute('href', '/connect');
+    await expect(menu.getByRole('link', { name: 'Connected agents' })).toHaveCount(0);
+    await menu.getByRole('link', { name: 'Connect an agent' }).click();
+    await expect(page).toHaveURL(/\/connect$/);
+
+    // Under the setup steps: the agents you've connected, then personal tokens.
+    const yours = page.getByRole('region', { name: 'Your agents' });
+    await expect(yours.getByRole('heading', { name: 'Connected agents' })).toBeVisible();
+    await expect(page.getByTestId('connections')).toContainText('No agents connected yet.');
+    await expect(yours.getByRole('heading', { name: 'Personal tokens' })).toBeVisible();
+
+    // A personal token can be made and revoked here.
+    await yours.getByRole('textbox', { name: 'Token name' }).fill('CI job');
+    await yours.getByRole('button', { name: 'Create token' }).click();
+    await expect(yours.getByText('Copy your token now')).toBeVisible();
+    const row = yours.getByRole('listitem').filter({ hasText: 'CI job' });
+    await expect(row).toBeVisible();
+    page.once('dialog', (d) => void d.accept());
+    await row.getByRole('button', { name: 'Revoke' }).click();
+    await expect(row).toHaveCount(0);
+
+    // The advanced-setup token link jumps down to the tokens on this page.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.getByText('Advanced setup').click();
+    const tokenLink = page.getByTestId('advanced-setup').getByRole('link', { name: 'personal token' });
+    await expect(tokenLink).toHaveAttribute('href', '/connect#tokens');
+    await tokenLink.click();
+    await expect(page).toHaveURL(/\/connect#tokens$/);
+    await expect(page.locator('#tokens')).toBeInViewport();
+  });
+
+  test('old Settings links to agents, tokens and appearance still land in the right place', async ({ page }) => {
     await signIn(page);
     await page.goto('/settings#agents');
-    await expect(page.getByText('Connected agents')).toBeVisible();
-    await expect(page.getByTestId('connections')).toContainText('No agents connected yet.');
-    await expect(page.getByText('Personal tokens')).toBeVisible();
+    await expect(page).toHaveURL(/\/connect#agents$/);
+    await expect(page.getByTestId('connections')).toBeVisible();
+    await page.goto('/settings#tokens');
+    await expect(page).toHaveURL(/\/connect#tokens$/);
+    await expect(page.locator('#tokens')).toBeInViewport();
+    await page.goto('/settings#appearance');
+    await expect(page).toHaveURL(/\/appearance$/);
+    await expect(page.getByRole('radiogroup', { name: 'Visual style' })).toBeVisible();
   });
+
 });

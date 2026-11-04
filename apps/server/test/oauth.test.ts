@@ -213,7 +213,7 @@ describe('MCP OAuth authorization code flow', () => {
     expect(again.status).toBe(400);
     expect(again.body.error).toBe('invalid_grant');
 
-    // The connection shows up in Settings, and refresh tokens rotate.
+    // The connection shows up on the Connect an agent page, and refresh tokens rotate.
     const conns = await agent.get('/api/oauth/connections');
     expect(conns.body).toEqual([expect.objectContaining({ clientName: 'Claude Code (concord)' })]);
     const r1 = await token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });

@@ -4,7 +4,7 @@ import { test, expect, expectNoCrash, settle, signIn, demoOntology } from './fix
 /**
  * Visual looks (apps/web/src/lib/look.ts): the whole app's style is a set of CSS
  * variables picked by <html data-look>. These check that the default applies, that
- * ?look= and the Settings picker switch and remember it, that every look renders the
+ * ?look= and the Appearance page switch and remember it, that every look renders the
  * main pages cleanly, and that each look's colour pairs meet WCAG AA in light and dark.
  */
 
@@ -36,9 +36,10 @@ test.describe('looks', () => {
     expect(await look(page)).toBe('spec');
   });
 
-  test('the Settings appearance picker switches looks, by mouse and keyboard', async ({ page }) => {
+  test('the Appearance page switches looks, by mouse and keyboard', async ({ page }) => {
     await signIn(page, { name: 'Look tester' });
-    await page.goto('/settings');
+    await page.goto('/appearance');
+    await expect(page.getByRole('heading', { name: 'Appearance', level: 1 })).toBeVisible();
     await settle(page);
     const group = page.getByRole('radiogroup', { name: 'Visual style' });
     await expect(group).toBeVisible();
@@ -63,16 +64,29 @@ test.describe('looks', () => {
     expect(await look(page)).toBe('civic');
     await expect(page.getByRole('radio', { name: /Civic grid/ })).toHaveAttribute('aria-checked', 'true');
 
-    // The user menu links to the picker.
+    // The user menu links to the picker, and Profile no longer repeats it.
     await page.getByRole('button', { name: /Look tester/ }).click();
-    await expect(page.getByRole('menu').getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/settings#appearance');
+    await expect(page.getByRole('menu').getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/appearance');
+    await page.goto('/settings');
+    await expect(page.getByRole('heading', { name: 'Profile', level: 1 })).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: 'Visual style' })).toHaveCount(0);
+  });
+
+  test('the Appearance page works signed out, since the choice is kept in the browser', async ({ page }) => {
+    await page.goto('/appearance');
+    await settle(page);
+    await page.getByRole('radio', { name: /Workbench/ }).click();
+    expect(await look(page)).toBe('workbench');
+    await page.goto('/login');
+    await settle(page);
+    expect(await look(page)).toBe('workbench');
   });
 
   for (const id of LOOKS) {
     test(`the ${id} look renders the main pages without errors`, async ({ page, request }) => {
       await signIn(page, { name: `${id} tester` });
       const demo = await demoOntology(request);
-      for (const path of [`/?look=${id}`, `/o/${demo.id}`, `/o/${demo.id}/browse`, `/o/${demo.id}/changes`, `/o/${demo.id}/governance`, '/settings']) {
+      for (const path of [`/?look=${id}`, `/o/${demo.id}`, `/o/${demo.id}/browse`, `/o/${demo.id}/changes`, `/o/${demo.id}/governance`, '/settings', '/appearance']) {
         await page.goto(path);
         await settle(page);
         await expectNoCrash(page);
@@ -159,9 +173,9 @@ test.describe('looks', () => {
     expect(await look(page)).toBe('civic');
   });
 
-  test('choosing a look in Settings replaces ?look= in the address, so a reload keeps the choice', async ({ page }) => {
+  test('choosing a look on the Appearance page replaces ?look= in the address, so a reload keeps the choice', async ({ page }) => {
     await signIn(page, { name: 'Override tester' });
-    await page.goto('/settings?look=civic');
+    await page.goto('/appearance?look=civic');
     await settle(page);
     await page.getByRole('radio', { name: /Workbench/ }).click();
     await expect(page).not.toHaveURL(/look=/);

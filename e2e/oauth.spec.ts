@@ -40,8 +40,8 @@ test.describe('Connecting an agent with OAuth (no token)', () => {
       expect(JSON.stringify(res.content)).toContain('vol:Skill');
       await client.close();
 
-      // The connection is listed in Settings and can be disconnected.
-      await page.goto('/settings#agents');
+      // The connection is listed on the Connect an agent page and can be disconnected.
+      await page.goto('/connect#agents');
       const row = page.getByTestId('connections').getByRole('listitem').filter({ hasText: 'Claude Code (playwright)' });
       await expect(row).toBeVisible();
       page.once('dialog', (d) => void d.accept());

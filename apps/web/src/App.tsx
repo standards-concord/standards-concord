@@ -10,6 +10,7 @@ import { HubPage } from './pages/Hub';
 import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
 import { SettingsPage } from './pages/Settings';
+import { AppearancePage } from './pages/Appearance';
 import { NotFound } from './pages/NotFound';
 import { OntologyLayout } from './pages/ontology/Layout';
 import { OverviewTab } from './pages/ontology/Overview';
@@ -80,6 +81,7 @@ function Routed() {
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/appearance" element={<AppearancePage />} />
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
           <Route path="/settings" element={<RequireUser><SettingsPage /></RequireUser>} />

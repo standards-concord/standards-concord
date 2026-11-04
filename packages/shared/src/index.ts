@@ -547,7 +547,7 @@ export interface OAuthRequestInfo {
   resource?: string;
 }
 
-/** An app the person has connected with OAuth (Settings → Connected agents). */
+/** An app the person has connected with OAuth (Connect an agent → Connected agents). */
 export interface OAuthConnection {
   id: string;
   clientName: string;
