@@ -1,4 +1,4 @@
-import type { ApprovalRule, ChangeRequest, GovernancePolicy, Membership, Review, Role } from '@concord/shared';
+import { canCastVote, type ApprovalRule, type ChangeRequest, type GovernancePolicy, type Membership, type Review, type Role } from '@concord/shared';
 
 /**
  * The rule that governs a change at this level, with the ODI's privilege applied. This mirrors
@@ -66,7 +66,7 @@ export function askOf(cr: ChangeRequest, policy: GovernancePolicy, { roles, me, 
   if (cr.status === 'voting') {
     // The vote can open before the ODI approves, but it cannot pass without that approval.
     if (needsOdiApproval(policy, cr) && !odiApproved && has(['odi'])) return 'Approve';
-    return rule.vote && has(rule.vote.voterRoles) ? 'Vote on' : undefined;
+    return rule.vote && canCastVote(roles, rule.vote.voterRoles) ? 'Vote on' : undefined;
   }
   if (cr.status === 'review') return cr.authorId !== me && roles.length > 0 ? 'Review' : undefined;
   if (cr.status === 'approved') return !rule.autoMerge && canEdit ? 'Merge' : undefined;

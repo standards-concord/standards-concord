@@ -213,7 +213,10 @@ test.describe('progressive disclosure', () => {
     await page.route(new RegExp(`/api/change-requests/${target.id}(/reviews)?$`), async (route) => {
       if (route.request().method() === 'POST') reviewed = route.request().postDataJSON();
       const d = await (await page.request.get(`/api/change-requests/${target.id}`)).json();
-      const reviews = reviewed ? [{ id: 'rev-odi', changeRequestId: target.id, userId: me.user.id, roles: ['odi'], decision: 'approve', at: new Date().toISOString() }] : [];
+      // Stamp the approval with the demo clock, which runs ahead of real time, as the server would.
+      const at = ((await (await page.request.get('/api/session')).json()) as { now: string }).now;
+      expect(at >= (d.opsUpdatedAt ?? d.createdAt), 'the mock approval comes after the latest edits').toBe(true);
+      const reviews = reviewed ? [{ id: 'rev-odi', changeRequestId: target.id, userId: me.user.id, roles: ['odi'], decision: 'approve', at }] : [];
       await route.fulfill({ json: { ...asVoting(d), reviews, votes: [] } });
     });
 

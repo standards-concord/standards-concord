@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import type { ChangeOp, ChangeRequestDetail } from '@concord/shared';
+import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
 import { ArrowLeft, Check, CircleSlash, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
@@ -40,7 +40,8 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const canEdit = isAuthor || hasRole('editor', 'steward', 'owner');
   const open = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
   const voterRoles = cr.governance.rule.vote?.voterRoles ?? [];
-  const canVote = cr.status === 'voting' && (voterRoles.some((r) => myRoles.includes(r)) || hasRole());
+  // The same check the server uses to accept and count a vote.
+  const canVote = cr.status === 'voting' && canCastVote(myRoles, voterRoles);
   const myVote = cr.votes.find((v) => v.userId === uid);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;

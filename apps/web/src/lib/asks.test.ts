@@ -36,6 +36,10 @@ describe('askOf', () => {
     // The server rejects an owner's vote when owners are not voters.
     expect(ask(cr('voting', 'major'), ['owner'])).toBeUndefined();
     expect(ask(cr('voting', 'major'), ['contributor'])).toBeUndefined();
+    // Someone who only acts as an agent is never counted, so is never asked, even when agents are listed.
+    const agents = { ...policy, changes: { ...policy.changes, major: rule({ vote: { voterRoles: ['member', 'agent'], quorum: 0.5, threshold: 0.5, durationDays: 7 } }) } } as GovernancePolicy;
+    expect(ask(cr('voting', 'major'), ['agent'], 'me', agents)).toBeUndefined();
+    expect(ask(cr('voting', 'major'), ['agent', 'member'], 'me', agents)).toBe('Vote on');
   });
 
   it('asks every member but the author to review, since any member’s objection or request for changes counts', () => {

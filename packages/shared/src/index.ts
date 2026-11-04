@@ -69,6 +69,15 @@ export type Role =
   | 'agent'
   | 'odi';
 
+/**
+ * Whether someone with these roles can cast a vote that counts under a rule's voter roles. Members
+ * who only act as AI agents never vote. The server's acceptance check, its tally and the app's
+ * "Vote on" ask all use this, so a vote is only asked for and accepted where it will be counted.
+ */
+export function canCastVote(roles: readonly Role[], voterRoles: readonly Role[]): boolean {
+  return roles.some((r) => voterRoles.includes(r)) && !roles.every((r) => r === 'agent');
+}
+
 export const ROLE_INFO: Record<Role, { label: string; description: string }> = {
   owner: { label: 'Owner', description: 'Accountable for the ontology. Can change governance and transfer ownership.' },
   steward: { label: 'Steward', description: 'Runs the process day to day: triages requests, chairs votes, cuts releases.' },
