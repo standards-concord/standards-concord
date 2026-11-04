@@ -38,6 +38,7 @@ function PublicationApproval({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpda
   const approved = !!p && cr.privacyCleared?.fingerprint === p.fingerprint;
   const hinted = p ? p.hints.length + p.statements.filter((st) => st.hint).length : 0;
   const kind = (k: 'use case title' | 'name') => (k === 'name' ? 'a person’s name' : 'a use case title');
+  const short = (iri: string) => iri.replace(/^.*[#/]/, '') || iri;
   return (
     <Card>
       <CardHeader icon={ShieldCheck} title="What this publishes" subtitle="Drafted from use cases, which may be private. An editor approves exactly this before it is merged." />
@@ -70,7 +71,13 @@ function PublicationApproval({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpda
                   <ul className="mt-1 max-h-72 space-y-1 overflow-auto">
                     {p.statements.map((st, i) => (
                       <li key={i} data-statement data-hint={st.hint ?? undefined} className={cx('break-words rounded px-1 font-mono text-xs', st.hint && 'bg-warn-soft')}>
-                        {st.subject} · {st.predicate} · <span className="font-sans">{st.object}</span>
+                        <span className="block font-sans">
+                          <span className="font-medium">{short(st.subject)}</span> · {short(st.predicate)} · {st.object}
+                        </span>
+                        {/* Exactly as published: full IRIs, language and datatype. A private name can sit anywhere in an IRI. */}
+                        <code className="block text-muted" data-nt>
+                          {st.nt}
+                        </code>
                         {st.hint && <span className="sr-only"> (may be {kind(st.hint)})</span>}
                       </li>
                     ))}

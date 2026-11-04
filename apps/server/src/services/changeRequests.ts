@@ -39,7 +39,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
 import { createHash } from 'node:crypto';
-import { findSecrets, redactText, secretsOf } from './redact.js';
+import { findSecrets, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -422,36 +422,39 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
 export const needsPublicationApproval = (cr: Pick<ChangeRequest, 'origin'>) => cr.origin.type === 'synthesis';
 
 const NT = /^(<[^>]*>|_:\S+) <([^>]*)> (.*) \.$/;
-const localOf = (iri: string) => iri.replace(/^<|>$/g, '').replace(/^.*[#/]/, '') || iri;
-function readable(object: string): string {
+/** A literal's text, for reading; IRIs and blank nodes stay exactly as they are. */
+function literalText(object: string): string | undefined {
   const lit = /^"((?:[^"\\]|\\.)*)"/.exec(object);
-  if (lit) return JSON.parse(`"${lit[1]}"`) as string;
-  return object.startsWith('<') ? localOf(object) : object;
+  return lit ? (JSON.parse(`"${lit[1]}"`) as string) : undefined;
 }
+/** Stands in for today's date when fingerprinting, so only the dates merging generates (dcterms:created and the like) are left out. */
+const DATE_STAND_IN = '0001-01-01';
 
 /** What merging this request now would publish, worked out exactly as merge() does it. */
 async function publicationOf(cr: ChangeRequest, project = getProject(cr.ontologyId)) {
   const working = await ontologyStore.working(project);
-  const date = clock.iso().slice(0, 10);
+  const base = ontologyStore.head(project);
   // No author: dcterms:contributor would publish the requester's name on every new term.
-  const after = applyChangeOps(working, cr.ops, { date, source: `${project.slug}#${cr.number}` }).graph;
+  const ctx = (date: string) => ({ date, source: `${project.slug}#${cr.number}` });
+  const after = applyChangeOps(working, cr.ops, ctx(clock.iso().slice(0, 10))).graph;
   const added = diffOntologies(working, after).addedNTriples;
   const kgcl = toKGCL(cr.ops, after.prefixes);
-  // Today's date isn't part of what's approved: a request approved today and merged tomorrow is the same.
-  const stable = added.map((t) => t.split(`"${date}"`).join('"DATE"')).sort();
-  const fingerprint = createHash('sha256').update(JSON.stringify([cr.title, kgcl, stable])).digest('base64url');
+  // The same edits applied with a stand-in date: what's approved doesn't change from one day to the next, but
+  // any date someone wrote is part of it. The edits themselves and the draft they apply to are too.
+  const dated = diffOntologies(working, applyChangeOps(working, cr.ops, ctx(DATE_STAND_IN)).graph).addedNTriples.sort();
+  const fingerprint = createHash('sha256').update(JSON.stringify([cr.title, kgcl, dated, cr.ops, base])).digest('base64url');
   return { fingerprint, title: cr.title, kgcl, added, after };
 }
 
-/** For the editor approving it: what would be published, with what looks private highlighted. */
+/** For the editor approving it: what would be published, every statement in full, with what looks private highlighted. */
 export async function publicationPreview(cr: ChangeRequest): Promise<Publication> {
   const p = await publicationOf(cr);
   const secrets = secretsOf(cr);
   const hint = (text: string) => (secrets ? findSecrets(text, secrets)[0] : undefined);
   const statements = p.added.map((t) => {
     const m = NT.exec(t);
-    const st: PublicationStatement = m ? { subject: localOf(m[1]), predicate: localOf(m[2]), object: readable(m[3]) } : { subject: '', predicate: '', object: t };
-    const h = hint(st.object) ?? hint(st.subject);
+    const st: PublicationStatement = m ? { subject: m[1].replace(/^<|>$/g, ''), predicate: m[2], object: literalText(m[3]) ?? m[3].replace(/^<|>$/g, ''), nt: t } : { subject: '', predicate: '', object: t, nt: t };
+    const h = hint(st.object) ?? hint(st.subject) ?? hint(t);
     return h ? { ...st, hint: h } : st;
   });
   const hints: Publication['hints'] = [];
@@ -536,10 +539,6 @@ export async function withdraw(cr: ChangeRequest, actor: User) {
 }
 
 export async function revise(cr: ChangeRequest, actor: User, instruction: string) {
-  // A request drafted from use cases keeps their titles and authors out of the revision,
-  // including titles they had before a rename (secretsOf includes those).
-  const secrets = secretsOf(cr);
-  const hide = (text: string) => (secrets ? redactText(text, secrets) : text);
   const project = getProject(cr.ontologyId);
   const working = await ontologyStore.working(project);
   const c = (iri: string) => compactIRI(iri, working.prefixes);
@@ -555,7 +554,7 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
     messages: [
       {
         role: 'user',
-        content: `Ontology:\n${ontologyDigest(working)}\n\nChange request #${cr.number}: ${hide(cr.title)}\n${hide(cr.description)}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
+        content: `Ontology:\n${ontologyDigest(working)}\n\nChange request #${cr.number}: ${cr.title}\n${cr.description}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
       },
     ],
     fallback: () => {

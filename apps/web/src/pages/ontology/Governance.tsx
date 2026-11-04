@@ -405,13 +405,13 @@ function HeldVersions() {
             <li key={h.version} className="space-y-2 px-5 py-3" data-held={h.version}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <span className="font-medium">{h.version === 'draft' ? 'Working draft' : `Version ${h.version}`}</span>
-                <span className="text-xs text-muted">
-                  {plural(h.statements, 'statement')} ·{' '}
-                  <a className="text-accent hover:underline" href={api.publicHoldTurtleUrl(id, h.version)} target="_blank" rel="noreferrer">
-                    Read all of it (Turtle)
-                  </a>
-                </span>
+                <span className="text-xs text-muted">{plural(h.statements, 'statement')}</span>
               </div>
+              {h.error && (
+                <p className="text-sm text-warn" role="note">
+                  {h.error}
+                </p>
+              )}
               {h.hints.length ? (
                 <>
                   <p className="text-sm text-warn">{plural(h.hints.length, 'item')} may name a use case or a person. The check can miss things, so read it all.</p>
@@ -428,7 +428,25 @@ function HeldVersions() {
               ) : (
                 <p className="text-sm text-muted">Nothing looks private, but the check can miss things, so read it all.</p>
               )}
-              <Button size="sm" variant="primary" loading={approve.pending} onClick={() => void approve.run(h.version, h.fingerprint)}>
+              <div className="space-y-1" data-held-content>
+                <p className="text-xs text-muted">Approving publishes exactly these, as shown here:</p>
+                {(
+                  [
+                    ['turtle', 'The ontology (Turtle; every download is made from it)', h.turtle],
+                    ['notes', 'Release notes', h.notes],
+                    ['snapshot', 'Use case snapshot shown on the page', h.snapshot],
+                  ] as const
+                ).map(([key, label, text]) => (
+                  <details key={key} data-part={key} className="rounded border border-line">
+                    <summary className="cursor-pointer px-2 py-1 text-sm">
+                      {label}
+                      {!text && <span className="text-muted"> (none)</span>}
+                    </summary>
+                    {text && <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words border-t border-line p-2 font-mono text-xs">{text}</pre>}
+                  </details>
+                ))}
+              </div>
+              <Button size="sm" variant="primary" loading={approve.pending} disabled={!h.fingerprint} onClick={() => void approve.run(h.version, h.fingerprint)}>
                 Approve exactly this for publishing
               </Button>
             </li>

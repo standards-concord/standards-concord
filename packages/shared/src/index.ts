@@ -394,14 +394,24 @@ export interface PublicHoldReview {
   /** Approving sends this back: it changes whenever what the version publishes does. */
   fingerprint: string;
   statements: number;
-  /** Statements and note lines that look like they name a use case or a person (hints, not verdicts). */
+  /** Statements and lines that look like they name a use case or a person (hints, not verdicts). Full IRIs. */
   hints: { subject: string; predicate: string; object: string; kind: 'use case title' | 'name' }[];
+  /** Everything the fingerprint covers, in full: what approving publishes. */
+  turtle: string;
+  notes: string;
+  snapshot: string;
+  /** Set when the version couldn't be read: nothing is highlighted, but it can still be read and approved. */
+  error?: string;
 }
 
 export interface PublicationStatement {
+  /** Full IRIs (or a blank node), never shortened: a private name can sit anywhere in one. */
   subject: string;
   predicate: string;
+  /** A literal's text, or the full IRI. */
   object: string;
+  /** The statement exactly as it is published (N-Triples), with any language or datatype. */
+  nt: string;
   /** Looks like it names a private use case or a person (a hint, not a verdict). */
   hint?: 'use case title' | 'name';
 }
