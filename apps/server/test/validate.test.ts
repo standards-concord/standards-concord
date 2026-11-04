@@ -220,9 +220,10 @@ describe('POST to the ontology IRI validates data', () => {
     });
     afterAll(() => new Promise((r) => server.close(r)));
 
+    // Every request comes from 127.0.0.1, one client (localhost can be ::1 instead).
     /** Starts a POST whose body never finishes arriving. */
     const trickle = () => {
-      const req = http.request({ port, method: 'POST', path: '/def/volunteering', headers: { 'Content-Type': 'text/turtle', 'Content-Length': '100000' } });
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/def/volunteering', headers: { 'Content-Type': 'text/turtle', 'Content-Length': '100000' } });
       req.on('error', () => {});
       req.write(PREFIXES);
       const answer = new Promise<{ status: number; body: string }>((resolve) =>
@@ -239,7 +240,7 @@ describe('POST to the ontology IRI validates data', () => {
       const a = trickle();
       const b = trickle();
       await new Promise((r) => setTimeout(r, 100));
-      const third = await request(server).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID);
+      const third = await request(`http://127.0.0.1:${port}`).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID);
       expect(third.status).toBe(429);
       expect(third.body.error).toMatch(/already have 2 validations in progress/);
       expect(third.headers['retry-after']).toBe('5');
@@ -247,7 +248,7 @@ describe('POST to the ontology IRI validates data', () => {
       b.req.destroy();
       let ok = 0;
       for (let i = 0; i < 5 && ok !== 200; i++) {
-        ok = (await request(server).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status;
+        ok = (await request(`http://127.0.0.1:${port}`).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status;
         if (ok !== 200) await new Promise((r) => setTimeout(r, 50));
       }
       expect(ok).toBe(200);
