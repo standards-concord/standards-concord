@@ -54,6 +54,45 @@ describe('the first copy in a tester’s pod', () => {
     expect(fs.readFileSync(path.join(dir, 'testing.previous-1234-1.jsonld'), 'utf8')).toBe('theirs');
   });
 
+  // Locally, the copy used to be written over unconditionally, even if the file changed (or appeared) after it was checked.
+  it('never writes over a local file that changed after it was kept', async () => {
+    const u = await tester('local-changed');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'first', 'text/plain');
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    const keep = solid.keepExisting.bind(solid);
+    const spy = vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (...args) => {
+      const when = await keep(...args);
+      fs.writeFileSync(file, 'changed meanwhile');
+      return when;
+    });
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('changed meanwhile');
+    spy.mockRestore();
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    const dir = path.dirname(file);
+    const kept = fs.readdirSync(dir).filter((f) => f.includes('.previous-')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).sort();
+    expect(kept).toEqual(['changed meanwhile', 'first']);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.1', '0.8.0']);
+  });
+
+  it('never writes over a local file that appeared after it found nothing there', async () => {
+    const u = await tester('local-appeared');
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    const keep = solid.keepExisting.bind(solid);
+    vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (...args) => {
+      const when = await keep(...args);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'appeared meanwhile');
+      return when;
+    });
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('appeared meanwhile');
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    const dir = path.dirname(file);
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8'))).toEqual(['appeared meanwhile']);
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('writes nothing while the pod can’t say whether something is there, and catches up later', async () => {
     const u = await tester('pod-unsure');
     const keep = vi.spyOn(solid, 'keepExisting').mockRejectedValueOnce(new Error('GET … → 500'));

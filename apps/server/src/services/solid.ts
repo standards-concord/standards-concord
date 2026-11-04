@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Session } from '@inrupt/solid-client-authn-node';
@@ -89,6 +90,40 @@ export interface WriteCondition {
   ifNoneMatch?: '*';
 }
 export class PreconditionFailed extends Error {}
+
+const localTag = (bytes: Buffer) => `"sha256-${createHash('sha256').update(bytes).digest('hex')}"`;
+
+/**
+ * Write a private file only if `when` holds, the way a pod's PUT would:
+ * `ifNoneMatch: '*'` creates it exclusively; `ifMatch` replaces it only if its
+ * bytes still hash to that tag, through a temporary file renamed into place (so
+ * a reader never sees half a file). This server is the only writer of these
+ * files, and the check and rename run without yielding, so nothing can slip in
+ * between them.
+ */
+function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (when.ifNoneMatch === '*') {
+    try {
+      fs.writeFileSync(file, bytes, { flag: 'wx' });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PreconditionFailed(`${file} already exists`);
+      throw err;
+    }
+  }
+  let current: Buffer;
+  try {
+    current = fs.readFileSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new PreconditionFailed(`${file} is gone`);
+    throw err;
+  }
+  if (localTag(current) !== when.ifMatch) throw new PreconditionFailed(`${file} changed`);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, bytes, { flag: 'wx' });
+  fs.renameSync(tmp, file);
+}
 
 export const solid = {
   get enabled() {
@@ -187,14 +222,21 @@ export const solid = {
       }
       return { ifMatch: etag };
     }
+    // Locally the "ETag" is a hash of the file's bytes, and the copy is made from those same bytes.
     const dir = path.join(config.dataDir, 'private', userId);
     const file = path.join(dir, relPath);
-    if (!fs.existsSync(file)) return {};
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ifNoneMatch: '*' };
+      throw err;
+    }
     for (let n = 0; ; n++) {
       if (n >= 5) throw new Error(`could not find a free name to keep ${file}`);
       try {
-        fs.copyFileSync(file, path.join(dir, asideName(n)), fs.constants.COPYFILE_EXCL);
-        return {};
+        fs.writeFileSync(path.join(dir, asideName(n)), bytes, { flag: 'wx' });
+        return { ifMatch: localTag(bytes) };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       }
@@ -209,7 +251,12 @@ export const solid = {
    */
   async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
-    if (!(this.enabled && rec)) return this.write(userId, relPath, typeof body === 'string' ? body : Buffer.from(body), contentType);
+    if (!(this.enabled && rec)) {
+      const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
+      if (!when.ifMatch && !when.ifNoneMatch) return this.write(userId, relPath, bytes, contentType);
+      writeLocalIf(path.join(config.dataDir, 'private', userId, relPath), bytes, when);
+      return { kind: 'local', url: `${config.publicUrl}/people/${userId}/private/${relPath}` };
+    }
     const s = await sessionFor({ ...rec, id: userId });
     const url = `${rec.podUrl}concord/${relPath}`;
     const headers: Record<string, string> = { 'content-type': contentType };
