@@ -54,6 +54,7 @@ let failDeletes = 0;
 const nextComment: Behaviour[] = [];
 /** One-off behaviours for the next single-comment GET. */
 const nextCommentGet: Behaviour[] = [];
+let onCommentGet: (() => void) | undefined;
 /** Label additions to refuse with a 502. */
 let failLabels = 0;
 /** Called as labels are added or removed, for interleaving other events. */
@@ -120,6 +121,7 @@ const stub = http.createServer((req, res) => {
     }
     const cd = url.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/issues\/comments\/(\d+)$/);
     if (cd && req.method === 'GET') {
+      onCommentGet?.();
       const b = nextCommentGet.shift();
       if (b && 'status' in b) return void res.writeHead(b.status, b.headers).end(b.body ?? '{}');
       const c = comments.find((x) => x.repo === cd[1] && x.id === Number(cd[2]));
@@ -208,6 +210,7 @@ beforeEach(() => {
   dropLabelDeletes = 0;
   nextComment.length = 0;
   nextCommentGet.length = 0;
+  onCommentGet = undefined;
   next.length = 0;
   requests.length = 0;
   posts = 0;
@@ -1058,5 +1061,17 @@ describe('triage through the server', () => {
     expect(get<{ value: { until: number } }>('kv', `feedback-issues:pause:${REPO}`)?.value.until).toBe(t + HOUR);
     expect((await triage(2)).status).toBe(503);
     expect(comments).toHaveLength(1);
+  });
+
+  // The account lookup after the comment GET used to skip the pause check, so a pause set meanwhile was ignored.
+  it('checks the pause before looking up the token’s account', async () => {
+    const res = await submit('Pause before account lookup');
+    nextComment.push({ cutOff: true });
+    expect((await triage(1)).status).toBe(502);
+    onCommentGet = () => put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + HOUR, streak: 1 } });
+    requests.length = 0;
+    await expect(resolve(res.body.id, { action: 'comment', comment: comments[0].id })).rejects.toMatchObject({ status: 503 });
+    expect(requests.some((r) => r.startsWith('GET /user'))).toBe(false);
+    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
   });
 });

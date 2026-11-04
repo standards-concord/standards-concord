@@ -225,8 +225,10 @@ async function github(method: string, path: string, body?: unknown): Promise<unk
 
 let login: string | undefined;
 /** The account the token belongs to. */
-async function botLogin(): Promise<string> {
-  login ??= ((await github('GET', '/user')) as { login: string }).login;
+async function botLogin(repo: string): Promise<string> {
+  if (login) return login;
+  await waitForPause(repo); // like every other request
+  login = ((await github('GET', '/user')) as { login: string }).login;
   return login;
 }
 
@@ -236,7 +238,7 @@ async function botLogin(): Promise<string> {
  * hint for a person to check; nothing is done with these automatically.
  */
 async function findCandidates(pub: Publication): Promise<{ candidates: Issue[]; note?: string }> {
-  const me = await botLogin();
+  const me = await botLogin(pub.repo);
   const from = (pub.sentAt ?? now()) - 10 * 60_000;
   const candidates: Issue[] = [];
   for (let page = 1; page <= 5; page++) {
@@ -635,9 +637,10 @@ async function verifyTriageComment(p: Publication, id: number) {
   let me: string;
   try {
     c = (await github('GET', `/repos/${p.repo}/issues/comments/${id}`)) as typeof c;
-    me = await botLogin();
+    me = await botLogin(p.repo);
   } catch (err) {
     if (err instanceof GitHubError && err.status === 404) throw new HttpError(400, 'No comment with that id exists');
+    if (err instanceof Paused) throw new HttpError(503, 'GitHub asked us to wait; try again later');
     // A rate limit here pauses the whole queue, like any other request.
     if (err instanceof GitHubError && err.rateLimited) {
       rateLimited(p.repo, err.retryAt);
