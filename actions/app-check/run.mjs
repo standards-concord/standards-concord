@@ -19,7 +19,7 @@
  *
  * No dependencies, so it starts fast and there is nothing to install or audit.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,7 +37,23 @@ const shareOutput = flag(env.CONCORD_SHARE_OUTPUT);
 const failOnBreak = flag(env.CONCORD_FAIL_ON_BREAK);
 const quiet = flag(env.CONCORD_QUIET);
 const runUrl = env.GITHUB_RUN_ID && env.GITHUB_REPOSITORY ? `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : env.CONCORD_RUN_URL;
-const commit = env.GITHUB_SHA || env.CONCORD_COMMIT;
+/**
+ * The app commit under test. Results carry over between runs of the same commit, so a run only
+ * needs to test what changed. Without one (and no clean git checkout to read it from) every run
+ * tests every open change.
+ */
+function appCommit() {
+  const given = (env.GITHUB_SHA || env.CONCORD_COMMIT || '').trim();
+  if (given) return given;
+  try {
+    const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };
+    if (execFileSync('git', ['status', '--porcelain'], opts).trim()) return undefined;
+    return execFileSync('git', ['rev-parse', 'HEAD'], opts).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+const commit = appCommit();
 
 const EXT = { turtle: 'ttl', ntriples: 'nt', rdfxml: 'owl', jsonld: 'jsonld', manchester: 'omn', linkml: 'linkml.yaml', shacl: 'shacl.ttl' };
 
@@ -202,9 +218,7 @@ try {
 } catch (err) {
   fail(err.status === 401 ? 'Concord did not accept the app token. Create a new one on the App checks page.' : err.message);
 }
-log(`Concord: ${pending.app.name} on ${pending.ontology.title} (${pending.ontology.ontologyIRI})`);
-const targets = pending.targets.slice(0, maxChanges);
-log(`${pending.targets.length} change request(s) to test${pending.targets.length > targets.length ? `, ${targets.length} this run` : ''}.`);
+log(`Concord: ${pending.app.name} on ${pending.ontology.title} (${pending.ontology.ontologyIRI})${commit ? `, app commit ${commit.slice(0, 12)}` : ''}`);
 
 let exitCode = 0;
 // Always test the working draft first: if the app fails there, its results say nothing about the changes.
@@ -220,6 +234,14 @@ if (baseline.outcome !== 'passed') {
   // A newer run (or a newer working draft) has taken over: this run's results wouldn't count.
   log('The working draft moved on, or a newer run already reported it, so this run stops here. The next run tests the changes.');
 } else {
+  // Concord answers the draft result with what this run should test: anything that has no
+  // result counting under it, least recently tested first.
+  const all = Array.isArray(baselineReply.targets) ? baselineReply.targets : pending.targets;
+  // Without a commit, results only count for the run that made them, so this run tests them all.
+  const targets = commit ? all.slice(0, maxChanges) : all;
+  log(`${all.length} change request(s) to test${all.length > targets.length ? `, ${targets.length} this run` : ''}.`);
+  if (!commit && all.length > maxChanges)
+    log(`No app commit is known (set CONCORD_COMMIT), so all ${all.length} are tested: results from one run can't be reused by the next.`);
   for (const t of targets) {
     const r = await check(`#${t.number} ${t.title}`, t.source, { CONCORD_TARGET: `cr-${t.number}`, CONCORD_CHANGE_REQUEST: String(t.number), CONCORD_REVISION: t.revision });
     const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, attempt, outcome: r.outcome, summary: r.summary, runUrl, commit })).json();

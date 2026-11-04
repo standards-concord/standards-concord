@@ -47,6 +47,8 @@ interface AppDoc extends ConnectedApp {
     targets: Record<string, string>;
     /** What this run found on the working draft, and with which app commit. Its change results are tied to it. */
     reported?: { outcome: AppCheckOutcome; commit?: string };
+    /** The run asked to test everything again (recheck). */
+    all?: boolean;
   }[];
   /**
    * The run from which the app has passed the current working draft without a break (same
@@ -241,21 +243,25 @@ function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = g
   return sameApp ? c : undefined;
 }
 
-/** Start a run: a new attempt number, and a record of exactly what this run is asked to test. */
-export function pending(app: AppDoc, all: boolean, commitParam?: unknown): PendingAppChecks {
-  // A result carries over to this run only if this run tests the same app commit as the one
-  // behind the draft result in force; otherwise this run's draft result will void it, so test again.
-  const commit = short(commitParam, 64);
-  const carriesOver = !!commit && commit === app.baseline?.commit;
-  const project = getProject(app.ontologyId);
-  const base = baselineRevision(project);
-  const targets = listCRs(project.id)
+type Target = PendingAppChecks['targets'][number];
+
+/** Whether the app has a result for this change that counts now (and isn't an error). */
+function settled(app: AppDoc, cr: ChangeRequest, revision: string, project: OntologyProject) {
+  const counted = resultFor(app, cr, revision, project);
+  return !!counted && counted.outcome !== 'error';
+}
+
+/**
+ * Changes to test, most in need first: those never tested come first, then those tested longest
+ * ago, so a run that can only test some of them never starves the rest.
+ */
+function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string, string>): (Target & { settled: boolean })[] {
+  return listCRs(project.id)
     .filter(isOpen)
-    .sort((a, b) => a.number - b.number)
+    .filter((cr) => !crIds || crIds[cr.id] === revisionOf(cr, project))
     .map((cr) => {
       const revision = revisionOf(cr, project);
       const last = latestCheck(app.id, cr.id);
-      const counted = resultFor(app, cr, revision, project);
       return {
         changeRequestId: cr.id,
         number: cr.number,
@@ -267,15 +273,30 @@ export function pending(app: AppDoc, all: boolean, commitParam?: unknown): Pendi
         source: `/api/change-requests/${cr.id}/proposed`,
         page: `/o/${project.id}/changes/${cr.id}`,
         lastOutcome: last?.revision === revision ? last.outcome : undefined,
-        // Done once it has a result that counts; 'error' means the run broke before testing anything.
-        done: carriesOver && !!counted && counted.outcome !== 'error',
+        lastTestedAt: last?.at,
+        settled: settled(app, cr, revision, project),
       };
     })
-    .filter((t) => all || !t.done)
-    .map(({ done: _d, ...t }) => t);
+    .sort((x, y) => (x.lastTestedAt ?? '').localeCompare(y.lastTestedAt ?? '') || x.number - y.number);
+}
+
+/**
+ * Start a run: a new attempt number, and a record of exactly what this run may test (every open
+ * change). The targets listed are a first guess: the run's own result for the working draft
+ * decides which earlier results still count, so the reply to that result says what to test.
+ */
+export function pending(app: AppDoc, all: boolean, commitParam?: unknown): PendingAppChecks {
+  // A result can carry over to this run only if it tests the same app commit as the one behind
+  // the draft result in force.
+  const commit = short(commitParam, 64);
+  const carriesOver = !!commit && commit === app.baseline?.commit;
+  const project = getProject(app.ontologyId);
+  const base = baselineRevision(project);
+  const open = targetsFor(app, project);
+  const targets = open.filter((t) => all || !(carriesOver && t.settled)).map(({ settled: _s, ...t }) => t);
   app.attempts = (app.attempts ?? 0) + 1;
   const attempt = app.attempts;
-  app.runs = [...(app.runs ?? []), { attempt, baseline: base, targets: Object.fromEntries(targets.map((t) => [t.changeRequestId, t.revision])) }].slice(-RUNS_KEPT);
+  app.runs = [...(app.runs ?? []), { attempt, all, baseline: base, targets: Object.fromEntries(open.map((t) => [t.changeRequestId, t.revision])) }].slice(-RUNS_KEPT);
   saveApp(app);
   return {
     app: { id: app.id, name: app.name },
@@ -289,6 +310,14 @@ export function pending(app: AppDoc, all: boolean, commitParam?: unknown): Pendi
     },
     targets,
   };
+}
+
+/** After a run's draft result is in: the changes this run should test, given what counts now. */
+function retestsFor(app: AppDoc, run: NonNullable<AppDoc['runs']>[number], project: OntologyProject): Target[] {
+  if (run.reported?.outcome !== 'passed') return [];
+  return targetsFor(app, project, run.targets)
+    .filter((t) => run.all || !t.settled)
+    .map(({ settled: _s, ...t }) => t);
 }
 
 const OUTCOMES: AppCheckOutcome[] = ['passed', 'failed', 'error'];
@@ -358,7 +387,8 @@ export async function report(app: AppDoc, input: ReportInput) {
     run.reported = { outcome, commit };
     saveApp(app);
     const order = ordering(app.baseline, { revision, attempt, outcome }, baselineRevision(project));
-    if (order !== 'newer') return { stale: order === 'stale', replay: order === 'replay' };
+    if (order === 'stale') return { stale: true, targets: [] };
+    if (order === 'replay') return { stale: false, replay: true, targets: retestsFor(app, run, project) };
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
     // Still passing the same draft with the same app: earlier results for changes still count.
     const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
@@ -369,7 +399,8 @@ export async function report(app: AppDoc, input: ReportInput) {
       logActivity({ ontologyId: project.id, actorId: app.ownerId, type: 'app.baseline-failed', message: `reports that their app ${app.name} fails against the current working draft`, link: `/o/${project.id}/apps` });
     // The baseline decides whether this app's results mean anything, so re-decide everywhere.
     await reconcile(project.id, [app.ownerId]);
-    return { stale: false };
+    // Everything this result left without a result that counts gets tested in this same run.
+    return { stale: false, targets: retestsFor(getAppDoc(app.id), run, project) };
   }
 
   if (typeof input.target !== 'string') throw new HttpError(400, "target must be 'baseline' or a change request id");

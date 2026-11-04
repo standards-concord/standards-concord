@@ -664,6 +664,8 @@ export interface PendingAppChecks {
     /** Path of the change request page in the web app. */
     page: string;
     lastOutcome?: AppCheckOutcome;
+    /** When this app last reported on the change; never-tested changes are listed first, then the longest ago. */
+    lastTestedAt?: string;
   }[];
 }
 

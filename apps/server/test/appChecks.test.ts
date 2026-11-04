@@ -512,6 +512,28 @@ describe('autopilot', () => {
     expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
   });
 
+  it('a run whose draft result voids earlier results is told to test those changes again', async () => {
+    const crId = await freshCR('Autopilot after overlapping draft results');
+    const val = await login('reviewer', 'Reviewer Val');
+    const a = await connect(val, 'Val’s app', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    // Runs 2 and 3 start for the same commit, so the change isn't on their lists.
+    const run2 = await pending(a.token!, false, 'app-main');
+    const run3 = await pending(a.token!, false, 'app-main');
+    expect(run2.targets.some((t) => t.changeRequestId === crId)).toBe(false);
+    expect(run3.targets.some((t) => t.changeRequestId === crId)).toBe(false);
+    // Run 2 fails the draft; run 3 then passes it, which starts a new passing streak.
+    await report(a.token!, { target: 'baseline', revision: run2.baseline.revision, attempt: run2.attempt, outcome: 'failed', commit: 'app-main' });
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    const reply = (await report(a.token!, { target: 'baseline', revision: run3.baseline.revision, attempt: run3.attempt, outcome: 'passed', commit: 'app-main' })).body;
+    // So run 3 is told to test the change after all, and can.
+    const again = (reply.targets as { changeRequestId: string; revision: string }[]).find((t) => t.changeRequestId === crId);
+    expect(again, 'the change is to be tested again').toBeTruthy();
+    const res = await report(a.token!, { target: crId, revision: again!.revision, attempt: run3.attempt, outcome: 'passed' });
+    expect(res.body.autopilot.action).toBe('approved');
+    expect((await detail(crId)).governance.approvals).toBe(1);
+  });
+
   it('never overrides what the person said themselves', async () => {
     const crId = await freshCR('Autopilot leaves people alone');
     const ola = await login('reviewer', 'Reviewer Ola');
@@ -792,6 +814,25 @@ console.log('ok', process.env.CONCORD_TARGET);
     expect((await detail(crId)).governance.approvals).toBe(1);
   }, 60_000);
 
+  it('with a run limit, each run tests the changes that waited longest, so none are starved', async () => {
+    const lin = await login('reviewer', 'Developer Lin');
+    const created = (await lin.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Limited app' })).body as ConnectedApp;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
+    const env = { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: 'true', CONCORD_MAX_CHANGES: '1', CONCORD_COMMIT: 'limited-v1' };
+    const open = (await pending(created.token!, true)).targets.length;
+    expect(open).toBeGreaterThan(2);
+    const tested = new Set<string>();
+    for (let i = 0; i < open; i++) {
+      const res = await runAction(dir, env);
+      expect(res.code, res.out).toBe(0);
+      const n = [...res.out.matchAll(/^#(\d+): passed/gm)].map((m) => m[1]);
+      expect(n).toHaveLength(1);
+      expect(tested.has(n[0]), `run ${i + 1} retested #${n[0]}`).toBe(false);
+      tested.add(n[0]);
+    }
+    expect(tested.size).toBe(open);
+  }, 120_000);
+
   it('fails the job and skips the changes when the working draft already breaks the app', async () => {
     const hal = await login('reviewer', 'Developer Hal');
     const created = (await hal.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Broken app' })).body as ConnectedApp;
@@ -824,6 +865,7 @@ wait
       CONCORD_TEST_COMMAND: 'sh test.sh',
       CONCORD_TIMEOUT_MINUTES: '0.005',
       CONCORD_MAX_CHANGES: '1',
+      CONCORD_COMMIT: 'hanging-v1',
     });
     expect(res.code, res.out).toBe(1);
     expect(res.out).toMatch(/could not be tested/);
