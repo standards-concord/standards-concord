@@ -250,6 +250,31 @@ describe('MCP OAuth authorization code flow', () => {
     expect((await agent.get('/api/oauth/connections')).body).toEqual([]);
   });
 
+  it('when the same refresh token is sent twice at once, one wins and the whole connection is then revoked', async () => {
+    const client = await register();
+    const agent = await signedIn();
+    const { verifier, challenge } = pkce();
+    const { code } = await authorize(agent, client.client_id, origin, { challenge, resource: `${origin}/mcp` });
+    const t = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT });
+    const refresh = () => token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
+    const results = await Promise.all([refresh(), refresh(), refresh()]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400, 400]);
+    const winner = results.find((r) => r.status === 200)!;
+    // The replays revoked the family, so even the winner's new tokens are dead.
+    expect((await tools(winner.body.access_token)).status).toBe(401);
+    expect((await token({ grant_type: 'refresh_token', refresh_token: winner.body.refresh_token, client_id: client.client_id })).status).toBe(400);
+  });
+
+  it('two authorization-code exchanges at once produce one connection', async () => {
+    const client = await register();
+    const agent = await signedIn();
+    const { verifier, challenge } = pkce();
+    const { code } = await authorize(agent, client.client_id, origin, { challenge, resource: `${origin}/mcp` });
+    const exchange = () => token({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT });
+    const results = await Promise.all([exchange(), exchange()]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400]);
+  });
+
   it('lets only one of two racing refreshes win, and treats the loser as a replay', async () => {
     const client = await register();
     const agent = await signedIn();

@@ -69,7 +69,24 @@ const LOCAL_SCHEMAS = {
       plugins: {
         type: 'array',
         minItems: 1,
-        items: { type: 'object', required: ['name', 'source'], properties: { name: kebab, source: { anyOf: [{ type: 'string', pattern: '^\\./' }, { type: 'object', required: ['source'] }] }, description: str, version: str } },
+        items: {
+          type: 'object',
+          required: ['name', 'source'],
+          properties: {
+            name: kebab,
+            // The source variants Claude Code documents: a relative folder in this repo, a GitHub repo, a git URL or an npm package.
+            source: {
+              oneOf: [
+                { type: 'string', pattern: '^\\./' },
+                { type: 'object', required: ['source', 'repo'], properties: { source: { const: 'github' }, repo: { type: 'string', pattern: '^[\\w.-]+/[\\w.-]+$' }, ref: str, sha: str } },
+                { type: 'object', required: ['source', 'url'], properties: { source: { const: 'url' }, url: { type: 'string', pattern: '^https://' }, ref: str, sha: str } },
+                { type: 'object', required: ['source', 'package'], properties: { source: { const: 'npm' }, package: str, version: str } },
+              ],
+            },
+            description: str,
+            version: str,
+          },
+        },
       },
     },
   },
@@ -141,9 +158,10 @@ for (const file of FILES) {
     // Marketplace entries must point at a folder that exists.
     for (const p of doc.plugins ?? []) {
       const rel = typeof p.source === 'string' ? p.source : p.source?.path;
-      if (rel && !fs.existsSync(path.join(root, rel))) {
+      const local = typeof p.source === 'string' || p.source?.source === 'local';
+      if (local && !(typeof rel === 'string' && fs.statSync(path.join(root, rel), { throwIfNoEntry: false })?.isDirectory())) {
         failed++;
-        console.error(`x  ${file}: plugin ${p.name} points at ${rel}, which does not exist`);
+        console.error(`x  ${file}: plugin ${p.name} points at ${rel}, which is not a folder in this repository`);
       }
     }
     continue;
