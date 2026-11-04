@@ -199,9 +199,15 @@ export const actions: Record<string, Action> = {
   async 'open-query'(c) {
     await c.d.goto(o(c, '/query'));
   },
-  async 'run-query'(c) {
-    await c.d.click(c.d.page.getByRole('button', { name: /^Run$/ }), 'the Run button');
-    await sleep(800);
+  async 'ask-query'(c) {
+    // Describe the query in the chat: the first suggestion lists the main records.
+    const chip = c.d.page.getByTestId('query-suggestions').getByRole('button');
+    if (!(await c.d.click(chip, 'a suggested question', { settle: false }))) return;
+    await c.d.page.getByTestId('query-results').waitFor({ state: 'visible', timeout: 20_000 }).catch(() => c.d.warn('The query assistant gave no results'));
+    await sleep(900);
+    await c.d.highlight(c.d.page.getByTestId('sparql-editor'), 'the SPARQL it wrote');
+    await sleep(900);
+    await c.d.clearHighlight();
     await c.d.scroll(380, 1500);
   },
   async 'open-use-cases'(c) {

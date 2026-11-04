@@ -156,3 +156,10 @@ export const PersonaActionSchema = z.object({
   comment: str,
   vote: z.enum(['yes', 'no', 'abstain']),
 });
+
+export const QueryChatSchema = z.object({
+  reply: str.describe('One to three plain sentences for a non-technical reader: what the query finds and any choice you made. No SPARQL here.'),
+  query: str.describe('The complete SPARQL 1.1 query, with every PREFIX it uses declared at the top'),
+  target: z.enum(['ontology', 'data']).describe('"data" when it asks about records (instances), "ontology" when it asks about the model itself'),
+  columns: z.array(z.object({ variable: str.describe('A projected variable, without "?"'), label: str.describe('A short readable column heading') })),
+});

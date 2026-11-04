@@ -1,37 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { BookOpen, ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Pencil, Play, Search, ShieldCheck, Workflow } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Play, RotateCcw, Search, ShieldCheck, Sparkles, Table2 } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
+import type { ChatMessage, QueryTarget } from '@concord/shared';
 import { api } from '../../api';
 import { useAsync, useLocalStorage } from '../../lib/hooks';
 import { allTerms, makeLabeler } from '../../lib/ontology';
-import { buildSparql, newStep, pathLabels, type BuilderModel } from '../../lib/sparql-builder';
 import { insertTerm } from '../../lib/prefixes';
 import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
 import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
 import { CodeEditor } from '../../components/code/CodeEditor';
-import { CodeView, HighlightedCode } from '../../components/code/CodeView';
-import { QueryBuilder } from '../../components/query/QueryBuilder';
-import { QueryDiagram } from '../../components/query/QueryDiagram';
-import { propertyOptions, type PropertyOption } from '../../components/query/schema';
+import { CodeView } from '../../components/code/CodeView';
+import { ChatView } from '../../components/ChatView';
+import { useSession } from '../../lib/session';
 import { useOntology } from './Layout';
 
 /**
- * Query the ontology and check instance data entirely in the browser, using
- * the sparq SPARQL engine compiled to WebAssembly. Nothing is sent to the server.
- * Queries are written in a highlighted SPARQL editor (with autocomplete for the
- * ontology's terms) or built visually.
+ * Query the ontology and check instance data in the browser, using the sparq
+ * SPARQL engine compiled to WebAssembly. Queries are written by describing
+ * them to the query assistant in a chat beside the editor (each message
+ * refines the query), or directly in the highlighted SPARQL editor, with
+ * autocomplete for the ontology's terms. Sample data never leaves the page:
+ * the assistant gets the conversation, the query, and record counts.
  */
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-type ResultRows = { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; labels?: Record<string, string>; limit?: number };
+type ResultRows = { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; labels?: Record<string, string> };
 type Result = ResultRows | { kind: 'ask'; answer: boolean } | { kind: 'graph'; text: string; count: number };
 
-type Mode = 'builder' | 'sparql';
-type Target = 'ontology' | 'data';
+type Target = QueryTarget;
+type Columns = { variable: string; label: string }[];
 
 /** Sample data for the demo (volunteering) ontology. Other ontologies start from an empty skeleton. */
 const DEMO_DATA = (ns: string, prefix: string) => `@prefix ${prefix}: <${ns}> .
@@ -145,17 +146,12 @@ async function countRecords(data: string): Promise<{ byClass: Map<string, number
 
 function QueryWorkspace() {
   const { id, ontology } = useOntology();
+  const { session } = useSession();
   const [params, setParams] = useSearchParams();
-  const mode: Mode = params.get('mode') === 'sparql' ? 'sparql' : 'builder';
   const setParam = (k: string, v: string) => {
     const n = new URLSearchParams(params);
     n.set(k, v);
     setParams(n, { replace: true });
-  };
-  const setMode = (m: Mode) => {
-    setResult(null);
-    setQueryError(undefined);
-    setParam('mode', m);
   };
   // One workspace at a time; both keep their inputs and results when you switch.
   const workspace: Workspace = params.get('view') === 'check' ? 'check' : 'query';
@@ -207,29 +203,11 @@ function QueryWorkspace() {
   }, [data]);
   const recordTotal = recordCounts?.total;
 
-  // Builder state: start from the first class that has instances in the sample data.
-  const [model, setModel] = useLocalStorage<BuilderModel | null>(`concord.query.${id}.builder`, null);
-  useEffect(() => {
-    if (!view.data || !recordCounts) return;
-    if (model && view.data.classes.some((c) => c.iri === model.rootClass)) return;
-    // Prefer a class the sample data has records of, so the first run finds something.
-    const live = view.data.classes.filter((c) => !c.deprecated);
-    const records = (iri: string) => recordCounts.byClass.get(iri) ?? 0;
-    const preferred = [...live].sort((a, b) => records(b.iri) - records(a.iri))[0];
-    if (!preferred) return;
-    // Start with the class's first attribute (e.g. its title) as a column, so the first run shows something readable.
-    const attrs = propertyOptions(view.data, preferred.iri, makeLabeler(view.data)).filter((o) => o.group === 'suggested' && o.kind === 'data');
-    const first = attrs.find((o) => /title|name/i.test(o.label)) ?? attrs[0];
-    const steps = first ? [newStep(first.iri, first.valueType)] : [];
-    setModel({ rootClass: preferred.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the ontology or a reset changes it
-  }, [view.data, model, recordCounts]);
-  const allOptions = useMemo(() => (view.data ? propertyOptions(view.data, undefined, label) : []), [view.data, label]);
-  const optionFor = useCallback((iri: string): PropertyOption | undefined => allOptions.find((o) => o.iri === iri), [allOptions]);
-  const built = useMemo(
-    () => (model ? buildSparql(model, { prefixes: { ...prefixes, rdfs: 'http://www.w3.org/2000/01/rdf-schema#', skos: 'http://www.w3.org/2004/02/skos/core#' } }) : null),
-    [model, prefixes],
-  );
+  // The query assistant's conversation, and the column headings it gave for the current query.
+  const [chat, setChat] = useLocalStorage<(ChatMessage & { simulated?: boolean })[]>(`concord.query.${id}.chat`, []);
+  const [columns, setColumns] = useLocalStorage<Columns>(`concord.query.${id}.columns`, []);
+  const [asking, setAsking] = useState(false);
+  const [chatError, setChatError] = useState<unknown>();
 
   // Autocomplete: every term as a prefixed name, findable by its label too. Accepting
   // one adds the PREFIX (or @prefix) declaration if the text doesn't have it yet.
@@ -298,38 +276,37 @@ function QueryWorkspace() {
     return store;
   };
 
-  const activeQuery = mode === 'builder' ? (built?.query ?? '') : query;
-  const effectiveTarget: Target = mode === 'builder' ? 'data' : target;
   // Each answer remembers the question and data it came from, so a changed question never sits above an old answer.
-  const questionKey = `${mode}|${effectiveTarget}|${activeQuery}|${effectiveTarget === 'data' ? data : ''}`;
+  const keyFor = (q: string, t: Target) => `${t}|${q}|${t === 'data' ? data : ''}`;
+  const questionKey = keyFor(query, target);
   const [ranKey, setRanKey] = useState<string>();
   const [checkedData, setCheckedData] = useState<string>();
   const resultStale = !!result && ranKey !== questionKey;
   const reportStale = !!report && checkedData !== data;
 
-  const run = async () => {
+  /** Runs the editor's query, or the one the assistant just wrote (state hasn't caught up yet). */
+  const run = async (next?: { query: string; target: Target; columns: Columns }) => {
     if (!storeRef.current) return;
+    const q = next?.query ?? query;
+    const t = next?.target ?? target;
+    const cols = next?.columns ?? columns;
     setQueryError(undefined);
-    setRanKey(questionKey);
+    setRanKey(keyFor(q, t));
     const t0 = performance.now();
     try {
-      const s = await storeFor(effectiveTarget);
+      const s = await storeFor(t);
       if (!s) return;
-      const form = queryForm(activeQuery);
-      if (form === 'ask') setResult({ kind: 'ask', answer: s.queryBoolean(activeQuery) });
+      const form = queryForm(q);
+      if (form === 'ask') setResult({ kind: 'ask', answer: s.queryBoolean(q) });
       else if (form === 'construct' || form === 'describe') {
-        const text = s.queryQuadsString(activeQuery);
+        const text = s.queryQuadsString(q);
         setResult({ kind: 'graph', text, count: text.split('\n').filter((l) => l.trim()).length });
       } else {
-        const json = JSON.parse(s.queryJson(activeQuery)) as { head: { vars: string[] }; results: { bindings: Record<string, { value: string }>[] } };
+        const json = JSON.parse(s.queryJson(q)) as { head: { vars: string[] }; results: { bindings: Record<string, { value: string }>[] } };
         const rows = json.results.bindings.map((b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.value])));
-        // Builder results get readable column headings: the class, or the property path.
-        let labels: Record<string, string> | undefined;
-        if (mode === 'builder' && built && model) {
-          labels = { [built.variables.root]: label(model.rootClass), count: `Number of ${label(model.rootClass)} records` };
-          for (const [stepId, path] of Object.entries(pathLabels(model.steps, (iri) => optionFor(iri)?.label ?? label(iri)))) labels[built.variables[stepId]] = path;
-        }
-        setResult({ kind: 'rows', vars: json.head.vars, rows, labels, limit: mode === 'builder' && !model?.countOnly ? model?.limit : undefined });
+        // The assistant's readable headings, for the columns this query still has.
+        const labels = Object.fromEntries(cols.filter((c) => json.head.vars.includes(c.variable)).map((c) => [c.variable, c.label]));
+        setResult({ kind: 'rows', vars: json.head.vars, rows, labels: Object.keys(labels).length ? labels : undefined });
       }
     } catch (e) {
       setQueryError(e);
@@ -337,6 +314,63 @@ function QueryWorkspace() {
     }
     setQueryMs(Math.round(performance.now() - t0));
   };
+
+  const ask = async (text: string) => {
+    const mine: ChatMessage = { id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() };
+    const history = [...chat, mine];
+    setChat(history);
+    setAsking(true);
+    setChatError(undefined);
+    try {
+      const r = await api.queryChat(id, {
+        messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        query,
+        target,
+        dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
+      });
+      setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated }]);
+      setQuery(r.query);
+      setTarget(r.target);
+      setColumns(r.columns);
+      await run({ query: r.query, target: r.target, columns: r.columns });
+    } catch (e) {
+      setChatError(e);
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  /** The refresh button: clears the conversation and puts the starting query back. */
+  const startOver = () => {
+    setChat([]);
+    setColumns([]);
+    setChatError(undefined);
+    setQuery(examples[0].query);
+    setTarget('ontology');
+    setResult(null);
+    setQueryError(undefined);
+  };
+
+  // Suggestions to start from, using this ontology's own words.
+  const suggestions = useMemo(() => {
+    if (!view.data) return [];
+    const counts = recordCounts?.byClass ?? new Map<string, number>();
+    const classes = [...view.data.classes].filter((c) => !c.deprecated).sort((a, b) => (counts.get(b.iri) ?? 0) - (counts.get(a.iri) ?? 0));
+    const top = classes[0];
+    const titleProp = top && view.data.datatypeProperties.find((p) => p.domain.includes(top.iri) && /title|name/i.test(p.label ?? ''));
+    return [
+      top && `List every ${label(top.iri)}${titleProp ? ` with its ${titleProp.label}` : ''}`,
+      classes[1] && `How many ${label(classes[1].iri)} records are there?`,
+      'Which classes have no definition?',
+    ].filter((x): x is string => !!x);
+  }, [view.data, recordCounts, label]);
+  const greeting: ChatMessage = {
+    id: 'greeting',
+    role: 'assistant',
+    content: `Tell me what you’d like to find in *${ontology.title}* and I’ll write the SPARQL and run it. Then ask for changes (“also show…”, “only the ones…”) or edit the query yourself.`,
+    at: '',
+  };
+  const lastReply = [...chat].reverse().find((m) => m.role === 'assistant');
 
   const check = () => {
     const s = storeRef.current;
@@ -366,7 +400,7 @@ function QueryWorkspace() {
     <div className="space-y-4">
       <p className="flex flex-wrap items-center gap-2 text-sm text-muted">
         <Cpu className="size-4" />
-        Runs in your browser with the sparq engine (WebAssembly). Your queries and data never leave this page.
+        Queries run in your browser with the sparq engine (WebAssembly), and your sample data never leaves this page. The assistant sees your messages, the query and the ontology.
         {ready && (
           <Badge tone="ok">
             <span data-testid="sparq-ready">
@@ -388,50 +422,61 @@ function QueryWorkspace() {
       />
 
       {workspace === 'query' ? (
-        <Card>
-          <CardHeader
-            title="Query the ontology"
-            subtitle={
-              mode === 'builder'
-                ? 'Build a query by picking classes and properties.'
-                : 'SPARQL 1.1, with autocomplete for this ontology’s terms (Ctrl/⌘-Space) and Ctrl/⌘-Enter to run'
-            }
-            icon={Play}
-            actions={
-              <div className="flex flex-wrap items-center gap-2">
-                <Segmented
-                  label="Query mode"
-                  value={mode}
-                  onChange={setMode}
-                  options={[
-                    { id: 'builder', label: 'Visual builder', icon: Workflow },
-                    { id: 'sparql', label: 'SPARQL', icon: Code2 },
-                  ]}
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+            <Card className="flex min-w-0 flex-col">
+              <div data-testid="query-chat" className="flex min-h-0 flex-1 flex-col">
+                <CardHeader
+                  title="Ask for a query"
+                  subtitle="Describe what you want; each message refines the query."
+                  icon={Sparkles}
+                  actions={
+                    <Button size="sm" variant="ghost" icon={RotateCcw} onClick={startOver} disabled={asking} aria-label="Start over" title="Start over: clear the chat and put the starting query back" />
+                  }
                 />
-                <Button variant="primary" icon={Play} onClick={run} disabled={!ready || !activeQuery}>
-                  Run
-                </Button>
+                <ChatView
+                  className="h-[440px] px-4 pb-4"
+                  messages={[greeting, ...chat]}
+                  pending={asking}
+                  onSend={(text) => ask(text)}
+                  disabled={!ready}
+                  userName={session?.user?.name}
+                  placeholder="Describe what you want to find…"
+                  error={chatError}
+                  quickReplies={
+                    chat.length === 0 && suggestions.length ? (
+                      <div className="flex flex-wrap gap-1.5" data-testid="query-suggestions">
+                        {suggestions.map((q) => (
+                          <button key={q} type="button" onClick={() => void ask(q)} disabled={!ready || asking} className="rounded-full border border-line-strong bg-surface px-2.5 py-1 text-left text-xs hover:border-accent hover:text-accent disabled:opacity-50">
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null
+                  }
+                  footer={
+                    lastReply?.simulated ? (
+                      <p className="mt-1.5 text-xs text-muted" data-testid="query-chat-offline">
+                        Offline helper: it matches your words to the ontology’s terms. With Claude connected it can answer harder questions.
+                      </p>
+                    ) : null
+                  }
+                />
               </div>
-            }
-          />
-          <div className="space-y-3 p-4">
-            {(mode === 'builder' || target === 'data') && recordTotal !== undefined && (
-              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted" data-testid="dataset-summary">
-                <Database className="size-3.5" />
-                {recordTotal > 0 ? (
-                  <span>
-                    Runs over the ontology plus {recordTotal.toLocaleString()} sample {recordTotal === 1 ? 'record' : 'records'}.
-                  </span>
-                ) : (
-                  <span>There is no sample data yet, so questions about records will find nothing.</span>
-                )}
-                <button type="button" className="text-accent underline-offset-2 hover:underline" onClick={() => setWorkspace('check')}>
-                  {recordTotal > 0 ? 'Edit sample data' : 'Add sample data'}
-                </button>
-              </p>
-            )}
-            {mode === 'sparql' ? (
-              <>
+            </Card>
+
+            <Card className="min-w-0">
+              <CardHeader
+                title="SPARQL"
+                subtitle="The assistant writes here, and you can edit it too: Ctrl/⌘-Space suggests terms, Ctrl/⌘-Enter runs."
+                icon={Code2}
+                actions={
+                  <Button variant="primary" icon={Play} onClick={() => void run()} disabled={!ready || !query.trim()}>
+                    Run
+                  </Button>
+                }
+              />
+              <div className="space-y-3 p-4">
                 <div className="flex flex-wrap items-center gap-2">
                   <Select
                     value=""
@@ -439,6 +484,7 @@ function QueryWorkspace() {
                       const ex = examples.find((x) => x.id === e.target.value);
                       if (ex) {
                         setQuery(ex.query);
+                        setColumns([]);
                         if (ex.id === 'instances') setTarget('data');
                       }
                     }}
@@ -464,131 +510,113 @@ function QueryWorkspace() {
                   value={query}
                   onChange={setQuery}
                   language="sparql"
-                  onRun={run}
+                  onRun={() => void run()}
                   completions={sparqlCompletions}
                   ariaLabel="SPARQL query"
-                  minHeight={200}
+                  minHeight={260}
                   maxHeight={420}
                   testId="sparql-editor"
                 />
-                <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent, Ctrl/⌘-Space suggests terms.</p>
-              </>
-            ) : !view.data || !model || !built ? (
-              view.error ? (
-                <InlineError error={view.error} />
-              ) : view.data && !view.data.classes.some((c) => !c.deprecated) ? (
-                <p className="rounded-md border border-dashed border-line-strong px-4 py-6 text-center text-sm text-muted" data-testid="builder-empty">
-                  This ontology has no classes yet, so there is nothing to build a query from. Use the SPARQL editor, or add classes first.
-                </p>
-              ) : (
-                <Loading label="Reading the ontology’s classes…" />
-              )
-            ) : (
-              <div className="space-y-4">
-                <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} onReset={() => setModel(null)} />
-                <QueryDiagram model={model} variables={built.variables} label={label} optionFor={optionFor} />
-                <details className="group">
-                  <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted">
-                    <BookOpen className="size-4" /> The SPARQL this builds
-                  </summary>
-                  <div className="mt-2 space-y-2">
-                    <HighlightedCode code={built.query} language="sparql" className="text-[0.8rem] leading-relaxed" />
-                    <Button
-                      size="sm"
-                      icon={Pencil}
-                      onClick={() => {
-                        setQuery(built.query);
-                        setTarget('data');
-                        setMode('sparql');
-                      }}
-                    >
-                      Edit as SPARQL
-                    </Button>
-                  </div>
-                </details>
+                <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</p>
               </div>
-            )}
+            </Card>
+          </div>
 
-            {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
-            {queryError ? <InlineError error={queryError} /> : null}
-            {resultStale && (
-              <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="result-stale">
-                The question or data changed since this ran.
-                <Button size="sm" icon={Play} onClick={run}>
-                  Run again
-                </Button>
-              </p>
-            )}
-            <div className={cx('space-y-3', resultStale && 'opacity-50')}>
-              {result?.kind === 'ask' && (
-                <p className="text-sm" data-testid="query-answer">
-                  Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
+          <Card>
+            <CardHeader title="Results" icon={Table2} />
+            <div className="space-y-3 p-4">
+              {target === 'data' && recordTotal !== undefined && (
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted" data-testid="dataset-summary">
+                  <Database className="size-3.5" />
+                  {recordTotal > 0 ? (
+                    <span>
+                      Runs over the ontology plus {recordTotal.toLocaleString()} sample {recordTotal === 1 ? 'record' : 'records'}.
+                    </span>
+                  ) : (
+                    <span>There is no sample data yet, so questions about records will find nothing.</span>
+                  )}
+                  <button type="button" className="text-accent underline-offset-2 hover:underline" onClick={() => setWorkspace('check')}>
+                    {recordTotal > 0 ? 'Edit sample data' : 'Add sample data'}
+                  </button>
                 </p>
               )}
-              {result?.kind === 'graph' && (
-                <div className="space-y-1" data-testid="query-graph">
-                  <p className="text-xs text-muted">
-                    {result.count} triple{result.count === 1 ? '' : 's'}
-                    {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
-                  </p>
-                  <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
-                </div>
+              {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
+              {queryError ? <InlineError error={queryError} /> : null}
+              {resultStale && (
+                <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="result-stale">
+                  The question or data changed since this ran.
+                  <Button size="sm" icon={Play} onClick={() => void run()}>
+                    Run again
+                  </Button>
+                </p>
               )}
-              {result?.kind === 'rows' && (
-                <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
-                  <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
-                    <span>
-                      {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+              {!result && !queryError && ready && <p className="text-sm text-muted">Ask for a query, or press Run, and the answer appears here.</p>}
+              <div className={cx('space-y-3', resultStale && 'opacity-50')}>
+                {result?.kind === 'ask' && (
+                  <p className="text-sm" data-testid="query-answer">
+                    Answer: <strong>{result.answer ? 'yes' : 'no'}</strong>
+                  </p>
+                )}
+                {result?.kind === 'graph' && (
+                  <div className="space-y-1" data-testid="query-graph">
+                    <p className="text-xs text-muted">
+                      {result.count} triple{result.count === 1 ? '' : 's'}
                       {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
-                    </span>
-                    <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
-                      <Download className="size-3" /> CSV
-                    </a>
+                    </p>
+                    <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
                   </div>
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr>
-                        {result.vars.map((v) => (
-                          <th key={v} className={cx('px-3 py-1.5 font-medium', !result.labels?.[v] && 'font-mono text-[var(--syn-variable)]')} title={`?${v}`}>
-                            {result.labels?.[v] ?? `?${v}`}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
-                        <tr key={i} className="border-t border-line align-top">
+                )}
+                {result?.kind === 'rows' && (
+                  <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
+                    <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
+                      <span>
+                        {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
+                        {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
+                      </span>
+                      <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
+                        <Download className="size-3" /> CSV
+                      </a>
+                    </div>
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr>
                           {result.vars.map((v) => (
-                            <td key={v} className="px-3 py-1.5 font-mono" title={r[v] ?? 'No value'}>
-                              {r[v] !== undefined ? (
-                                short(r[v], prefixes)
-                              ) : (
-                                <span className="text-subtle" aria-label="No value">
-                                  —
-                                </span>
-                              )}
-                            </td>
+                            <th key={v} className={cx('px-3 py-1.5 font-medium', !result.labels?.[v] && 'font-mono text-[var(--syn-variable)]')} title={`?${v}`}>
+                              {result.labels?.[v] ?? `?${v}`}
+                            </th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
-                </div>
-              )}
-              {result?.kind === 'rows' && result.limit && result.rows.length >= result.limit && (
-                <p className="text-xs text-warn" data-testid="limit-reached">
-                  Stopped at the limit of {result.limit} rows, so there may be more. Raise it under More options.
-                </p>
-              )}
+                      </thead>
+                      <tbody>
+                        {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
+                          <tr key={i} className="border-t border-line align-top">
+                            {result.vars.map((v) => (
+                              <td key={v} className="px-3 py-1.5 font-mono" title={r[v] ?? 'No value'}>
+                                {r[v] !== undefined ? (
+                                  short(r[v], prefixes)
+                                ) : (
+                                  <span className="text-subtle" aria-label="No value">
+                                    —
+                                  </span>
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </Card>
+          </Card>
+        </div>
       ) : (
         <Card>
           <CardHeader
             title="Check your data"
-            subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. The visual builder queries this data too."
+            subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. Questions about records run over this data too."
             icon={ShieldCheck}
             actions={
               <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes.data}>

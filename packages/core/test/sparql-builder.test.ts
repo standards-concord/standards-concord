@@ -1,14 +1,29 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { SparqStore } from '@sparq-org/sparq';
-import { activeFilter, buildSparql, isRequired, newStep, pathLabels, updateStep, type BuilderModel } from './sparql-builder';
+import * as ox from 'oxigraph';
+import { activeFilter, buildSparql, isRequired, newStep, pathLabels, updateStep, type BuilderModel } from '../src/sparql-builder.js';
+import { fixtureText } from './helpers.js';
+
+/** An in-memory Oxigraph store with the same small API the tests used with sparq in the browser. */
+const Store = ((ox as any).Store ?? (ox as any).default?.Store) as new () => { load(text: string, opts: { format: string }): void; query(q: string): unknown };
+async function storeFrom(turtle: string) {
+  const store = new Store();
+  store.load(turtle, { format: 'text/turtle' });
+  return {
+    queryJson(q: string) {
+      const solutions = store.query(q) as Map<string, { value: string }>[];
+      const bindings = solutions.map((m) => Object.fromEntries([...m.entries()].map(([k, v]) => [k, { value: v.value }])));
+      return JSON.stringify({ results: { bindings } });
+    },
+    free() {},
+  };
+}
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 const VOL = 'https://w3id.org/odi/volunteering#';
 const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
 const prefixes = { vol: VOL, rdfs: RDFS, owl: 'http://www.w3.org/2002/07/owl#' };
-const fixture = (f: string) => readFileSync(new URL(`../../../../packages/core/fixtures/${f}`, import.meta.url), 'utf8');
+const fixture = fixtureText;
 
 function model(partial: Partial<BuilderModel> = {}): BuilderModel {
   return { rootClass: `${VOL}VolunteeringOpportunity`, includeSubclasses: true, steps: [], distinct: true, countOnly: false, descending: false, ...partial };
@@ -134,9 +149,9 @@ describe('buildSparql', () => {
   });
 });
 
-describe('generated queries run on sparq', () => {
+describe('generated queries run', () => {
   it('returns the example data the builder asked for', async () => {
-    const store = await SparqStore.fromString(`${fixture('volunteering.ttl')}\n${fixture('volunteering-example-data.ttl')}`, 'turtle');
+    const store = await storeFrom(`${fixture('volunteering.ttl')}\n${fixture('volunteering-example-data.ttl')}`);
     const title = newStep(`${VOL}title`);
     const org = { ...newStep(`${VOL}offeredBy`), show: false, optional: false };
     const orgLabel = newStep(`${RDFS}label`);
@@ -154,7 +169,7 @@ describe('generated queries run on sparq', () => {
     store.free();
   });
   it('nested filters only return matching records (the P1 from review)', async () => {
-    const store = await SparqStore.fromString(`${fixture('volunteering.ttl')}\n${fixture('volunteering-example-data.ttl')}`, 'turtle');
+    const store = await storeFrom(`${fixture('volunteering.ttl')}\n${fixture('volunteering-example-data.ttl')}`);
     const title = newStep(`${VOL}title`);
     const orgLabel = { ...newStep(`${RDFS}label`), filter: { op: 'contains' as const, value: 'green spaces' } };
     const org = { ...newStep(`${VOL}offeredBy`, 'resource'), children: [orgLabel] };
@@ -183,7 +198,7 @@ ex:r3 a ex:Record ; ex:title "Three" .
 `;
   const EX = 'https://example.org/';
   const titles = async (steps: BuilderModel['steps']) => {
-    const store = await SparqStore.fromString(graph, 'turtle');
+    const store = await storeFrom(graph);
     const built = buildSparql({ rootClass: `${EX}Record`, includeSubclasses: false, steps, distinct: true, countOnly: false, descending: false }, { prefixes: { ex: EX } });
     const rows = (JSON.parse(store.queryJson(built.query)) as { results: { bindings: Record<string, { value: string }>[] } }).results.bindings;
     store.free();

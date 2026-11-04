@@ -1,12 +1,12 @@
 /**
- * The visual query builder's model and its translation to SPARQL. The model
- * is a tree: a root class ("find every Volunteering opportunity") with
- * property steps hanging off it, and object-property steps can have their own
- * children ("…offered by an organisation, show its title"). Pure functions,
- * so they're unit-tested without a browser.
+ * A structured query model and its translation to SPARQL. The model is a
+ * tree: a root class ("find every Volunteering opportunity") with property
+ * steps hanging off it, and object-property steps can have their own children
+ * ("…offered by an organisation, show its label"). The query assistant's
+ * offline helper builds queries with it. Pure functions, unit-tested.
  */
 
-export type IRI = string;
+import type { IRI } from './types.js';
 
 export type FilterOp = 'contains' | 'equals' | 'notEquals' | 'gt' | 'lt' | 'startsWith' | 'regex';
 
@@ -62,7 +62,7 @@ export interface BuilderContext {
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
 
-export function localName(iri: IRI): string {
+function localName(iri: IRI): string {
   const m = /[#/:]([^#/:]+)$/.exec(iri);
   return m ? m[1] : iri;
 }

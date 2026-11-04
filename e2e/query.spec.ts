@@ -1,9 +1,10 @@
 import { test, expect, signIn, demoOntology, type Page } from './fixtures';
 
 /**
- * The Query tab: sparq (WebAssembly) loads in the browser, the visual builder
- * builds and runs queries over the ontology plus sample data, the SPARQL editor
- * highlights, autocompletes and runs every query form, and SHACL checks run.
+ * The Query tab: sparq (WebAssembly) loads in the browser, the query assistant
+ * writes and refines SPARQL from a chat (the offline helper in tests) and runs
+ * it, the SPARQL editor highlights, autocompletes and runs every query form,
+ * and SHACL checks run.
  */
 
 async function setEditor(page: Page, testId: string, text: string) {
@@ -15,7 +16,18 @@ async function setEditor(page: Page, testId: string, text: string) {
 const results = (page: Page) => page.getByTestId('query-results');
 const run = (page: Page) => page.getByRole('button', { name: 'Run', exact: true }).click();
 const toggle = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
-const moreOptions = (page: Page) => page.getByTestId('builder-options').locator('summary').click();
+const chat = (page: Page) => page.getByTestId('query-chat');
+const editorText = (page: Page) => page.getByTestId('sparql-editor').evaluate((el) => (el as HTMLElement).innerText.replace(/\u00a0/g, ' '));
+
+/** Sends a message to the query assistant and waits for its reply. */
+async function ask(page: Page, text: string) {
+  const replies = chat(page).getByTestId('chat-message-assistant');
+  await expect(replies.first()).toBeVisible();
+  const before = await replies.count();
+  await chat(page).getByLabel('Your message').fill(text);
+  await chat(page).getByRole('button', { name: 'Send' }).click();
+  await expect(replies).toHaveCount(before + 1);
+}
 
 test.describe('Query tab', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -32,88 +44,103 @@ test.describe('Query tab', () => {
     await expect(page.getByText(/magic word|WebAssembly.instantiate/)).toHaveCount(0);
   });
 
-  test('the visual builder runs its starting query over the sample data', async ({ page }) => {
-    await expect(toggle(page, 'Visual builder')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByLabel('Class to find')).toHaveValue(/VolunteeringOpportunity$/);
-    await expect(page.getByTestId('query-diagram')).toContainText('volunteering opportunity');
-    await run(page);
+  test('a suggestion writes the query, runs it over the sample data and labels the columns', async ({ page }) => {
+    const suggestions = page.getByTestId('query-suggestions');
+    await expect(suggestions.getByRole('button')).toHaveCount(3);
+    await suggestions.getByRole('button', { name: /^List every volunteering opportunity/ }).click();
+    await expect(chat(page)).toContainText('This lists every volunteering opportunity');
+    // The conversation has started, so the suggestions make way.
+    await expect(suggestions).toHaveCount(0);
+    await expect(page.getByTestId('query-chat-offline')).toBeVisible();
+    expect(await editorText(page)).toContain('vol:VolunteeringOpportunity');
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
     await expect(results(page)).toContainText('2 rows');
-    await expect(results(page)).toContainText('Saturday food bank shift');
     await expect(results(page)).toContainText('Park clean-up');
+    // Readable headings from the assistant, with the variable behind each one on hover.
+    await expect(results(page).locator('th').first()).toHaveText('volunteering opportunity');
+    await expect(results(page).locator('th', { hasText: 'title' })).toHaveAttribute('title', '?title');
   });
 
-  test('following a relationship, filtering, sorting and counting', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    await expect(page.getByTestId('builder-step')).toHaveCount(3);
-    const diagram = page.getByTestId('query-diagram');
-    await expect(diagram).toContainText('organisation');
-    await expect(diagram).toContainText('?offeredBy_label');
-    await page.getByText('The SPARQL this builds').click();
-    await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).toContainText('?offeredBy rdfs:label ?offeredBy_label');
+  test('each message refines the query: more columns, a number filter, then a count', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity');
+    await expect(results(page)).toContainText('2 rows');
 
-    await run(page);
+    await ask(page, 'Also show the minimum age and who offers it');
+    let q = await editorText(page);
+    expect(q).toContain('vol:minimumAge');
+    expect(q).toContain('vol:offeredBy');
+    await expect(results(page).locator('th')).toContainText(['minimum age', 'offered by › label']);
     await expect(results(page)).toContainText('Northvale Food Bank');
-    // Builder results use readable headings, and show missing values as a dash.
-    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by', 'offered by › label']);
 
-    // Filter the title: a filtered property becomes required.
-    const title = page.getByTestId('builder-step').filter({ hasText: 'title' }).first();
-    await title.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await title.getByLabel('Filter value').fill('PARK');
-    await expect(title.getByRole('switch', { name: 'Keep records without it' })).toBeDisabled();
-    await run(page);
+    // The Saturday shift's age is the text "sixteen", so only the park clean-up is under 15.
+    await ask(page, 'Only those with a minimum age under 15');
+    q = await editorText(page);
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    expect(q).toContain('vol:offeredBy');
     await expect(results(page)).toContainText('1 row');
     await expect(results(page)).toContainText('Park clean-up');
-    await expect(results(page)).not.toContainText('Saturday');
 
-    // Hide a column.
-    await page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first().getByRole('switch', { name: 'Show in results' }).first().click();
-    await run(page);
-    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by › label']);
-
-    // Remove the filter, sort descending, then count.
-    await title.getByLabel('Filter', { exact: true }).selectOption('');
-    await moreOptions(page);
-    await page.getByLabel('Sort by').selectOption({ label: 'title' });
-    await page.getByRole('switch', { name: 'Descending' }).click();
-    await run(page);
-    await expect(results(page).locator('tbody tr').first()).toContainText('Saturday food bank shift');
-    await page.getByRole('switch', { name: /Just count/ }).click();
-    await run(page);
-    await expect(results(page).locator('th')).toHaveText(['Number of volunteering opportunity records']);
-    await expect(results(page).locator('tbody td')).toHaveText('2');
-
-    // Removing a step removes it from the query.
-    await page.getByRole('button', { name: 'Remove offered by' }).click();
-    await expect(page.getByTestId('builder-step')).toHaveCount(1);
+    await ask(page, 'How many organisations are there?');
+    expect(await editorText(page)).toContain('COUNT(DISTINCT');
+    await expect(results(page).locator('th')).toHaveText([/Number of organisation/i]);
+    await expect(results(page).locator('tbody td')).toHaveText(['1']);
   });
 
-  test('a filter on a linked thing only returns records that match it', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
-    await name.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await name.getByLabel('Filter value').fill('nothing matches this');
-    // The whole path to the condition is now required.
-    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
+  test('questions about the model itself run against the ontology', async ({ page }) => {
+    await page.getByTestId('query-suggestions').getByRole('button', { name: 'Which classes have no definition?' }).click();
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    expect(await editorText(page)).toContain('FILTER NOT EXISTS');
+    await expect(results(page)).toBeVisible();
+  });
+
+  test('Start over clears the conversation and puts the starting query back', async ({ page }) => {
+    const start = await editorText(page);
+    await ask(page, 'List every volunteering opportunity');
+    await expect(results(page)).toBeVisible();
+    expect(await editorText(page)).not.toBe(start);
+    await chat(page).getByRole('button', { name: 'Start over' }).click();
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    await expect(page.getByTestId('query-suggestions')).toBeVisible();
+    expect(await editorText(page)).toBe(start);
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    await expect(results(page)).toHaveCount(0);
+  });
+
+  test('the conversation, query and headings survive leaving the page', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity with its minimum age');
+    const url = page.url();
+    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
+    await page.goto(url);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(chat(page).getByTestId('chat-message-user')).toContainText('List every volunteering opportunity with its minimum age');
+    await expect(chat(page)).toContainText('This lists every volunteering opportunity');
+    expect(await editorText(page)).toContain('vol:minimumAge');
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
-    await expect(results(page)).toContainText('0 rows');
-    await name.getByLabel('Filter value').fill('northvale');
-    await run(page);
-    await expect(results(page)).toContainText('2 rows');
+    await expect(results(page).locator('th')).toContainText(['minimum age']);
+  });
+
+  test('if the assistant fails, the conversation keeps the question and shows the error', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 500/);
+    await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
+    const start = await editorText(page);
+    await chat(page).getByLabel('Your message').fill('List every volunteering opportunity');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    expect(await editorText(page)).toBe(start);
   });
 
   test('changing the question marks the old answer as stale', async ({ page }) => {
-    await run(page);
+    await ask(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('2 rows');
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
+    await page.getByTestId('sparql-editor').click();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.insertText('\n# edited by hand');
     await expect(page.getByTestId('result-stale')).toBeVisible();
     await page.getByTestId('result-stale').getByRole('button', { name: 'Run again' }).click();
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
-    await expect(results(page).locator('th')).toContainText(['minimum age']);
 
     // The SHACL report goes stale when the data changes.
     await toggle(page, 'Check data').click();
@@ -125,36 +152,20 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('report-stale')).toBeVisible();
   });
 
-  test('drafts survive leaving the page', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
-    await toggle(page, 'SPARQL').click();
-    await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a ?y } LIMIT 1');
+  test('a hand-written query keeps its dataset after leaving the page', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> } # mine');
+    await page.getByLabel('Run against').selectOption('data');
     const url = page.url();
     await page.getByRole('link', { name: 'Source & export', exact: true }).click();
     await page.goto(url);
-    await expect(page.getByTestId('sparql-editor')).toContainText('SELECT ?x WHERE { ?x a ?y } LIMIT 1');
-    await toggle(page, 'Visual builder').click();
-    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(1);
-    // Start over sits with the builder's controls, not inside the generated code.
-    await page.getByTestId('query-builder').getByRole('button', { name: 'Start over' }).click();
-    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(0);
-  });
-
-  test('a restored SPARQL draft keeps its dataset', async ({ page }) => {
-    await page.getByText('The SPARQL this builds').click();
-    await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
-    const url = page.url();
-    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
-    await page.goto(url);
+    expect(await editorText(page)).toContain('# mine');
     await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
+    await expect(results(page)).toContainText('2 rows');
   });
 
   test('each ontology keeps its own drafts, even when the page is reused', async ({ page }) => {
     const draftA = 'SELECT ?a WHERE { ?a ?b ?c } # draft A';
-    await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', draftA);
     const a = new URL(page.url()).pathname;
     const created = await page.request.post('/api/ontologies', { data: { title: `E2E second ${Date.now()}`, prefix: 'sec', description: 'Second ontology for draft isolation' } });
@@ -164,7 +175,7 @@ test.describe('Query tab', () => {
     await page.evaluate((to) => {
       history.pushState(null, '', to);
       dispatchEvent(new PopStateEvent('popstate'));
-    }, `/o/${b.id}/query?mode=sparql`);
+    }, `/o/${b.id}/query`);
     await expect(page).toHaveURL(new RegExp(`/o/${b.id}/query`));
     const editor = page.getByTestId('sparql-editor');
     await expect(editor).not.toContainText('draft A');
@@ -195,60 +206,16 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('sparq-ready')).toHaveCount(0);
   });
 
-  test('requiring a nested property requires the path to it', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
-    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
-    await name.getByRole('switch', { name: 'Keep records without it' }).click();
-    // The label's own control stays editable; the relationship above it is now required.
-    await expect(name.getByRole('switch', { name: 'Keep records without it' })).toBeEnabled();
-    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
-    await page.getByText('The SPARQL this builds').click();
-    await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).not.toContainText('OPTIONAL {\n    ?volunteeringOpportunity vol:offeredBy');
-    // Sorting names each column by its path.
-    await moreOptions(page);
-    await expect(page.getByLabel('Sort by').locator('option', { hasText: 'offered by › label' })).toHaveCount(1);
-  });
-
-  test('changing the condition never leaves a hidden value in the query', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
-    const age = page.getByTestId('builder-step').filter({ hasText: 'minimum age' });
-    await age.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await age.getByLabel('Filter value').fill('sixteen');
-    await page.getByText('The SPARQL this builds').click();
-    const sparql = page.getByText('The SPARQL this builds').locator('..').locator('..');
-    await expect(sparql).toContainText('CONTAINS(LCASE(STR(?minimumAge)), "sixteen")');
-    // A number condition shows a number field: the leftover text is cleared, and nothing hidden runs.
-    await age.getByLabel('Filter', { exact: true }).selectOption('lt');
-    await expect(age.getByLabel('Filter value')).toHaveAttribute('type', 'number');
-    await expect(age.getByLabel('Filter value')).toHaveValue('');
-    await expect(sparql).not.toContainText('FILTER');
-    await age.getByLabel('Filter value').fill('15');
-    await expect(sparql).toContainText('FILTER(?minimumAge < 15)');
-    await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
-  });
-
   test('the query shows which data it runs over, with a shortcut to edit it', async ({ page }) => {
+    await expect(page.getByTestId('dataset-summary')).toHaveCount(0);
+    await page.getByLabel('Run against').selectOption('data');
     await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
     await page.getByTestId('dataset-summary').getByRole('button', { name: 'Edit sample data' }).click();
     await expect(toggle(page, 'Check data')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('data-editor')).toBeVisible();
   });
 
-  test('the builder hands its query to the SPARQL editor', async ({ page }) => {
-    await page.getByText('The SPARQL this builds').click();
-    await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
-    await expect(page).toHaveURL(/mode=sparql/);
-    await expect(page.getByTestId('sparql-editor')).toContainText('a/rdfs:subClassOf* vol:VolunteeringOpportunity');
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
-    await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
-  });
-
   test('the SPARQL editor highlights, autocompletes and runs with Ctrl/⌘-Enter', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
     const editor = page.getByTestId('sparql-editor');
     await expect(editor.locator('.tok-keyword', { hasText: 'SELECT' })).toBeVisible();
     await expect(editor.locator('.tok-variable').first()).toBeVisible();
@@ -292,8 +259,6 @@ test.describe('Query tab', () => {
   });
 
   test('every query form: ASK, CONSTRUCT, examples and errors', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
-
     await page.getByLabel('Example queries').selectOption({ label: 'Does every class have a label?' });
     await run(page);
     await expect(page.getByTestId('query-answer')).toHaveText(/Answer: (yes|no)/);
@@ -324,7 +289,7 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('data-editor')).toHaveCount(0);
     await toggle(page, 'Check data').click();
     await expect(page).toHaveURL(/view=check/);
-    await expect(page.getByTestId('query-builder')).toHaveCount(0);
+    await expect(page.getByTestId('query-chat')).toHaveCount(0);
     const data = page.getByTestId('data-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Check', exact: true }).click();
@@ -337,17 +302,16 @@ test.describe('Query tab', () => {
     await toggle(page, 'Check data').click();
     await expect(report).toContainText('saturday-shift');
 
-    // Editing the data changes what the builder finds.
+    // Editing the data changes what queries find.
     await data.click();
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
     await toggle(page, 'Query ontology').click();
-    await run(page);
+    await ask(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');
   });
   test('long results are paginated', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
     await run(page);
     const table = results(page);

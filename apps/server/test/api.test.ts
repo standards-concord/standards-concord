@@ -229,6 +229,55 @@ describe('agents over MCP', () => {
   });
 });
 
+describe('query assistant (offline helper)', () => {
+  const ask = async (agent: Agent, messages: { role: 'user' | 'assistant'; content: string }[], query = '') => {
+    const res = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages, query, target: 'ontology' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body as { reply: string; query: string; target: string; columns: { variable: string; label: string }[]; simulated: boolean };
+  };
+
+  it('needs a signed-in person and a message', async () => {
+    expect((await request(app).post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(401);
+    const agent = await login('contributor');
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [] })).status).toBe(400);
+  });
+
+  it('writes, refines and counts, with queries that parse', async () => {
+    const { sparqlSyntaxError } = await import('@concord/core');
+    const agent = await login('contributor');
+    const first = await ask(agent, [{ role: 'user', content: 'List every volunteering opportunity' }]);
+    expect(first.simulated).toBe(true);
+    expect(first.target).toBe('data');
+    expect(first.query).toContain('vol:VolunteeringOpportunity');
+    expect(first.query).toContain('vol:title');
+    expect(await sparqlSyntaxError(first.query)).toBeUndefined();
+    expect(first.columns.map((c) => c.label)).toContain('title');
+
+    const history = [
+      { role: 'user' as const, content: 'List every volunteering opportunity' },
+      { role: 'assistant' as const, content: first.reply },
+      { role: 'user' as const, content: 'Also show the minimum age and who it is offered by, only over 15' },
+    ];
+    const second = await ask(agent, history, first.query);
+    expect(second.query).toContain('vol:minimumAge');
+    expect(second.query).toContain('vol:offeredBy');
+    expect(second.query).toContain('FILTER(?minimumAge > 15)');
+    expect(await sparqlSyntaxError(second.query)).toBeUndefined();
+
+    const count = await ask(agent, [...history, { role: 'assistant', content: second.reply }, { role: 'user', content: 'How many organisations are there?' }]);
+    expect(count.query).toContain('COUNT(DISTINCT');
+    expect(count.query).toContain('vol:Organisation');
+    expect(count.columns[0].label).toMatch(/Number of organisation/i);
+  });
+
+  it('answers questions about the model itself against the ontology', async () => {
+    const agent = await login('contributor');
+    const r = await ask(agent, [{ role: 'user', content: 'Which classes have no definition?' }]);
+    expect(r.target).toBe('ontology');
+    expect(r.query).toContain('FILTER NOT EXISTS');
+  });
+});
+
 describe('feedback', () => {
   it('walks the structured questionnaire and records answers', async () => {
     const qs = await request(app).get('/api/feedback/questions');

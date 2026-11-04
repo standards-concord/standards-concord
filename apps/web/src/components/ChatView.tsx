@@ -21,7 +21,7 @@ function Bubble({ m, userName, children }: { m: ChatMessage; userName?: string; 
   const mine = m.role === 'user';
   if (m.role === 'system') return <p className="py-1 text-center text-xs text-muted">{m.content}</p>;
   return (
-    <div className={cx('flex gap-2.5', mine && 'flex-row-reverse')}>
+    <div className={cx('flex gap-2.5', mine && 'flex-row-reverse')} data-testid={`chat-message-${m.role}`}>
       {mine ? (
         <Avatar name={userName ?? 'You'} size={28} />
       ) : (
@@ -124,6 +124,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
                 }
               }}
               placeholder={dict.listening ? 'Listening… speak naturally' : placeholder}
+              aria-label="Your message"
               className={cx(
                 'block w-full resize-none rounded-xl border border-control bg-surface px-3.5 py-2.5 text-sm placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-60',
                 dict.listening && 'border-danger/60',

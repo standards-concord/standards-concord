@@ -747,3 +747,34 @@ export interface SessionInfo {
  *  POST /api/transcribe (audio/webm body)            -> { text: string } (server-side STT fallback; 501 if not configured)
  */
 export const API_PREFIX = '/api';
+
+/* ------------------------------------------------------------------------ */
+/* Query assistant                                                           */
+/* ------------------------------------------------------------------------ */
+
+export type QueryTarget = 'ontology' | 'data';
+
+export interface QueryChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface QueryChatRequest {
+  /** The conversation so far, ending with the user's latest message. */
+  messages: QueryChatTurn[];
+  /** The query as it stands in the editor, including any edits made by hand. */
+  query: string;
+  target: QueryTarget;
+  /** How many sample records of each class the user's (browser-only) data has. Counts only, never the data. */
+  dataSummary?: { classIri: string; count: number }[];
+}
+
+export interface QueryChatResponse {
+  reply: string;
+  query: string;
+  target: QueryTarget;
+  /** Readable headings for result columns, by variable name (without '?'). */
+  columns: { variable: string; label: string }[];
+  /** True when the offline helper answered instead of Claude. */
+  simulated: boolean;
+}

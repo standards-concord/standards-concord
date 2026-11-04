@@ -29,6 +29,7 @@ import {
   workingValidation,
 } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
+import { queryChat } from '../services/queryChat.js';
 import { PERSONAS } from '../services/personas.js';
 import * as releases from '../services/releases.js';
 import { fairContext } from '../services/fairResolution.js';
@@ -183,6 +184,22 @@ export function apiRouter(): Router {
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
     res.json({ ...forCaller(req, await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
+  });
+
+  // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.
+  r.post('/ontologies/:id/query-chat', async (req, res) => {
+    requireUser(req);
+    const b = req.body ?? {};
+    const messages = (Array.isArray(b.messages) ? b.messages : [])
+      .filter((m: { role?: unknown; content?: unknown }) => (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string')
+      .slice(-30)
+      .map((m: { role: 'user' | 'assistant'; content: string }) => ({ role: m.role, content: m.content.slice(0, 4000) }));
+    if (!messages.some((m: { role: string }) => m.role === 'user')) throw new HttpError(400, 'Say what you want the query to find');
+    const dataSummary = (Array.isArray(b.dataSummary) ? b.dataSummary : [])
+      .filter((d: { classIri?: unknown; count?: unknown }) => typeof d?.classIri === 'string' && typeof d.count === 'number')
+      .slice(0, 200);
+    const graph = await ontologyStore.at(project(req), undefined);
+    res.json(await queryChat(graph, { messages, query: typeof b.query === 'string' ? b.query.slice(0, 20000) : '', target: b.target === 'data' ? 'data' : 'ontology', dataSummary }));
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
