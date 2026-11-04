@@ -122,6 +122,28 @@ ex:helper a vol:Role .
     await expect(item.getByRole('button')).toHaveCount(0);
   });
 
+  // Used to go wrong: "Show all" rendered every problem at once (10,000 rows froze the page for over a second)
+  // and stayed expanded. Now long lists are paged, 50 at a time.
+  test('a long list of problems is shown a page at a time', async ({ page }) => {
+    await signIn(page, { name: 'E2E check pages', role: 'editor' });
+    await openCheck(page, id);
+    const records = Array.from({ length: 60 }, (_, i) => `ex:org${i} a vol:VolunteerInvolvingOrganisation .`).join('\n');
+    await setData(page, `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/data/> .\n\n${records}\n`);
+    await check(page);
+    const list = problems(page);
+    await expect(list.getByRole('listitem')).toHaveCount(50);
+    const pages = page.getByRole('navigation', { name: 'Pages of problems found' });
+    await expect(pages).toContainText('1–50 of 60');
+    await expect(pages.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    await pages.getByRole('button', { name: 'Next' }).click();
+    await expect(list.getByRole('listitem')).toHaveCount(10);
+    await expect(pages).toContainText('51–60 of 60');
+    await expect(pages.getByRole('button', { name: 'Next' })).toBeDisabled();
+    // The items on later pages still jump to their place.
+    await list.getByRole('button', { name: /ex:org\d+ requires/ }).first().click();
+    await expect.poll(() => selection(page)).toMatch(/^ex:org\d+$/);
+  });
+
   // Used to go wrong: problems showed full <https://…> IRIs because sparq wraps IRIs in
   // angle brackets, which the prefix lookup never matched, and it only knew the ontology's prefixes.
   test('problems use the prefixes the data declares', async ({ page }) => {

@@ -410,4 +410,42 @@ describe('review regressions', () => {
     // A record the ontology also describes may have values there, so no count is given.
     expect(shared.text).not.toMatch(/found/);
   });
+
+  // Review 3. An alternative with a datatype and a node kind (or a class and a datatype) was described by one of them only.
+  it('an alternative with two kinds of requirement falls back to general wording', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:q 5 .\n';
+    const shapes = (alt: string) => `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\nex:S sh:targetClass ex:C ; sh:property [ sh:path ex:q ; sh:or ( ${alt} [ sh:datatype xsd:string ] ) ] .\n`;
+    const result = { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' };
+    for (const alt of ['[ sh:datatype xsd:integer ; sh:nodeKind sh:IRI ]', '[ sh:class ex:A ; sh:datatype xsd:integer ]']) {
+      const [f] = describeFindings([result], exCtx(text, shapes(alt)));
+      expect(f.text).toBe('Value 5 doesn’t match any of the allowed kinds of value');
+    }
+  });
+
+  // Review 3. A node-level result (sparq reports the record as its own value, with no path) lost its underline and jump.
+  it('a node-level finding points at the record', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C .\n';
+    const shapes = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\nex:S a sh:NodeShape ; sh:targetClass ex:C ; sh:nodeKind sh:Literal .\n`;
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, value: `<${EX}a>`, sourceConstraintComponent: sh('NodeKind'), message: 'Value does not have node kind Literal' }], exCtx(text, shapes));
+    expect(f.ranges.map((r) => text.slice(r.from, r.to))).toEqual(['ex:a']);
+    expect(f.at?.line).toBe(2);
+    expect(f.unlocated).toBeUndefined();
+  });
+
+  // Review 3. A written label that happens to start like sparq's own names (_:__ttl_anon_user) was treated as anonymous.
+  it('a written _:label is found whatever it is called', () => {
+    const text = '@prefix ex: <http://e/> .\n_:__ttl_anon_user a ex:C .\n';
+    const [f] = describeFindings([{ focusNode: '_:__ttl_anon_user', path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Please supply two contacts' }], exCtx(text));
+    expect(f.ranges.map((r) => text.slice(r.from, r.to))).toEqual(['_:__ttl_anon_user']);
+    expect(f.unlocated).toBeUndefined();
+  });
+
+  // Review 3. With a single anonymous value the explanation said the record "has more than one".
+  it('only says there are several anonymous values when there are', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a ex:p [ ex:z 1 ] .\nex:b ex:p [ ex:z 1 ] .\n';
+    const result = (focus: string) => ({ focusNode: `<${EX}${focus}>`, path: `<${EX}p>`, value: '_:__ttl_anon_4_1', sourceConstraintComponent: sh('Class'), message: 'Value does not have class <http://e/K>' });
+    const [shared] = describeFindings([result('a')], { ...exCtx(text), external: new Set([termKey({ kind: 'iri', value: `${EX}a` })]) });
+    expect(shared.unlocated).toMatch(/described in the ontology/);
+    expect(shared.unlocated).not.toMatch(/more than one/);
+  });
 });

@@ -13,8 +13,34 @@ const ANALYSE_DELAY = 250;
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-/** Problems shown before "Show all", so a very broken file doesn't flood the page. */
-const FIRST_FINDINGS = 50;
+/** Problems shown per page, so a very broken file never renders thousands of rows at once. */
+const PAGE_SIZE = 50;
+
+/** The page of a list to show, kept in range as the list shrinks or grows. */
+function usePage<T>(items: T[]) {
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const current = Math.min(page, pages - 1);
+  return { start: current * PAGE_SIZE, items: items.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE), page: current, pages, setPage, total: items.length };
+}
+
+function Pager({ label, pager }: { label: string; pager: ReturnType<typeof usePage> }) {
+  if (pager.pages < 2) return null;
+  const { start, page, pages, setPage, total } = pager;
+  return (
+    <nav aria-label={label} className="flex items-center gap-2 text-xs text-muted">
+      <Button size="sm" variant="ghost" disabled={page === 0} onClick={() => setPage(page - 1)}>
+        Previous
+      </Button>
+      <span>
+        {(start + 1).toLocaleString()}–{Math.min(start + PAGE_SIZE, total).toLocaleString()} of {total.toLocaleString()}
+      </span>
+      <Button size="sm" variant="ghost" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>
+        Next
+      </Button>
+    </nav>
+  );
+}
 
 /** A term as code, coloured the way the editor colours Turtle. */
 function TermCode({ code }: { code: string }) {
@@ -126,8 +152,6 @@ export interface CheckDataProps {
 export function CheckData({ result, onResult, data, onDataChange, completions, ontologyTurtle, shapes, store, ready, ontologyPrefixes, namespace }: CheckDataProps) {
   const editor = useRef<CodeEditorHandle>(null);
   const { report, checkedData, error: checkError } = result;
-  const [showAll, setShowAll] = useState(false);
-  const [showAllLive, setShowAllLive] = useState(false);
   const [formatNote, setFormatNote] = useState<string>();
   const [formatting, setFormatting] = useState(false);
   const reportStale = !!report && checkedData !== data;
@@ -203,6 +227,8 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
     return out;
   }, [syntaxError, termWarnings, settled]);
 
+  const livePage = usePage(live);
+
   const diagnostics = useMemo<EditorDiagnostic[]>(() => {
     const out: EditorDiagnostic[] = [];
     for (const l of live) out.push({ from: l.at!.from, to: l.to, severity: l.severity, message: l.text, source: l.severity === 'error' ? 'Turtle syntax' : 'Ontology terms' });
@@ -229,7 +255,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const check = () => {
     const s = store();
     if (!s || !shapes) return;
-    setShowAll(false);
+    reportPage.setPage(0);
     // The analysis catches up at once, so the new underlines line up with what was checked.
     setSettled(data);
     try {
@@ -288,7 +314,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   }, [formatNote]);
 
   const reveal = (from: number, to: number) => editor.current?.reveal(from, to);
-  const shown = showAll ? findings : findings.slice(0, FIRST_FINDINGS);
+  const reportPage = usePage(findings);
   const errors = findings.filter((f) => f.severity === 'error').length;
 
   return (
@@ -335,18 +361,14 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
         </p>
         {live.length > 0 && (
           <div className="space-y-1" data-testid="data-lint">
-            <ol className="space-y-1" aria-label="Problems in the Turtle">
-              {(showAllLive ? live : live.slice(0, FIRST_FINDINGS)).map((l, i) => (
-                <li key={i}>
+            <ol className="space-y-1" aria-label="Problems in the Turtle" start={livePage.start + 1}>
+              {livePage.items.map((l, i) => (
+                <li key={livePage.start + i}>
                   <ProblemItem finding={l} onReveal={reveal} />
                 </li>
               ))}
             </ol>
-            {!showAllLive && live.length > FIRST_FINDINGS && (
-              <Button size="sm" variant="ghost" onClick={() => setShowAllLive(true)}>
-                Show all {live.length.toLocaleString()} problems in the Turtle
-              </Button>
-            )}
+            <Pager label="Pages of problems in the Turtle" pager={livePage} />
           </div>
         )}
         {checkError && !syntaxError ? <InlineError error={checkError} /> : null}
@@ -373,19 +395,15 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
               )}
             </p>
             {findings.length > 0 && (
-              <ol className="space-y-1" aria-label="Problems found">
-                {shown.map((f, i) => (
-                  <li key={i}>
+              <ol className="space-y-1" aria-label="Problems found" start={reportPage.start + 1}>
+                {reportPage.items.map((f, i) => (
+                  <li key={reportPage.start + i}>
                     <ProblemItem finding={f} onReveal={reportStale ? undefined : reveal} />
                   </li>
                 ))}
               </ol>
             )}
-            {shown.length < findings.length && (
-              <Button size="sm" variant="ghost" onClick={() => setShowAll(true)}>
-                Show all {findings.length.toLocaleString()} problems
-              </Button>
-            )}
+            <Pager label="Pages of problems found" pager={reportPage} />
           </div>
         )}
       </div>

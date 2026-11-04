@@ -3,7 +3,7 @@
  * written with the prefixes from their own data, and finds where in their
  * Turtle each problem is (see turtleDoc.ts), so the editor can underline it.
  */
-import { RDF, RDF_TYPE, XSD, parseTurtle, termKey, type Placed, type RdfTerm, type Span, type TurtleDoc } from './turtleDoc';
+import { GENERATED_BLANK, RDF, RDF_TYPE, XSD, parseTurtle, termKey, type Placed, type RdfTerm, type Span, type TurtleDoc } from './turtleDoc';
 
 const SH = 'http://www.w3.org/ns/shacl#';
 
@@ -339,6 +339,18 @@ function indexDoc(doc: TurtleDoc) {
   return bySubject;
 }
 
+/** The _:labels the document actually writes (its own [ … ] nodes have generated names that can't be written). */
+const labelCache = new WeakMap<TurtleDoc, Set<string>>();
+function writtenLabels(doc: TurtleDoc): Set<string> {
+  let labels = labelCache.get(doc);
+  if (!labels) {
+    labels = new Set();
+    for (const t of doc.triples) for (const term of [t.s.term, t.o.term]) if (term.kind === 'blank' && !term.value.startsWith(GENERATED_BLANK)) labels.add(term.value);
+    labelCache.set(doc, labels);
+  }
+  return labels;
+}
+
 const textOf = (ps: Part[]) => ps.map((p) => (typeof p === 'string' ? p : 'code' in p ? p.code : p.strong)).join('');
 
 /** Shape properties that say nothing about the value, so an alternative can still be described fully without them. */
@@ -376,7 +388,8 @@ function describeAlternative(t: RdfTerm, shapes: ShapesIndex, prefixes: [string,
     if (!w) return undefined;
     out.push(w);
   } else out.push('a value');
-  if (cls && kind) return undefined;
+  // Two kinds of requirement at once (a class and a datatype, a datatype and a node kind) can't be put in one short phrase truthfully.
+  if ([cls, dt, kind].filter(Boolean).length > 1) return undefined;
   const quals: Part[][] = [];
   const bound = (p: string, words: string) => {
     const v = one(p);
@@ -425,7 +438,9 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
 
   // Where it is. sparq labels anonymous nodes ([ … ], ( … )) itself, so those are never guessed at.
   // A _:label someone wrote is kept by sparq, so it can be matched.
-  const findable = (t: RdfTerm | undefined) => !!t && (t.kind !== 'blank' || !/^__ttl_anon_/.test(t.value));
+  // sparq names [ … ] nodes itself, so a blank node can only be matched if the data wrote its label.
+  const labels = writtenLabels(ctx.doc);
+  const findable = (t: RdfTerm | undefined) => !!t && (t.kind !== 'blank' || labels.has(t.value));
   const focusKey = focus ? termKey(focus) : undefined;
   const shared = !!focusKey && !!ctx.external?.has(focusKey);
   const located = findable(focus) && !shared && bySubject.has(focusKey!);
@@ -442,14 +457,16 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   let ranges: Span[] = [];
   if (withValue.length) ranges = withValue.map((t) => ({ from: t.o.from, to: t.o.to }));
   else if (component === 'MaxCount' && withPath.length) ranges = withPath.map((t) => ({ from: t.p.from, to: t.o.to }));
-  else if (subjectSpan && !value) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
+  // Node-level results (no path) report the record itself as the value.
+  else if (subjectSpan && (!value || (!pathIri && termKey(value) === focusKey))) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
   // A [ … ] subject can be long: underline just its opening bracket.
   ranges = ranges.map((r) => (subjectSpan && focus?.kind === 'blank' && r.from === subjectSpan.from && r.to === subjectSpan.to && r.to - r.from > 1 && /^\[/.test(ctx.text.slice(r.from, r.from + 1)) ? { from: r.from, to: r.from + 1 } : r));
   let unlocated: string | undefined;
   if (!ranges.length) {
     if (focus?.kind === 'blank' && !findable(focus)) unlocated = 'This is about an anonymous record (written with [ … ]), which can’t be matched to one place in the text. Giving it a name (like _:b1 or ex:something) lets Concord point to it.';
-    else if (value?.kind === 'blank' && !findable(value)) unlocated = 'The value is an anonymous record (written with [ … ]), and this record has more than one, so Concord can’t tell which.';
     else if (shared) unlocated = 'This record is described in the ontology as well as here, so Concord can’t point to one place.';
+    else if (value?.kind === 'blank' && !findable(value))
+      unlocated = [...distinctObjects.values()].filter((t) => t.o.term.kind === 'blank').length > 1 ? 'The value is an anonymous record (written with [ … ]), and this record has more than one, so Concord can’t tell which.' : 'The value is an anonymous record (written with [ … ]), which can’t be matched to one place in the text.';
     else unlocated = 'Concord couldn’t find this in the text.';
   }
   // SHACL counts distinct values, so repeating a triple doesn't count twice.
