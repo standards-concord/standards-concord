@@ -156,7 +156,7 @@ export function OntologyLayout() {
 
   return (
     <Ctx.Provider value={ctx}>
-      <div className="border-b border-line bg-surface">
+      <div className="ontology-header border-b border-line bg-surface">
         <div className="mx-auto max-w-7xl px-4 pt-6 sm:px-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -184,7 +184,8 @@ export function OntologyLayout() {
           <SectionNav id={id} />
         </div>
       </div>
-      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+      {/* A clear gap between the ontology header and the page beneath it. */}
+      <div className="ontology-content mx-auto max-w-7xl px-4 pt-10 pb-12 sm:px-6">
         <Outlet />
       </div>
     </Ctx.Provider>

@@ -1,7 +1,5 @@
-import { FORMAT_INFO, serialize } from '@concord/core';
-import type { OutputFormat } from '@concord/core/types';
 import { Router, type Request, type Response } from 'express';
-import { NEGOTIABLE, splitExtension } from '../public/routes.js';
+import { NEGOTIABLE, sendFormat, splitExtension, type PublicFormat } from '../public/routes.js';
 import { findFork, forkUrls, forkVersion } from '../services/forks.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -10,7 +8,8 @@ import { ontologyStore } from '../services/ontologyStore.js';
  * Dereferenceable development forks:
  *
  *   /def/<ontology>/forks/<fork>          content negotiated (Turtle unless the client asks for HTML)
- *   /def/<ontology>/forks/<fork>.ttl      one format by extension (.jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl)
+ *   /def/<ontology>/forks/<fork>.ttl      one format by extension: every format a release offers (.jsonld, .owl,
+ *                                         .nt, .omn, .linkml.yaml, .shacl.ttl, .shaclc, .js, .ts, .d.ts, .tgz)
  *
  * Always the fork's latest revision, so an application that imports it picks
  * up new terms as soon as they are added. Browsers asking for HTML are sent
@@ -32,7 +31,7 @@ async function serve(req: Request, res: Response) {
   if (!fork || fork.ontologyId !== project.id) return plain(res, 404, `${project.title} has no fork called “${seg.base}”.`);
   const urls = forkUrls(project, fork);
 
-  let format: OutputFormat | 'html' | undefined = seg.format;
+  let format: PublicFormat | undefined = seg.format;
   if (!format) {
     // A fork IRI is an import target: HTML (a redirect to the fork's page) only for clients that
     // ask for it, as browsers do; a bare Accept or */* (fetch, curl, RDF libraries) gets Turtle.
@@ -43,25 +42,25 @@ async function serve(req: Request, res: Response) {
     format = NEGOTIABLE[best];
     res.vary('Accept');
   }
-  res.set(
-    'Link',
-    [
-      ...(Object.keys(urls.formats) as OutputFormat[]).map((f) => `<${urls.formats[f]}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"`),
-      `<${urls.iri}>; rel="canonical"`,
-      `<${urls.app}>; rel="alternate"; type="text/html"`,
-    ].join(', '),
-  );
-  if (format === 'html') return res.redirect(303, urls.app);
+  if (format === 'html') {
+    res.set('Link', `<${urls.iri}>; rel="canonical", <${urls.app}>; rel="alternate"; type="text/html"`);
+    return res.redirect(303, urls.app);
+  }
 
-  const graph = await ontologyStore.forkGraph(project, fork.slug);
-  const info = FORMAT_INFO[format];
+  res.set('ETag', `"${fork.head}-${format}${req.query.deps === 'bare' ? '-bare' : ''}${req.query.syntax === 'extended' ? '-ext' : ''}"`);
   res.set('Cache-Control', 'no-cache');
-  res.set('ETag', `"${fork.head}-${format}"`);
   if (req.fresh) return void res.status(304).end();
   res.set('X-Concord-Fork-Version', forkVersion(fork));
-  res.type(`${info.mediaType}; charset=utf-8`);
-  res.set('Content-Disposition', `inline; filename="${project.slug}-fork-${fork.slug}.${info.extension}"`);
-  res.send(await serialize(graph, format));
+  // The same formats, headers and file names as a release (public/routes.ts).
+  await sendFormat(req, res, {
+    project,
+    graph: await ontologyStore.forkGraph(project, fork.slug),
+    format,
+    version: `fork-${fork.slug}`,
+    self: urls.iri,
+    mutable: true,
+    packageVersion: forkVersion(fork),
+  });
 }
 
 export function forkResolver(): Router {

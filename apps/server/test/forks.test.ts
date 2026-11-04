@@ -130,6 +130,17 @@ describe('development forks', () => {
     const main = await reader.get('/api/ontologies/volunteering/view');
     expect(main.body.classes.some((c: { iri: string }) => c.iri === `${VOL}VolunteeringActivity`)).toBe(false);
 
+    // Every format a release offers, generated classes and SHACLC included.
+    const js = await request(app).get('/def/volunteering/forks/volunteer-hours.js');
+    expect(js.status).toBe(200);
+    expect(js.headers['content-type']).toMatch(/javascript/);
+    expect(js.headers['access-control-allow-origin']).toBe('*');
+    expect(js.text).toMatch(/class /);
+    expect((await request(app).get('/def/volunteering/forks/volunteer-hours.shaclc')).status).toBe(200);
+    const tgz = await request(app).get('/def/volunteering/forks/volunteer-hours.tgz');
+    expect(tgz.status).toBe(200);
+    expect(tgz.headers['content-type']).toMatch(/gzip/);
+
     const detail = await reader.get(forkPath);
     expect(detail.body.history.length).toBe(2);
     expect(detail.body.history[0].subject).toBe('Add volunteering activities');

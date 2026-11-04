@@ -176,7 +176,7 @@ async function locked<T>(id: string, fn: (f: OntologyFork, from: Snapshot) => Pr
 /* ------------------------------------------------------------------------ */
 
 /** File extensions offered for imports, by format (same as the public version pages). */
-const URL_FORMATS: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl'];
+const URL_FORMATS: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl', 'shaclc', 'javascript', 'typescript'];
 
 const publicRoot = (p: Pick<OntologyProject, 'slug'>) => `${config.webUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}`;
 
