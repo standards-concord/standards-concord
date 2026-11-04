@@ -4,7 +4,7 @@ import { ArrowLeft, ExternalLink, Minus, Rocket, Scale, ThumbsDown, ThumbsUp } f
 import { api, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { formatDate, roleLabel } from '../../lib/format';
+import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { Markdown } from '../../components/Markdown';
@@ -14,7 +14,7 @@ import { ReleaseStatus } from './Releases';
 
 export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
-  const { id, userById, hasRole, myRoles, reload } = useOntology();
+  const { id, ontology, userById, hasRole, myRoles, reload } = useOntology();
   const { session } = useSession();
   const state = useAsync(() => api.release(releaseId), [releaseId]);
   const act = useAction(async (fn: () => Promise<ReleaseDetail>) => {
@@ -49,6 +49,11 @@ export function ReleaseDetailPage() {
             <div className="mt-4 space-y-1 border-t border-line pt-3 text-xs text-muted">
               <div className="flex items-center gap-1.5">
                 Version IRI: <code className="font-mono">{r.versionIRI}</code> <CopyButton text={r.versionIRI} variant="ghost" />
+                {r.status === 'published' && (
+                  <a href={publicPageUrl(ontology.slug, r.version)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="release-public-page">
+                    Public page <ExternalLink className="size-3" aria-hidden />
+                  </a>
+                )}
               </div>
               {r.commit && <div>Commit: <code className="font-mono">{r.commit.slice(0, 10)}</code></div>}
               <div>

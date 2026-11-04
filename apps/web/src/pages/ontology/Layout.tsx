@@ -5,7 +5,8 @@ import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
-import { titleCase } from '../../lib/format';
+import { ExternalLink } from 'lucide-react';
+import { publicPageUrl, titleCase } from '../../lib/format';
 import { HealthBadges } from '../../components/badges';
 import { Badge, ErrorCard, Loading, cx } from '../../components/ui';
 
@@ -85,7 +86,12 @@ export function OntologyLayout() {
                 <Badge tone="outline">{titleCase(o.stage)}</Badge>
                 {o.demo && <Badge tone="warn">Demo</Badge>}
               </div>
-              <p className="mt-0.5 truncate font-mono text-xs text-subtle">{o.ontologyIRI}</p>
+              <p className="mt-0.5 flex min-w-0 items-center gap-2 text-xs">
+                <span className="truncate font-mono text-subtle">{o.ontologyIRI}</span>
+                <a href={publicPageUrl(o.slug)} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 font-medium text-accent hover:underline" data-testid="public-page-link">
+                  Public page <ExternalLink className="size-3" aria-hidden />
+                </a>
+              </p>
             </div>
             <HealthBadges o={o} />
           </div>

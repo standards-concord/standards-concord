@@ -18,6 +18,7 @@ export default defineConfig({
       '/api': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
       '/mcp': { target, changeOrigin: true },
+      '/def': { target, changeOrigin: false },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
