@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo } from 'react';
-import { Link, Outlet, useLocation, useParams } from 'react-router';
+import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
@@ -62,6 +62,7 @@ function rememberedPath(id: string, section: string): string | undefined {
 
 function SectionNav({ id }: { id: string }) {
   const loc = useLocation();
+  const nav = useNavigate();
   const segment = loc.pathname.split('/')[3] ?? '';
   const current = sectionOf(segment);
   const activeTab = TAB_ALIASES[segment] ?? segment;
@@ -81,11 +82,21 @@ function SectionNav({ id }: { id: string }) {
       <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
         {SECTIONS.map((s) => {
           const active = s === current;
-          const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
+          const target = () => {
+            const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
+            return remembered && remembered.startsWith(`/o/${id}/`) ? remembered : href(s.tabs[0][0]);
+          };
           return (
             <Link
               key={s.label}
-              to={remembered && remembered.startsWith(`/o/${id}/`) ? remembered : href(s.tabs[0][0])}
+              to={target()}
+              onClick={(e) => {
+                // The page is remembered after each render, so the href can lag behind a quick click
+                // made straight after navigating: look it up again at click time.
+                if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                nav(target());
+              }}
               aria-current={active ? 'page' : undefined}
               className={cx('border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', active ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
             >
