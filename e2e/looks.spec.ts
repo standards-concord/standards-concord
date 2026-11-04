@@ -109,6 +109,43 @@ test.describe('looks', () => {
     });
   }
 
+  test('a look someone chose before the ODI default arrived is kept', async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem('seeded')) {
+        localStorage.setItem('concord-look', 'civic');
+        sessionStorage.setItem('seeded', '1');
+      }
+    });
+    await page.goto('/login');
+    expect(await look(page)).toBe('civic');
+    await page.reload();
+    expect(await look(page)).toBe('civic');
+  });
+
+  for (const scheme of ['light', 'dark'] as const)
+    test(`white avatar initials stay readable on every hue in the ODI look (${scheme})`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto('/login?look=odi');
+      const worst = await page.evaluate(() => {
+        const probe = document.createElement('span');
+        document.body.appendChild(probe);
+        const lum = ([r, g, b]: number[]) => {
+          const f = (c: number) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+          return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+        };
+        let min = Infinity;
+        for (let hue = 0; hue < 360; hue++) {
+          // The same colour the Avatar component draws (components/ui.tsx).
+          probe.style.color = `hsl(${hue} var(--avatar-s) var(--avatar-l))`;
+          const c = getComputedStyle(probe).color.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+          min = Math.min(min, 1.05 / (lum(c) + 0.05));
+        }
+        probe.remove();
+        return min;
+      });
+      expect(worst).toBeGreaterThanOrEqual(4.5);
+    });
+
   for (const scheme of ['light', 'dark'] as const) {
     test(`every look's colour pairs meet WCAG AA contrast (${scheme})`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });

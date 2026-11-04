@@ -12,6 +12,9 @@ import { ValidationDetails } from '../../components/Validation';
 import { Avatar, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
 
+/** Links inside sentences are underlined in every look, so they never rely on colour alone. */
+const proseLink = 'text-accent underline decoration-1 underline-offset-[0.18em] hover:decoration-2';
+
 /** Change requests still moving through the process, in the order people need to act on them. */
 const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs-work', 'approved'];
 
@@ -43,7 +46,9 @@ export function OverviewTab() {
   // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
   const healthKey = wantsHealth ? loc.key : undefined;
   useEffect(() => {
-    if (healthKey && validation.data) healthRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!healthKey || !validation.data) return;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    healthRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
   }, [healthKey, validation.data]);
 
   const members = o.members ?? [];
@@ -61,11 +66,11 @@ export function OverviewTab() {
         <section aria-label="About this ontology">
           <p className="max-w-[68ch] text-lg leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
           <p className="mt-3 max-w-[68ch] text-sm leading-relaxed text-muted" data-testid="overview-summary">
-            <Link to={`/o/${id}/browse`} className="text-accent hover:underline">
+            <Link to={`/o/${id}/browse`} className={proseLink}>
               {plural(o.stats.classes, 'class', 'classes')} and {plural(o.stats.properties, 'property', 'properties')}
             </Link>
             , drawn from{' '}
-            <Link to={`/o/${id}/use-cases`} className="text-accent hover:underline">
+            <Link to={`/o/${id}/use-cases`} className={proseLink}>
               {plural(o.stats.useCases, 'use case')}
             </Link>
             . Version {o.currentVersion}
@@ -73,13 +78,13 @@ export function OverviewTab() {
               <>
                 {' '}
                 after{' '}
-                <Link to={`/o/${id}/releases`} className="text-accent hover:underline">
+                <Link to={`/o/${id}/releases`} className={proseLink}>
                   {plural(o.stats.releases, 'release')}
                 </Link>
               </>
             )}
             , run as{' '}
-            <Link to={`/o/${id}/governance`} className="text-accent hover:underline">
+            <Link to={`/o/${id}/governance`} className={proseLink}>
               {o.governance.name}
             </Link>
             .
@@ -97,14 +102,14 @@ export function OverviewTab() {
               <Row term="Current version">v{o.currentVersion}</Row>
               {o.domain && <Row term="Domain">{o.domain}</Row>}
               <Row term="Governance">
-                <Link to={`/o/${id}/governance`} className="text-accent hover:underline">
+                <Link to={`/o/${id}/governance`} className={proseLink}>
                   {o.governance.name}
                 </Link>
               </Row>
               <Row term="Created">{formatDate(o.createdAt)}</Row>
               {o.github && (
                 <Row term="Published to">
-                  <a className="text-accent hover:underline" href={`https://github.com/${o.github.repo}`} target="_blank" rel="noreferrer">
+                  <a className={proseLink} href={`https://github.com/${o.github.repo}`} target="_blank" rel="noreferrer">
                     github.com/{o.github.repo}
                   </a>
                 </Row>
@@ -151,11 +156,11 @@ export function OverviewTab() {
           ) : inProgress.length === 0 ? (
             <p className="mt-2 text-sm text-muted">
               Nothing is in progress.{' '}
-              <Link to={`/o/${id}/changes`} className="text-accent hover:underline">
+              <Link to={`/o/${id}/changes`} className={proseLink}>
                 Propose a change
               </Link>{' '}
               or{' '}
-              <Link to={`/o/${id}/use-cases`} className="text-accent hover:underline">
+              <Link to={`/o/${id}/use-cases`} className={proseLink}>
                 describe a use case
               </Link>
               .
@@ -221,11 +226,12 @@ export function OverviewTab() {
               <ValidationDetails
                 report={validation.data}
                 label={label}
+                headingLevel={3}
                 openLintKey={healthKey}
                 lintNote={
                   <>
                     Lint runs again on every{' '}
-                    <Link to={`/o/${id}/changes`} className="text-accent hover:underline">
+                    <Link to={`/o/${id}/changes`} className={proseLink}>
                       change request
                     </Link>
                     , and errors block approval.

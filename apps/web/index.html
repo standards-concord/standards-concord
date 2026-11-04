@@ -14,7 +14,7 @@
         var looks = ['odi', 'spec', 'civic', 'workbench', 'classic'];
         var look = 'odi';
         try {
-          var stored = localStorage.getItem('concord-look-2');
+          var stored = localStorage.getItem('concord-look');
           if (looks.indexOf(stored) >= 0) look = stored;
         } catch (e) {}
         var param = new URLSearchParams(location.search).get('look');

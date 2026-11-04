@@ -266,7 +266,21 @@ export function CqResults({ report }: { report: ValidationReport }) {
 }
 
 /** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
-export function ValidationDetails({ report, label, openLintKey, lintNote }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode }) {
+export function ValidationDetails({
+  report,
+  label,
+  openLintKey,
+  lintNote,
+  headingLevel = 4,
+}: {
+  report: ValidationReport;
+  label: Labeler;
+  /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */
+  openLintKey?: unknown;
+  lintNote?: ReactNode;
+  /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
+  headingLevel?: 3 | 4;
+}) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
   const infos = report.lint.length - errors - warnings;
@@ -280,16 +294,16 @@ export function ValidationDetails({ report, label, openLintKey, lintNote }: { re
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" heading={4} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} keepMounted>
           <FairChecks report={report} showAll />
         </Disclosure>
         <Disclosure
           className="px-4 py-3"
-          heading={4}
+          heading={headingLevel}
           title="Competency questions"
           summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
           defaultOpen={cqOk < report.competencyQuestions.length}

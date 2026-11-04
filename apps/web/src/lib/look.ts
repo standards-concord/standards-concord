@@ -38,8 +38,8 @@ export const LOOKS = [
 
 export type LookId = (typeof LOOKS)[number]['id'];
 export const DEFAULT_LOOK: LookId = 'odi';
-// Renamed when the ODI look became the default, so earlier choices start again from it.
-const KEY = 'concord-look-2';
+// Only an explicit choice is saved, so people who picked a look keep it; everyone else gets the default.
+const KEY = 'concord-look';
 
 export function isLook(v: unknown): v is LookId {
   return LOOKS.some((l) => l.id === v);

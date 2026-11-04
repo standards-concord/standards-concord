@@ -134,6 +134,44 @@ test.describe('progressive disclosure', () => {
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/changes/`));
   });
 
+  for (const look of ['odi', 'spec', 'civic', 'workbench', 'classic'])
+    test(`overview links are underlined and the action banner keeps a visible focus ring (${look})`, async ({ page }) => {
+      await page.goto(`/o/${demo.id}?look=${look}`);
+      await settle(page);
+      // Links inside sentences never rely on colour alone.
+      for (const link of await page.getByTestId('overview-summary').getByRole('link').all())
+        expect(await link.evaluate((el) => getComputedStyle(el).textDecorationLine), await link.innerText()).toContain('underline');
+      // The banner is filled with the accent colour, so its focus ring must differ from it.
+      const asks = page.getByTestId('overview-asks');
+      const link = asks.getByRole('link').first();
+      await link.focus();
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      await expect(link).toBeFocused();
+      const [ring, bg] = await link.evaluate((el) => [getComputedStyle(el).outlineColor, getComputedStyle(el.closest('[data-testid=overview-asks]')!).backgroundColor]);
+      const ratio = await page.evaluate(
+        ([a, b]) => {
+          const parse = (c: string) => c.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+          const lum = ([r, g, bl]: number[]) => {
+            const f = (c: number) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+            return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(bl);
+          };
+          const [hi, lo] = [lum(parse(a)), lum(parse(b))].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        },
+        [ring, bg],
+      );
+      expect(ratio, `focus ring ${ring} on ${bg}`).toBeGreaterThanOrEqual(3);
+    });
+
+  test('the overview health checks sit one heading level below their section', async ({ page }) => {
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const health = page.locator('#health');
+    await expect(health.getByRole('heading', { level: 2, name: 'Health of the working draft' })).toBeVisible();
+    for (const name of [/Lint findings/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
+  });
+
   test('a contributor with nothing to act on sees no waiting panel', async ({ page }) => {
     await signIn(page, { name: 'Bystander', role: 'contributor' });
     await page.goto(`/o/${demo.id}`);

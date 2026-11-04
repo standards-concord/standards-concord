@@ -193,8 +193,9 @@
   --sh-lg: 0 0 0 1px var(--line-strong);
   --sh-xl: 0 0 0 1px var(--fg);
   --sh-2xl: 0 0 0 1px var(--fg);
+  /* White initials on every hue stay above 4.5:1 at this lightness (e2e/looks.spec.ts). */
   --avatar-s: 55%;
-  --avatar-l: 36%;
+  --avatar-l: 30%;
   --header-bg: var(--surface);
   --header-fg: var(--fg);
   --header-muted: var(--muted);
@@ -436,7 +437,7 @@
     --syn-tag: #6fa8ff;
     --syn-attr: #ef3aab;
     --syn-selection: #1a2f66;
-    --avatar-l: 32%;
+    --avatar-l: 30%;
     color-scheme: dark;
   }
   [data-look='spec'] {
@@ -674,6 +675,15 @@
 [data-look='odi'] :focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
+}
+/* No glass effects: dialog backdrops are a plain tint. */
+[data-look='odi'] [class*='backdrop-blur'] {
+  backdrop-filter: none;
+}
+
+/* The action banner sits on the accent colour, so its focus ring uses the text colour on it. */
+.overview-asks :focus-visible {
+  outline-color: var(--accent-fg);
 }
 
 /* Specification: links and section headings read like a W3C document. */
