@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { FORMAT_INFO, serialize } from '@concord/core';
+import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -23,33 +23,57 @@ export { PUBLIC_BASE };
  *   /def/<slug>                 the ontology IRI: the latest release
  *   /def/<slug>/<version>       a version IRI, e.g. /def/volunteering/1.0.0
  *   /def/<slug>/draft           the unreleased working draft
- *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .html)
+ *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .shaclc, .html)
+ *   /def/<slug>/<version>.js    JavaScript classes for every SHACL node shape (@rdfjs/wrapper), to import from a browser
+ *                               (?deps=bare imports "@rdfjs/wrapper" by name instead of from a CDN); also .ts and .d.ts
+ *   /def/<slug>/<version>.tgz   the same classes as an npm package: npm install <this URL>
+ *   /def/<slug>/<version>.shaclc  standard SHACL compact syntax (?syntax=extended keeps shape names)
  *
- * Browsers get the HTML page; anything asking for RDF gets RDF (Vary: Accept).
+ * Browsers get the HTML page; anything asking for RDF (or JavaScript, or
+ * SHACLC) gets that (Vary: Accept). Responses allow any origin, so an app on
+ * another site can fetch the ontology or import its classes.
  * Persistent IRIs (w3id.org) redirect here, see w3id.ts.
  */
 
 /** Formats offered for download and by content negotiation, in display order. */
-const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl'];
+const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl', 'shaclc', 'javascript', 'typescript'];
+
+/** What a /def URL can return: a serialisation, the HTML page, type declarations or an npm package. */
+export type PublicFormat = OutputFormat | 'html' | 'dts' | 'npm';
+
+const EXTRA_INFO: Record<'dts' | 'npm', { label: string; mediaType: string; extension: string }> = {
+  dts: { label: 'TypeScript declarations', mediaType: 'application/typescript', extension: 'd.ts' },
+  npm: { label: 'npm package', mediaType: 'application/gzip', extension: 'tgz' },
+};
 
 /**
  * Media types answered by content negotiation: exactly the types we produce and
- * send back, with no aliases (SHACL and LinkML are by extension only). HTML is
- * first, so a bare Accept or *\/* gets the page.
+ * send back, with no aliases (SHACL, LinkML, the declarations and the npm
+ * package are by extension only). HTML is first, so a bare Accept or *\/* gets
+ * the page.
  */
-const NEGOTIABLE: Record<string, OutputFormat | 'html'> = {
+const NEGOTIABLE: Record<string, PublicFormat> = {
   'text/html': 'html',
   'text/turtle': 'turtle',
   'application/ld+json': 'jsonld',
   'application/rdf+xml': 'rdfxml',
   'application/n-triples': 'ntriples',
   'text/owl-manchester': 'manchester',
+  'text/shaclc': 'shaclc',
+  'text/javascript': 'javascript',
+  'application/typescript': 'typescript',
 };
 
 /** File extensions, longest first so ".shacl.ttl" wins over ".ttl". */
-const EXTENSIONS: [string, OutputFormat | 'html'][] = [
+const EXTENSIONS: [string, PublicFormat][] = [
   ['linkml.yaml', 'linkml'],
   ['shacl.ttl', 'shacl'],
+  ['shaclc', 'shaclc'],
+  ['d.ts', 'dts'],
+  ['ts', 'typescript'],
+  ['mjs', 'javascript'],
+  ['js', 'javascript'],
+  ['tgz', 'npm'],
   ['jsonld', 'jsonld'],
   ['html', 'html'],
   ['ttl', 'turtle'],
@@ -59,7 +83,7 @@ const EXTENSIONS: [string, OutputFormat | 'html'][] = [
   ['nt', 'ntriples'],
 ];
 
-function splitExtension(segment: string): { base: string; format?: OutputFormat | 'html' } {
+function splitExtension(segment: string): { base: string; format?: PublicFormat } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
   return { base: segment };
 }
@@ -104,8 +128,20 @@ export async function pageInput(
       href: opts.relativeDownloads ? `ontology.${info.extension}` : `${root}/${version}.${info.extension}`,
     };
   });
+  const mod = await toWrapperClasses(graph, { name: project.slug });
+  const withGetter = mod.classes.filter((c) => c.datasetGetter);
+  const example = withGetter.find((c) => c.properties.length > 1 && !c.extends) ?? withGetter[0];
   return {
     project,
+    code: {
+      moduleUrl: `${root}/${version}.js`,
+      packageUrl: `${root}/${version}.tgz`,
+      packageName: `${project.slug}-ontology`,
+      datasetClass: mod.datasetClass,
+      exampleClass: example?.name,
+      exampleGetter: example?.datasetGetter,
+      exampleProperty: example?.properties[0]?.name,
+    },
     view: graph.view(),
     kind: isDraft ? 'draft' : 'release',
     version,
@@ -234,24 +270,49 @@ async function serve(req: Request, res: Response) {
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 
-  let format = last.format;
-  if (!format) {
-    // The answer depends on Accept, including when it is a refusal.
-    res.vary('Accept');
-    const best = req.accepts(Object.keys(NEGOTIABLE));
-    if (!best) {
-      res
-        .status(406)
-        .set('Cache-Control', 'no-store')
-        .type('text/plain')
-        .send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl`);
-      return;
-    }
-    format = NEGOTIABLE[best];
+  const format = last.format ?? negotiate(req, res);
+  if (!format) return;
+  if (format === 'html') {
+    publicHeaders(res, `${root}/${version}`, version === 'draft');
+    const input = await pageInput(project, version, base);
+    res.type('html').send(renderOntologyPage(input));
+    return;
   }
+  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
+  await sendFormat(req, res, {
+    project,
+    graph,
+    format,
+    version,
+    self: `${root}/${version}`,
+    mutable: version === 'draft',
+    // The draft is ahead of the latest release: 1.0.0 → 1.1.0-draft.
+    packageVersion: version === 'draft' ? `${latest ? bumpVersion(latest, 'minor') : '0.1.0'}-draft` : version,
+  });
+}
 
-  res.set('Cache-Control', version === 'draft' ? 'no-cache' : 'public, max-age=300');
-  const self = `${root}/${version}`;
+/** The format an Accept header asks for, or undefined after answering 406. */
+export function negotiate(req: Request, res: Response): PublicFormat | undefined {
+  // The answer depends on Accept, including when it is a refusal.
+  res.vary('Accept');
+  const best = req.accepts(Object.keys(NEGOTIABLE));
+  if (!best) {
+    res
+      .status(406)
+      .set('Cache-Control', 'no-store')
+      .type('text/plain')
+      .send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl or .js`);
+    return undefined;
+  }
+  return NEGOTIABLE[best];
+}
+
+function publicHeaders(res: Response, self: string, mutable: boolean) {
+  res.vary('Accept');
+  // Public data: any site may fetch it, or import the generated classes from it.
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Disposition');
+  res.set('Cache-Control', mutable ? 'no-cache' : 'public, max-age=300');
   res.set(
     'Link',
     [
@@ -260,17 +321,66 @@ async function serve(req: Request, res: Response) {
       `<${self}>; rel="canonical"`,
     ].join(', '),
   );
+}
 
-  if (format === 'html') {
-    const input = await pageInput(project, version, base);
-    res.type('html').send(renderOntologyPage(input));
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+export interface SendFormatOptions {
+  project: OntologyProject;
+  graph: Awaited<ReturnType<typeof ontologyStore.at>>;
+  format: Exclude<PublicFormat, 'html'>;
+  /** '1.0.0', 'draft' or e.g. 'forks/activity-tracking': used in file names. */
+  version: string;
+  /** The canonical URL of this version, without an extension. */
+  self: string;
+  /** Drafts and forks change, so they aren't cached. */
+  mutable: boolean;
+  /** Semver version for the npm package (falls back to owl:versionInfo, then 0.0.0). */
+  packageVersion?: string;
+}
+
+/**
+ * Sends one version of an ontology in any non-HTML format: an RDF
+ * serialisation, SHACLC, the generated JavaScript or TypeScript classes, their
+ * declarations, or an npm package of them. Shared by every /def route (releases,
+ * the draft and forks) so each offers the same formats.
+ */
+export async function sendFormat(req: Request, res: Response, o: SendFormatOptions): Promise<void> {
+  publicHeaders(res, o.self, o.mutable);
+  const fileBase = `${o.project.slug}-${o.version.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
+  if (o.format === 'javascript' || o.format === 'typescript' || o.format === 'dts' || o.format === 'npm') {
+    const mod = await toWrapperClasses(o.graph, { name: o.project.slug, sourceUrl: o.self });
+    if (o.format === 'npm') {
+      const info = o.graph.view().metadata.versionInfo;
+      const version = [o.packageVersion, info].find((v) => v && SEMVER.test(v)) ?? '0.0.0';
+      const tgz = npmPackage(mod, {
+        name: `${o.project.slug}-ontology`,
+        version,
+        description: `Classes for ${o.project.title}, generated from its SHACL shapes`,
+        homepage: o.self,
+        shapes: await toShacl(o.graph),
+      });
+      res.type(EXTRA_INFO.npm.mediaType);
+      res.set('Content-Disposition', `attachment; filename="${fileBase}.tgz"`);
+      res.send(tgz);
+      return;
+    }
+    const text =
+      o.format === 'typescript' ? mod.ts : o.format === 'dts' ? mod.dts : req.query.deps === 'bare' ? mod.js : withWrapperImport(mod.js, WRAPPER_CDN);
+    const info = o.format === 'dts' ? EXTRA_INFO.dts : FORMAT_INFO[o.format];
+    res.type(`${info.mediaType}; charset=utf-8`);
+    // Deno and other URL importers find the declarations here.
+    if (o.format === 'javascript') res.set('X-TypeScript-Types', `${o.self}.d.ts`);
+    res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
+    res.send(text);
     return;
   }
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
-  const info = FORMAT_INFO[format];
+  const info = FORMAT_INFO[o.format];
+  // ?syntax=extended keeps shape names and labels, in shaclc-write's extended SHACLC.
+  const text = o.format === 'shaclc' && req.query.syntax === 'extended' ? await toShaclc(o.graph, { extended: true }) : await serialize(o.graph, o.format, { name: o.project.slug });
   res.type(`${info.mediaType}; charset=utf-8`);
-  res.set('Content-Disposition', `inline; filename="${project.slug}-${version}.${info.extension}"`);
-  res.send(await serialize(graph, format));
+  res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
+  res.send(text);
 }
 
 export function publicRouter(): Router {

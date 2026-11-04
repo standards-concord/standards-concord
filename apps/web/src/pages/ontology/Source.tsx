@@ -7,6 +7,8 @@ import { Button, Card, ErrorCard, Loading, Select } from '../../components/ui';
 import { CodeView } from '../../components/code/CodeView';
 import { FORMAT_LANGUAGE } from '../../components/code/languages';
 import { useOntology } from './Layout';
+import { publicPageUrl } from '../../lib/format';
+import { datasetClassName } from '../../lib/classes-hint';
 
 const FORMATS: {
   id: OutputFormat;
@@ -55,6 +57,18 @@ const FORMATS: {
     label: 'SHACL',
     ext: 'shacl.ttl',
     note: 'Shapes generated from the ontology to validate instance data.',
+  },
+  {
+    id: 'shaclc',
+    label: 'SHACLC',
+    ext: 'shaclc',
+    note: 'The same shapes in SHACL compact syntax, which is much easier to read.',
+  },
+  {
+    id: 'typescript',
+    label: 'Classes',
+    ext: 'ts',
+    note: 'A class for every SHACL shape, generated with the ODI SHACL converter over @rdfjs/wrapper, so apps can work with the data as objects.',
   },
 ];
 
@@ -111,6 +125,7 @@ export function SourceTab() {
         </summary>
         <p className="mt-1 pl-6">{meta.note}</p>
       </details>
+      {format === 'typescript' && <ImportHint slug={ontology.slug} version={ref === 'working' ? 'draft' : ref} code={source.data} />}
       <Card className="p-0">
         {/* Loading first: a request for a new format or version never shows the previous one's text or error. */}
         {source.loading ? (
@@ -123,6 +138,31 @@ export function SourceTab() {
           <CodeView code={source.data} language={FORMAT_LANGUAGE[format] ?? 'text'} ariaLabel={`${meta.label} source`} maxHeight={640} testId="source-code" />
         )}
       </Card>
+    </div>
+  );
+}
+
+/** How to use the generated classes: import from the version's URL, or install it as an npm package. */
+function ImportHint({ slug, version, code }: { slug: string; version: string; code?: string }) {
+  const base = `${window.location.origin}${publicPageUrl(slug, version)}`;
+  const dataset = datasetClassName(code, slug);
+  const lines = [
+    `// In a browser, with no build step:`,
+    `import { ${dataset} } from "${base}.js";`,
+    ``,
+    `// With npm and a bundler (the package is "${slug}-ontology"):`,
+    `// npm install ${base}.tgz`,
+  ].join('\n');
+  return (
+    <div className="space-y-1" data-testid="classes-import">
+      <CodeView code={lines} language="javascript" ariaLabel="How to import the classes" maxHeight={160} />
+      <p className="text-xs text-muted">
+        The same URL also answers <code>Accept: text/javascript</code>. TypeScript declarations are at{' '}
+        <a className="text-accent hover:underline" href={`${base}.d.ts`} target="_blank" rel="noreferrer">
+          {version}.d.ts
+        </a>
+        .
+      </p>
     </div>
   );
 }
