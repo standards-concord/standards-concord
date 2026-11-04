@@ -6,6 +6,8 @@ import { setMetadata } from '../src/changes.js';
 import { compactJsonLd } from '../src/serialize.js';
 import { isSafeNamespace, isSafePrefix, namespaceCacheForTests, setOxigraphLoaderForTests } from '../src/ns.js';
 import { createRequire } from 'node:module';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 
 const EX = 'https://example.org/e#';
 
@@ -144,6 +146,21 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
     expect(namespaceCacheForTests().entries).toBe(before.entries);
     for (let i = 0; i < 600; i++) isSafeNamespace(`https://example.org/${'y'.repeat(4000)}${i}#`);
     expect(namespaceCacheForTests().chars).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it('caches a copy of each namespace, not the document it was read from', () => {
+    // The cache used to keep the parser's substring, which kept each whole source document in memory.
+    v8.setFlagsFromString('--expose-gc');
+    const gc = vm.runInNewContext('gc') as () => void;
+    gc();
+    const before = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 20; i++) {
+      const source = `https://example.org/heap${i}-${Math.random()}#` + 'x'.repeat(2_000_000);
+      expect(isSafeNamespace(source.slice(0, source.indexOf('#') + 1))).toBe(true);
+    }
+    gc();
+    // 20 sources of 2 MB each: about 40 MB if they were kept.
+    expect(process.memoryUsage().heapUsed - before).toBeLessThan(10_000_000);
   });
 
   it('fails closed without caching when Oxigraph can’t be loaded', () => {

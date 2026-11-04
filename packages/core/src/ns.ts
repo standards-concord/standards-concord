@@ -102,7 +102,8 @@ function remember(iri: string, ok: boolean): boolean {
     verdicts.clear();
     verdictChars = 0;
   }
-  verdicts.set(iri, ok);
+  // A copy, not the string itself: a parser's substring would keep its whole source document alive in the cache.
+  verdicts.set(Buffer.from(iri, 'utf8').toString('utf8'), ok);
   verdictChars += iri.length;
   return ok;
 }

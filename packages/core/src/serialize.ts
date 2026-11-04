@@ -62,7 +62,7 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
   const context: Record<string, string> = {};
   for (const [p, ns] of Object.entries(graph.prefixes).sort(([a], [b]) => a.localeCompare(b))) {
     // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
-    if (p && isSafePrefix(p) && isSafeNamespace(ns) && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
+    if (p && isSafePrefix(p) && [...used].some((u) => u.startsWith(ns)) && isSafeNamespace(ns)) context[p] = ns; // Unused prefixes aren't checked.
   }
   // In a context, a namespace "p:rest" is read as a compact IRI using the term p unless rest starts with "//":
   // a prefix urn with the namespace urn:example:vol:, or zz with zz:foo, would loop. Such a term is left out.
