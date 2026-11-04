@@ -54,7 +54,10 @@ if (arg === '--check') {
     const text = read(f);
     if (text == null) continue;
     for (const m of text.matchAll(repoRef)) {
-      if (m[1].toLowerCase() !== oldOwner.toLowerCase() && !['github.com', 'ghcr.io', 'www.github.com'].includes(m[1])) stale.push(`${f}: ${m[0]}`);
+      // A host isn't an owner. (When the org and repo share a name, "github.com/<org>" itself
+      // looks like "<owner>/<name>".)
+      const isHost = /(^|[^\w])(github\.com|ghcr\.io)$/.test(m[1]);
+      if (m[1].toLowerCase() !== oldOwner.toLowerCase() && !isHost) stale.push(`${f}: ${m[0]}`);
     }
     for (const m of text.matchAll(registryName)) if (m[1] !== oldOwner) stale.push(`${f}: ${m[0]}`);
   }
