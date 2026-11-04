@@ -149,8 +149,9 @@ export function CodeEditor({
       theme,
       langComp.current.of(support ?? []),
       EditorView.contentAttributes.of({ 'aria-label': ariaLabel, ...(testId ? { 'data-testid': testId } : {}) }),
+      // Read-only views stay focusable (no editable:false) so keyboard selection,
+      // copy and Ctrl/⌘-F search work in them.
       EditorState.readOnly.of(readOnly),
-      EditorView.editable.of(!readOnly),
       wrap ? EditorView.lineWrapping : [],
       placeholder ? placeholderExt(placeholder) : [],
       keymap.of([...searchKeymap, ...foldKeymap, ...defaultKeymap]),
