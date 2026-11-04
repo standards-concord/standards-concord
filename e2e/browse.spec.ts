@@ -615,6 +615,96 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await viewer.close();
   });
 
+  test('a PNG matches the SVG drawn in a browser, for every kind of label', async ({ page }) => {
+    // Kerning and arrows, italics, an inherited attribute (a coloured arrow), a relationship,
+    // other scripts, right-to-left text, emoji (including a white circle, which has little
+    // contrast), a blank Hangul filler and a deprecated (struck through) class. (Not CJK: an SVG
+    // image can pick a different system font for it than the page, which the PNG follows.)
+    const attrs = [
+      { ...prop('AVATAR -> WAVE => Tokyo', { domain: [NS + 'Base'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' },
+      ...Array.from({ length: 12 }, (_, i) => ({ ...prop(`extra${i}`, { domain: [NS + 'Kid'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' })),
+    ];
+    await stub(
+      page,
+      [
+        { ...cls('Base', [], [{ property: NS + 'knows', kind: 'some', filler: NS + 'Kid' }]), label: 'Οργανισμός Организация Tổ chức' },
+        { ...cls('Kid', ['Base']), label: `مرحبا ${'i'.repeat(20)} ⚪ 👨‍👩‍👧 🇬🇧 \u3164 Café` },
+        { ...cls('Old'), label: 'Retired class', deprecated: true },
+      ],
+      [{ ...prop('knows'), label: 'knows' }],
+      attrs,
+    );
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(3);
+    const [svgText, pngFile] = [await exportSvg(page, d), await (async () => {
+      const download = page.waitForEvent('download');
+      await d.getByRole('button', { name: 'Download as PNG' }).click();
+      return readFileSync(await (await download).path()).toString('base64');
+    })()];
+    const viewer = await page.context().newPage();
+    const result = await viewer.evaluate(
+      async ({ svgText, png }) => {
+        const load = async (src: string) => {
+          const img = new Image();
+          img.src = src;
+          await img.decode();
+          return img;
+        };
+        const out = await load(`data:image/png;base64,${png}`);
+        const svg = await load(URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml' })));
+        // The SVG image's embedded fonts load after it decodes; give them time.
+        await new Promise((r) => setTimeout(r, 1500));
+        const pixels = (img: HTMLImageElement) => {
+          const c = document.createElement('canvas');
+          c.width = out.naturalWidth;
+          c.height = out.naturalHeight;
+          const ctx = c.getContext('2d')!;
+          ctx.drawImage(img, 0, 0, c.width, c.height);
+          return ctx.getImageData(0, 0, c.width, c.height).data;
+        };
+        const a = pixels(out);
+        const b = pixels(svg);
+        let ink = 0;
+        let differ = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          const da = Math.abs(a[i] - a[0]) + Math.abs(a[i + 1] - a[1]) + Math.abs(a[i + 2] - a[2]);
+          const db = Math.abs(b[i] - a[0]) + Math.abs(b[i + 1] - a[1]) + Math.abs(b[i + 2] - a[2]);
+          if (da > 60 || db > 60) ink++;
+          if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 120) differ++;
+        }
+        return { ink, differ, ratio: differ / ink };
+      },
+      { svgText, png: pngFile },
+    );
+    // About 1.5% of ink pixels differ, from glyphs placed a fraction of a pixel apart. A PNG
+    // drawn before the fonts load differs on most of them.
+    expect(result.ink).toBeGreaterThan(5000);
+    expect(result.ratio, JSON.stringify(result)).toBeLessThan(0.03);
+    await viewer.close();
+  });
+
+  test('a PNG of a large diagram is saved within the size budget', async ({ page }) => {
+    const classes = [];
+    const attrs = [];
+    for (let i = 0; i < 500; i++) {
+      classes.push(cls(`Class${i}`));
+      for (let j = 0; j < 12; j++) attrs.push({ ...prop(`attributeNumber${j}OfClass${i}`, { domain: [NS + `Class${i}`], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' });
+    }
+    await stub(page, classes, [], attrs);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    await page.getByRole('button', { name: /^Draw all \d+ classes anyway/ }).click();
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(500);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    const png = readFileSync(await (await download).path());
+    const [w, h] = [png.readUInt32BE(16), png.readUInt32BE(20)];
+    expect(Math.max(w, h)).toBeLessThanOrEqual(16_384);
+    expect(w * h).toBeLessThanOrEqual(64_000_000);
+    await expect(d.getByRole('alert')).toHaveCount(0);
+  });
+
   test('a PNG too large for the browser is saved smaller, and one it cannot make says so', async ({ page }) => {
     // A browser that can't allocate canvases above a given size (as large canvases fail on
     // memory-constrained devices), and then one that can't encode any PNG at all.
