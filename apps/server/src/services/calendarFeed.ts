@@ -18,6 +18,8 @@ export interface CalendarOccurrence {
   /** Lower-cased attendee emails. */
   attendees: string[];
   organizer?: string;
+  /** Who sent the invite on the organiser's behalf (ORGANIZER;SENT-BY), if anyone. */
+  sentBy?: string;
   recurring: boolean;
   /** The bot's own response to the invite, if the feed says (ACCEPTED, DECLINED, NEEDS-ACTION…). */
   attendeeStatus: Record<string, string>;
@@ -52,6 +54,7 @@ type Details = {
   attendees: string[];
   attendeeStatus: Record<string, string>;
   organizer?: string;
+  sentBy?: string;
   cancelled: boolean;
 };
 
@@ -72,6 +75,7 @@ function details(c: ICAL.Component): Details {
     attendees: Object.keys(attendeeStatus),
     attendeeStatus,
     organizer: email(c.getFirstPropertyValue('organizer')),
+    sentBy: email(c.getFirstProperty('organizer')?.getParameter('sent-by')),
     cancelled: str(c.getFirstPropertyValue('status')).toUpperCase() === 'CANCELLED',
   };
 }
@@ -86,22 +90,24 @@ function inherit(own: Details, series?: Details): Details {
     attendees: own.attendees.length ? own.attendees : series.attendees,
     attendeeStatus: own.attendees.length ? own.attendeeStatus : series.attendeeStatus,
     organizer: own.organizer ?? series.organizer,
+    sentBy: own.organizer ? own.sentBy : series.sentBy,
     cancelled: own.cancelled,
   };
 }
 
 const iso = (t: ICAL.Time) => t.toJSDate().toISOString();
 
-/** Occurrences that overlap [from, to). Cancelled occurrences and events without a start are left out. */
-export function parseOccurrences(ics: string, window: { from: Date; to: Date }): CalendarOccurrence[] {
+type Grouped = Map<string, { master?: ICAL.Event; exceptions: ICAL.Event[] }>;
+
+/** Masters and their modified instances (RECURRENCE-ID), grouped by UID. */
+function readEvents(ics: string): Grouped {
   const root = new ICAL.Component(ICAL.parse(ics));
   for (const tz of root.getAllSubcomponents('vtimezone')) {
     const tzid = str(tz.getFirstPropertyValue('tzid'));
     if (tzid && !ICAL.TimezoneService.has(tzid)) ICAL.TimezoneService.register(new ICAL.Timezone(tz));
   }
 
-  // Masters and their modified instances (RECURRENCE-ID), grouped by UID.
-  const byUid = new Map<string, { master?: ICAL.Event; exceptions: ICAL.Event[] }>();
+  const byUid: Grouped = new Map();
   for (const vevent of root.getAllSubcomponents('vevent')) {
     const ev = new ICAL.Event(vevent);
     if (!ev.uid || !ev.startDate) continue;
@@ -110,7 +116,27 @@ export function parseOccurrences(ics: string, window: { from: Date; to: Date }):
     else entry.master = ev;
     byUid.set(ev.uid, entry);
   }
+  return byUid;
+}
 
+/**
+ * What an invite cancels: whole events or series (by UID) and single weeks of a
+ * series (by occurrence key). A cancellation sent on its own lists no calls, so
+ * it is read separately from the occurrences.
+ */
+export function parseCancellations(ics: string): { uids: string[]; keys: string[] } {
+  const uids: string[] = [];
+  const keys: string[] = [];
+  for (const [uid, { master, exceptions }] of readEvents(ics)) {
+    if (master && details(master.component).cancelled) uids.push(uid);
+    for (const ex of exceptions) if (details(ex.component).cancelled) keys.push(`${uid}@${iso(ex.recurrenceId ?? ex.startDate)}`);
+  }
+  return { uids, keys };
+}
+
+/** Occurrences that overlap [from, to). Cancelled occurrences and events without a start are left out. */
+export function parseOccurrences(ics: string, window: { from: Date; to: Date }): CalendarOccurrence[] {
+  const byUid = readEvents(ics);
   const out: CalendarOccurrence[] = [];
   const from = window.from.getTime();
   const to = window.to.getTime();
@@ -130,6 +156,7 @@ export function parseOccurrences(ics: string, window: { from: Date; to: Date }):
       attendees: d.attendees,
       attendeeStatus: d.attendeeStatus,
       organizer: d.organizer,
+      sentBy: d.sentBy,
     });
   };
 

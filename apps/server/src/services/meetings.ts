@@ -11,7 +11,7 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
-import { recall } from './recall.js';
+import { BookingError, recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
@@ -35,14 +35,59 @@ export function mutateMeeting(id: string, change: (m: Meeting) => void): Promise
 /** Roles that can run a call: bring the bot in, skip or approve calls, post in its chat. */
 export const FACILITATOR_ROLES: Role[] = ['owner', 'steward', 'editor'];
 
-export function canFacilitate(m: Pick<Meeting, 'ontologyId' | 'createdBy'>, user: User | undefined) {
+/**
+ * Running a call (approving, skipping, chat posting, ending it) is for the
+ * ontology's owners, stewards and editors only. Having added the call, or
+ * having sent the invite, doesn't count: invites can come from anyone.
+ */
+export function canFacilitate(m: Pick<Meeting, 'ontologyId'>, user: User | undefined) {
   if (!user) return false;
-  return !!user.isPlatformAdmin || m.createdBy === user.id || rolesFor(m.ontologyId, user.id).some((r) => FACILITATOR_ROLES.includes(r));
+  return !!user.isPlatformAdmin || config.adminEmails.includes(user.email?.toLowerCase() ?? '') || rolesFor(m.ontologyId, user.id).some((r) => FACILITATOR_ROLES.includes(r));
 }
 
-export function requireFacilitator(m: Meeting, user: User | undefined, action: string) {
+export function requireFacilitator(m: Pick<Meeting, 'ontologyId'>, user: User | undefined, action: string) {
   if (!user) throw new HttpError(401, 'Sign in first');
-  if (!canFacilitate(m, user)) throw new HttpError(403, `Only the person who added this call, or the ontology's owners, stewards and editors, can ${action}`);
+  if (!canFacilitate(m, user)) throw new HttpError(403, `Only the ontology's owners, stewards and editors can ${action}`);
+}
+
+/** Analysing (or re-analysing) a call: facilitators, or whoever uploaded the transcript or ran the simulation. */
+export function requireAnalyst(m: Meeting, user: User | undefined) {
+  if (!user) throw new HttpError(401, 'Sign in first');
+  const own = m.createdBy === user.id && (m.source === 'upload' || m.source === 'simulation');
+  if (!own && !canFacilitate(m, user)) throw new HttpError(403, "Only the ontology's owners, stewards and editors can analyse this call");
+}
+
+/** Whether a bot is still in (or on its way into) the call. */
+export const botActive = (m: Meeting) => !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
+
+/**
+ * What a signed-in person may see of a meeting. Invites waiting for approval are
+ * for facilitators only, and so are the call's Meet link, organiser and bot id.
+ */
+export function visibleMeeting(m: Meeting, user: User | undefined): Meeting | undefined {
+  if (canFacilitate(m, user)) return m;
+  if (m.calendar?.approval === 'pending') return undefined;
+  const { meetingUrl: _url, ...rest } = m;
+  return {
+    ...rest,
+    bot: m.bot && { ...m.bot, botId: undefined },
+    calendar: m.calendar && { ...m.calendar, organizer: undefined, sentBy: undefined, uid: undefined, key: '' },
+  };
+}
+
+/* Series approval: one approval covers every week of a series, while its organiser and Meet link stay the same. */
+
+type SeriesApproval = { id: string; organizer?: string; meetingUrl?: string; approvedBy: string; at: string };
+const approvalKey = (ontologyId: string, uid: string) => `meet-bot:approval:${ontologyId}:${uid}`;
+
+export function seriesApproved(ontologyId: string, uid: string | undefined, organizer: string | undefined, meetingUrl: string | undefined) {
+  if (!uid) return undefined;
+  const a = get<SeriesApproval>('kv', approvalKey(ontologyId, uid));
+  return a && a.organizer === organizer && a.meetingUrl === meetingUrl ? a : undefined;
+}
+
+export function recordSeriesApproval(ontologyId: string, uid: string | undefined, organizer: string | undefined, meetingUrl: string | undefined, userId: string) {
+  if (uid) put('kv', { id: approvalKey(ontologyId, uid), organizer, meetingUrl, approvedBy: userId, at: clock.iso() });
 }
 
 /** Live updates for the meeting page (SSE). */
@@ -128,6 +173,8 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 /* ------------------------------------------------------------------------ */
 
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
+  m = getMeeting(m.id);
+  if (botActive(m)) throw new HttpError(409, 'The bot is still in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = getProject(m.ontologyId);
   m = await mutateMeeting(m.id, (x) => {
@@ -282,7 +329,11 @@ export async function onLiveLine(meetingId: string, line: TranscriptLine, opts: 
     index = x.facilitatorPrompts.push(entry) - 1;
   });
   emit(fresh, { type: 'prompt', prompt: entry });
-  if (fresh.postPromptsToChat) await postPrompt(meetingId, index, { quiet: true });
+  // A notice about chat posting that failed earlier is retried first. Prompts go
+  // into the chat automatically only once the call has been told they will.
+  await announceChatMode(meetingId).catch(() => undefined);
+  const now = getMeeting(meetingId);
+  if (now.postPromptsToChat && (now.source === 'simulation' || now.chatModeAnnounced)) await postPrompt(meetingId, index, { quiet: true });
 }
 
 /** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
@@ -339,10 +390,13 @@ export async function announceChatMode(meetingId: string) {
       ? `${config.meetBot.botName}: from now on I'll post follow-up questions here in the chat.`
       : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
   );
-  if (r.ok)
-    await mutateMeeting(meetingId, (x) => {
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    if (r.ok) {
       x.chatModeAnnounced = want;
-    });
+      delete x.chatNoticeError;
+    } else x.chatNoticeError = `Couldn’t tell the call that posting is now ${want ? 'on' : 'off'} (${r.error}). Concord will try again${want ? ', and holds back automatic posts until it has' : ''}.`;
+  });
+  emit(fresh, { type: 'meeting', meeting: fresh });
 }
 
 /** Meeting options facilitators can change before or during a call. Every change is logged. */
@@ -363,7 +417,9 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
     if (patch.approve && m.calendar!.approval === 'pending') {
       m.calendar!.approval = 'approved';
       m.calendar!.approvedBy = user.id;
-      changes.push('approved the co-lead bot joining');
+      delete m.calendar!.approvalNote;
+      recordSeriesApproval(m.ontologyId, m.calendar!.uid, m.calendar!.organizer, m.meetingUrl, user.id);
+      changes.push(m.calendar!.recurring ? 'approved the co-lead bot joining the series' : 'approved the co-lead bot joining');
     }
     if (patch.skip !== undefined && patch.skip !== !!m.calendar!.skip) {
       // A bot already booked for this call is cancelled first; if that fails, nothing changes.
@@ -379,6 +435,19 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
   });
   for (const c of changes) logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} “${m.title}”`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   emit(m, { type: 'meeting', meeting: m });
+  // The other weeks of an approved series, with the same organiser and Meet link, are approved too.
+  if (patch.approve && m.calendar?.uid) {
+    for (const other of list<Meeting>('meetings', m.ontologyId)) {
+      if (other.id === m.id || other.calendar?.uid !== m.calendar.uid || other.calendar.approval !== 'pending') continue;
+      if (!seriesApproved(m.ontologyId, other.calendar.uid, other.calendar.organizer, other.meetingUrl)) continue;
+      const o = await mutateMeeting(other.id, (x) => {
+        x.calendar!.approval = 'approved';
+        x.calendar!.approvedBy = user.id;
+        delete x.calendar!.approvalNote;
+      });
+      emit(o, { type: 'meeting', meeting: o });
+    }
+  }
   if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
   return getMeeting(meetingId);
 }
@@ -440,6 +509,7 @@ export async function dispatchBot(m: Meeting, joinAt?: string): Promise<NonNulla
   }
   try {
     const bot = await recall.createBot({
+      meetingId: m.id,
       meetingUrl: m.meetingUrl!,
       joinAt,
       postPromptsToChat: !!m.postPromptsToChat,
@@ -447,8 +517,25 @@ export async function dispatchBot(m: Meeting, joinAt?: string): Promise<NonNulla
     });
     return { provider: 'recall', botId: bot.id, status: 'joining' };
   } catch (err) {
-    return { provider: 'recall', status: 'error', error: (err as Error).message };
+    const uncertain = err instanceof BookingError && err.uncertain;
+    return { provider: 'recall', status: 'error', error: (err as Error).message, uncertain: uncertain || undefined };
   }
+}
+
+/**
+ * After a booking whose answer was lost: adopts the bot if Recall.ai did create
+ * it (cancelling any duplicates), so it isn't booked twice. Undefined when
+ * Recall.ai can't be asked yet; an empty object when there is no bot.
+ */
+export async function findLostBooking(m: Meeting): Promise<{ botId?: string } | undefined> {
+  let ids: string[];
+  try {
+    ids = await recall.findBots(m.meetingUrl!, m.id);
+  } catch {
+    return undefined;
+  }
+  for (const extra of ids.slice(1)) await recall.cancelBot(extra);
+  return { botId: ids[0] };
 }
 
 export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string, opts: { postPromptsToChat?: boolean } = {}) {
@@ -459,10 +546,13 @@ export async function inviteBot(project: OntologyProject, user: User, title: str
     bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' },
     chatModeAnnounced: !!opts.postPromptsToChat,
   });
-  m.bot = await dispatchBot(m);
-  save(m);
+  const bot = await dispatchBot(m);
+  // A transcript can arrive before Recall.ai answers: change only the bot, on the latest copy.
+  const fresh = await mutateMeeting(m.id, (x) => {
+    x.bot = x.bot?.status === 'in-call' && bot.botId ? { ...bot, status: 'in-call' } : bot;
+  });
   logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
-  return m;
+  return fresh;
 }
 
 /** Recall.ai real-time transcript webhook. */
@@ -470,8 +560,23 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   const stored = get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`);
   if (!stored || stored.secret !== secret) throw new HttpError(401, 'Bad webhook secret');
   const m = getMeeting(meetingId);
-  const evt = body as { event?: string; data?: { data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } } };
+  const evt = body as {
+    event?: string;
+    data?: { bot?: { id?: string }; data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } };
+  };
   if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
+    const fromBot = evt.data.bot?.id;
+    // A bot that should not be in this call (skipped, cancelled, unapproved, replaced or ended) is told to leave, and what it hears is dropped.
+    const unwanted =
+      (!!fromBot && !!m.bot?.botId && fromBot !== m.bot.botId) ||
+      !!m.bot?.leaving ||
+      m.bot?.status === 'done' ||
+      (!!m.calendar && (!!m.calendar.cancelPending || !!m.calendar.skip || m.calendar.approval === 'pending'));
+    if (unwanted) {
+      const id = fromBot ?? m.bot?.botId;
+      if (id && recall.enabled()) void recall.cancelBot(id);
+      return;
+    }
     const words = evt.data.data.words;
     let joined = false;
     if (m.bot?.status !== 'in-call' || m.status === 'scheduled')
@@ -485,15 +590,30 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   }
 }
 
+/**
+ * Takes the bot out of the call, then analyses the transcript. If Recall.ai won't
+ * remove the bot, the call stays open (marked as leaving, retried every minute)
+ * and this throws, rather than say the call ended while the bot is still in it.
+ */
 export async function endLiveMeeting(meetingId: string) {
+  let error: string | undefined;
   const m = await meetingLock(meetingId, async () => {
     const m = getMeeting(meetingId);
-    if (m.bot?.provider === 'recall' && m.bot.botId && m.bot.status !== 'done') await recall.leave(m.bot.botId);
-    if (m.bot) m.bot.status = 'done';
+    if (m.bot?.provider === 'recall' && m.bot.botId && m.bot.status !== 'done') {
+      const r = await recall.leave(m.bot.botId);
+      if (!r.ok) {
+        error = r.error;
+        m.bot = { ...m.bot, leaving: true, error: r.error };
+        return save(m);
+      }
+    }
+    if (m.bot) m.bot = { ...m.bot, status: 'done', leaving: undefined, error: undefined };
     return save(m);
   });
+  emit(m, { type: 'meeting', meeting: m });
+  if (error) throw new HttpError(502, `${error} Concord will keep trying; the call is analysed once the bot has left.`);
   emit(m, { type: 'status', status: m.status, bot: m.bot });
-  return m.transcript.length ? analyseMeeting(m) : m;
+  return m.transcript.length && m.status !== 'analysed' ? analyseMeeting(m) : m;
 }
 
 /* ------------------------------------------------------------------------ */

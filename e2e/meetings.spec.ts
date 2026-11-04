@@ -109,6 +109,9 @@ test.describe('Meet co-lead bot', () => {
     const row = page.getByRole('listitem').filter({ hasText: 'E2E use case workshop' });
     await expect(row).toBeVisible();
     await expect(upcoming).toBeVisible();
+    // An invite can't prove who sent it, so a facilitator approves it first.
+    await expect(row.getByText('Needs approval')).toBeVisible();
+    await row.getByRole('button', { name: 'Approve' }).click();
     // No Recall.ai key in these tests: the row says so, separately from the switch.
     await expect(row.getByText('No bot provider on this server')).toBeVisible();
     await expect(row.getByRole('switch', { name: /^Bot joins “E2E use case workshop” on / })).toHaveAttribute('aria-checked', 'true');
@@ -148,7 +151,7 @@ test.describe('Meet co-lead bot', () => {
     await expect(page.getByText('E2E use case workshop')).toHaveCount(0);
   });
 
-  test('an invite from someone who isn’t a facilitator waits for approval', async ({ page, request }) => {
+  test('an invite from anyone waits for a facilitator’s approval', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await writeBotCalendar(page.request, invite({ uid: 'e2e-stranger', title: 'E2E stranger’s call', start: inHours(4), organizer: 'stranger@elsewhere.test', description: '#volunteering' }));
     await page.goto(`/o/${demo.id}/meetings`);
@@ -263,6 +266,16 @@ test.describe('Meet co-lead bot', () => {
     // Choose a file or paste text first; only that input shows.
     await expect(dialog.getByLabel('Transcript file')).toBeVisible();
     await expect(dialog.getByRole('textbox', { name: 'Transcript' })).toHaveCount(0);
+    // The choice is a radio group: one tab stop, arrow keys move between options.
+    const fromFile = dialog.getByRole('radio', { name: 'From a file' });
+    await expect(fromFile).toHaveAttribute('tabindex', '0');
+    await expect(dialog.getByRole('radio', { name: 'Paste text' })).toHaveAttribute('tabindex', '-1');
+    await fromFile.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(dialog.getByRole('radio', { name: 'Paste text' })).toHaveAttribute('aria-checked', 'true');
+    await expect(dialog.getByRole('radio', { name: 'Paste text' })).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(fromFile).toHaveAttribute('aria-checked', 'true');
     await dialog.getByRole('radio', { name: 'Paste text' }).click();
     await expect(dialog.getByLabel('Transcript file')).toHaveCount(0);
     await dialog.getByRole('textbox', { name: 'Transcript' }).fill('Priya: Which shifts need a DBS check?\nTom: The Saturday ones.');
@@ -286,6 +299,9 @@ test.describe('Meet co-lead bot, as a contributor', () => {
     // A steward puts a call on the bot's calendar first.
     await signIn(page, { name: 'E2E steward', role: 'steward' });
     await writeBotCalendar(page.request, invite({ uid: 'e2e-contrib', title: 'E2E contributor view', start: inHours(5), description: '#volunteering' }));
+    const meetingsNow = (await (await page.request.get(`/api/ontologies/${demo.id}/meetings`)).json()) as { id: string; title: string }[];
+    const pending = meetingsNow.find((m) => m.title === 'E2E contributor view')!;
+    expect((await page.request.patch(`/api/meetings/${pending.id}`, { data: { approve: true } })).ok()).toBeTruthy();
     await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E contributor list', delayMs: 0 } });
 
     await signIn(page, { name: 'E2E contributor', role: 'contributor' });

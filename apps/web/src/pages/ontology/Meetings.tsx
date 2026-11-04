@@ -119,11 +119,12 @@ export function plusAddress(email: string, slug: string) {
 
 type BotMode = 'email' | 'link' | 'ics';
 
-/** Facilitators (owners, stewards, editors) and whoever added a call can run it. */
+/** Facilitators (owners, stewards, editors) run calls. */
 export function useCanFacilitate() {
   const { hasRole } = useOntology();
   const { session } = useSession();
-  return (m?: Pick<Meeting, 'createdBy'>) => hasRole('owner', 'steward', 'editor') || (!!m && m.createdBy === session?.user?.id);
+  // Only the ontology's owners, stewards and editors run calls (the server checks the same).
+  return (_m?: Pick<Meeting, 'ontologyId'>) => !!session?.user?.isPlatformAdmin || hasRole('owner', 'steward', 'editor');
 }
 
 export function ChatToggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
@@ -147,7 +148,7 @@ function BotDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  onScheduled: () => void;
+  onScheduled: (notice?: string) => void;
   bot?: MeetBotInfo;
   ontology: { id: string; slug: string; title: string };
 }) {
@@ -166,10 +167,10 @@ function BotDialog({
     nav(`/o/${id}/meetings/${m.id}`);
   });
   const schedule = useAction(async () => {
-    const ms = await api.scheduleFromInvite(id, ics, postToChat);
+    const { meetings: ms, cancelled } = await api.scheduleFromInvite(id, ics, postToChat);
     onClose();
-    if (ms.length === 1) nav(`/o/${id}/meetings/${ms[0].id}`);
-    else onScheduled();
+    if (ms.length === 1 && !cancelled) nav(`/o/${id}/meetings/${ms[0].id}`);
+    else onScheduled(cancelled ? `The bot won’t join ${cancelled === 1 ? 'the cancelled call' : `the ${cancelled} cancelled calls`}.` : undefined);
   });
   const preview = ics ? icsPreview(ics) : undefined;
   return (
@@ -222,7 +223,7 @@ function BotDialog({
               </div>
               <ul className="list-disc space-y-1 pl-5 text-xs text-muted">
                 <li>Concord checks the bot’s calendar every minute; Google can take a few minutes to pass on a new or changed invite. Calls show under Upcoming calls here.</li>
-                <li>Invites from this ontology’s owners, stewards and editors are booked automatically. Anyone else’s wait for one of them to approve.</li>
+                <li>An invite can’t prove who sent it, so each new invite waits for one of this ontology’s owners, stewards or editors to approve it, once for a whole series.</li>
                 <li>Moving or cancelling the invite moves or cancels the bot. The host may need to admit it when it arrives.</li>
                 <li>
                   Alternatively, invite <code className="font-mono">{plusAddress(bot.inviteEmail, ontology.slug)}</code> instead of using the tag (check it reaches the bot with your calendar first).
@@ -292,17 +293,20 @@ function BotDialog({
 function icsPreview(ics: string) {
   const summary = ics.match(/^SUMMARY:(.*)$/m)?.[1]?.trim();
   const weekly = /^RRULE:/m.test(ics);
-  if (!summary) return undefined;
-  return `“${summary}”${weekly ? ', a recurring series' : ''}`;
+  const cancelled = /^STATUS:CANCELLED/m.test(ics) || /^METHOD:CANCEL/m.test(ics);
+  if (!summary) return cancelled ? 'a cancellation' : undefined;
+  return `“${summary}”${weekly ? ', a recurring series' : ''}${cancelled ? ' (includes a cancellation)' : ''}`;
 }
 
 /** Where the bot stands for one upcoming call: what will happen, separate from the switch saying what should. */
 function BookingState({ m }: { m: Meeting }) {
-  if (m.calendar?.approval === 'pending') return <Badge tone="warn">Needs approval</Badge>;
+  if (m.calendar?.approval === 'pending') return <Badge tone="warn" title={m.calendar.approvalNote}>{m.calendar.approvalNote ? 'Needs approval again' : 'Needs approval'}</Badge>;
   if (m.calendar?.skip) return <Badge tone="neutral">Skipping</Badge>;
   if (m.calendar?.cancelPending) return <Badge tone="danger">Cancelling the bot failed; retrying</Badge>;
   if (m.bot?.provider === 'simulated') return <Badge tone="neutral" title={m.bot.error}>No bot provider on this server</Badge>;
+  if (m.bot?.botId && m.bot.error) return <Badge tone="danger" title={m.bot.error}>Cancelling the bot failed; retrying</Badge>;
   if (m.bot?.botId) return <Badge tone="ok">Bot booked</Badge>;
+  if (m.bot?.uncertain) return <Badge tone="warn" title={m.bot.error}>Checking an unconfirmed booking</Badge>;
   if (m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Booking failed; retrying</Badge>;
   return <Badge tone="outline">Books 15 min before</Badge>;
 }
@@ -323,7 +327,7 @@ function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: (
         title="Upcoming calls"
         subtitle={
           <>
-            From calendar invites. The bot joins each one when it starts.
+            From calendar invites. The bot joins each approved call when it starts; a facilitator approves each new invite once, for the whole series.
             {bot?.lastSync && <> Calendar {bot.lastSync.ok ? 'checked' : 'check failed'} {relativeTime(bot.lastSync.at, now())}.</>}
           </>
         }
@@ -344,8 +348,9 @@ function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: (
                       · <Repeat className="size-3" /> part of a series
                     </>
                   )}
-                  {m.calendar?.organizer && <> · from {m.calendar.organizer}</>}
+                  {m.calendar?.organizer && <> · organiser: {m.calendar.organizer}</>}
                 </div>
+                {m.calendar?.approvalNote && <div className="text-xs text-warn">{m.calendar.approvalNote}</div>}
               </Link>
               <BookingState m={m} />
               {mine && m.calendar?.approval === 'pending' && (
@@ -378,6 +383,7 @@ export function MeetingsTab() {
   const upcoming = (list.data ?? []).filter((m) => m.status === 'scheduled').sort((a, b) => (a.calendar?.start ?? '').localeCompare(b.calendar?.start ?? ''));
   const past = (list.data ?? []).filter((m) => m.status !== 'scheduled');
   const [dialog, setDialog] = useState<'upload' | 'bot'>();
+  const [notice, setNotice] = useState<string>();
   const simulate = useAction(async () => {
     const m = await api.simulateMeeting(id, 'Simulated working-group call');
     nav(`/o/${id}/meetings/${m.id}`);
@@ -441,6 +447,11 @@ export function MeetingsTab() {
       </div>
       )}
       <InlineError error={simulate.error} />
+      {notice && (
+        <p role="status" className="mb-4 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm">
+          {notice}
+        </p>
+      )}
       <UpcomingCalls calls={upcoming} onChange={() => void list.reload()} bot={bot} />
       {list.error && !list.data ? (
         <ErrorCard error={list.error} onRetry={list.reload} />
@@ -473,7 +484,10 @@ export function MeetingsTab() {
         </Card>
       )}
       <UploadDialog open={dialog === 'upload'} onClose={() => setDialog(undefined)} />
-      {dialog === 'bot' && <BotDialog open onClose={() => setDialog(undefined)} onScheduled={() => void list.reload()} bot={bot} ontology={ontology} />}
+      {dialog === 'bot' && <BotDialog open onClose={() => setDialog(undefined)} onScheduled={(n) => {
+            setNotice(n);
+            void list.reload();
+          }} bot={bot} ontology={ontology} />}
     </div>
   );
 }

@@ -62,7 +62,7 @@ Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search
 | --- | --- |
 | Sign in with Google / GitHub | `GOOGLE_CLIENT_ID/SECRET`, `GITHUB_CLIENT_ID/SECRET` |
 | Solid pods for private data | `SOLID_SERVER_URL` (Community Solid Server v7+) |
-| Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. Add `MEET_BOT_EMAIL`, `MEET_BOT_ICS_URL` and `MEET_BOT_ALLOWED_INVITERS` so inviting the bot's address to a call (or a recurring series) brings it in: [docs/meet-bot.md](docs/meet-bot.md). |
+| Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. Add `MEET_BOT_EMAIL` and `MEET_BOT_ICS_URL` so inviting the bot's address to a call (or a recurring series) brings it in: [docs/meet-bot.md](docs/meet-bot.md). |
 | Publish releases to GitHub | `GITHUB_PUBLISH_TOKEN`, and set the repository on the ontology |
 | Voice input on Firefox | `STT_PROVIDER=openai`, `OPENAI_API_KEY` |
 

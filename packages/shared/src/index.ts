@@ -352,16 +352,21 @@ export interface MeetingCalendarInfo {
   start: string;
   end: string;
   organizer?: string;
+  /** ORGANIZER;SENT-BY: someone who sent the invite on the organiser's behalf. */
+  sentBy?: string;
   /** True for one occurrence of a recurring series. */
   recurring: boolean;
   /** Set when someone told the bot to stay out of this occurrence. */
   skip?: boolean;
   /**
-   * 'pending' when the invite came from someone who isn't a facilitator of the
-   * ontology (or on the allow-list): no bot is booked until a facilitator approves.
+   * No bot is booked until a facilitator of the ontology approves the call. Approval
+   * covers a whole series, for as long as its organiser and Meet link stay the same;
+   * if either changes, the call needs approving again.
    */
   approval?: 'approved' | 'pending';
   approvedBy?: string;
+  /** Why the call needs approving again, when it was approved before. */
+  approvalNote?: string;
   /** The call left the calendar but cancelling its booked bot failed; retried every minute. */
   cancelPending?: boolean;
 }
@@ -373,13 +378,24 @@ export interface Meeting {
   source: 'upload' | 'google-meet-bot' | 'calendar-invite' | 'simulation' | 'google-drive';
   /** Google Meet URL when a bot was invited. */
   meetingUrl?: string;
-  bot?: { provider: 'recall' | 'simulated'; botId?: string; status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error'; error?: string };
+  bot?: {
+    provider: 'recall' | 'simulated';
+    botId?: string;
+    status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error';
+    error?: string;
+    /** A booking request whose answer was lost: Recall.ai is checked for the bot before booking again. */
+    uncertain?: boolean;
+    /** Someone ended the call but the bot couldn't be removed yet; retried every minute. */
+    leaving?: boolean;
+  };
   /** Set for calls the bot was invited to through its calendar address. */
   calendar?: MeetingCalendarInfo;
   /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */
   postPromptsToChat?: boolean;
   /** What the bot last told the call about posting in its chat (its join message, or a later notice). */
   chatModeAnnounced?: boolean;
+  /** The last notice about chat posting couldn't be sent; it is retried as the call goes on. */
+  chatNoticeError?: string;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
   facilitatorPrompts: FacilitatorPrompt[];
@@ -717,13 +733,13 @@ export interface SessionInfo {
  *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
  *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl, postPromptsToChat?} -> Meeting   (invites the co-lead bot)
- *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> Meeting[]   (schedules the bot from a calendar invite)
+ *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> {meetings: Meeting[]; cancelled: number}   (imports a calendar invite or its cancellation)
  *  GET  /api/meet-bot                                -> MeetBotInfo
  *  POST /api/meet-bot/sync                           -> MeetBotInfo   (re-read the bot's calendar now)
- *  PATCH /api/meetings/:id {postPromptsToChat?, skip?} -> Meeting
+ *  PATCH /api/meetings/:id {postPromptsToChat?, skip?, approve?} -> Meeting   (owners, stewards and editors)
  *  POST /api/meetings/:id/prompts/:index/post        -> Meeting   (post one prompt into the meeting chat)
  *  POST /api/ontologies/:id/meetings/simulate {title} -> Meeting           (replays a scripted call live)
- *  GET  /api/meetings/:id                            -> Meeting
+ *  GET  /api/meetings/:id                            -> Meeting   (signed in; Meet link and organiser only for facilitators)
  *  POST /api/meetings/:id/analyse                    -> Meeting
  *  POST /api/meetings/:id/propose                    -> { useCases: UseCase[]; changeRequest?: ChangeRequest }
  *  GET  /api/meetings/:id/stream                     -> text/event-stream of {type:'line'|'prompt'|'status', ...}

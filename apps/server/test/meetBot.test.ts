@@ -10,9 +10,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
 import { list, openDb, remove } from '../src/db.js';
-import { parseOccurrences } from '../src/services/calendarFeed.js';
+import { parseCancellations, parseOccurrences } from '../src/services/calendarFeed.js';
+import { findProject, setRoles } from '../src/services/ontologies.js';
+import { createUser } from '../src/services/users.js';
 import { dispatchDue, meetBotInfo, routeOccurrence, sanitise, syncCalendar } from '../src/services/meetBot.js';
-import { getMeeting, recallWebhook } from '../src/services/meetings.js';
+import { canFacilitate, getMeeting, recallWebhook } from '../src/services/meetings.js';
 import { chatText } from '../src/services/recall.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { calendar, oneOff, weeklySeries } from './fixtures/invites.js';
@@ -25,7 +27,9 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0 };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false };
+/** Bots the stand-in has created, for listing and status. */
+const bots = new Map<string, { id: string; meeting_url: string; metadata?: Record<string, string>; status_changes: { code: string }[] }>();
 
 beforeAll(async () => {
   openDb();
@@ -41,9 +45,24 @@ beforeAll(async () => {
           res.statusCode = status;
           res.end(body);
         }, delay);
-      if (req.method === 'POST' && req.url === '/bot/') return reply(201, JSON.stringify({ id: `bot-${++nextBot}` }), stubMode.botDelayMs);
+      if (req.method === 'POST' && req.url === '/bot/') {
+        const body = JSON.parse(raw) as { meeting_url: string; metadata?: Record<string, string> };
+        const bot = { id: `bot-${++nextBot}`, meeting_url: body.meeting_url, metadata: body.metadata, status_changes: [{ code: 'ready' }] };
+        bots.set(bot.id, bot);
+        // Recall.ai took the booking, but the answer never arrives.
+        if (stubMode.dropCreate) return void res.destroy();
+        return reply(201, JSON.stringify({ id: bot.id }), stubMode.botDelayMs);
+      }
+      if (req.method === 'GET' && req.url?.startsWith('/bot/?')) {
+        const url = new URL(req.url, 'http://x').searchParams.get('meeting_url');
+        return reply(200, JSON.stringify({ next: null, results: [...bots.values()].filter((b) => b.meeting_url === url) }));
+      }
+      const own = req.url?.match(/^\/bot\/(bot-\d+)\/$/);
+      if (req.method === 'GET' && own) return reply(bots.has(own[1]) ? 200 : 404, JSON.stringify(bots.get(own[1]) ?? {}));
       if (stubMode.failCancel && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}');
-      if (req.url?.includes('send_chat_message')) return reply(200, '{}', stubMode.chatDelayMs);
+      if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : reply(200, '{}', stubMode.chatDelayMs);
+      const done = req.url?.match(/^\/bot\/(bot-\d+)\/(?:leave_call\/)?$/);
+      if (done && (req.method === 'DELETE' || req.method === 'POST')) bots.get(done[1])?.status_changes.push({ code: 'done' });
       if (req.url?.includes('private-')) return reply(404, 'Not found');
       reply(200, '{}');
     });
@@ -61,7 +80,8 @@ afterAll(() => {
 
 beforeEach(() => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0 });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false });
+  config.meetBot.trustOrganizer = false;
   for (const m of list<Meeting>('meetings')) if (m.source === 'calendar-invite') remove('meetings', m.id);
 });
 
@@ -141,16 +161,26 @@ describe('invite-by-email', () => {
   let feed: string;
   const writeFeed = (...events: string[]) => fs.writeFileSync(feed, calendar(...events));
 
-  beforeAll(() => {
+  beforeAll(async () => {
     feed = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-cal-')), 'bot.ics');
     config.meetBot.calendarIcsUrl = pathToFileURL(feed).href;
     config.meetBot.recallApiKey = 'test-key';
+    // The fixtures' organisers are stewards of the demo ontology, with accounts under those emails.
+    for (const email of ['tom@example.org', 'priya@example.org']) {
+      const u = await createUser({ name: email, email, provider: 'demo', subject: `test-${email}` });
+      setRoles(findProject('volunteering')!.id, u.id, ['steward']);
+    }
   });
   beforeEach(() => {
     config.meetBot.calendarIcsUrl = pathToFileURL(feed).href;
-    // Organisers at example.org may book the bot; tests of approval clear this.
-    config.meetBot.allowedInviters = ['@example.org'];
+    // Most tests are about booking, so they trust organisers; the approval tests switch this off.
+    config.meetBot.trustOrganizer = true;
   });
+  const steward = async (name: string) => {
+    const agent = request.agent(app);
+    const r = await agent.post('/api/auth/demo').send({ name, role: 'steward' });
+    return Object.assign(agent, { userId: r.body.user.id as string });
+  };
 
   const calendarMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite');
 
@@ -257,7 +287,6 @@ describe('invite-by-email', () => {
   });
 
   it('holds invites from people who aren’t facilitators until one approves, and ignores invites the bot isn’t on or declined', async () => {
-    config.meetBot.allowedInviters = [];
     writeFeed(
       oneOff({ uid: 'stranger', organizer: 'stranger@elsewhere.test', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }),
       oneOff({ uid: 'declined', partstat: 'DECLINED', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }),
@@ -366,7 +395,7 @@ describe('invite-by-email', () => {
     const got = await scheduleFromInvite(getProject(m.ontologyId), { id: 'u', name: 'x' } as never, calendar(oneOff({ uid: 'shared-1', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' })), {
       now: at('2026-11-09T10:00:00Z'),
     });
-    expect(got.map((x) => x.id)).toEqual([m.id]);
+    expect(got.meetings.map((x) => x.id)).toEqual([m.id]);
     expect(calendarMeetings()).toHaveLength(1);
   });
 
@@ -381,6 +410,204 @@ describe('invite-by-email', () => {
     expect(JSON.stringify(info)).not.toMatch(/s3cr3t/);
     expect(JSON.stringify(meetBotInfo())).not.toMatch(/s3cr3t/);
     expect(info.lastSync.error).toMatch(/not a valid address/);
+  });
+
+  /* ----- Fixes from the second review ----- */
+
+  const secretOf = (id: string) => list<{ id: string; secret: string }>('kv').find((k) => k.id === `meeting-secret:${id}`)!.secret;
+  const line = (id: string, text: string, botId?: string) =>
+    recallWebhook(id, secretOf(id), { event: 'transcript.data', data: { ...(botId ? { bot: { id: botId } } : {}), data: { participant: { name: 'Aisha Rahman' }, words: [{ text }] } } });
+  /** A one-off call at 15:00 on 10 November, with its bot booked and in the call. */
+  const liveCall = async () => {
+    writeFeed(oneOff({ uid: 'live-1', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    const [m] = calendarMeetings();
+    await line(m.id, 'Hello everyone.', getMeeting(m.id).bot!.botId);
+    return getMeeting(m.id);
+  };
+
+  it('by default every invite waits for approval; one approval covers the series, until its Meet link changes', async () => {
+    config.meetBot.trustOrganizer = false;
+    writeFeed(weeklySeries({ description: '#volunteering' }));
+    await syncCalendar(at('2026-11-02T09:00:00Z'));
+    let weeks = calendarMeetings();
+    expect(weeks.map((w) => w.calendar!.approval)).toEqual(['pending', 'pending']);
+    // Organised by a steward, but the invite can't prove that, so nothing is booked.
+    await dispatchDue(at('2026-11-03T09:50:00Z'));
+    expect(calls.filter((c) => c.url === '/bot/')).toEqual([]);
+
+    const s = await steward('Steward Ava');
+    expect((await s.patch(`/api/meetings/${weeks[0].id}`).send({ approve: true })).status).toBe(200);
+    weeks = calendarMeetings();
+    expect(weeks.map((w) => w.calendar!.approval)).toEqual(['approved', 'approved']);
+    // Weeks that turn up later are covered too.
+    await syncCalendar(at('2026-11-16T09:00:00Z'));
+    const moved = calendarMeetings().find((w) => w.calendar!.start === '2026-11-24T14:00:00.000Z')!;
+    expect(moved.calendar!.approval).toBe('approved');
+    await dispatchDue(at('2026-11-24T13:46:00Z'));
+    const botId = getMeeting(moved.id).bot!.botId!;
+    expect(botId).toBeTruthy();
+
+    // The Meet link changes: the booking is cancelled and the call needs approving again.
+    calls.length = 0;
+    writeFeed(weeklySeries({ description: '#volunteering', meet: 'https://meet.google.com/new-linx-abc' }));
+    await syncCalendar(at('2026-11-24T13:50:00Z'));
+    const after = getMeeting(moved.id);
+    expect(after.calendar).toMatchObject({ approval: 'pending', approvalNote: expect.stringMatching(/Meet link changed/) });
+    expect(after.bot?.botId).toBeUndefined();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${botId}/` }));
+    await dispatchDue(at('2026-11-24T13:55:00Z'));
+    expect(calls.filter((c) => c.url === '/bot/')).toEqual([]);
+  });
+
+  it('trusting organisers still holds forwarded invites, non-members’ invites, and a changed organiser', async () => {
+    const olive = await createUser({ name: 'Olive', email: 'olive@elsewhere.test', provider: 'demo', subject: 'test-olive' });
+    writeFeed(
+      oneOff({ uid: 'fwd', sentBy: 'mallory@elsewhere.test', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }),
+      oneOff({ uid: 'olive', organizer: 'olive@elsewhere.test', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }),
+      oneOff({ uid: 'tom', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }),
+    );
+    await syncCalendar(at('2026-11-09T09:00:00Z'));
+    const byUid = (uid: string) => calendarMeetings().find((m) => m.calendar!.uid === uid)!;
+    expect(byUid('fwd').calendar).toMatchObject({ approval: 'pending', sentBy: 'mallory@elsewhere.test' });
+    expect(byUid('olive').calendar!.approval).toBe('pending');
+    // Organising the call gives Olive no say over it.
+    expect(byUid('olive').createdBy).toBe('calendar');
+    expect(canFacilitate(byUid('olive'), olive)).toBe(false);
+    expect(byUid('tom').calendar!.approval).toBe('approved');
+
+    // Tom's call is taken over by someone else: it needs approving again.
+    writeFeed(oneOff({ uid: 'tom', organizer: 'mallory@elsewhere.test', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-09T09:01:00Z'));
+    expect(byUid('tom').calendar).toMatchObject({ approval: 'pending', approvalNote: expect.stringMatching(/organiser changed/) });
+  });
+
+  it('analysing needs a facilitator and an ended call; ending reports a bot it couldn’t remove and keeps trying', async () => {
+    const m = await liveCall();
+    expect(m.bot?.status).toBe('in-call');
+    const contributor = request.agent(app);
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Cy', role: 'contributor' });
+    expect((await contributor.post(`/api/meetings/${m.id}/analyse`)).status).toBe(403);
+    expect((await contributor.post(`/api/meetings/${m.id}/propose`)).status).toBe(403);
+    const s = await steward('Steward Eve');
+    expect((await s.post(`/api/meetings/${m.id}/analyse`)).status).toBe(409);
+
+    stubMode.failCancel = true;
+    const end = await s.post(`/api/meetings/${m.id}/end`);
+    expect(end.status).toBe(502);
+    expect(getMeeting(m.id)).toMatchObject({ status: 'live', bot: { status: 'in-call', leaving: true } });
+    // Retried every minute; once the bot is out, the call is analysed.
+    stubMode.failCancel = false;
+    await dispatchDue(at('2026-11-10T15:30:00Z'));
+    expect(getMeeting(m.id)).toMatchObject({ status: 'analysed', bot: { status: 'done' } });
+  });
+
+  it('retries a failed cancellation even once the bot is in the call, and drops what that bot hears', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    const botId = getMeeting(m.id).bot!.botId!;
+    stubMode.failCancel = true;
+    writeFeed();
+    await syncCalendar(at('2026-11-10T14:50:00Z'));
+    expect(getMeeting(m.id).calendar?.cancelPending).toBe(true);
+    // The bot joins anyway: nothing it transcribes is kept, and the call doesn't go live.
+    await line(m.id, 'Is this thing on?', botId);
+    expect(getMeeting(m.id)).toMatchObject({ status: 'scheduled', transcript: [] });
+    stubMode.failCancel = false;
+    await dispatchDue(at('2026-11-10T15:02:00Z'));
+    expect(calendarMeetings()).toEqual([]);
+  });
+
+  it('finds a booking whose answer was lost instead of booking a second bot', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-10T14:00:00Z'));
+    stubMode.dropCreate = true;
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const booked = `bot-${nextBot}`;
+    const [m] = calendarMeetings();
+    expect(getMeeting(m.id).bot).toMatchObject({ uncertain: true });
+    stubMode.dropCreate = false;
+    await dispatchDue(at('2026-11-10T14:47:00Z'));
+    expect(calls.filter((c) => c.method === 'POST' && c.url === '/bot/')).toHaveLength(1);
+    expect(calls.some((c) => c.method === 'GET' && c.url.startsWith('/bot/?'))).toBe(true);
+    expect(getMeeting(m.id).bot).toMatchObject({ botId: booked });
+    expect(getMeeting(m.id).bot?.uncertain).toBeUndefined();
+  });
+
+  it('importing only a cancellation cancels the booked call', async () => {
+    const start = new Date(Date.now() + 10 * 60_000);
+    const one = (status?: string) => calendar(oneOff({ uid: 'import-cancel', start: start.toISOString(), end: new Date(start.getTime() + 3600e3).toISOString(), status }));
+    expect(parseCancellations(one('CANCELLED'))).toEqual({ uids: ['import-cancel'], keys: [] });
+    const s = await steward('Steward Ivy');
+    const made = await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one() });
+    const id = made.body.meetings[0].id as string;
+    const botId = getMeeting(id).bot!.botId!;
+    expect(botId).toBeTruthy();
+    const res = await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one('CANCELLED') });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ meetings: [], cancelled: 1 });
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${botId}/` }));
+    expect(list<Meeting>('meetings').some((x) => x.id === id)).toBe(false);
+  });
+
+  it('retries a chat notice that failed, and holds back automatic posts until the call has been told', async () => {
+    const m = await liveCall();
+    const s = await steward('Steward Noor');
+    stubMode.failChat = true;
+    expect((await s.patch(`/api/meetings/${m.id}`).send({ postPromptsToChat: true })).status).toBe(200);
+    expect(getMeeting(m.id)).toMatchObject({ postPromptsToChat: true, chatModeAnnounced: false, chatNoticeError: expect.stringMatching(/Couldn’t tell the call/) });
+    for (let i = 0; i < 4; i++) await line(m.id, `A "rota" is a weekly pattern, part ${i}.`);
+    expect(getMeeting(m.id).facilitatorPrompts.at(-1)?.posted).toBe(false);
+
+    stubMode.failChat = false;
+    calls.length = 0;
+    for (let i = 0; i < 4; i++) await line(m.id, `The "activity record" holds hours, note ${i}.`);
+    const after = getMeeting(m.id);
+    expect(after.chatModeAnnounced).toBe(true);
+    expect(after.chatNoticeError).toBeUndefined();
+    const sent = calls.filter((c) => c.url.includes('send_chat_message')).map((c) => c.body.message as string);
+    expect(sent[0]).toMatch(/from now on I'll post follow-up questions here/);
+    expect(after.facilitatorPrompts.at(-1)?.posted).toBe(true);
+  });
+
+  it('shows meetings to signed-in people only, and invites awaiting approval, Meet links and organisers to facilitators only', async () => {
+    config.meetBot.trustOrganizer = false;
+    writeFeed(oneOff({ uid: 'private-call', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-09T09:00:00Z'));
+    const [m] = calendarMeetings();
+    expect((await request(app).get('/api/ontologies/volunteering/meetings')).body).toEqual([]);
+    expect((await request(app).get(`/api/meetings/${m.id}`)).status).toBe(401);
+    const contributor = request.agent(app);
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Dee', role: 'contributor' });
+    expect(((await contributor.get('/api/ontologies/volunteering/meetings')).body as Meeting[]).some((x) => x.id === m.id)).toBe(false);
+    expect((await contributor.get(`/api/meetings/${m.id}`)).status).toBe(404);
+
+    const s = await steward('Steward Uma');
+    expect((await s.get(`/api/meetings/${m.id}`)).body.calendar.organizer).toBe('tom@example.org');
+    await s.patch(`/api/meetings/${m.id}`).send({ approve: true });
+    const seen = (await contributor.get(`/api/meetings/${m.id}`)).body as Meeting;
+    expect(seen.title).toBe('Use case workshop');
+    expect(seen.meetingUrl).toBeUndefined();
+    expect(seen.calendar?.organizer).toBeUndefined();
+    expect((await contributor.post('/api/meet-bot/sync')).status).toBe(403);
+  });
+
+  it('“Join a call now” keeps transcript lines that arrive before Recall.ai answers', async () => {
+    const s = await steward('Steward Raj');
+    stubMode.botDelayMs = 200;
+    const sending = s.post('/api/ontologies/volunteering/meetings/bot').send({ title: 'Join now race', meetingUrl: 'https://meet.google.com/abc-defg-hij' });
+    const req = sending.then((r) => r);
+    await new Promise((r) => setTimeout(r, 80));
+    const m = list<Meeting>('meetings').find((x) => x.title === 'Join now race')!;
+    await line(m.id, 'Said before the booking came back.');
+    const res = await req;
+    expect(res.status).toBe(201);
+    const after = getMeeting(m.id);
+    expect(after.transcript).toHaveLength(1);
+    expect(after.bot).toMatchObject({ botId: `bot-${nextBot}`, status: 'in-call' });
   });
 
   it('reports a feed it cannot read without dropping scheduled calls', async () => {
@@ -408,13 +635,13 @@ describe('scheduling from an uploaded invite', () => {
     const ics = calendar(oneOff({ uid: 'upload-1@google.com', start: start.toISOString(), end: new Date(start.getTime() + 3600e3).toISOString() }));
     const res = await tester.post('/api/ontologies/volunteering/meetings/calendar').send({ ics, postPromptsToChat: true });
     expect(res.status).toBe(201);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0]).toMatchObject({ status: 'scheduled', postPromptsToChat: true, calendar: { feed: 'upload' } });
+    expect(res.body.meetings).toHaveLength(1);
+    expect(res.body.meetings[0]).toMatchObject({ status: 'scheduled', postPromptsToChat: true, calendar: { feed: 'upload', approval: 'approved' } });
     // Uploading the same invite again updates the call rather than adding another.
-    expect((await tester.post('/api/ontologies/volunteering/meetings/calendar').send({ ics })).body[0].id).toBe(res.body[0].id);
+    expect((await tester.post('/api/ontologies/volunteering/meetings/calendar').send({ ics })).body.meetings[0].id).toBe(res.body.meetings[0].id);
     // Without a Recall.ai key, the bot can't join, and the meeting says so when the call comes round.
     await dispatchDue(new Date(start.getTime() - 60_000));
-    expect(getMeeting(res.body[0].id)).toMatchObject({ status: 'error', bot: { error: expect.stringMatching(/RECALL_API_KEY/) } });
+    expect(getMeeting(res.body.meetings[0].id)).toMatchObject({ status: 'error', bot: { error: expect.stringMatching(/RECALL_API_KEY/) } });
 
     const bad = await tester.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: 'hello' });
     expect(bad.status).toBe(400);
@@ -437,7 +664,7 @@ describe('scheduling from an uploaded invite', () => {
     await steward.post('/api/auth/demo').send({ name: 'Steward Sal', role: 'steward' });
     const res = await steward.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: series() });
     expect(res.status).toBe(201);
-    expect(res.body).toHaveLength(2);
+    expect(res.body.meetings).toHaveLength(2);
     const second = new Date(first.getTime() + 7 * 86400e3);
     await steward.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: series(second) });
     const left = list<Meeting>('meetings').filter((m) => m.calendar?.uid === 'weekly-upload');

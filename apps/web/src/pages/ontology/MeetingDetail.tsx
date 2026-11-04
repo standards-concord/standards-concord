@@ -9,6 +9,7 @@ import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Lo
 import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
+import { useSession } from '../../lib/session';
 import { ChatToggle, MeetingStatus, useCanFacilitate } from './Meetings';
 
 const SPEAKER_COLORS = ['#2563eb', '#c2410c', '#15803d', '#9333ea', '#be185d', '#0e7490', '#a16207', '#4f46e5'];
@@ -91,7 +92,15 @@ export function MeetingDetailPage() {
   const analyse = useAction(async () => m.setData(await api.analyseMeeting(meetingId)));
   const canFacilitate = useCanFacilitate();
   const update = useAction(async (changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => m.setData(await api.updateMeeting(meetingId, changes)));
-  const end = useAction(async () => m.setData(await api.endMeeting(meetingId)));
+  const end = useAction(async () => {
+    try {
+      m.setData(await api.endMeeting(meetingId));
+    } finally {
+      // If the bot couldn't be removed, the meeting now says so; show it.
+      void m.reload();
+    }
+  });
+  const { session } = useSession();
   const [posting, setPosting] = useState<number>();
   const postPrompt = useAction(async (i: number) => {
     setPosting(i);
@@ -115,6 +124,9 @@ export function MeetingDetailPage() {
   const a = mt.analysis;
   // Posting into the meeting chat needs a bot in the call (or a simulated one).
   const mayRun = canFacilitate(mt);
+  // Uploaders and whoever ran a simulation can analyse their own calls too.
+  const mayAnalyse = mayRun || (mt.createdBy === session?.user?.id && (mt.source === 'upload' || mt.source === 'simulation'));
+  const botInCall = mt.bot?.status === 'joining' || mt.bot?.status === 'in-call';
   const hasChat = mt.source === 'simulation' || mt.source === 'google-meet-bot' || mt.source === 'calendar-invite';
   const canPostNow = live && (mt.source === 'simulation' || (mt.bot?.provider === 'recall' && ['joining', 'in-call'].includes(mt.bot.status)));
 
@@ -130,7 +142,7 @@ export function MeetingDetailPage() {
         {scheduled && mt.calendar && (
           <p className="text-sm text-muted">
             {mt.calendar.approval === 'pending'
-              ? `${mt.calendar.organizer ?? 'Someone'} invited the bot. It won’t join until one of the ontology’s owners, stewards or editors approves.`
+              ? `The bot was invited${mt.calendar.organizer ? ` (organiser: ${mt.calendar.organizer})` : ''}. It won’t join until one of the ontology’s owners, stewards or editors approves${mt.calendar.recurring ? ' the series' : ''}.`
               : mt.calendar.skip
                 ? 'The bot is skipping this call.'
                 : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The host may need to admit it. The transcript streams in here live.`}
@@ -157,6 +169,11 @@ export function MeetingDetailPage() {
       {hasChat && mayRun && (live || scheduled) && (
         <div className="border-b border-line px-5 py-3">
           <ChatToggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} />
+          {mt.chatNoticeError && (
+            <p className="mt-2 text-xs text-danger" data-testid="chat-notice-error">
+              {mt.chatNoticeError}
+            </p>
+          )}
         </div>
       )}
       <ul className="divide-y divide-line">
@@ -220,12 +237,14 @@ export function MeetingDetailPage() {
               {mt.calendar.organizer && <> · organised by {mt.calendar.organizer}</>}
             </p>
           )}
+          {mt.calendar?.approvalNote && <p className="mt-1 text-sm text-warn">{mt.calendar.approvalNote} A facilitator needs to approve it again.</p>}
+          {mt.bot?.leaving && <p className="mt-1 text-sm text-warn">You ended the call, but the bot couldn’t be removed yet. Concord keeps trying and analyses the call once it has left.</p>}
           {mt.bot?.error && <p className="mt-1 text-sm text-danger">Bot error: {mt.bot.error}</p>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {scheduled && mt.calendar && mayRun && mt.calendar.approval === 'pending' && (
             <Button variant="primary" loading={update.pending} onClick={() => void update.run({ approve: true })}>
-              Approve the bot joining
+              {mt.calendar.recurring ? 'Approve the bot for this series' : 'Approve the bot joining'}
             </Button>
           )}
           {scheduled && mt.calendar && mayRun && mt.calendar.approval !== 'pending' && (
@@ -239,7 +258,7 @@ export function MeetingDetailPage() {
               End call and analyse
             </Button>
           )}
-          {!a && mt.status !== 'live' && (
+          {!a && mt.status !== 'live' && !botInCall && mayAnalyse && (
             <Button icon={Wand2} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
               Analyse transcript
             </Button>

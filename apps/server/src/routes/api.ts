@@ -272,7 +272,11 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ meetings --------------------------- */
-  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id)));
+  // Meetings are for signed-in people; pending invites, Meet links and organisers for facilitators only.
+  r.get('/ontologies/:id/meetings', (req, res) => {
+    if (!req.user) return void res.json([]);
+    res.json(meetings.listMeetings(project(req).id).flatMap((m) => meetings.visibleMeeting(m, req.user) ?? []));
+  });
   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
@@ -292,7 +296,9 @@ export function apiRouter(): Router {
   });
   r.get('/meet-bot', (_req, res) => res.json(meetBot.meetBotInfo()));
   r.post('/meet-bot/sync', async (req, res) => {
-    requireUser(req);
+    const user = requireUser(req);
+    const anywhere = user.isPlatformAdmin || list<{ ontologyId: string; userId: string; roles: Role[] }>('memberships').some((ms) => ms.userId === user.id && ms.roles.some((x) => meetings.FACILITATOR_ROLES.includes(x)));
+    if (!anywhere) throw new HttpError(403, 'Only owners, stewards and editors can re-read the bot’s calendar');
     await meetBot.syncCalendar();
     await meetBot.dispatchDue();
     res.json(meetBot.meetBotInfo());
@@ -306,7 +312,13 @@ export function apiRouter(): Router {
       }),
     );
   });
-  r.get('/meetings/:id', (req, res) => res.json(meetings.getMeeting(String(req.params.id))));
+  const visible = (req: Request) => {
+    const user = requireUser(req);
+    const m = meetings.visibleMeeting(meetings.getMeeting(String(req.params.id)), user);
+    if (!m) throw new HttpError(404, 'No such meeting');
+    return m;
+  };
+  r.get('/meetings/:id', (req, res) => res.json(visible(req)));
   r.patch('/meetings/:id', async (req, res) => {
     const b = req.body ?? {};
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
@@ -318,8 +330,9 @@ export function apiRouter(): Router {
     res.json(await meetings.postPrompt(m.id, Number(req.params.index)));
   });
   r.post('/meetings/:id/analyse', async (req, res) => {
-    requireUser(req);
-    res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
+    const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireAnalyst(m, requireUser(req));
+    res.json(await meetings.analyseMeeting(m));
   });
   r.post('/meetings/:id/end', async (req, res) => {
     const m = meetings.getMeeting(String(req.params.id));
@@ -328,17 +341,27 @@ export function apiRouter(): Router {
     res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
-    const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), requireUser(req));
+    const user = requireUser(req);
+    const m = meetings.getMeeting(String(req.params.id));
+    if (!meetings.visibleMeeting(m, user)) throw new HttpError(404, 'No such meeting');
+    // Analysing first is only for those who may analyse it.
+    if (!m.analysis) meetings.requireAnalyst(m, user);
+    const out = await meetings.proposeFromMeeting(m, user);
     res.json({ useCases: out.useCases, changeRequest: out.changeRequest ? crs.detail(out.changeRequest) : undefined });
   });
   r.get('/meetings/:id/stream', (req, res) => {
-    const m = meetings.getMeeting(String(req.params.id));
+    const user = requireUser(req);
+    const m = visible(req);
+    const show = (x: Meeting) => meetings.visibleMeeting(x, user);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
     const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: meetings.getMeeting(m.id) as Meeting });
-      else send(e.type, e);
+      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: show(meetings.getMeeting(m.id)) });
+      else if (e.type === 'meeting') {
+        const x = show(e.meeting as Meeting);
+        if (x) send('meeting', { type: 'meeting', meeting: x });
+      } else send(e.type, e);
     };
     meetings.meetingEvents.on(m.id, onEvent);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
