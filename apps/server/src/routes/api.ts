@@ -12,7 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
-import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor } from '../services/alpha.js';
+import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -537,7 +537,7 @@ export function apiRouter(): Router {
           appCommit: optStr(b.appCommit),
           sinceVersion: optStr(b.sinceVersion),
         },
-        testerFor(req),
+        testerForSaving(req, res),
       ),
     );
   });
@@ -545,7 +545,7 @@ export function apiRouter(): Router {
   /* ------------------------------ alpha testing ------------------------ */
   r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
   r.post('/alpha/visit', async (req, res) => {
-    const tester = testerFor(req);
+    const tester = testerForSaving(req, res);
     if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
     const b = req.body ?? {};
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
