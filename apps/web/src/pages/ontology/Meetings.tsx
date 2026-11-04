@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { Meeting, MeetBotInfo } from '@concord/shared';
-import { Bot, CalendarClock, CalendarPlus, FileUp, Mail, Play, Radio, Repeat, Users, Video } from 'lucide-react';
+import { Bot, CalendarClock, CalendarPlus, ClipboardPaste, FileUp, Mail, Play, Plus, Radio, Repeat, Users, Video } from 'lucide-react';
+import { Popover } from '../../components/Disclosure';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -47,6 +48,7 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
   const [fileName, setFileName] = useState<string>();
+  const [source, setSource] = useState<'file' | 'paste'>('file');
   const upload = useAction(async () => {
     const m = await api.uploadMeeting(id, title.trim() || fileName || 'Uploaded meeting', text);
     onClose();
@@ -73,22 +75,35 @@ function UploadDialog({ open, onClose }: { open: boolean; onClose: () => void })
         <Field label="Title">
           <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Working group call — 12 March" />
         </Field>
-        <Field label="Transcript file" hint="Google Meet / Gemini notes, .vtt, .srt, or plain “Speaker: text” lines.">
-          <input
-            type="file"
-            accept=".txt,.vtt,.srt,.md,text/plain,text/vtt"
-            className="block w-full text-sm file:mr-3 file:rounded-lg file:border file:border-line-strong file:bg-surface file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-surface-2"
-            onChange={async (e) => {
-              const f = e.target.files?.[0];
-              if (!f) return;
-              setFileName(f.name.replace(/\.[^.]+$/, ''));
-              setText(await f.text());
-            }}
-          />
-        </Field>
-        <Field label="…or paste it here">
-          <Textarea rows={10} value={text} onChange={(e) => setText(e.target.value)} className="font-mono text-xs" placeholder={'Amira: We need to know which volunteers are DBS checked.\nTom: And when the check expires…'} />
-        </Field>
+        <div className="flex flex-wrap gap-2" role="tablist" aria-label="How to add the transcript">
+          <Chip active={source === 'file'} onClick={() => setSource('file')}>
+            <FileUp className="size-3" /> From a file
+          </Chip>
+          <Chip active={source === 'paste'} onClick={() => setSource('paste')}>
+            <ClipboardPaste className="size-3" /> Paste text
+          </Chip>
+        </div>
+        {source === 'file' ? (
+          <Field label="Transcript file" hint="Google Meet / Gemini notes, .vtt, .srt, or plain “Speaker: text” lines.">
+            <input
+              type="file"
+              accept=".txt,.vtt,.srt,.md,text/plain,text/vtt"
+              aria-label="Transcript file"
+              className="block w-full text-sm file:mr-3 file:rounded-lg file:border file:border-line-strong file:bg-surface file:px-3 file:py-1.5 file:text-sm file:font-medium hover:file:bg-surface-2"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                setFileName(f.name.replace(/\.[^.]+$/, ''));
+                setText(await f.text());
+              }}
+            />
+          </Field>
+        ) : (
+          <Field label="Transcript">
+            <Textarea rows={10} value={text} onChange={(e) => setText(e.target.value)} className="font-mono text-xs" placeholder={'Amira: We need to know which volunteers are DBS checked.\nTom: And when the check expires…'} />
+          </Field>
+        )}
+        {source === 'file' && fileName && text && <p className="text-xs text-muted">{fileName}: {text.split('\n').filter((l) => l.trim()).length} lines read</p>}
         <InlineError error={upload.error} />
       </div>
     </Dialog>
@@ -303,24 +318,51 @@ export function MeetingsTab() {
     const m = await api.simulateMeeting(id, 'Simulated working-group call');
     nav(`/o/${id}/meetings/${m.id}`);
   });
+  const populated = !!list.data?.length;
+  const botBody = session?.meetBot.inviteEmail
+    ? 'Add its email address to a calendar invite, or paste a Meet link. It listens and raises gaps and follow-up questions live.'
+    : 'It joins your Google Meet, listens, and raises gaps and follow-up questions live.';
 
   return (
     <div>
-      <div className="mb-5">
-        <h2 className="text-lg font-semibold">Meetings</h2>
-        <p className="max-w-2xl text-sm text-muted">Turn conversations into requirements. Concord extracts use cases, terms (with the speaker’s own words as evidence), competency questions, disagreements and decisions.</p>
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Meetings</h2>
+          <p className="max-w-2xl text-sm text-muted">Turn conversations into requirements. Concord extracts use cases, terms (with the speaker’s own words as evidence), competency questions, disagreements and decisions.</p>
+        </div>
+        {populated && (
+          <Popover
+            label="Add meeting"
+            align="right"
+            trigger={
+              <>
+                <Plus className="size-4" /> Add meeting
+              </>
+            }
+            className="h-9 gap-2 rounded-lg border border-transparent bg-accent px-3.5 text-sm font-medium text-accent-fg shadow-sm hover:bg-accent-hover"
+            panelClassName="w-72 p-1.5"
+          >
+            <div role="menu" aria-label="Add meeting" className="flex flex-col">
+              <MenuItem icon={FileUp} title="Upload a transcript" body="Google Meet, Gemini notes, .vtt or .srt" onClick={() => setDialog('upload')} />
+              <MenuItem icon={Video} title="Invite the co-lead bot" body={session?.meetBot.inviteEmail ? 'By email, Meet link or calendar invite' : 'Paste a Meet link or upload an invite'} onClick={() => setDialog('bot')} />
+              <MenuItem icon={Play} title="Run a simulated meeting" body="A scripted call, with the bot co-facilitating" onClick={() => void simulate.run()} />
+            </div>
+          </Popover>
+        )}
       </div>
+      {list.data && !populated && (
       <div className="mb-6 grid gap-3 md:grid-cols-3">
         <ActionCard icon={FileUp} title="Upload a transcript" body="From Google Meet, Gemini notes, Zoom (.vtt) or subtitles (.srt)." onClick={() => setDialog('upload')} cta="Upload" />
         <ActionCard
           icon={Video}
           title="Invite the co-lead bot"
-          body={session?.meetBot.inviteEmail ? 'Add its email address to a calendar invite, or paste a Meet link. It listens and raises gaps and follow-up questions live.' : 'It joins your Google Meet, listens, and raises gaps and follow-up questions live.'}
+          body={botBody}
           onClick={() => setDialog('bot')}
           cta="Invite to a Meet"
         />
         <ActionCard icon={Play} title="Run a simulated live meeting" body="Watch a scripted call unfold in real time, with the bot co-facilitating." onClick={() => void simulate.run()} cta="Start simulation" loading={simulate.pending} />
       </div>
+      )}
       <InlineError error={simulate.error} />
       <UpcomingCalls calls={upcoming} onChange={() => void list.reload()} />
       {list.error && !list.data ? (
@@ -328,9 +370,11 @@ export function MeetingsTab() {
       ) : !list.data ? (
         <Loading />
       ) : !past.length ? (
-        <EmptyState icon={Users} title={upcoming.length ? 'No past meetings yet' : 'No meetings yet'}>
-          Upload a transcript, invite the bot to your next call, or run a simulated meeting to see how it works.
-        </EmptyState>
+        upcoming.length ? null : (
+          <EmptyState icon={Users} title="No meetings yet">
+            Upload a transcript, invite the bot to your next call, or run a simulated meeting to see how it works.
+          </EmptyState>
+        )
       ) : (
         <Card>
           <ul className="divide-y divide-line">
@@ -354,6 +398,18 @@ export function MeetingsTab() {
       <UploadDialog open={dialog === 'upload'} onClose={() => setDialog(undefined)} />
       {dialog === 'bot' && <BotDialog open onClose={() => setDialog(undefined)} onScheduled={() => void list.reload()} bot={session?.meetBot} ontology={ontology} />}
     </div>
+  );
+}
+
+function MenuItem({ icon: Icon, title, body, onClick }: { icon: typeof Bot; title: string; body: string; onClick: () => void }) {
+  return (
+    <button type="button" role="menuitem" onClick={onClick} className="flex items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-surface-2">
+      <Icon className="mt-0.5 size-4 shrink-0 text-accent" />
+      <span>
+        <span className="block text-sm font-medium">{title}</span>
+        <span className="block text-xs text-muted">{body}</span>
+      </span>
+    </button>
   );
 }
 

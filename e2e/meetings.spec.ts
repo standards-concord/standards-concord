@@ -43,7 +43,12 @@ const inHours = (h: number) => new Date(Math.ceil((Date.now() + h * 3600e3) / 60
 async function openBotDialog(page: Page, ontologyId: string) {
   await page.goto(`/o/${ontologyId}/meetings`);
   await settle(page);
-  await page.getByRole('button', { name: 'Invite to a Meet' }).click();
+  // An empty list offers three cards; once there are meetings, an "Add meeting" menu.
+  const add = page.getByRole('button', { name: 'Add meeting' });
+  if (await add.isVisible()) {
+    await add.click();
+    await page.getByRole('menuitem', { name: /Invite the co-lead bot/ }).click();
+  } else await page.getByRole('button', { name: 'Invite to a Meet' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: 'Bring the co-lead bot to a Google Meet' })).toBeVisible();
   return dialog;
@@ -190,8 +195,66 @@ test.describe('Meet co-lead bot', () => {
 
     // Ending the call stops the bot and analyses the transcript.
     await page.getByRole('button', { name: 'End call and analyse' }).click();
-    await expect(page.getByRole('heading', { name: 'Analysis' })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('button', { name: 'End call and analyse' })).toHaveCount(0);
     await expectNoCrash(page);
+  });
+
+  test('a finished meeting opens on its summary, with the transcript, prompts and extracted items one click away', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E finished call', delayMs: 0 } });
+    const m = (await r.json()) as { id: string };
+    await page.goto(`/o/${demo.id}/meetings/${m.id}`);
+    await settle(page);
+    const views = page.getByRole('tablist', { name: 'Meeting views' });
+    await expect(views.getByRole('button', { name: /Summary/ })).toHaveClass(/border-accent/);
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible();
+    // The summary shows counts, not the whole transcript.
+    await expect(page.getByRole('list', { name: 'What the call produced' })).toContainText('transcript lines');
+    await expect(page.getByText('Thanks for joining.', { exact: false })).toHaveCount(0);
+
+    await page.getByRole('button', { name: /transcript lines/ }).click();
+    await expect(page.getByText(/Thanks for joining/)).toBeVisible();
+    await views.getByRole('button', { name: /Bot prompts/ }).click();
+    await expect(page.getByTestId('facilitator-prompt').first()).toBeVisible();
+    await views.getByRole('button', { name: /Extracted items/ }).click();
+    await expect(page.getByRole('heading', { name: 'Extracted items' })).toBeVisible();
+    // Quotes are behind each term's disclosure.
+    const quote = page.getByRole('button', { name: /What was said/ }).first();
+    if (await quote.count()) {
+      await quote.click();
+      await expect(page.locator('blockquote').first()).toBeVisible();
+    }
+    await expectNoCrash(page);
+  });
+
+  test('a populated list has one "Add meeting" menu; an empty one keeps the three cards', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E list call', delayMs: 0 } });
+    await page.goto(`/o/${demo.id}/meetings`);
+    await settle(page);
+    await expect(page.getByRole('button', { name: 'Start simulation' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Add meeting' }).click();
+    const menu = page.getByRole('menu', { name: 'Add meeting' });
+    await expect(menu.getByRole('menuitem')).toHaveCount(3);
+    await menu.getByRole('menuitem', { name: /Upload a transcript/ }).click();
+    const dialog = page.getByRole('dialog', { name: undefined }).filter({ has: page.getByRole('heading', { name: 'Upload a meeting transcript' }) });
+    // Choose a file or paste text first; only that input shows.
+    await expect(dialog.getByLabel('Transcript file')).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: 'Transcript' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Paste text' }).click();
+    await expect(dialog.getByLabel('Transcript file')).toHaveCount(0);
+    await dialog.getByRole('textbox', { name: 'Transcript' }).fill('Priya: Which shifts need a DBS check?\nTom: The Saturday ones.');
+    await expect(dialog.getByRole('button', { name: 'Upload and analyse' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    // With no meetings, the explanatory cards come back.
+    await page.route('**/api/ontologies/*/meetings', (route) => route.fulfill({ json: [] }));
+    await page.reload();
+    await settle(page);
+    await expect(page.getByRole('button', { name: 'Add meeting' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Start simulation' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Invite to a Meet' })).toBeVisible();
+    await expect(page.getByText('No meetings yet')).toBeVisible();
   });
 });

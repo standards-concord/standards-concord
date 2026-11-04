@@ -1,16 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import type { Meeting, UseCase } from '@concord/shared';
+import type { Meeting, MeetingAnalysis, UseCase } from '@concord/shared';
 import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, Sparkles, Wand2 } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Spinner, Toggle } from '../../components/ui';
+import { Badge, Button, Card, CardHeader, Chip, EmptyState, ErrorCard, InlineError, Loading, Spinner, Toggle } from '../../components/ui';
+import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
 import { MeetingStatus } from './Meetings';
 
 const SPEAKER_COLORS = ['#2563eb', '#c2410c', '#15803d', '#9333ea', '#be185d', '#0e7490', '#a16207', '#4f46e5'];
+
+type View = 'summary' | 'transcript' | 'prompts' | 'extracted';
+const VIEWS: [View, string][] = [
+  ['summary', 'Summary'],
+  ['transcript', 'Transcript'],
+  ['prompts', 'Bot prompts'],
+  ['extracted', 'Extracted items'],
+];
 
 function fmtT(t?: number) {
   if (t === undefined) return '';
@@ -24,6 +33,7 @@ export function MeetingDetailPage() {
   const { id } = useOntology();
   const nav = useNavigate();
   const m = useAsync(() => api.meeting(meetingId), [meetingId]);
+  const [view, setView] = useState<View>('summary');
   const [proposed, setProposed] = useState<{ useCases: UseCase[]; changeRequestId?: string }>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const live = m.data?.status === 'live';
@@ -106,6 +116,69 @@ export function MeetingDetailPage() {
   const hasChat = mt.source === 'simulation' || mt.source === 'google-meet-bot' || mt.source === 'calendar-invite';
   const canPostNow = live && (mt.source === 'simulation' || (mt.bot?.provider === 'recall' && ['joining', 'in-call'].includes(mt.bot.status)));
 
+  const transcriptCard = (
+    <Card>
+      <CardHeader title="Transcript" subtitle={live ? 'Streaming live…' : `${mt.transcript.length} lines`} actions={live ? <Spinner /> : undefined} />
+      <div ref={scrollRef} className="max-h-[70vh] space-y-3 overflow-y-auto p-5">
+        {waitingBot && !mt.transcript.length && (
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <Spinner /> The bot is {mt.bot?.status === 'in-call' ? 'in the call — transcript will appear shortly' : `${mt.bot?.status}…`}
+          </div>
+        )}
+        {scheduled && mt.calendar && (
+          <p className="text-sm text-muted">
+            {mt.calendar.skip ? 'The bot is skipping this call.' : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The transcript streams in here live.`}
+          </p>
+        )}
+        {!mt.transcript.length && !waitingBot && !scheduled && <p className="text-sm text-muted">No transcript yet.</p>}
+        {mt.transcript.map((l, i) => (
+          <div key={i} className="flex gap-3">
+            <span className="w-10 shrink-0 pt-0.5 text-right font-mono text-[0.7rem] text-subtle">{fmtT(l.t)}</span>
+            <div className="min-w-0">
+              <span className="text-xs font-semibold" style={{ color: colorFor(l.speaker) }}>
+                {l.speaker}
+              </span>
+              <p className="text-sm leading-relaxed">{l.text}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+  const promptsCard = (
+    <Card>
+      <CardHeader icon={Bot} title="Co-lead bot prompts" subtitle="Gaps and follow-up questions the bot raised" />
+      {hasChat && (live || scheduled) && (
+        <div className="border-b border-line px-5 py-3">
+          <Toggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} label="Post prompts in the Meet chat" />
+          <p className="mt-1 pl-11 text-xs text-muted">{mt.postPromptsToChat ? 'Everyone in the call sees each new prompt in the chat.' : 'New prompts only show here. Post any of them with its button.'}</p>
+        </div>
+      )}
+      <ul className="divide-y divide-line">
+        {mt.facilitatorPrompts.map((p, i) => (
+          <li key={i} className="flex gap-2 px-5 py-3 text-sm" data-testid="facilitator-prompt">
+            {p.posted ? <MessageSquare className="mt-0.5 size-4 shrink-0 text-accent" /> : <Lightbulb className="mt-0.5 size-4 shrink-0 text-warn" />}
+            <div className="min-w-0 flex-1">
+              <p>{p.text}</p>
+              <p className="mt-0.5 text-xs text-subtle">
+                {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
+              </p>
+              {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
+              {!p.posted && canPostNow && (
+                <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
+                  Post in the Meet chat
+                </Button>
+              )}
+            </div>
+          </li>
+        ))}
+        {!mt.facilitatorPrompts.length && <li className="px-5 py-4 text-sm text-muted">{live ? 'Listening for gaps…' : 'No prompts were raised.'}</li>}
+      </ul>
+    </Card>
+  );
+  // After the call, show a summary first; transcript, prompts and extracted items are a click away.
+  const showViews = !live && !scheduled && !processing;
+
   return (
     <div>
       <Link to={`/o/${id}/meetings`} className="mb-4 inline-flex items-center gap-1 text-sm text-muted hover:text-fg">
@@ -176,161 +249,37 @@ export function MeetingDetailPage() {
         </Card>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_400px]">
-        <Card>
-          <CardHeader title="Transcript" subtitle={live ? 'Streaming live…' : `${mt.transcript.length} lines`} actions={live ? <Spinner /> : undefined} />
-          <div ref={scrollRef} className="max-h-[70vh] space-y-3 overflow-y-auto p-5">
-            {waitingBot && !mt.transcript.length && (
-              <div className="flex items-center gap-2 text-sm text-muted">
-                <Spinner /> The bot is {mt.bot?.status === 'in-call' ? 'in the call — transcript will appear shortly' : `${mt.bot?.status}…`}
-              </div>
-            )}
-            {scheduled && mt.calendar && (
-              <p className="text-sm text-muted">
-                {mt.calendar.skip ? 'The bot is skipping this call.' : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The transcript streams in here live.`}
-              </p>
-            )}
-            {!mt.transcript.length && !waitingBot && !scheduled && <p className="text-sm text-muted">No transcript yet.</p>}
-            {mt.transcript.map((l, i) => (
-              <div key={i} className="flex gap-3">
-                <span className="w-10 shrink-0 pt-0.5 text-right font-mono text-[0.7rem] text-subtle">{fmtT(l.t)}</span>
-                <div className="min-w-0">
-                  <span className="text-xs font-semibold" style={{ color: colorFor(l.speaker) }}>
-                    {l.speaker}
-                  </span>
-                  <p className="text-sm leading-relaxed">{l.text}</p>
-                </div>
-              </div>
+      {showViews && a ? (
+        <>
+          <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="Meeting views">
+            {VIEWS.map(([key, label]) => (
+              <Chip key={key} active={view === key} onClick={() => setView(key)}>
+                {label}
+                {key === 'prompts' && <span className="text-subtle">{mt.facilitatorPrompts.length}</span>}
+                {key === 'extracted' && <span className="text-subtle">{a.useCases.length + a.terms.length + a.competencyQuestions.length + a.openQuestions.length}</span>}
+              </Chip>
             ))}
           </div>
-        </Card>
-
-        <div className="space-y-4">
-          <Card>
-            <CardHeader icon={Bot} title="Co-lead bot prompts" subtitle="Gaps and follow-up questions the bot raised" />
-            {hasChat && (live || scheduled) && (
-              <div className="border-b border-line px-5 py-3">
-                <Toggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} label="Post prompts in the Meet chat" />
-                <p className="mt-1 pl-11 text-xs text-muted">{mt.postPromptsToChat ? 'Everyone in the call sees each new prompt in the chat.' : 'New prompts only show here. Post any of them with its button.'}</p>
-              </div>
+          {view === 'summary' && <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} onOpen={setView} />}
+          {view === 'transcript' && transcriptCard}
+          {view === 'prompts' && promptsCard}
+          {view === 'extracted' && <ExtractedView a={a} />}
+        </>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_400px]">
+          {transcriptCard}
+          <div className="space-y-4">
+            {promptsCard}
+            {a ? (
+              <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} />
+            ) : (
+              <EmptyState icon={Sparkles} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
+                {live ? 'Keep watching — the transcript and bot prompts update live.' : 'Run the analysis to extract use cases, terms and questions.'}
+              </EmptyState>
             )}
-            <ul className="divide-y divide-line">
-              {mt.facilitatorPrompts.map((p, i) => (
-                <li key={i} className="flex gap-2 px-5 py-3 text-sm" data-testid="facilitator-prompt">
-                  {p.posted ? <MessageSquare className="mt-0.5 size-4 shrink-0 text-accent" /> : <Lightbulb className="mt-0.5 size-4 shrink-0 text-warn" />}
-                  <div className="min-w-0 flex-1">
-                    <p>{p.text}</p>
-                    <p className="mt-0.5 text-xs text-subtle">
-                      {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
-                    </p>
-                    {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
-                    {!p.posted && canPostNow && (
-                      <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
-                        Post in the Meet chat
-                      </Button>
-                    )}
-                  </div>
-                </li>
-              ))}
-              {!mt.facilitatorPrompts.length && <li className="px-5 py-4 text-sm text-muted">{live ? 'Listening for gaps…' : 'No prompts were raised.'}</li>}
-            </ul>
-          </Card>
-
-          {a ? (
-            <Card>
-              <CardHeader icon={Sparkles} title="Analysis" />
-              <div className="space-y-5 p-5 text-sm">
-                <Markdown text={a.summary} />
-                {a.useCases.length > 0 && (
-                  <Section title={`Use cases (${a.useCases.length})`}>
-                    <ul className="space-y-2">
-                      {a.useCases.map((u, i) => (
-                        <li key={i} className="rounded-lg border border-line p-2.5">
-                          <div className="font-medium">{u.title}</div>
-                          {u.speaker && <div className="text-xs text-muted">raised by {u.speaker}</div>}
-                          {u.sections.goal && <p className="mt-1 text-xs">{u.sections.goal}</p>}
-                        </li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-                {a.terms.length > 0 && (
-                  <Section title={`Terms (${a.terms.length})`}>
-                    <ul className="space-y-2">
-                      {a.terms.map((t, i) => (
-                        <li key={i}>
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-medium">{t.label}</span>
-                            <Badge tone="outline">{titleCase(t.kind.replace(/([A-Z])/g, ' $1'))}</Badge>
-                            {t.existingIri && <Badge tone="ok">exists</Badge>}
-                          </div>
-                          {t.definition && <p className="text-xs text-muted">{t.definition}</p>}
-                          {t.evidence?.map((e, j) => (
-                            <blockquote key={j} className="mt-1 border-l-2 border-line-strong pl-2 text-xs text-subtle italic">
-                              “{e}”
-                            </blockquote>
-                          ))}
-                        </li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-                {a.competencyQuestions.length > 0 && (
-                  <Section title="Competency questions" icon={CircleHelp}>
-                    <ul className="list-disc space-y-1 pl-5">
-                      {a.competencyQuestions.map((q, i) => (
-                        <li key={i}>
-                          {q.question} {q.askedBy && <span className="text-xs text-muted">— {q.askedBy}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-                {a.disagreements.length > 0 && (
-                  <Section title="Disagreements" icon={MessageSquareWarning}>
-                    <ul className="space-y-2">
-                      {a.disagreements.map((d, i) => (
-                        <li key={i} className="rounded-lg bg-warn-soft p-2.5">
-                          <div className="font-medium">{d.topic}</div>
-                          <ul className="mt-1 space-y-0.5 text-xs">
-                            {d.positions.map((p, j) => (
-                              <li key={j}>
-                                <strong>{p.speaker}:</strong> {p.position}
-                              </li>
-                            ))}
-                          </ul>
-                        </li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-                {a.openQuestions.length > 0 && (
-                  <Section title="Open questions">
-                    <ul className="list-disc space-y-1 pl-5">
-                      {a.openQuestions.map((q, i) => (
-                        <li key={i}>{q}</li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-                {a.decisions.length > 0 && (
-                  <Section title="Decisions" icon={Gavel}>
-                    <ul className="list-disc space-y-1 pl-5">
-                      {a.decisions.map((q, i) => (
-                        <li key={i}>{q}</li>
-                      ))}
-                    </ul>
-                  </Section>
-                )}
-              </div>
-            </Card>
-          ) : (
-            <EmptyState icon={Sparkles} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
-              {live ? 'Keep watching — the transcript and bot prompts update live.' : 'Run the analysis to extract use cases, terms and questions.'}
-            </EmptyState>
-          )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -344,5 +293,138 @@ function Section({ title, icon: Icon, children }: { title: string; icon?: typeof
       </h4>
       {children}
     </div>
+  );
+}
+
+/** What a finished call came to: the summary, decisions and open disagreements, with counts of what was extracted. */
+function SummaryView({ a, prompts, lines, onOpen }: { a: MeetingAnalysis; prompts: number; lines: number; onOpen?: (v: View) => void }) {
+  const counts: [string, number, View][] = [
+    ['use cases', a.useCases.length, 'extracted'],
+    ['terms', a.terms.length, 'extracted'],
+    ['competency questions', a.competencyQuestions.length, 'extracted'],
+    ['open questions', a.openQuestions.length, 'extracted'],
+    ['bot prompts', prompts, 'prompts'],
+    ['transcript lines', lines, 'transcript'],
+  ];
+  return (
+    <Card>
+      <CardHeader icon={Sparkles} title="Summary" />
+      <div className="space-y-5 p-5 text-sm">
+        <Markdown text={a.summary} />
+        <ul className="flex flex-wrap gap-2" aria-label="What the call produced">
+          {counts.map(([label, n, v]) => (
+            <li key={label}>
+              {onOpen ? (
+                <button type="button" onClick={() => onOpen(v)} className="rounded-lg border border-line px-2.5 py-1.5 text-left hover:border-accent hover:text-accent">
+                  <span className="font-semibold tabular-nums">{n}</span> <span className="text-xs text-muted">{label}</span>
+                </button>
+              ) : (
+                <span className="inline-block rounded-lg border border-line px-2.5 py-1.5">
+                  <span className="font-semibold tabular-nums">{n}</span> <span className="text-xs text-muted">{label}</span>
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {a.decisions.length > 0 && (
+          <Section title="Decisions" icon={Gavel}>
+            <ul className="list-disc space-y-1 pl-5">
+              {a.decisions.map((q, i) => (
+                <li key={i}>{q}</li>
+              ))}
+            </ul>
+          </Section>
+        )}
+        {a.disagreements.length > 0 && (
+          <Section title="Unresolved disagreements" icon={MessageSquareWarning}>
+            <ul className="space-y-2">
+              {a.disagreements.map((d, i) => (
+                <li key={i} className="rounded-lg bg-warn-soft p-2.5">
+                  <div className="font-medium">{d.topic}</div>
+                  <ul className="mt-1 space-y-0.5 text-xs">
+                    {d.positions.map((p, j) => (
+                      <li key={j}>
+                        <strong>{p.speaker}:</strong> {p.position}
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/** Use cases, terms (with the speakers' words one click away), competency and open questions. */
+function ExtractedView({ a }: { a: MeetingAnalysis }) {
+  const none = !a.useCases.length && !a.terms.length && !a.competencyQuestions.length && !a.openQuestions.length;
+  return (
+    <Card>
+      <CardHeader icon={Sparkles} title="Extracted items" subtitle="What Concord found in the call, to turn into use cases and a change request" />
+      <div className="space-y-5 p-5 text-sm">
+        {none && <p className="text-muted">Nothing was extracted from this call.</p>}
+        {a.useCases.length > 0 && (
+          <Section title={`Use cases (${a.useCases.length})`}>
+            <ul className="space-y-2">
+              {a.useCases.map((u, i) => (
+                <li key={i} className="rounded-lg border border-line p-2.5">
+                  <div className="font-medium">{u.title}</div>
+                  {u.speaker && <div className="text-xs text-muted">raised by {u.speaker}</div>}
+                  {u.sections.goal && <p className="mt-1 text-xs">{u.sections.goal}</p>}
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
+        {a.terms.length > 0 && (
+          <Section title={`Terms (${a.terms.length})`}>
+            <ul className="space-y-3">
+              {a.terms.map((t, i) => (
+                <li key={i}>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium">{t.label}</span>
+                    <Badge tone="outline">{titleCase(t.kind.replace(/([A-Z])/g, ' $1'))}</Badge>
+                    {t.existingIri && <Badge tone="ok">exists</Badge>}
+                  </div>
+                  {t.definition && <p className="text-xs text-muted">{t.definition}</p>}
+                  {!!t.evidence?.length && (
+                    <Disclosure className="mt-1" tone="muted" title={<span className="text-xs">What was said ({t.evidence.length})</span>}>
+                      {t.evidence.map((e, j) => (
+                        <blockquote key={j} className="mt-1 border-l-2 border-line-strong pl-2 text-xs text-subtle italic">
+                          “{e}”
+                        </blockquote>
+                      ))}
+                    </Disclosure>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
+        {a.competencyQuestions.length > 0 && (
+          <Section title={`Competency questions (${a.competencyQuestions.length})`} icon={CircleHelp}>
+            <ul className="list-disc space-y-1 pl-5">
+              {a.competencyQuestions.map((q, i) => (
+                <li key={i}>
+                  {q.question} {q.askedBy && <span className="text-xs text-muted">— {q.askedBy}</span>}
+                </li>
+              ))}
+            </ul>
+          </Section>
+        )}
+        {a.openQuestions.length > 0 && (
+          <Section title={`Open questions (${a.openQuestions.length})`}>
+            <ul className="list-disc space-y-1 pl-5">
+              {a.openQuestions.map((q, i) => (
+                <li key={i}>{q}</li>
+              ))}
+            </ul>
+          </Section>
+        )}
+      </div>
+    </Card>
   );
 }
