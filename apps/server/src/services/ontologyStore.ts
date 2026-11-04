@@ -18,20 +18,27 @@ function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
 }
 
-function git(dir: string, args: string[], env: Record<string, string> = {}): string {
+function git(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string {
+  const { name, email, ...extra } = env;
   return execFileSync('git', args, {
     cwd: dir,
     encoding: 'utf8',
+    input,
     env: {
       ...process.env,
-      GIT_AUTHOR_NAME: env.name ?? 'Concord',
-      GIT_AUTHOR_EMAIL: env.email ?? 'concord@localhost',
+      GIT_AUTHOR_NAME: name ?? 'Concord',
+      GIT_AUTHOR_EMAIL: email ?? 'concord@localhost',
       GIT_COMMITTER_NAME: 'Concord',
       GIT_COMMITTER_EMAIL: 'concord@localhost',
+      ...extra,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   }).trim();
 }
+
+/** Fork branches live under refs/heads/forks/. */
+const FORK_PREFIX = 'forks/';
+const forkBranch = (forkSlug: string) => `${FORK_PREFIX}${forkSlug}`;
 
 const graphCache = new Map<string, OntologyGraph>();
 
@@ -72,9 +79,10 @@ export const ontologyStore = {
     return g;
   },
 
-  /** `ref` is 'working' or a released version like '1.2.0'. */
+  /** `ref` is 'working', a released version like '1.2.0', or a development fork 'forks/<fork-slug>'. */
   async at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph> {
     if (!ref || ref === 'working') return this.working(project);
+    if (ref.startsWith(FORK_PREFIX)) return this.forkGraph(project, ref.slice(FORK_PREFIX.length));
     const key = `${project.slug}@v${ref}`;
     let g = graphCache.get(key);
     if (!g) {
@@ -128,6 +136,103 @@ export const ontologyStore = {
 
   log(project: Pick<OntologyProject, 'slug'>, limit = 50) {
     const out = git(repoDir(project), ['log', `-${limit}`, '--format=%H%x1f%an%x1f%aI%x1f%s']);
+    return out
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [sha, author, date, subject] = l.split('\x1f');
+        return { sha, author, date, subject };
+      });
+  },
+
+  /* ---------------------------------------------------------------------- */
+  /* Development forks: branches that never touch the working tree          */
+  /* ---------------------------------------------------------------------- */
+
+  forkBranch,
+
+  /** Start a fork branch at the current head of main. Returns the commit it starts from. */
+  createFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string): string {
+    const dir = repoDir(project);
+    const head = this.head(project);
+    git(dir, ['branch', forkBranch(forkSlug), head]);
+    return head;
+  },
+
+  forkExists(project: Pick<OntologyProject, 'slug'>, forkSlug: string): boolean {
+    try {
+      git(repoDir(project), ['rev-parse', '--verify', '--quiet', `refs/heads/${forkBranch(forkSlug)}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  forkHead(project: Pick<OntologyProject, 'slug'>, forkSlug: string): string {
+    if (!this.forkExists(project, forkSlug)) throw new HttpError(404, `Fork ${forkSlug} not found`);
+    return git(repoDir(project), ['rev-parse', `refs/heads/${forkBranch(forkSlug)}`]);
+  },
+
+  readAt(project: Pick<OntologyProject, 'slug'>, commit: string): string {
+    return git(repoDir(project), ['show', `${commit}:${FILE}`]);
+  },
+
+  async forkGraph(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<OntologyGraph> {
+    const head = this.forkHead(project, forkSlug);
+    const key = `${project.slug}@${head}`;
+    let g = graphCache.get(key);
+    if (!g) {
+      g = await OntologyGraph.fromTurtle(this.readAt(project, head));
+      graphCache.set(key, g);
+    }
+    return g;
+  },
+
+  /**
+   * Commit a new ontology.ttl to a fork branch without checking it out: the
+   * blob goes into a throwaway index built from the branch's tree, so main's
+   * working tree is never touched. `parents` defaults to the branch head; a
+   * sync passes [branch head, upstream head] so the history shows the merge.
+   */
+  async commitFork(
+    project: Pick<OntologyProject, 'slug'>,
+    forkSlug: string,
+    graph: OntologyGraph,
+    message: string,
+    author: CommitAuthor,
+    extraParents: string[] = [],
+  ): Promise<string> {
+    const dir = repoDir(project);
+    const branch = forkBranch(forkSlug);
+    const parent = this.forkHead(project, forkSlug);
+    const index = path.join(dir, '.git', `concord-fork-${process.pid}-${Date.now()}.index`);
+    try {
+      const env = { GIT_INDEX_FILE: index };
+      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, await graph.toTurtle());
+      git(dir, ['read-tree', parent], env);
+      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], env);
+      const tree = git(dir, ['write-tree'], env);
+      const parents = [parent, ...extraParents.filter((p) => p !== parent)].flatMap((p) => ['-p', p]);
+      const commit = git(dir, ['commit-tree', tree, ...parents, '-m', message], { name: author.name, email: author.email ?? 'developer@concord' });
+      git(dir, ['update-ref', `refs/heads/${branch}`, commit, parent]);
+      return commit;
+    } finally {
+      fs.rmSync(index, { force: true });
+    }
+  },
+
+  /** Commits on main since `commit` (how far a fork has fallen behind). */
+  commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): number {
+    try {
+      return Number(git(repoDir(project), ['rev-list', '--count', `${commit}..main`]));
+    } catch {
+      return 0;
+    }
+  },
+
+  /** The fork's own commits (newest first), not the upstream ones it was synced with. */
+  forkLog(project: Pick<OntologyProject, 'slug'>, forkSlug: string, limit = 50) {
+    const out = git(repoDir(project), ['log', `-${limit}`, '--first-parent', '--format=%H%x1f%an%x1f%aI%x1f%s', `refs/heads/${forkBranch(forkSlug)}`, '^refs/heads/main']);
     return out
       .split('\n')
       .filter(Boolean)

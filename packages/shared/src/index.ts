@@ -359,7 +359,8 @@ export type ChangeRequestOrigin =
   | { type: 'agent'; agentName?: string; reportId?: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
-  | { type: 'synthesis'; useCaseIds: string[] };
+  | { type: 'synthesis'; useCaseIds: string[] }
+  | { type: 'fork'; forkId: string; forkSlug: string };
 
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
@@ -489,6 +490,92 @@ export interface ChangeRequest {
   warnings?: string[];
   /** KGCL-style change lines, for people used to ontology change languages. */
   kgcl?: string[];
+}
+
+/* ------------------------------------------------------------------------ */
+/* Development forks                                                         */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * A personal, pre-release copy of an ontology that a developer can import
+ * straight away while a change goes through governance. Forks are git
+ * branches (`forks/<slug>`) in the ontology's repository; new terms keep the
+ * upstream namespace, so data written against the fork stays valid once the
+ * change lands and only the import URL has to change.
+ */
+export type ForkStatus = 'active' | 'proposed' | 'merged' | 'released' | 'closed';
+
+export interface OntologyFork {
+  id: string;
+  slug: string;
+  ontologyId: string;
+  ownerId: string;
+  title: string;
+  /** What the fork is for, e.g. "Volunteer hours in the Helping Hands app". */
+  purpose?: string;
+  /** Git branch in the ontology repository. */
+  branch: string;
+  /** Upstream commit and released version the fork was taken from (or last synced with). */
+  baseCommit: string;
+  baseVersion: string;
+  /** Every edit made on the fork since its base, in order. Replayed on sync and proposed upstream as one change request. */
+  ops: ChangeOp[];
+  /** Increments on every edit or sync; part of the fork's version string. */
+  revision: number;
+  head: string;
+  status: ForkStatus;
+  changeRequestIds: string[];
+  /** The revision last proposed upstream; edits after it are not in the change request yet. */
+  proposedRevision?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ForkUrls {
+  /** The fork's document IRI: dereference it for Turtle, JSON-LD and the other formats. */
+  iri: string;
+  /** One URL per format (by extension), for import statements. */
+  formats: Record<string, string>;
+  /** Where to see the fork in Concord. */
+  app: string;
+}
+
+export interface ForkTerm {
+  iri: string;
+  curie: string;
+  label?: string;
+  kind: string;
+  /** Whether the edit adds the term or changes an existing one. */
+  change: 'added' | 'changed';
+  /** Where the term stands upstream. */
+  upstream: 'not-proposed' | 'pending' | 'merged' | 'released' | 'rejected' | 'missing';
+  /** The released version that first contains it. */
+  releasedIn?: string;
+  /** When review renamed the term, the IRI it landed under. */
+  landedAs?: string;
+}
+
+export interface ForkSummary extends OntologyFork {
+  owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
+  ontology: Pick<OntologyProject, 'id' | 'slug' | 'title' | 'prefix' | 'currentVersion'>;
+  version: string;
+  urls: ForkUrls;
+  terms: ForkTerm[];
+  changeRequest?: { id: string; number: number; title: string; status: ChangeRequestStatus; level?: ChangeLevel };
+  /** Upstream commits since the fork's base (0 when up to date). */
+  behindBy: number;
+}
+
+/** What an agent should do about a fork at the start of a development session. */
+export interface ForkCheck {
+  fork: ForkSummary;
+  outcome: 'keep-using-fork' | 'sync-fork' | 'switch-to-draft' | 'switch-to-release' | 'fork-closed';
+  message: string;
+  /** Import URLs to replace in the application. */
+  replace: { from: string; to: string }[];
+  /** Term IRIs that landed under a different name. */
+  renames: { from: string; to: string }[];
+  steps: string[];
 }
 
 export interface ChangeRequestDetail extends ChangeRequest {

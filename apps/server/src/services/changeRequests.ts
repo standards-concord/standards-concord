@@ -121,7 +121,7 @@ export async function createChangeRequest(project: OntologyProject, author: User
 }
 
 /** LLM drafts edits from a plain-language request; falls back to a simple parser. */
-async function draftFromNaturalLanguage(project: OntologyProject, working: OntologyGraph, text: string, kind: ChangeRequestKind) {
+export async function draftFromNaturalLanguage(project: OntologyProject, working: OntologyGraph, text: string, kind: ChangeRequestKind) {
   const { value } = await llm.json<Proposal>({
     task: 'draft-change',
     system: CHANGE_DRAFTER,

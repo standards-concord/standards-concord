@@ -15,6 +15,8 @@ import type {
   ChatMessage,
   CompetencyQuestion,
   FeedbackQuestion,
+  ForkCheck,
+  ForkSummary,
   FeedbackSubmission,
   GovernancePolicy,
   GovernanceTemplateId,
@@ -145,6 +147,15 @@ export type NewChangeRequestInput = {
   ops?: ChangeOp[];
   naturalLanguage?: string;
 };
+export type ForkDetail = ForkSummary & { history: { sha: string; author: string; date: string; subject: string }[] };
+export type ForkEditResult = {
+  fork: ForkSummary;
+  ops: ChangeOp[];
+  terms: ForkSummary['terms'];
+  warnings: string[];
+  validation: { passed: boolean; consistent: boolean; errors: string[]; warnings: string[] };
+};
+export type ForkSyncResult = { synced: boolean; fork: ForkSummary; conflicts: string[]; message: string };
 export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment';
 export type VoteChoice = 'yes' | 'no' | 'abstain';
 
@@ -215,6 +226,19 @@ export const api = {
   merge: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/merge`),
   withdraw: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/withdraw`),
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),
+
+  // Development forks
+  forks: (id: string) => get<ForkSummary[]>(`/api/ontologies/${e(id)}/forks`),
+  myForks: () => get<ForkSummary[]>('/api/forks'),
+  createFork: (id: string, body: { name: string; purpose?: string }) => post<ForkDetail>(`/api/ontologies/${e(id)}/forks`, body),
+  fork: (id: string, fork: string) => get<ForkDetail>(`/api/ontologies/${e(id)}/forks/${e(fork)}`),
+  checkFork: (id: string, fork: string) => get<ForkCheck>(`/api/ontologies/${e(id)}/forks/${e(fork)}/check`),
+  editFork: (id: string, fork: string, body: { description?: string; ops?: ChangeOp[]; message?: string }) =>
+    post<ForkEditResult>(`/api/ontologies/${e(id)}/forks/${e(fork)}/edits`, body),
+  proposeFork: (id: string, fork: string, body: { title?: string; description?: string } = {}) =>
+    post<{ fork: ForkSummary; changeRequest: ChangeRequestDetail }>(`/api/ontologies/${e(id)}/forks/${e(fork)}/propose`, body),
+  syncFork: (id: string, fork: string) => post<ForkSyncResult>(`/api/ontologies/${e(id)}/forks/${e(fork)}/sync`),
+  closeFork: (id: string, fork: string) => post<ForkSummary>(`/api/ontologies/${e(id)}/forks/${e(fork)}/close`),
 
   // Releases
   releases: (id: string) => get<Release[]>(`/api/ontologies/${e(id)}/releases`),

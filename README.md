@@ -53,7 +53,20 @@ url = "https://<host>/mcp"
 bearer_token_env_var = "CONCORD_TOKEN"
 ```
 
-Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search_terms`, `get_term`, `sparql_query`, `validate_data`, `report_gap`, `propose_change`, `get_change_request`.
+Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search_terms`, `get_term`, `sparql_query`, `validate_data`, `report_gap`, `propose_change`, `get_change_request`, and the development fork tools below.
+
+### Development forks
+
+Need a term the standard doesn't have yet? Fork it, add the term, and keep building while the change is reviewed. A fork is your own pre-release of the ontology:
+
+- It resolves at `https://<host>/def/<ontology>/forks/<fork>` (content negotiated, or by extension: `.ttl`, `.jsonld`, `.owl`, `.nt`, `.omn`, `.linkml.yaml`, `.shacl.ttl`), so applications can import it directly. It always serves the fork's latest revision, with CORS open.
+- New terms keep the standard's namespace (`vol:VolunteeringActivity`, not a fork-specific IRI), so data written against the fork stays valid when the term lands. Moving back to the main ontology means changing the import URL.
+- It is stamped as a pre-release: `owl:versionIRI` is the fork's URL, `owl:versionInfo` is like `1.0.0-fork.volunteer-hours.2`, and `owl:priorVersion` is the release it came from.
+- Proposing the fork opens one change request with all its edits, which goes through the ontology's normal governance. Proposing again after more edits updates that request.
+- Each fork is a git branch, `forks/<fork>`, in the ontology's repository; it never touches `main`.
+
+In the hub, forks are under *Changes → Forks*. Over MCP: `create_fork`, `edit_fork`, `propose_fork`, `check_forks`, `sync_fork`, `list_forks`, `get_fork` and `close_fork`. Agents are told to call `check_forks` at the start of every development session: it reports whether each fork's terms are pending, merged or released, and when they have landed it returns the import URLs to replace (and any terms renamed in review).
+
 
 ### Optional services
 

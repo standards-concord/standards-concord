@@ -24,6 +24,7 @@ export type Collection =
   | 'agentReports'
   | 'feedback'
   | 'activity'
+  | 'forks'
   | 'kv';
 
 let db: DatabaseSync | undefined;

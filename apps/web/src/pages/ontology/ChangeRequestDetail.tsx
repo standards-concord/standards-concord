@@ -215,6 +215,11 @@ export function ChangeRequestPage() {
               view use case
             </Link>
           )}
+          {cr.origin.type === 'fork' && (
+            <Link className="text-accent hover:underline" to={`/o/${id}/forks/${cr.origin.forkSlug}`}>
+              view fork
+            </Link>
+          )}
           {cr.origin.type === 'synthesis' &&
             cr.origin.useCaseIds.map((u, i) => (
               <Link key={u} className="text-accent hover:underline" to={`/o/${id}/use-cases/${u}`}>

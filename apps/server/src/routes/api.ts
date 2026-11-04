@@ -30,6 +30,7 @@ import {
 } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { PERSONAS } from '../services/personas.js';
+import * as forks from '../services/forks.js';
 import * as releases from '../services/releases.js';
 import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
@@ -396,6 +397,44 @@ export function apiRouter(): Router {
   r.post('/releases/:id/publish', async (req, res) => {
     res.json(releases.releaseDetail(await releases.publishRelease(releases.getRelease(String(req.params.id)), requireUser(req))));
   });
+
+  /* -------------------------- development forks ---------------------- */
+  const fork = (req: Request) => forks.mustFindFork(String(req.params.fork), project(req));
+  r.get('/ontologies/:id/forks', async (req, res) => {
+    res.json(await Promise.all(forks.listForks(project(req).id).map((f) => forks.forkSummary(f))));
+  });
+  r.post('/ontologies/:id/forks', async (req, res) => {
+    const f = await forks.createFork(project(req), requireUser(req), { name: str(req.body?.name, 'name', 80), purpose: optStr(req.body?.purpose) });
+    res.status(201).json(await forks.forkDetail(f));
+  });
+  r.get('/forks', async (req, res) => {
+    res.json(await Promise.all(forks.forksOwnedBy(requireUser(req).id).map((f) => forks.forkSummary(f))));
+  });
+  r.get('/ontologies/:id/forks/:fork', async (req, res) => res.json(await forks.forkDetail(fork(req))));
+  r.get('/ontologies/:id/forks/:fork/check', async (req, res) => res.json(await forks.checkFork(fork(req))));
+  r.get('/ontologies/:id/forks/:fork/validation', async (req, res) => {
+    const p = project(req);
+    const f = fork(req);
+    const graph = await ontologyStore.forkGraph(p, f.slug);
+    res.json(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+  });
+  r.post('/ontologies/:id/forks/:fork/edits', async (req, res) => {
+    const b = req.body ?? {};
+    res.json(
+      await forks.editFork(fork(req), req.user, {
+        description: optStr(b.description),
+        terms: Array.isArray(b.terms) ? b.terms : undefined,
+        ops: Array.isArray(b.ops) ? b.ops : undefined,
+        message: optStr(b.message),
+      }),
+    );
+  });
+  r.post('/ontologies/:id/forks/:fork/propose', async (req, res) => {
+    const out = await forks.proposeFork(fork(req), req.user, { title: optStr(req.body?.title), description: optStr(req.body?.description) });
+    res.json({ fork: out.fork, changeRequest: crs.detail(out.changeRequest) });
+  });
+  r.post('/ontologies/:id/forks/:fork/sync', async (req, res) => res.json(await forks.syncFork(fork(req), req.user)));
+  r.post('/ontologies/:id/forks/:fork/close', async (req, res) => res.json(await forks.closeFork(fork(req), req.user)));
 
   /* ------------------------------- agents ---------------------------- */
   r.get('/agent-tokens', (req, res) => res.json(listAgentTokens(requireUser(req).id)));

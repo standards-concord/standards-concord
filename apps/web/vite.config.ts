@@ -18,6 +18,8 @@ export default defineConfig({
       '/api': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
       '/mcp': { target, changeOrigin: true },
+      // Dereferenceable ontology documents (not /definitely-a-page).
+      '^/def/': { target, changeOrigin: true },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
