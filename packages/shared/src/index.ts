@@ -395,6 +395,8 @@ export interface PublicReport {
   createdAt: string;
   /** Set while a moderator is opening it as a change request (ms since the epoch). */
   claimedAt?: number;
+  /** Server only: which request holds the claim. Never sent to the browser. */
+  claimToken?: string;
 }
 
 /**

@@ -390,6 +390,105 @@ describe('public reports: second review', () => {
   });
 });
 
+describe('public reports: third review', () => {
+  const steward = async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'Third review steward', role: 'steward' });
+    return agent;
+  };
+  const projectId = () => findProject('volunteering')!.id;
+  const opened = (reportId: string) => publicCRs().filter((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
+  const accept = (s: Awaited<ReturnType<typeof steward>>, id: string) => s.post(`/api/ontologies/${projectId()}/public-reports/${id}/accept`);
+  const dismiss = (s: Awaited<ReturnType<typeof steward>>, id: string) => s.post(`/api/ontologies/${projectId()}/public-reports/${id}/dismiss`);
+  /** Holds the next approval at its first read of the ontology, until let go. */
+  const holdNextApproval = () => {
+    const real = ontologyStore.working.bind(ontologyStore);
+    let letGo!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((r) => (letGo = r));
+    const waiting = new Promise<void>((r) => (reached = r));
+    let first = true;
+    vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (first) {
+        first = false;
+        reached();
+        await gate;
+      }
+      return real(p);
+    });
+    return { waiting, letGo: () => letGo() };
+  };
+
+  it('escapes the tags instead of deleting them, so none can be rebuilt from the pieces', () => {
+    const crafted = 'a </untrusted_public_re<untrusted_public_report>port> b <untrusted_public_<</untrusted_public_report>report> c';
+    const text = requestText({ number: 7, title: crafted, description: `${crafted}\n< / untrusted_public_report >`, origin: { type: 'public-report', termIri: `${NS}Volunteer`, version: 'draft' } });
+    expect(text.match(/<\/untrusted_public_report>/g)).toHaveLength(1);
+    expect(text.match(/<untrusted_public_report>/g)).toHaveLength(1);
+    expect(text.endsWith('</untrusted_public_report>')).toBe(true);
+    const inside = text.slice(text.indexOf('<untrusted_public_report>') + '<untrusted_public_report>'.length, text.lastIndexOf('</untrusted_public_report>'));
+    expect(inside).not.toMatch(/[<>]/);
+    // Nothing they wrote is lost: it reads back exactly.
+    expect(inside).toContain('a &lt;/untrusted_public_re&lt;untrusted_public_report&gt;port&gt; b');
+    expect(UNTRUSTED_TEXT).toContain('&lt;');
+  });
+
+  it('opens one change request when a claim goes stale and its first approver finishes late', async () => {
+    const v = await visitor('192.0.2.80');
+    const { body } = await v.send({ description: 'A report whose first approval stalls past its claim.' });
+    const [a, b] = [await steward(), await steward()];
+    const held = holdNextApproval();
+    const first = accept(a, body.reference).then((r) => r);
+    await held.waiting;
+    // Two minutes pass: the first claim is stale, and another moderator takes it over and finishes.
+    const doc = get<PublicReport>('publicReports', body.reference)!;
+    put('publicReports', { ...doc, claimedAt: doc.claimedAt! - 121_000 }, doc.ontologyId);
+    expect((await accept(b, body.reference)).status).toBe(201);
+    held.letGo();
+    // The first approver no longer holds the report: it saves nothing.
+    expect([200, 409]).toContain((await first).status);
+    expect(opened(body.reference)).toHaveLength(1);
+    expect(queued().some((r) => r.id === body.reference)).toBe(false);
+  });
+
+  it('refuses to dismiss a report while it is being opened, and the approval still opens it once', async () => {
+    const v = await visitor('192.0.2.81');
+    const { body } = await v.send({ description: 'A report dismissed while it is being opened.' });
+    const [a, b] = [await steward(), await steward()];
+    const held = holdNextApproval();
+    const approving = accept(a, body.reference).then((r) => r);
+    await held.waiting;
+    const refused = await dismiss(b, body.reference);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/opening this report/);
+    expect(queued().some((r) => r.id === body.reference)).toBe(true);
+    // Moderators never see the claim's token.
+    const listed = (await b.get(`/api/ontologies/${projectId()}/public-reports`)).body as PublicReport[];
+    expect(listed.find((r) => r.id === body.reference)).not.toHaveProperty('claimToken');
+    held.letGo();
+    expect((await approving).status).toBe(201);
+    expect(opened(body.reference)).toHaveLength(1);
+    // Dismissing it afterwards finds nothing to dismiss, and opens or removes nothing more.
+    expect((await dismiss(b, body.reference)).status).toBe(200);
+    expect(opened(body.reference)).toHaveLength(1);
+  });
+
+  it('lets a stale claim be dismissed, and then the late approver opens nothing', async () => {
+    const v = await visitor('192.0.2.82');
+    const { body } = await v.send({ description: 'A report dismissed after its approval stalled.' });
+    const [a, b] = [await steward(), await steward()];
+    const held = holdNextApproval();
+    const late = accept(a, body.reference).then((r) => r);
+    await held.waiting;
+    const doc = get<PublicReport>('publicReports', body.reference)!;
+    put('publicReports', { ...doc, claimedAt: doc.claimedAt! - 121_000 }, doc.ontologyId);
+    expect((await dismiss(b, body.reference)).status).toBe(200);
+    held.letGo();
+    expect((await late).status).toBe(409);
+    expect(opened(body.reference)).toHaveLength(0);
+    expect(queued().some((r) => r.id === body.reference)).toBe(false);
+  });
+});
+
 describe('public Browse', () => {
   it('lists every class, even ones in a cycle with no root', async () => {
     const project = findProject('volunteering')!;

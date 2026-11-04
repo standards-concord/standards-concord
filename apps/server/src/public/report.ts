@@ -5,7 +5,7 @@ import type { TermView } from '@concord/core/types';
 import type { OntologyProject, PublicReport } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { claim, get, insertOnce, list, put, remove, removeWhereAtMost } from '../db.js';
+import { get, HttpError, insertOnce, list, put, remove, removeWhereAtMost, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { clientIp } from '../oauth.js';
 import { findProject } from '../services/ontologies.js';
@@ -422,28 +422,78 @@ export function reportRouter(): Router {
 
 /* ------------------------------ moderation ------------------------------ */
 
-/** Reports waiting for review, newest first. */
-export const listPublicReports = (ontologyId: string) => list<PublicReport>('publicReports', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+/* Reports waiting for review, newest first. Once reviewed, a report is gone: opened as a change request, or dismissed. */
+/** A claim older than this is from a request that never finished (the server stopped, say): it can be taken over. */
+const CLAIM_STALE_MS = 2 * 60 * 1000;
+const claimedNow = (r: PublicReport, now: number) => !!r.claimedAt && now - r.claimedAt <= CLAIM_STALE_MS;
+
+/** What moderators see: the report without the claim's private token. */
+export const listPublicReports = (ontologyId: string) =>
+  list<PublicReport>('publicReports', ontologyId)
+    .map(({ claimToken: _, ...r }) => r)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 export const getPublicReport = (ontologyId: string, id: string) => {
   const r = get<PublicReport>('publicReports', id);
   return r && r.ontologyId === ontologyId ? r : undefined;
 };
-/** Once reviewed, a report is gone: opened as a change request, or dismissed. */
-export const removePublicReport = (id: string) => remove('publicReports', id);
 
-/** A claim older than this is from a request that never finished (the server stopped, say): it can be taken over. */
-const CLAIM_STALE_MS = 2 * 60 * 1000;
+/** A claim on a report: proof that this request, and no other, is opening it. */
+export interface ReportClaim {
+  report: PublicReport;
+  token: string;
+}
 
 /**
- * Claims a report for opening as a change request, in one statement, so two
- * moderators (or a double click) can't open it twice. Undefined if someone
- * else is opening it right now.
+ * Claims a report for opening as a change request, in one transaction, so two
+ * moderators (or a double click) can't open it at once. A claim that went
+ * stale is taken over; the request that held it can no longer finish (see
+ * convertPublicReport). Undefined if the report is gone or someone else is
+ * opening it right now.
  */
-export function claimPublicReport(report: PublicReport, now = Date.now()): PublicReport | undefined {
-  if (report.claimedAt && now - report.claimedAt > CLAIM_STALE_MS) put('publicReports', { ...report, claimedAt: undefined }, report.ontologyId);
-  return claim<PublicReport>('publicReports', report.id, 'claimedAt', now);
+export function claimPublicReport(ontologyId: string, id: string, now = Date.now()): ReportClaim | undefined {
+  return transaction(() => {
+    const report = getPublicReport(ontologyId, id);
+    if (!report || claimedNow(report, now)) return undefined;
+    const token = crypto.randomUUID();
+    put('publicReports', { ...report, claimedAt: now, claimToken: token }, report.ontologyId);
+    return { report: { ...report, claimedAt: undefined, claimToken: undefined }, token };
+  });
 }
-/** Puts a claimed report back in the queue, as it was, when opening it failed. */
-export const releasePublicReport = (report: PublicReport) => {
-  if (get<PublicReport>('publicReports', report.id)) put('publicReports', { ...report, claimedAt: undefined }, report.ontologyId);
-};
+
+/**
+ * The moment a claimed report becomes a change request. Called inside the
+ * transaction that saves the change request: the report is removed only if
+ * this claim still holds it, so a request whose claim was taken over (or a
+ * report dismissed meanwhile) saves nothing. One report, one change request.
+ */
+export function convertPublicReport(c: ReportClaim) {
+  const now = get<PublicReport>('publicReports', c.report.id);
+  if (!now || now.claimToken !== c.token) throw new HttpError(409, 'This report was reviewed by someone else while you were opening it');
+  remove('publicReports', c.report.id);
+}
+
+/** Puts a claimed report back in the queue when opening it failed, unless someone else holds it by now. */
+export function releasePublicReport(c: ReportClaim) {
+  transaction(() => {
+    const now = get<PublicReport>('publicReports', c.report.id);
+    if (now?.claimToken === c.token) put('publicReports', { ...now, claimedAt: undefined, claimToken: undefined }, now.ontologyId);
+  });
+}
+
+/**
+ * Dismisses a report, unless a moderator is opening it right now: then it's
+ * a conflict, and the report becomes their change request. True if it was
+ * dismissed, false if it was already gone.
+ */
+export function dismissPublicReport(ontologyId: string, id: string, now = Date.now()): boolean {
+  return transaction(() => {
+    const report = getPublicReport(ontologyId, id);
+    if (!report) return false;
+    if (claimedNow(report, now)) throw new HttpError(409, 'Someone is opening this report as a change request right now');
+    remove('publicReports', id);
+    return true;
+  });
+}
+
+/** Removes a report outright: one whose change request already exists. */
+export const removePublicReport = (id: string) => remove('publicReports', id);

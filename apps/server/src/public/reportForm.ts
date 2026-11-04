@@ -46,4 +46,3 @@ export function reportChoices(o: { action: string; iri: string; version: string;
   </section>
 </div>`;
 }
-

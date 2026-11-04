@@ -27,7 +27,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest, requestText } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -76,6 +76,12 @@ export interface CreateInput {
   warnings?: string[];
   /** Submit straight into review (agents, synthesis) rather than leaving as a draft. */
   submit?: boolean;
+  /**
+   * Runs in the same transaction that saves the change request, just before
+   * it: throwing saves nothing. For steps that must happen exactly once with
+   * the save, such as taking a public report off the queue.
+   */
+  atSave?: () => void;
 }
 
 export async function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
@@ -118,7 +124,10 @@ export async function createChangeRequest(project: OntologyProject, author: User
     warnings,
     baseCommit: ontologyStore.head(project),
   };
-  save(cr);
+  transaction(() => {
+    input.atSave?.();
+    save(cr);
+  });
   logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
   await triage(cr);
   if (input.submit) await submit(cr, author);
