@@ -678,6 +678,8 @@ export interface SessionInfo {
    * told this, and their pod's feedback folder is shared read-only with these WebIDs.
    */
   feedbackReaders: string[];
+  /** Who turns recorded speech into text when the browser can't (the server-side fallback), if anyone. */
+  serverTranscription: 'openai' | null;
   llm: { provider: 'anthropic' | 'simulated'; model: string };
   solid: { enabled: boolean; serverUrl?: string };
   meetBot: { provider: 'recall' | 'simulated' };

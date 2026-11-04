@@ -54,6 +54,7 @@ function sessionInfo(user?: User): SessionInfo {
     user,
     providers: providers(),
     feedbackReaders: config.adminWebIds,
+    serverTranscription: config.stt.provider === 'openai' && config.stt.openaiKey ? 'openai' : null,
     llm: { provider: llm.provider, model: llm.model },
     solid: { enabled: !!config.solid.serverUrl, serverUrl: config.solid.serverUrl },
     meetBot: { provider: config.meetBot.recallApiKey ? 'recall' : 'simulated' },

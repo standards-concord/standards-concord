@@ -137,7 +137,7 @@ export function ipLiteral(url: URL): string | undefined {
 }
 
 export interface SafeRequestOptions extends SafeFetchOptions {
-  method?: 'GET' | 'POST' | 'HEAD';
+  method?: 'GET' | 'POST' | 'PUT' | 'HEAD';
   headers?: Record<string, string>;
   body?: string;
   /** Refuse a status before its body is read (the connection is dropped at once). */

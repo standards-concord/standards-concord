@@ -73,28 +73,54 @@ function headerRecord(h: HeadersInit | undefined): Record<string, string> {
   return out;
 }
 
+/** Lets tests see every request the guarded transport makes (and so notice any that bypass it). */
+export const guardedRequests: { observe?: (method: string, url: string) => void } = {};
+
+/** The pod server's own responses (feedback documents, listings, ACLs) may be larger than an OIDC document, but are still capped. */
+export const POD_MAX_BYTES = 1024 * 1024;
+
+function guarded(maxBytes: number, check?: (url: URL) => void) {
+  return async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    check?.(url);
+    const trusted = isTrusted(url);
+    const method = (init.method ?? 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'POST' && method !== 'PUT' && method !== 'HEAD') throw new FetchError('bad-response', `${method} is not allowed`);
+    let body: string | undefined;
+    if (init.body !== undefined && init.body !== null) {
+      if (typeof init.body === 'string') body = init.body;
+      else if (init.body instanceof URLSearchParams) body = init.body.toString();
+      else throw new FetchError('bad-response', 'Unsupported request body');
+    }
+    const headers = headerRecord(init.headers);
+    guardedRequests.observe?.(method, url.href);
+    const r = await safeRequest(url, { method, headers, body, accept: headers.accept ?? '*/*', maxBytes, timeoutMs: TIMEOUT_MS, allowPrivate: trusted, allowHttp: trusted });
+    // Response refuses bodies on these statuses; a redirect comes back as itself and is never followed.
+    const nullBody = [101, 204, 205, 304].includes(r.status) || method === 'HEAD';
+    if (r.status < 200 || r.status > 599) throw new FetchError('bad-response', `HTTP ${r.status}`);
+    return new Response(nullBody ? null : r.body, { status: r.status, headers: r.headers });
+  };
+}
+
 /**
  * The only fetch the Solid sign-in uses, handed to oauth4webapi as its
  * customFetch. See the comment at the top for what it enforces.
  */
-export async function guardedFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
-  const url = new URL(input instanceof Request ? input.url : String(input));
-  const trusted = isTrusted(url);
-  const method = (init.method ?? 'GET').toUpperCase();
-  if (method !== 'GET' && method !== 'POST') throw new FetchError('bad-response', `${method} is not allowed`);
-  let body: string | undefined;
-  if (init.body !== undefined && init.body !== null) {
-    if (typeof init.body === 'string') body = init.body;
-    else if (init.body instanceof URLSearchParams) body = init.body.toString();
-    else throw new FetchError('bad-response', 'Unsupported request body');
-  }
-  const headers = headerRecord(init.headers);
-  const r = await safeRequest(url, { method, headers, body, accept: headers.accept, maxBytes: MAX_BYTES, timeoutMs: TIMEOUT_MS, allowPrivate: trusted, allowHttp: trusted });
-  // Response refuses bodies on these statuses; a redirect comes back as itself and is never followed.
-  const nullBody = [101, 204, 205, 304].includes(r.status);
-  if (r.status < 200 || r.status > 599) throw new FetchError('bad-response', `HTTP ${r.status}`);
-  return new Response(nullBody ? null : r.body, { status: r.status, headers: r.headers });
+export const guardedFetch = guarded(MAX_BYTES);
+
+/** The URL, if it is on the operator's own pod server (the only place Concord reads or writes pods). */
+export function podUrl(raw: string | URL): URL {
+  const u = new URL(raw);
+  if (!config.solid.serverUrl || u.origin !== new URL(config.solid.serverUrl).origin) throw new FetchError('bad-response', `Not on this server’s pod server: ${u.href}`);
+  return u;
 }
+
+/**
+ * The only fetch for the pod server (account API, owners' reads and writes,
+ * sharing, admins' reads): the same guarded transport, its origin only, with a
+ * larger byte cap.
+ */
+export const podFetch = guarded(POD_MAX_BYTES, podUrl);
 
 const oauthOptions = (url: URL) => ({
   [oauth.customFetch]: guardedFetch as typeof fetch,
@@ -299,6 +325,8 @@ export interface SolidLogin {
   accessToken: string;
   refreshToken?: string;
   expiresAt: number;
+  /** For a pod owner Concord acts for (client credentials), instead of a refresh token. */
+  clientSecret?: string;
 }
 
 export interface FinishedLogin {
@@ -381,11 +409,48 @@ export async function finishLogin(loginId: string | undefined, callbackUrl: stri
   };
 }
 
+/** Get a token with client credentials (DPoP-bound) for a login that has them. */
+async function grantClientCredentials(login: SolidLogin) {
+  const DPoP = oauth.DPoP(login.client, login.keys);
+  const opts = oauthOptions(new URL(login.as.token_endpoint!));
+  const t = await withNonceRetry(async () =>
+    oauth.processClientCredentialsResponse(
+      login.as,
+      login.client,
+      await oauth.clientCredentialsGrantRequest(login.as, login.client, oauth.ClientSecretBasic(login.clientSecret!), new URLSearchParams({ scope: 'webid' }), { DPoP, ...opts }),
+    ),
+  );
+  if (t.token_type?.toLowerCase() !== 'dpop') throw new SolidLoginError('The pod server didn’t issue a DPoP-bound token');
+  login.accessToken = t.access_token;
+  login.expiresAt = Date.now() + (t.expires_in ?? 300) * 1000;
+}
+
+let ownServer: Promise<oauth.AuthorizationServer> | undefined;
+
+/**
+ * Act as a pod owner on the operator's own Solid server, with the client
+ * credentials Concord minted for their WebID when it provisioned the pod.
+ */
+export async function clientCredentialsLogin(webId: string, clientId: string, clientSecret: string): Promise<SolidLogin> {
+  if (!config.solid.serverUrl) throw new SolidLoginError('No Solid server is configured');
+  ownServer ??= discoverProvider(`${config.solid.serverUrl.replace(/\/+$/, '')}/`).catch((err) => {
+    ownServer = undefined;
+    throw err;
+  });
+  const login: SolidLogin = { webId, as: await ownServer, client: { client_id: clientId }, keys: await oauth.generateKeyPair('ES256'), accessToken: '', expiresAt: 0, clientSecret };
+  await grantClientCredentials(login);
+  return login;
+}
+
 /** Refresh the access token if it is (nearly) expired. Returns false when the login can't continue. */
 async function fresh(login: SolidLogin): Promise<boolean> {
   if (Date.now() < login.expiresAt - 30_000) return true;
-  if (!login.refreshToken) return false;
   try {
+    if (login.clientSecret) {
+      await grantClientCredentials(login);
+      return true;
+    }
+    if (!login.refreshToken) return false;
     const DPoP = oauth.DPoP(login.client, login.keys);
     const opts = oauthOptions(new URL(login.as.token_endpoint!));
     const t = await withNonceRetry(async () =>
@@ -400,25 +465,34 @@ async function fresh(login: SolidLogin): Promise<boolean> {
   }
 }
 
+export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { headers?: Record<string, string>; body?: string }) => Promise<Response>;
+
 /**
- * A GET that acts as the signed-in WebID (DPoP proof per request), for the
- * operator's own pod server only, never following redirects. Undefined if the
- * login can no longer be used.
+ * Requests that act as the login's WebID (a DPoP proof per request), on the
+ * operator's own pod server only, through `podFetch`. Undefined if the login
+ * can no longer be used. A 401 from the pod comes back as a response.
  */
-export async function podReader(login: SolidLogin): Promise<((url: string, accept: string) => Promise<Response>) | undefined> {
+export async function podRequester(login: SolidLogin): Promise<PodRequest | undefined> {
   if (!(await fresh(login))) return undefined;
-  const DPoP = oauth.DPoP(login.client, login.keys);
-  return async (url, accept) => {
-    const u = new URL(url);
-    if (!config.solid.serverUrl || u.origin !== new URL(config.solid.serverUrl).origin) throw new Error(`Not on this server’s pod server: ${url}`);
-    return withNonceRetry(() =>
-      oauth.protectedResourceRequest(login.accessToken, 'GET', u, new Headers({ accept }), null, {
-        DPoP,
-        [oauth.customFetch]: ((i: string, init: RequestInit) => fetch(i, { ...init, redirect: 'manual' })) as never,
-        ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}),
-      }),
-    );
+  return async (method, url, init = {}) => {
+    const u = podUrl(url);
+    if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
+    const DPoP = oauth.DPoP(login.client, login.keys);
+    const opts = { DPoP, [oauth.customFetch]: podFetch as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
+    try {
+      return await withNonceRetry(() => oauth.protectedResourceRequest(login.accessToken, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts));
+    } catch (err) {
+      // oauth4webapi raises a 401 challenge as an error; hand it back as the response it was.
+      if (err instanceof oauth.WWWAuthenticateChallengeError) return err.response;
+      throw err;
+    }
   };
+}
+
+/** A GET as the signed-in WebID (see podRequester). Undefined if the login can no longer be used. */
+export async function podReader(login: SolidLogin): Promise<((url: string, accept: string) => Promise<Response>) | undefined> {
+  const req = await podRequester(login);
+  return req && ((url, accept) => req('GET', url, { headers: { accept } }));
 }
 
 /** Logins are kept per browser session: the key is a hash of the session cookie, never the account. */

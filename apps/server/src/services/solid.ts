@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Session } from '@inrupt/solid-client-authn-node';
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
 import { get, list, put } from '../db.js';
 import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
+import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type SolidLogin } from '../solidOidc.js';
 
 /**
  * Private data lives in each person's Solid pod. People never see this:
@@ -13,6 +13,10 @@ import { slugify } from '../ids.js';
  * Community Solid Server (v7 JSON account API) under one platform-owned
  * account, mints client credentials bound to that WebID, and from then on
  * reads and writes that person's private resources as them.
+ *
+ * Every request to the Solid server goes through `podFetch` (solidOidc.ts):
+ * this server's origin only, no redirects, capped size and time. The plain
+ * `fetch` is never used here (a test checks).
  *
  * Without a Solid server configured, the same API falls back to local files,
  * and the WebID is a profile document served by this platform.
@@ -32,7 +36,7 @@ interface Kv<T> {
 }
 
 const json = async (r: Response) => {
-  if (!r.ok) throw new Error(`Solid server ${r.url} → ${r.status} ${await r.text().catch(() => '')}`);
+  if (!r.ok) throw new Error(`Solid server account API → ${r.status} ${(await r.text().catch(() => '')).slice(0, 200)}`);
   return r.json();
 };
 
@@ -40,28 +44,28 @@ async function platformAccountToken(base: string): Promise<string> {
   const saved = get<Kv<string>>('kv', 'solid-account-token');
   if (saved) {
     // Check it still works; CSS account tokens expire with the cookie lifetime.
-    const r = await fetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${saved.value}` } });
+    const r = await podFetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${saved.value}` } });
     const body = await r.json().catch(() => undefined);
     if (body?.controls?.account?.pod) return saved.value;
   }
   // Create a platform account with a password so we can log back in.
   const creds = get<Kv<{ email: string; password: string }>>('kv', 'solid-account-login');
-  let { controls } = await json(await fetch(`${base}/.account/`));
+  let { controls } = await json(await podFetch(`${base}/.account/`));
   let authorization: string;
   if (creds) {
     ({ authorization } = await json(
-      await fetch(controls.password.login, {
+      await podFetch(controls.password.login, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email: creds.value.email, password: creds.value.password }),
       }),
     ));
   } else {
-    ({ authorization } = await json(await fetch(controls.account.create, { method: 'POST' })));
+    ({ authorization } = await json(await podFetch(controls.account.create, { method: 'POST' })));
     const login = { email: `platform@${new URL(config.publicUrl).hostname || 'concord.local'}`, password: crypto.randomUUID() };
-    ({ controls } = await json(await fetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${authorization}` } })));
+    ({ controls } = await json(await podFetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${authorization}` } })));
     await json(
-      await fetch(controls.password.create, {
+      await podFetch(controls.password.create, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `CSS-Account-Token ${authorization}` },
         body: JSON.stringify(login),
@@ -73,15 +77,16 @@ async function platformAccountToken(base: string): Promise<string> {
   return authorization;
 }
 
-const sessions = new Map<string, Session>();
+const owners = new Map<string, SolidLogin>();
 
-async function sessionFor(rec: PodRecord): Promise<Session> {
-  let s = sessions.get(rec.id);
-  if (s?.info.isLoggedIn) return s;
-  s = new Session({ keepAlive: true });
-  await s.login({ clientId: rec.clientId, clientSecret: rec.clientSecret, oidcIssuer: `${config.solid.serverUrl}/` });
-  sessions.set(rec.id, s);
-  return s;
+/** Requests that act as the pod's owner (client credentials, DPoP), through podFetch. */
+async function ownerRequest(rec: PodRecord): Promise<PodRequest> {
+  const known = owners.get(rec.id);
+  const req = known && (await podRequester(known));
+  if (req) return req;
+  const login = await clientCredentialsLogin(rec.webId, rec.clientId, rec.clientSecret);
+  owners.set(rec.id, login);
+  return (await podRequester(login))!;
 }
 
 export const solid = {
@@ -102,13 +107,13 @@ export const solid = {
     const token = await platformAccountToken(base);
     const headers = { 'content-type': 'application/json', authorization: `CSS-Account-Token ${token}` };
     // No content-type on the GET: CSS 7.3 then tries to parse the empty body as JSON and fails with a 500.
-    const { controls } = await json(await fetch(`${base}/.account/`, { headers: { authorization: headers.authorization } }));
+    const { controls } = await json(await podFetch(`${base}/.account/`, { headers: { authorization: headers.authorization } }));
     const name = `${slugify(user.name).slice(0, 24)}-${user.id.slice(-6)}`.toLowerCase();
-    const pod = await json(await fetch(controls.account.pod, { method: 'POST', headers, body: JSON.stringify({ name }) }));
+    const pod = await json(await podFetch(controls.account.pod, { method: 'POST', headers, body: JSON.stringify({ name }) }));
     const podUrl: string = pod.pod ?? `${base}/${name}/`;
     const webId: string = pod.webId ?? `${podUrl}profile/card#me`;
     const cc = await json(
-      await fetch(controls.account.clientCredentials, { method: 'POST', headers, body: JSON.stringify({ name: `concord-${user.id}`, webId }) }),
+      await podFetch(controls.account.clientCredentials, { method: 'POST', headers, body: JSON.stringify({ name: `concord-${user.id}`, webId }) }),
     );
     const rec: PodRecord = { id: `pod:${user.id}`, podUrl, webId, clientId: cc.id, clientSecret: cc.secret };
     put('kv', rec);
@@ -120,9 +125,9 @@ export const solid = {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
-        const s = await sessionFor({ ...rec, id: userId });
+        const req = await ownerRequest({ ...rec, id: userId });
         const url = `${rec.podUrl}concord/${relPath}`;
-        const res = await s.fetch(url, { method: 'PUT', headers: { 'content-type': contentType }, body });
+        const res = await req('PUT', url, { headers: { 'content-type': contentType }, body });
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
       } catch (err) {
@@ -139,8 +144,8 @@ export const solid = {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
-        const s = await sessionFor({ ...rec, id: userId });
-        const res = await s.fetch(`${rec.podUrl}concord/${relPath}`);
+        const req = await ownerRequest({ ...rec, id: userId });
+        const res = await req('GET', `${rec.podUrl}concord/${relPath}`);
         if (res.ok) return await res.text();
       } catch {
         /* fall through to local */
@@ -165,10 +170,9 @@ export const solid = {
 
   /**
    * Give `readers` (WebIDs) read-only access to a folder in a user's pod and
-   * everything in it, alongside the pod owner's full control. Writes the folder's
-   * access control resource: a WAC .acl, or an ACP .acr if the server uses ACP.
-   * Rewritten whole each time, so a WebID taken off the list loses access.
-   * Skips the write when the folder is already shared with exactly these readers.
+   * everything in it, alongside the pod owner's full control (see shareFolder).
+   * A WebID taken off the list loses access the next time this runs. Skips the
+   * work when the folder is already shared with exactly these readers.
    */
   async shareRead(userId: string, relFolder: string, readers: string[], opts: { create?: boolean; force?: boolean } = {}): Promise<'shared' | 'unchanged' | 'missing' | 'local'> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
@@ -177,30 +181,10 @@ export const solid = {
     const key = `share:${userId}:${relFolder}`;
     const prev = get<Kv<string[]>>('kv', key);
     if (!opts.force && prev && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
-    const s = await sessionFor({ ...rec, id: userId });
-    const folder = `${rec.podUrl}concord/${relFolder}`;
-    let head = await s.fetch(folder, { method: 'HEAD' });
-    if (head.status === 404) {
-      if (!opts.create) return 'missing';
-      const made = await s.fetch(folder, { method: 'PUT', headers: { 'content-type': 'text/turtle' }, body: '' });
-      if (!made.ok) throw new Error(`PUT ${folder} → ${made.status}`);
-      head = await s.fetch(folder, { method: 'HEAD' });
-    }
-    if (!head.ok) throw new Error(`HEAD ${folder} → ${head.status}`);
-    const { acl, acp } = aclOf(head.headers.get('link'), folder);
-    // Change only Concord's own sharing rule: whatever else the folder's access control says stays.
-    const existing = await readRdf(s.fetch.bind(s), acl);
-    let body: string;
-    if (acp) body = await acpMerge(folder, acl, existing ?? [], want);
-    else {
-      // No ACL of its own yet: it inherits one. Writing one stops the inheritance, so carry the inherited rules over.
-      const inherited = existing ? undefined : await inheritedAcl(s.fetch.bind(s), folder, rec.podUrl);
-      body = await wacMerge(folder, acl, existing, inherited, rec.webId, want);
-    }
-    const res = await s.fetch(acl, { method: 'PUT', headers: { 'content-type': 'text/turtle' }, body });
-    if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
-    put('kv', { id: key, value: want });
-    return 'shared';
+    const req = await ownerRequest({ ...rec, id: userId });
+    const r = await shareFolder(req, `${rec.podUrl}concord/${relFolder}`, rec.podUrl, rec.webId, want, { create: opts.create });
+    if (r === 'shared') put('kv', { id: key, value: want });
+    return r;
   },
 
   /** A minimal WebID profile document for locally-hosted WebIDs. */
@@ -241,7 +225,7 @@ const ACP = 'http://www.w3.org/ns/solid/acp#';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const { namedNode: nn, quad: q } = DataFactory;
 
-/** The ACL resource a Link header points to, and whether it is ACP (.acr) rather than WAC. */
+/** The access control resource a Link header points to, and whether it is ACP (.acr) rather than WAC. */
 function aclOf(link: string | null, resource: string) {
   const links = parseLinks(link, resource);
   const acl = links.find((l) => l.rel === 'acl')?.url;
@@ -250,29 +234,65 @@ function aclOf(link: string | null, resource: string) {
   return { acl, acp };
 }
 
-type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
-
-/** GET an RDF document; undefined when it doesn't exist. */
-async function readRdf(fetchFn: Fetch, url: string): Promise<Quad[] | undefined> {
-  const r = await fetchFn(url, { headers: { accept: 'text/turtle' } });
+/** GET an RDF document and its ETag; undefined when it doesn't exist. Any other answer than 200 or 404 is an error. */
+async function readRdf(req: PodRequest, url: string): Promise<{ quads: Quad[]; etag: string } | undefined> {
+  const r = await req('GET', url, { headers: { accept: 'text/turtle' } });
   if (r.status === 404) return undefined;
-  if (!r.ok) throw new Error(`GET ${url} → ${r.status}`);
-  return new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await r.text());
+  if (r.status !== 200) throw new Error(`GET ${url} → ${r.status}`);
+  const etag = r.headers.get('etag');
+  if (!etag) throw new Error(`${url} has no ETag, so it can’t be changed safely`);
+  return { quads: new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await r.text()), etag };
 }
 
-/** The nearest ancestor's ACL (the one a folder without its own inherits), up to the pod root. */
-async function inheritedAcl(fetchFn: Fetch, folder: string, podUrl: string): Promise<{ container: string; quads: Quad[] } | undefined> {
+/**
+ * The nearest ancestor's ACL (the one a folder without its own inherits), up to
+ * the pod root. Never guesses: an ancestor that answers anything but 200 or 404
+ * stops it, since a nearer ACL could be hiding behind the error.
+ */
+async function inheritedAcl(req: PodRequest, folder: string, podUrl: string): Promise<{ container: string; quads: Quad[] }> {
   let container = new URL('..', folder).href;
   while (container.startsWith(podUrl)) {
-    const head = await fetchFn(container, { method: 'HEAD' });
-    if (head.ok) {
-      const quads = await readRdf(fetchFn, aclOf(head.headers.get('link'), container).acl);
-      if (quads) return { container, quads };
-    }
+    const head = await req('HEAD', container);
+    if (head.status === 200) {
+      const found = await readRdf(req, aclOf(head.headers.get('link'), container).acl);
+      if (found) return { container, quads: found.quads };
+    } else if (head.status !== 404) throw new Error(`Couldn’t tell what ${folder} inherits: ${container} answered ${head.status}. Nothing was changed.`);
     if (container === podUrl) break;
     container = new URL('..', container).href;
   }
-  return undefined;
+  throw new Error(`Couldn’t find the access control ${folder} inherits. Nothing was changed.`);
+}
+
+/**
+ * Share `folder` read-only with `readers` by changing only Concord's own rule in
+ * its WAC ACL (see wacMerge). The write is conditional on what was read (If-Match
+ * its ETag, or If-None-Match: * when the ACL is new), so a concurrent change is
+ * never overwritten: a conflict is retried once from a fresh read, then reported.
+ * Pods using ACP are refused without changing anything.
+ */
+export async function shareFolder(req: PodRequest, folder: string, podUrl: string, owner: string, readers: string[], opts: { create?: boolean } = {}): Promise<'shared' | 'missing'> {
+  let head = await req('HEAD', folder);
+  if (head.status === 404) {
+    if (!opts.create) return 'missing';
+    const made = await req('PUT', folder, { headers: { 'content-type': 'text/turtle', 'if-none-match': '*' }, body: '' });
+    if (!made.ok && made.status !== 412) throw new Error(`PUT ${folder} → ${made.status}`);
+    head = await req('HEAD', folder);
+  }
+  if (head.status !== 200) throw new Error(`HEAD ${folder} → ${head.status}`);
+  const { acl, acp } = aclOf(head.headers.get('link'), folder);
+  if (acp) throw new Error(`${folder} is on a pod that uses ACP access control. Concord only shares folders on WAC pods, so nothing was changed.`);
+  for (let attempt = 1; ; attempt++) {
+    const existing = await readRdf(req, acl);
+    // No ACL of its own yet: it inherits one. Writing one stops the inheritance, so carry the inherited rules over.
+    const inherited = existing ? undefined : await inheritedAcl(req, folder, podUrl);
+    const body = await wacMerge(folder, acl, existing?.quads, inherited, owner, readers);
+    const condition: Record<string, string> = existing ? { 'if-match': existing.etag } : { 'if-none-match': '*' };
+    const res = await req('PUT', acl, { headers: { 'content-type': 'text/turtle', ...condition }, body });
+    if (res.status === 412 && attempt === 1) continue;
+    if (res.status === 412) throw new Error(`${acl} changed while Concord was updating it, twice. Nothing was written.`);
+    if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
+    return 'shared';
+  }
 }
 
 const usable = (u: string) => {
@@ -329,37 +349,6 @@ export async function wacMerge(folder: string, aclUrl: string, existing: Quad[] 
     for (const r of readers) quads.push(q(ours, nn(`${ACL}agent`), usable(r)));
   }
   return serialise(quads, { acl: ACL });
-}
-
-/**
- * ACP: the folder's ACR with Concord's own access control (read for `readers`,
- * on the folder and its members) set, and nothing else changed. ACP adds up
- * policies, so the owner's inherited access is untouched.
- */
-export async function acpMerge(folder: string, acrUrl: string, existing: Quad[], readers: string[]): Promise<string> {
-  const ac = nn(`${acrUrl}#concord-admins-access`);
-  const policy = nn(`${acrUrl}#concord-admins-policy`);
-  const matcher = nn(`${acrUrl}#concord-admins-matcher`);
-  const managed = [ac, policy, matcher];
-  let quads = existing.filter((x) => !managed.some((m) => x.subject.equals(m) || x.object.equals(m)));
-  if (readers.length) {
-    const acr = quads.find((x) => x.predicate.value === RDF_TYPE && x.object.value === `${ACP}AccessControlResource`)?.subject ?? nn(acrUrl);
-    if (!quads.some((x) => x.subject.equals(acr) && x.predicate.value === RDF_TYPE)) quads.push(q(acr as never, nn(RDF_TYPE), nn(`${ACP}AccessControlResource`)));
-    if (!quads.some((x) => x.subject.equals(acr) && x.predicate.value === `${ACP}resource`)) quads.push(q(acr as never, nn(`${ACP}resource`), usable(folder)));
-    quads = [
-      ...quads,
-      q(acr as never, nn(`${ACP}accessControl`), ac),
-      q(acr as never, nn(`${ACP}memberAccessControl`), ac),
-      q(ac, nn(RDF_TYPE), nn(`${ACP}AccessControl`)),
-      q(ac, nn(`${ACP}apply`), policy),
-      q(policy, nn(RDF_TYPE), nn(`${ACP}Policy`)),
-      q(policy, nn(`${ACP}allow`), nn(`${ACL}Read`)),
-      q(policy, nn(`${ACP}anyOf`), matcher),
-      q(matcher, nn(RDF_TYPE), nn(`${ACP}Matcher`)),
-      ...readers.map((r) => q(matcher, nn(`${ACP}agent`), usable(r))),
-    ];
-  }
-  return serialise(quads, { acp: ACP, acl: ACL });
 }
 
 /** Serialise an interview transcript as Turtle (schema.org Conversation) for the pod. */
