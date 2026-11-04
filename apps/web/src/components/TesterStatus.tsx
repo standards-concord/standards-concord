@@ -127,16 +127,24 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
   const where = t.me?.storedIn === 'solid' ? 'your Solid pod' : 'your private storage on this server';
 
   if (!session || (t.meLoading && !t.me)) return <p className="text-sm text-muted">Checking who’s testing…</p>;
+  const podBehind = t.me?.podBehind && t.me.storedIn === 'solid' && (
+    <p role="status" className="text-muted">
+      Your pod couldn’t be reached just now, so its copy is a little behind. Nothing is lost: it catches up next time.
+    </p>
+  );
 
   if (tester?.lasting)
     return (
-      <div role="group" aria-label="Your testing record" className="flex items-start gap-3 text-sm">
-        <KeyRound className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
-        <p>
-          Signed in as <strong>{tester.name}</strong>. The versions you test and your feedback are saved to {where}
-          {t.me?.versions.length ? ` (${t.me.versions.length} version${t.me.versions.length === 1 ? '' : 's'} so far)` : ''}.
-          {session.user?.id !== tester.id && <span className="text-muted"> That stays true while you play someone else in the demo.</span>}
-        </p>
+      <div role="group" aria-label="Your testing record" className="space-y-2 text-sm">
+        <div className="flex items-start gap-3">
+          <KeyRound className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
+          <p>
+            Signed in as <strong>{tester.name}</strong>. The versions you test and your feedback are saved to {where}
+            {t.me?.versions.length ? ` (${t.me.versions.length} version${t.me.versions.length === 1 ? '' : 's'} so far)` : ''}.
+            {session.user?.id !== tester.id && <span className="text-muted"> That stays true while you play someone else in the demo.</span>}
+          </p>
+        </div>
+        {podBehind}
       </div>
     );
 
@@ -154,6 +162,7 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
             )}
           </p>
         </div>
+        {podBehind}
         <OAuthButtons returnTo={returnTo} />
       </div>
     );

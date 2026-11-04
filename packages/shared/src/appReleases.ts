@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.13.0',
+    version: '0.14.0',
     date: '2026-11-04',
     title: 'Sign in with your WebID',
     changes: [
@@ -80,7 +80,7 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
-    version: '0.12.0',
+    version: '0.13.0',
     date: '2026-11-04',
     title: 'Returning testers see what changed',
     changes: [
@@ -92,6 +92,118 @@ export const APP_RELEASES: AppRelease[] = [
           'The alpha pages show which version you’re testing. Sign in and Concord saves the version and your feedback to your own pod; next time it shows what changed, points your role at the new parts and asks about those rather than everything.',
         roles: [],
         ask: 'How useful is seeing what’s changed since your last visit, rather than starting over?',
+      },
+    ],
+  },
+  {
+    version: '0.12.2',
+    date: '2026-11-04',
+    title: 'Fixes found by testing every flow',
+    pr: 45,
+    changes: [
+      {
+        id: 'a11y-names',
+        type: 'fix',
+        title: 'Dialogs, switches and answer boxes are properly named',
+        detail:
+          'Screen readers now announce each dialog by its title, and policy switches, the new-owner picker, the chat box and feedback answers have names. Chips say whether they’re on.',
+        roles: [],
+      },
+      {
+        id: 'review-comment-once',
+        type: 'fix',
+        title: 'A review comment shows once in the Discussion tab',
+        detail: 'A review comment on a change request no longer appears twice in its discussion.',
+        roles: ['steward', 'member'],
+      },
+    ],
+  },
+  {
+    version: '0.12.1',
+    date: '2026-11-04',
+    title: 'Clearer, safer agent connections',
+    pr: 34,
+    changes: [
+      {
+        id: 'oauth-consent',
+        type: 'fix',
+        title: 'The connect screen says who an app is and where access goes',
+        detail:
+          'When an agent asks to connect, Concord says whether it can confirm who made the app (an unverified app’s name and website are only its own claims) and exactly where access will be sent, including apps on this device.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+      {
+        id: 'chatgpt-steps',
+        type: 'fix',
+        title: 'Up-to-date steps for connecting ChatGPT',
+        detail: 'The ChatGPT instructions match ChatGPT’s current screens: create Concord as a plugin, install it, then pick it with @ in a chat.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+    ],
+  },
+  {
+    version: '0.12.0',
+    date: '2026-11-04',
+    title: 'SHACL compact syntax and classes for apps',
+    pr: 18,
+    changes: [
+      {
+        id: 'shaclc-classes',
+        type: 'feat',
+        title: 'Shapes in SHACL compact syntax, and generated classes',
+        detail:
+          'Source & export adds the SHACL shapes in compact syntax, which is much easier to read, and a JavaScript/TypeScript class for every shape so apps can work with the data as objects. Both are also served at the ontology’s URI.',
+        roles: ['agent', 'contributor'],
+        to: '{o}/source',
+        ask: 'How useful are the compact SHACL view and the generated classes for building against the standard?',
+      },
+      {
+        id: 'value-checks',
+        type: 'fix',
+        title: 'Data checks handle decimals, string types and patterns exactly',
+        detail: 'Validating data now checks exact decimal bounds, string subtypes and XSD patterns, and several datatypes on one property.',
+        roles: ['agent'],
+      },
+    ],
+  },
+  {
+    version: '0.11.3',
+    date: '2026-11-04',
+    title: 'Room under the ontology header',
+    pr: 41,
+    changes: [
+      {
+        id: 'header-gap',
+        type: 'fix',
+        title: 'A clear gap between the ontology header and the page',
+        detail: 'Each ontology page has breathing room between its header and the content below.',
+        roles: [],
+      },
+    ],
+  },
+  {
+    version: '0.11.2',
+    date: '2026-11-04',
+    title: 'Safer sign-in, and feedback for administrators only',
+    pr: 40,
+    changes: [
+      {
+        id: 'signin-hardening',
+        type: 'fix',
+        title: 'Signing in with Google or GitHub is safer',
+        detail:
+          'Each Google or GitHub identity has its own account: signing in never joins an account just because the email address matches, and a sign-in that didn’t start in your browser is refused.',
+        roles: [],
+      },
+      {
+        id: 'feedback-admins',
+        type: 'fix',
+        title: 'Only administrators can read testers’ feedback',
+        detail:
+          'Everyone’s feedback is readable only by this deployment’s administrators, signed in with Google or GitHub. Ontology roles and demo personas no longer count, and Feedback admin is gone from everyone else’s menu.',
+        roles: ['odi'],
       },
     ],
   },
@@ -514,6 +626,8 @@ export interface AlphaMe {
   /** Where the record lives: their Solid pod, or this server's private store when no Solid server is configured. */
   storedIn?: 'solid' | 'local';
   recordUrl?: string;
+  /** The copy in their pod is behind (the pod couldn't be written to); it catches up on a later visit. The history here is complete. */
+  podBehind?: boolean;
 }
 
 /** The newest version a tester used before `current`, if any. */

@@ -1,11 +1,15 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
+import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import { syncFeedbackSharing } from './services/feedback.js';
 
 openDb();
+const secrets = migrateClientSecrets();
+if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
+if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }

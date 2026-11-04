@@ -105,7 +105,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
     const min = q.min ?? 1;
     const max = q.max ?? 5;
     return (
-      <Select value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} className="h-8 text-xs">
+      <Select aria-label={q.text} value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} className="h-8 text-xs">
         <option value="">—</option>
         {Array.from({ length: max - min + 1 }, (_, i) => min + i).map((n) => (
           <option key={n} value={n}>
@@ -117,7 +117,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   }
   if (q.type === 'choice')
     return (
-      <Select value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs">
+      <Select aria-label={q.text} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs">
         <option value="">—</option>
         {(q.options ?? []).map((o) => (
           <option key={o}>{o}</option>
@@ -127,7 +127,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   if (q.type === 'multi') {
     const arr = Array.isArray(value) ? value : value ? [String(value)] : [];
     return (
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap gap-1" role="group" aria-label={q.text}>
         {(q.options ?? []).map((o) => (
           <Chip key={o} active={arr.includes(o)} onClick={() => onChange(arr.includes(o) ? arr.filter((x) => x !== o) : [...arr, o])} className="py-0.5 text-[0.7rem]">
             {o}
@@ -136,7 +136,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
       </div>
     );
   }
-  return <Textarea rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
+  return <Textarea aria-label={q.text} rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
 }
 
 export function FeedbackPage() {
@@ -173,7 +173,17 @@ export function FeedbackPage() {
     try {
       const r = await api.feedbackChat({ ...questionScope(sc), messages: msgs, answers: ans, pathway: sc.pathway, currentQuestionId });
       setMessages([...msgs, msg('assistant', r.reply)]);
-      if (r.answers) setAnswers({ ...ans, ...r.answers });
+      // Apply only what the reply changed, and never over an answer edited in the panel while it was on its way.
+      const changed = r.answers;
+      if (changed)
+        setAnswers((cur) => {
+          const next = { ...cur };
+          for (const [k, v] of Object.entries(changed)) {
+            const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+            if (!same(v, ans[k]) && same(cur[k], ans[k])) next[k] = v;
+          }
+          return next;
+        });
       setDone(r.done);
       setNextQ(r.nextQuestionId);
     } catch (e) {
@@ -200,8 +210,10 @@ export function FeedbackPage() {
     const nextAns = value ? { ...answers, [value.qid]: value.v } : answers;
     setMessages(nextMsgs);
     setAnswers(nextAns);
-    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one.
-    void turn(scope, nextMsgs, nextAns, nextQ);
+    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one. If they've
+    // already answered it in the panel, typed text goes to the next unanswered question instead of replacing that.
+    const answering = value || !nextQ || answers[nextQ] === undefined ? nextQ : undefined;
+    void turn(scope, nextMsgs, nextAns, answering);
   };
 
   const submit = useAction(async () => {

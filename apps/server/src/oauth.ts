@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { claim, get, HttpError, list, put, remove, take, transaction } from './db.js';
+import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -53,6 +53,10 @@ interface ClientDoc {
   info: OAuthClientInformationFull;
   /** Client ID Metadata Documents are cached for a day. */
   fetchedAt?: number;
+  /** Which version of the metadata-document checks admitted it; older cache entries are checked again. */
+  checks?: number;
+  /** Registered confidential clients: sha256 of the client secret. The secret itself is only ever in the registration response. */
+  secretHash?: string;
 }
 interface PendingRequest {
   id: string;
@@ -197,7 +201,33 @@ export function validateClientMetadata(doc: unknown): { ok: true; info: OAuthCli
   return { ok: true, info: { ...(doc as object), ...m } as OAuthClientInformationFull };
 }
 
+const SHARED_SECRET_METHODS = new Set(['client_secret_basic', 'client_secret_post', 'client_secret_jwt']);
+
+/**
+ * Why a client metadata document's authentication fields rule it out, if they do (CIMD draft -03, §4.1 and §5).
+ * ChatGPT lists every method it can use in token_endpoint_auth_methods_supported (no order) and a preference
+ * in the singular field, which must be one of them. Shared-secret methods are meaningless in a public
+ * document. Concord only supports `none` for these clients, so the document must allow it; a document that
+ * names no method at all is a public client, as the draft says.
+ */
+export function cimdAuthProblem(doc: Record<string, unknown>): string | undefined {
+  const list = doc.token_endpoint_auth_methods_supported;
+  const one = doc.token_endpoint_auth_method;
+  if (list !== undefined && (!Array.isArray(list) || !list.length || !list.every((m) => typeof m === 'string'))) return 'token_endpoint_auth_methods_supported must be a non-empty list of strings';
+  if (one !== undefined && typeof one !== 'string') return 'token_endpoint_auth_method must be a string';
+  const methods = [...((list as string[] | undefined) ?? []), ...(one === undefined ? [] : [one as string])];
+  if (methods.some((m) => SHARED_SECRET_METHODS.has(m))) return 'a metadata document cannot use shared-secret authentication';
+  if (list !== undefined && one !== undefined && !(list as string[]).includes(one as string)) return 'token_endpoint_auth_method is not in token_endpoint_auth_methods_supported';
+  const allowsNone = list !== undefined ? (list as string[]).includes('none') : one === undefined || one === 'none';
+  return allowsNone ? undefined : 'the client requires authentication Concord does not support (only none)';
+}
+
+/** Token endpoint authentication Concord supports; also what the authorization server metadata advertises. */
+const AUTH_METHODS = ['none', 'client_secret_post'];
+
 const CIMD_FRESH = 24 * 60 * 60;
+/** Bump when fetchClientMetadata starts refusing something it used to accept. */
+const CIMD_CHECKS = 3;
 /** After a failed refresh (network error, timeout, 5xx), a cached document may be used this much longer, then never. */
 const CIMD_STALE_GRACE = 60 * 60;
 
@@ -231,21 +261,143 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
     return { kind: 'invalid' };
   }
   if (!doc || typeof doc !== 'object' || doc.client_id !== clientId) return { kind: 'invalid' };
-  // Metadata documents describe public clients: no secret is ever issued.
+  // Concord only takes metadata-document clients as public clients (PKCE, no client authentication). That is
+  // only safe when the document says the client may work that way: a client that insists on private_key_jwt
+  // is refused rather than quietly downgraded, so a leaked refresh token can't be used without its key.
+  if (cimdAuthProblem(doc)) return { kind: 'invalid' };
   const checked = validateClientMetadata({ ...doc, token_endpoint_auth_method: 'none' });
   if (!checked.ok) return { kind: 'invalid' };
   return { kind: 'ok', info: { ...checked.info, client_id: clientId, client_secret: undefined } };
 }
 
+/**
+ * A registered (not metadata-document) client. Upgrades a record older code wrote (see upgradeLegacy) as
+ * it is read, so the stored client never carries a usable secret; clientAuth checks the hash instead of the SDK.
+ */
+function registeredClient(clientId: string): ClientDoc | undefined {
+  const doc = get<ClientDoc>('oauthClients', clientId);
+  if (!doc || !needsUpgrade(doc)) return doc;
+  const upgraded = transaction(() => {
+    const fresh = get<ClientDoc>('oauthClients', clientId);
+    return fresh && needsUpgrade(fresh) ? upgradeLegacy(fresh) : fresh;
+  });
+  scheduleScrub();
+  return upgraded;
+}
+
+/** Records older versions wrote: a plain-text secret, or a confidential client with no method recorded (RFC 7591 default). */
+const needsUpgrade = (doc: ClientDoc) => doc.info.client_secret !== undefined || (doc.info.token_endpoint_auth_method === undefined && doc.secretHash !== undefined);
+
+/**
+ * Hash a plain-text secret, and record the method Concord actually checks (client_secret_post) for a
+ * confidential client that registered without one. Hashing raises the owed scrub generation in the same
+ * write, so the scrub can't be skipped. Call inside a transaction.
+ */
+function upgradeLegacy(doc: ClientDoc): ClientDoc {
+  const { client_secret, ...info } = doc.info;
+  const secretHash = typeof client_secret === 'string' ? sha(client_secret) : doc.secretHash;
+  if (info.token_endpoint_auth_method === undefined && secretHash !== undefined) info.token_endpoint_auth_method = 'client_secret_post';
+  const upgraded = { ...doc, info: info as OAuthClientInformationFull, secretHash };
+  put<ClientDoc>('oauthClients', upgraded);
+  if (client_secret !== undefined) {
+    const state = scrubState();
+    put<ScrubState>('kv', { ...state, owed: state.owed + 1 });
+  }
+  return upgraded;
+}
+
+/**
+ * Scrub bookkeeping, by generation: every secret hashed raises `owed`; a scrub that succeeds records the
+ * generation it started from as `scrubbed` (never lowering it). Work owed after a scrub started, by this
+ * process or another, stays owed. With no record yet, one scrub is owed (old versions' leftovers).
+ */
+interface ScrubState {
+  id: string;
+  owed: number;
+  scrubbed: number;
+}
+const SCRUB = 'oauth-secret-scrub-v2';
+const scrubState = (): ScrubState => get<ScrubState>('kv', SCRUB) ?? { id: SCRUB, owed: 1, scrubbed: 0 };
+
+/** Scrub old copies of secrets from the database files if that is owed. True once nothing is owed. */
+export function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): boolean {
+  // All of it, the bookkeeping included, gives up at once if another connection holds a lock: the work
+  // stays owed and the scheduler tries again later, so it never stalls requests or throws out of a timer.
+  try {
+    return withoutWaiting(() => {
+      const before = scrubState();
+      if (before.scrubbed >= before.owed) return true;
+      const generation = before.owed;
+      if (!scrub()) return false;
+      transaction(() => {
+        const now = scrubState();
+        put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
+      });
+      const after = scrubState();
+      return after.scrubbed >= after.owed;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One scrub attempt at a time, off the request: the first soon, then backing off (30 s doubling to an
+ * hour) while another connection keeps blocking it. Further calls while one is scheduled do nothing.
+ */
+let scrubTimer: NodeJS.Timeout | undefined;
+let scrubBackoff = 0;
+export function scheduleScrub(delayMs = 0) {
+  if (scrubTimer) return;
+  scrubTimer = setTimeout(() => {
+    scrubTimer = undefined;
+    if (scrubIfOwed()) {
+      scrubBackoff = 0;
+      return;
+    }
+    scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
+    scheduleScrub(scrubBackoff);
+  }, delayMs);
+  scrubTimer.unref();
+}
+/** Tests only: whether a scrub attempt is waiting, and cancel it. */
+export const scrubRetryPending = () => scrubTimer !== undefined;
+export function cancelScrubRetry() {
+  if (scrubTimer) clearTimeout(scrubTimer);
+  scrubTimer = undefined;
+  scrubBackoff = 0;
+}
+
+/**
+ * Run at startup: upgrade every record older code wrote (hashing plain-text secrets), then scrub the
+ * database file and its write-ahead log of old copies. A blocked scrub stays owed and is retried in the
+ * background with backoff, and at the next start.
+ */
+export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
+  const hashed = transaction(() => {
+    const legacy = list<ClientDoc>('oauthClients').filter(needsUpgrade);
+    for (const d of legacy) upgradeLegacy(d);
+    return legacy.filter((d) => d.info.client_secret !== undefined).length;
+  });
+  const scrubbed = scrubIfOwed();
+  if (!scrubbed) scheduleScrub(30_000);
+  return { hashed, scrubbed };
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const isSecretHash = (h: unknown): h is string => typeof h === 'string' && SHA256_HEX.test(h);
+/** Constant-time check of a presented secret against its stored hash. A malformed stored hash never matches. */
+const sameSecret = (given: string, hash: unknown) => isSecretHash(hash) && timingSafeEqual(Buffer.from(sha(given), 'hex'), Buffer.from(hash, 'hex'));
+
 const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
+    if (!clientId.startsWith('https://')) return registeredClient(clientId)?.info;
     const doc = get<ClientDoc>('oauthClients', clientId);
-    if (!clientId.startsWith('https://')) return doc?.info;
-    const age = doc?.fetchedAt ? now() - doc.fetchedAt : Infinity;
+    const age = doc?.fetchedAt && doc.checks === CIMD_CHECKS ? now() - doc.fetchedAt : Infinity;
     if (doc && age < CIMD_FRESH) return doc.info;
     const r = await fetchClientMetadata(clientId);
     if (r.kind === 'ok') {
-      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now() });
+      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now(), checks: CIMD_CHECKS });
       return r.info;
     }
     if (r.kind === 'invalid') {
@@ -256,11 +408,18 @@ const clientsStore: OAuthRegisteredClientsStore = {
     return doc && age < CIMD_FRESH + CIMD_STALE_GRACE ? doc.info : undefined;
   },
   registerClient(client) {
+    const method = client.token_endpoint_auth_method;
+    if (method !== undefined && !AUTH_METHODS.includes(method))
+      throw new InvalidClientMetadataError(`token_endpoint_auth_method ${method} is not supported; use none (with PKCE) or client_secret_post`);
     const checked = validateClientMetadata(client);
     if (!checked.ok) throw new InvalidClientMetadataError(checked.reason);
     const info = { ...checked.info, ...client } as OAuthClientInformationFull;
     if (!info.client_id) info.client_id = newId('client');
-    put<ClientDoc>('oauthClients', { id: info.client_id, info });
+    // RFC 7591's default (client_secret_basic) isn't supported; the SDK has issued a secret, so say how to send it.
+    if (method === undefined) info.token_endpoint_auth_method = 'client_secret_post';
+    if (info.token_endpoint_auth_method !== 'none' && !info.client_secret) throw new InvalidClientMetadataError('a confidential client needs a secret');
+    const { client_secret, ...stored } = info;
+    put<ClientDoc>('oauthClients', { id: info.client_id, info: stored as OAuthClientInformationFull, secretHash: client_secret ? sha(client_secret) : undefined });
     return info;
   },
 };
@@ -428,8 +587,12 @@ export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
     clientName: clientName(client),
     clientUri: client.client_uri,
     logoUri: client.logo_uri,
-    redirectHost: redirect.host,
-    localRedirect: ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname),
+    publisher: client.client_id.startsWith('https://') ? new URL(client.client_id).host : undefined,
+    ...(redirect.protocol === 'https:' || redirect.protocol === 'http:'
+      ? { redirectHost: redirect.host, redirectKind: LOOPBACK.has(redirect.hostname) ? ('local' as const) : ('web' as const) }
+      : // A native app's link: anything after the scheme is up to the app, so it says nothing about who receives access.
+        { redirectHost: redirect.protocol, redirectKind: 'native' as const }),
+    localRedirect: (redirect.protocol === 'https:' || redirect.protocol === 'http:') && LOOPBACK.has(redirect.hostname),
     resource: p.resource,
   };
 }
@@ -554,6 +717,40 @@ function routerFor(origin: string): Router {
   r.get('/.well-known/oauth-protected-resource', cors, (_req, res) =>
     res.json({ resource: mcpUrlFor(origin), authorization_servers: [`${origin}/`], resource_name: 'Concord', resource_documentation: `${origin}/connect`, bearer_methods_supported: ['header'] }),
   );
+  // Client authentication for /token and /revoke, before the SDK sees the request. Concord supports none
+  // (public clients, PKCE) and client_secret_post. Anything else a client sends expects to be checked, so it
+  // is refused rather than ignored: client assertions, HTTP Basic, or a secret from a public client.
+  // Registered clients' secrets are stored hashed and compared in constant time here; the stored client has
+  // no client_secret, so the SDK's own check (plain string comparison) never runs.
+  const clientAuth = (req: Request, res: Response, next: NextFunction) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const refuse = (why: string) => res.status(401).json({ error: 'invalid_client', error_description: why });
+    if (body.client_assertion !== undefined || body.client_assertion_type !== undefined)
+      return refuse('Client assertions (private_key_jwt) are not supported. Authenticate with none (PKCE) or client_secret_post.');
+    if (req.headers.authorization !== undefined) return refuse('HTTP Basic client authentication is not supported. Send client_secret in the request body, or nothing for a public client.');
+    if (typeof body.client_id !== 'string') return next(); // the SDK answers invalid_request
+    const doc = body.client_id.startsWith('https://') ? undefined : registeredClient(body.client_id);
+    const given = body.client_secret;
+    // Whether a secret is needed comes from the registered method, never from whether a hash happens to be
+    // there: a confidential client whose stored hash is missing or damaged fails closed.
+    const method = doc?.info.token_endpoint_auth_method;
+    const confidential = method === 'client_secret_post';
+    if (doc && (!AUTH_METHODS.includes(method as string) || confidential !== (doc.secretHash !== undefined && doc.secretHash !== null)))
+      return refuse('This client’s registration is damaged. Register it again.');
+    if (doc && confidential) {
+      if (typeof given !== 'string' || !sameSecret(given, doc.secretHash)) return refuse('The client secret is missing or wrong.');
+      const expires = doc.info.client_secret_expires_at;
+      if (expires && expires < now()) return refuse('The client secret has expired. Register the client again.');
+    } else if (given !== undefined) {
+      return refuse('This is a public client (none): send no client_secret.');
+    }
+    delete body.client_secret;
+    next();
+  };
+  // Mounted with use() so it covers every path the SDK's /token and /revoke routers answer (they match
+  // prefixes, so /token/ and /token// reach them too), not just the exact paths.
+  const postOnly = (h: RequestHandler): RequestHandler => (req, res, next) => (req.method === 'POST' ? h(req, res, next) : next());
+  for (const path of ['/token', '/revoke']) r.use(path, postOnly(cors), postOnly(express.urlencoded({ extended: false })), postOnly(clientAuth));
   r.use(
     mcpAuthRouter({
       provider,
@@ -575,8 +772,41 @@ function routerFor(origin: string): Router {
 const OAUTH_PATHS = /^\/(\.well-known\/(oauth-authorization-server|oauth-protected-resource)|authorize|token|register|revoke)(\/|$)/;
 
 /** Mount at the app root. Builds one router per public origin, so every domain gets matching metadata. */
+/** The only paths the OAuth endpoints answer on; anything else that looks like one (/token/, /token//) is not found. */
+const CANONICAL_OAUTH_PATHS = new Set(['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/authorize', '/token', '/register', '/revoke']);
+
+/**
+ * The path as a lenient server or proxy might read it: percent-decoded, lower-cased, without ;parameters,
+ * empty or dot segments. Used only to recognise near-misses of the OAuth endpoints and refuse them.
+ */
+function looseOAuthPath(path: string): boolean {
+  // Decode %XX byte by byte, without ever failing on malformed sequences, until nothing changes (catches
+  // any depth of encoding). Then drop what isn't printable ASCII: overlong UTF-8, NULs and other bytes
+  // that some decoder somewhere might turn into a slash or nothing.
+  // Dropping bytes can join the pieces of a new escape (%25%00%32%66 → %2f), so both happen in each pass.
+  // A path still changing after the last pass is treated as a near-miss rather than let through.
+  let p = path;
+  for (let i = 0; ; i++) {
+    const next = p.replace(/%([0-9a-f]{2})/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16))).replace(/[^\x20-\x7e]/g, '');
+    if (next === p) break;
+    if (i === 64) return true;
+    p = next;
+  }
+  p = p.replace(/\\/g, '/').toLowerCase();
+  const segments: string[] = [];
+  for (const s of p.split('/')) {
+    const seg = s.split(';')[0].trim();
+    if (!seg || seg === '.') continue;
+    if (seg === '..') segments.pop();
+    else segments.push(seg);
+  }
+  return OAUTH_PATHS.test(`/${segments.join('/')}`);
+}
+
 export function oauthRoutes(req: Request, res: Response, next: NextFunction) {
-  if (!OAUTH_PATHS.test(req.path)) return next();
+  const exact = OAUTH_PATHS.test(req.path);
+  if (!exact && !looseOAuthPath(req.path)) return next();
+  if (!exact || !CANONICAL_OAUTH_PATHS.has(req.path)) return void res.status(404).json({ error: 'not_found' });
   const origin = publicOrigin(req);
   if (!origin) return refuseUnknownOrigin(res);
   const limit = limits.find(([re]) => re.test(req.path))?.[1];

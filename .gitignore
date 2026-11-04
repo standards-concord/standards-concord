@@ -9,5 +9,6 @@ test-results
 playwright-report
 playwright-report-solid
 e2e/.auth
+.gen/
 walkthrough/out
 walkthrough/.cache

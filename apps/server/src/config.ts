@@ -27,7 +27,7 @@ export const config = {
   demoMode: bool(process.env.DEMO_MODE, true),
   /**
    * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
-   * An account's WebID is shown under Settings; it stays the same whichever provider they sign in with.
+   * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
    * Someone who signs in with their own WebID (Solid) has that WebID. Listed WebIDs are also given
    * read access to each tester's feedback folder in their pod, and are shown to testers.
    */

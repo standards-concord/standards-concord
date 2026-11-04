@@ -2,7 +2,7 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { APP_RELEASES, APP_VERSION, bumpFor, bumpVersion, changesFor, changesSince, compareVersions, lastTestedBefore, parseVersion, releasesSince } from '@concord/shared';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { changeQuestions, FEEDBACK_QUESTIONS, questionsFor } from '../src/services/feedback.js';
 import { createUser, upsertFederatedUser } from '../src/services/users.js';
@@ -195,17 +195,29 @@ describe('alpha tester records', () => {
     expect((await upsertFederatedUser({ provider: 'github', subject: 'gh-link-1', name: 'Real Name' }, other)).id).toBe(demo.id);
   });
 
-  it('survives a malformed record in the pod', async () => {
-    const u = await createUser({ name: 'Messy pod', provider: 'demo', subject: 'messy' });
-    await solid.write(u.id, 'alpha/testing.jsonld', JSON.stringify({ versions: [{ version: '0.7.0', roles: {}, feedbackIds: 'x' }, { version: 42 }, null, { version: '0.7.0', roles: ['agent', 'nope'], firstAt: 'yesterday' }] }));
-    const r = await recordVersion(u, { version: '0.8.0', role: 'member' });
-    expect(r.versions).toEqual([
-      expect.objectContaining({ version: '0.8.0', roles: ['member'], feedbackIds: [] }),
-      expect.objectContaining({ version: '0.7.0', roles: ['agent'], feedbackIds: [] }),
+  it('tidies malformed version lists, merging duplicates rather than dropping them', () => {
+    const tidy = normaliseVersions([
+      { version: '0.7.0', roles: {}, feedbackIds: 'x' },
+      { version: 42 },
+      null,
+      { version: '0.7.0', roles: ['agent', 'nope'], firstAt: 'yesterday', feedbackIds: ['fb_a', 'bad id!'] },
+      { version: '0.8.0', feedbackIds: ['fb_b'] },
     ]);
-    await solid.write(u.id, 'alpha/testing.jsonld', 'not json');
-    expect((await recordVersion(u, { version: '0.8.0' })).versions.map((v) => v.version)).toEqual(['0.8.0']);
+    expect(tidy).toEqual([
+      expect.objectContaining({ version: '0.8.0', feedbackIds: ['fb_b'] }),
+      expect.objectContaining({ version: '0.7.0', roles: ['agent'], feedbackIds: ['fb_a'] }),
+    ]);
     expect(normaliseVersions({ versions: 1 })).toEqual([]);
+  });
+
+  it('mirrors the record to the tester’s pod, and never reads it back', async () => {
+    const u = await createUser({ name: 'Edits their pod', provider: 'demo', subject: 'mirror' });
+    await recordVersion(u, { version: '0.7.0' });
+    expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0']);
+    // Whatever happens to the pod copy, the history here is what counts, and the mirror is rewritten from it.
+    await solid.write(u.id, 'alpha/testing.jsonld', 'not json');
+    expect((await recordVersion(u, { version: '0.8.0' })).versions.map((v) => v.version)).toEqual(['0.8.0', '0.7.0']);
+    expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0', '0.7.0']);
   });
 
   it('keeps every update when several arrive at once', async () => {
@@ -227,12 +239,12 @@ describe('alpha tester records', () => {
     const existing = await upsertFederatedUser({ provider: 'github', subject: 'gh-existing-1', name: 'Existing' });
     await recordVersion(existing, { version: '0.6.0', feedbackId: 'fb_old' });
     const demo = await createUser({ name: 'Alpha tester', provider: 'demo', subject: 'tester_merge' });
+    put('feedback', { id: 'fb_new', pathway: 'general', answers: {}, transcript: [], createdAt: new Date().toISOString() });
     await recordVersion(demo, { version: '0.8.0', role: 'agent', feedbackId: 'fb_new' });
-    await solid.write(demo.id, 'feedback/fb_new.json', '{"id":"fb_new"}', 'application/json');
     await mergeTesterRecords(demo, existing);
     const after = (await recordVersion(existing, { version: '0.6.0' })).versions;
     expect(after.map((v) => v.version)).toEqual(['0.8.0', '0.6.0']);
     expect(after[0]).toMatchObject({ roles: ['agent'], feedbackIds: ['fb_new'] });
-    expect(await solid.read(existing.id, 'feedback/fb_new.json')).toBe('{"id":"fb_new"}');
+    expect(JSON.parse((await solid.read(existing.id, 'feedback/fb_new.json'))!).id).toBe('fb_new');
   });
 });

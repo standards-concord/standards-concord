@@ -70,12 +70,15 @@ const C = createContext<TesterCtx | null>(null);
 export function TesterProvider({ children, roleKey }: { children: ReactNode; roleKey?: TesterRoleKey }) {
   const { session } = useSession();
   const userId = session?.user?.id;
-  const me = useAsync(() => api.alphaMe(), [userId]);
+  // Each answer is tagged with the account it was asked for, so a slow answer for the
+  // previous account (or a failed reload) never stands in for the current one.
+  const me = useAsync(async () => ({ forUser: userId, me: await api.alphaMe() }), [userId]);
   // What each tester (or anyone signed out) said they last tested ("first" = first time), and the
   // versions this browser has been used with.
   const [picks, setPicks] = useLocalStorage<Record<string, string>>('concord.alpha.picks', {});
   const [seen, setSeen] = useLocalStorage<string[]>('concord.alpha.seen', []);
-  const [compare, setCompare] = useState<string>();
+  // A comparison belongs to the tester who picked it: another tester in this browser starts from their own baseline.
+  const [compareFor, setCompareFor] = useState<{ tester: string; version: string }>();
 
   useEffect(() => {
     if (!seen.includes(APP_VERSION)) setSeen((s) => [...new Set([...s, APP_VERSION])]);
@@ -83,7 +86,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
 
   // Save this version (and the role being tried) to the tester's pod, once per version and role.
   const recorded = useRef<string>('');
-  const me_ = me.data;
+  const me_ = me.data && me.data.forUser === userId ? me.data.me : undefined;
   const setMe = me.setData;
   useEffect(() => {
     const tester = me_?.tester;
@@ -98,13 +101,14 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     recorded.current = key;
     void api
       .alphaVisit({ version: APP_VERSION, commit: APP_COMMIT || undefined, role: roleKey })
-      .then((r) => setMe(r))
+      .then((r) => setMe((prev) => (prev && prev.forUser === userId && prev.me.tester?.id === tester.id ? { forUser: userId, me: r } : prev!)))
       .catch(() => {
         recorded.current = '';
       });
-  }, [me_, roleKey, setMe]);
+  }, [me_, roleKey, setMe, userId]);
 
   const testerKey = me_?.tester?.id ?? 'anon';
+  const compare = compareFor?.tester === testerKey ? compareFor.version : undefined;
   const value = useMemo<TesterCtx>(() => {
     const valid = (v: string | undefined) => (v && findRelease(v) && compareVersions(v, APP_VERSION) < 0 ? findRelease(v)!.version : undefined);
     const versions = Array.isArray(me_?.versions) ? me_.versions.filter((v) => typeof v?.version === 'string') : [];
@@ -135,7 +139,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
       baselineSource,
       hasHistory,
       pickSince: (v) => {
-        if (hasHistory) return setCompare(v && v !== baseline ? v : undefined);
+        if (hasHistory) return setCompareFor(v && v !== baseline ? { tester: testerKey, version: v } : undefined);
         setPicks((p) => {
           const next = { ...(p ?? {}) };
           if (v === undefined) delete next[testerKey];

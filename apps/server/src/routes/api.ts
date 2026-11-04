@@ -138,7 +138,7 @@ export function apiRouter(): Router {
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
-    setSessionCookie(res, user.id);
+    setSessionCookie(res, user.id, 'demo');
     rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
@@ -218,7 +218,7 @@ export function apiRouter(): Router {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format);
+    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -556,7 +556,7 @@ export function apiRouter(): Router {
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
   });
   const feedbackAdmin = (req: Request) => {
-    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, signed in with Google, GitHub or Solid). Ontology roles
+    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google, GitHub or Solid). Ontology roles
     // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');

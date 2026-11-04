@@ -106,10 +106,14 @@ describe('administrators by WebID', () => {
     const saved = [...config.adminWebIds];
     config.adminWebIds.splice(0, saved.length, 'https://jesse.example/profile/card#me');
     try {
-      expect(isAdmin(user({ providers: [{ provider: 'solid', subject: 'https://jesse.example/profile/card#me' }] }))).toBe(true);
-      expect(isAdmin(user({ providers: [{ provider: 'demo', subject: 'x' }] }))).toBe(false);
-      expect(isAdmin(user({ providers: [{ provider: 'solid', subject: 'https://jesse.example/profile/card#me' }], simulated: true }))).toBe(false);
-      expect(isAdmin(user({ webId: 'https://other.example/#me', providers: [{ provider: 'solid', subject: 'https://other.example/#me' }] }))).toBe(false);
+      const solidUser = user({ providers: [{ provider: 'solid', subject: 'https://jesse.example/profile/card#me' }] });
+      expect(isAdmin(solidUser, 'solid')).toBe(true);
+      // Only in a session that was itself signed in with Solid.
+      expect(isAdmin(solidUser, 'demo')).toBe(false);
+      expect(isAdmin(solidUser, undefined)).toBe(false);
+      expect(isAdmin(user({ providers: [{ provider: 'demo', subject: 'x' }] }), 'demo')).toBe(false);
+      expect(isAdmin(user({ providers: [{ provider: 'solid', subject: 'https://jesse.example/profile/card#me' }], simulated: true }), 'solid')).toBe(false);
+      expect(isAdmin(user({ webId: 'https://other.example/#me', providers: [{ provider: 'solid', subject: 'https://other.example/#me' }] }), 'solid')).toBe(false);
     } finally {
       config.adminWebIds.splice(0, config.adminWebIds.length, ...saved);
     }

@@ -9,7 +9,7 @@ import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
-import { acceptVersion, recordVersion } from './alpha.js';
+import { acceptVersion, recordFeedback } from './alpha.js';
 import { solid } from './solid.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
@@ -227,14 +227,15 @@ export async function submitFeedback(user: User | undefined, input: Omit<Feedbac
     name: input.name ?? (user?.simulated ? undefined : user?.name),
     createdAt: clock.iso(),
   };
-  put('feedback', sub);
-  // Testers' own copy of what they said goes in their pod too, with the version they tested.
-  let savedTo: { kind: 'solid' | 'local'; url: string } | undefined;
-  if (tester) {
-    savedTo = await solid.write(tester.id, `feedback/${sub.id}.json`, JSON.stringify(sub, null, 2), 'application/json').catch(() => undefined);
-    if (savedTo?.kind === 'solid') await shareFeedbackFolder(tester.id);
-    if (appVersion) await recordVersion(tester, { version: appVersion, commit: input.appCommit, role: input.role, feedbackId: sub.id }).catch(() => undefined);
+  if (!tester) {
+    put('feedback', sub);
+    return { ...sub, savedTo: undefined };
   }
+  // A tester's feedback is stored together with its place in their testing record (or not at all, with a 409, if
+  // the record can't take it), then copied to their pod with the version they tested.
+  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, () => put('feedback', sub));
+  // The pod's feedback folder is shared read-only with the admins' WebIDs (testers are told this).
+  if (savedTo.kind === 'solid') await shareFeedbackFolder(tester.id);
   return { ...sub, savedTo };
 }
 

@@ -3,7 +3,8 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
-import { allUsers, createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
+import type { AuthProvider } from '@concord/shared';
+import { allUsers, createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
 import { clientIdDocument, finishLogin, resolveIssuer, sessionKey, SolidLoginError, startLogin, type SolidLogin } from './solidOidc.js';
 import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
@@ -20,22 +21,24 @@ declare global {
 
 /** Identities people can sign in with again from anywhere (not demo accounts). */
 export const LASTING_PROVIDERS = ['google', 'github', 'solid'] as const;
+const FEDERATED: readonly AuthProvider[] = LASTING_PROVIDERS;
 
 /**
  * Deployment administrators: an account whose WebID is in ADMIN_WEBIDS (or, the
- * older way, whose verified email is in ADMIN_EMAILS). It must be signed in with
- * Google, GitHub or their own WebID (Solid): demo accounts and simulated personas never count.
+ * older way, whose verified email is in ADMIN_EMAILS). This session must itself
+ * have been signed in with Google, GitHub or their own WebID (Solid): demo
+ * accounts, simulated personas, and sessions a demo account had before it was
+ * linked to a provider never count.
  */
-export function isAdmin(user: User): boolean {
-  const federated = user.providers.some((p) => (LASTING_PROVIDERS as readonly string[]).includes(p.provider));
-  if (!federated || user.simulated) return false;
+export function isAdmin(user: User, method: AuthProvider | undefined): boolean {
+  if (!method || !FEDERATED.includes(method) || !user.providers.some((p) => p.provider === method) || user.simulated) return false;
   if (user.webId && config.adminWebIds.includes(user.webId)) return true;
   return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
 }
 
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
-  req.user = user && isAdmin(user) ? { ...user, isPlatformAdmin: true } : user;
+  const s = sessionOf(req.cookies?.[SESSION_COOKIE]);
+  req.user = s && isAdmin(s.user, s.method) ? { ...s.user, isPlatformAdmin: true } : s?.user;
   next();
 }
 
@@ -44,9 +47,9 @@ export function requireUser(req: Request): User {
   return req.user;
 }
 
-/** Start a session for `userId` and give the browser its cookie. Returns the session token. */
-export function setSessionCookie(res: Response, userId: string): string {
-  const token = createSession(userId);
+/** Start a session for `userId` (signed in with `method`) and give the browser its cookie. Returns the session token. */
+export function setSessionCookie(res: Response, userId: string, method: AuthProvider): string {
+  const token = createSession(userId, method);
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
@@ -112,10 +115,10 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string): string {
+function signInAs(req: Request, res: Response, userId: string, method: AuthProvider): string {
   endAdminLogin(req.cookies?.[SESSION_COOKIE]);
   destroySession(req.cookies?.[SESSION_COOKIE]);
-  return setSessionCookie(res, userId);
+  return setSessionCookie(res, userId, method);
 }
 
 /**
@@ -127,9 +130,10 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
   const tester = testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
   const user = await upsertFederatedUser(identity, demoTester);
-  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user).catch((err) => console.warn(`[alpha] could not move testing record: ${(err as Error).message}`));
+  // An existing account takes over the demo account's testing record, in one step on this server.
+  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
   clearTesterCookie(req, res);
-  const sessionToken = signInAs(req, res, user.id);
+  const sessionToken = signInAs(req, res, user.id, identity.provider);
   return { user, sessionToken };
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
@@ -231,7 +235,7 @@ export function mountAuth(router: Router) {
     if (managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
-    if (isAdmin(user)) {
+    if (isAdmin(user, 'solid')) {
       if (adminLogins.size >= MAX_ADMIN_LOGINS) adminLogins.delete(adminLogins.keys().next().value!);
       adminLogins.set(sessionKey(sessionToken), done.login);
     }

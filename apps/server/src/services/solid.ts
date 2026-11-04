@@ -187,6 +187,39 @@ export const solid = {
     return r;
   },
 
+  /**
+   * Both copies of a resource as the older versions of Concord left them: the
+   * pod's, and the one kept on this server. Only "not there" counts as missing:
+   * a pod that answers with an error or can't be reached throws.
+   */
+  async readLegacy(userId: string, relPath: string): Promise<{ pod?: string; local?: string }> {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const file = path.join(config.dataDir, 'private', userId, relPath);
+    const local = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+    if (!(this.enabled && rec)) return { local };
+    const req = await ownerRequest({ ...rec, id: userId });
+    const url = `${rec.podUrl}concord/${relPath}`;
+    const res = await req('GET', url);
+    if (res.ok) return { pod: await res.text(), local };
+    if (res.status === 404 || res.status === 410) return { local };
+    throw new Error(`GET ${url} → ${res.status}`);
+  },
+
+  /**
+   * Like `write`, but when the user has a pod the write must reach it: no quiet
+   * fallback to this server, which later reads of the pod wouldn't see. Throws
+   * if the pod refuses or can't be reached.
+   */
+  async writeExisting(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    if (!(this.enabled && rec)) return this.write(userId, relPath, body, contentType);
+    const req = await ownerRequest({ ...rec, id: userId });
+    const url = `${rec.podUrl}concord/${relPath}`;
+    const res = await req('PUT', url, { headers: { 'content-type': contentType }, body });
+    if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
+    return { kind: 'solid', url };
+  },
+
   /** A minimal WebID profile document for locally-hosted WebIDs. */
   profileDocument(user: User): string {
     const me = this.localWebId(user.id);
