@@ -109,6 +109,9 @@ export function ValidateTab() {
   const fileInput = useRef<HTMLInputElement>(null);
   // Bumped whenever the inputs change: a response for an older request is dropped.
   const request = useRef(0);
+  // Bumped for each file chosen: a file that finishes reading after a newer one (or after the data was edited) is dropped.
+  const loads = useRef(0);
+  const [reading, setReading] = useState(false);
 
   const text = file?.text ?? data;
   const format: DataFormat = picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
@@ -125,12 +128,14 @@ export function ValidateTab() {
   /** The data, format or version changed: forget the report and any answer still on its way. */
   const invalidate = () => {
     request.current++;
+    loads.current++;
+    setReading(false);
     setReport(null);
     setBusy(false);
   };
 
   const run = async () => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || busy || reading) return;
     const id = ++request.current;
     const snapshot = { text, format, version };
     setBusy(true);
@@ -151,7 +156,22 @@ export function ValidateTab() {
     setError(undefined);
     invalidate();
     if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
-    const content = await f.text();
+    const token = loads.current;
+    setReading(true);
+    let content: string;
+    try {
+      content = await f.text();
+    } catch (e) {
+      if (token === loads.current) {
+        setReading(false);
+        setError(e);
+      }
+      return;
+    }
+    // Something newer happened while the file was read (another file, an edit, a new version): keep that.
+    if (token !== loads.current) return;
+    // The file's contents become the data now, so nothing reported or asked for before can stand.
+    invalidate();
     if (content.length > EDITOR_LIMIT) {
       setFile({ name: f.name, text: content });
     } else {
@@ -177,7 +197,7 @@ export function ValidateTab() {
           subtitle={`Check RDF data against ${ontology.title}: the SHACL shapes derived from it, and the terms it defines`}
           icon={ShieldCheck}
           actions={
-            <Button variant="primary" icon={ShieldCheck} onClick={run} loading={busy} disabled={!text.trim()}>
+            <Button variant="primary" icon={ShieldCheck} onClick={run} loading={busy || reading} disabled={!text.trim() || reading}>
               Validate
             </Button>
           }
@@ -264,6 +284,8 @@ export function ValidateTab() {
               <CodeEditor
                 value={data}
                 onChange={(v) => {
+                  // The editor also reports the text this page put in it: only an edit changes anything.
+                  if (v === data) return;
                   setData(v);
                   invalidate();
                 }}

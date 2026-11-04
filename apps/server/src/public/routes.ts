@@ -84,22 +84,43 @@ export function wantsShaclProfile(req: Request): boolean {
 }
 
 /**
- * Whether Accept allows a media type. Parameters other than q (such as
- * profile, which req.accepts treats as must-match) are ignored. The most
- * specific matching range decides (RFC 9110 12.5.1), so "text/turtle;q=0, *\/*"
- * refuses Turtle.
+ * Whether Accept allows a representation: a media type with parameters, such
+ * as text/turtle with profile="http://www.w3.org/ns/shacl#". A range matches
+ * when its type matches and each of its parameters (other than q) equals the
+ * representation's; profile values match by IRI, with or without <>. The most
+ * specific matching range decides (RFC 9110 12.5.1): a range with parameters
+ * beats the bare type, which beats type/*, which beats *\/*. So
+ * "text/turtle;q=0, *\/*" refuses Turtle, and
+ * 'text/turtle;profile="…shacl#";q=0, text/turtle' refuses the SHACL profile.
  */
-export function acceptsIgnoringParams(header: string | undefined, type: string): boolean {
+export function acceptsRepresentation(header: string | undefined, type: string, params: Record<string, string> = {}): boolean {
   if (!header?.trim()) return true;
-  const [major] = type.toLowerCase().split('/');
+  const want = type.toLowerCase();
+  const [major] = want.split('/');
+  const norm = (k: string, v: string) => (k === 'profile' ? v.replace(/^<|>$/g, '') : v.toLowerCase());
   let best: { specificity: number; q: number } | undefined;
   for (const part of header.split(',')) {
-    const [range, ...params] = part.split(';').map((x) => x.trim().toLowerCase());
-    const specificity = range === type.toLowerCase() ? 3 : range === `${major}/*` ? 2 : range === '*/*' ? 1 : 0;
+    const [rangeRaw, ...paramParts] = part.split(';');
+    const range = rangeRaw.trim().toLowerCase();
+    let q = 1;
+    const rangeParams: [string, string][] = [];
+    for (const p of paramParts) {
+      const eq = p.indexOf('=');
+      if (eq < 0) continue;
+      const key = p.slice(0, eq).trim().toLowerCase();
+      const value = p.slice(eq + 1).trim().replace(/^"|"$/g, '');
+      if (key === 'q') q = Number(value);
+      else rangeParams.push([key, value]);
+    }
+    let specificity = range === want ? 3 : range === `${major}/*` ? 2 : range === '*/*' ? 1 : 0;
     if (!specificity) continue;
-    const qParam = params.find((p) => /^q\s*=/.test(p));
-    const q = qParam ? Number(qParam.split('=')[1]) : 1;
-    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q: Number.isFinite(q) ? q : 0 };
+    if (rangeParams.length) {
+      const matches = rangeParams.every(([k, v]) => params[k] !== undefined && norm(k, params[k]) === norm(k, v));
+      if (!matches) continue;
+      specificity += 3 + rangeParams.length;
+    }
+    if (!Number.isFinite(q)) q = 0;
+    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q };
   }
   return !!best && best.q > 0;
 }
@@ -289,7 +310,7 @@ async function serve(req: Request, res: Response) {
   if (!format && wantsShaclProfile(req)) {
     res.vary('Accept');
     res.vary('Accept-Profile');
-    if (!acceptsIgnoringParams(req.get('Accept'), 'text/turtle')) {
+    if (!acceptsRepresentation(req.get('Accept'), 'text/turtle', { profile: SHACL_PROFILE })) {
       res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
       return;
     }

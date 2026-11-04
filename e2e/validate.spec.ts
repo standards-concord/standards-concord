@@ -116,6 +116,51 @@ test.describe('Validate data', () => {
     await expect(report(page)).toHaveCount(0);
   });
 
+  test('a file still being read never shows the report for other data', async ({ page }, info) => {
+    // Hold every File.text() until the test lets it go.
+    await page.addInitScript(() => {
+      const w = window as unknown as { releaseFileRead: () => void };
+      let release: () => void = () => {};
+      let held = new Promise<void>((r) => (release = r));
+      w.releaseFileRead = () => {
+        release();
+        held = new Promise<void>((r) => (release = r));
+      };
+      const text = File.prototype.text;
+      File.prototype.text = async function (this: File) {
+        if (this.name.startsWith('held-')) await held;
+        return text.call(this);
+      };
+    });
+    await page.goto('/o/volunteering/validate');
+    const big = info.outputPath('held-big.ttl');
+    let body = '@prefix vol: <https://w3id.org/odi/volunteering#> .\n';
+    for (let i = 0; body.length < 600 * 1024; i++) body += `<https://example.org/r${i}> a vol:Role .\n`;
+    fs.writeFileSync(big, body);
+    const validate = page.getByRole('button', { name: 'Validate', exact: true });
+
+    // While a large file is read, the example already in the editor can't be validated.
+    await page.getByRole('button', { name: 'Try an example' }).click();
+    await page.getByTestId('validate-file').setInputFiles(big);
+    await expect(validate).toBeDisabled();
+    await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
+    await expect(page.getByTestId('validate-file-summary')).toContainText('held-big.ttl');
+    await expect(report(page)).toHaveCount(0);
+    await validate.click();
+    await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+
+    // Choosing the example while a file is read keeps the example.
+    const small = info.outputPath('held-small.ttl');
+    fs.writeFileSync(small, '<https://example.org/only-in-the-file> a <https://w3id.org/odi/volunteering#Role> .\n');
+    await page.getByTestId('validate-file').setInputFiles(small);
+    await expect(report(page)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Try an example' }).click();
+    await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
+    await expect(validate).toBeEnabled();
+    await expect(page.getByTestId('validate-editor')).toContainText('saturday-shift');
+    await expect(page.getByTestId('validate-editor')).not.toContainText('only-in-the-file');
+  });
+
   test('explains data it cannot read', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 400/);
     await page.goto('/o/volunteering/validate');

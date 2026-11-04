@@ -52,6 +52,33 @@ describe('reading data', () => {
     expect(err.message).toMatch(/more than 10 triples/);
   });
 
+  it('stops parsing at the cap, in every format', async () => {
+    // Past the cap the data is broken (or, for JSON-LD, needs a remote context): a 413, not a 400, shows the parser never read that far.
+    const n = 5000;
+    const tail = ' this is not RDF <<<';
+    const nt = Array.from({ length: n }, (_, i) => `<https://e/s${i}> <https://e/p> "${i}" .`).join('\n');
+    const cases: [string, Parameters<typeof parseData>[1]][] = [
+      [`<https://e/a> <https://e/p> ${Array.from({ length: n }, (_, i) => i).join(', ')} .${tail}`, 'turtle'],
+      [nt + tail, 'ntriples'],
+      [`{"@context": {"p": "https://e/p"}, "@graph": [${Array.from({ length: n }, (_, i) => `{"@id": "https://e/s${i}", "p": ${i}}`).join(',')}, {"@context": "https://remote.example/", "@id": "https://e/x", "p": 1}]}`, 'jsonld'],
+      [`<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:e="https://e/">${Array.from({ length: n }, (_, i) => `<rdf:Description rdf:about="https://e/s${i}"><e:p>${i}</e:p></rdf:Description>`).join('')}<unclosed`, 'rdfxml'],
+    ];
+    for (const [text, format] of cases) {
+      const err = await parseData(text, format, { maxTriples: 2 }).catch((e) => e);
+      expect(err, format).toBeInstanceOf(DataError);
+      expect([format, err.status, err.message]).toEqual([format, 413, 'The data has more than 2 triples, the limit.']);
+    }
+  });
+
+  it('parses data split across chunks, including multi-byte characters', async () => {
+    const long = 'é😀'.repeat(20_000);
+    const quads = await parseData(`<https://e/a> <https://e/p> "${long}" .\n<https://e/a> <https://e/q> "x" .`, 'turtle');
+    expect(quads).toHaveLength(2);
+    expect(quads.find((q) => q.predicate.value === 'https://e/p')!.object.value).toBe(long);
+    const json = await parseData(JSON.stringify({ '@id': 'https://e/a', 'https://e/p': long }), 'jsonld');
+    expect(json[0].object.value).toBe(long);
+  });
+
   it('refuses RDF/XML DTDs', async () => {
     const err = await parseData('<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>', 'rdfxml').catch((e) => e);
     expect(err).toBeInstanceOf(DataError);

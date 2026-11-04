@@ -53,18 +53,19 @@ const BAD_IRI = /[\u0000-\u0020<>"{}|^`\\]/;
 
 /**
  * Parses instance data into triples in the default graph (named graphs are
- * merged into it, as SHACL validates one data graph). Parsers stream: past
- * maxTriples, nothing more is kept, so a small document that expands to many
- * triples can't fill memory before it is refused. RDF/XML with a DTD is
- * refused, because entity declarations can expand without limit.
+ * merged into it, as SHACL validates one data graph). Every parser is fed the
+ * text a chunk at a time and stops at the triple after maxTriples, so a small
+ * document that expands to many triples can't fill memory or keep the parser
+ * busy before it is refused. RDF/XML with a DTD is refused, because entity
+ * declarations can expand without limit.
  */
 export async function parseData(text: string, format: DataFormat, opts: ParseDataOptions = {}): Promise<Quad[]> {
   const max = opts.maxTriples ?? Infinity;
   const out = new Store();
   let seen = 0;
   const keep = (q: Quad) => {
-    seen++;
-    if (seen > max) return;
+    // Throwing stops the parser where it is (see the stream* functions).
+    if (++seen > max) throw new DataError(413, `The data has more than ${max.toLocaleString('en')} triples, the limit.`);
     for (const t of [q.subject, q.predicate, q.object]) {
       if (t.termType !== 'NamedNode') continue;
       if (!ABSOLUTE.test(t.value)) throw new DataError(400, `The data uses a relative IRI <${t.value}>. Add @base (or xml:base), or pass a base IRI.`);
@@ -73,37 +74,141 @@ export async function parseData(text: string, format: DataFormat, opts: ParseDat
     out.addQuad(q.subject, q.predicate, q.object);
   };
   try {
-    await streamQuads(text, format, opts.baseIRI, keep);
+    await streamQuads(text, format, opts.baseIRI, keep, max);
   } catch (err) {
     if (err instanceof DataError) throw err;
     throw new DataError(400, `Could not parse the data as ${DATA_FORMATS[format].label}: ${(err as Error).message}`);
   }
-  if (seen > max) throw new DataError(413, `The data has more than ${max.toLocaleString('en')} triples, the limit.`);
   return out.getQuads(null, null, null, null);
 }
 
-/** Parses N-Triples-family text, handing each quad to `emit` as it is read. */
-function streamN3(text: string, format: 'Turtle' | 'TriG' | 'N-Triples' | 'N-Quads', baseIRI: string | undefined, emit: (q: Quad) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let failed = false;
-    new Parser({ format, baseIRI }).parse(text, (err, quad) => {
-      if (failed) return;
-      if (err) {
-        failed = true;
-        return reject(err);
-      }
-      if (!quad) return resolve();
-      try {
-        emit(quad);
-      } catch (e) {
-        failed = true;
-        reject(e);
-      }
-    });
-  });
+/** How much text each parser is given at a time. */
+const CHUNK = 16 * 1024;
+
+/** The text in chunks, never splitting a surrogate pair. */
+function* chunks(text: string): Generator<string> {
+  for (let i = 0; i < text.length; ) {
+    let end = Math.min(i + CHUNK, text.length);
+    const c = text.charCodeAt(end - 1);
+    if (end < text.length && c >= 0xd800 && c <= 0xdbff) end++;
+    yield text.slice(i, end);
+    i = end;
+  }
 }
 
-async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void): Promise<void> {
+/**
+ * Parses Turtle-family text with n3, handing each quad to `emit`. The text is
+ * fed as a stream of chunks, which n3 parses synchronously as each arrives, so
+ * an exception from `emit` (such as the triple cap) comes straight back out
+ * of the loop and nothing after it is read.
+ */
+function streamN3(text: string, format: 'Turtle' | 'TriG' | 'N-Triples' | 'N-Quads', baseIRI: string | undefined, emit: (q: Quad) => void): Promise<void> {
+  // The smallest stream n3 accepts: it listens for data, end and error.
+  const listeners: Record<string, ((x?: string) => void)[]> = {};
+  const input = {
+    on: (event: string, fn: (x?: string) => void) => void (listeners[event] ??= []).push(fn),
+    emit: (event: string, x?: string) => listeners[event]?.forEach((fn) => fn(x)),
+  };
+  let error: unknown;
+  let finished = false;
+  new Parser({ format, baseIRI }).parse(input as never, (err, quad) => {
+    if (finished) return;
+    if (err) {
+      finished = true;
+      error = err;
+    } else if (quad) emit(quad);
+    else finished = true;
+  });
+  try {
+    for (const chunk of chunks(text)) {
+      if (finished) break;
+      input.emit('data', chunk);
+    }
+    if (!finished) input.emit('end');
+  } catch (e) {
+    error = e;
+  }
+  return error === undefined ? Promise.resolve() : Promise.reject(error);
+}
+
+/**
+ * Feeds a streaming parser (RDF/XML, JSON-LD) a chunk at a time, yielding
+ * between chunks so its output is handled, and stops feeding it as soon as a
+ * quad is refused or the parser fails.
+ */
+async function feed(
+  parser: { write(chunk: string): unknown; end(): unknown; destroy(): unknown; on(event: string, fn: (x: never) => void): unknown },
+  text: string,
+  emit: (q: Quad) => void,
+): Promise<void> {
+  let error: unknown;
+  let ended = false;
+  const done = new Promise<void>((resolve) => {
+    parser.on('data', (q: Quad) => {
+      if (error !== undefined) return;
+      try {
+        emit(q);
+      } catch (e) {
+        error = e;
+        parser.destroy();
+        resolve();
+      }
+    });
+    parser.on('error', (e: unknown) => {
+      if (error === undefined) error = e;
+      resolve();
+    });
+    parser.on('end', () => {
+      ended = true;
+      resolve();
+    });
+  });
+  for (const chunk of chunks(text)) {
+    if (error !== undefined) break;
+    parser.write(chunk);
+    await new Promise((r) => setImmediate(r));
+  }
+  if (error === undefined) parser.end();
+  await done;
+  if (error !== undefined) throw error;
+  if (!ended) throw new Error('the parser stopped before the end of the data');
+}
+
+/** Never fetches: a remote @context would let anyone make this server request any URL. */
+const NO_REMOTE_DOCUMENTS = {
+  load: async (url: string): Promise<never> => {
+    throw new DataError(400, `Remote JSON-LD contexts are not fetched (${url}). Put the context inline in the document.`);
+  },
+};
+
+/**
+ * At most how many triples a JSON-LD document can make: one for each value of
+ * each property and each @type, two for each list item. (Contexts only
+ * rename, coerce or drop values; they don't multiply them.) Walks the parsed
+ * JSON without recursion, so deep nesting can't overflow the stack.
+ */
+export function jsonLdTripleBound(doc: unknown): number {
+  let count = 0;
+  const stack: unknown[] = [doc];
+  while (stack.length) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      for (const x of node) stack.push(x);
+      continue;
+    }
+    if (!node || typeof node !== 'object') continue;
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '@context') continue;
+      const values = Array.isArray(value) ? value : [value];
+      if (key === '@list') count += 2 * values.length + 1;
+      else if (key === '@type' || !key.startsWith('@')) count += values.length;
+      if (key !== '@type' && key !== '@id' && key !== '@value' && key !== '@language' && key !== '@direction') stack.push(value);
+    }
+  }
+  return count;
+}
+
+async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void, maxTriples = Infinity): Promise<void> {
   switch (format) {
     case 'turtle':
       return streamN3(text, 'Turtle', baseIRI, emit);
@@ -117,53 +222,30 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
       // A DTD can declare entities that expand a few bytes into gigabytes ("billion laughs").
       if (/<!DOCTYPE|<!ENTITY/i.test(text)) throw new DataError(400, 'RDF/XML with a DOCTYPE or entity declarations is not accepted. Expand the entities and remove the DOCTYPE.');
       const { RdfXmlParser } = await import('rdfxml-streaming-parser');
-      return new Promise((resolve, reject) => {
-        let failed = false;
-        const parser = new RdfXmlParser({ baseIRI: baseIRI ?? '' });
-        const fail = (e: unknown) => {
-          if (failed) return;
-          failed = true;
-          reject(e);
-        };
-        parser.on('data', (q: Quad) => {
-          if (failed) return;
-          try {
-            emit(q);
-          } catch (e) {
-            fail(e);
-          }
-        });
-        parser.on('error', fail);
-        parser.on('end', () => !failed && resolve());
-        parser.write(text);
-        parser.end();
-      });
+      return feed(new RdfXmlParser({ baseIRI: baseIRI ?? '' }) as never, text, emit);
     }
     case 'jsonld': {
-      const jsonld = (await import('jsonld')).default;
       let doc: unknown;
       try {
         doc = JSON.parse(text);
       } catch (err) {
         throw new DataError(400, `The data is not valid JSON: ${(err as Error).message}`);
       }
-      let remote: string | undefined;
-      let nquads: string;
+      // The parser holds back a top-level @graph or array until the document ends
+      // (a later @id could name the graph), so bound the output before parsing.
+      if (jsonLdTripleBound(doc) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
+      doc = undefined;
+      // A streaming parser, so expansion stops at the triple cap rather than after the whole document.
+      const { JsonLdParser } = await import('jsonld-streaming-parser');
+      const parser = new JsonLdParser({ baseIRI, documentLoader: NO_REMOTE_DOCUMENTS as never });
       try {
-        nquads = (await jsonld.toRDF(doc as object, {
-          format: 'application/n-quads',
-          base: baseIRI,
-          // Never fetch: a remote @context would let anyone make this server request any URL.
-          documentLoader: async (url: string) => {
-            remote = url;
-            throw new Error('remote documents are not loaded');
-          },
-        } as never)) as unknown as string;
+        return await feed(parser as never, text, emit);
       } catch (err) {
-        if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
+        // The loader's refusal comes back wrapped by the context parser.
+        const remote = /Remote JSON-LD contexts are not fetched \(([^)]*)\)/.exec(String((err as Error)?.message ?? err));
+        if (remote && !(err instanceof DataError)) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote[1]}). Put the context inline in the document.`);
         throw err;
       }
-      return streamN3(nquads, 'N-Quads', undefined, emit);
     }
     default:
       throw new DataError(400, `Unsupported data format: ${format as string}`);

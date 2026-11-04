@@ -1,15 +1,21 @@
 import { Parser, Store } from 'n3';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { POOL_LIMITS } from '../src/services/validationPool.js';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { BODY_LIMITS, RATE_LIMITS } from '../src/public/validate.js';
+import { admit, POOL_LIMITS } from '../src/services/validationPool.js';
 
 const app = createApp();
 const SH = 'http://www.w3.org/ns/shacl#';
 
+const PER_MINUTE = RATE_LIMITS.perMinute;
 beforeAll(async () => {
+  // The rate limit has its own test, at the end.
+  RATE_LIMITS.perMinute = 10_000;
   openDb();
   await seedDemo();
 });
@@ -204,6 +210,93 @@ describe('POST to the ontology IRI validates data', () => {
     }
   });
 
+  describe('places in the validator, taken before the data is read', () => {
+    let server: http.Server;
+    let port: number;
+    beforeAll(async () => {
+      server = app.listen(0);
+      await new Promise((r) => server.once('listening', r));
+      port = (server.address() as AddressInfo).port;
+    });
+    afterAll(() => new Promise((r) => server.close(r)));
+
+    /** Starts a POST whose body never finishes arriving. */
+    const trickle = () => {
+      const req = http.request({ port, method: 'POST', path: '/def/volunteering', headers: { 'Content-Type': 'text/turtle', 'Content-Length': '100000' } });
+      req.on('error', () => {});
+      req.write(PREFIXES);
+      const answer = new Promise<{ status: number; body: string }>((resolve) =>
+        req.on('response', (res) => {
+          let body = '';
+          res.on('data', (d) => (body += d));
+          res.on('end', () => resolve({ status: res.statusCode!, body }));
+        }),
+      );
+      return { req, answer };
+    };
+
+    it('lets one client hold two at once, and gives them back when it goes away', async () => {
+      const a = trickle();
+      const b = trickle();
+      await new Promise((r) => setTimeout(r, 100));
+      const third = await request(server).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID);
+      expect(third.status).toBe(429);
+      expect(third.body.error).toMatch(/already have 2 validations in progress/);
+      expect(third.headers['retry-after']).toBe('5');
+      a.req.destroy();
+      b.req.destroy();
+      let ok = 0;
+      for (let i = 0; i < 5 && ok !== 200; i++) {
+        ok = (await request(server).post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status;
+        if (ok !== 200) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(ok).toBe(200);
+    });
+
+    it('turns everyone away while every place is taken, without reading their data', async () => {
+      const places = Array.from({ length: POOL_LIMITS.workers + POOL_LIMITS.queue }, (_, i) => admit(`test:${i}`));
+      try {
+        const busy = await post('/def/volunteering', VALID);
+        expect(busy.status).toBe(503);
+        expect(busy.headers.connection).toBe('close');
+        // Requests that would fail anyway still get their real answer.
+        expect((await post('/def/nothing-here', VALID)).status).toBe(404);
+      } finally {
+        for (const p of places) if (p.ok) p.release();
+      }
+      expect((await post('/def/volunteering', VALID)).status).toBe(200);
+    });
+
+    it('stops waiting for data that arrives too slowly', async () => {
+      const before = BODY_LIMITS.ms;
+      BODY_LIMITS.ms = 150;
+      try {
+        const { answer } = trickle();
+        const res = await answer;
+        expect(res.status).toBe(408);
+        expect(res.body).toMatch(/took longer than 0.15 s to arrive/);
+      } finally {
+        BODY_LIMITS.ms = before;
+      }
+    });
+
+    it('turns a job away when it has waited too long for a worker', async () => {
+      const before = { wait: POOL_LIMITS.queueWaitMs, perClient: POOL_LIMITS.perClient };
+      POOL_LIMITS.queueWaitMs = 0;
+      POOL_LIMITS.perClient = 10;
+      let big = PREFIXES;
+      for (let i = 0; i < 3000; i++) big += `ex:r${i} a vol:Role ; vol:title "r" .\n`;
+      try {
+        const answers = await Promise.all(Array.from({ length: POOL_LIMITS.workers + 1 }, () => post('/def/volunteering', big)));
+        const statuses = answers.map((r) => r.status);
+        expect(statuses).toContain(503);
+        expect(statuses).toContain(200);
+      } finally {
+        Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient });
+      }
+    });
+  });
+
   it('answers CORS preflight for cross-site POSTs', async () => {
     const res = await request(app).options('/def/volunteering/1.0.0').set('Origin', 'https://app.example.org').set('Access-Control-Request-Method', 'POST');
     expect(res.status).toBe(204);
@@ -253,6 +346,18 @@ describe('the SHACL profile of the ontology IRI', () => {
     expect(res.status).toBe(406);
     const ok = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/*;q=0, text/turtle;q=0.5').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
     expect(ok.status).toBe(200);
+    // A range naming the profile is more specific than the bare type.
+    const refusedProfile = await request(app)
+      .get('/def/volunteering/1.0.0')
+      .set('Accept', 'text/turtle;profile="http://www.w3.org/ns/shacl#";q=0, text/turtle;q=1')
+      .set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(refusedProfile.status).toBe(406);
+    const otherProfile = await request(app)
+      .get('/def/volunteering/1.0.0')
+      .set('Accept', 'text/turtle;profile="https://example.org/other";q=0, text/turtle;q=1')
+      .set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(otherProfile.status).toBe(200);
+    expect(otherProfile.text).toMatch(/sh:NodeShape/);
   });
 
   it('refuses the profile in a type it is not available in', async () => {
@@ -278,6 +383,7 @@ describe('the public page', () => {
 
 describe('rate limits', () => {
   it('limits validation requests per client', async () => {
+    RATE_LIMITS.perMinute = PER_MINUTE;
     const statuses: number[] = [];
     for (let i = 0; i < 35; i++) statuses.push((await post('/def/volunteering', VALID)).status);
     expect(statuses).toContain(429);

@@ -7,17 +7,57 @@ import type { ValidationJob, ValidationOutcome, WorkerReply } from './validation
  * has a deadline and each worker a heap limit: a worker that runs over is
  * stopped and replaced, and the caller gets a 422 or 413, so one input can't
  * hold up or exhaust the server. Jobs beyond the workers wait in a short
- * queue; past that the caller gets a 503.
+ * queue, for a limited time; past that the caller gets a 503.
+ *
+ * Callers reserve a place with admit() before they read a request body, so
+ * the number of bodies held in memory is bounded too (workers + queue), and
+ * one client can hold at most perClient of those places.
  */
 
 export const POOL_LIMITS = {
   workers: Number(process.env.VALIDATE_WORKERS ?? 2),
   timeoutMs: Number(process.env.VALIDATE_TIMEOUT_MS ?? 10_000),
   heapMb: Number(process.env.VALIDATE_HEAP_MB ?? 192),
-  queue: Number(process.env.VALIDATE_QUEUE ?? 16),
+  /** Jobs waiting for a worker. Places in all: workers + queue. */
+  queue: Number(process.env.VALIDATE_QUEUE ?? 4),
+  /** How long a job may wait for a worker before the caller gets a 503. */
+  queueWaitMs: Number(process.env.VALIDATE_QUEUE_WAIT_MS ?? 15_000),
+  /** Places one client may hold at once (reading, waiting or running). */
+  perClient: Number(process.env.VALIDATE_PER_CLIENT ?? 2),
 };
 
-type Pending = { job: ValidationJob; resolve: (o: ValidationOutcome) => void; reject: (e: unknown) => void };
+export type Admission = { ok: true; release: () => void } | { ok: false; status: 429 | 503; message: string };
+
+const held = new Map<string, number>();
+let admitted = 0;
+
+/**
+ * Reserves a place for one validation, before its data is read. Release it
+ * when the request ends, however it ends (release is safe to call twice).
+ */
+export function admit(client: string): Admission {
+  const mine = held.get(client) ?? 0;
+  if (mine >= POOL_LIMITS.perClient) {
+    return { ok: false, status: 429, message: `You already have ${mine} validation${mine === 1 ? '' : 's'} in progress. Wait for ${mine === 1 ? 'it' : 'them'} to finish.` };
+  }
+  if (admitted >= POOL_LIMITS.workers + POOL_LIMITS.queue) return { ok: false, status: 503, message: 'The validator is busy. Try again in a moment.' };
+  held.set(client, mine + 1);
+  admitted++;
+  let released = false;
+  return {
+    ok: true,
+    release: () => {
+      if (released) return;
+      released = true;
+      admitted--;
+      const left = (held.get(client) ?? 1) - 1;
+      if (left > 0) held.set(client, left);
+      else held.delete(client);
+    },
+  };
+}
+
+type Pending = { job: ValidationJob; resolve: (o: ValidationOutcome) => void; reject: (e: unknown) => void; wait?: NodeJS.Timeout };
 interface Slot {
   worker: Worker;
   current?: Pending & { timer: NodeJS.Timeout };
@@ -74,6 +114,7 @@ function pump() {
     if (!slot && slots.length < POOL_LIMITS.workers) slot = spawn();
     if (!slot) return;
     const next = queue.shift()!;
+    clearTimeout(next.wait);
     const timer = setTimeout(() => {
       retire(slot!, new DataError(422, `Checking the data took longer than ${POOL_LIMITS.timeoutMs / 1000} s, so it was stopped. Try smaller or simpler data.`));
     }, POOL_LIMITS.timeoutMs);
@@ -85,7 +126,16 @@ function pump() {
 export function runValidation(job: Omit<ValidationJob, 'id'>): Promise<ValidationOutcome> {
   if (queue.length >= POOL_LIMITS.queue) return Promise.reject(new DataError(503, 'The validator is busy. Try again in a moment.'));
   return new Promise((resolve, reject) => {
-    queue.push({ job: { ...job, id: nextId++ }, resolve, reject });
+    const pending: Pending = { job: { ...job, id: nextId++ }, resolve, reject };
+    // Waiting counts towards the caller's time too: a job that can't start soon is turned away.
+    pending.wait = setTimeout(() => {
+      const i = queue.indexOf(pending);
+      if (i < 0) return;
+      queue.splice(i, 1);
+      reject(new DataError(503, 'The validator is busy. Try again in a moment.'));
+    }, POOL_LIMITS.queueWaitMs);
+    pending.wait.unref();
+    queue.push(pending);
     pump();
   });
 }

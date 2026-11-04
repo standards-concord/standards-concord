@@ -8,6 +8,7 @@ import * as z from 'zod';
 import { config } from './config.js';
 import { list } from './db.js';
 import { reportGap, sparql } from './services/agents.js';
+import { admit } from './services/validationPool.js';
 import { validateDataAgainst } from './services/dataValidation.js';
 import { latestVersion } from './public/routes.js';
 import { PUBLIC_BASE } from './public/w3id.js';
@@ -143,8 +144,15 @@ function buildServer(user: User, agentName: string) {
         if (!text) return fail('Pass the data to validate as data.');
         const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
         if (v !== 'draft' && !ontologyStore.versions(p).includes(v)) return fail(`${p.title} has no version "${version}".`);
-        const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });
-        return json(body);
+        // Shares the validator's places with POSTs to the ontology IRI (validationPool.ts).
+        const place = admit(`user:${user.id}`);
+        if (!place.ok) return fail(place.message);
+        try {
+          const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });
+          return json(body);
+        } finally {
+          place.release();
+        }
       }),
   );
 
