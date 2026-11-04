@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useImperativeHandle, useRef, type Ref } from 'react';
 import { Compartment, EditorState, Prec, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -13,10 +13,11 @@ import {
   placeholder as placeholderExt,
   rectangularSelection,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirror/commands';
 import { bracketMatching, foldGutter, foldKeymap, foldService, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type Completion, type CompletionSource } from '@codemirror/autocomplete';
+import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import { languageSupport, type CodeLanguage } from './languages';
 import { highlighter } from './highlight';
 import { cx } from '../ui';
@@ -49,7 +50,43 @@ const theme = EditorView.theme({
   '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
   '.cm-completionDetail': { color: 'inherit', opacity: '0.7', marginLeft: '8px', fontStyle: 'normal' },
   '.cm-placeholder': { color: 'var(--subtle)' },
+  // Problems: wavy underlines in the theme's colours, and a readable popup on hover.
+  '.cm-lintRange-error': { backgroundImage: 'none', textDecoration: 'underline wavy var(--danger)', textDecorationSkipInk: 'none', textUnderlineOffset: '3px' },
+  '.cm-lintRange-warning': { backgroundImage: 'none', textDecoration: 'underline wavy var(--warn)', textDecorationSkipInk: 'none', textUnderlineOffset: '3px' },
+  '.cm-lintRange-info': { backgroundImage: 'none', textDecoration: 'underline dotted var(--muted)', textUnderlineOffset: '3px' },
+  '.cm-tooltip-lint': { maxWidth: '28rem', fontFamily: 'var(--font-sans, inherit)', fontSize: '0.8rem' },
+  '.cm-diagnostic': { padding: '6px 10px', whiteSpace: 'pre-wrap' },
+  '.cm-diagnostic-error': { borderLeft: '4px solid var(--danger)' },
+  '.cm-diagnostic-warning': { borderLeft: '4px solid var(--warn)' },
+  '.cm-diagnostic-info': { borderLeft: '4px solid var(--muted)' },
+  '.cm-diagnosticSource': { color: 'var(--muted)', fontSize: '0.75rem', marginTop: '2px' },
+  '.cm-lint-marker': { width: '0.8em', height: '0.8em' },
 });
+
+/** A problem to underline in the editor, with the text of its hover popup. */
+export interface EditorDiagnostic {
+  from: number;
+  to: number;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  /** Where the problem came from, shown under the message (e.g. "SHACL check"). */
+  source?: string;
+}
+
+/** What a page can do to an editor it holds a ref to. */
+export interface CodeEditorHandle {
+  /** Selects a range, scrolls it into the middle of the editor and focuses the editor. */
+  reveal(from: number, to: number): void;
+}
+
+function toCm(doc: number, ds: EditorDiagnostic[]): Diagnostic[] {
+  return ds
+    .map((d) => {
+      const from = Math.max(0, Math.min(d.from, doc));
+      return { ...d, from, to: Math.max(from, Math.min(d.to, doc)) };
+    })
+    .sort((a, b) => a.from - b.from);
+}
 
 /**
  * Indentation-based folding for the RDF-family languages (Turtle subject
@@ -86,6 +123,9 @@ export interface CodeEditorProps {
   wrap?: boolean;
   className?: string;
   testId?: string;
+  /** Problems to underline, with hover popups and gutter markers. */
+  diagnostics?: EditorDiagnostic[];
+  ref?: Ref<CodeEditorHandle>;
 }
 
 const SPARQL_COMPLETIONS: Completion[] = [
@@ -125,6 +165,8 @@ export function CodeEditor({
   wrap = false,
   className,
   testId,
+  diagnostics,
+  ref,
 }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
@@ -132,6 +174,24 @@ export function CodeEditor({
   // Keep callbacks fresh without rebuilding the editor.
   const latest = useRef({ onChange, onRun, completions });
   latest.current = { onChange, onRun, completions };
+  const latestDiagnostics = useRef(diagnostics);
+  latestDiagnostics.current = diagnostics;
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reveal(from, to) {
+        const v = view.current;
+        if (!v) return;
+        const len = v.state.doc.length;
+        const a = Math.max(0, Math.min(from, len));
+        const b = Math.max(a, Math.min(to, len));
+        v.dispatch({ selection: { anchor: a, head: b }, effects: EditorView.scrollIntoView(a, { y: 'center' }) });
+        v.focus();
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     if (!host.current) return;
@@ -155,6 +215,7 @@ export function CodeEditor({
       wrap ? EditorView.lineWrapping : [],
       placeholder ? placeholderExt(placeholder) : [],
       keymap.of([...searchKeymap, ...foldKeymap, ...defaultKeymap]),
+      diagnostics ? lintGutter() : [],
     ];
     if (!readOnly) {
       extensions.push(
@@ -181,6 +242,7 @@ export function CodeEditor({
     }
     const v = new EditorView({ state: EditorState.create({ doc: value, extensions }), parent: host.current });
     view.current = v;
+    if (latestDiagnostics.current) v.dispatch(setDiagnostics(v.state, toCm(v.state.doc.length, latestDiagnostics.current)));
     return () => {
       v.destroy();
       view.current = null;
@@ -193,9 +255,16 @@ export function CodeEditor({
   useEffect(() => {
     const v = view.current;
     if (v && v.state.doc.toString() !== value) {
-      v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: value } });
+      // Its own undo step (e.g. Format), never merged with the typing just before it.
+      v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: value }, annotations: isolateHistory.of('full') });
     }
   }, [value]);
+
+  // Diagnostics are computed for the current text, so they replace whatever was shown.
+  useEffect(() => {
+    const v = view.current;
+    if (v && diagnostics) v.dispatch(setDiagnostics(v.state, toCm(v.state.doc.length, diagnostics)));
+  }, [diagnostics]);
 
   return (
     <div
