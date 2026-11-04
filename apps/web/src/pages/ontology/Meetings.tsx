@@ -314,6 +314,7 @@ function BookingState({ m }: { m: Meeting }) {
   if (m.calendar?.approval === 'pending') return <Badge tone="warn" title={m.calendar.approvalNote}>{m.calendar.approvalNote ? 'Needs approval again' : 'Needs approval'}</Badge>;
   if (m.calendar?.skip) return <Badge tone="neutral">Skipping</Badge>;
   if (m.calendar?.cancelPending) return <Badge tone="danger">Cancelling the bot failed; retrying</Badge>;
+  if (m.bot?.cancelError && !isBooked(m)) return <Badge tone="warn" title={m.bot.cancelError}>Cancelling the old bot; retrying</Badge>;
   if (m.bot?.provider === 'simulated') return <Badge tone="neutral" title={m.bot.error}>No bot provider on this server</Badge>;
   if (isBooked(m) && m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Cancelling the bot failed; retrying</Badge>;
   if (isBooked(m)) return <Badge tone="ok">Bot booked</Badge>;
@@ -340,6 +341,7 @@ function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: (
           <>
             From calendar invites. The bot joins each approved call when it starts; a facilitator approves each new invite once, for the whole series.
             {bot?.lastSync && <> Calendar {bot.lastSync.ok ? 'checked' : 'check failed'} {relativeTime(bot.lastSync.at, now())}.</>}
+            {!!bot?.cancelling && <span data-testid="bots-cancelling"> Still cancelling {bot.cancelling === 1 ? 'one bot' : `${bot.cancelling} bots`} with Recall.ai; retried every minute.</span>}
           </>
         }
       />

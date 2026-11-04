@@ -23,6 +23,7 @@ import {
   seriesApproved,
 } from './meetings.js';
 import { recall } from './recall.js';
+import { retireDue, retiringCount } from './retiring.js';
 import { allUsers, logActivity } from './users.js';
 
 /**
@@ -62,6 +63,7 @@ export function meetBotInfo(): MeetBotInfo {
     calendarConnected: !!config.meetBot.calendarIcsUrl,
     postToChatDefault: config.meetBot.postToChatDefault,
     lastSync: last ? { at: last.at, ok: last.ok, events: last.events, error: last.error } : undefined,
+    cancelling: retiringCount() || undefined,
   };
 }
 
@@ -193,18 +195,11 @@ async function withdrawCall(meetingId: string): Promise<'done' | 'retrying'> {
   return meetingLock(meetingId, async () => {
     const m = get<Meeting>('meetings', meetingId);
     if (!m) return 'done';
-    // Marked first, so a webhook arriving meanwhile is already refused.
-    m.calendar = { ...m.calendar!, cancelPending: true };
-    saveMeeting(m);
+    // The bot is recorded for cancelling first (retried every minute until Recall.ai
+    // confirms, and any line it sends meanwhile dropped), so the meeting can go now.
     const r = await cancelMeetingBot(m);
-    if (!r.ok) {
-      m.bot = { ...m.bot!, error: r.error };
-      saveMeeting(m);
-      emit(m, { type: 'meeting', meeting: m });
-      return 'retrying';
-    }
     remove('meetings', m.id);
-    return 'done';
+    return r.ok ? 'done' : 'retrying';
   });
 }
 
@@ -224,6 +219,8 @@ async function reconcile(
   const byKey = new Map(calendarMeetings().map((m) => [m.calendar!.key, m]));
   const touched: Meeting[] = [];
   const seen = new Set<string>();
+  /** Live calls whose invite changed under them: the bot is taken out once the loop is done. */
+  const endAfter: string[] = [];
 
   for (const occ of occs) {
     if (!occ.meetingUrl) continue;
@@ -295,9 +292,31 @@ async function reconcile(
       if (!m) return undefined;
       // The calendar is the better source: it reports moves and cancellations.
       if (feed === 'calendar' && m.calendar!.feed === 'upload') m.calendar!.feed = 'calendar';
-      if (m.status !== 'scheduled') return m;
       const cal = m.calendar!;
       const importer = feed === 'upload' ? opts.actor : undefined;
+      // A new organiser or Meet link needs approving again, unless its series was approved as it now stands (or a facilitator imports it).
+      const detailsChanged = cal.organizer !== occ.organizer || m.meetingUrl !== occ.meetingUrl;
+      const reapprove =
+        detailsChanged && cal.approval === 'approved' && !importer && !preApproved(occ, findProject(m.ontologyId)!)
+          ? m.meetingUrl !== occ.meetingUrl
+            ? 'The invite’s Meet link changed since it was approved.'
+            : 'The invite’s organiser changed since it was approved.'
+          : undefined;
+      if (m.status !== 'scheduled') {
+        // Changed under a call the bot is already in: the bot leaves (once this loop is done) and the call needs approving again.
+        if (reapprove && botActive(m) && !m.bot?.leaving) {
+          m.calendar = { ...cal, organizer: occ.organizer, sentBy: occ.sentBy, approval: 'pending', approvedBy: undefined, approvalNote: reapprove };
+          saveMeeting(m);
+          logActivity({
+            ontologyId: m.ontologyId,
+            type: 'meeting.updated',
+            message: 'The co-lead bot is leaving a call because its invite changed.',
+            link: `/o/${m.ontologyId}/meetings/${m.id}`,
+          });
+          endAfter.push(m.id);
+        }
+        return m;
+      }
       // Importing the invite is the importer's approval, for a call waiting for one too.
       if (importer) {
         recordSeriesApproval(m.ontologyId, occ.uid, occ.organizer, occ.meetingUrl, importer.id);
@@ -307,31 +326,17 @@ async function reconcile(
           delete cal.approvalNote;
         }
       }
-      // A new organiser or Meet link needs approving again, unless its series was approved as it now stands.
-      const detailsChanged = cal.organizer !== occ.organizer || m.meetingUrl !== occ.meetingUrl;
-      let reapprove: string | undefined;
-      if (detailsChanged && cal.approval === 'approved' && !importer && !preApproved(occ, findProject(m.ontologyId)!))
-        reapprove = m.meetingUrl !== occ.meetingUrl ? 'The invite’s Meet link changed since it was approved.' : 'The invite’s organiser changed since it was approved.';
       const moved = cal.start !== occ.start.toISOString() || m.meetingUrl !== occ.meetingUrl;
       if (!moved && !detailsChanged && m.title === occ.title && cal.end === occ.end.toISOString()) return saveMeeting(m);
-      // The revoked approval is saved before anything else, so a failed cancellation is retried and a joining bot refused.
       if (reapprove) {
-        m.calendar = { ...cal, organizer: occ.organizer, sentBy: occ.sentBy, approval: 'pending', approvedBy: undefined, approvalNote: reapprove };
-        saveMeeting(m);
+        m.calendar = { ...cal, approval: 'pending', approvedBy: undefined, approvalNote: reapprove };
         logActivity({ ontologyId: m.ontologyId, type: 'meeting.updated', message: 'A call needs approving again because its invite changed.', link: `/o/${m.ontologyId}/meetings/${m.id}` });
       }
-      if (moved && (m.bot?.botId || m.bot?.uncertain)) {
+      // The booked bot is let go: recorded for cancelling (with the Meet link it was booked for,
+      // retried until Recall.ai confirms), so a later approval books a fresh one.
+      if ((moved || reapprove) && (m.bot?.botId || m.bot?.uncertain || m.bot?.bookingId)) {
         const r = await cancelMeetingBot(m);
-        // Keep the old booking (retried until it is cancelled) rather than lose track of a bot that may still join.
-        if (!r.ok) {
-          m.bot = { ...m.bot!, error: r.error };
-          if (!reapprove) return saveMeeting(m);
-          m.title = occ.title;
-          m.meetingUrl = occ.meetingUrl;
-          m.calendar = { ...m.calendar!, start: occ.start.toISOString(), end: occ.end.toISOString() };
-          return saveMeeting(m);
-        }
-        m.bot = { provider: m.bot!.provider, status: 'scheduled' };
+        m.bot = { provider: m.bot!.provider, status: 'scheduled', cancelError: r.ok ? undefined : r.error };
       }
       m.title = occ.title;
       m.meetingUrl = occ.meetingUrl;
@@ -344,12 +349,17 @@ async function reconcile(
     }
   }
 
-  // Calls this feed no longer lists: cancelled before they start, or the bot taken out if it's already in.
+  for (const id of endAfter) await endLiveMeeting(id).catch(() => undefined);
+
+  // Calls this feed no longer lists: cancelled before they start, or the bot taken out
+  // if it's already in (past the scheduled end too, while the call overruns).
   const uids = new Set(occs.map((o) => o.uid));
   for (const m of calendarMeetings()) {
     const cal = m.calendar!;
-    if (seen.has(cal.key) || new Date(cal.end) <= opts.now || cal.cancelPending) continue;
-    if (m.status !== 'scheduled' && !botActive(m)) continue;
+    if (seen.has(cal.key) || cal.cancelPending) continue;
+    if (m.status === 'scheduled' ? new Date(cal.end) <= opts.now : !botActive(m) || m.bot?.leaving) continue;
+    // Older than the feed window: the clock ends that call by itself.
+    if (new Date(cal.end).getTime() < opts.now.getTime() - OVERRUN_MAX_MS) continue;
     const gone = feed === 'calendar' ? cal.feed === 'calendar' : cal.feed === 'upload' && m.ontologyId === opts.project?.id && !!cal.uid && uids.has(cal.uid) && new Date(cal.start).getTime() < opts.now.getTime() + HORIZON_MS;
     if (gone) await withdrawCall(m.id);
   }
@@ -440,23 +450,25 @@ async function dispatchOne(meetingId: string, now: Date) {
       emit(m, { type: 'meeting', meeting: m });
     };
 
-    // Cancellations that failed are retried whatever state the call is in, even if the bot got in.
+    // Left over from before the cancellation ledger: hand the bot to it and drop the call.
     if (cal.cancelPending) {
-      const r = await cancelMeetingBot(m);
-      if (r.ok) remove('meetings', m.id);
+      await cancelMeetingBot(m);
+      remove('meetings', m.id);
       return;
     }
-    // A booked bot on a call that's now skipped or waiting for approval is cancelled (retried until it works).
-    if ((m.bot?.botId || m.bot?.uncertain) && m.bot.status !== 'done' && (cal.skip || cal.approval === 'pending')) {
+    // A booked bot on a call that's now skipped or waiting for approval is let go: the
+    // ledger retries the cancellation until Recall.ai confirms, and drops anything it sends.
+    if ((m.bot?.botId || m.bot?.uncertain || m.bot?.bookingId) && m.bot.status !== 'done' && m.bot.status !== 'in-call' && (cal.skip || cal.approval === 'pending')) {
       const r = await cancelMeetingBot(m);
-      m.bot = r.ok ? { provider: m.bot.provider, status: 'scheduled' } : { ...m.bot, error: r.error };
-      if (r.ok && m.status === 'live') m.status = 'scheduled';
+      m.bot = { provider: m.bot.provider, status: 'scheduled', cancelError: r.ok ? undefined : r.error };
+      if (m.status === 'live') m.status = 'scheduled';
       changed();
-      if (!r.ok) return;
     }
     if (m.status !== 'scheduled') return;
 
     if (t >= end) {
+      // Whatever was booked (or may have been, if the reply was lost) is let go before the meeting forgets it.
+      if (m.bot?.botId || m.bot?.uncertain || m.bot?.bookingId) await cancelMeetingBot(m);
       if (cal.skip || cal.approval === 'pending') remove('meetings', m.id);
       else {
         m.status = 'error';
@@ -495,7 +507,16 @@ async function dispatchOne(meetingId: string, now: Date) {
     }
     const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined);
     // A failed booking is retried on the next tick until the call ends.
-    if (bot.status === 'error') m.bot = { provider: 'recall', status: 'scheduled', error: bot.error, uncertain: bot.uncertain };
+    // An unconfirmed booking keeps its booking id and Meet link, so the bot can still be found (or cancelled) later.
+    if (bot.status === 'error')
+      m.bot = {
+        provider: 'recall',
+        status: 'scheduled',
+        error: bot.error,
+        uncertain: bot.uncertain,
+        bookingId: bot.uncertain ? bot.bookingId : undefined,
+        bookedUrl: bot.uncertain ? bot.bookedUrl : undefined,
+      };
     else if (t >= start) {
       m.bot = bot;
       m.status = 'live';
@@ -523,6 +544,7 @@ async function settleLostBooking(meetingId: string) {
 /** Books bots for calls starting soon, closes out calls that have finished, and retries anything that failed. */
 export async function dispatchDue(now = new Date()) {
   const t = now.getTime();
+  await retireDue();
   for (const m of calendarMeetings()) {
     await dispatchOne(m.id, now);
     const fresh = get<Meeting>('meetings', m.id);

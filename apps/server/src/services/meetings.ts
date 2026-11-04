@@ -12,6 +12,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
 import { BookingError, recall } from './recall.js';
+import { isRetired, retireBot } from './retiring.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
@@ -174,7 +175,7 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   m = getMeeting(m.id);
-  if (botActive(m)) throw new HttpError(409, 'The bot is still in the call. End the call first.');
+  if (botActive(m) || m.bot?.uncertain || m.bot?.leaving) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = getProject(m.ontologyId);
   m = await mutateMeeting(m.id, (x) => {
@@ -433,6 +434,8 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
   const before = getMeeting(meetingId);
   requireFacilitator(before, user, 'change this call');
   const changes: string[] = [];
+  // A call waiting for approval is only for facilitators to see, so the activity log doesn't name it.
+  let named = before.calendar?.approval !== 'pending';
   const m = await meetingLock(meetingId, async () => {
     const m = getMeeting(meetingId);
     if (patch.postPromptsToChat !== undefined && patch.postPromptsToChat !== !!m.postPromptsToChat) {
@@ -448,21 +451,22 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
       m.calendar!.approvedBy = user.id;
       delete m.calendar!.approvalNote;
       recordSeriesApproval(m.ontologyId, m.calendar!.uid, m.calendar!.organizer, m.meetingUrl, user.id);
+      named = true;
       changes.push(m.calendar!.recurring ? 'approved the co-lead bot joining the series' : 'approved the co-lead bot joining');
     }
     if (patch.skip !== undefined && patch.skip !== !!m.calendar!.skip) {
       // A bot already booked for this call is cancelled first; if that fails, nothing changes.
       if (patch.skip && (m.bot?.botId || m.bot?.uncertain)) {
         const r = await cancelMeetingBot(m);
-        if (!r.ok) throw new HttpError(502, `${r.error} The bot is still booked; try again.`);
-        m.bot = { provider: m.bot.provider, status: 'scheduled' };
+        // Forgotten here either way: if Recall.ai didn't confirm, the cancellation is retried and anything that bot sends is dropped.
+        m.bot = { provider: m.bot.provider, status: 'scheduled', cancelError: r.ok ? undefined : r.error };
       }
       m.calendar!.skip = patch.skip;
       changes.push(patch.skip ? 'told the co-lead bot to skip' : 'told the co-lead bot to join');
     }
     return save(m);
   });
-  for (const c of changes) logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} “${m.title}”`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
+  for (const c of changes) logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} ${named ? `“${m.title}”` : 'a call waiting for approval'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   emit(m, { type: 'meeting', meeting: m });
   // The other weeks of an approved series, with the same organiser and Meet link, are approved too.
   if (patch.approve && m.calendar?.uid) {
@@ -536,37 +540,33 @@ export async function dispatchBot(m: Meeting, joinAt?: string): Promise<NonNulla
     secret = newToken();
     put('kv', { id: `meeting-secret:${m.id}`, secret });
   }
+  const bookingId = m.bot?.bookingId && !m.bot.botId && !m.bot.uncertain ? m.bot.bookingId : newId('bk');
+  const booking = { bookingId, bookedUrl: m.meetingUrl };
   try {
     const bot = await recall.createBot({
       meetingId: m.id,
+      bookingId,
       meetingUrl: m.meetingUrl!,
       joinAt,
       postPromptsToChat: !!m.postPromptsToChat,
       webhookUrl: `${config.publicUrl}/api/webhooks/recall?meeting=${m.id}&secret=${secret}`,
     });
-    return { provider: 'recall', botId: bot.id, status: 'joining' };
+    return { provider: 'recall', botId: bot.id, status: 'joining', ...booking };
   } catch (err) {
     const uncertain = err instanceof BookingError && err.uncertain;
-    return { provider: 'recall', status: 'error', error: (err as Error).message, uncertain: uncertain || undefined };
+    // An unconfirmed booking keeps its id and Meet link, to find (or cancel) that bot later.
+    return { provider: 'recall', status: 'error', error: (err as Error).message, ...(uncertain ? { uncertain: true, ...booking } : {}) };
   }
 }
 
-/** Cancels whatever bot a meeting has booked, including one whose booking reply was lost (found through Recall.ai first). */
+/**
+ * Lets go of whatever bot a meeting has booked, including one whose booking reply
+ * was lost: it is recorded for cancelling (retried every minute until Recall.ai
+ * confirms, whatever happens to the meeting) and tried straight away. The caller
+ * forgets the bot on the meeting either way; the result says whether it's gone yet.
+ */
 export async function cancelMeetingBot(m: Meeting): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (m.bot?.provider !== 'recall') return { ok: true };
-  if (m.bot.botId) return recall.cancelBot(m.bot.botId);
-  if (!m.bot.uncertain) return { ok: true };
-  let ids: string[];
-  try {
-    ids = await recall.findBots(m.meetingUrl!, m.id);
-  } catch {
-    return { ok: false, error: 'Couldn’t check with Recall.ai whether an unconfirmed booking went through, so it can’t be cancelled yet. Retrying.' };
-  }
-  for (const id of ids) {
-    const r = await recall.cancelBot(id);
-    if (!r.ok) return r;
-  }
-  return { ok: true };
+  return retireBot(m.id, m.bot, m.meetingUrl);
 }
 
 /**
@@ -577,7 +577,8 @@ export async function cancelMeetingBot(m: Meeting): Promise<{ ok: true } | { ok:
 export async function findLostBooking(m: Meeting): Promise<{ botId?: string } | undefined> {
   let ids: string[];
   try {
-    ids = await recall.findBots(m.meetingUrl!, m.id);
+    const want = m.bot?.bookingId;
+    ids = (await recall.findBots(m.bot?.bookedUrl ?? m.meetingUrl!, m.id)).filter((b) => !want || !b.booking || b.booking === want).map((b) => b.id);
   } catch {
     return undefined;
   }
@@ -590,13 +591,19 @@ export async function inviteBot(project: OntologyProject, user: User, title: str
   const m = newMeeting(project, user, title, 'google-meet-bot', {
     meetingUrl,
     postPromptsToChat: !!opts.postPromptsToChat,
-    bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' },
+    // The booking id is stored before booking, so the bot's first words can identify it if the reply is slow or lost.
+    bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled', bookingId: newId('bk'), bookedUrl: meetingUrl },
     chatModeAnnounced: !!opts.postPromptsToChat,
   });
   const bot = await dispatchBot(m);
   // A transcript can arrive before Recall.ai answers: change only the bot, on the latest copy.
   const fresh = await mutateMeeting(m.id, (x) => {
-    x.bot = x.bot?.status === 'in-call' && bot.botId ? { ...bot, status: 'in-call' } : bot;
+    // The webhook may already have said the bot is in the call: keep that, whatever the reply said.
+    if (x.bot?.status === 'in-call') {
+      if (!x.bot.botId) x.bot = bot.botId ? { ...bot, status: 'in-call' } : { ...x.bot, uncertain: true, error: bot.error };
+      return;
+    }
+    x.bot = bot;
   });
   logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return fresh;
@@ -609,10 +616,14 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   getMeeting(meetingId);
   const evt = body as {
     event?: string;
-    data?: { bot?: { id?: string }; data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } };
+    data?: {
+      bot?: { id?: string; metadata?: Record<string, string> };
+      data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } };
+    };
   };
   if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
     const fromBot = evt.data.bot?.id;
+    const fromBooking = evt.data.bot?.metadata?.concord_booking;
     const words = evt.data.data.words;
     let joined = false;
     let staleBot: string | undefined;
@@ -624,8 +635,12 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
       { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative },
       {
         accept: (x) => {
+          // Without a confirmed bot id, only the bot of the current booking is expected (told by its booking id when Recall.ai sends it).
+          const awaited = !x.bot?.botId && !!x.bot?.bookingId && (!fromBooking || fromBooking === x.bot.bookingId);
           const unwanted =
+            (!!fromBot && isRetired(fromBot)) ||
             (!!fromBot && !!x.bot?.botId && fromBot !== x.bot.botId) ||
+            (!!fromBot && !x.bot?.botId && !awaited) ||
             !!x.bot?.leaving ||
             x.bot?.status === 'done' ||
             (!!x.calendar && (!!x.calendar.cancelPending || !!x.calendar.skip || x.calendar.approval === 'pending'));
@@ -634,7 +649,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
         },
         before: (x) => {
           joined = x.bot?.status !== 'in-call';
-          // A booking whose reply was lost: the webhook (signed with this meeting's secret) says which bot it is.
+          // The current booking's reply was slow or lost: the webhook (signed with this meeting's secret) says which bot it is.
           if (x.bot && !x.bot.botId && fromBot) x.bot = { ...x.bot, botId: fromBot, uncertain: undefined, error: undefined };
           if (x.bot) x.bot.status = 'in-call';
           if (x.status === 'scheduled') x.status = 'live';
@@ -642,7 +657,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
       },
     );
     if (!kept) {
-      if (staleBot && recall.enabled()) void recall.cancelBot(staleBot);
+      if (staleBot && recall.enabled()) void retireBot(meetingId, { provider: 'recall', botId: staleBot });
       return;
     }
     if (joined) await announceChatMode(meetingId).catch(() => undefined);
@@ -659,7 +674,7 @@ export async function endLiveMeeting(meetingId: string) {
   const m = await meetingLock(meetingId, async () => {
     const m = getMeeting(meetingId);
     // A booking whose reply was lost has no bot id: find (and remove) that bot through Recall.ai first.
-    if (m.bot?.provider === 'recall' && !m.bot.botId && m.bot.uncertain && m.bot.status !== 'done') {
+    if (m.bot?.provider === 'recall' && !m.bot.botId && (m.bot.uncertain || m.bot.bookingId) && m.bot.status !== 'done') {
       const r = await cancelMeetingBot(m);
       if (!r.ok) {
         error = r.error;

@@ -52,7 +52,8 @@ export const recall = {
    * Sends a bot to a call. With joinAt, Recall.ai schedules it to join at that
    * time (it asks for at least ten minutes' notice to guarantee a bot is free).
    */
-  async createBot(opts: { meetingUrl: string; webhookUrl: string; joinAt?: string; postPromptsToChat: boolean; meetingId: string }) {
+  /** bookingId identifies this booking attempt, so a lost one is told apart from later ones. */
+  async createBot(opts: { meetingUrl: string; webhookUrl: string; joinAt?: string; postPromptsToChat: boolean; meetingId: string; bookingId?: string }) {
     const intro = opts.postPromptsToChat
       ? `Hi, I'm ${config.meetBot.botName}. I'm transcribing this call to capture use cases and terms for the ontology, and I'll post the odd clarifying question here in the chat.`
       : `Hi, I'm ${config.meetBot.botName}. I'm transcribing this call to capture use cases and terms for the ontology. For now my suggestions go to the facilitator in Concord, not this chat; I'll say here if that changes.`;
@@ -65,7 +66,7 @@ export const recall = {
           meeting_url: opts.meetingUrl,
           bot_name: config.meetBot.botName,
           // Lets a lost booking be found again (see findBots).
-          metadata: { concord_meeting: opts.meetingId },
+          metadata: { concord_meeting: opts.meetingId, ...(opts.bookingId ? { concord_booking: opts.bookingId } : {}) },
           ...(opts.joinAt ? { join_at: opts.joinAt } : {}),
           chat: { on_bot_join: { send_to: 'everyone', message: intro } },
           recording_config: {
@@ -99,17 +100,14 @@ export const recall = {
    * Bots booked for this Concord meeting that haven't finished, found by the
    * metadata createBot attaches. Throws if Recall.ai can't be asked.
    */
-  async findBots(meetingUrl: string, meetingId: string): Promise<string[]> {
-    const found: string[] = [];
+  async findBots(meetingUrl: string, meetingId: string): Promise<{ id: string; booking?: string }[]> {
+    const found: { id: string; booking?: string }[] = [];
     let url: string | null = `${base()}/bot/?meeting_url=${encodeURIComponent(meetingUrl)}`;
     for (let page = 0; url && page < 10; page++) {
       const res: Response = await fetch(url, { headers: headers() });
       if (!res.ok) throw new Error(await failure(res));
-      const body = (await res.json()) as {
-        next?: string | null;
-        results?: RecallBot[];
-      };
-      for (const b of body.results ?? []) if (b.metadata?.concord_meeting === meetingId && !ended(b)) found.push(b.id);
+      const body = (await res.json()) as { next?: string | null; results?: RecallBot[] };
+      for (const b of body.results ?? []) if (b.metadata?.concord_meeting === meetingId && !ended(b)) found.push({ id: b.id, booking: b.metadata?.concord_booking });
       url = body.next ?? null;
     }
     return found;

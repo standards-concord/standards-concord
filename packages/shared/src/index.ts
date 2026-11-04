@@ -387,6 +387,12 @@ export interface Meeting {
     error?: string;
     /** A booking request whose answer was lost: Recall.ai is checked for the bot before booking again. */
     uncertain?: boolean;
+    /** Identifies the current booking attempt (sent to Recall.ai as metadata). */
+    bookingId?: string;
+    /** The Meet link the current booking was made for. */
+    bookedUrl?: string;
+    /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */
+    cancelError?: string;
     /** Someone ended the call but the bot couldn't be removed yet; retried every minute. */
     leaving?: boolean;
   };
@@ -419,6 +425,8 @@ export interface MeetBotInfo {
   postToChatDefault: boolean;
   /** The latest read of the bot's calendar. The error never contains the feed's secret address. */
   lastSync?: { at: string; ok: boolean; events: number; error?: string };
+  /** Bots Concord is still trying to cancel (Recall.ai hasn't confirmed yet). */
+  cancelling?: number;
 }
 
 /* ------------------------------------------------------------------------ */

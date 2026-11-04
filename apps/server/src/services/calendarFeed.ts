@@ -198,5 +198,10 @@ export function parseOccurrences(ics: string, window: { from: Date; to: Date }):
       add(uid, series!, next, end, `${uid}@${iso(next)}`, recurring);
     }
   }
-  return out.sort((a, b) => a.start.getTime() - b.start.getTime());
+  // Whatever parseCancellations calls cancelled stays out, even when ical.js can't read
+  // that event (a cancelled week with no start time, or METHOD:CANCEL without a STATUS).
+  const cancelled = parseCancellations(ics);
+  const uids = new Set(cancelled.uids);
+  const keys = new Set(cancelled.keys);
+  return out.filter((o) => !uids.has(o.uid) && !keys.has(o.key)).sort((a, b) => a.start.getTime() - b.start.getTime());
 }

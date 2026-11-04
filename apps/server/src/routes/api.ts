@@ -6,7 +6,7 @@ import { ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, put } from '../db.js';
+import { get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
@@ -538,8 +538,16 @@ export function apiRouter(): Router {
   r.get('/activity', (req, res) => {
     const id = optStr(req.query.ontologyId);
     const all = listActivity(id ? mustFindProject(id).id : undefined, 100);
-    // Meetings are for signed-in people, and so is what happens to them.
-    res.json(req.user ? all : all.filter((a) => !a.type.startsWith('meeting.')));
+    // Meetings are for signed-in people, and so is what happens to them; a call waiting for
+    // approval (and what's been said about it) is for facilitators only.
+    const hidden = (a: (typeof all)[number]) => {
+      if (!a.type.startsWith('meeting.')) return false;
+      if (!req.user) return true;
+      const mid = /\/meetings\/(mtg_[\w-]+)/.exec(a.link ?? '')?.[1];
+      const m = mid ? get<Meeting>('meetings', mid) : undefined;
+      return !!m && !meetings.visibleMeeting(m, req.user);
+    };
+    res.json(all.filter((a) => !hidden(a)));
   });
 
   /* ------------------------------ feedback --------------------------- */

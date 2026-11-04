@@ -240,6 +240,11 @@ export function MeetingDetailPage() {
           {mt.calendar?.approvalNote && <p className="mt-1 text-sm text-warn">{mt.calendar.approvalNote} A facilitator needs to approve it again.</p>}
           {mt.bot?.leaving && <p className="mt-1 text-sm text-warn">You ended the call, but the bot couldn’t be removed yet. Concord keeps trying and analyses the call once it has left.</p>}
           {mt.bot?.error && <p className="mt-1 text-sm text-danger">Bot error: {mt.bot.error}</p>}
+          {mt.bot?.cancelError && (
+            <p className="mt-1 text-sm text-warn" data-testid="cancel-error">
+              The bot booked earlier hasn’t been cancelled yet ({mt.bot.cancelError}). Concord keeps trying, and ignores anything it sends meanwhile.
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {scheduled && mt.calendar && mayRun && mt.calendar.approval === 'pending' && (
