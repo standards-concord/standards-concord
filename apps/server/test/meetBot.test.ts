@@ -328,8 +328,7 @@ describe('invite-by-email', () => {
     const activity = (await steward.get(`/api/activity?ontologyId=${m.ontologyId}`)).body as { message: string }[];
     expect(activity.some((a) => /approved the co-lead bot joining/.test(a.message))).toBe(true);
     // Nobody signed out sees what happens to meetings, and the request for approval names no call or organiser.
-    const anon = (await request(app).get(`/api/activity?ontologyId=${m.ontologyId}`)).body as { type: string; message: string }[];
-    expect(anon.some((a) => a.type.startsWith('meeting.'))).toBe(false);
+    expect((await request(app).get(`/api/activity?ontologyId=${m.ontologyId}`)).status).toBe(401);
     expect(activity.find((a) => /asks the co-lead bot/.test(a.message))?.message).not.toMatch(/stranger@|Use case workshop/);
     await dispatchDue(at('2026-11-10T14:47:00Z'));
     expect(calls.filter((c) => c.url === '/bot/')).toHaveLength(1);
@@ -425,7 +424,7 @@ describe('invite-by-email', () => {
     expect(synced).toMatchObject({ ok: false, error: expect.stringMatching(/returned 404/) });
     config.meetBot.calendarIcsUrl = '"https://calendar.google.com/calendar/ical/bot/private-s3cr3t/basic.ics"';
     await syncCalendar(at('2026-11-09T09:02:00Z'));
-    const info = (await request(app).get('/api/meet-bot')).body;
+    const info = (await (await steward('Steward Kit')).get('/api/meet-bot')).body;
     expect(JSON.stringify(info)).not.toMatch(/s3cr3t/);
     expect(JSON.stringify(meetBotInfo())).not.toMatch(/s3cr3t/);
     expect(info.lastSync.error).toMatch(/not a valid address/);
@@ -612,7 +611,7 @@ describe('invite-by-email', () => {
     writeFeed(oneOff({ uid: 'private-call', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await syncCalendar(at('2026-11-09T09:00:00Z'));
     const [m] = calendarMeetings();
-    expect((await request(app).get('/api/ontologies/volunteering/meetings')).body).toEqual([]);
+    expect((await request(app).get('/api/ontologies/volunteering/meetings')).status).toBe(401);
     expect((await request(app).get(`/api/meetings/${m.id}`)).status).toBe(401);
     const contributor = request.agent(app);
     await contributor.post('/api/auth/demo').send({ name: 'Contributor Dee', role: 'contributor' });
@@ -809,7 +808,7 @@ describe('invite-by-email', () => {
     const synced = await syncCalendar(at('2026-11-09T09:01:00Z'));
     expect(synced).toMatchObject({ ok: false });
     expect(calendarMeetings()).toHaveLength(1);
-    const info = await request(app).get('/api/meet-bot');
+    const info = await (await steward('Steward Lou')).get('/api/meet-bot');
     expect(info.body).toMatchObject({ provider: 'recall', inviteEmail: 'concord.bot@example.org', calendarConnected: true, lastSync: { ok: false } });
   });
 });
