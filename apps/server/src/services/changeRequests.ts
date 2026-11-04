@@ -32,6 +32,7 @@ import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
+import { consentEpoch } from './useCases.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
@@ -207,42 +208,49 @@ function validationPassed(v: ValidationReport | undefined) {
 export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  try {
-    const p = await preview(project, cr.ops, cr.tests, author);
-    cr.diff = trimDiff(p.diff);
-    cr.classification = p.classification;
-    cr.validation = p.validation;
-    cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
-    cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
-    cr.timeline.push(
-      ev(
-        'triaged',
-        `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
-          .filter((r) => r.level === p.classification.level)
-          .map((r) => r.rule)
-          .slice(0, 3)
-          .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
-      ),
-    );
-    if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
-  } catch (err) {
-    const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
-    cr.validation = {
-      lint: [{ severity: 'error', code: 'change-not-applicable', message }],
-      fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
-      reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
-      competencyQuestions: [],
-      passed: false,
-    };
-    cr.timeline.push(ev('validated', message));
+  const timeline = [...cr.timeline];
+  // Validation runs the use cases' competency questions over their example data. If a use case
+  // stops being public while it runs (or while the analysis is written), the results may include
+  // its questions, so the whole thing runs again from what is public now.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const epoch = consentEpoch(cr.ontologyId);
+    cr.timeline = [...timeline];
+    // Tests a withdrawal has scrubbed from the stored change request stay scrubbed.
+    const stored = get<ChangeRequest>('changeRequests', cr.id);
+    if (stored) cr.tests = stored.tests;
+    try {
+      const p = await preview(project, cr.ops, cr.tests, author);
+      cr.diff = trimDiff(p.diff);
+      cr.classification = p.classification;
+      cr.validation = p.validation;
+      cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
+      cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
+      cr.timeline.push(
+        ev(
+          'triaged',
+          `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
+            .filter((r) => r.level === p.classification.level)
+            .map((r) => r.rule)
+            .slice(0, 3)
+            .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
+        ),
+      );
+      if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
+    } catch (err) {
+      const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
+      cr.validation = {
+        lint: [{ severity: 'error', code: 'change-not-applicable', message }],
+        fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
+        reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
+        competencyQuestions: [],
+        passed: false,
+      };
+      cr.timeline.push(ev('validated', message));
+    }
+    if (consentEpoch(cr.ontologyId) === epoch) return save(cr);
   }
-  // A use case withdrawn while this ran has had its questions scrubbed from the stored change
-  // request: keep that, and drop any result for a question that no longer runs.
-  const stored = get<ChangeRequest>('changeRequests', cr.id);
-  if (stored) cr.tests = stored.tests;
-  const key = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
-  const allowed = new Set([...competencyTests(project.id), ...(cr.tests ?? [])].map((q) => key(q.question)));
-  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: cr.validation.competencyQuestions.filter((r) => allowed.has(key(r.question))) };
+  // Use cases kept changing: keep the checks, but no competency question results.
+  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: [] };
   return save(cr);
 }
 

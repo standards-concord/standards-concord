@@ -147,7 +147,7 @@ const validationCache = new Map<string, Promise<ValidationReport>>();
  */
 export function competencyTests(ontologyId: string) {
   return list<UseCase>('useCases', ontologyId)
-    .filter((u) => u.status !== 'archived' && u.visibility === 'public' && !u.withdrawnAt)
+    .filter((u) => u.status !== 'archived' && u.status !== 'draft' && u.visibility === 'public' && !u.withdrawnAt)
     .flatMap((u) => u.competencyQuestions)
     .filter((q) => q.sparql)
     .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));

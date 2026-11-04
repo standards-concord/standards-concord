@@ -67,6 +67,7 @@ export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, vie
  * saved validation results (below).
  */
 const noLongerPublic: ((u: UseCase) => void)[] = [];
+noLongerPublic.push((u) => consentEpochs.set(u.ontologyId, consentEpoch(u.ontologyId) + 1));
 
 const consentLocks = new Map<string, Promise<unknown>>();
 /**
@@ -85,7 +86,12 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
   return run;
 }
 export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPublic.push(fn);
-const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived';
+/** Public, and fit to derive public material from: not withdrawn, archived, or a draft its author hasn't submitted. */
+const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived' && u.status !== 'draft';
+
+const consentEpochs = new Map<string, number>();
+/** Goes up whenever a use case of the ontology stops being public, so long-running work can tell it must start again. */
+export const consentEpoch = (ontologyId: string) => consentEpochs.get(ontologyId) ?? 0;
 
 const questionKey = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
 
@@ -98,13 +104,23 @@ onNoLongerPublic((u) => {
   const questions = new Set([...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)].map(questionKey));
   if (!questions.size) return;
   const gone = (r: { question: string }) => questions.has(questionKey(r.question));
+  // Change requests drafted from it quote its title in their own: replaced with a neutral phrase.
+  const title = u.sections.name?.trim();
+  const titleRe = title && title.length >= 4 ? new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : undefined;
+  const redact = (text?: string) => (text && titleRe ? text.replace(titleRe, 'a use case that is no longer public') : text);
   for (const cr of list<ChangeRequest>('changeRequests', u.ontologyId)) {
     const cqs = cr.validation?.competencyQuestions;
     const inResults = !!cqs?.some(gone);
     const inTests = !!cr.tests?.some(gone);
-    if (!inResults && !inTests) continue;
+    const fromIt = !!titleRe && [cr.title, cr.description, cr.analysis?.summary, cr.analysis?.rationale].some((t) => !!t && t.toLowerCase().includes(title!.toLowerCase()));
+    if (!inResults && !inTests && !fromIt) continue;
     if (inResults) cr.validation = { ...cr.validation!, competencyQuestions: cqs!.filter((r) => !gone(r)) };
     if (inTests) cr.tests = cr.tests!.filter((t) => !gone(t));
+    if (fromIt) {
+      cr.title = redact(cr.title)!;
+      cr.description = redact(cr.description) ?? '';
+      if (cr.analysis) cr.analysis = { ...cr.analysis, summary: redact(cr.analysis.summary)!, rationale: redact(cr.analysis.rationale)! };
+    }
     put('changeRequests', cr, cr.ontologyId);
   }
 });
@@ -208,7 +224,8 @@ export function present(u: UseCase, viewer?: User): UseCase {
     // Evidence quotes can name people: dropped for anonymous use cases, and for a call's use cases when the viewer can't see the call.
     terms: u.anonymous || (u.source === 'meeting' && !fromMeeting) ? u.terms.map(({ label, kind, definition, existingIri }) => ({ label, kind, definition, existingIri })) : u.terms,
     links: (u.links ?? []).filter((l) => linkOk(l) && (l.type !== 'change-request' || !!viewer)).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
-    changeRequestIds: u.changeRequestIds,
+    // Change requests are behind sign-in, and so is which ones a use case led to.
+    ...(viewer ? { changeRequestIds: u.changeRequestIds } : {}),
     // Who triaged an anonymous use case could be its author, so that is left out.
     resolution: u.resolution && (u.anonymous ? { ...u.resolution, by: undefined } : u.resolution),
     completeness: u.completeness,

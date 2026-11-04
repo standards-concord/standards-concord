@@ -115,6 +115,7 @@ export function apiRouter(): Router {
   r.use((_req, res, next) => {
     res.set('Cache-Control', 'private, no-store');
     res.vary('Cookie');
+    res.vary('Authorization');
     next();
   });
 
@@ -569,7 +570,8 @@ export function apiRouter(): Router {
     // It acts as simulated members and returns their activity, so only for signed-in testers.
     requireUser(req);
     const id = optStr(req.body?.ontologyId) ?? DEMO_SLUG;
-    res.json({ events: await step(mustFindProject(id).id, req.user?.id) });
+    // The same projection as the activity feed: nothing about use cases or calls this tester may not see.
+    res.json({ events: useCases.visibleActivity(await step(mustFindProject(id).id, req.user?.id), req.user) });
   });
   r.post('/simulation/clock', async (req, res) => {
     demoOnly();

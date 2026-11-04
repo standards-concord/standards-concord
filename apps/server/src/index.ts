@@ -1,9 +1,11 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
+import { acquireProcessLock } from './processLock.js';
 import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
+acquireProcessLock(config.dataDir);
 openDb();
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
