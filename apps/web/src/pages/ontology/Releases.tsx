@@ -7,6 +7,7 @@ import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Loading, Textarea } from '../../components/ui';
+import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
 
@@ -119,36 +120,93 @@ export function ReleasesTab() {
           Once change requests are merged into the working draft, bundle them into a versioned release.
         </EmptyState>
       ) : (
-        <div className="space-y-3">
-          {[...list.data]
-            .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-            .map((r) => (
-              <Card key={r.id} className="p-5">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <Link to={`/o/${id}/releases/${r.id}`} className="flex items-center gap-2 hover:text-accent">
-                      <span className="font-mono text-lg font-semibold">v{r.version}</span>
-                      <LevelBadge level={r.level} />
-                      <ReleaseStatus r={r} />
-                    </Link>
-                    <p className="mt-0.5 text-xs text-muted">
-                      {r.publishedAt ? `Published ${formatDate(r.publishedAt)}` : `Drafted ${formatDate(r.createdAt)}`} · {r.changeRequestIds.length} change{r.changeRequestIds.length === 1 ? '' : 's'}
-                    </p>
-                  </div>
-                  {r.githubUrl && (
-                    <a href={r.githubUrl} target="_blank" rel="noreferrer">
-                      <Button size="sm">
-                        <GitHubIcon className="size-3.5" /> GitHub <ExternalLink className="size-3" />
-                      </Button>
-                    </a>
-                  )}
-                </div>
-                {r.notes && <Markdown text={r.notes} className="mt-3 line-clamp-4 text-muted" />}
-              </Card>
-            ))}
-        </div>
+        <ReleaseGroups releases={list.data} ontologyId={id} />
       )}
       <DraftReleaseDialog open={open} onClose={() => setOpen(false)} />
+    </div>
+  );
+}
+
+function ReleaseCard({ r, ontologyId, notes = 'preview' }: { r: Release; ontologyId: string; notes?: 'preview' | 'none' }) {
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Link to={`/o/${ontologyId}/releases/${r.id}`} className="flex items-center gap-2 hover:text-accent">
+            <span className="font-mono text-lg font-semibold">v{r.version}</span>
+            <LevelBadge level={r.level} />
+            <ReleaseStatus r={r} />
+          </Link>
+          <p className="mt-0.5 text-xs text-muted">
+            {r.publishedAt ? `Published ${formatDate(r.publishedAt)}` : `Drafted ${formatDate(r.createdAt)}`} · {r.changeRequestIds.length} change{r.changeRequestIds.length === 1 ? '' : 's'}
+          </p>
+        </div>
+        {r.githubUrl && (
+          <a href={r.githubUrl} target="_blank" rel="noreferrer">
+            <Button size="sm">
+              <GitHubIcon className="size-3.5" /> GitHub <ExternalLink className="size-3" />
+            </Button>
+          </a>
+        )}
+      </div>
+      {notes === 'preview' && r.notes && <Markdown text={r.notes} className="mt-3 line-clamp-4 text-muted" />}
+    </Card>
+  );
+}
+
+/** In progress first, then the latest published release, then older ones as compact rows. */
+function ReleaseGroups({ releases, ontologyId }: { releases: Release[]; ontologyId: string }) {
+  const sorted = [...releases].sort((a, b) => Date.parse(b.publishedAt ?? b.createdAt) - Date.parse(a.publishedAt ?? a.createdAt));
+  const inProgress = sorted.filter((r) => r.status === 'draft' || r.status === 'voting');
+  const published = sorted.filter((r) => r.status === 'published');
+  const rejected = sorted.filter((r) => r.status === 'rejected');
+  const [latest, ...older] = published;
+  const previous = [...older, ...rejected];
+  return (
+    <div className="space-y-6">
+      {inProgress.length > 0 && (
+        <section aria-label="In progress">
+          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">In progress</h3>
+          <div className="space-y-3">
+            {inProgress.map((r) => (
+              <ReleaseCard key={r.id} r={r} ontologyId={ontologyId} />
+            ))}
+          </div>
+        </section>
+      )}
+      {latest && (
+        <section aria-label="Latest published">
+          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Latest published</h3>
+          <ReleaseCard r={latest} ontologyId={ontologyId} />
+        </section>
+      )}
+      {previous.length > 0 && (
+        <Card className="px-5 py-4">
+          <Disclosure title="Previous releases" summary={`${previous.length}`}>
+            <ul className="divide-y divide-line">
+              {previous.map((r) => (
+                <li key={r.id} className="py-2.5">
+                  <Disclosure
+                    tone="muted"
+                    title={
+                      <span className="flex flex-wrap items-center gap-2 text-fg">
+                        <Link to={`/o/${ontologyId}/releases/${r.id}`} className="font-mono font-medium hover:text-accent" onClick={(e) => e.stopPropagation()}>
+                          v{r.version}
+                        </Link>
+                        <LevelBadge level={r.level} />
+                        <ReleaseStatus r={r} />
+                      </span>
+                    }
+                    summary={r.publishedAt ? formatDate(r.publishedAt) : formatDate(r.createdAt)}
+                  >
+                    {r.notes ? <Markdown text={r.notes} className="pl-5 text-sm text-muted" /> : <p className="pl-5 text-sm text-muted">No notes.</p>}
+                  </Disclosure>
+                </li>
+              ))}
+            </ul>
+          </Disclosure>
+        </Card>
+      )}
     </div>
   );
 }

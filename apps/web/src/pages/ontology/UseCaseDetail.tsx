@@ -25,6 +25,8 @@ export function UseCaseDetailPage() {
   if (!uc.data) return <Loading />;
   const u = uc.data;
   const author = userById(u.authorId);
+  const canContinue = u.source === 'chat' && u.status === 'eliciting';
+  const canMarkReady = u.status !== 'ready' && u.status !== 'synthesised';
 
   return (
     <div>
@@ -41,25 +43,26 @@ export function UseCaseDetailPage() {
           <p className="mt-1 mb-6 text-xs text-muted">
             {author?.name ?? 'Unknown author'} · started {formatDate(u.createdAt)} · updated {formatDate(u.updatedAt)}
           </p>
-          <UseCaseDocument uc={u} />
+          <UseCaseDocument uc={u} collapsible />
         </Card>
         <div className="space-y-4">
           <Card className="space-y-4 p-5">
             <CompletenessMeter value={u.completeness} />
             <div className="flex flex-col gap-2">
-              <Button variant="primary" icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()}>
-                Synthesise ontology changes
-              </Button>
-              {u.source === 'chat' && u.status === 'eliciting' && (
-                <Button icon={MessageSquareText} loading={start.pending} onClick={() => void start.run(u.id)}>
+              {/* The main action depends on where the use case is: finish it, mark it ready, then draft changes. */}
+              {canContinue && (
+                <Button variant="primary" icon={MessageSquareText} loading={start.pending} onClick={() => void start.run(u.id)}>
                   Continue the interview
                 </Button>
               )}
-              {u.status !== 'ready' && u.status !== 'synthesised' && (
-                <Button icon={CircleCheck} loading={setStatus.pending} onClick={() => void setStatus.run('ready')}>
+              {canMarkReady && (
+                <Button variant={canContinue ? 'secondary' : 'primary'} icon={CircleCheck} loading={setStatus.pending} onClick={() => void setStatus.run('ready')}>
                   Mark as ready
                 </Button>
               )}
+              <Button variant={canContinue || canMarkReady ? 'secondary' : 'primary'} icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()}>
+                Draft changes
+              </Button>
               {u.status !== 'archived' && (
                 <Button variant="ghost" icon={Archive} disabled={setStatus.pending} onClick={() => void setStatus.run('archived')}>
                   Archive

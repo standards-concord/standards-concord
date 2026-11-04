@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { UseCase, UseCaseSections } from '@concord/shared';
 import { USE_CASE_SECTION_LABELS } from '@concord/shared';
 import { CircleCheck, Circle } from 'lucide-react';
@@ -5,6 +6,7 @@ import { CqStatusChip } from './badges';
 import { Badge, ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { pct, titleCase } from '../lib/format';
+import { Disclosure } from './Disclosure';
 
 type Key = keyof UseCaseSections;
 
@@ -136,16 +138,19 @@ export function SectionValue({ k, s }: { k: Key; s: UseCaseSections }) {
   }
 }
 
-export function UseCaseDocument({ uc, live, highlight = [] }: { uc: UseCase; live?: boolean; highlight?: string[] }) {
+export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc: UseCase; live?: boolean; highlight?: string[]; /** Open the first group only; the rest show counts. */ collapsible?: boolean }) {
   const s = uc.sections ?? {};
+  const firstShown = SECTION_GROUPS.findIndex((g) => g.keys.some((k) => isFilled(s[k])));
   return (
     <div className="space-y-6">
-      {SECTION_GROUPS.map((g) => {
-        const keys = live ? g.keys : g.keys.filter((k) => isFilled(s[k]));
-        if (!keys.length) return null;
+      {SECTION_GROUPS.map((g, gi) => {
+        // While live, show what has been captured (and what is being asked about now) in full,
+        // and list the sections still to cover as one compact line instead of empty boxes.
+        const keys = g.keys.filter((k) => isFilled(s[k]) || (live && highlight.includes(k)));
+        const todo = live ? g.keys.filter((k) => !keys.includes(k)) : [];
+        if (!keys.length && !todo.length) return null;
         return (
-          <section key={g.title}>
-            <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">{g.title}</h3>
+          <GroupSection key={g.title} title={g.title} count={keys.length} collapsible={collapsible} defaultOpen={gi === firstShown}>
             <div className="space-y-3">
               {keys.map((k) => {
                 const filled = isFilled(s[k]);
@@ -155,24 +160,33 @@ export function UseCaseDocument({ uc, live, highlight = [] }: { uc: UseCase; liv
                       {live && (filled ? <CircleCheck className="size-3.5 text-ok" /> : <Circle className="size-3.5 text-line-strong" />)}
                       {USE_CASE_SECTION_LABELS[k]}
                     </div>
-                    {filled ? <SectionValue k={k} s={s} /> : <p className="text-xs text-subtle">Not covered yet</p>}
+                    {filled ? <SectionValue k={k} s={s} /> : <p className="text-xs text-subtle">{highlight.includes(k) ? 'The interviewer is asking about this now' : 'Not covered yet'}</p>}
                   </div>
                 );
               })}
             </div>
-          </section>
+            {todo.length > 0 && (
+              <p className={cx('text-xs text-subtle', keys.length > 0 && 'mt-2')}>
+                <span className="font-medium">Not covered yet:</span> {todo.map((k) => USE_CASE_SECTION_LABELS[k]).join(', ')}
+              </p>
+            )}
+          </GroupSection>
         );
       })}
-      <CompetencyQuestions uc={uc} highlight={highlight.includes('competencyQuestions')} />
-      <ElicitedTerms uc={uc} highlight={highlight.includes('terms')} />
+      <GroupSection title={`Competency questions (${uc.competencyQuestions.length})`} collapsible={collapsible} defaultOpen>
+        <CompetencyQuestions uc={uc} highlight={highlight.includes('competencyQuestions')} compact={collapsible} bare />
+      </GroupSection>
+      <GroupSection title={`Terms mentioned (${uc.terms.length})`} collapsible={collapsible}>
+        <ElicitedTerms uc={uc} highlight={highlight.includes('terms')} bare />
+      </GroupSection>
     </div>
   );
 }
 
-export function CompetencyQuestions({ uc, highlight }: { uc: UseCase; highlight?: boolean }) {
+export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseCase; highlight?: boolean; /** Question and status first; example, terms and test on request. */ compact?: boolean; bare?: boolean }) {
   return (
     <section>
-      <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Competency questions ({uc.competencyQuestions.length})</h3>
+      {!bare && <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Competency questions ({uc.competencyQuestions.length})</h3>}
       {uc.competencyQuestions.length ? (
         <ul className={cx('divide-y divide-line rounded-lg border border-line', highlight && 'border-accent')}>
           {uc.competencyQuestions.map((q) => (
@@ -181,21 +195,12 @@ export function CompetencyQuestions({ uc, highlight }: { uc: UseCase; highlight?
                 <p className="text-sm font-medium">{q.question}</p>
                 <CqStatusChip status={q.status} />
               </div>
-              {q.exampleAnswer && <p className="mt-1 text-xs text-muted">e.g. {q.exampleAnswer}</p>}
-              {q.terms?.length ? (
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  {q.terms.map((t) => (
-                    <Badge key={t} tone="outline">
-                      {t}
-                    </Badge>
-                  ))}
-                </div>
-              ) : null}
-              {q.sparql && (
-                <details className="mt-1.5">
-                  <summary className="cursor-pointer text-xs text-accent">SPARQL test</summary>
-                  <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
-                </details>
+              {compact ? (
+                <Disclosure className="mt-1" tone="muted" title={<span className="text-xs">Example answer, terms and test</span>}>
+                  <CqDetail q={q} />
+                </Disclosure>
+              ) : (
+                <CqDetail q={q} />
               )}
             </li>
           ))}
@@ -207,10 +212,10 @@ export function CompetencyQuestions({ uc, highlight }: { uc: UseCase; highlight?
   );
 }
 
-export function ElicitedTerms({ uc, highlight }: { uc: UseCase; highlight?: boolean }) {
+export function ElicitedTerms({ uc, highlight, bare }: { uc: UseCase; highlight?: boolean; bare?: boolean }) {
   return (
     <section>
-      <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Terms mentioned ({uc.terms.length})</h3>
+      {!bare && <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Terms mentioned ({uc.terms.length})</h3>}
       {uc.terms.length ? (
         <ul className={cx('grid gap-2 sm:grid-cols-2', highlight && 'rounded-lg ring-2 ring-accent/30')}>
           {uc.terms.map((t, i) => (
@@ -243,5 +248,50 @@ export function CompletenessMeter({ value }: { value: number }) {
       </div>
       <ProgressBar value={value} tone={value >= 0.7 ? 'ok' : 'accent'} />
     </div>
+  );
+}
+
+function CqDetail({ q }: { q: UseCase['competencyQuestions'][number] }) {
+  return (
+    <>
+      {q.exampleAnswer && <p className="mt-1 text-xs text-muted">e.g. {q.exampleAnswer}</p>}
+      {q.terms?.length ? (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {q.terms.map((t) => (
+            <Badge key={t} tone="outline">
+              {t}
+            </Badge>
+          ))}
+        </div>
+      ) : null}
+      {q.sparql && (
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-xs text-accent">SPARQL test</summary>
+          <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
+        </details>
+      )}
+    </>
+  );
+}
+
+/** A titled group of the use case document; collapsible on the read-only page. */
+function GroupSection({ title, count, collapsible, defaultOpen, children }: { title: string; count?: number; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
+  if (!collapsible)
+    return (
+      <section>
+        <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">{title}</h3>
+        {children}
+      </section>
+    );
+  return (
+    <section>
+      <Disclosure
+        title={<span className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</span>}
+        summary={count !== undefined ? `${count} ${count === 1 ? 'section' : 'sections'}` : undefined}
+        defaultOpen={defaultOpen}
+      >
+        {children}
+      </Disclosure>
+    </section>
   );
 }
