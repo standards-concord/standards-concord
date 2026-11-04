@@ -1,31 +1,39 @@
-# Narrated walkthrough video
+# Narrated walkthrough videos
 
-Records a narrated tour of Concord as an MP4, from an editable script: about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
+Records two narrated videos of Concord as MP4s, each from an editable script:
+
+- **The tour** ([narration.md](narration.md), `concord-walkthrough.*`): what Concord is for, how a standard grows into a release, and building an app on it with a coding agent.
+- **How to take part** ([feedback.md](feedback.md), `concord-feedback.*`): for alpha testers. The welcome page, the guided walkthrough, simulating the others, and how to give feedback. About three minutes.
+
+Both are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)).
+
+The tour is about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
-pnpm walkthrough                        # voice from the environment (see below)
+pnpm walkthrough                        # both videos, voice from the environment (see below)
+pnpm walkthrough --video feedback       # one video: tour or feedback
 pnpm walkthrough --voice elevenlabs     # asks for ELEVENLABS_API_KEY without echoing it, if unset
 pnpm walkthrough --draft                # no voice: captions only, for checking pacing and visuals
-pnpm walkthrough --only intro,goals     # some scenes only
+pnpm walkthrough --only intro,goals     # some scenes only (of the video that has them)
 pnpm walkthrough --strict               # fail on any warning: UI drift, a narrated outcome not shown, a page or request error
 pnpm walkthrough --publish              # a release video: strict, no stand-ins, no outside requests, a real voice
 ```
 
-It boots its own offline Concord (fresh demo data, simulated AI, no FAIR lookups on the internet, a clock fixed to start at 23 November 2026, seeded ids) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Output lands in `walkthrough/out/`:
+It boots its own offline Concord (fresh demo data, simulated AI, no FAIR lookups on the internet, a clock fixed to start at 23 November 2026, seeded ids) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Each video is recorded in its own run, one after the other. That Concord serves `walkthrough/out/` as its videos (`MEDIA_DIR`), so the feedback video's shot of the welcome page shows the tour just recorded. Output lands in `walkthrough/out/`, once per video (`concord-walkthrough` and `concord-feedback`):
 
 | File | What |
 | --- | --- |
-| `concord-walkthrough.mp4` | 1920×1080, 30 fps H.264, AAC narration, soft English captions, a chapter per scene |
-| `concord-walkthrough.vtt` | The captions, for YouTube or a web player |
-| `transcript.md` | The narration as text, one section per chapter, for accessibility and review |
-| `chapters.txt` | Chapter timestamps in YouTube's description format |
-| `report.json` | Voice, scenes recorded and skipped, platform features found, stand-ins used, blocked outside requests, caption timing source, warnings |
+| `<name>.mp4` | 1920×1080, 30 fps H.264, AAC narration, soft English captions, a chapter per scene |
+| `<name>.vtt` | The captions, for YouTube or a web player |
+| `<name>.transcript.md` | The narration as text, one section per chapter, for accessibility and review |
+| `<name>.chapters.txt` | Chapter timestamps in YouTube's description format |
+| `<name>.report.json` | Voice, scenes recorded and skipped, platform features found, stand-ins used, blocked outside requests, caption timing source, warnings |
 
 Needs Node 22.13+, pnpm, ffmpeg, and Playwright's Chromium (`pnpm exec playwright install chromium`). For the reasoner to show as passing, run `./toolkit/setup.sh` first (HermiT needs Java).
 
 ## Changing the script
 
-The words are in [narration.md](narration.md); what happens on screen is in [scenes.ts](scenes.ts).
+The words are in [narration.md](narration.md) and [feedback.md](feedback.md); what happens on screen is in [scenes.ts](scenes.ts).
 
 ```md
 ## Exploring a standard {#explore}
@@ -86,7 +94,9 @@ Video frames are counted against the clock, so a slow encoder never shifts the t
 
 ## Releases
 
-[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records the video when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches the MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request and nothing is uploaded.
+[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records both videos when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in either video and nothing is uploaded.
+
+- The welcome page (`/welcome`) plays the latest release's videos. The API server reads that release from GitHub (`MEDIA_REPO`, default `jeswr/standards-concord`), downloads each file once per release into its data directory, and serves it from `/api/media/`, so captions and seeking work from Concord's own origin. Set `MEDIA_DIR` to serve a local folder instead, such as `walkthrough/out/` after a recording. Until a release has the videos, the page says they're on their way.
 
 - Add `ELEVENLABS_API_KEY` as a repository secret for the narration. Without a voice key, release runs are skipped with a notice. Set the repository variable `ELEVENLABS_OUTPUT_FORMAT` to change the audio format.
 - The recording job has read-only access and doesn't keep the checkout's credentials; a separate job with write access only attaches the files.

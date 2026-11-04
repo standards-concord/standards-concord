@@ -1,7 +1,9 @@
 name: Walkthrough video
 
-# Records the narrated walkthrough (walkthrough/README.md) for every published release,
-# or on demand, and attaches it to the release.
+# Records the two narrated videos (walkthrough/README.md) for every published release, or
+# on demand, and attaches them to the release: the tour (concord-walkthrough.*) and how
+# alpha testers take part (concord-feedback.*). The /welcome page plays the latest
+# release's copies.
 #
 # Release videos use `--publish`: every scene must run cleanly, with no stand-ins, no
 # warnings and no requests to outside hosts, or nothing is attached. Set the
@@ -112,7 +114,7 @@ jobs:
         if: steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}
           restore-keys: walkthrough-voice-${{ steps.voice.outputs.voice }}-
       - name: Restore narration from the last release
         if: steps.voice.outputs.ready == 'true'
@@ -155,11 +157,11 @@ jobs:
         with:
           name: concord-walkthrough
           path: |
-            walkthrough/out/concord-walkthrough.mp4
-            walkthrough/out/concord-walkthrough.vtt
-            walkthrough/out/transcript.md
-            walkthrough/out/chapters.txt
-            walkthrough/out/report.json
+            walkthrough/out/concord-*.mp4
+            walkthrough/out/concord-*.vtt
+            walkthrough/out/concord-*.transcript.md
+            walkthrough/out/concord-*.chapters.txt
+            walkthrough/out/concord-*.report.json
             walkthrough/out/walkthrough-voice.tar.gz
           if-no-files-found: ignore
           retention-days: 90
@@ -182,6 +184,11 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "$TAG" --repo "$REPO" --clobber \
-            out/concord-walkthrough.mp4 out/concord-walkthrough.vtt out/transcript.md \
-            out/chapters.txt out/walkthrough-voice.tar.gz
+          files=()
+          for v in concord-walkthrough concord-feedback; do
+            for ext in mp4 vtt transcript.md chapters.txt; do
+              [ -f "out/$v.$ext" ] || { echo "::error::out/$v.$ext is missing"; exit 1; }
+              files+=("out/$v.$ext")
+            done
+          done
+          gh release upload "$TAG" --repo "$REPO" --clobber "${files[@]}" out/walkthrough-voice.tar.gz

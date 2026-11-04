@@ -330,7 +330,7 @@ export function WalkthroughDock() {
   const loc = useLocation();
   const nav = useNavigate();
   const demo = useDemoOntology();
-  if (loc.pathname.startsWith('/alpha') || loc.pathname.startsWith('/login')) return null;
+  if (loc.pathname.startsWith('/alpha') || loc.pathname.startsWith('/login') || loc.pathname.startsWith('/welcome')) return null;
   // On the explore step, the pill names the next suggested task and how many are done; otherwise the step.
   const tasks = STEPS[w.step]?.id === 'tour' && demo ? tasksFor(w.myRoles, demo.id) : [];
   const nextTask = tasks.find((t) => !w.done[t.id]);

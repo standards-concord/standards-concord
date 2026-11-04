@@ -175,11 +175,18 @@ export interface PublicationNeedingAdmin {
   createdAt: string;
 }
 
+export interface MediaIndex {
+  release: { tag: string; name?: string; publishedAt?: string; url: string } | null;
+  files: { name: string; size: number; url: string }[];
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
   demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
   logout: () => post<Record<string, never>>('/api/auth/logout'),
+  /** The walkthrough videos for the latest release (see /welcome). */
+  mediaIndex: () => get<MediaIndex>('/api/media/index.json'),
   personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
 

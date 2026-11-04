@@ -35,7 +35,7 @@ export interface Ctx {
   /** Rewrites local URLs in text to the hub URL shown on screen. */
   shown: (text: string) => string;
   /** Things the video must say on screen about how it was made. */
-  notices: { classesStandIn: boolean };
+  notices: { classesStandIn: boolean; publishing?: boolean };
   state: {
     token?: string;
     fork?: { id?: string; slug?: string; iri?: string; appUrl?: string; js?: string };
@@ -555,9 +555,173 @@ export const actions: Record<string, Action> = {
     await claimAppWorks(c, true);
   },
   async 'outro-card'(c) {
-    await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: 'Try it: standards-concord.vercel.app/alpha' }, 0);
+    await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: `Try it: ${startHere(c)}` }, 0);
+  },
+
+  /* ------------------------ alpha testers (feedback.md) ------------------------ */
+  async 'title-card-feedback'(c) {
+    await c.d.chapter({ eyebrow: 'Concord · Alpha testing', title: 'How to take part', sub: 'Try Concord in a role, then tell us what you think.' }, 0);
+    await sleep(900);
+    await c.d.goto(`${c.hub}/welcome`, { keepCard: true });
+  },
+  async 'open-welcome'(c) {
+    await show(c, `${c.hub}/welcome`);
+    await c.d.claimVisible(c.d.page.getByRole('heading', { level: 1, name: 'Help us test Concord' }), 'the welcome page is showing');
+  },
+  async 'point-welcome-aims'(c) {
+    const aims = c.d.page.locator('section[aria-labelledby="what-title"]');
+    await glideTo(c, aims);
+    await c.d.highlight(aims, 'what Concord is for');
+    await sleep(1800);
+    await c.d.clearHighlight();
+    // "…a short tour of the whole platform"
+    const tour = c.d.page.locator('#tour-title');
+    await glideTo(c, tour);
+    await c.d.claim((await c.d.page.locator('[data-testid="tour-video"]').count()) > 0 || !argvPublishing(c), 'the tour video is embedded on the welcome page');
+    await c.d.highlight(c.d.page.locator('article', { has: tour }), 'the tour video');
+  },
+  async 'point-how-it-works'(c) {
+    await c.d.clearHighlight();
+    const steps = c.d.page.locator('section[aria-labelledby="how-title"]');
+    await glideTo(c, steps);
+    await c.d.claim((await steps.locator('li').count()) === 4, 'the welcome page lists four steps');
+    await c.d.highlight(steps.locator('ol'), 'the four steps');
+  },
+  async 'point-start-walkthrough'(c) {
+    await c.d.clearHighlight();
+    const start = c.d.page.getByRole('link', { name: 'Start the guided walkthrough' }).last();
+    await glideTo(c, start);
+    await c.d.pointAt(start, 'the Start the guided walkthrough button');
+    await c.d.highlight(start, 'the start button');
+  },
+  async 'alpha-open'(c) {
+    await c.d.clearHighlight();
+    await c.d.click(c.d.page.getByRole('link', { name: 'Start the guided walkthrough' }).last(), 'the Start the guided walkthrough button');
+    await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Guided walkthrough' }), 'the guided walkthrough opens');
+    await sleep(1200);
+    await c.d.click(c.d.page.getByRole('button', { name: /Let’s start/ }), 'the Let’s start button');
+    await c.d.claimVisible(c.d.page.getByRole('heading', { name: /Pick your role/ }), 'the walkthrough moves on to picking a role');
+  },
+  async 'alpha-expand-role'(c) {
+    const roles = c.d.page.getByRole('region');
+    await c.d.highlight(c.d.page.getByRole('region', { name: 'Ontology steward' }).locator('..'), 'the roles');
+    await sleep(2600);
+    await c.d.clearHighlight();
+    const member = c.d.page.getByRole('region', { name: 'Voting member' });
+    await c.d.click(member.getByRole('button').first(), 'the Voting member role');
+    c.d.claim((await roles.count()) >= 4, 'several roles are offered');
+    await c.d.claimVisible(member.getByRole('button').nth(1), 'the voting member role lists people to play');
+  },
+  async 'alpha-pick-person'(c) {
+    const person = c.d.page.getByRole('region', { name: 'Voting member' }).getByRole('button').nth(1);
+    await c.d.highlight(person, 'a person to play');
+    await sleep(2200);
+    await c.d.clearHighlight();
+    await c.d.click(person, 'a voting member to play');
+    await c.d.claimVisible(c.d.page.getByRole('heading', { name: /Explore the demo/ }), 'picking a person moves on to the tasks');
+  },
+  async 'alpha-show-tasks'(c) {
+    const next = c.d.page.getByRole('group', { name: 'Suggested next task' });
+    await c.d.highlight(next, 'the suggested task');
+    await sleep(1200);
+    await c.d.pointAt(next.getByRole('button', { name: 'Go' }), 'the Go button');
+    await sleep(1400);
+    await c.d.click(next.getByRole('button', { name: /I’ve done this/ }), 'I’ve done this');
+    await c.d.claimVisible(c.d.page.getByText(/^1 of \d+ done$/), 'the task is ticked off');
+    await c.d.clearHighlight();
+  },
+  async 'alpha-keep-open'(c) {
+    await c.d.click(c.d.page.getByRole('button', { name: 'Keep the guide open while I explore' }), 'Keep the guide open while I explore');
+    const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
+    await c.d.claimVisible(dock, 'the guide stays open on the ontology page');
+    await sleep(800);
+    await c.d.highlight(dock, 'the guide');
+  },
+  async 'alpha-simulate'(c) {
+    await c.d.clearHighlight();
+    const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
+    await c.d.click(dock.getByRole('button', { name: 'Next: simulate the others' }), 'Next: simulate the others');
+    const stepped = c.d.page.waitForResponse((r) => /\/simulation\/step/.test(r.url()) && r.request().method() === 'POST', { timeout: 20_000 }).catch(() => undefined);
+    await c.d.click(dock.getByRole('button', { name: 'Simulate the others' }), 'Simulate the others');
+    const res = await stepped;
+    const body = res?.ok() ? await res.json().catch(() => undefined) : undefined;
+    // "…the other participants comment, review and vote."
+    c.d.claim(Array.isArray(body?.events) && body.events.length > 0, 'simulating the others makes them act');
+    await sleep(1200);
+  },
+  async 'alpha-fast-forward'(c) {
+    const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
+    const time = dock.getByText(/^Simulated time:/);
+    const before = await time.textContent().catch(() => '');
+    await c.d.click(dock.getByRole('button', { name: '+7 days' }), 'the +7 days button');
+    const moved = await c.d.page
+      .waitForFunction(([b]) => [...document.querySelectorAll('aside p')].some((p) => p.textContent?.startsWith('Simulated time:') && p.textContent !== b), [before], { timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    c.d.claim(moved, 'the simulated clock moves forward');
+    await c.d.highlight(time, 'the simulated time');
+  },
+  async 'open-feedback'(c) {
+    await c.d.clearHighlight();
+    const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
+    await c.d.click(dock.getByRole('button', { name: /I’m ready to give feedback/ }), 'I’m ready to give feedback');
+    await c.d.click(dock.getByRole('link', { name: 'Give feedback' }), 'the Give feedback button in the guide');
+    await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Tell us what you think' }), 'the feedback page opens');
+  },
+  async 'highlight-guided'(c) {
+    await c.d.highlight(c.d.page.getByRole('button', { name: /Guided feedback/ }), 'Guided feedback');
+  },
+  async 'start-general'(c) {
+    await c.d.highlight(c.d.page.getByRole('button', { name: /Just tell us something/ }), 'Just tell us something');
+    await sleep(1400);
+    await c.d.clearHighlight();
+    await c.d.click(c.d.page.getByRole('button', { name: /Just tell us something/ }), 'Just tell us something');
+    await c.d.claimVisible(c.d.page.getByPlaceholder('Type or tap the mic and talk…'), 'the feedback chat opens');
+  },
+  async 'type-feedback'(c) {
+    const box = c.d.page.getByPlaceholder('Type or tap the mic and talk…');
+    await c.d.type(box, 'I liked seeing the votes close on their own. It took me a while to find where to report a problem with a term.', 'the feedback box', 22);
+    const replied = c.d.page.waitForResponse((r) => r.url().endsWith('/api/feedback/chat') && r.request().method() === 'POST', { timeout: 30_000 }).catch(() => undefined);
+    await box.press('Enter');
+    const res = await replied;
+    const body = res?.ok() ? await res.json().catch(() => undefined) : undefined;
+    c.d.claim(typeof body?.reply === 'string' && body.reply.length > 0, 'the assistant replies to the feedback');
+    await c.d.settle();
+  },
+  async 'submit-feedback'(c) {
+    await c.d.click(c.d.page.getByRole('button', { name: /Submit what I’ve said so far|Submit feedback/ }).last(), 'the submit button');
+    await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Thank you!' }), 'the feedback is submitted');
+  },
+  async 'highlight-header-feedback'(c) {
+    await c.d.click(c.d.page.getByRole('button', { name: 'Back to the hub' }), 'Back to the hub');
+    const header = c.d.page.locator('header a[href="/feedback"]');
+    await c.d.claimVisible(header, 'Give feedback is in the header');
+    await c.d.pointAt(header, 'the Give feedback button in the header');
+    await c.d.highlight(header, 'Give feedback', 'On every page');
+  },
+  async 'outro-card-feedback'(c) {
+    await c.d.clearHighlight();
+    await c.d.chapter({ eyebrow: 'Concord · Alpha testing', title: 'Thank you', sub: `Start here: ${startHere(c)}` }, 0);
   },
 };
+
+/** The landing page to send people to, as shown on screen. */
+const startHere = (c: Ctx) => `${c.shownHub.replace(/^https?:\/\//, '').replace(/\/$/, '')}/welcome`;
+
+/** Whether this is a release recording, where the tour must already be on the welcome page. */
+const argvPublishing = (c: Ctx) => c.notices.publishing === true;
+
+/** Scrolls smoothly until the target is in the middle of the screen. */
+async function glideTo(c: Ctx, target: import('@playwright/test').Locator) {
+  const l = await c.d.find(target, 'a section of the page');
+  if (!l) return;
+  const dy = await l.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return r.top + Math.min(r.height, innerHeight * 0.7) / 2 - innerHeight / 2;
+  });
+  if (Math.abs(dy) > 8) await c.d.scroll(dy, Math.min(1600, 500 + Math.abs(dy)));
+  await sleep(250);
+}
 
 /**
  * Takes a change request through review, merge and release using the demo personas, so

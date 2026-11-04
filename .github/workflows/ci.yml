@@ -153,7 +153,7 @@ jobs:
         if: always()
         with:
           name: walkthrough-check
-          path: walkthrough/out/report.json
+          path: walkthrough/out/*.report.json
           retention-days: 7
 
   # Builds the backend image the server runs. The server pulls a new image every five
