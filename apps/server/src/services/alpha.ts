@@ -1,8 +1,8 @@
 import type { Request, Response } from 'express';
-import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
+import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type FeedbackSubmission, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
 import { config } from '../config.js';
-import { get, HttpError, put, remove } from '../db.js';
-import { createSession, destroySession, getUser, sessionUser } from './users.js';
+import { get, HttpError, put } from '../db.js';
+import { createSession, destroySession, destroyUserSessions, sessionUser } from './users.js';
 import { solid } from './solid.js';
 
 /**
@@ -46,71 +46,19 @@ export function rememberTester(req: Request, res: Response, before: User | undef
   res.cookie(TESTER_COOKIE, createSession(before.id), cookieOpts());
 }
 
-/**
- * Sign-in could not move a demo tester's record into the account they signed in
- * to: keep remembering the demo account as this browser's tester, so the record
- * stays reachable, until `resumeTransfer` moves it.
- */
-export function keepTesterForTransfer(req: Request, res: Response, demo: User) {
-  if (sessionUser(req.cookies?.[TESTER_COOKIE])?.id === demo.id) return;
-  clearTesterCookie(req, res);
-  res.cookie(TESTER_COOKIE, createSession(demo.id), cookieOpts());
-}
-
-/**
- * Records still to move into an account, kept on the server (not just in the
- * browser's cookie) so that signing out, or signing in on another device,
- * doesn't lose them. Only `federatedSignIn` adds one, after the browser proved
- * control of both the demo account and the provider identity.
- */
-interface PendingTransfers {
-  id: string;
-  from: string[];
-}
-const pendingKey = (toId: string) => `alpha-transfer:${toId}`;
-export function addPendingTransfer(fromId: string, toId: string) {
-  const doc = get<PendingTransfers>('kv', pendingKey(toId)) ?? { id: pendingKey(toId), from: [] };
-  if (!doc.from.includes(fromId)) doc.from.push(fromId);
-  put('kv', doc);
-}
-function donePendingTransfer(fromId: string, toId: string) {
-  const doc = get<PendingTransfers>('kv', pendingKey(toId));
-  if (!doc) return;
-  doc.from = doc.from.filter((f) => f !== fromId);
-  if (doc.from.length) put('kv', doc);
-  else remove('kv', doc.id);
-}
-export const pendingTransfers = (toId: string) => get<PendingTransfers>('kv', pendingKey(toId))?.from ?? [];
-
-/**
- * Move any testing records still waiting to come into the signed-in Google or
- * GitHub account (see `addPendingTransfer`). In the browser that signed in, the
- * demo account stays the tester until its record has moved.
- */
-export async function resumeTransfer(req: Request, res: Response) {
-  const user = req.user;
-  if (!user || user.simulated || !isLasting(user)) return;
-  for (const fromId of pendingTransfers(user.id)) {
-    const from = getUser(fromId);
-    try {
-      if (from) await mergeTesterRecords(from, user);
-    } catch (err) {
-      console.warn(`[alpha] testing record still could not move: ${(err as Error).message}`);
-      continue;
-    }
-    donePendingTransfer(fromId, user.id);
-    if (sessionUser(req.cookies?.[TESTER_COOKIE])?.id === fromId) {
-      clearTesterCookie(req, res);
-      delete req.cookies[TESTER_COOKIE];
-    }
-  }
-}
-
 export function testerInfo(u: User): AlphaTesterInfo {
   return { id: u.id, name: u.name, avatarUrl: u.avatarUrl, lasting: isLasting(u), providers: [...new Set(u.providers.map((p) => p.provider))], podUrl: u.podUrl };
 }
 
-/* ------------------------------------------------------------ pod record */
+/* --------------------------------------------------------- testing record */
+
+/*
+ * Each tester's history lives on this server (one document per tester, written
+ * synchronously, so it is never lost to a pod that is down) and is mirrored to
+ * their pod, so they keep their own copy. The mirror is rewritten from the
+ * server's history whenever it changes, and again on later visits until a write
+ * succeeds; it is never read back.
+ */
 
 const RECORD = 'alpha/testing.jsonld';
 
@@ -133,8 +81,22 @@ const CONTEXT = {
   roles: { '@id': 'concord:testedAsRole', '@container': '@set' },
 };
 
-const MAX_VERSIONS = 200;
-const MAX_FEEDBACK = 500;
+interface HistoryDoc {
+  id: string;
+  versions: TestedVersion[];
+  /** Bumped on every change, so a mirror write only marks the copy it wrote as current. */
+  rev: number;
+  /** The rev the pod copy has. */
+  mirroredRev: number;
+  /** Feedback documents still to copy into this tester's pod (after a record moved in). */
+  feedbackToCopy?: string[];
+  /** Set once this (demo) tester's record has moved into another account: it takes no more changes. */
+  movedTo?: string;
+}
+
+/** Limits on what a visit or a feedback submission can add. Merging records never drops anything. */
+export const MAX_VERSIONS = 200;
+export const MAX_FEEDBACK_PER_VERSION = 500;
 const str = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : undefined);
 const isoOr = (v: unknown, fallback: string) => {
   const s = str(v, 40);
@@ -142,14 +104,13 @@ const isoOr = (v: unknown, fallback: string) => {
 };
 
 /**
- * Read a pod record defensively: it is the tester's own document, so anything in
- * it may be malformed. Keeps only well-formed entries, one per version, with
- * bounded strings and arrays.
+ * Tidy a list of tested versions: only well-formed entries, one per version
+ * (duplicates are merged, never dropped), newest first.
  */
 export function normaliseVersions(raw: unknown): TestedVersion[] {
   if (!Array.isArray(raw)) return [];
   const byVersion = new Map<string, TestedVersion>();
-  for (const v of raw.slice(0, MAX_VERSIONS * 2)) {
+  for (const v of raw) {
     if (!v || typeof v !== 'object') continue;
     const e = v as Record<string, unknown>;
     const version = str(e.version, 20);
@@ -161,7 +122,7 @@ export function normaliseVersions(raw: unknown): TestedVersion[] {
       version: key,
       firstAt,
       lastAt: isoOr(e.lastAt, firstAt),
-      feedbackIds: Array.isArray(e.feedbackIds) ? [...new Set(e.feedbackIds.filter((f): f is string => typeof f === 'string' && /^[\w-]{1,64}$/.test(f)))].slice(0, MAX_FEEDBACK) : [],
+      feedbackIds: Array.isArray(e.feedbackIds) ? [...new Set(e.feedbackIds.filter((f): f is string => typeof f === 'string' && /^[\w-]{1,64}$/.test(f)))] : [],
     };
     const commit = str(e.commit, 40);
     if (commit && /^[0-9a-f]{7,40}$/i.test(commit)) entry.commit = commit;
@@ -172,7 +133,7 @@ export function normaliseVersions(raw: unknown): TestedVersion[] {
     const prev = byVersion.get(key);
     byVersion.set(key, prev ? mergeEntry(prev, entry) : entry);
   }
-  return [...byVersion.values()].sort((a, b) => compareVersions(b.version, a.version)).slice(0, MAX_VERSIONS);
+  return [...byVersion.values()].sort((a, b) => compareVersions(b.version, a.version));
 }
 
 function mergeEntry(a: TestedVersion, b: TestedVersion): TestedVersion {
@@ -182,76 +143,76 @@ function mergeEntry(a: TestedVersion, b: TestedVersion): TestedVersion {
     commit: a.commit ?? b.commit,
     firstAt: a.firstAt < b.firstAt ? a.firstAt : b.firstAt,
     lastAt: a.lastAt > b.lastAt ? a.lastAt : b.lastAt,
-    feedbackIds: [...new Set([...a.feedbackIds, ...b.feedbackIds])].slice(0, MAX_FEEDBACK),
+    feedbackIds: [...new Set([...a.feedbackIds, ...b.feedbackIds])],
     ...(roles.length ? { roles } : {}),
   };
 }
 
-/**
- * The tester's record. No record yet is an empty history; a pod that could not
- * be read throws (`readExisting`), so nothing is written over a record that is
- * only out of reach for now. A record that is not JSON at all is kept aside
- * (testing.unreadable-<time>.jsonld) before a fresh one replaces it.
- */
-async function readVersions(userId: string): Promise<TestedVersion[]> {
-  let copies: { pod?: string; local?: string };
-  try {
-    copies = await solid.readCopies(userId, RECORD);
-  } catch (err) {
-    throw new HttpError(503, `Your testing record could not be read just now, so nothing was changed. Please try again. (${(err as Error).message})`);
-  }
-  // A copy kept on this server (from before the pod was set up, or while it was unreachable) is merged in, never dropped.
-  const versions: TestedVersion[] = [];
-  for (const raw of [copies.pod, copies.local]) {
-    if (!raw) continue;
-    try {
-      versions.push(...normaliseVersions((JSON.parse(raw) as Partial<RecordDoc> | null)?.versions));
-    } catch {
-      await solid.write(userId, RECORD.replace('.jsonld', `.unreadable-${Date.now()}.jsonld`), raw, 'text/plain');
-    }
-  }
-  return normaliseVersions(versions);
+const historyKey = (userId: string) => `alpha-history:${userId}`;
+function history(userId: string): HistoryDoc {
+  const doc = get<HistoryDoc>('kv', historyKey(userId));
+  return doc ? { ...doc, versions: normaliseVersions(doc.versions) } : { id: historyKey(userId), versions: [], rev: 0, mirroredRev: 0 };
+}
+function saveHistory(doc: HistoryDoc) {
+  doc.rev += 1;
+  put('kv', doc);
 }
 
+const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.podUrl?.startsWith(config.solid.serverUrl) ? 'solid' : 'local');
+const podUrlOf = (u: User, rel: string) => (podKind(u) === 'solid' && u.podUrl ? `${u.podUrl}concord/${rel}` : `${config.publicUrl}/people/${u.id}/private/${rel}`);
+
 /**
- * Read-modify-write of one tester's record, one at a time per tester. Only this
- * server writes the record, and it runs as a single process, so a per-tester
- * queue is enough to stop two tabs (or a visit and a feedback submission)
- * overwriting each other.
+ * Bring the tester's pod copy up to date (one write at a time per tester, always
+ * from the latest history). Failures are logged and retried on a later change or
+ * visit; the history itself is already safe on this server.
  */
-const queues = new Map<string, Promise<unknown>>();
-function updateRecord<T>(userId: string, fn: (versions: TestedVersion[]) => Promise<T>): Promise<T> {
-  const prev = queues.get(userId) ?? Promise.resolve();
-  const run = prev.catch(() => undefined).then(async () => fn(await readVersions(userId)));
-  const tail = run.catch(() => undefined);
-  queues.set(userId, tail);
-  void tail.then(() => {
-    if (queues.get(userId) === tail) queues.delete(userId);
+const mirrors = new Map<string, Promise<void>>();
+export function mirrorToPod(user: User): Promise<void> {
+  const prev = mirrors.get(user.id) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    const h = history(user.id);
+    if (h.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
+    try {
+      const copied: string[] = [];
+      for (const id of h.feedbackToCopy ?? []) {
+        const fb = get<FeedbackSubmission>('feedback', id);
+        if (fb) await solid.writeExisting(user.id, `feedback/${id}.json`, JSON.stringify(fb, null, 2), 'application/json');
+        copied.push(id);
+      }
+      const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', versions: h.versions };
+      // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
+      await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json');
+      const now = history(user.id);
+      now.mirroredRev = Math.max(now.mirroredRev, h.rev);
+      now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
+      put('kv', now);
+    } catch (err) {
+      console.warn(`[alpha] pod copy of ${user.id}'s testing record is behind: ${(err as Error).message}`);
+    }
+  });
+  mirrors.set(user.id, run);
+  void run.then(() => {
+    if (mirrors.get(user.id) === run) mirrors.delete(user.id);
   });
   return run;
 }
 
-async function writeVersions(user: User, versions: TestedVersion[]) {
-  const doc: RecordDoc = {
-    '@context': CONTEXT,
-    '@id': '',
-    '@type': 'concord:AlphaTestingRecord',
-    versions: [...versions].sort((a, b) => compareVersions(b.version, a.version)),
+function meFor(user: User): AlphaMe {
+  const h = history(user.id);
+  return {
+    tester: testerInfo(user),
+    versions: h.versions,
+    storedIn: podKind(user),
+    recordUrl: podUrlOf(user, RECORD),
+    ...(h.mirroredRev < h.rev || h.feedbackToCopy?.length ? { podBehind: true } : {}),
   };
-  // Straight to the pod or not at all: a copy left only on this server would be missed by the next read of the pod.
-  return solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json');
 }
-
-const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.podUrl?.startsWith(config.solid.serverUrl) ? 'solid' : 'local');
 
 export async function alphaMe(req: Request): Promise<AlphaMe> {
   const t = testerFor(req);
   if (!t) return { versions: [] };
-  try {
-    return { tester: testerInfo(t), versions: await readVersions(t.id), storedIn: podKind(t) };
-  } catch {
-    return { tester: testerInfo(t), versions: [], storedIn: podKind(t), unreadable: true };
-  }
+  await mirrorToPod(t);
+  return meFor(t);
 }
 
 /**
@@ -272,45 +233,67 @@ const knownVersion = (v: unknown) => {
   return ok;
 };
 
-/** Record that the tester used `version` (and, optionally, sent feedback on it). */
+const movedError = () => new HttpError(409, 'This tester account’s record has moved into the account you signed in to. Sign in again to keep testing.');
+
+/** Record that the tester used `version` (and, optionally, sent feedback on it). Saved here first, then mirrored to their pod. */
 export async function recordVersion(tester: User, input: { version: unknown; commit?: unknown; role?: unknown; feedbackId?: string }): Promise<AlphaMe> {
   const version = knownVersion(input.version);
-  return updateRecord(tester.id, async (versions) => {
-    // Real time, not the demo's fast-forwardable governance clock.
-    const now = new Date().toISOString();
-    let entry = versions.find((v) => v.version === version);
-    if (!entry) {
-      entry = { version, firstAt: now, lastAt: now, feedbackIds: [] };
-      versions.push(entry);
-    }
-    entry.lastAt = now;
-    if (typeof input.commit === 'string' && /^[0-9a-f]{7,40}$/i.test(input.commit)) entry.commit = input.commit;
-    if (typeof input.role === 'string' && TESTER_ROLE_KEYS.includes(input.role as TesterRoleKey) && !entry.roles?.includes(input.role as TesterRoleKey))
-      entry.roles = [...(entry.roles ?? []), input.role as TesterRoleKey];
-    if (input.feedbackId && !entry.feedbackIds.includes(input.feedbackId)) entry.feedbackIds.push(input.feedbackId);
-    const kept = normaliseVersions(versions);
-    const saved = await writeVersions(tester, kept);
-    return { tester: testerInfo(tester), versions: kept, storedIn: saved.kind, recordUrl: saved.url };
-  });
+  const h = history(tester.id);
+  if (h.movedTo) throw movedError();
+  // Real time, not the demo's fast-forwardable governance clock.
+  const now = new Date().toISOString();
+  let entry = h.versions.find((v) => v.version === version);
+  if (!entry) {
+    if (h.versions.length >= MAX_VERSIONS) throw new HttpError(409, `This testing record already has ${MAX_VERSIONS} versions.`);
+    entry = { version, firstAt: now, lastAt: now, feedbackIds: [] };
+    h.versions.push(entry);
+  }
+  entry.lastAt = now;
+  if (typeof input.commit === 'string' && /^[0-9a-f]{7,40}$/i.test(input.commit)) entry.commit = input.commit;
+  if (typeof input.role === 'string' && TESTER_ROLE_KEYS.includes(input.role as TesterRoleKey) && !entry.roles?.includes(input.role as TesterRoleKey))
+    entry.roles = [...(entry.roles ?? []), input.role as TesterRoleKey];
+  if (input.feedbackId && !entry.feedbackIds.includes(input.feedbackId)) {
+    if (entry.feedbackIds.length >= MAX_FEEDBACK_PER_VERSION) throw new HttpError(409, `This testing record already has ${MAX_FEEDBACK_PER_VERSION} pieces of feedback for ${version}.`);
+    entry.feedbackIds.push(input.feedbackId);
+  }
+  h.versions = normaliseVersions(h.versions);
+  saveHistory(h);
+  await mirrorToPod(tester);
+  return meFor(tester);
+}
+
+/**
+ * Keep a copy of a piece of feedback in the tester's pod (mirrored like the
+ * record, so a pod that is down only delays it). Returns where it will be.
+ */
+export async function saveFeedbackCopy(tester: User, feedbackId: string): Promise<{ kind: 'solid' | 'local'; url: string } | undefined> {
+  const h = history(tester.id);
+  if (h.movedTo) return undefined;
+  h.feedbackToCopy = [...new Set([...(h.feedbackToCopy ?? []), feedbackId])];
+  saveHistory(h);
+  await mirrorToPod(tester);
+  return { kind: podKind(tester), url: podUrlOf(tester, `feedback/${feedbackId}.json`) };
 }
 
 /**
  * Move a demo tester's record into the account they have just signed in to
  * (they proved control of both: the demo account's cookie and the provider
- * identity). Copies their feedback documents too; the demo account keeps its own
- * copy. Throws if anything could not be read or written; it is safe to run
- * again, since versions and feedback are merged rather than replaced.
+ * identity). Everything is merged, nothing dropped, in one step on this server;
+ * their feedback documents are then copied into the account's pod with the
+ * record. The demo account's record is closed (it takes no more changes) and its
+ * sessions end, so no browser keeps adding to a record nobody will see again.
  */
 export async function mergeTesterRecords(from: User, into: User) {
-  const theirs = await updateRecord(from.id, async (v) => v);
-  if (!theirs.length) return;
-  await updateRecord(into.id, async (mine) => {
-    const merged = normaliseVersions([...mine, ...theirs]);
-    await writeVersions(into, merged);
-    return merged;
-  });
-  for (const id of new Set(theirs.flatMap((v) => v.feedbackIds))) {
-    const doc = await solid.readExisting(from.id, `feedback/${id}.json`);
-    if (doc && !(await solid.readExisting(into.id, `feedback/${id}.json`))) await solid.writeExisting(into.id, `feedback/${id}.json`, doc, 'application/json');
+  const theirs = history(from.id);
+  if (theirs.movedTo) return;
+  const mine = history(into.id);
+  if (theirs.versions.length) {
+    mine.versions = normaliseVersions([...mine.versions, ...theirs.versions]);
+    mine.feedbackToCopy = [...new Set([...(mine.feedbackToCopy ?? []), ...theirs.versions.flatMap((v) => v.feedbackIds)])];
+    saveHistory(mine);
   }
+  theirs.movedTo = into.id;
+  saveHistory(theirs);
+  destroyUserSessions(from.id);
+  await mirrorToPod(into);
 }

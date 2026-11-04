@@ -93,7 +93,6 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     if (!tester) return;
     const key = `${tester.id}:${APP_VERSION}:${roleKey ?? ''}`;
     if (recorded.current === key) return;
-    if (me_.unreadable) return; // Nothing is written over a record that couldn't be read.
     const entry = me_.versions.find((v) => v?.version === APP_VERSION);
     if (entry && (!roleKey || (Array.isArray(entry.roles) && entry.roles.includes(roleKey)))) {
       recorded.current = key;

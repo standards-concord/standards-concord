@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { HttpError } from './db.js';
 import type { AuthProvider } from '@concord/shared';
 import { createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
-import { addPendingTransfer, clearTesterCookie, keepTesterForTransfer, mergeTesterRecords, testerFor } from './services/alpha.js';
+import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -94,21 +94,9 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
   const tester = testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
   const user = await upsertFederatedUser(identity, demoTester);
-  let moved = true;
-  if (demoTester && demoTester.id !== user.id) {
-    moved = await mergeTesterRecords(demoTester, user).then(
-      () => true,
-      (err) => (console.warn(`[alpha] could not move testing record yet: ${(err as Error).message}`), false),
-    );
-  }
-  // Until the record has moved, this browser keeps the demo account as the tester
-  // (so nothing is lost), and the server remembers the move and tries it again on
-  // the account's next visit, even after signing out or from another device.
-  if (moved) clearTesterCookie(req, res);
-  else {
-    addPendingTransfer(demoTester!.id, user.id);
-    keepTesterForTransfer(req, res, demoTester!);
-  }
+  // An existing account takes over the demo account's testing record, in one step on this server.
+  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
+  clearTesterCookie(req, res);
   signInAs(req, res, user.id, identity.provider);
   return user;
 }

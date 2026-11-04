@@ -576,8 +576,8 @@ export interface AlphaMe {
   /** Where the record lives: their Solid pod, or this server's private store when no Solid server is configured. */
   storedIn?: 'solid' | 'local';
   recordUrl?: string;
-  /** The record exists but could not be read just now; `versions` is empty and nothing will be written over it. */
-  unreadable?: boolean;
+  /** The copy in their pod is behind (the pod couldn't be written to); it catches up on a later visit. The history here is complete. */
+  podBehind?: boolean;
 }
 
 /** The newest version a tester used before `current`, if any. */

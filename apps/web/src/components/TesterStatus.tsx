@@ -127,14 +127,9 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
   const where = t.me?.storedIn === 'solid' ? 'your Solid pod' : 'your private storage on this server';
 
   if (!session || (t.meLoading && !t.me)) return <p className="text-sm text-muted">Checking who’s testing…</p>;
-  const unreadable = t.me?.unreadable && (
-    <p role="status" className="text-warn">
-      Your testing record couldn’t be read just now. Nothing has been changed, and it will show again once your pod answers.
-    </p>
-  );
-  const moving = tester && !tester.lasting && session.user?.providers?.some((p) => p.provider === 'google' || p.provider === 'github') && (
+  const podBehind = t.me?.podBehind && t.me.storedIn === 'solid' && (
     <p role="status" className="text-muted">
-      We couldn’t move your testing record into the account you signed in to yet. It stays here, and we’ll try again next time.
+      Your pod couldn’t be reached just now, so its copy is a little behind. Nothing is lost: it catches up next time.
     </p>
   );
 
@@ -149,7 +144,7 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
             {session.user?.id !== tester.id && <span className="text-muted"> That stays true while you play someone else in the demo.</span>}
           </p>
         </div>
-        {unreadable}
+        {podBehind}
       </div>
     );
 
@@ -167,8 +162,8 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
             )}
           </p>
         </div>
-        {unreadable}
-        {moving || <OAuthButtons returnTo={returnTo} />}
+        {podBehind}
+        <OAuthButtons returnTo={returnTo} />
       </div>
     );
 

@@ -95,138 +95,92 @@ describe('a demo account that signs in with GitHub', () => {
       }
     }));
 
-  it('keeps its testing record reachable when the record can’t be moved yet, and moves it later', () =>
+  it('moves its testing record into an existing account in one step, and closes the demo record everywhere', () =>
     withGitHub(async () => {
       const existing = await upsertFederatedUser({ provider: 'github', subject: '7002', name: 'Existing account' });
       await recordVersion(existing, { version: '0.6.0' });
-      const agent = request.agent(app);
-      const joined = await agent.post('/api/auth/demo').send({ name: 'Tester with history' });
+      const device1 = request.agent(app);
+      const joined = await device1.post('/api/auth/demo').send({ name: 'Tester with history' });
       const demoId = joined.body.user.id as string;
-      await agent.post('/api/alpha/visit').send({ version: '0.7.0' });
+      const demoToken = cookie(joined, 'concord_session')!;
+      await device1.post('/api/alpha/visit').send({ version: '0.7.0' });
 
-      // Their pod is out of reach while they sign in.
-      const readCopies = solid.readCopies.bind(solid);
-      const spy = vi.spyOn(solid, 'readCopies').mockImplementation(async (userId, rel) => {
-        if (userId === demoId) throw new Error('pod unavailable');
-        return readCopies(userId, rel);
-      });
-      const done = await signInWithGitHub(agent, 7002);
-      expect(cookie(done, 'concord_tester')).toBeTruthy();
-      expect((await agent.get('/api/session')).body.user.id).toBe(existing.id);
-      // Nothing was lost: the demo account is still the tester, and its record is untouched.
-      const waiting = (await agent.get('/api/alpha/me')).body;
-      expect(waiting.tester.id).toBe(demoId);
-      expect(waiting.unreadable).toBe(true);
-      const { versions: existingVersions } = await recordVersion(existing, { version: '0.6.0' });
-      expect(existingVersions.map((v) => v.version)).toEqual(['0.6.0']);
-
-      // Once the pod is back, the next visit moves the record and the GitHub account becomes the tester.
-      spy.mockRestore();
-      const moved = (await agent.get('/api/alpha/me')).body;
-      expect(moved.tester.id).toBe(existing.id);
-      expect(moved.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0', '0.6.0']);
-      expect((await agent.get('/api/alpha/me')).body.tester.id).toBe(existing.id);
-    }));
-});
-
-describe('a testing record still waiting to move', () => {
-  it('is moved later even after signing out, or from another device', () =>
-    withGitHub(async () => {
-      const existing = await upsertFederatedUser({ provider: 'github', subject: '7003', name: 'Existing account' });
-      await recordVersion(existing, { version: '0.6.0' });
-      const agent = request.agent(app);
-      const demoId = (await agent.post('/api/auth/demo').send({ name: 'Signs out too soon' })).body.user.id as string;
-      await agent.post('/api/alpha/visit').send({ version: '0.7.0' });
-      const readCopies = solid.readCopies.bind(solid);
-      const spy = vi.spyOn(solid, 'readCopies').mockImplementation(async (userId, rel) => {
-        if (userId === demoId) throw new Error('pod unavailable');
-        return readCopies(userId, rel);
-      });
-      await signInWithGitHub(agent, 7003);
-      await agent.post('/api/auth/logout');
-      spy.mockRestore();
-      // Signing in again in a fresh browser picks the move up.
-      const elsewhere = request.agent(app);
-      await signInWithGitHub(elsewhere, 7003);
-      const me = (await elsewhere.get('/api/alpha/me')).body;
+      await signInWithGitHub(device1, 7002);
+      const me = (await device1.get('/api/alpha/me')).body;
       expect(me.tester.id).toBe(existing.id);
       expect(me.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0', '0.6.0']);
-    }));
 
-  it('stays waiting when the account it moves into can’t be written to', () =>
-    withGitHub(async () => {
-      const existing = await upsertFederatedUser({ provider: 'github', subject: '7004', name: 'Existing account' });
-      await recordVersion(existing, { version: '0.6.0' });
-      const agent = request.agent(app);
-      const demoId = (await agent.post('/api/auth/demo').send({ name: 'Pod refuses writes' })).body.user.id as string;
-      await agent.post('/api/alpha/visit').send({ version: '0.7.0' });
-      const writeExisting = solid.writeExisting.bind(solid);
-      const spy = vi.spyOn(solid, 'writeExisting').mockImplementation(async (userId, ...rest) => {
-        if (userId === existing.id) throw new Error('PUT → 500');
-        return writeExisting(userId, ...rest);
-      });
-      await signInWithGitHub(agent, 7004);
-      // Still the demo account's record in this browser, nothing lost.
-      const waiting = (await agent.get('/api/alpha/me')).body;
-      expect(waiting.tester.id).toBe(demoId);
-      expect(waiting.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0']);
-      spy.mockRestore();
-      const moved = (await agent.get('/api/alpha/me')).body;
-      expect(moved.tester.id).toBe(existing.id);
-      expect(moved.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0', '0.6.0']);
+      // Another browser still holding the demo account's session is signed out, and the old record takes no more changes.
+      const device2 = () => request(app).post('/api/alpha/visit').set('Cookie', `concord_session=${demoToken}`).send({ version: '0.8.0' });
+      expect((await device2()).status).toBe(401);
+      await expect(recordVersion((await import('../src/services/users.js')).getUser(demoId)!, { version: '0.8.0' })).rejects.toMatchObject({ status: 409 });
+      // Moving again (say, a retried sign-in) changes nothing.
+      expect((await device1.get('/api/alpha/me')).body.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0', '0.6.0']);
     }));
 });
 
-describe('a testing record that can’t be read', () => {
-  it('is never written over', async () => {
-    const u = await createUser({ name: 'Flaky pod', provider: 'demo', subject: 'flaky' });
-    await recordVersion(u, { version: '0.7.0' });
-    vi.spyOn(solid, 'readCopies').mockRejectedValueOnce(new Error('GET … → 500'));
-    await expect(recordVersion(u, { version: '0.8.0' })).rejects.toMatchObject({ status: 503 });
-    expect((await recordVersion(u, { version: '0.8.1' })).versions.map((v) => v.version)).toEqual(['0.8.1', '0.7.0']);
-  });
-
-  it('is never saved only to this server when the pod refuses the write', async () => {
-    const u = await createUser({ name: 'Refusing pod', provider: 'demo', subject: 'refusing' });
-    await recordVersion(u, { version: '0.7.0' });
-    vi.spyOn(solid, 'writeExisting').mockRejectedValueOnce(new Error('PUT … → 500'));
-    await expect(recordVersion(u, { version: '0.8.0' })).rejects.toThrow('PUT');
-    // The record only ever goes through the write that must reach the pod.
-    const strict = vi.spyOn(solid, 'writeExisting');
-    expect((await recordVersion(u, { version: '0.9.0' })).versions.map((v) => v.version)).toEqual(['0.9.0', '0.7.0']);
-    expect(strict).toHaveBeenCalledWith(u.id, 'alpha/testing.jsonld', expect.any(String), 'application/ld+json');
-  });
-
-  it('keeps versions saved on this server while the pod was out of reach', async () => {
-    const u = await createUser({ name: 'Two copies', provider: 'demo', subject: 'two-copies' });
-    const doc = (versions: string[]) => JSON.stringify({ versions: versions.map((version) => ({ version, firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds: [] })) });
-    vi.spyOn(solid, 'readCopies').mockResolvedValue({ pod: doc(['0.7.0']), local: doc(['0.8.0']) });
-    vi.spyOn(solid, 'writeExisting').mockResolvedValue({ kind: 'solid', url: 'https://pod.example/record' });
-    expect((await recordVersion(u, { version: '0.9.0' })).versions.map((v) => v.version)).toEqual(['0.9.0', '0.8.0', '0.7.0']);
-  });
-
-  it('is reported as unreadable rather than empty, and a visit is refused', async () => {
+describe('a testing record when the pod can’t be written to', () => {
+  it('keeps every visit and piece of feedback on this server, and the pod catches up later', async () => {
     const agent = request.agent(app);
-    const joined = await agent.post('/api/auth/demo').send({ name: 'Out of reach' });
+    const id = (await agent.post('/api/auth/demo').send({ name: 'Pod is down' })).body.user.id as string;
     await agent.post('/api/alpha/visit').send({ version: '0.7.0' });
-    const id = joined.body.user.id as string;
-    const readCopies = solid.readCopies.bind(solid);
-    vi.spyOn(solid, 'readCopies').mockImplementation(async (userId, rel) => {
-      if (userId === id) throw new Error('pod unavailable');
-      return readCopies(userId, rel);
+    const writeExisting = solid.writeExisting.bind(solid);
+    const down = vi.spyOn(solid, 'writeExisting').mockImplementation(async (userId, ...rest) => {
+      if (userId === id) throw new Error('PUT → 500');
+      return writeExisting(userId, ...rest);
     });
-    const me = (await agent.get('/api/alpha/me')).body;
-    expect(me).toMatchObject({ versions: [], unreadable: true });
-    expect((await agent.post('/api/alpha/visit').send({ version: '0.8.0' })).status).toBe(503);
-    vi.restoreAllMocks();
-    expect((await agent.get('/api/alpha/me')).body.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0']);
+    expect((await agent.post('/api/alpha/visit').send({ version: '0.8.0' })).status).toBe(200);
+    const fb = await agent.post('/api/feedback').send({ pathway: 'general', answers: { overall: 4 }, transcript: [], appVersion: '0.8.0' });
+    expect(fb.status).toBe(201);
+    const behind = (await agent.get('/api/alpha/me')).body;
+    expect(behind.podBehind).toBe(true);
+    expect(behind.versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0', '0.7.0']);
+    expect(behind.versions[0].feedbackIds).toEqual([fb.body.id]);
+
+    down.mockRestore();
+    const caughtUp = (await agent.get('/api/alpha/me')).body;
+    expect(caughtUp.podBehind).toBeUndefined();
+    const mirror = JSON.parse((await solid.read(id, 'alpha/testing.jsonld'))!);
+    expect(mirror.versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0', '0.7.0']);
+    expect(JSON.parse((await solid.read(id, `feedback/${fb.body.id}.json`))!).id).toBe(fb.body.id);
   });
 
-  it('keeps a record that isn’t JSON aside before starting a new one', async () => {
-    const u = await createUser({ name: 'Garbled pod', provider: 'demo', subject: 'garbled' });
-    await solid.write(u.id, 'alpha/testing.jsonld', 'not json');
-    const writes = vi.spyOn(solid, 'write');
-    expect((await recordVersion(u, { version: '0.8.0' })).versions.map((v) => v.version)).toEqual(['0.8.0']);
-    expect(writes.mock.calls[0]).toEqual([u.id, expect.stringMatching(/^alpha\/testing\.unreadable-\d+\.jsonld$/), 'not json', 'text/plain']);
+  it('still moves everything into the account a tester signs in to, feedback included', () =>
+    withGitHub(async () => {
+      const existing = await upsertFederatedUser({ provider: 'github', subject: '7004', name: 'Existing account' });
+      const agent = request.agent(app);
+      const demoId = (await agent.post('/api/auth/demo').send({ name: 'Pod refuses writes' })).body.user.id as string;
+      const writeExisting = solid.writeExisting.bind(solid);
+      const down = vi.spyOn(solid, 'writeExisting').mockImplementation(async (userId, ...rest) => {
+        if (userId === demoId || userId === existing.id) throw new Error('PUT → 500');
+        return writeExisting(userId, ...rest);
+      });
+      const fb = await agent.post('/api/feedback').send({ pathway: 'general', answers: { overall: 3 }, transcript: [], appVersion: '0.7.0' });
+      expect(fb.status).toBe(201);
+      await signInWithGitHub(agent, 7004);
+      const moved = (await agent.get('/api/alpha/me')).body;
+      expect(moved.tester.id).toBe(existing.id);
+      expect(moved.versions).toEqual([expect.objectContaining({ version: '0.7.0', feedbackIds: [fb.body.id] })]);
+      expect(moved.podBehind).toBe(true);
+      down.mockRestore();
+      expect((await agent.get('/api/alpha/me')).body.podBehind).toBeUndefined();
+      expect(JSON.parse((await solid.read(existing.id, `feedback/${fb.body.id}.json`))!).id).toBe(fb.body.id);
+    }));
+});
+
+describe('the limits on a testing record', () => {
+  it('never drop anything when two records merge, and refuse rather than drop when full', async () => {
+    const { MAX_VERSIONS, mergeTesterRecords } = await import('../src/services/alpha.js');
+    const a = await createUser({ name: 'Full record A', provider: 'demo', subject: 'full-a' });
+    const b = await upsertFederatedUser({ provider: 'github', subject: 'full-b', name: 'Full record B' });
+    for (let i = 0; i < MAX_VERSIONS; i++) {
+      await recordVersion(a, { version: `50.0.${i}` });
+      await recordVersion(b, { version: `60.0.${i}` });
+    }
+    await expect(recordVersion(b, { version: '70.0.0' })).rejects.toMatchObject({ status: 409 });
+    await mergeTesterRecords(a, b);
+    const merged = (await recordVersion(b, { version: '60.0.0' })).versions;
+    expect(merged).toHaveLength(MAX_VERSIONS * 2);
+    expect(merged.at(-1)?.version).toBe('50.0.0');
   });
 });

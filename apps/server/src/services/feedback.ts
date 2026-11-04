@@ -7,8 +7,7 @@ import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
-import { acceptVersion, recordVersion } from './alpha.js';
-import { solid } from './solid.js';
+import { acceptVersion, recordVersion, saveFeedbackCopy } from './alpha.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
   id,
@@ -229,8 +228,9 @@ export async function submitFeedback(user: User | undefined, input: Omit<Feedbac
   // Testers' own copy of what they said goes in their pod too, with the version they tested.
   let savedTo: { kind: 'solid' | 'local'; url: string } | undefined;
   if (tester) {
-    savedTo = await solid.write(tester.id, `feedback/${sub.id}.json`, JSON.stringify(sub, null, 2), 'application/json').catch(() => undefined);
-    if (appVersion) await recordVersion(tester, { version: appVersion, commit: input.appCommit, role: input.role, feedbackId: sub.id }).catch(() => undefined);
+    // Recorded on this server first (so it is never lost), then copied to their pod.
+    if (appVersion) await recordVersion(tester, { version: appVersion, commit: input.appCommit, role: input.role, feedbackId: sub.id }).catch((err) => console.warn(`[alpha] feedback ${sub.id} not added to the testing record: ${(err as Error).message}`));
+    savedTo = await saveFeedbackCopy(tester, sub.id);
   }
   return { ...sub, savedTo };
 }
