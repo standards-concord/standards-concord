@@ -1,6 +1,8 @@
 /**
  * Namespaces, well-known vocabularies and IRI helpers.
  */
+import { createRequire } from 'node:module';
+import { Parser } from 'n3';
 
 export const NS = {
   owl: 'http://www.w3.org/2002/07/owl#',
@@ -41,67 +43,45 @@ export const XSD: Record<string, string> = Object.fromEntries(
  */
 export const isSafePrefix = (p: string): boolean => /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
 
-/** Unicode noncharacters: U+FDD0 to U+FDEF, and the last two code points of every plane. */
-const isNoncharacter = (cp: number): boolean => (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
+const nodeRequire = createRequire(import.meta.url);
+let oxigraph: { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> } | undefined;
 
-/** Characters an IRI can't hold unescaped (RFC 3987), which is also what Turtle's IRIREF refuses. */
-const IRI_EXCLUDED = new Set([...'<>"{}|\\^`']);
+/** Characters that could break out of the IRI in the Turtle check itself, or that JSON-LD refuses (any Unicode space). */
+const PRE_FILTER = /[\s\u0000-\u001f\u007f-\u009f<>"{}|\\^`]/u;
+
+const verdicts = new Map<string, boolean>();
 
 /**
  * A namespace IRI safe to write as a Turtle prefix and a JSON-LD context
- * entry, and that our Turtle reader reads back: any scheme (URNs and raw
- * Unicode included) followed by
- * - no spaces (Unicode ones included, which JSON-LD refuses), controls,
- *   `<>"{}|\^` or backticks, surrogates or
- *   noncharacters, and every `%` followed by two hex digits (a percent-encoded
- *   noncharacter is refused too);
- * - at most one `#` (a fragment can't hold another);
- * - square brackets only around an IP-literal host, and in an authority at
- *   most one `@` and a numeric port.
- * Starting with a scheme, it can never be a JSON-LD keyword such as `@import`.
+ * entry. Rather than restate the IRI grammar, it asks the parsers that read
+ * our output: a one-triple Turtle document declaring the namespace as a
+ * prefix and using it must be read back, to the same IRIs, by both N3 and
+ * Oxigraph (which checks RFC 3987 strictly, hosts and code points included).
+ * A cheap filter first refuses spaces (Unicode ones too, which JSON-LD
+ * refuses), controls and the characters that end an IRI in Turtle. Starting
+ * with a scheme, it can never be a JSON-LD keyword such as `@import`.
+ * Verdicts are cached.
  */
 export function isSafeNamespace(iri: string): boolean {
-  const m = /^[A-Za-z][A-Za-z0-9+.-]*:(.+)$/s.exec(iri);
-  if (!m) return false;
-  const rest = m[1];
-  // JSON-LD refuses an IRI with any Unicode space (U+00A0, U+2003 and the like), though RFC 3987 allows some.
-  if (/\s/u.test(rest)) return false;
-  for (let i = 0; i < rest.length; i++) {
-    const ch = rest[i];
-    const cp = rest.codePointAt(i)!;
-    if (cp > 0xffff) i++;
-    else if (cp >= 0xd800 && cp <= 0xdfff) return false;
-    if (cp <= 0x20 || (cp >= 0x7f && cp <= 0x9f) || isNoncharacter(cp) || IRI_EXCLUDED.has(ch)) return false;
-    if (ch === '%' && !/^[0-9A-Fa-f]{2}$/.test(rest.slice(i + 1, i + 3))) return false;
+  const known = verdicts.get(iri);
+  if (known !== undefined) return known;
+  const ok = iri.length <= 4096 && /^[A-Za-z][A-Za-z0-9+.-]*:./s.test(iri) && !PRE_FILTER.test(iri) && parsersAgree(iri);
+  if (verdicts.size >= 10_000) verdicts.clear();
+  verdicts.set(iri, ok);
+  return ok;
+}
+
+function parsersAgree(iri: string): boolean {
+  const doc = `@prefix ns: <${iri}> .\nns:Thing <urn:concord:check> <${iri}> .\n`;
+  const same = (quads: Array<{ subject: { value: string }; object: { value: string } }>) =>
+    quads.length === 1 && quads[0].subject.value === iri + 'Thing' && quads[0].object.value === iri;
+  try {
+    if (!same(new Parser({ format: 'text/turtle' }).parse(doc))) return false;
+    oxigraph ??= nodeRequire('oxigraph');
+    return same(oxigraph!.parse(doc, { format: 'text/turtle' }));
+  } catch {
+    return false;
   }
-  if (rest.split('#').length > 2) return false;
-  let outside = rest;
-  if (rest.startsWith('//')) {
-    const end = rest.slice(2).search(/[/?#]/);
-    const authority = end < 0 ? rest.slice(2) : rest.slice(2, 2 + end);
-    outside = end < 0 ? '' : rest.slice(2 + end);
-    const at = authority.split('@');
-    if (at.length > 2) return false;
-    const hostPort = at[at.length - 1];
-    const lit = /^\[([0-9A-Fa-f:.]+|v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\](?::(\d*))?$/.exec(hostPort);
-    if (!lit) {
-      if (/[[\]]/.test(hostPort)) return false;
-      const colon = hostPort.lastIndexOf(':');
-      if (colon >= 0 && !/^\d*$/.test(hostPort.slice(colon + 1))) return false;
-    }
-    if (/[[\]]/.test(at.length > 1 ? at[0] : '')) return false;
-  }
-  if (/[[\]]/.test(outside)) return false;
-  // Percent-encoded text is checked once decoded; bytes that aren't UTF-8 text are left as they are.
-  if (rest.includes('%')) {
-    let decoded = '';
-    try { decoded = decodeURIComponent(rest); } catch { /* not UTF-8 text */ }
-    for (const c of decoded) {
-      const cp = c.codePointAt(0)!;
-      if (isNoncharacter(cp)) return false;
-    }
-  }
-  return true;
 }
 
 export const RDF_TYPE = NS.rdf + 'type';

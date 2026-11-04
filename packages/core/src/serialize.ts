@@ -64,6 +64,11 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
     // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
     if (p && isSafePrefix(p) && isSafeNamespace(ns) && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
   }
+  // A JSON-LD processor reads an IRI that starts with "p:" as a compact IRI using the term p: a prefix urn
+  // with the namespace urn:example:vol:, or e with the IRI e:/Thing, would loop or be refused. Such a term
+  // is left out, and the IRIs it would have shortened are written in full.
+  const clashes = (p: string) => Object.values(context).some((ns) => ns.startsWith(`${p}:`)) || [...used].some((u) => u.startsWith(`${p}:`));
+  for (const p of Object.keys(context)) if (clashes(p)) delete context[p];
   return JSON.stringify(sortKeys(await compactJsonLd(expanded, context)), null, 2) + '\n';
 }
 
