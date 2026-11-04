@@ -223,13 +223,13 @@ export function curve(points: { x: number; y: number }[]) {
 
 export async function downloadSvg(svg: SVGSVGElement | null, filename: string, bg: string) {
   if (!svg) return;
-  let clone = svg.cloneNode(true) as SVGSVGElement;
-  // SVG files name their fonts but don't carry them, so text is exported as outlines and looks
-  // the same in any viewer. If the outlines can't be made, each run of text is instead fixed to
-  // its on-screen length, which browsers honour.
+  // SVG files name their fonts but don't carry them, so text is exported as outlines (with the
+  // real text kept underneath) and looks the same in any viewer. If that can't be done, each
+  // run of text is instead fixed to its on-screen length, which browsers honour.
+  let clone: SVGSVGElement;
   try {
-    const { outlineText } = await import('../../lib/outlineText');
-    await outlineText(svg, clone);
+    const { exportableSvg } = await import('../../lib/outlineText');
+    clone = await exportableSvg(svg);
   } catch (err) {
     console.warn('Exporting text as outlines failed; exporting it as text', err);
     clone = svg.cloneNode(true) as SVGSVGElement;
@@ -242,8 +242,8 @@ export async function downloadSvg(svg: SVGSVGElement | null, filename: string, b
   }
   const vp = clone.querySelector('[data-viewport]');
   vp?.removeAttribute('transform');
-  const w = svg.dataset.width ?? '800';
-  const h = svg.dataset.height ?? '600';
+  const w = clone.dataset.width ?? '800';
+  const h = clone.dataset.height ?? '600';
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   clone.setAttribute('width', w);
   clone.setAttribute('height', h);

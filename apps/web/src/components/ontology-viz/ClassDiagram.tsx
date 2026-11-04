@@ -3,6 +3,7 @@ import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
+import { OUTLINE_SAFE_TEXT } from '../../lib/outlineText';
 import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
 import { curve, downloadSvg, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
@@ -379,7 +380,7 @@ export function ClassDiagram({
         <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${title.toLowerCase().replace(/\W+/g, '-')}.svg`, c.surface)}>
           {toolbar}
         </ZoomControls>
-        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
+        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" style={OUTLINE_SAFE_TEXT} data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
           <defs>
             <marker id={`${uid}-tri`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
               <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.muted} strokeWidth="1.3" />
