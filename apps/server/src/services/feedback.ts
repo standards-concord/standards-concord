@@ -7,7 +7,7 @@ import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
-import { recordVersion } from './alpha.js';
+import { acceptVersion, recordVersion } from './alpha.js';
 import { solid } from './solid.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
@@ -214,7 +214,7 @@ function heuristicFeedbackTurn(input: FeedbackChatInput, questions: FeedbackQues
  */
 export async function submitFeedback(user: User | undefined, input: Omit<FeedbackSubmission, 'id' | 'createdAt'>, tester: User | undefined = user && !user.simulated ? user : undefined) {
   if (!input.answers || typeof input.answers !== 'object') throw new HttpError(400, 'answers required');
-  const appVersion = input.appVersion && findRelease(input.appVersion) ? findRelease(input.appVersion)!.version : undefined;
+  const appVersion = acceptVersion(input.appVersion);
   const sub: FeedbackSubmission = {
     ...input,
     appVersion,

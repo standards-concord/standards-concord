@@ -93,7 +93,7 @@ describe('feedback about what changed', () => {
     const expected = changesFor(changesSince('0.6.0'), 'agent').filter((c) => c.type !== 'fix' || c.ask);
     expect(newIds).toEqual(expected.slice(0, 6).map((c) => `new:${c.id}`));
     // The agent's own changes come first, newest first.
-    expect(newIds.slice(0, 2)).toEqual(['new:agent-pages', 'new:mcp-oauth']);
+    expect(newIds.slice(0, 3)).toEqual(['new:chatgpt', 'new:agent-pages', 'new:mcp-oauth']);
     expect(qs.map((q) => q.id)).toEqual(expect.arrayContaining(['new:other', 'overall', 'missing', 'comments']));
     // Nothing from the full questionnaire about the whole app (e.g. governance) is asked again.
     expect(qs.some((q) => q.id.startsWith('gov_'))).toBe(false);
@@ -108,10 +108,10 @@ describe('feedback about what changed', () => {
   it('serves the change questions and walks through them in the chat', async () => {
     const q = await request(app).get('/api/feedback/questions').query({ pathway: 'changes', since: '0.7.0', role: 'agent' });
     expect(q.status).toBe(200);
-    expect(q.body[0].id).toBe('new:agent-pages');
+    expect(q.body.slice(0, 2).map((x: { id: string }) => x.id)).toEqual(['new:chatgpt', 'new:agent-pages']);
     const chat = await request(app).post('/api/feedback/chat').send({ pathway: 'changes', since: '0.7.0', role: 'agent', messages: [], answers: {} });
     expect(chat.status).toBe(200);
-    expect(chat.body.nextQuestionId).toBe('new:agent-pages');
+    expect(chat.body.nextQuestionId).toBe('new:chatgpt');
     expect(chat.body.reply).toMatch(/What’s new since 0\.7\.0/);
   });
 });
@@ -129,11 +129,14 @@ describe('alpha tester records', () => {
     const me = await agent.post('/api/auth/demo').send({ name: 'Returning tester', role: 'member' });
     const testerId = me.body.user.id;
     expect((await agent.post('/api/alpha/visit').send({ version: 'nope' })).status).toBe(400);
+    expect((await agent.post('/api/alpha/visit').send({ version: '0.0.1' })).status).toBe(400);
+    // A web build a little ahead of this server is fine.
+    expect((await agent.post('/api/alpha/visit').send({ version: '99.0.0' })).status).toBe(200);
     const v1 = await agent.post('/api/alpha/visit').send({ version: '0.7.0', commit: 'abc1234', role: 'member' });
     expect(v1.status).toBe(200);
     expect(v1.body.tester).toMatchObject({ id: testerId, name: 'Returning tester', lasting: false });
     expect(v1.body.storedIn).toBe('local');
-    expect(v1.body.versions).toEqual([expect.objectContaining({ version: '0.7.0', commit: 'abc1234', roles: ['member'], feedbackIds: [] })]);
+    expect(v1.body.versions).toContainEqual(expect.objectContaining({ version: '0.7.0', commit: 'abc1234', roles: ['member'], feedbackIds: [] }));
 
     // Become a persona: the session is theirs now, but the tester is still the same person.
     const personas = (await agent.get('/api/personas')).body as { id: string; name: string }[];
@@ -142,7 +145,7 @@ describe('alpha tester records', () => {
     expect(s.body.user.id).toBe(persona.id);
     const after = await agent.get('/api/alpha/me');
     expect(after.body.tester.id).toBe(testerId);
-    expect(after.body.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0']);
+    expect(after.body.versions.map((v: { version: string }) => v.version)).toEqual(['99.0.0', '0.7.0']);
 
     // Feedback given as the persona is recorded against the tester's version, in the tester's pod.
     const fb = await agent.post('/api/feedback').send({ pathway: 'changes', answers: { overall: 4 }, transcript: [], appVersion: APP_VERSION, sinceVersion: '0.7.0', role: 'member' });

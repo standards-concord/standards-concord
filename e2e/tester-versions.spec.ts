@@ -93,6 +93,9 @@ test('a returning tester’s versions and feedback are saved to their pod and st
   // Feedback on what changed goes to the tester's pod with the version they tested.
   await page.goto('/feedback');
   await page.getByRole('button', { name: /What’s changed since 0\.7\.0/ }).click();
+  // Agents' changes first, newest first.
+  await expect(page.getByText(/If you use ChatGPT, could you connect it/).first()).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: 'Skip', exact: true }).click();
   await expect(page.getByText(/Is it clear where to connect an agent/).first()).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: '4', exact: true }).click();
   await expect(page.getByText(/How useful is seeing what’s changed since your last visit/).first()).toBeVisible({ timeout: 20_000 });

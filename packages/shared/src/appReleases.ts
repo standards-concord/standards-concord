@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.9.0',
+    version: '0.11.0',
     date: '2026-11-04',
     title: 'Returning testers see what changed',
     changes: [
@@ -65,6 +65,84 @@ export const APP_RELEASES: AppRelease[] = [
           'The alpha pages show which version you’re testing. Sign in and Concord saves the version and your feedback to your own pod; next time it shows what changed, points your role at the new parts and asks about those rather than everything.',
         roles: [],
         ask: 'How useful is seeing what’s changed since your last visit, rather than starting over?',
+      },
+    ],
+  },
+  {
+    version: '0.10.0',
+    date: '2026-11-04',
+    title: 'Clearer change requests and governance',
+    pr: 22,
+    changes: [
+      {
+        id: 'cr-decision',
+        type: 'feat',
+        title: 'Change requests lead with the decision',
+        detail:
+          'Each change request has Changes, Checks and Discussion views and one Decision card with the next step, what’s blocking it and what you can do. The patch, minor or major level explains itself.',
+        roles: ['steward', 'member', 'odi', 'contributor'],
+        to: '{o}/changes',
+        tasks: ['review', 'vote'],
+        ask: 'Could you tell what a change request needed next, and what you could do about it?',
+      },
+      {
+        id: 'governance-edit',
+        type: 'feat',
+        title: 'Governance policies are easier to read and edit',
+        detail: 'Summaries follow the rules that actually apply. Editing is a separate mode with a preview, Save and Discard, and you can compare every level side by side.',
+        roles: ['steward', 'odi'],
+        to: '{o}/governance',
+        tasks: ['governance'],
+        ask: 'Did the governance summary match how you expected decisions to be made?',
+      },
+      {
+        id: 'interview-first',
+        type: 'feat',
+        title: 'Interviews put the conversation first',
+        detail: 'The use case interview shows the chat with a progress strip; the document view and side-by-side are there when you want them.',
+        roles: ['contributor'],
+        to: '{o}/use-cases',
+        tasks: ['interview'],
+      },
+      {
+        id: 'checks-incomplete',
+        type: 'fix',
+        title: '“Checks incomplete” instead of “Healthy” when the reasoner didn’t run',
+        detail: 'An ontology is no longer shown as healthy when a required check could not run.',
+        roles: [],
+      },
+    ],
+  },
+  {
+    version: '0.9.1',
+    date: '2026-11-04',
+    title: 'More private details behind sign-in',
+    pr: 31,
+    changes: [
+      {
+        id: 'private-reads-2',
+        type: 'fix',
+        title: 'Validation, the simulation and member details need sign-in',
+        detail: 'Validation reports, the simulation and owner and count details are no longer readable without signing in.',
+        roles: [],
+      },
+    ],
+  },
+  {
+    version: '0.9.0',
+    date: '2026-11-04',
+    title: 'Connect ChatGPT',
+    pr: 30,
+    changes: [
+      {
+        id: 'chatgpt',
+        type: 'feat',
+        title: 'Connect ChatGPT as well as Claude and Codex',
+        detail: 'The Connect page shows how to add Concord to ChatGPT as a custom connector, with the same OAuth sign-in.',
+        roles: ['agent'],
+        to: '/connect',
+        tasks: ['agent'],
+        ask: 'If you use ChatGPT, could you connect it to Concord?',
       },
     ],
   },
@@ -118,7 +196,7 @@ export const APP_RELEASES: AppRelease[] = [
         id: 'mcp-oauth',
         type: 'feat',
         title: 'Connect a coding agent in one click',
-        detail: 'The MCP connector signs you in with OAuth, so there are no tokens to copy. The Connect page has install links for Claude, Claude Code, Codex and ChatGPT.',
+        detail: 'The MCP connector signs you in with OAuth, so there are no tokens to copy. The Connect page has install links for Claude, Claude Code and Codex.',
         roles: ['agent'],
         to: '/connect',
         tasks: ['agent'],

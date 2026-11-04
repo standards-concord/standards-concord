@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { APP_RELEASES, compareVersions, findRelease, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
+import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
 import { config } from '../config.js';
 import { HttpError } from '../db.js';
 import { createSession, destroySession, sessionUser } from './users.js';
@@ -102,9 +102,22 @@ export async function alphaMe(req: Request): Promise<AlphaMe> {
   return { tester: testerInfo(t), versions: await readVersions(t.id), storedIn: podKind(t) };
 }
 
+/**
+ * A version this server knows, or a well-formed newer one: the web app (on
+ * Vercel) can be deployed a little before this server, so it may be ahead.
+ */
+export function acceptVersion(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const known = findRelease(v);
+  if (known) return known.version;
+  const p = parseVersion(v);
+  return p && compareVersions(v, APP_VERSION) > 0 ? p.join('.') : undefined;
+}
+
 const knownVersion = (v: unknown) => {
-  if (typeof v !== 'string' || !findRelease(v)) throw new HttpError(400, `Unknown app version. Known versions: ${APP_RELEASES.map((r) => r.version).join(', ')}`);
-  return findRelease(v)!.version;
+  const ok = acceptVersion(v);
+  if (!ok) throw new HttpError(400, `Unknown app version. Known versions: ${APP_RELEASES.map((r) => r.version).join(', ')}`);
+  return ok;
 };
 
 /** Record that the tester used `version` (and, optionally, sent feedback on it). */
