@@ -130,7 +130,7 @@ test.describe('Query tab', () => {
     await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a ?y } LIMIT 1');
     const url = page.url();
-    await page.getByRole('link', { name: 'Formats', exact: true }).click();
+    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
     await page.goto(url);
     await expect(page.getByTestId('sparql-editor')).toContainText('SELECT ?x WHERE { ?x a ?y } LIMIT 1');
     await toggle(page, 'Visual builder').click();

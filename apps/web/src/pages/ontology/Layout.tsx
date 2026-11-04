@@ -33,7 +33,7 @@ export function useOntology() {
  */
 export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
-  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query']] },
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate']] },
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agents']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
   { label: 'Governance', tabs: [['governance', 'Governance']] },
