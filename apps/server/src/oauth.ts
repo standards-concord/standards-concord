@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { get, HttpError, list, put, remove } from './db.js';
+import { claim, get, HttpError, list, put, remove, take, transaction } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -125,17 +125,29 @@ export function fromTrustedProxy(req: Request): boolean {
  * and for the audience of tokens:
  *  - from the authenticated Vercel middleware, the site's own origin (so a new
  *    Vercel domain works without backend changes);
- *  - otherwise the request's host, if it is one of trustedOrigins();
- *  - otherwise PUBLIC_URL, the canonical address.
+ *  - otherwise the origin in trustedOrigins() whose host is the request's own
+ *    Host header. X-Forwarded-Host and X-Forwarded-Proto are never consulted,
+ *    and the scheme comes from configuration, not the request;
+ *  - otherwise, when CONCORD_PROXY_SECRET is set, nothing: every legitimate
+ *    request then names its origin, so the caller refuses the request (421);
+ *  - otherwise PUBLIC_URL. Without the secret, Vercel's forwarded requests
+ *    arrive with the backend's own host name, so any unlisted host is defined
+ *    as an alias of the canonical resource rather than a resource of its own.
  * Unauthenticated X-Concord-Origin headers are ignored.
  */
-export function publicOrigin(req: Request): string {
+export function publicOrigin(req: Request): string | undefined {
   const hinted = req.header('x-concord-origin');
   if (hinted && ORIGIN_RE.test(hinted.trim()) && fromTrustedProxy(req)) return norm(hinted);
-  const host = req.host;
-  const direct = host && /^[a-z0-9.-]+(:\d+)?$/i.test(host) ? norm(`${req.protocol}://${host}`) : undefined;
-  if (direct && trustedOrigins().includes(direct)) return direct;
+  const host = req.headers.host?.trim().toLowerCase();
+  const direct = host ? trustedOrigins().find((o) => new URL(o).host === host) : undefined;
+  if (direct) return direct;
+  if (process.env.CONCORD_PROXY_SECRET) return undefined;
   return norm(config.publicUrl);
+}
+
+/** The answer for a request whose origin publicOrigin() refuses. */
+export function refuseUnknownOrigin(res: Response) {
+  res.status(421).json({ error: 'misdirected_request', error_description: 'This address does not serve Concord. Use the address on the Connect page.' });
 }
 
 export const mcpUrlFor = (origin: string) => `${origin}/mcp`;
@@ -267,7 +279,11 @@ function issueTokens(grant: GrantDoc): OAuthTokens {
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, refresh_token: refresh, scope: grant.scopes.join(' ') || undefined };
 }
 
+/** Revoke a connection and every token in its family, all at once. Not for use inside another transaction. */
 function revokeGrant(grantId: string) {
+  transaction(() => revokeGrantNow(grantId));
+}
+function revokeGrantNow(grantId: string) {
   for (const t of list<TokenDoc>('oauthTokens', grantId)) remove('oauthTokens', t.id);
   remove('oauthGrants', grantId);
 }
@@ -285,6 +301,7 @@ export const provider: OAuthServerProvider = {
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response) {
     const origin = publicOrigin(res.req);
+    if (!origin) throw new InvalidRequestError('This address does not serve Concord');
     const resource = mcpUrlFor(origin);
     // Clients that don't send a resource indicator get tokens for this server's MCP URL anyway: tokens are never audience-free.
     if (params.resource && !sameResource(resource, params.resource)) throw new InvalidTargetError(`This server only issues tokens for ${resource}`);
@@ -313,9 +330,8 @@ export const provider: OAuthServerProvider = {
   },
 
   async exchangeAuthorizationCode(client, code, _verifier, redirectUri, resource) {
-    const c = get<CodeDoc>('oauthCodes', sha(code));
-    // Codes are single use, whatever happens next.
-    if (c) remove('oauthCodes', c.id);
+    // Codes are single use, whatever happens next: taking it deletes it, and only one caller can take it.
+    const c = take<CodeDoc>('oauthCodes', sha(code));
     if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired authorization code');
     if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError('redirect_uri does not match the authorization request');
     if (resource && !sameResource(c.resource, resource)) throw new InvalidTargetError('resource does not match the authorization request');
@@ -329,30 +345,38 @@ export const provider: OAuthServerProvider = {
       resource: c.resource,
       createdAt: new Date().toISOString(),
     };
-    put('oauthGrants', grant, c.userId);
-    return issueTokens(grant);
+    return transaction(() => {
+      put('oauthGrants', grant, c.userId);
+      return issueTokens(grant);
+    });
   },
 
   async exchangeRefreshToken(client, refreshToken, _scopes, resource) {
-    // No awaits between reading and writing: Node runs this as one step, so two
-    // concurrent refreshes with the same token can't both succeed.
-    const t = get<TokenDoc>('oauthTokens', sha(refreshToken));
-    const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
-    if (!t || t.kind !== 'refresh' || !grant || grant.clientId !== client.client_id) throw new InvalidGrantError('Invalid or expired refresh token');
-    if (t.consumedAt) {
-      // A rotated refresh token came back: someone has a copy. Revoke the whole grant (RFC 9700 §4.14.2).
-      revokeGrant(grant.id);
-      throw new InvalidGrantError('This refresh token was already used. The connection has been revoked; sign in again.');
-    }
-    if (t.expiresAt < now()) throw new InvalidGrantError('Invalid or expired refresh token');
-    if (!grant.resource) {
-      revokeGrant(grant.id);
-      throw new InvalidGrantError('This connection predates audience-bound tokens; sign in again.');
-    }
-    if (resource && !sameResource(grant.resource, resource)) throw new InvalidTargetError('resource does not match the original grant');
-    // Rotate, keeping the old token's hash so a replay is recognised.
-    put<TokenDoc>('oauthTokens', { ...t, consumedAt: now() }, grant.id);
-    return issueTokens(grant);
+    // One transaction (write lock taken before reading) covers checking, consuming, rotating and
+    // revoking. Consuming is also a single conditional UPDATE, so of two refreshes racing with the
+    // same token exactly one wins; the other is treated as a replay.
+    const outcome = transaction((): { tokens: OAuthTokens } | { error: Error } => {
+      const t = get<TokenDoc>('oauthTokens', sha(refreshToken));
+      const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
+      if (!t || t.kind !== 'refresh' || !grant || grant.clientId !== client.client_id) return { error: new InvalidGrantError('Invalid or expired refresh token') };
+      const replay = () => {
+        // A rotated refresh token came back: someone has a copy. Revoke the whole family (RFC 9700 §4.14.2).
+        revokeGrantNow(grant.id);
+        return { error: new InvalidGrantError('This refresh token was already used. The connection has been revoked; sign in again.') };
+      };
+      if (t.consumedAt) return replay();
+      if (t.expiresAt < now()) return { error: new InvalidGrantError('Invalid or expired refresh token') };
+      if (!grant.resource) {
+        revokeGrantNow(grant.id);
+        return { error: new InvalidGrantError('This connection predates audience-bound tokens; sign in again.') };
+      }
+      if (resource && !sameResource(grant.resource, resource)) return { error: new InvalidTargetError('resource does not match the original grant') };
+      // Rotate, keeping the old token's hash (marked consumed) so a replay is recognised.
+      if (!claim<TokenDoc>('oauthTokens', t.id, 'consumedAt', now())) return replay();
+      return { tokens: issueTokens(grant) };
+    });
+    if ('error' in outcome) throw outcome.error;
+    return outcome.tokens;
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -460,7 +484,8 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
   try {
     const info = await provider.verifyAccessToken(token);
     // OAuth tokens are only good for the MCP URL they were issued for. Personal tokens are not audience-bound.
-    if (info.clientId !== 'personal-token' && (!info.resource || !sameResource(mcpUrlFor(publicOrigin(req)), info.resource))) return { error: 'invalid' };
+    const origin = publicOrigin(req);
+    if (info.clientId !== 'personal-token' && (!origin || !info.resource || !sameResource(mcpUrlFor(origin), info.resource))) return { error: 'invalid' };
     const user = getUser(String(info.extra?.userId));
     if (!user) return { error: 'invalid' };
     const grantId = info.extra?.grantId as string | undefined;
@@ -553,6 +578,7 @@ const OAUTH_PATHS = /^\/(\.well-known\/(oauth-authorization-server|oauth-protect
 export function oauthRoutes(req: Request, res: Response, next: NextFunction) {
   if (!OAUTH_PATHS.test(req.path)) return next();
   const origin = publicOrigin(req);
+  if (!origin) return refuseUnknownOrigin(res);
   const limit = limits.find(([re]) => re.test(req.path))?.[1];
   try {
     if (limit) return void limit(req, res, () => routerFor(origin)(req, res, next));

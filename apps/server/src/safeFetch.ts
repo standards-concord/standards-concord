@@ -8,12 +8,15 @@ import type { Readable } from 'node:stream';
  * Documents), without letting them reach Concord's private network or tie up
  * the server:
  *
- *  - The address is checked inside the socket's own DNS lookup, so the
- *    address that was checked is the one connected to (no DNS rebinding).
- *    TLS still verifies the hostname.
+ *  - A host written as an IP address is checked before any socket opens (Node
+ *    skips the DNS lookup for those). Host names are checked inside the
+ *    socket's own DNS lookup, so the address that was checked is the one
+ *    connected to (no DNS rebinding). TLS still verifies the hostname.
  *  - Only global unicast addresses are allowed.
  *  - No redirects, no compression, a hard byte cap while streaming, one
  *    deadline covering DNS, connect and body, and a cap on concurrent fetches.
+ *    Whatever the outcome, the connection is destroyed before the fetch's
+ *    slot is released, so no response keeps downloading after it is refused.
  */
 
 const V4_BLOCKED: [string, number][] = [
@@ -56,6 +59,7 @@ export function isPublicAddress(ip: string): boolean {
   if (family !== 6) return false;
   const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i)?.[1];
   if (mapped) return isPublicAddress(mapped);
+  // Any other form of ::ffff:0:0/96 (such as ::ffff:7f00:1) falls outside 2000::/3 below and is refused.
   return v6Global.check(ip, 'ipv6') && !v6Blocked.check(ip, 'ipv6');
 }
 
@@ -94,6 +98,8 @@ export function readCapped(stream: Readable, maxBytes: number): Promise<string> 
     });
     stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     stream.on('error', (e) => reject(e));
+    // Closed without 'end' (the connection was cut): never leave the caller waiting.
+    stream.on('close', () => reject(new FetchError('unavailable', 'The connection closed before the response finished')));
   });
 }
 
@@ -115,6 +121,14 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   /** Tests only: allow private addresses. */
   allowPrivate?: boolean;
+  /** Tests only: trust this CA certificate (PEM) as well. */
+  ca?: string;
+}
+
+/** The URL's host as an IP address, if it is written as one (WHATWG URLs normalise 2130706433 to 127.0.0.1). */
+export function ipLiteral(url: URL): string | undefined {
+  const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
+  return isIP(host) ? host : undefined;
 }
 
 /**
@@ -127,6 +141,8 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   const timeoutMs = opts.timeoutMs ?? 5000;
   if (url.protocol !== 'https:') return Promise.reject(new FetchError('bad-response', 'Only https URLs can be fetched'));
+  const literal = ipLiteral(url);
+  if (literal && !opts.allowPrivate && !isPublicAddress(literal)) return Promise.reject(new FetchError('bad-response', `Refusing to connect to ${literal}: not a public address`));
   if (active >= MAX_CONCURRENT) return Promise.reject(new FetchError('busy', 'Too many metadata fetches in progress'));
   active++;
   return new Promise<string>((resolve, reject) => {
@@ -135,6 +151,8 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Tear the connection down before giving the slot back: nothing more is read once we've decided.
+      req.destroy();
       active--;
       if (err) reject(err instanceof FetchError ? err : new FetchError('unavailable', err.message));
       else resolve(value!);
@@ -144,17 +162,21 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       {
         method: 'GET',
         headers: { Accept: 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': 'Concord OAuth' },
+        // A fresh connection each time: no pooled socket outlives the fetch.
+        agent: false,
+        ...(opts.ca ? { ca: opts.ca } : {}),
         lookup: (opts.allowPrivate ? dnsLookup : publicOnlyLookup) as never,
       },
       (res) => {
         const status = res.statusCode ?? 0;
-        if (status === 404 || status === 410) return void (res.resume(), done(new FetchError('not-found', `HTTP ${status}`, status)));
-        if (status >= 500) return void (res.resume(), done(new FetchError('unavailable', `HTTP ${status}`, status)));
-        if (status < 200 || status >= 300) return void (res.resume(), done(new FetchError('bad-response', `HTTP ${status}`, status)));
+        // Refused responses are never read: done() destroys the connection.
+        if (status === 404 || status === 410) return done(new FetchError('not-found', `HTTP ${status}`, status));
+        if (status >= 500) return done(new FetchError('unavailable', `HTTP ${status}`, status));
+        if (status < 200 || status >= 300) return done(new FetchError('bad-response', `HTTP ${status}`, status));
         const encoding = res.headers['content-encoding'];
-        if (encoding && encoding !== 'identity') return void (res.destroy(), done(new FetchError('bad-response', `Unexpected content encoding ${encoding}`)));
+        if (encoding && encoding !== 'identity') return done(new FetchError('bad-response', `Unexpected content encoding ${encoding}`));
         const length = Number(res.headers['content-length']);
-        if (Number.isFinite(length) && length > maxBytes) return void (res.destroy(), done(new FetchError('too-large', `Response is ${length} bytes`)));
+        if (Number.isFinite(length) && length > maxBytes) return done(new FetchError('too-large', `Response is ${length} bytes`));
         readCapped(res, maxBytes).then(
           (text) => done(undefined, text),
           (e: Error) => done(e),
@@ -162,9 +184,7 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       },
     );
     // One deadline for DNS, connecting, TLS and the whole body.
-    const timer = setTimeout(() => {
-      req.destroy(new FetchError('unavailable', `Timed out after ${timeoutMs} ms`));
-    }, timeoutMs);
+    const timer = setTimeout(() => done(new FetchError('unavailable', `Timed out after ${timeoutMs} ms`)), timeoutMs);
     req.on('error', (e) => done(e));
     req.end();
   });

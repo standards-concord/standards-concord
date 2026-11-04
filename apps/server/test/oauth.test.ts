@@ -9,7 +9,7 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { get, openDb, put } from '../src/db.js';
+import { claim, get, openDb, put } from '../src/db.js';
 import { newId } from '../src/ids.js';
 import { setClientMetadataFetcher } from '../src/oauth.js';
 import { FetchError, isPublicAddress, readCapped, safeFetchText } from '../src/safeFetch.js';
@@ -62,7 +62,7 @@ const token = (body: Record<string, string>) => request(base).post('/token').typ
 
 const mcp = (accessToken: string | undefined, body: object, host?: string) => {
   const r = request(base).post('/mcp').set('Accept', 'application/json, text/event-stream');
-  if (host) r.set('X-Forwarded-Host', host);
+  if (host) r.set('Host', host);
   if (accessToken) r.set('Authorization', `Bearer ${accessToken}`);
   return r.send(body);
 };
@@ -123,16 +123,42 @@ describe('MCP OAuth discovery', () => {
     expect(as.headers['access-control-allow-origin']).toBe('*');
   });
 
-  it('builds URLs for trusted domains only, and the canonical address for anything else', async () => {
-    const forged = await request(base).get('/.well-known/oauth-authorization-server').set('X-Forwarded-Host', 'attacker.example').set('X-Forwarded-Proto', 'https');
-    expect(forged.body.issuer).toBe('http://localhost:8787/');
+  it('builds URLs from the Host header for configured domains only, never from X-Forwarded-*', async () => {
+    const asMeta = (h: Record<string, string>) => request(base).get('/.well-known/oauth-authorization-server').set(h);
+    // Forwarded headers can't pick the origin, even a configured one.
     process.env.PUBLIC_ORIGINS = `${base},https://concord.example.org`;
     try {
-      const alias = await request(base).get('/.well-known/oauth-authorization-server').set('X-Forwarded-Host', 'concord.example.org').set('X-Forwarded-Proto', 'https');
+      const forged = await asMeta({ 'X-Forwarded-Host': 'concord.example.org', 'X-Forwarded-Proto': 'https' });
+      expect(forged.body.issuer).toBe(`${base}/`);
+      // A configured domain in the Host header gets its own URLs, with the scheme from configuration.
+      const alias = await asMeta({ Host: 'concord.example.org', 'X-Forwarded-Proto': 'http' });
       expect(alias.body.issuer).toBe('https://concord.example.org/');
       expect(alias.body.token_endpoint).toBe('https://concord.example.org/token');
     } finally {
       process.env.PUBLIC_ORIGINS = base;
+    }
+    // Without the proxy secret, an unlisted host (such as the backend's own name, which Vercel uses) is an alias of PUBLIC_URL.
+    expect((await asMeta({ Host: 'attacker.example' })).body.issuer).toBe('http://localhost:8787/');
+  });
+
+  it('refuses unlisted hosts once the proxy secret is set, for OAuth and MCP alike', async () => {
+    process.env.CONCORD_PROXY_SECRET = 'proxy-secret-for-tests';
+    try {
+      for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/mcp', '/authorize', '/register']) {
+        const res = await request(base).get(path).set('Host', '74.152.52.138.sslip.io');
+        expect(res.status, path).toBe(421);
+      }
+      const direct = await mcp(undefined, { jsonrpc: '2.0', id: 1, method: 'initialize' }, 'attacker.example');
+      expect(direct.status).toBe(421);
+      expect(direct.headers['www-authenticate']).toBeUndefined();
+      // Configured hosts and the authenticated proxy still work.
+      expect((await request(base).get('/.well-known/oauth-authorization-server')).status).toBe(200);
+      const viaProxy = await request(base)
+        .get('/.well-known/oauth-protected-resource/mcp')
+        .set({ Host: '74.152.52.138.sslip.io', 'X-Concord-Origin': 'https://standards-concord.vercel.app', 'X-Concord-Proxy-Secret': 'proxy-secret-for-tests' });
+      expect(viaProxy.body.resource).toBe('https://standards-concord.vercel.app/mcp');
+    } finally {
+      delete process.env.CONCORD_PROXY_SECRET;
     }
   });
 
@@ -222,6 +248,24 @@ describe('MCP OAuth authorization code flow', () => {
     expect((await tools(t.body.access_token)).status).toBe(401);
     expect((await token({ grant_type: 'refresh_token', refresh_token: stolen.body.refresh_token, client_id: client.client_id })).status).toBe(400);
     expect((await agent.get('/api/oauth/connections')).body).toEqual([]);
+  });
+
+  it('lets only one of two racing refreshes win, and treats the loser as a replay', async () => {
+    const client = await register();
+    const agent = await signedIn();
+    const { verifier, challenge } = pkce();
+    const { code } = await authorize(agent, client.client_id, origin, { challenge, resource: `${origin}/mcp` });
+    const t = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT });
+    // Simulate another writer that read the same unconsumed token and consumed it first, between our read and our write:
+    // the conditional consume in exchangeRefreshToken must then lose, not mint a second successor.
+    const hash = createHash('sha256').update(t.body.refresh_token).digest('hex');
+    const before = get<{ id: string; grantId: string }>('oauthTokens', hash)!;
+    expect(claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeDefined();
+    expect(claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeUndefined();
+    const loser = await token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
+    expect(loser.status).toBe(400);
+    expect(get('oauthGrants', before.grantId)).toBeUndefined();
+    expect((await tools(t.body.access_token)).status).toBe(401);
   });
 
   it('binds tokens to this MCP URL even when the client sends no resource', async () => {

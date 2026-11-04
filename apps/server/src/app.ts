@@ -14,7 +14,9 @@ import { getUser } from './services/users.js';
 export function createApp(): express.Express {
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  // Only believe X-Forwarded-* from a proxy on this machine or its private network (Caddy in the
+  // same Docker network in production, Vite in development). TRUST_PROXY overrides it, in Express's syntax.
+  app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback, linklocal, uniquelocal');
   app.use(cookieParser());
   app.use(sessionMiddleware);
 

@@ -11,7 +11,7 @@ import { reportGap, sparql, validateData } from './services/agents.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
-import { authenticateMcp, publicOrigin, resourceMetadataUrlFor } from './oauth.js';
+import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
 
 /**
  * MCP connector for coding agents (Claude Code, Codex, Cursor…).
@@ -208,10 +208,11 @@ function summariseCR(id: string, p: OntologyProject) {
 }
 
 export async function mcpHandler(req: Request, res: Response) {
+  const origin = publicOrigin(req);
+  if (!origin) return refuseUnknownOrigin(res);
   const who = await authenticateMcp(req);
   if (who.error) {
     // Per the MCP authorization spec: point the client at our Protected Resource Metadata so it can start the OAuth flow.
-    const origin = publicOrigin(req);
     const challenge = `Bearer resource_metadata="${resourceMetadataUrlFor(origin)}"${who.error === 'invalid' ? ', error="invalid_token", error_description="The access token is invalid or expired"' : ''}`;
     res
       .status(401)

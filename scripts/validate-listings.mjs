@@ -2,6 +2,8 @@
 /**
  * Validates the plugin and marketplace files against the JSON Schema each one
  * declares in "$schema", so a loader that checks schemas won't reject them.
+ * Files in formats without a published schema are checked against local
+ * schemas below.
  * The schemas live online: in CI a schema that can't be fetched fails the
  * check; locally it is skipped with a warning (some networks block the hosts).
  *
@@ -49,22 +51,105 @@ function validatorFor(schema) {
   return ajv.compileAsync(schema);
 }
 
+/**
+ * Files that declare no $schema (Claude Code's own formats and the Codex
+ * marketplace) are checked against these, written from each tool's
+ * documentation: the fields each loader needs, with the right types.
+ */
+const str = { type: 'string', minLength: 1 };
+const kebab = { type: 'string', pattern: '^[a-z0-9]+(-[a-z0-9]+)*$' };
+const LOCAL_SCHEMAS = {
+  '.claude-plugin/marketplace.json': {
+    type: 'object',
+    required: ['name', 'owner', 'plugins'],
+    properties: {
+      name: kebab,
+      owner: { type: 'object', required: ['name'], properties: { name: str, email: str, url: str } },
+      metadata: { type: 'object', properties: { description: str, version: str, pluginRoot: str } },
+      plugins: {
+        type: 'array',
+        minItems: 1,
+        items: { type: 'object', required: ['name', 'source'], properties: { name: kebab, source: { anyOf: [{ type: 'string', pattern: '^\\./' }, { type: 'object', required: ['source'] }] }, description: str, version: str } },
+      },
+    },
+  },
+  '.agents/plugins/marketplace.json': {
+    type: 'object',
+    required: ['name', 'plugins'],
+    properties: {
+      name: kebab,
+      interface: { type: 'object', properties: { displayName: str } },
+      plugins: {
+        type: 'array',
+        minItems: 1,
+        items: {
+          type: 'object',
+          required: ['name', 'source'],
+          properties: {
+            name: kebab,
+            source: { type: 'object', required: ['source', 'path'], properties: { source: { enum: ['local'] }, path: { type: 'string', pattern: '^\\./' } } },
+            policy: { type: 'object', properties: { installation: { enum: ['AVAILABLE', 'INSTALLED_BY_DEFAULT', 'NOT_AVAILABLE'] }, authentication: { enum: ['ON_INSTALL', 'ON_USE'] } } },
+            category: str,
+          },
+        },
+      },
+    },
+  },
+  'plugins/concord/.claude-plugin/plugin.json': {
+    type: 'object',
+    required: ['name'],
+    properties: { name: kebab, version: { type: 'string', pattern: '^\\d+\\.\\d+\\.\\d+' }, description: str, author: { type: 'object', required: ['name'] }, homepage: { type: 'string', format: 'uri' }, repository: str, keywords: { type: 'array', items: str } },
+  },
+  'plugins/concord/.mcp.json': {
+    type: 'object',
+    required: ['mcpServers'],
+    properties: {
+      mcpServers: {
+        type: 'object',
+        minProperties: 1,
+        additionalProperties: {
+          type: 'object',
+          required: ['type', 'url'],
+          properties: { type: { enum: ['http', 'sse'] }, url: { type: 'string', format: 'uri', pattern: '^https://' }, headers: { type: 'object' } },
+          additionalProperties: false,
+        },
+      },
+    },
+  },
+};
+
 let failed = 0;
 let skipped = 0;
+const report = (file, validate, doc, against) => {
+  if (validate(doc)) return console.log(`ok ${file}`);
+  failed++;
+  console.error(`x  ${file} does not match ${against}:`);
+  for (const e of validate.errors ?? []) console.error(`     ${e.instancePath || '/'} ${e.message} ${JSON.stringify(e.params)}`);
+};
 for (const file of FILES) {
   const doc = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
   if (!doc.$schema) {
-    console.log(`-  ${file}: declares no $schema, nothing to check`);
+    const schema = LOCAL_SCHEMAS[file];
+    if (!schema) {
+      failed++;
+      console.error(`x  ${file}: declares no $schema and has no local schema here`);
+      continue;
+    }
+    const ajv = new Ajv({ strict: false, allErrors: true });
+    addFormats.default(ajv);
+    report(file, ajv.compile(schema), doc, 'its documented format');
+    // Marketplace entries must point at a folder that exists.
+    for (const p of doc.plugins ?? []) {
+      const rel = typeof p.source === 'string' ? p.source : p.source?.path;
+      if (rel && !fs.existsSync(path.join(root, rel))) {
+        failed++;
+        console.error(`x  ${file}: plugin ${p.name} points at ${rel}, which does not exist`);
+      }
+    }
     continue;
   }
   try {
-    const validate = await validatorFor(await fetchJson(doc.$schema));
-    if (validate(doc)) console.log(`ok ${file}`);
-    else {
-      failed++;
-      console.error(`x  ${file} does not match ${doc.$schema}:`);
-      for (const e of validate.errors ?? []) console.error(`     ${e.instancePath || '/'} ${e.message} ${JSON.stringify(e.params)}`);
-    }
+    report(file, await validatorFor(await fetchJson(doc.$schema)), doc, doc.$schema);
   } catch (e) {
     if (e instanceof Unreachable && !ci) {
       skipped++;

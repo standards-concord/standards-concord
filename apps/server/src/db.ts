@@ -39,6 +39,7 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
   db = new DatabaseSync(file);
   db.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS docs (
       collection TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -99,13 +100,41 @@ export function remove(collection: Collection, id: string) {
   conn().prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(collection, id);
 }
 
+/** Delete a document and return it, in one statement: of several callers racing for it, only one gets it. */
+export function take<T>(collection: Collection, id: string): T | undefined {
+  const row = conn().prepare('DELETE FROM docs WHERE collection = ? AND id = ? RETURNING data').get(collection, id) as { data: string } | undefined;
+  return row ? (JSON.parse(row.data) as T) : undefined;
+}
+
+/**
+ * Set `field` to `value` on a document only if it is not set yet, in one
+ * statement, and return the document as it was. Undefined means it doesn't
+ * exist or someone else set the field first.
+ */
+export function claim<T>(collection: Collection, id: string, field: string, value: string | number): T | undefined {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
+  const row = conn()
+    .prepare(`UPDATE docs SET data = json_set(data, '$.${field}', ?) WHERE collection = ? AND id = ? AND json_extract(data, '$.${field}') IS NULL RETURNING data`)
+    .get(value, collection, id) as { data: string } | undefined;
+  if (!row) return undefined;
+  const doc = JSON.parse(row.data) as Record<string, unknown>;
+  delete doc[field];
+  return doc as T;
+}
+
 export function clearAll() {
   conn().exec('DELETE FROM docs');
 }
 
+/**
+ * Run fn in one transaction. BEGIN IMMEDIATE takes the write lock before fn
+ * reads anything, so read-then-write steps can't interleave with another
+ * writer (another process on the same database waits, up to busy_timeout).
+ * fn must be synchronous and must not nest transactions.
+ */
 export function transaction<T>(fn: () => T): T {
   const c = conn();
-  c.exec('BEGIN');
+  c.exec('BEGIN IMMEDIATE');
   try {
     const out = fn();
     c.exec('COMMIT');
