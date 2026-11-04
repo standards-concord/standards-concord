@@ -211,7 +211,7 @@ async function seedHistory() {
 }
 
 async function seedConnectedApp(project: OntologyProject, owner: User, passesId: string, failsId: string) {
-  const app = createConnectedApp(project, owner, { name: 'CharityBase volunteer export', repo: 'charitybase-demo/volunteer-export', autopilot: { enabled: true, levels: ['patch', 'minor'], onFailure: 'report' } });
+  const app = await createConnectedApp(project, owner, { name: 'CharityBase volunteer export', repo: 'charitybase-demo/volunteer-export', autopilot: { enabled: true, levels: ['patch', 'minor'], onFailure: 'report' } });
   const sim = 'Simulated CI run for the demo.';
   await reportAs(app.id, { target: 'baseline', revision: baselineRevision(project), outcome: 'passed', summary: sim });
   await reportAs(app.id, { target: passesId, revision: revisionOf(getCR(passesId)), outcome: 'passed', summary: `\`npm test\` passed. ${sim}` });

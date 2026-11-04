@@ -87,8 +87,13 @@ export const ontologyStore = {
   },
 
   async commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor): Promise<string> {
+    return this.commitWorkingText(project, await graph.toTurtle(), message, author);
+  },
+
+  /** Synchronous, so callers can check state and commit with nothing running in between. */
+  commitWorkingText(project: OntologyProject, turtle: string, message: string, author: CommitAuthor): string {
     const dir = repoDir(project);
-    fs.writeFileSync(path.join(dir, FILE), await graph.toTurtle());
+    fs.writeFileSync(path.join(dir, FILE), turtle);
     git(dir, ['add', FILE]);
     const status = git(dir, ['status', '--porcelain']);
     if (status) git(dir, ['commit', '-q', '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });

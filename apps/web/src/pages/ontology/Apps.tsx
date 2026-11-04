@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import type { AutopilotSettings, ChangeLevel, ConnectedApp, GovernancePolicy, Role } from '@concord/shared';
 import { AppWindow, CheckCircle2, CircleAlert, ExternalLink, KeyRound, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react';
@@ -7,40 +7,11 @@ import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { LEVEL_LABEL, relativeTime, roleLabel } from '../../lib/format';
 import { Avatar, Badge, Button, Card, CardHeader, CodeBlock, CopyButton, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Select, Toggle } from '../../components/ui';
+import { workflowYaml } from '../../lib/workflowYaml';
 import { useOntology } from './Layout';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const LEVEL_HINT: Record<ChangeLevel, string> = { patch: 'fixes and wording', minor: 'new terms', major: 'breaking changes' };
-
-/** The workflow file to add to the app's repository. */
-export function workflowYaml(concordUrl: string, ontologyTitle: string) {
-  return `# .github/workflows/concord.yml
-# Tests this app against every change proposed to ${ontologyTitle} on Concord.
-name: Concord ontology checks
-on:
-  schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes (GitHub can delay scheduled runs)
-  workflow_dispatch:
-jobs:
-  concord:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npm ci
-      - uses: jeswr/standards-concord/actions/app-check@main
-        with:
-          concord-url: ${concordUrl}
-          token: \${{ secrets.CONCORD_APP_TOKEN }}
-          test-command: npm test
-          # If your app keeps a copy of the ontology, give its path and it is swapped
-          # for each proposed version. Otherwise read $CONCORD_ONTOLOGY_FILE in your tests.
-          # ontology-file: data/ontology.ttl
-`;
-}
 
 /** What autopilot can do for someone with these roles, for each change level. */
 function powers(policy: GovernancePolicy, roles: Role[]) {
@@ -54,7 +25,15 @@ function powers(policy: GovernancePolicy, roles: Role[]) {
 }
 
 function BaselineBadge({ app }: { app: ConnectedApp }) {
+  const { now } = useSession();
   if (!app.baseline) return <Badge tone="outline">Not run yet</Badge>;
+  // The working draft has moved on since the app last tested it.
+  if (app.baseline.current === false)
+    return (
+      <Badge tone="outline" title={`Last run ${relativeTime(app.baseline.at, now())}: ${app.baseline.outcome}`}>
+        {app.baseline.outcome === 'passed' ? 'Passed an earlier draft' : 'Failed an earlier draft'}, waiting for a new run
+      </Badge>
+    );
   if (app.baseline.outcome === 'passed')
     return (
       <Badge tone="ok" icon={CheckCircle2}>
@@ -69,9 +48,8 @@ function BaselineBadge({ app }: { app: ConnectedApp }) {
 }
 
 function SetupSteps({ app, token }: { app: ConnectedApp; token?: string }) {
-  const { ontology } = useOntology();
   const origin = typeof location !== 'undefined' ? location.origin : '';
-  const yaml = workflowYaml(origin, ontology.title);
+  const yaml = workflowYaml(origin);
   const repoUrl = app.repo ? `https://github.com/${app.repo}` : undefined;
   return (
     <ol className="space-y-4 text-sm">
@@ -264,6 +242,14 @@ export function AppsTab() {
   const state = useAsync(() => api.apps(id), [id]);
   const [tokens, setTokens] = useState<Record<string, string>>({});
   const policyOff = ontology.governance.automation.appAutopilot === false;
+  // Results come in from CI at any time; keep the page current while it's open.
+  const { reload } = state;
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') void reload();
+    }, 30_000);
+    return () => clearInterval(t);
+  }, [reload]);
 
   if (state.error && !state.data) return <ErrorCard error={state.error} onRetry={state.reload} />;
   if (!state.data) return <Loading />;
@@ -277,7 +263,12 @@ export function AppsTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">App checks</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">App checks</h2>
+          <Button size="sm" variant="ghost" icon={RefreshCw} onClick={() => void reload()} disabled={state.loading}>
+            Refresh
+          </Button>
+        </div>
         <p className="max-w-3xl text-sm text-muted">
           Building something on {ontology.title}? Connect your app and its CI tests it against every proposed change before the change is merged. Results show on each{' '}
           <Link className="text-accent hover:underline" to={`/o/${id}/changes`}>

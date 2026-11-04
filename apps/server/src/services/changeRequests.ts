@@ -31,7 +31,7 @@ import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
-import { checksFor, onStatusChanged, revisionOf } from './appChecks.js';
+import { autopilotStands, checksFor, onStatusChanged, revisionOf } from './appChecks.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -52,6 +52,7 @@ export const saveCR = save;
 
 function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
   if (cr.status === status) return;
+  if (status === 'approved') cr.approvedFrom = cr.status === 'voting' ? 'voting' : 'review';
   cr.status = status;
   cr.statusSince = clock.iso();
   if (status === 'review') cr.reviewStartedAt = cr.statusSince;
@@ -292,23 +293,60 @@ function fallbackAnalysis(cr: ChangeRequest, c: (iri: string) => string) {
 export const reviewsFor = (crId: string) => list<Review>('reviews', crId);
 export const votesFor = (subjectId: string) => list<Vote>('votes', subjectId);
 
-export function governanceFor(cr: ChangeRequest) {
+/**
+ * Each person's latest say, as governance counts it. A withdrawn say, or one autopilot made
+ * that no longer stands (see autopilotStands), leaves that person with no say: an older
+ * review or vote never comes back into force.
+ */
+export function effectiveSay<T extends Review | Vote>(items: T[], cr: ChangeRequest, revision: string): T[] {
+  const latest = new Map<string, T>();
+  for (const x of [...items].sort((a, b) => a.at.localeCompare(b.at))) latest.set(x.userId, x);
+  return [...latest.values()].filter((x) => !x.withdrawnAt && autopilotStands(x, cr, revision));
+}
+
+export function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest['status']; voteClosed?: boolean } = {}) {
   const project = getProject(cr.ontologyId);
   const since = cr.opsUpdatedAt ?? cr.createdAt;
+  const revision = revisionOf(cr, project);
+  const reviews = reviewsFor(cr.id).filter((r) => r.at >= since);
   return evaluate({
     policy: project.governance,
     level: cr.classification?.level ?? 'minor',
     kind: 'change',
-    status: cr.status,
+    status: opts.status ?? cr.status,
     statusSince: cr.statusSince,
     reviewStartedAt: cr.reviewStartedAt ?? cr.statusSince,
     authorId: cr.authorId,
-    reviews: reviewsFor(cr.id).filter((r) => r.at >= since),
-    votes: votesFor(cr.id).filter((v) => v.at >= since),
+    reviews: effectiveSay(reviews.filter((r) => r.decision !== 'comment'), cr, revision),
+    votes: effectiveSay(votesFor(cr.id).filter((v) => v.at >= since), cr, revision),
     members: members(cr.ontologyId),
     validationOk: validationPassed(cr.validation),
     now: clock.now(),
+    voteClosed: opts.voteClosed,
   });
+}
+
+/**
+ * Does an approved request still meet the rule that approved it? Approvals and votes can be
+ * withdrawn (or lapse when the change's revision moves) between approval and merge.
+ */
+export function approvalHolds(cr: ChangeRequest): { ok: boolean; reason?: string } {
+  if (cr.status !== 'approved' || !cr.approvedFrom) return { ok: true };
+  const g = governanceFor(cr, { status: cr.approvedFrom, voteClosed: cr.approvedFrom === 'voting' });
+  return g.outcome === 'approved' ? { ok: true } : { ok: false, reason: g.unmet[0] ?? g.next };
+}
+
+/**
+ * Send an approved request back to the stage that approved it because the approval no longer
+ * holds. A review keeps its original review period; a vote reopens for a new voting period.
+ */
+function revokeApproval(cr: ChangeRequest, reason?: string) {
+  const back = cr.approvedFrom ?? 'review';
+  const startedAt = cr.reviewStartedAt;
+  setStatus(cr, back, `${back === 'voting' ? 'vote reopened' : 'back in review'}: the approval no longer holds${reason ? ` (${reason})` : ''}`);
+  if (startedAt) cr.reviewStartedAt = startedAt;
+  cr.approvedFrom = undefined;
+  logActivity({ ontologyId: cr.ontologyId, type: `cr.${back}`, message: `#${cr.number} ${cr.title} → ${back} again (the approval no longer holds)`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
 }
 
 export function detail(cr: ChangeRequest): ChangeRequestDetail {
@@ -388,9 +426,14 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
       setStatus(cr, 'review', 'entered review');
       continue;
     }
+    if (cr.status === 'approved') {
+      const held = approvalHolds(cr);
+      if (held.ok) break;
+      revokeApproval(cr, held.reason);
+      continue;
+    }
     const g = governanceFor(cr);
     if (g.outcome === cr.status) break;
-    if (cr.status === 'approved') break;
     if (cr.status === 'needs-work' && g.outcome !== 'rejected') {
       // needs-work only leaves via an explicit resubmit/revision, or once the blockers clear
       if (g.outcome === 'needs-work') break;
@@ -426,15 +469,35 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  const working = await ontologyStore.working(project);
-  let after: OntologyGraph;
-  try {
-    after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
-  } catch (err) {
-    setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-    return save(cr);
+  let turtle: string | undefined;
+  for (let attempt = 0; attempt < 3 && turtle === undefined; attempt++) {
+    const head = ontologyStore.head(project);
+    const working = await ontologyStore.working(project);
+    let after: OntologyGraph;
+    try {
+      after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    } catch (err) {
+      setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
+      return save(cr);
+    }
+    const text = await after.toTurtle();
+    // Another merge landed while this one was being prepared: redo it on the new head.
+    if (ontologyStore.head(project) === head) turtle = text;
   }
-  cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
+  if (turtle === undefined) throw new HttpError(409, 'The working draft kept changing; try merging again');
+  // Things may have changed while the merge was prepared (an app failed, autopilot withdrew a
+  // yes, someone withdrew the request). From here to the commit nothing else can run.
+  const fresh = getCR(cr.id);
+  if (fresh.status !== 'approved') return fresh;
+  const held = approvalHolds(fresh);
+  if (!held.ok) {
+    revokeApproval(fresh, held.reason);
+    save(fresh);
+    if (actor) throw new HttpError(409, `The approval no longer holds${held.reason ? `: ${held.reason}` : ''}`);
+    return fresh;
+  }
+  cr = fresh;
+  cr.mergedCommit = ontologyStore.commitWorkingText(project, turtle, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
     name: author?.name ?? 'Concord',
   });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
@@ -492,7 +555,9 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
 /** Periodic sweep: time-based transitions (review periods ending, votes closing). */
 export async function tick(): Promise<number> {
   let changed = 0;
-  for (const cr of list<ChangeRequest>('changeRequests').filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {
+  for (const { id } of list<ChangeRequest>('changeRequests').filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {
+    // Re-read: advancing one request (a merge, autopilot) can change the others.
+    const cr = getCR(id);
     const before = cr.status;
     const after = await advance(cr);
     if (after.status !== before) changed++;

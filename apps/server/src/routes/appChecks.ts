@@ -17,17 +17,17 @@ export function mountAppChecks(r: Router) {
     requireUser(req);
     res.json(apps.listApps(mustFindProject(String(req.params.id)).id));
   });
-  r.post('/ontologies/:id/apps', (req, res) => {
+  r.post('/ontologies/:id/apps', async (req, res) => {
     const b = req.body ?? {};
-    res.status(201).json(apps.createApp(mustFindProject(String(req.params.id)), requireUser(req), { name: b.name, repo: b.repo, autopilot: b.autopilot }));
+    res.status(201).json(await apps.createApp(mustFindProject(String(req.params.id)), requireUser(req), { name: b.name, repo: b.repo, autopilot: b.autopilot }));
   });
   r.patch('/apps/:id', async (req, res) => {
     const b = req.body ?? {};
     res.json(await apps.updateApp(String(req.params.id), requireUser(req), { name: b.name, repo: b.repo, autopilot: b.autopilot }));
   });
   r.post('/apps/:id/token', (req, res) => res.json(apps.rotateToken(String(req.params.id), requireUser(req))));
-  r.delete('/apps/:id', (req, res) => {
-    apps.deleteApp(String(req.params.id), requireUser(req));
+  r.delete('/apps/:id', async (req, res) => {
+    await apps.deleteApp(String(req.params.id), requireUser(req));
     res.status(204).end();
   });
 

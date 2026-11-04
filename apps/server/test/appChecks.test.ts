@@ -8,6 +8,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeRequestDetail, ConnectedApp, PendingAppChecks } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
+import { appForToken, report as reportResult } from '../src/services/appChecks.js';
+import { getCR, merge } from '../src/services/changeRequests.js';
+import { getProject } from '../src/services/ontologies.js';
+import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
 
 const app = createApp();
@@ -33,6 +37,82 @@ const pending = async (token: string, all = false) => {
   return res.body as PendingAppChecks;
 };
 const report = (token: string, body: Record<string, unknown>) => request(app).post('/api/app-checks').set('Authorization', `Bearer ${token}`).send(body);
+
+/** One CI run, as the GitHub Action makes it: ask what to test, then report with the run's attempt. */
+async function ciRun(token: string) {
+  const p = await pending(token, true);
+  const revisionFor = (target: string) => (target === 'baseline' ? p.baseline.revision : (p.targets.find((t) => t.changeRequestId === target)?.revision ?? 'not-listed'));
+  const post = async (target: string, outcome: string, extra: Record<string, unknown> = {}) => {
+    const res = await report(token, { target, revision: revisionFor(target), attempt: p.attempt, outcome, ...extra });
+    expect(res.status, res.text).toBe(200);
+    return res.body as { stale: boolean; replay?: boolean; check?: { outcome: string }; autopilot?: { action: string; message: string } };
+  };
+  return { p, post };
+}
+
+/** A CI run where the working draft passes and each listed change gets the given outcome. Returns the last reply. */
+async function ci(token: string, results: Record<string, string>) {
+  const run = await ciRun(token);
+  await run.post('baseline', 'passed');
+  let last;
+  for (const [target, outcome] of Object.entries(results)) last = await run.post(target, outcome);
+  return last!;
+}
+
+let crCount = 0;
+/** A new minor change in review, so no app has tested it. */
+async function freshCR(title: string, localName = `testNote${crCount + 1}`) {
+  const author = await login('editor', `Author ${++crCount}`);
+  const created = await author.post(`/api/ontologies/${demoId}/change-requests`).send({
+    title,
+    description: 'A change for the app check tests.',
+    kind: 'feature',
+    ops: [
+      {
+        op: 'addDatatypeProperty',
+        localName,
+        label: `test note ${crCount}`,
+        definition: 'A short free-text note that the organisation offering a volunteering opportunity adds for volunteers, used here to test connected apps.',
+        domain: [`${VOL}VolunteeringOpportunity`],
+        range: ['http://www.w3.org/2001/XMLSchema#string'],
+      },
+    ],
+  });
+  expect(created.status, created.text).toBe(201);
+  const submitted = await author.post(`/api/change-requests/${created.body.id}/submit`);
+  expect(submitted.body.status).toBe('review');
+  return created.body.id as string;
+}
+
+async function connect(agent: Agent, name: string, autopilot?: Record<string, unknown>) {
+  const res = await agent.post(`/api/ontologies/${demoId}/apps`).send({ name, autopilot });
+  expect(res.status, res.text).toBe(201);
+  return res.body as ConnectedApp;
+}
+
+async function asOwner() {
+  const owner = request.agent(app);
+  const personas = (await request(app).get('/api/personas')).body as { id: string; name: string }[];
+  await owner.post('/api/auth/demo').send({ userId: personas.find((p) => p.name === 'Priya Shah')!.id });
+  return owner;
+}
+
+async function setPolicy(change: (policy: any) => void) {
+  const owner = await asOwner();
+  const policy = structuredClone((await owner.get(`/api/ontologies/${demoId}`)).body.governance);
+  change(policy);
+  const res = await owner.put(`/api/ontologies/${demoId}/governance`).send({ policy });
+  expect(res.status, res.text).toBe(200);
+}
+
+const autopilotSays = (d: ChangeRequestDetail, userId: string) => [...d.reviews, ...d.votes].filter((x) => x.userId === userId && x.autopilot);
+const standing = (d: ChangeRequestDetail, userId: string) => autopilotSays(d, userId).filter((x) => !x.withdrawnAt && x.autopilot!.revision === d.revision);
+
+/** Move the working draft on, as merging another change would. */
+function touchWorkingDraft() {
+  const project = getProject(demoId);
+  ontologyStore.commitWorkingText(project, `${ontologyStore.readWorkingText(project)}\n# touched by a test ${Date.now()}\n`, 'Touch', { name: 'Test' });
+}
 
 beforeAll(async () => {
   openDb();
@@ -70,6 +150,7 @@ describe('the demo', () => {
     const auto = seeded.reviews.find((r) => r.autopilot);
     expect(auto?.decision).toBe('approve');
     expect(auto?.autopilot?.apps[0].name).toBe('CharityBase volunteer export');
+    expect(auto?.autopilot?.revision).toBe(seeded.revision);
     expect(seeded.appChecks?.[0]).toMatchObject({ outcome: 'passed', current: true });
     expect(seeded.status).toBe('review');
     const major = await detail(majorId);
@@ -100,7 +181,7 @@ describe('connected apps', () => {
   it('refuses CI calls without a valid app token', async () => {
     expect((await request(app).get('/api/app-checks/pending')).status).toBe(401);
     expect((await request(app).get('/api/app-checks/pending').set('Authorization', 'Bearer cna_nope')).status).toBe(401);
-    expect((await report('cna_nope', { target: 'baseline', revision: 'x', outcome: 'passed' })).status).toBe(401);
+    expect((await report('cna_nope', { target: 'baseline', revision: 'x', attempt: 1, outcome: 'passed' })).status).toBe(401);
   });
 
   it('only lets the owner change the app', async () => {
@@ -112,13 +193,15 @@ describe('connected apps', () => {
 
   it('lists open change requests to test, with the ontology each would produce', async () => {
     const p = await pending(created.token!);
+    expect(p.attempt).toBeGreaterThan(0);
+    expect((await pending(created.token!)).attempt).toBe(p.attempt + 1);
     expect(p.ontology.slug).toBe('volunteering');
     expect(p.baseline.source).toContain('ref=working');
     const minor = p.targets.find((t) => t.changeRequestId === minorId)!;
     expect(minor).toBeTruthy();
     expect(minor.level).toBe('minor');
     expect(minor.status).toBe('review');
-    expect(p.targets.every((t) => ['review', 'voting'].includes(t.status))).toBe(true);
+    expect(p.targets.every((t) => ['review', 'voting', 'approved'].includes(t.status))).toBe(true);
 
     const proposed = await request(app).get(minor.source);
     expect(proposed.status).toBe(200);
@@ -133,16 +216,13 @@ describe('connected apps', () => {
   });
 
   it('records results on the change request without autopilot', async () => {
-    const p = await pending(created.token!);
-    const minor = p.targets.find((t) => t.changeRequestId === minorId)!;
-    expect((await report(created.token!, { target: 'baseline', revision: p.baseline.revision, outcome: 'passed' })).body.stale).toBe(false);
-    const res = await report(created.token!, { target: minorId, revision: minor.revision, outcome: 'passed', runUrl: 'https://github.com/example/rota-planner/actions/runs/1', commit: 'abc123' });
-    expect(res.status, res.text).toBe(200);
-    expect(res.body.autopilot.action).toBe('none');
+    const run = await ciRun(created.token!);
+    expect((await run.post('baseline', 'passed')).stale).toBe(false);
+    const res = await run.post(minorId, 'passed', { runUrl: 'https://github.com/example/rota-planner/actions/runs/1', commit: 'abc123' });
+    expect(res.autopilot!.action).toBe('none');
     const d = await detail(minorId);
-    expect(d.revision).toBe(minor.revision);
     const check = d.appChecks!.find((c) => c.appId === created.id)!;
-    expect(check).toMatchObject({ outcome: 'passed', current: true, runUrl: 'https://github.com/example/rota-planner/actions/runs/1' });
+    expect(check).toMatchObject({ outcome: 'passed', current: true, attempt: run.p.attempt, runUrl: 'https://github.com/example/rota-planner/actions/runs/1' });
     expect(check.app.autopilot).toBe(false);
     expect(d.timeline.some((e) => e.type === 'app-check' && e.message.includes('Rota planner passed'))).toBe(true);
     expect(d.reviews.some((r) => r.autopilot)).toBe(false);
@@ -152,121 +232,44 @@ describe('connected apps', () => {
   });
 
   it('ignores unsafe links and bad outcomes', async () => {
-    const p = await pending(created.token!, true);
-    const minor = p.targets.find((t) => t.changeRequestId === minorId)!;
-    expect((await report(created.token!, { target: minorId, revision: minor.revision, outcome: 'great' })).status).toBe(400);
-    const res = await report(created.token!, { target: minorId, revision: minor.revision, outcome: 'passed', runUrl: 'javascript:alert(1)' });
-    expect(res.body.check.runUrl).toBeUndefined();
+    const run = await ciRun(created.token!);
+    const revision = run.p.targets.find((t) => t.changeRequestId === minorId)!.revision;
+    expect((await report(created.token!, { target: minorId, revision, attempt: run.p.attempt, outcome: 'great' })).status).toBe(400);
+    const res = await run.post(minorId, 'passed', { runUrl: 'javascript:alert(1)' });
+    expect(res.check!.outcome).toBe('passed');
+    expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.runUrl).toBeUndefined();
   });
 
-  it('approves for the owner when autopilot is turned on, and withdraws it when the app fails', async () => {
-    const res = await rae.patch(`/api/apps/${created.id}`).send({ autopilot: { enabled: true } });
-    expect(res.status, res.text).toBe(200);
-    let d = await detail(minorId);
-    const approval = d.reviews.find((r) => r.autopilot && r.decision === 'approve');
-    expect(approval, 'autopilot approved on turning it on').toBeTruthy();
-    expect(approval!.autopilot!.apps[0].name).toBe('Rota planner');
-    expect(approval!.comment).toMatch(/Autopilot: Rota planner passed/);
-    expect(d.governance.approvals).toBe(1);
+  it('keeps the newest run’s result when results arrive late or twice', async () => {
+    const older = await ciRun(created.token!);
+    const newer = await ciRun(created.token!);
+    const revision = newer.p.targets.find((t) => t.changeRequestId === minorId)!.revision;
+    expect((await report(created.token!, { target: minorId, revision, outcome: 'passed' })).status, 'attempt is required').toBe(400);
+    expect((await report(created.token!, { target: minorId, revision, attempt: newer.p.attempt + 50, outcome: 'passed' })).status, 'attempt must have been issued').toBe(400);
 
-    const revision = d.revision!;
-    const fail = await report(created.token!, { target: minorId, revision, outcome: 'failed', summary: '`npm test` exited with code 1.' });
-    expect(fail.body.autopilot.action).toBe('withdrew');
-    d = await detail(minorId);
-    expect(d.reviews.some((r) => r.autopilot)).toBe(false);
-    expect(d.governance.approvals).toBe(0);
-    expect(d.timeline.some((e) => e.message.includes('Autopilot withdrew'))).toBe(true);
+    expect((await newer.post(minorId, 'failed')).stale).toBe(false);
+    const events = (await detail(minorId)).timeline.length;
+    // A slow older run reports a pass after the newer run's failure: ignored.
+    const late = await older.post(minorId, 'passed');
+    expect(late.stale).toBe(true);
+    expect(late.autopilot).toBeUndefined();
+    // The newer run's result arrives again (a retried request): nothing changes.
+    expect((await newer.post(minorId, 'failed')).replay).toBe(true);
+    // The same run can't change its mind.
+    expect((await report(created.token!, { target: minorId, revision, attempt: newer.p.attempt, outcome: 'passed' })).status).toBe(409);
+    const d = await detail(minorId);
     expect(d.appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('failed');
-
-    const again = await report(created.token!, { target: minorId, revision, outcome: 'passed' });
-    expect(again.body.autopilot.action).toBe('approved');
-    // Saying the same thing twice does nothing.
-    expect((await report(created.token!, { target: minorId, revision, outcome: 'passed' })).body.autopilot.action).toBe('none');
-    expect((await detail(minorId)).reviews.filter((r) => r.autopilot).length).toBe(1);
+    expect(d.timeline.length).toBe(events);
+    // A later run's pass does count.
+    expect((await ci(created.token!, { [minorId]: 'passed' })).stale).toBe(false);
+    expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
   });
 
   it('ignores results for an old revision of the change', async () => {
-    const res = await report(created.token!, { target: minorId, revision: 'old-revision', outcome: 'failed' });
+    const run = await ciRun(created.token!);
+    const res = await report(created.token!, { target: minorId, revision: 'old-revision', attempt: run.p.attempt, outcome: 'failed' });
     expect(res.body.stale).toBe(true);
-    expect(res.body.autopilot).toBeUndefined();
-    const d = await detail(minorId);
-    expect(d.appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
-    expect(d.reviews.filter((r) => r.autopilot).length).toBe(1);
-  });
-
-  it('never overrides what the person said themselves', async () => {
-    await rae.post(`/api/change-requests/${minorId}/reviews`).send({ decision: 'object', comment: 'I would rather model this as a class of expense.' });
-    const d = await detail(minorId);
-    const res = await report(created.token!, { target: minorId, revision: d.revision, outcome: 'passed' });
-    expect(res.body.autopilot.message).toMatch(/reviewed this change yourself/);
-  });
-
-  it('waits for all of the owner’s autopilot apps, and says nothing when the working draft already fails', async () => {
-    const mo = await login('reviewer', 'Reviewer Mo');
-    const a = (await mo.post(`/api/ontologies/${demoId}/apps`).send({ name: 'App A', autopilot: { enabled: true } })).body as ConnectedApp;
-    const b = (await mo.post(`/api/ontologies/${demoId}/apps`).send({ name: 'App B', autopilot: { enabled: true } })).body as ConnectedApp;
-    const p = await pending(a.token!);
-    const minor = p.targets.find((t) => t.changeRequestId === minorId)!;
-    const first = await report(a.token!, { target: minorId, revision: minor.revision, outcome: 'passed' });
-    expect(first.body.autopilot.message).toMatch(/Waiting for all/);
-    await report(b.token!, { target: 'baseline', revision: p.baseline.revision, outcome: 'failed' });
-    const second = await report(b.token!, { target: minorId, revision: minor.revision, outcome: 'passed' });
-    expect(second.body.autopilot.message).toMatch(/fails against the working draft/);
-    await report(b.token!, { target: 'baseline', revision: p.baseline.revision, outcome: 'passed' });
-    const d = await detail(minorId);
-    expect(d.reviews.find((r) => r.autopilot && r.autopilot.apps.length === 2), 'approved once both passed and the baseline was fixed').toBeTruthy();
-  });
-
-  it('votes in a vote, only for the levels it is allowed, and can vote no', async () => {
-    // Open the vote on the breaking change: its 14-day review period ends.
-    const steward = await login('steward', 'Steward Sam');
-    await steward.post('/api/simulation/clock').send({ advanceDays: 4 });
-    let d = await detail(majorId);
-    expect(d.status).toBe('voting');
-    expect(d.classification?.level).toBe('major');
-
-    const gee = await login('reviewer', 'Member Gee');
-    const created2 = (await gee.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Map export', autopilot: { enabled: true, onFailure: 'oppose' } })).body as ConnectedApp;
-    const res = await report(created2.token!, { target: majorId, revision: d.revision, outcome: 'passed' });
-    expect(res.body.autopilot.message).toMatch(/isn’t on for major/);
-
-    await gee.patch(`/api/apps/${created2.id}`).send({ autopilot: { levels: ['patch', 'minor', 'major'] } });
-    d = await detail(majorId);
-    const yes = d.votes.find((v) => v.autopilot);
-    expect(yes?.choice).toBe('yes');
-
-    const no = await report(created2.token!, { target: majorId, revision: d.revision, outcome: 'failed' });
-    expect(no.body.autopilot.action).toBe('voted-no');
-    d = await detail(majorId);
-    const mine = d.votes.filter((v) => v.autopilot);
-    expect(mine.map((v) => v.choice)).toEqual(['no']);
-    expect(d.governance.vote?.no).toBeGreaterThanOrEqual(1);
-  });
-
-  it('asks again after the change is edited', async () => {
-    const editor = await login('editor', 'Editor Ivy');
-    const before = (await pending(created.token!, true)).targets.find((t) => t.changeRequestId === minorId)!;
-    const cr = await detail(minorId);
-    const ops = [...cr.ops, { op: 'updateAnnotations', iri: `${VOL}accessNote`, set: { comment: 'Mention step-free access first.' } }];
-    const res = await editor.patch(`/api/change-requests/${minorId}`).send({ ops });
-    expect(res.status, res.text).toBe(200);
-    const after = (await pending(created.token!)).targets.find((t) => t.changeRequestId === minorId);
-    expect(after, 'listed again for testing').toBeTruthy();
-    expect(after!.revision).not.toBe(before.revision);
-    expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.current).toBe(false);
-  });
-
-  it('respects a governance policy that turns autopilot off', async () => {
-    const owner = request.agent(app);
-    const personas = (await request(app).get('/api/personas')).body as { id: string; name: string }[];
-    await owner.post('/api/auth/demo').send({ userId: personas.find((p) => p.name === 'Priya Shah')!.id });
-    const o = (await owner.get(`/api/ontologies/${demoId}`)).body;
-    const policy = { ...o.governance, automation: { ...o.governance.automation, appAutopilot: false } };
-    expect((await owner.put(`/api/ontologies/${demoId}/governance`).send({ policy })).status).toBe(200);
-    const d = await detail(minorId);
-    const res = await report(created.token!, { target: minorId, revision: d.revision, outcome: 'passed' });
-    expect(res.body.autopilot.message).toMatch(/turned off/);
-    await owner.put(`/api/ontologies/${demoId}/governance`).send({ policy: { ...policy, automation: { ...policy.automation, appAutopilot: true } } });
+    expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
   });
 
   it('replaces the token and deletes the app', async () => {
@@ -277,6 +280,246 @@ describe('connected apps', () => {
     expect((await rae.delete(`/api/apps/${created.id}`)).status).toBe(204);
     expect((await request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${rotated.token}`)).status).toBe(401);
     expect((await detail(minorId)).appChecks!.some((c) => c.appId === created.id)).toBe(false);
+  });
+});
+
+describe('autopilot', () => {
+  it('approves for the owner when turned on, and withdraws when the app fails', async () => {
+    const crId = await freshCR('Autopilot approves and withdraws');
+    const kit = await login('reviewer', 'Reviewer Kit');
+    const a = await connect(kit, 'Kit’s app');
+    await ci(a.token!, { [crId]: 'passed' });
+    expect((await detail(crId)).reviews.some((r) => r.autopilot)).toBe(false);
+
+    const res = await kit.patch(`/api/apps/${a.id}`).send({ autopilot: { enabled: true } });
+    expect(res.status, res.text).toBe(200);
+    let d = await detail(crId);
+    const approval = d.reviews.find((r) => r.autopilot && r.decision === 'approve');
+    expect(approval, 'autopilot approved on turning it on').toBeTruthy();
+    expect(approval!.autopilot!.apps[0].name).toBe('Kit’s app');
+    expect(approval!.comment).toMatch(/Autopilot: Kit’s app passed/);
+    expect(d.governance.approvals).toBe(1);
+
+    const fail = await ci(a.token!, { [crId]: 'failed' });
+    expect(fail.autopilot!.action).toBe('withdrew');
+    d = await detail(crId);
+    // The approval stays on record, marked withdrawn, and no longer counts.
+    const withdrawn = d.reviews.find((r) => r.id === approval!.id)!;
+    expect(withdrawn.withdrawnAt).toBeTruthy();
+    expect(d.governance.approvals).toBe(0);
+    expect(d.timeline.some((e) => e.message.includes('Autopilot withdrew Reviewer Kit’s yes'))).toBe(true);
+
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    // Passing again does nothing new.
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('none');
+    d = await detail(crId);
+    expect(standing(d, withdrawn.userId).length).toBe(1);
+    expect(d.governance.approvals).toBe(1);
+  });
+
+  it('stops counting an approval once the working draft moves on, until the app tests again', async () => {
+    const crId = await freshCR('Autopilot approvals lapse');
+    const lee = await login('reviewer', 'Reviewer Lee');
+    const a = await connect(lee, 'Lee’s app', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    const before = await detail(crId);
+    expect(before.governance.approvals).toBe(1);
+    const human = await login('reviewer', 'Reviewer Human');
+    await human.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+    expect((await detail(crId)).governance.approvals).toBe(2);
+
+    touchWorkingDraft();
+    const after = await detail(crId);
+    expect(after.revision).not.toBe(before.revision);
+    // The person's own approval still counts; autopilot's was for a version that no longer exists.
+    expect(after.governance.approvals).toBe(1);
+    expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
+    // The App checks page shows the baseline result as out of date.
+    const listed = (await lee.get(`/api/ontologies/${demoId}/apps`)).body as ConnectedApp[];
+    expect(listed.find((x) => x.id === a.id)!.baseline).toMatchObject({ outcome: 'passed', current: false });
+    // A run against the new working draft brings it back.
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    expect((await detail(crId)).governance.approvals).toBe(2);
+  });
+
+  it('waits for all of the owner’s autopilot apps, including one connected later', async () => {
+    const crId = await freshCR('Autopilot waits for every app');
+    const mo = await login('reviewer', 'Reviewer Mo');
+    const a = await connect(mo, 'App A', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    // A second app with autopilot: the yes waits for it.
+    const b = await connect(mo, 'App B', { enabled: true });
+    let d = await detail(crId);
+    expect(d.governance.approvals).toBe(0);
+    expect(d.timeline.some((e) => /Autopilot withdrew Reviewer Mo’s yes: waiting for App B/.test(e.message))).toBe(true);
+    const run = await ciRun(b.token!);
+    await run.post('baseline', 'passed');
+    expect((await run.post(crId, 'passed')).autopilot!.action).toBe('approved');
+    d = await detail(crId);
+    expect(d.reviews.find((r) => !r.withdrawnAt && r.autopilot?.apps.length === 2)).toBeTruthy();
+  });
+
+  it('withdraws when an app errors, fails the working draft, is turned off or deleted, or the policy turns autopilot off', async () => {
+    const crId = await freshCR('Autopilot withdraws when it loses its footing');
+    const nia = await login('reviewer', 'Reviewer Nia');
+    const a = await connect(nia, 'Nia’s app', { enabled: true });
+    const approvals = async () => (await detail(crId)).governance.approvals;
+    const pass = async () => {
+      await ci(a.token!, { [crId]: 'passed' });
+      expect(await approvals()).toBe(1);
+    };
+    await pass();
+    // The app couldn't run against the change.
+    expect((await ci(a.token!, { [crId]: 'error' })).autopilot!.action).toBe('withdrew');
+    expect(await approvals()).toBe(0);
+    await pass();
+    // The app now fails the working draft itself.
+    await (await ciRun(a.token!)).post('baseline', 'failed');
+    expect(await approvals()).toBe(0);
+    await pass();
+    // Autopilot turned off.
+    await nia.patch(`/api/apps/${a.id}`).send({ autopilot: { enabled: false } });
+    expect(await approvals()).toBe(0);
+    await nia.patch(`/api/apps/${a.id}`).send({ autopilot: { enabled: true } });
+    expect(await approvals()).toBe(1);
+    // The ontology's policy turns autopilot off.
+    await setPolicy((p) => (p.automation.appAutopilot = false));
+    expect(await approvals()).toBe(0);
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.message).toMatch(/turned off/);
+    await setPolicy((p) => (p.automation.appAutopilot = true));
+    expect(await approvals()).toBe(1);
+    // The app is deleted.
+    expect((await nia.delete(`/api/apps/${a.id}`)).status).toBe(204);
+    expect(await approvals()).toBe(0);
+    const d = await detail(crId);
+    expect(d.reviews.filter((r) => r.autopilot && !r.withdrawnAt && r.autopilot.revision === d.revision)).toHaveLength(0);
+  });
+
+  it('never overrides what the person said themselves', async () => {
+    const crId = await freshCR('Autopilot leaves people alone');
+    const ola = await login('reviewer', 'Reviewer Ola');
+    const a = await connect(ola, 'Ola’s app', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    await ola.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'object', comment: 'I would rather model this as a class.' });
+    const res = await ci(a.token!, { [crId]: 'failed' });
+    expect(res.autopilot!.message).toMatch(/yourself/);
+    const d = await detail(crId);
+    expect(d.reviews.filter((r) => r.userId === d.reviews.find((x) => x.decision === 'object')!.userId).map((r) => r.decision)).toEqual(['approve', 'object']);
+  });
+
+  it('votes in a vote, only for allowed levels; never for someone who objected; takes a no back without reviving an older yes', async () => {
+    // Before the vote opens, a member objects in review.
+    const obi = await login('reviewer', 'Member Obi');
+    await obi.post(`/api/change-requests/${majorId}/reviews`).send({ decision: 'object', comment: 'Some sessions really are at several sites.' });
+    const obiApp = await connect(obi, 'Obi’s app', { enabled: true, levels: ['patch', 'minor', 'major'] });
+
+    // Open the vote on the breaking change: its review period ends.
+    const steward = await login('steward', 'Steward Sam');
+    await steward.post('/api/simulation/clock').send({ advanceDays: 4 });
+    let d = await detail(majorId);
+    expect(d.status).toBe('voting');
+    expect(d.classification?.level).toBe('major');
+
+    // Obi objected, so autopilot doesn't vote yes for them even though their app passes.
+    expect((await ci(obiApp.token!, { [majorId]: 'passed' })).autopilot!.message).toMatch(/yourself/);
+    d = await detail(majorId);
+    expect(d.votes.some((v) => v.autopilot && v.userId === d.reviews.find((r) => r.decision === 'object' && r.comment?.includes('several sites'))!.userId)).toBe(false);
+
+    const gee = await login('reviewer', 'Member Gee');
+    const map = await connect(gee, 'Map export', { enabled: true, onFailure: 'oppose' });
+    expect((await ci(map.token!, { [majorId]: 'passed' })).autopilot!.message).toMatch(/isn’t on for major/);
+
+    await gee.patch(`/api/apps/${map.id}`).send({ autopilot: { levels: ['patch', 'minor', 'major'] } });
+    d = await detail(majorId);
+    const geeId = d.votes.find((v) => v.autopilot?.apps[0].name === 'Map export')!.userId;
+    expect(standing(d, geeId).map((v) => (v as { choice: string }).choice)).toEqual(['yes']);
+    const yesCount = d.governance.vote!.yes;
+    const cast = d.governance.vote!.cast;
+
+    expect((await ci(map.token!, { [majorId]: 'failed' })).autopilot!.action).toBe('voted-no');
+    d = await detail(majorId);
+    expect(standing(d, geeId).at(-1)).toMatchObject({ choice: 'no' });
+    expect(d.governance.vote!.yes).toBe(yesCount - 1);
+    expect(d.governance.vote!.no).toBeGreaterThanOrEqual(1);
+
+    // The app now fails the working draft too: its failure says nothing, so the no is taken
+    // back, and the yes before it does not come back.
+    await (await ciRun(map.token!)).post('baseline', 'failed');
+    d = await detail(majorId);
+    expect(d.votes.filter((v) => v.userId === geeId).every((v) => v.withdrawnAt || v.choice === 'yes')).toBe(true);
+    expect(d.governance.vote!.cast).toBe(cast - 1);
+    expect(d.governance.vote!.yes).toBe(yesCount - 1);
+    expect(d.timeline.some((e) => e.message.startsWith('Autopilot withdrew Member Gee’s no'))).toBe(true);
+  });
+
+  describe('between approval and merge', () => {
+    let crId: string;
+    let pat: Agent;
+    let token: string;
+
+    beforeAll(async () => {
+      // Merging by hand, so an approved change waits.
+      await setPolicy((p) => (p.changes.minor.autoMerge = false));
+      crId = await freshCR('Autopilot between approval and merge');
+      const steward = await login('steward', 'Steward Clock');
+      await steward.post('/api/simulation/clock').send({ advanceDays: 8 });
+      const human = await login('reviewer', 'Reviewer Vic');
+      await human.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+      pat = await login('reviewer', 'Reviewer Pat');
+      token = (await connect(pat, 'Pat’s app', { enabled: true })).token!;
+    });
+    afterAll(async () => {
+      await setPolicy((p) => (p.changes.minor.autoMerge = true));
+    });
+
+    it('keeps testing an approved change, and a failure sends it back to review', async () => {
+      expect((await ci(token, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+      let d = await detail(crId);
+      expect(d.status).toBe('approved');
+      expect(d.approvedFrom).toBe('review');
+      const listed = (await pending(token, true)).targets.find((t) => t.changeRequestId === crId);
+      expect(listed?.status).toBe('approved');
+
+      expect((await ci(token, { [crId]: 'failed' })).autopilot!.action).toBe('withdrew');
+      d = await detail(crId);
+      expect(d.status).toBe('review');
+      expect(d.timeline.some((e) => e.message.includes('back in review: the approval no longer holds'))).toBe(true);
+    });
+
+    it('a failure that arrives while the merge is being prepared stops it', async () => {
+      expect((await ci(token, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+      expect((await detail(crId)).status).toBe('approved');
+      const project = getProject(demoId);
+      const head = ontologyStore.head(project);
+      const run = await pending(token, true);
+      const revision = run.targets.find((t) => t.changeRequestId === crId)!.revision;
+
+      // Start the merge, and before it can commit, the app's failure comes in.
+      const merging = merge(getCR(crId), undefined);
+      const reporting = reportResult(appForToken(`Bearer ${token}`), { target: crId, revision, attempt: run.attempt, outcome: 'failed' });
+      const merged = await merging;
+      await reporting;
+      expect(merged.status).toBe('review');
+      expect(ontologyStore.head(project)).toBe(head);
+      expect((await detail(crId)).status).toBe('review');
+    });
+  });
+
+  it('asks again after the change is edited', async () => {
+    const crId = await freshCR('Autopilot after an edit');
+    const quinn = await login('reviewer', 'Reviewer Quinn');
+    const a = await connect(quinn, 'Quinn’s app');
+    await ci(a.token!, { [crId]: 'passed' });
+    const before = (await pending(a.token!, true)).targets.find((t) => t.changeRequestId === crId)!;
+    const editor = await login('editor', 'Editor Ivy');
+    const cr = await detail(crId);
+    const ops = [...cr.ops, { op: 'updateAnnotations', iri: `${VOL}${(cr.ops[0] as { localName: string }).localName}`, set: { comment: 'Keep it short.' } }];
+    const res = await editor.patch(`/api/change-requests/${crId}`).send({ ops });
+    expect(res.status, res.text).toBe(200);
+    const after = (await pending(a.token!)).targets.find((t) => t.changeRequestId === crId);
+    expect(after, 'listed again for testing').toBeTruthy();
+    expect(after!.revision).not.toBe(before.revision);
+    expect((await detail(crId)).appChecks!.find((c) => c.appId === a.id)!.current).toBe(false);
   });
 });
 
@@ -304,7 +547,9 @@ describe('the GitHub Action script', () => {
     const gil = await login('reviewer', 'Developer Gil');
     const created = (await gil.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Single-site map' })).body as ConnectedApp;
 
-    // A tiny "app" whose test breaks if any property, such as hasLocation, becomes functional.
+    const breaking = await freshCR('A change that breaks the map', 'breaksTheMap');
+    const passing = await freshCR('A change the map is fine with');
+    // A tiny "app" whose test breaks with one of the changes.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
     fs.mkdirSync(path.join(dir, 'data'));
     fs.writeFileSync(path.join(dir, 'data/volunteering.ttl'), '# vendored copy\n');
@@ -314,7 +559,7 @@ describe('the GitHub Action script', () => {
 const ttl = fs.readFileSync('data/volunteering.ttl', 'utf8');
 if (process.env.CONCORD_ONTOLOGY_FILE !== new URL('data/volunteering.ttl', 'file://' + process.cwd() + '/').pathname) throw new Error('CONCORD_ONTOLOGY_FILE should point at the vendored copy');
 if (!ttl.includes('VolunteeringOpportunity')) throw new Error('ontology missing');
-if (/FunctionalProperty/.test(ttl.split('hasLocation')[1]?.split(/\\.\\s*\\n/)[0] ?? '')) { console.error('one location per session breaks multi-site opportunities'); process.exit(1); }
+if (ttl.includes('breaksTheMap')) { console.error('the map does not know breaksTheMap'); process.exit(1); }
 console.log('ok', process.env.CONCORD_TARGET);
 `,
     );
@@ -336,12 +581,12 @@ console.log('ok', process.env.CONCORD_TARGET);
     expect(fs.readFileSync(summary, 'utf8')).toMatch(/Working draft \|.*passed/);
     expect(fs.readFileSync(output, 'utf8')).toMatch(/checked=\d+/);
 
-    const major = await detail(majorId);
+    const major = await detail(breaking);
     const majorCheck = major.appChecks!.find((c) => c.appId === created.id)!;
     expect(majorCheck.outcome, res.out).toBe('failed');
     expect(majorCheck.runUrl).toBe('https://github.com/example/single-site-map/actions/runs/42');
     expect(majorCheck.summary).toBe('`node test.mjs` exited with code 1.');
-    const minor = await detail(minorId);
+    const minor = await detail(passing);
     expect(minor.appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
 
     // Nothing new to test on the next run.
@@ -361,6 +606,44 @@ console.log('ok', process.env.CONCORD_TARGET);
     expect(apps.find((a) => a.id === created.id)!.baseline?.outcome).toBe('failed');
     expect((await detail(minorId)).appChecks!.some((c) => c.appId === created.id)).toBe(false);
   });
+
+  it('fails the job when a change could not be tested, and stops everything a timed-out test started', async () => {
+    const ike = await login('reviewer', 'Developer Ike');
+    const created = (await ike.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Hanging app' })).body as ConnectedApp;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
+    // The working draft passes; for a change, the test starts a background process and hangs.
+    fs.writeFileSync(
+      path.join(dir, 'test.sh'),
+      `if [ "$CONCORD_TARGET" = baseline ]; then exit 0; fi
+node -e "setInterval(() => {}, 1000)" &
+echo $! >> pids
+wait
+`,
+    );
+    const res = await runAction(dir, {
+      CONCORD_APP_TOKEN: created.token!,
+      CONCORD_TEST_COMMAND: 'sh test.sh',
+      CONCORD_TIMEOUT_MINUTES: '0.005',
+      CONCORD_MAX_CHANGES: '1',
+    });
+    expect(res.code, res.out).toBe(1);
+    expect(res.out).toMatch(/could not be tested/);
+    expect(res.out).toMatch(/timed out after 0\.01 minutes/);
+    const pids = fs.readFileSync(path.join(dir, 'pids'), 'utf8').trim().split('\n').map(Number);
+    expect(pids.length).toBe(1);
+    // Gone, or a zombie waiting to be reaped (the container's init may not reap promptly).
+    const alive = (pid: number) => {
+      try {
+        return !/^\d+ \(.*\) Z/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+      } catch {
+        return false;
+      }
+    };
+    for (let i = 0; i < 30 && pids.some(alive); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(pids.filter(alive), 'the background process should have been stopped').toEqual([]);
+    const checks = (await Promise.all(((await pending(created.token!, true)).targets).map((t) => detail(t.changeRequestId)))).flatMap((d) => d.appChecks ?? []).filter((c) => c.appId === created.id);
+    expect(checks.map((c) => c.outcome)).toEqual(['error']);
+  }, 30_000);
 
   it('explains a missing or wrong token', async () => {
     const res = await runAction(os.tmpdir(), { CONCORD_APP_TOKEN: 'cna_wrong', CONCORD_TEST_COMMAND: 'true' });

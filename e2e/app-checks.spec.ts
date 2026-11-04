@@ -99,14 +99,16 @@ test.describe('app checks', () => {
     expect(target, 'the new change is listed for testing').toBeTruthy();
     const proposed = await page.request.get(target.source);
     expect(await proposed.text()).toContain('familyFriendly');
-    await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: pending.baseline.revision, outcome: 'passed' } });
+    const attempt = pending.attempt;
+    await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: 'passed' } });
     const res = await page.request.post('/api/app-checks', {
       headers: auth,
-      data: { target: crId, revision: target.revision, outcome: 'passed', runUrl: 'https://github.com/example/family-finder/actions/runs/7' },
+      data: { target: crId, revision: target.revision, attempt, outcome: 'passed', runUrl: 'https://github.com/example/family-finder/actions/runs/7' },
     });
     expect((await res.json()).autopilot.action).toBe('approved');
 
-    await page.reload();
+    // The page picks up the new result when refreshed.
+    await page.getByRole('button', { name: 'Refresh' }).click();
     await expect(app.getByText('Passes the working draft')).toBeVisible();
 
     await page.goto(`/o/${demo.id}/changes/${crId}`);
@@ -118,13 +120,16 @@ test.describe('app checks', () => {
     await expect(approval.getByText('Autopilot', { exact: true })).toBeVisible();
     await expect(page.getByText(/Approvals: 1\/2|1 more approval/).first()).toBeVisible();
 
-    // A failure takes the approval back.
-    await page.request.post('/api/app-checks', { headers: auth, data: { target: crId, revision: target.revision, outcome: 'failed', summary: '`npm test` exited with code 1.' } });
+    // A failure in the next CI run takes the approval back. It stays on record, marked withdrawn.
+    const next = await (await page.request.get('/api/app-checks/pending?all=1', { headers: auth })).json();
+    await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: next.baseline.revision, attempt: next.attempt, outcome: 'passed' } });
+    await page.request.post('/api/app-checks', { headers: auth, data: { target: crId, revision: target.revision, attempt: next.attempt, outcome: 'failed', summary: '`npm test` exited with code 1.' } });
     await page.reload();
     await settle(page);
     await expect(page.getByTestId('app-check').filter({ hasText: 'Family finder' })).toContainText('Failed');
     await expect(page.getByText(/Autopilot withdrew Ravi Reviewer’s yes/)).toBeVisible();
-    await expect(approval.getByText('Autopilot', { exact: true })).toHaveCount(0);
+    await expect(approval.getByText('Withdrawn', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Approvals: 0\/2|2 more approval/).first()).toBeVisible();
     await expectNoCrash(page);
   });
 

@@ -31,7 +31,7 @@ const token = env.CONCORD_APP_TOKEN ?? '';
 const command = env.CONCORD_TEST_COMMAND ?? '';
 const format = env.CONCORD_FORMAT || 'turtle';
 const maxChanges = Math.max(1, Number(env.CONCORD_MAX_CHANGES) || 20);
-const timeoutMs = Math.max(1, Number(env.CONCORD_TIMEOUT_MINUTES) || 15) * 60_000;
+const timeoutMs = (Number(env.CONCORD_TIMEOUT_MINUTES) > 0 ? Number(env.CONCORD_TIMEOUT_MINUTES) : 15) * 60_000;
 const recheck = flag(env.CONCORD_RECHECK);
 const shareOutput = flag(env.CONCORD_SHARE_OUTPUT);
 const failOnBreak = flag(env.CONCORD_FAIL_ON_BREAK);
@@ -88,6 +88,22 @@ async function api(method, p, body) {
   }
 }
 
+// The test run in progress, so a timeout or a cancelled job can stop all of it.
+let running;
+const groupKill = process.platform !== 'win32';
+
+/** Stop the test command and everything it started (npm, test workers, servers…). */
+function stop(child, signal) {
+  try {
+    if (groupKill) process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {}
+  }
+}
+
 /** Run the test command; resolves with its exit code (or null if it couldn't run or timed out). */
 function runTests(extraEnv) {
   return new Promise((resolve) => {
@@ -99,23 +115,31 @@ function runTests(extraEnv) {
         if (tail.length > 40) tail.shift();
       }
     };
-    const child = spawn(command, { shell: true, env: { ...env, ...extraEnv, CONCORD_APP_TOKEN: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group, so stopping it stops the processes it spawned too.
+    const child = spawn(command, { shell: true, detached: groupKill, env: { ...env, ...extraEnv, CONCORD_APP_TOKEN: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    running = child;
     let timedOut = false;
+    let settled = false;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      running = undefined;
+      resolve(r);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 5000).unref();
+      stop(child, 'SIGTERM');
+      setTimeout(() => stop(child, 'SIGKILL'), 5000).unref();
     }, timeoutMs);
     child.stdout.on('data', (c) => keep(c, process.stdout));
     child.stderr.on('data', (c) => keep(c, process.stderr));
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ code: null, error: err.message, tail: tail.join('\n') });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: timedOut ? null : code, error: timedOut ? `timed out after ${timeoutMs / 60000} minutes` : undefined, tail: tail.join('\n').trim() });
-    });
+    child.on('error', (err) => done({ code: null, error: err.message, tail: tail.join('\n') }));
+    const finish = (code) =>
+      done({ code: timedOut ? null : code, error: timedOut ? `timed out after ${+(timeoutMs / 60000).toFixed(2)} minutes` : undefined, tail: tail.join('\n').trim() });
+    child.on('close', finish);
+    // If something it started escaped the group and holds the output open, don't wait for it forever.
+    child.on('exit', (code) => setTimeout(() => finish(code), 10_000).unref());
   });
 }
 
@@ -128,8 +152,16 @@ const restore = () => {
   if (original) fs.writeFileSync(target, original);
   else fs.rmSync(target, { force: true });
 };
-process.on('exit', restore);
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(130));
+process.on('exit', () => {
+  if (running) stop(running, 'SIGKILL');
+  restore();
+});
+// A cancelled job: stop the tests, put the ontology file back, and exit.
+for (const sig of ['SIGINT', 'SIGTERM'])
+  process.on(sig, () => {
+    if (running) stop(running, 'SIGTERM');
+    process.exit(130);
+  });
 
 const withFormat = (p) => {
   const u = new URL(p, `${base}/`);
@@ -170,7 +202,8 @@ log(`${pending.targets.length} change request(s) to test${pending.targets.length
 let exitCode = 0;
 // Always test the working draft first: if the app fails there, its results say nothing about the changes.
 const baseline = await check('Working draft', pending.baseline.source, { CONCORD_TARGET: 'baseline', CONCORD_REVISION: pending.baseline.revision });
-await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit });
+const attempt = pending.attempt;
+await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit });
 rows.push(['Working draft', '', baseline.outcome]);
 if (baseline.outcome !== 'passed') {
   console.error(`::error::${pending.app.name} ${baseline.outcome === 'failed' ? 'fails' : 'could not be tested'} against the current working draft of ${pending.ontology.title}, so the proposed changes were not tested. ${baseline.summary}`);
@@ -178,15 +211,21 @@ if (baseline.outcome !== 'passed') {
 } else {
   for (const t of targets) {
     const r = await check(`#${t.number} ${t.title}`, t.source, { CONCORD_TARGET: `cr-${t.number}`, CONCORD_CHANGE_REQUEST: String(t.number), CONCORD_REVISION: t.revision });
-    const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, outcome: r.outcome, summary: r.summary, runUrl, commit })).json();
-    const note = out.stale ? 'the change moved on while testing; it will be tested again' : out.autopilot && out.autopilot.action !== 'none' ? `autopilot: ${out.autopilot.message}` : '';
+    const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, attempt, outcome: r.outcome, summary: r.summary, runUrl, commit })).json();
+    const note = out.stale ? 'the change moved on while testing (or a newer run reported first); it will be tested again' : out.autopilot && out.autopilot.action !== 'none' ? `autopilot: ${out.autopilot.message}` : '';
     rows.push([`[#${t.number} ${t.title}](${new URL(t.page, `${base}/`)})`, t.level ?? '', r.outcome, note]);
-    log(`#${t.number}: ${r.outcome}${note ? ` (${note})` : ''}`);
+    log(`#${t.number}: ${r.outcome}${r.outcome === 'error' ? `: ${r.summary}` : ''}${note ? ` (${note})` : ''}`);
   }
 }
 
 const failed = rows.filter((r) => r[2] === 'failed' && r[0] !== 'Working draft');
+const errored = rows.filter((r) => r[2] === 'error' && r[0] !== 'Working draft');
 if (failOnBreak && failed.length) exitCode = 1;
+// A change that couldn't be tested isn't a pass: fail the job so someone looks.
+if (errored.length) {
+  console.error(`::error::${errored.length} proposed change(s) could not be tested. Concord will ask for them again on the next run.`);
+  exitCode = 1;
+}
 
 const icon = { passed: '✅ passed', failed: '❌ failed', error: '⚠️ error' };
 const md = [

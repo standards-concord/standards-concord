@@ -11,6 +11,7 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
+import { reconcile as reconcileAutopilot } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
 import { listTemplates } from '../services/governance.js';
@@ -218,7 +219,10 @@ export function apiRouter(): Router {
     requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(setGovernance(p, policy, user)));
+    const updated = setGovernance(p, policy, user);
+    // Turning autopilot off (or changing who approves and votes) changes what autopilot may say.
+    await reconcileAutopilot(p.id);
+    res.json(await summary(updated));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {

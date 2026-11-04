@@ -335,7 +335,7 @@ export function ChangeRequestPage() {
                           <div className="flex flex-wrap items-center gap-1.5">
                             <strong className="font-medium">{nameOf(item.r.userId)}</strong>
                             <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
-                            <AutopilotBadge mark={item.r.autopilot} />
+                            <AutopilotBadge say={item.r} revision={cr.revision} />
                             <RoleChips roles={item.r.roles} />
                             <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                           </div>
@@ -346,7 +346,7 @@ export function ChangeRequestPage() {
                         <div className="flex flex-wrap items-center gap-1.5">
                           <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
                           <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
-                          <AutopilotBadge mark={item.v.autopilot} />
+                          <AutopilotBadge say={item.v} revision={cr.revision} />
                           <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                           {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
                         </div>

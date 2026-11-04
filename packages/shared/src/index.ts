@@ -389,6 +389,8 @@ export interface Review {
   at: string;
   /** Set when autopilot made this review because the person's apps passed their checks. */
   autopilot?: AutopilotMark;
+  /** When autopilot took this review back. A withdrawn review means the person has no say until they give one. */
+  withdrawnAt?: string;
 }
 
 export interface Vote {
@@ -402,9 +404,14 @@ export interface Vote {
   at: string;
   /** Set when autopilot cast this vote because of the person's app checks. */
   autopilot?: AutopilotMark;
+  /** When autopilot took this vote back. A withdrawn vote means the person has no vote until they cast one. */
+  withdrawnAt?: string;
 }
 
-/** Which app checks an autopilot review or vote was based on. */
+/**
+ * Which app checks an autopilot review or vote was based on. It counts only while it is
+ * the person's latest say, isn't withdrawn, and `revision` is still the change's revision.
+ */
 export interface AutopilotMark {
   revision: string;
   apps: { id: string; name: string; runUrl?: string }[];
@@ -495,6 +502,8 @@ export interface ChangeRequest {
   updatedAt: string;
   /** Status entered at — used for review period / vote windows */
   statusSince: string;
+  /** Which stage approved it, so the approval can be re-checked before merging. */
+  approvedFrom?: 'review' | 'voting';
   /** When the request entered review (review period is measured from here). */
   reviewStartedAt?: string;
   /** When the proposed edits last changed; reviews before this no longer count. */
@@ -605,7 +614,7 @@ export interface ConnectedApp {
   token?: string;
   autopilot: AutopilotSettings;
   /** The app's result against the current working draft, before any proposed change. */
-  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string };
+  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; current?: boolean };
   lastSeenAt?: string;
   createdAt: string;
   owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
@@ -623,6 +632,8 @@ export interface AppCheck {
   runUrl?: string;
   /** The app commit that was tested. */
   commit?: string;
+  /** The run that produced it, as issued by GET /api/app-checks/pending. Newer runs win. */
+  attempt?: number;
   at: string;
 }
 
@@ -635,6 +646,8 @@ export interface AppCheckResult extends AppCheck {
 /** What GET /api/app-checks/pending returns to an app's CI. Paths are relative to the Concord URL. */
 export interface PendingAppChecks {
   app: { id: string; name: string };
+  /** Identifies this run. Send it back with every result; results from older runs are ignored. */
+  attempt: number;
   ontology: { id: string; slug: string; title: string; ontologyIRI: string };
   formats: OutputFormat[];
   baseline: { revision: string; source: string; outcome?: AppCheckOutcome };
@@ -805,7 +818,7 @@ export interface SessionInfo {
  *  DELETE /api/apps/:id
  *  GET  /api/change-requests/:id/proposed?format=    -> text: the ontology as it would be with this change merged
  *  GET  /api/app-checks/pending?all=1                -> PendingAppChecks   (Bearer app token)
- *  POST /api/app-checks {target: 'baseline'|changeRequestId, revision, outcome, summary?, runUrl?, commit?}
+ *  POST /api/app-checks {target: 'baseline'|changeRequestId, revision, attempt, outcome, summary?, runUrl?, commit?}
  *                                                    -> { check?, stale, autopilot? }   (Bearer app token)
  *
  * Simulation (alpha walkthrough)

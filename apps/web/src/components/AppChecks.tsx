@@ -1,5 +1,5 @@
 import { Link } from 'react-router';
-import type { AppCheckResult, AutopilotMark, ChangeRequestDetail } from '@concord/shared';
+import type { AppCheckResult, ChangeRequestDetail, Review, Vote } from '@concord/shared';
 import { AppWindow, Bot, CheckCircle2, CircleAlert, ExternalLink, XCircle } from 'lucide-react';
 import { useSession } from '../lib/session';
 import { relativeTime } from '../lib/format';
@@ -11,13 +11,31 @@ const OUTCOME = {
   error: { label: "Couldn't run", tone: 'warn', icon: CircleAlert },
 } as const;
 
-/** Small badge for reviews and votes that autopilot made. */
-export function AutopilotBadge({ mark }: { mark?: AutopilotMark }) {
+/**
+ * Small badge for reviews and votes that autopilot made, saying when one no longer counts:
+ * autopilot withdrew it, or it was made for an earlier version of the change or working draft.
+ */
+export function AutopilotBadge({ say, revision }: { say: Review | Vote; revision?: string }) {
+  const mark = say.autopilot;
   if (!mark) return null;
+  const yes = 'decision' in say ? say.decision === 'approve' : say.choice === 'yes';
+  const apps = mark.apps.map((a) => a.name).join(', ');
+  const lapsed = say.withdrawnAt
+    ? { label: 'Withdrawn', title: 'Autopilot took this back, so it no longer counts.' }
+    : revision && mark.revision !== revision
+      ? { label: 'No longer counts', title: 'Made for an earlier version of the change or the working draft. It counts again once the app passes the current one.' }
+      : undefined;
   return (
-    <Badge tone="accent" icon={Bot} title={`Made by autopilot because ${mark.apps.map((a) => a.name).join(', ')} passed`}>
-      Autopilot
-    </Badge>
+    <>
+      <Badge tone={lapsed ? 'outline' : 'accent'} icon={Bot} title={`Made by autopilot because ${apps} ${yes ? 'passed' : 'failed'}`}>
+        Autopilot
+      </Badge>
+      {lapsed && (
+        <Badge tone="outline" title={lapsed.title}>
+          {lapsed.label}
+        </Badge>
+      )}
+    </>
   );
 }
 
