@@ -58,7 +58,7 @@ Let's look inside. The Browse page shows the classes and their relationships, so
 Source and export shows the same ontology however you need it. Turtle is the canonical form, and it's what we keep in git.
 
 [do: show-format linkml]
-LinkML is there too, because the ODI uses it internally to generate schemas and documentation.
+LinkML is there too, for teams that generate schemas and documentation from one model.
 
 [do: show-format shacl]
 And there are SHACL shapes, generated from the OWL, for validating data.
