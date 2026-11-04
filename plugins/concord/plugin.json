@@ -5,6 +5,6 @@
   "description": "Read, query and check data against the ODI's ontologies (OWL, LinkML), and report what's missing. Sign in with your Concord account on first use.",
   "author": { "name": "Concord (Open Data Institute)" },
   "homepage": "https://standards-concord.vercel.app/connect",
-  "repository": "https://github.com/jeswr/standards-concord",
+  "repository": "https://github.com/standards-concord/standards-concord",
   "keywords": ["ontology", "owl", "linkml", "standards", "open-data", "mcp"]
 }

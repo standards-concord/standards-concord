@@ -15,9 +15,9 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 ## Steps
 
-1. **Build the backend image.** Merge to `main`. The CI workflow's `image` job publishes `ghcr.io/jeswr/standards-concord:latest`, which is public, so the server needs no token to pull it.
+1. **Build the backend image.** Merge to `main`. The CI workflow's `image` job publishes `ghcr.io/standards-concord/standards-concord:latest`, which is public, so the server needs no token to pull it.
 
-2. **Create the Vercel project.** In Vercel, Add New, Project, and import `jeswr/standards-concord`. Leave the root directory as the repository root; the build settings come from [vercel.json](../vercel.json). Until step 4 is done, API calls return a message saying `BACKEND_URL` is missing.
+2. **Create the Vercel project.** In Vercel, Add New, Project, and import `standards-concord/standards-concord`. Leave the root directory as the repository root; the build settings come from [vercel.json](../vercel.json). Until step 4 is done, API calls return a message saying `BACKEND_URL` is missing.
 
 3. **Launch the backend.** On a machine with the Azure CLI, sign in with `az login`, then from the repository run:
 
