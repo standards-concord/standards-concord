@@ -7,6 +7,19 @@ import { Avatar, Button, Card, ErrorCard, InlineError, Loading } from '../compon
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 
+/** https, http on this computer, or a native app's reverse-domain scheme. Never javascript:, data: and the like. */
+export function isSafeReturnUrl(value: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.protocol === 'https:') return true;
+  if (u.protocol === 'http:') return ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+  return /^[a-z][a-z0-9+-]*(\.[a-z0-9+-]+)+:$/.test(u.protocol);
+}
+
 /**
  * Consent page for MCP clients (Claude, Claude Code, Codex…). The server's
  * /authorize endpoint sends people here; Allow sends them back to the client
@@ -19,6 +32,8 @@ export function OAuthAuthorizePage() {
   const req = useAsync(() => api.oauthRequest(id), [id]);
   const [leaving, setLeaving] = useState<'allowed' | 'denied'>();
   const go = (redirect: string, how: 'allowed' | 'denied') => {
+    // The server only hands back vetted return addresses; refuse anything that could run script here anyway.
+    if (!isSafeReturnUrl(redirect)) throw new Error('This app’s return address is not allowed.');
     setLeaving(how);
     window.location.assign(redirect);
   };

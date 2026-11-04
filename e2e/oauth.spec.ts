@@ -76,6 +76,78 @@ test.describe('Connecting an agent with OAuth (no token)', () => {
     }
   });
 
+  test('the consent page never follows a script address, even if the server sent one', async ({ page, baseURL, consoleGuard }) => {
+    await signIn(page);
+    const agent = await fakeAgent(baseURL!, 'Suspicious agent (playwright)');
+    try {
+      await page.goto((await agent.authorizationUrl).href);
+      await expect(page.getByTestId('oauth-title')).toBeVisible();
+      const dialogs: string[] = [];
+      page.on('dialog', (d) => void (dialogs.push(d.message()), d.dismiss()));
+      // Pretend the server was tricked into handing back a javascript: address for both buttons.
+      for (const action of ['approve', 'deny'] as const) {
+        await page.route(`**/api/oauth/requests/*/${action}`, (r) => r.fulfill({ json: { redirect: 'javascript:alert("pwned")//' } }));
+      }
+      for (const button of ['oauth-allow', 'oauth-deny']) {
+        await page.getByTestId(button).click();
+        await expect(page.getByText('This app’s return address is not allowed.')).toBeVisible();
+      }
+      await expect(page).toHaveURL(/\/oauth\/authorize\?request=/);
+      await expect(page.getByTestId('oauth-done')).toHaveCount(0);
+      expect(dialogs).toEqual([]);
+      consoleGuard.allow(/return address is not allowed/);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  test('agents cannot register a script or plain-http return address', async ({ request }) => {
+    for (const uri of ['javascript:alert(1)', 'data:text/html,hi', 'http://evil.example/callback']) {
+      const res = await request.post('/register', { data: { client_name: 'Bad', redirect_uris: [uri], token_endpoint_auth_method: 'none' }, failOnStatusCode: false });
+      expect(res.status(), uri).toBe(400);
+    }
+  });
+
+  test('another website cannot approve a connection in the background', async ({ page, baseURL, consoleGuard }) => {
+    consoleGuard.allow(/CORS|Access-Control|Failed to fetch|net::ERR/i);
+    await signIn(page);
+    const agent = await fakeAgent(baseURL!, 'Background agent (playwright)');
+    try {
+      const authUrl = (await agent.authorizationUrl).href;
+      await page.goto(authUrl);
+      await expect(page.getByTestId('oauth-title')).toBeVisible();
+      const id = new URL(page.url()).searchParams.get('request')!;
+      // A page on another site tries to approve it with the person's session.
+      await page.route('http://attacker.test/**', (r) => r.fulfill({ contentType: 'text/html', body: '<!doctype html><title>attacker</title>' }));
+      await page.goto('http://attacker.test/');
+      const outcome = await page.evaluate(async (url) => {
+        const tries = [
+          { headers: { 'Content-Type': 'application/json' }, body: '{}' },
+          { headers: { 'Content-Type': 'text/plain' }, body: '{}' },
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'a=1' },
+        ];
+        const results: string[] = [];
+        for (const t of tries) {
+          try {
+            const r = await fetch(url, { method: 'POST', credentials: 'include', mode: 'cors', ...t });
+            results.push(`status ${r.status}`);
+          } catch {
+            results.push('blocked');
+          }
+        }
+        return results;
+      }, `${baseURL}/api/oauth/requests/${id}/approve`);
+      expect(outcome.every((o) => o === 'blocked' || o === 'status 415' || o === 'status 401')).toBe(true);
+      // The request is still waiting for the person, and the agent got nothing.
+      await page.goto(`/oauth/authorize?request=${id}`);
+      await expect(page.getByTestId('oauth-allow')).toBeVisible();
+      await page.getByTestId('oauth-deny').click();
+      expect((await agent.callback).get('error')).toBe('access_denied');
+    } finally {
+      await agent.close();
+    }
+  });
+
   test('an old or unknown sign-in link explains what to do', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 404/);
     await page.goto('/oauth/authorize?request=authz_doesnotexist');

@@ -9,15 +9,15 @@ Where Concord's MCP server can be listed, what each listing needs, and who does 
 | Where | How people install | Status | Survives a domain change? |
 | --- | --- | --- | --- |
 | Concord's own `/connect` page | *Add to Claude* button, one-line commands for Claude Code and Codex, Cursor and VS Code links | Done | Yes: it always shows its own address |
-| Claude Code plugin marketplace (this repo) | `/plugin marketplace add jeswr/standards-concord`, then `/plugin install concord@concord` | Done | Yes: run the script and merge; plugins update on the version bump |
-| Codex plugin marketplace (this repo) | `codex plugin marketplace add jeswr/standards-concord`, then install from Plugins in the Codex app | Done | Yes, as above |
+| Claude Code plugin marketplace (this repo) | `/plugin marketplace add jeswr/standards-concord`, then `/plugin install concord@concord` | Done | Partly: run the script and merge; installs move when they update (Claude Code leaves auto-update off for third-party marketplaces, so people run `/plugin marketplace update concord` or turn it on), then sign in again |
+| Codex plugin marketplace (this repo) | `codex plugin marketplace add jeswr/standards-concord`, then install from Plugins in the Codex app | Done | Partly, as above |
 | Official MCP Registry | Discovered by MCP clients and directories that read the registry | Publishes from CI on merge | Yes: CI publishes a new version |
 | GitHub MCP Registry (github.com/mcp) | One click into VS Code and other GitHub-connected clients | Needs an email from Jesse after the registry entry is live | Syncs from the official registry |
 | Anthropic Connectors Directory (claude.ai) | Listed in Claude's connector directory | Needs Jesse to submit; needs a privacy policy and a reviewer account | No: email Anthropic to change the URL |
 | OpenAI plugin directory (ChatGPT and Codex) | Listed in the Plugins directory of ChatGPT and the Codex app | Needs Jesse (identity verification); needs a privacy policy, terms and a demo video | No: contact OpenAI support to change the URL |
 | Docker MCP Catalog, Glama, mcp.so, Cursor directory | Their own catalogues | Optional; details below | Varies |
 
-**Before submitting to Anthropic or OpenAI, move to a stable domain** (for example a subdomain the ODI controls). Both tie the listing and its OAuth settings to the exact URL, and changing it means a support request each time. The official registry, the plugins and the `/connect` page handle moves on their own.
+**Before submitting to Anthropic or OpenAI, move to a stable domain** (for example a subdomain the ODI controls). Both tie the listing and its OAuth settings to the exact URL, and changing it means a support request each time. The official registry and the `/connect` page follow a move by themselves; plugin installs follow once they update. After any move, each agent signs in again, so keep the old domain working for a while.
 
 ## Official MCP Registry
 

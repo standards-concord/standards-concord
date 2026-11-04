@@ -1,18 +1,18 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { lookup } from 'node:dns/promises';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
-import { InvalidGrantError, InvalidTargetError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { InvalidClientMetadataError, InvalidGrantError, InvalidRequestError, InvalidTargetError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthorizationParams, OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { createOAuthMetadata, mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthClientMetadataSchema, type OAuthClientInformationFull, type OAuthTokenRevocationRequest, type OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
-import { rateLimit as rateLimiter } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
 import { get, HttpError, list, put, remove } from './db.js';
 import { newId } from './ids.js';
+import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
 
 /**
@@ -32,9 +32,11 @@ import { getUser, userForAgentToken } from './services/users.js';
  * agent needs: no token to copy. Personal tokens (Settings → Agent tokens)
  * still work for headless agents such as CI.
  *
- * Every URL is derived from the host the request came in on, so the same
- * server works behind any domain (the Vercel site, a custom domain, the VM's
- * own name) without configuration. Set PUBLIC_ORIGINS to pin the list.
+ * Every URL is built for the domain the request came in on, as long as that
+ * domain is trusted (see publicOrigin): the authenticated Vercel middleware
+ * vouches for its own domains, and PUBLIC_URL / PUBLIC_ORIGINS list the rest.
+ * Anything else gets PUBLIC_URL. Tokens are bound to the MCP URL they were
+ * issued for.
  */
 
 const ACCESS_TTL = 60 * 60; // 1 hour
@@ -59,7 +61,7 @@ interface PendingRequest {
   codeChallenge: string;
   state?: string;
   scopes: string[];
-  resource?: string;
+  resource: string;
   issuer: string;
   expiresAt: number;
 }
@@ -70,7 +72,7 @@ interface CodeDoc {
   redirectUri: string;
   codeChallenge: string;
   scopes: string[];
-  resource?: string;
+  resource: string;
   expiresAt: number;
 }
 interface GrantDoc {
@@ -80,7 +82,8 @@ interface GrantDoc {
   clientName: string;
   userId: string;
   scopes: string[];
-  resource?: string;
+  /** The MCP URL these tokens are for (RFC 8707). Always set. */
+  resource: string;
   createdAt: string;
   lastUsedAt?: string;
 }
@@ -89,35 +92,50 @@ interface TokenDoc {
   grantId: string;
   kind: 'access' | 'refresh';
   expiresAt: number;
+  /** Set when a refresh token has been rotated. Presenting it again means it leaked: the whole grant is revoked. */
+  consumedAt?: number;
 }
 
 /* ------------------------------------------------------------------------ */
 /* Origins                                                                   */
 /* ------------------------------------------------------------------------ */
 
-const allowedOrigins = () =>
-  (process.env.PUBLIC_ORIGINS ?? '')
-    .split(',')
-    .map((s) => s.trim().replace(/\/$/, ''))
-    .filter(Boolean);
-
 const ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i;
+const norm = (o: string) => o.trim().replace(/\/$/, '').toLowerCase();
+
+/** The domains this server answers for: PUBLIC_URL, WEB_URL and any PUBLIC_ORIGINS (comma separated). */
+export const trustedOrigins = () => [...new Set([config.publicUrl, config.webUrl, ...(process.env.PUBLIC_ORIGINS ?? '').split(',')].map(norm).filter((o) => ORIGIN_RE.test(o)))];
 
 /**
- * The public origin this request was addressed to: the Vercel site (its
- * middleware sends X-Concord-Origin, which survives the VM's proxy, unlike
- * X-Forwarded-Host), a custom domain, or the backend's own name. When
- * PUBLIC_ORIGINS is set, unknown origins fall back to the first one listed.
- *
- * A forged header only changes the URLs in the forger's own responses: tokens
- * are bound to the origin they were issued for.
+ * Whether this request came through Concord's own Vercel middleware: it sends
+ * CONCORD_PROXY_SECRET, which only it and this server know. Only then are the
+ * X-Concord-Origin and X-Concord-Client-IP headers believed.
+ */
+export function fromTrustedProxy(req: Request): boolean {
+  const expected = process.env.CONCORD_PROXY_SECRET;
+  const got = req.header('x-concord-proxy-secret');
+  if (!expected || !got) return false;
+  const a = Buffer.from(sha(expected));
+  const b = Buffer.from(sha(got));
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * The public origin this request was addressed to, used for every OAuth URL
+ * and for the audience of tokens:
+ *  - from the authenticated Vercel middleware, the site's own origin (so a new
+ *    Vercel domain works without backend changes);
+ *  - otherwise the request's host, if it is one of trustedOrigins();
+ *  - otherwise PUBLIC_URL, the canonical address.
+ * Unauthenticated X-Concord-Origin headers are ignored.
  */
 export function publicOrigin(req: Request): string {
-  const hinted = req.header('x-concord-origin')?.trim();
+  const hinted = req.header('x-concord-origin');
+  if (hinted && ORIGIN_RE.test(hinted.trim()) && fromTrustedProxy(req)) return norm(hinted);
   const host = req.host;
-  const origin = (hinted && ORIGIN_RE.test(hinted) ? hinted : host && /^[a-z0-9.-]+(:\d+)?$/i.test(host) ? `${req.protocol}://${host}` : config.webUrl).toLowerCase();
-  const allow = allowedOrigins();
-  return allow.length && !allow.includes(origin) ? (allow[0] ?? config.webUrl) : origin;
+  const direct = host && /^[a-z0-9.-]+(:\d+)?$/i.test(host) ? norm(`${req.protocol}://${host}`) : undefined;
+  if (direct && trustedOrigins().includes(direct)) return direct;
+  return norm(config.publicUrl);
 }
 
 export const mcpUrlFor = (origin: string) => `${origin}/mcp`;
@@ -127,53 +145,108 @@ export const resourceMetadataUrlFor = (origin: string) => `${origin}/.well-known
 /* Clients                                                                   */
 /* ------------------------------------------------------------------------ */
 
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./];
-const isPrivate = (ip: string) => (isIP(ip) === 4 ? PRIVATE_V4.some((r) => r.test(ip)) : /^(::1?|f[cd]|fe80|::ffff:(10|127|192\.168|169\.254)\.)/i.test(ip));
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+const BLOCKED_SCHEMES = new Set(['javascript:', 'data:', 'vbscript:', 'file:', 'blob:', 'about:', 'ftp:', 'ws:', 'wss:']);
 
-/** Fetch a Client ID Metadata Document (the client_id is an https URL that serves the client's metadata). */
-async function fetchClientMetadata(clientId: string): Promise<OAuthClientInformationFull | undefined> {
+/**
+ * Where we will send a browser back to after consent: https, http only on
+ * this computer (CLI agents' loopback callbacks), or a reverse-domain
+ * private-use scheme for native apps (RFC 8252, e.g. com.example.app:/cb).
+ * Never javascript:, data: and the like. No fragments or credentials.
+ */
+export function isSafeRedirectUri(value: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.hash || u.username || u.password) return false;
+  if (BLOCKED_SCHEMES.has(u.protocol)) return false;
+  if (u.protocol === 'https:') return !!u.hostname;
+  if (u.protocol === 'http:') return LOOPBACK.has(u.hostname);
+  return /^[a-z][a-z0-9+-]*(\.[a-z0-9+-]+)+:$/.test(u.protocol);
+}
+
+const httpsUrl = (v: unknown) => typeof v === 'string' && URL.canParse(v) && new URL(v).protocol === 'https:';
+
+/** Checks a client's metadata (from registration or a metadata document) before we trust any of it. */
+export function validateClientMetadata(doc: unknown): { ok: true; info: OAuthClientInformationFull } | { ok: false; reason: string } {
+  const parsed = OAuthClientMetadataSchema.safeParse(doc);
+  if (!parsed.success) return { ok: false, reason: parsed.error.message };
+  const m = parsed.data;
+  if (!m.redirect_uris.length) return { ok: false, reason: 'redirect_uris is empty' };
+  const bad = m.redirect_uris.find((u) => !isSafeRedirectUri(u));
+  if (bad) return { ok: false, reason: `redirect URI not allowed: ${bad}` };
+  for (const field of ['client_uri', 'logo_uri', 'policy_uri', 'tos_uri'] as const) {
+    if (m[field] !== undefined && !httpsUrl(m[field])) return { ok: false, reason: `${field} must be an https URL` };
+  }
+  if (m.client_name !== undefined && (m.client_name.length > 100 || /[\u0000-\u001f]/.test(m.client_name))) return { ok: false, reason: 'client_name is too long or has control characters' };
+  return { ok: true, info: { ...(doc as object), ...m } as OAuthClientInformationFull };
+}
+
+const CIMD_FRESH = 24 * 60 * 60;
+/** After a failed refresh (network error, timeout, 5xx), a cached document may be used this much longer, then never. */
+const CIMD_STALE_GRACE = 60 * 60;
+
+type MetadataFetcher = (url: URL) => Promise<string>;
+let fetchMetadata: MetadataFetcher = (url) => safeFetchText(url, { maxBytes: 64 * 1024, timeoutMs: 5000 });
+/** Tests only. */
+export const setClientMetadataFetcher = (f: MetadataFetcher) => void (fetchMetadata = f);
+
+type CimdResult = { kind: 'ok'; info: OAuthClientInformationFull } | { kind: 'invalid' } | { kind: 'unavailable' };
+
+/** Fetch and validate a Client ID Metadata Document (the client_id is an https URL serving the client's metadata). */
+async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
   let url: URL;
   try {
     url = new URL(clientId);
   } catch {
-    return;
+    return { kind: 'invalid' };
   }
-  if (url.protocol !== 'https:' || url.hash || url.username || url.pathname === '/') return;
-  if (process.env.OAUTH_ALLOW_PRIVATE_CLIENT_URLS !== 'true') {
-    const addrs = await lookup(url.hostname, { all: true }).catch(() => []);
-    if (!addrs.length || addrs.some((a) => isPrivate(a.address))) return;
+  if (url.protocol !== 'https:' || url.hash || url.username || url.password || url.pathname === '/') return { kind: 'invalid' };
+  let body: string;
+  try {
+    body = await fetchMetadata(url);
+  } catch (err) {
+    const kind = err instanceof FetchError ? err.kind : 'unavailable';
+    return kind === 'unavailable' || kind === 'busy' ? { kind: 'unavailable' } : { kind: 'invalid' };
   }
-  const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000), headers: { Accept: 'application/json' } }).catch(() => undefined);
-  if (!res?.ok) return;
-  const body = await res.text();
-  if (body.length > 64 * 1024) return;
   let doc: Record<string, unknown>;
   try {
     doc = JSON.parse(body) as Record<string, unknown>;
   } catch {
-    return;
+    return { kind: 'invalid' };
   }
-  if (doc.client_id !== clientId || !Array.isArray(doc.redirect_uris) || !doc.redirect_uris.every((u) => typeof u === 'string' && URL.canParse(u))) return;
+  if (!doc || typeof doc !== 'object' || doc.client_id !== clientId) return { kind: 'invalid' };
   // Metadata documents describe public clients: no secret is ever issued.
-  return { ...(doc as OAuthClientInformationFull), client_id: clientId, token_endpoint_auth_method: 'none', client_secret: undefined };
+  const checked = validateClientMetadata({ ...doc, token_endpoint_auth_method: 'none' });
+  if (!checked.ok) return { kind: 'invalid' };
+  return { kind: 'ok', info: { ...checked.info, client_id: clientId, client_secret: undefined } };
 }
 
 const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
     const doc = get<ClientDoc>('oauthClients', clientId);
-    if (doc && (!doc.fetchedAt || now() - doc.fetchedAt < 24 * 60 * 60)) return doc.info;
-    if (clientId.startsWith('https://')) {
-      const info = await fetchClientMetadata(clientId);
-      if (info) {
-        put<ClientDoc>('oauthClients', { id: clientId, info, fetchedAt: now() });
-        return info;
-      }
-      return doc?.info;
+    if (!clientId.startsWith('https://')) return doc?.info;
+    const age = doc?.fetchedAt ? now() - doc.fetchedAt : Infinity;
+    if (doc && age < CIMD_FRESH) return doc.info;
+    const r = await fetchClientMetadata(clientId);
+    if (r.kind === 'ok') {
+      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now() });
+      return r.info;
     }
-    return undefined;
+    if (r.kind === 'invalid') {
+      // Removed or replaced with something we won't accept: forget the old one at once.
+      if (doc) remove('oauthClients', clientId);
+      return undefined;
+    }
+    return doc && age < CIMD_FRESH + CIMD_STALE_GRACE ? doc.info : undefined;
   },
   registerClient(client) {
-    const info = client as OAuthClientInformationFull;
+    const checked = validateClientMetadata(client);
+    if (!checked.ok) throw new InvalidClientMetadataError(checked.reason);
+    const info = { ...checked.info, ...client } as OAuthClientInformationFull;
     if (!info.client_id) info.client_id = newId('client');
     put<ClientDoc>('oauthClients', { id: info.client_id, info });
     return info;
@@ -199,7 +272,11 @@ function revokeGrant(grantId: string) {
   remove('oauthGrants', grantId);
 }
 
-const sameResource = (a: string | undefined, b: URL | string | undefined) => !a || !b || a.replace(/\/$/, '') === String(b).replace(/#.*$/, '').replace(/\/$/, '');
+/** Resource indicators must name exactly this server's MCP URL (a trailing slash is tolerated, fragments are not). */
+const sameResource = (expected: string, given: URL | string) => {
+  const g = String(given);
+  return !g.includes('#') && g.replace(/\/$/, '') === expected.replace(/\/$/, '');
+};
 
 export const provider: OAuthServerProvider = {
   get clientsStore() {
@@ -208,7 +285,11 @@ export const provider: OAuthServerProvider = {
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response) {
     const origin = publicOrigin(res.req);
-    if (params.resource && !sameResource(mcpUrlFor(origin), params.resource)) throw new InvalidTargetError(`This server only issues tokens for ${mcpUrlFor(origin)}`);
+    const resource = mcpUrlFor(origin);
+    // Clients that don't send a resource indicator get tokens for this server's MCP URL anyway: tokens are never audience-free.
+    if (params.resource && !sameResource(resource, params.resource)) throw new InvalidTargetError(`This server only issues tokens for ${resource}`);
+    // The SDK has matched this against the client's registered URIs, which we validated; check again before sending a browser there.
+    if (!isSafeRedirectUri(params.redirectUri)) throw new InvalidRequestError('redirect_uri is not allowed');
     const pending: PendingRequest = {
       id: newId('authz'),
       clientId: client.client_id,
@@ -216,7 +297,7 @@ export const provider: OAuthServerProvider = {
       codeChallenge: params.codeChallenge,
       state: params.state,
       scopes: params.scopes ?? [],
-      resource: params.resource?.href,
+      resource,
       issuer: `${origin}/`,
       expiresAt: now() + REQUEST_TTL,
     };
@@ -238,13 +319,14 @@ export const provider: OAuthServerProvider = {
     if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired authorization code');
     if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError('redirect_uri does not match the authorization request');
     if (resource && !sameResource(c.resource, resource)) throw new InvalidTargetError('resource does not match the authorization request');
+    if (!c.resource) throw new InvalidGrantError('Invalid authorization code');
     const grant: GrantDoc = {
       id: newId('grant'),
       clientId: client.client_id,
       clientName: clientName(client),
       userId: c.userId,
       scopes: c.scopes,
-      resource: c.resource ?? resource?.href,
+      resource: c.resource,
       createdAt: new Date().toISOString(),
     };
     put('oauthGrants', grant, c.userId);
@@ -252,12 +334,24 @@ export const provider: OAuthServerProvider = {
   },
 
   async exchangeRefreshToken(client, refreshToken, _scopes, resource) {
+    // No awaits between reading and writing: Node runs this as one step, so two
+    // concurrent refreshes with the same token can't both succeed.
     const t = get<TokenDoc>('oauthTokens', sha(refreshToken));
     const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
-    if (!t || t.kind !== 'refresh' || !grant || grant.clientId !== client.client_id || t.expiresAt < now()) throw new InvalidGrantError('Invalid or expired refresh token');
+    if (!t || t.kind !== 'refresh' || !grant || grant.clientId !== client.client_id) throw new InvalidGrantError('Invalid or expired refresh token');
+    if (t.consumedAt) {
+      // A rotated refresh token came back: someone has a copy. Revoke the whole grant (RFC 9700 §4.14.2).
+      revokeGrant(grant.id);
+      throw new InvalidGrantError('This refresh token was already used. The connection has been revoked; sign in again.');
+    }
+    if (t.expiresAt < now()) throw new InvalidGrantError('Invalid or expired refresh token');
+    if (!grant.resource) {
+      revokeGrant(grant.id);
+      throw new InvalidGrantError('This connection predates audience-bound tokens; sign in again.');
+    }
     if (resource && !sameResource(grant.resource, resource)) throw new InvalidTargetError('resource does not match the original grant');
-    // Rotate: the old refresh token stops working (OAuth 2.1 for public clients).
-    remove('oauthTokens', t.id);
+    // Rotate, keeping the old token's hash so a replay is recognised.
+    put<TokenDoc>('oauthTokens', { ...t, consumedAt: now() }, grant.id);
     return issueTokens(grant);
   },
 
@@ -265,13 +359,13 @@ export const provider: OAuthServerProvider = {
     const t = get<TokenDoc>('oauthTokens', sha(token));
     if (t?.kind === 'access') {
       const grant = get<GrantDoc>('oauthGrants', t.grantId);
-      if (!grant || t.expiresAt < now()) throw new InvalidTokenError('The access token has expired');
+      if (!grant || !grant.resource || t.expiresAt < now()) throw new InvalidTokenError('The access token has expired');
       return {
         token,
         clientId: grant.clientId,
         scopes: grant.scopes,
         expiresAt: t.expiresAt,
-        resource: grant.resource ? new URL(grant.resource) : undefined,
+        resource: new URL(grant.resource),
         extra: { userId: grant.userId, agentName: grant.clientName, grantId: grant.id },
       };
     }
@@ -284,7 +378,8 @@ export const provider: OAuthServerProvider = {
   async revokeToken(client, request: OAuthTokenRevocationRequest) {
     const t = get<TokenDoc>('oauthTokens', sha(request.token));
     const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
-    if (t && grant?.clientId === client.client_id) remove('oauthTokens', t.id);
+    // Revoking either token ends the whole connection, as a person disconnecting would.
+    if (t && grant?.clientId === client.client_id) revokeGrant(grant.id);
   },
 };
 
@@ -302,6 +397,7 @@ export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
   const p = pendingRequest(id);
   const client = await clientsStore.getClient(p.clientId);
   if (!client) throw new HttpError(404, 'The app asking for access is no longer registered. Try connecting again.');
+  if (!isSafeRedirectUri(p.redirectUri)) throw new HttpError(400, 'This app’s return address is not allowed.');
   const redirect = new URL(p.redirectUri);
   return {
     id: p.id,
@@ -316,6 +412,7 @@ export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
 
 function finish(p: PendingRequest, params: Record<string, string>) {
   remove('oauthRequests', p.id);
+  if (!isSafeRedirectUri(p.redirectUri)) throw new HttpError(400, 'This app’s return address is not allowed.');
   const url = new URL(p.redirectUri);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   if (p.state) url.searchParams.set('state', p.state);
@@ -362,7 +459,8 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
   if (!token) return { error: 'missing' };
   try {
     const info = await provider.verifyAccessToken(token);
-    if (info.resource && !sameResource(mcpUrlFor(publicOrigin(req)), info.resource)) return { error: 'invalid' };
+    // OAuth tokens are only good for the MCP URL they were issued for. Personal tokens are not audience-bound.
+    if (info.clientId !== 'personal-token' && (!info.resource || !sameResource(mcpUrlFor(publicOrigin(req)), info.resource))) return { error: 'invalid' };
     const user = getUser(String(info.extra?.userId));
     if (!user) return { error: 'invalid' };
     const grantId = info.extra?.grantId as string | undefined;
@@ -382,8 +480,25 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
 /* ------------------------------------------------------------------------ */
 
 // One set of limits for every domain (built once, not per origin). The client IP comes from X-Forwarded-For.
+/**
+ * Rate-limit by the person's IP. Behind Vercel and Caddy, req.ip is Vercel's
+ * egress address, so use the client IP the authenticated middleware passes on.
+ */
+export function clientIp(req: Request): string {
+  const passed = req.header('x-concord-client-ip')?.trim();
+  if (passed && isIP(passed) && fromTrustedProxy(req)) return passed;
+  return req.ip ?? 'unknown';
+}
 const limiter = (windowMs: number, limit: number) =>
-  rateLimiter({ windowMs, limit, standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false, xForwardedForHeader: false }, message: { error: 'too_many_requests', error_description: 'Too many requests. Try again later.' } });
+  rateLimiter({
+    windowMs,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),
+    validate: { trustProxy: false, xForwardedForHeader: false },
+    message: { error: 'too_many_requests', error_description: 'Too many requests. Try again later.' },
+  });
 const limits: [RegExp, RequestHandler][] = [
   [/^\/register/, limiter(60 * 60 * 1000, 30)],
   [/^\/(authorize|token|revoke)/, limiter(15 * 60 * 1000, 300)],

@@ -43,13 +43,15 @@ test.describe('Connect page', () => {
     await page.reload();
     await expect(page.getByRole('radio', { name: 'VS Code' })).toHaveAttribute('aria-checked', 'true');
 
-    // Advanced setup: the raw URL, plugin installs that follow Concord when its domain changes, and headless tokens.
+    // Advanced setup: the raw URL, plugin installs (with how to update them after a move), and headless tokens.
     await expect(page.getByTestId('mcp-url')).toBeHidden();
     await page.getByText('Advanced setup').click();
     await expect(page.getByTestId('mcp-url')).toHaveText(mcp);
     await expect(page.getByTestId('plugin-install')).toContainText('/plugin marketplace add jeswr/standards-concord');
     await expect(page.getByTestId('plugin-install')).toContainText('/plugin install concord@concord');
     await expect(page.getByTestId('plugin-install')).toContainText('codex plugin marketplace add jeswr/standards-concord');
+    await expect(page.getByTestId('plugin-update-note')).toContainText('/plugin marketplace update concord');
+    await expect(page.getByTestId('plugin-update-note')).toContainText('sign in again');
     await expect(page.getByTestId('advanced-setup').getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#tokens');
 
     // The page no longer lists the MCP tools.

@@ -3,12 +3,7 @@
   "mcpServers": {
     "concord": {
       "type": "streamable-http",
-      "url": "https://standards-concord.vercel.app/mcp",
-      "extensions": {
-        "com.openai": {
-          "auth": { "type": "oauth", "client": { "mode": "dcr" } }
-        }
-      }
+      "url": "https://standards-concord.vercel.app/mcp"
     }
   }
 }

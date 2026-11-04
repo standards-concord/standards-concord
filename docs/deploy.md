@@ -2,7 +2,7 @@
 
 Concord runs in two parts:
 
-- **Vercel** serves the web app, including the in-browser query engine (sparq, WebAssembly). A small routing middleware ([middleware.ts](../middleware.ts)) forwards `/api`, `/auth`, `/mcp`, `/people`, `/healthz` and the OAuth endpoints for MCP clients (`/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke`) to the backend, with cookies, request bodies and streamed responses passed through. People and coding agents only ever use the Vercel link. The middleware also sends `X-Concord-Origin`, so the backend builds OAuth metadata and MCP URLs for whichever domain the request came through; adding a custom domain in Vercel needs no backend change.
+- **Vercel** serves the web app, including the in-browser query engine (sparq, WebAssembly). A small routing middleware ([middleware.ts](../middleware.ts)) forwards `/api`, `/auth`, `/mcp`, `/people`, `/healthz` and the OAuth endpoints for MCP clients (`/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke`) to the backend, with cookies, request bodies and streamed responses passed through. People and coding agents only ever use the Vercel link. When `CONCORD_PROXY_SECRET` is set (step 5), the middleware also tells the backend which domain the request came through and the visitor's IP address, vouched for by that secret, so the backend builds OAuth metadata and MCP URLs for that domain and rate-limits by the real visitor; adding a custom domain in Vercel then needs no backend change. Without the secret the backend ignores those headers and uses `PUBLIC_URL`.
 - **One small VM** runs everything that needs a long-running server: the API, sign-in, the MCP endpoint for agents, live meeting streams and the Meet bot webhook, the governance clock (a tick every minute that closes review periods and votes, merges and drafts releases), git history for each ontology, the HermiT reasoner, and a Community Solid Server for private data. Caddy gives it HTTPS automatically. It runs on Azure, launched by one script, [deploy/azure/deploy.sh](../deploy/azure/deploy.sh). An AWS version is kept as an alternative (see the end of this page).
 
 GitHub Actions ([ci.yml](../.github/workflows/ci.yml)) typechecks and tests every push, then builds the backend image and pushes it to GitHub's container registry. The server checks for a new image every five minutes, so merging to `main` is the deploy. Vercel redeploys the web app on every push by itself.
@@ -29,9 +29,11 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 4. **Connect the two.** In Vercel, Settings, Environment Variables, add `BACKEND_URL` with the `BackendUrl` value for Production and Preview, then redeploy from the Deployments tab.
 
-5. **Add the Claude key.** `./deploy/azure/set-key.sh ANTHROPIC_API_KEY` asks for the value without showing it, so the interviewer, triage, meeting analysis, persona simulation and feedback chat use Claude.
+5. **Link the proxy and the backend with a secret.** Generate one with `openssl rand -hex 32`. Add it in Vercel as `CONCORD_PROXY_SECRET` (Production and Preview) and redeploy, then run `./deploy/azure/set-key.sh CONCORD_PROXY_SECRET` and paste the same value. The backend only believes the forwarded domain and visitor IP from requests carrying it, so people calling the backend directly can't pick which domain its OAuth URLs use or dodge the sign-in rate limits. Without it, everything still works for `PUBLIC_URL`, but other Vercel domains (previews, a new custom domain) show OAuth URLs for `PUBLIC_URL` and every agent counts as one visitor for rate limiting.
 
-6. **Check it.** `https://<vercel-url>/healthz` should return `{"ok":true}`. Send testers `https://<vercel-url>/alpha`.
+6. **Add the Claude key.** `./deploy/azure/set-key.sh ANTHROPIC_API_KEY` asks for the value without showing it, so the interviewer, triage, meeting analysis, persona simulation and feedback chat use Claude.
+
+7. **Check it.** `https://<vercel-url>/healthz` should return `{"ok":true}`. Send testers `https://<vercel-url>/alpha`.
 
 ## Adding keys later
 
@@ -40,6 +42,9 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | Key | What it turns on |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Claude for the interviewer, triage, meeting analysis, persona simulation and feedback chat. Without it these use an offline stand-in. |
+| `CONCORD_PROXY_SECRET` | Must equal the Vercel variable of the same name (step 5). Lets the backend trust the domain and visitor IP the Vercel middleware forwards. |
+| `PUBLIC_ORIGINS` | Comma-separated extra origins, such as a domain pointed straight at the backend, that may appear in OAuth metadata and MCP URLs when reached directly. Vercel domains don't need listing when `CONCORD_PROXY_SECRET` is set. |
+| `OPENAI_APPS_CHALLENGE` | The domain verification token from OpenAI's plugin submission, served at `/.well-known/openai-apps-challenge`. |
 | `ADMIN_EMAILS` | Comma-separated emails that can reset the demo and read every tester's feedback once signed in with Google or GitHub. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google. Create an OAuth client (Web application) in Google Cloud with redirect URI `<vercel-url>/auth/google/callback`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Sign in with GitHub. Create an OAuth app with callback URL `<vercel-url>/auth/github/callback`. |
@@ -55,6 +60,7 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 - **Deploy now** instead of waiting five minutes: run `systemctl start concord-refresh.service` the same way.
 - **Backups:** the disk is snapshotted daily at 03:00 UTC (incremental snapshots named `concord-YYYYMMDD` in the resource group), and snapshots older than 14 days are deleted. The disk holds the database, every ontology's git history and the Solid pods.
 - **Your own domain:** point DNS A records for the hostname and `pods.` under it at the static IP, change `HOST` in `/opt/concord/stack.env`, restart the stack, and change `BACKEND_URL` in Vercel.
+- **Moving Concord's public address** (the domain people and agents use): add the domain in Vercel, set `PUBLIC_URL` to it with `set-key.sh`, run `node scripts/public-url.mjs https://<new-origin>` and merge so the plugins and MCP Registry entry follow. Keep the old domain serving Concord for a few weeks: installed plugins only move when they update, and every agent has to sign in again at the new address, because OAuth tokens are tied to the address they were issued for.
 - **Removing it:** `az group delete -n concord` deletes the VM, its IP address, disk and snapshots.
 
 ## Alternative: AWS

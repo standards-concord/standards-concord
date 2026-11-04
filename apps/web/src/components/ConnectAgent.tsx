@@ -196,7 +196,12 @@ export function ConnectAgent() {
             <div className="flex items-center gap-1.5 text-xs font-medium text-fg">
               <Package className="size-3.5" /> Install as a plugin
             </div>
-            <p className="text-xs">Plugins point at Concord’s main public address and update themselves when it moves.</p>
+            <p className="text-xs" data-testid="plugin-update-note">
+              Plugins use Concord’s main public address. If Concord moves, plugins don’t always update by themselves: in Claude Code run{' '}
+              <code className="font-mono">/plugin marketplace update concord</code> (or turn on auto-update for this marketplace in{' '}
+              <code className="font-mono">/plugin</code>), and in Codex update Concord from the Plugins directory. Then sign in again, because a new address needs a new
+              sign-in.
+            </p>
             {claudeCodePluginCommands().map((c) => (
               <Command key={c} code={c} label="Copy" />
             ))}

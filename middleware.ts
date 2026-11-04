@@ -32,10 +32,19 @@ export default function middleware(request: Request): Response {
   }
   const url = new URL(request.url);
   const headers = new Headers(request.headers);
+  // Never pass on a visitor's own x-concord-* headers.
+  for (const name of [...headers.keys()]) if (name.startsWith('x-concord-')) headers.delete(name);
   headers.set('x-forwarded-host', url.host);
   headers.set('x-forwarded-proto', url.protocol.replace(':', ''));
-  // The backend's own proxy rewrites X-Forwarded-Host, so also say which site this came through.
-  // OAuth metadata and MCP URLs are built from it, so every domain pointed at this project just works.
-  headers.set('x-concord-origin', url.origin);
+  // The backend's own proxy (Caddy) rewrites X-Forwarded-*, so say which site this came through and
+  // who the visitor is, signed with a secret only this middleware and the backend know. The backend
+  // builds OAuth URLs for that site and rate-limits by that IP; without the secret it ignores both.
+  const secret = process.env.CONCORD_PROXY_SECRET;
+  if (secret) {
+    headers.set('x-concord-proxy-secret', secret);
+    headers.set('x-concord-origin', url.origin);
+    const ip = request.headers.get('x-real-ip') ?? request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+    if (ip) headers.set('x-concord-client-ip', ip);
+  }
   return rewrite(new URL(url.pathname + url.search, backend), { request: { headers } });
 }

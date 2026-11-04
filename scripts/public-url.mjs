@@ -9,8 +9,11 @@
  *   node scripts/public-url.mjs                                # print the current address
  *
  * Merging the change to main republishes the MCP Registry entry (see
- * .github/workflows/mcp-registry.yml); plugin installs pick it up on their
- * next update. The web app needs nothing: it always uses its own origin.
+ * .github/workflows/mcp-registry.yml). Plugin installs pick it up only when
+ * they update (Claude Code leaves auto-update off for third-party
+ * marketplaces), and every client has to sign in again at the new address,
+ * so keep the old address serving Concord for a while after a move. The web
+ * app needs nothing: it always uses its own origin.
  */
 import fs from 'node:fs';
 import path from 'node:path';
