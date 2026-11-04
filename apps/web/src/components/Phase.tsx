@@ -178,15 +178,19 @@ export function ChangeStatusBubble({ status, hasVote }: { status: ChangeRequestS
 
 /* ------------------------------------------------------------ Health */
 
-/** One chip for the working draft's health; the breakdown opens on click. */
-function healthState(o: OntologySummary) {
+/**
+ * One verdict for the working draft's health. A clean result only reads "Healthy" when every
+ * required check ran; if the OWL reasoner could not run it says "Checks incomplete" instead.
+ */
+export function healthState(o: OntologySummary) {
   const h = o.health;
+  const incomplete = h?.incomplete ?? [];
   const problem = h && (!h.consistent || h.errors > 0);
   const caution = h && !problem && (h.warnings > 0 || h.fairScore < 0.8 || !h.passed);
-  const tone: BubbleTone = !h ? 'neutral' : problem ? 'danger' : caution ? 'warn' : 'ok';
-  const label = !h ? 'Not validated yet' : problem ? 'Needs fixing' : caution ? 'Healthy, with notes' : 'Healthy';
-  const Icon = !h ? CircleDashed : problem ? CircleAlert : CircleCheck;
-  return { h, tone, label, Icon };
+  const tone: BubbleTone = !h ? 'neutral' : problem ? 'danger' : incomplete.length || caution ? 'warn' : 'ok';
+  const label = !h ? 'Not validated yet' : problem ? 'Needs fixing' : incomplete.length ? 'Checks incomplete' : caution ? 'Healthy, with notes' : 'Healthy';
+  const Icon = !h ? CircleDashed : problem || incomplete.length ? CircleAlert : CircleCheck;
+  return { h, tone, label, Icon, incomplete };
 }
 
 /** Non-interactive version of the health bubble, for places that are already links (e.g. hub cards). */
@@ -202,7 +206,8 @@ export function HealthChip({ o }: { o: OntologySummary }) {
 
 /** One chip for the working draft's health; the breakdown opens on click. */
 export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologySummary; detailsHref?: string; align?: 'left' | 'right' }) {
-  const { h, tone, label, Icon } = healthState(o);
+  const { h, tone, label, Icon, incomplete } = healthState(o);
+  const reasonerRan = !!h && h.reasoner !== 'structural' && !incomplete.some((m) => m.startsWith('OWL reasoner'));
   return (
     <Popover
       label={`Health: ${label}. Show details`}
@@ -215,28 +220,42 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
         </>
       }
     >
-      <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">Health of the working draft</h4>
-      {h ? (
-        <ul className="space-y-2">
-          <HealthRow ok={h.consistent} label="Reasoner" value={h.consistent ? 'Consistent' : 'Inconsistent'} />
-          <HealthRow ok={h.fairScore >= 0.8} warn={h.fairScore >= 0.5 && h.fairScore < 0.8} label="FAIR score" value={pct(h.fairScore)} />
-          <HealthRow
-            ok={h.errors === 0 && h.warnings === 0}
-            warn={h.errors === 0 && h.warnings > 0}
-            label="Lint (OWL best practice)"
-            value={h.errors ? plural(h.errors, 'error') : h.warnings ? plural(h.warnings, 'warning') : 'No errors or warnings'}
-          />
-          <HealthRow ok={h.passed} label="Overall validation" value={h.passed ? 'Passed' : 'Failing'} />
-        </ul>
-      ) : (
-        <p className="text-muted">Validation runs when the ontology changes.</p>
-      )}
-      {detailsHref && (
-        <div className="mt-3 border-t border-line pt-3 text-xs">
-          <Link to={detailsHref} className="font-medium text-accent hover:underline">
-            See the full report, including every lint finding
-          </Link>
-        </div>
+      {(close) => (
+        <>
+          <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">Health of the working draft</h4>
+          {h ? (
+            <ul className="space-y-2">
+              <HealthRow
+                ok={h.consistent && reasonerRan}
+                warn={h.consistent && !reasonerRan}
+                label="Reasoner"
+                value={!h.consistent ? 'Inconsistent' : reasonerRan ? 'Consistent' : 'Not run (structural checks only)'}
+              />
+              <HealthRow ok={h.fairScore >= 0.8} warn={h.fairScore >= 0.5 && h.fairScore < 0.8} label="FAIR score" value={pct(h.fairScore)} />
+              <HealthRow
+                ok={h.errors === 0 && h.warnings === 0}
+                warn={h.errors === 0 && h.warnings > 0}
+                label="Lint (OWL best practice)"
+                value={h.errors ? plural(h.errors, 'error') : h.warnings ? plural(h.warnings, 'warning') : 'No errors or warnings'}
+              />
+              <HealthRow ok={h.passed} label="Overall validation" value={h.passed ? 'Passed' : 'Failing'} />
+            </ul>
+          ) : (
+            <p className="text-muted">Validation runs when the ontology changes.</p>
+          )}
+          {incomplete.length > 0 && (
+            <div className="mt-3 rounded-lg bg-warn-soft p-2.5 text-xs text-warn" role="note">
+              <strong className="font-medium">Not every check could run.</strong> {incomplete.join('. ')}. A clean result here is not a full guarantee.
+            </div>
+          )}
+          {detailsHref && (
+            <div className="mt-3 border-t border-line pt-3 text-xs">
+              <Link to={detailsHref} onClick={close} className="font-medium text-accent hover:underline">
+                See the full report, including every lint finding
+              </Link>
+            </div>
+          )}
+        </>
       )}
     </Popover>
   );

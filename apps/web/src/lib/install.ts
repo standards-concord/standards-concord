@@ -18,6 +18,12 @@ export const mcpUrl = (origin: string) => `${origin.replace(/\/$/, '')}/mcp`;
 export const claudeConnectorLink = (url: string) =>
   `https://claude.ai/customize/connectors?${new URLSearchParams({ modal: 'add-custom-connector', connectorName: DISPLAY_NAME, connectorUrl: url })}`;
 
+/**
+ * ChatGPT has no link that prefills a custom MCP server, so the page opens ChatGPT's
+ * Plugins page and the person pastes the URL. ChatGPT signs in with OAuth like Claude does.
+ */
+export const CHATGPT_PLUGINS_URL = 'https://chatgpt.com/plugins';
+
 export const claudeCodeCommand = (url: string) => `claude mcp add --transport http ${SERVER_NAME} ${url}`;
 export const claudeCodePluginCommands = () => [`/plugin marketplace add ${MARKETPLACE_REPO}`, `/plugin install ${SERVER_NAME}@${SERVER_NAME}`];
 
