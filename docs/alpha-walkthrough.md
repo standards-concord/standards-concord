@@ -8,7 +8,7 @@ The demo ontology is the **volunteering opportunities** standard. It is already 
 
 The top of `/alpha` says which version of Concord the tester is using (and the build commit), with release notes for every version. The versions and their changes live in `packages/shared/src/appReleases.ts`, newest first. Numbers follow semantic-release: each release lists its changes as `feat`, `fix`, `perf` or `breaking`, and the server's unit tests check that the version is the previous one bumped by the biggest change. **When a pull request changes something testers will notice, add a release at the top** with the tester roles it matters to (`steward`, `contributor`, `member`, `odi`, `agent`, or none for everyone), where to try it (`{o}` is the demo ontology) and, ideally, a feedback question (`ask`).
 
-Testers are encouraged to sign in (Google or GitHub, or a tester account kept in their browser when those aren't switched on). Concord then saves each version they test, the roles they tried and their feedback to their own pod (`concord/alpha/testing.jsonld` and `concord/feedback/`). That stays tied to their own account while they play a simulated persona: a second cookie remembers who the tester is until they sign out.
+Testers are encouraged to sign in (Google, GitHub or their own WebID, or a tester account kept in their browser when those aren't switched on). Concord then saves each version they test, the roles they tried and their feedback to their own pod (`concord/alpha/testing.jsonld` and `concord/feedback/`). That stays tied to their own account while they play a simulated persona: a second cookie remembers who the tester is until they sign out.
 
 When they come back on a newer version, the page shows what changed since the last version they tested (signed-out testers pick it themselves), the role picker marks roles with changes made for them, the Explore step leads with those changes, and the feedback page offers a short questionnaire about just those changes before the overall questions.
 
@@ -58,7 +58,13 @@ The *Give feedback* button opens a chat. Testers can type or talk (microphone bu
 - **Open**: say anything; the AI asks a follow-up or two.
 - **What's changed** (returning testers only): one question per change since the version they last tested, their role's first, then the overall questions.
 
-Feedback is readable at `/admin/feedback` by ODI staff and ontology owners, with an AI summary of themes and tallies of the governance answers.
+Feedback is readable at `/admin/feedback` by the deployment's administrators (`ADMIN_WEBIDS`, or the older `ADMIN_EMAILS`), with an AI summary of themes and tallies of the governance answers. Each tester's `concord/feedback/` folder in their pod is shared read-only with the admin WebIDs (WAC on the Community Solid Server; ACP is written instead on servers that use it). An admin who signed in with their WebID can press *Read as my WebID* there to read the folders straight from the pods: the pods decide, not Concord.
+
+Testers are told this on the feedback page, before they start, beside the submit button and after they send:
+
+> **Who can read your feedback:** the Concord alpha team (this site's administrators) can read everything you send, including your name and email if you give them. Other testers can't. When you're signed in, we also save a copy in your Solid pod (in concord/feedback/) and share that folder read-only with the team's WebID, so they can read it there too.
+
+with the WebIDs listed underneath.
 
 ## Resetting
 

@@ -19,6 +19,7 @@ import type {
   CompetencyQuestion,
   FeedbackQuestion,
   FeedbackSubmission,
+  PodFeedbackReport,
   GovernancePolicy,
   GovernanceTemplateId,
   InterviewSession,
@@ -164,6 +165,8 @@ export const api = {
   logout: () => post<Record<string, never>>('/api/auth/logout'),
   personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
+  /** Sign in with a WebID (or the address of a Solid provider). */
+  solidLoginUrl: (webId: string, returnTo?: string) => `/auth/solid${qs({ webId, returnTo })}`,
 
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
@@ -259,6 +262,7 @@ export const api = {
     post<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>('/api/feedback', body as unknown as Json),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
+  podFeedback: () => get<PodFeedbackReport>('/api/feedback/pods'),
   // Alpha testing: the tester's own account and the app versions they've tested
   alphaMe: () => get<AlphaMe>('/api/alpha/me'),
   alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),

@@ -53,9 +53,18 @@ importers:
       express-rate-limit:
         specifier: ^8.7.1
         version: 8.7.1(express@5.3.0)
+      jose:
+        specifier: ^6.2.12
+        version: 6.2.12
       marked:
         specifier: ^18.1.1
         version: 18.1.1
+      n3:
+        specifier: ^2.13.12
+        version: 2.13.12
+      openid-client:
+        specifier: 5.7.1
+        version: 5.7.1
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -69,6 +78,9 @@ importers:
       '@types/express':
         specifier: ^5.0.6
         version: 5.0.6
+      '@types/n3':
+        specifier: ^1.26.4
+        version: 1.26.4
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5

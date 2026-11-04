@@ -16,6 +16,8 @@ export async function createUser(input: {
   organisation?: string;
   id?: string;
   isPlatformAdmin?: boolean;
+  /** Their own WebID (signed in with Solid). They still get a pod here for what Concord saves for them. */
+  webId?: string;
 }): Promise<User> {
   const id = input.id ?? newId('usr');
   const base: User = {
@@ -23,7 +25,7 @@ export async function createUser(input: {
     name: input.name,
     email: input.email,
     avatarUrl: input.avatarUrl,
-    webId: solid.localWebId(id),
+    webId: input.webId ?? solid.localWebId(id),
     providers: [{ provider: input.provider, subject: input.subject }],
     simulated: input.simulated,
     persona: input.persona,
@@ -34,7 +36,7 @@ export async function createUser(input: {
   // Every account gets a WebID and pod without having to know about Solid.
   try {
     const { webId, podUrl } = await solid.provision(base);
-    base.webId = webId;
+    base.webId = input.webId ?? webId;
     base.podUrl = podUrl;
   } catch (err) {
     console.warn(`[solid] could not provision pod for ${base.name}: ${(err as Error).message}`);
@@ -55,13 +57,15 @@ export function findByProvider(provider: AuthProvider, subject: string): User | 
  * checked the OAuth state, so the browser started this sign-in). When the
  * identity is new it is attached to that account, so what they saved stays theirs.
  */
-export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }, linkTo?: User) {
+export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string; webId?: string }, linkTo?: User) {
   const existing = findByProvider(p.provider, p.subject);
   if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
     const linked = get<User>('users', linkTo.id);
     if (linked) {
       linked.providers.push({ provider: p.provider, subject: p.subject });
       linked.name = p.name;
+      // Signing in with their own WebID makes it the account's WebID.
+      if (p.webId) linked.webId = p.webId;
       linked.email ??= p.email;
       linked.avatarUrl ??= p.avatarUrl;
       return put('users', linked);

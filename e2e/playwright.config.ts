@@ -41,7 +41,7 @@ export default defineConfig({
   projects: [
     {
       name: 'local',
-      testIgnore: /live\.spec\.ts/,
+      testIgnore: [/live\.spec\.ts/, /solid-.*\.spec\.ts/],
       use: { baseURL: `http://localhost:${WEB_PORT}` },
     },
     {

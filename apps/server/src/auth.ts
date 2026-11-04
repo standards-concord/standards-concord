@@ -3,7 +3,8 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
-import { createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
+import { allUsers, createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
+import { clientIdDocument, endLogin, finishLogin, resolveIssuer, SolidLoginError, startLogin } from './solidOidc.js';
 import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
@@ -17,13 +18,16 @@ declare global {
   }
 }
 
+/** Identities people can sign in with again from anywhere (not demo accounts). */
+export const LASTING_PROVIDERS = ['google', 'github', 'solid'] as const;
+
 /**
  * Deployment administrators: an account whose WebID is in ADMIN_WEBIDS (or, the
  * older way, whose verified email is in ADMIN_EMAILS). It must be signed in with
- * Google or GitHub: demo accounts and simulated personas never count.
+ * Google, GitHub or their own WebID (Solid): demo accounts and simulated personas never count.
  */
 export function isAdmin(user: User): boolean {
-  const federated = user.providers.some((p) => p.provider === 'google' || p.provider === 'github');
+  const federated = user.providers.some((p) => (LASTING_PROVIDERS as readonly string[]).includes(p.provider));
   if (!federated || user.simulated) return false;
   if (user.webId && config.adminWebIds.includes(user.webId)) return true;
   return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
@@ -55,10 +59,33 @@ const google = () =>
 const github = () =>
   config.github.clientId && config.github.clientSecret ? new arctic.GitHub(config.github.clientId, config.github.clientSecret, `${config.publicUrl}/auth/github/callback`) : undefined;
 
-export const providers = () => ({ google: !!google(), github: !!github(), demo: config.demoMode });
+export const providers = () => ({ google: !!google(), github: !!github(), solid: config.solidOidc.enabled, demo: config.demoMode });
+
+/**
+ * Administrators who signed in with Solid keep their login (a DPoP-bound token, in
+ * memory only) so Concord can read testers' pods as their WebID. Everyone else's
+ * Solid tokens are thrown away straight after sign-in: we only needed to know who they are.
+ */
+const adminLogins = new Map<string, string>();
+export const adminLoginFor = (userId: string) => adminLogins.get(userId);
+export async function endAdminLogin(userId: string | undefined) {
+  if (!userId) return;
+  await endLogin(adminLogins.get(userId));
+  adminLogins.delete(userId);
+}
+
+/**
+ * WebIDs Concord provisioned (each person's pod here) or serves itself can't be
+ * used to sign in with Solid: they belong to accounts that sign in another way.
+ */
+function managedWebId(webId: string) {
+  if (webId.startsWith(`${config.publicUrl}/people/`)) return true;
+  return allUsers().some((u) => u.webId === webId && !u.providers.some((p) => p.provider === 'solid' && p.subject === webId));
+}
 
 const tmpCookie = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: config.publicUrl.startsWith('https://'), maxAge: 10 * 60 * 1000, path: '/' });
 const OAUTH_COOKIES = ['oauth_state', 'oauth_verifier', 'oauth_return'];
+const SOLID_COOKIE = 'solid_login';
 
 /**
  * The callback must carry the state this browser was given when it started
@@ -96,7 +123,11 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
   signInAs(req, res, user.id);
   return user;
 }
-const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/');
+const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
+
+/** Back to the login page with a message, rather than a bare error page. */
+const loginError = (res: Response, returnTo: string, message: string) =>
+  res.redirect(`${config.webUrl}/login?${new URLSearchParams({ next: returnTo, solidError: message.slice(0, 300) })}`);
 
 /**
  * Sign in with Google or GitHub. A WebID and Solid pod are provisioned on first
@@ -147,5 +178,56 @@ export function mountAuth(router: Router) {
     const email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
     await federatedSignIn(req, res, { provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
     res.redirect(`${config.webUrl}${returnTo}`);
+  });
+
+  /*
+   * Sign in with your own WebID (Solid-OIDC with DPoP). The WebID becomes the
+   * account's WebID, so ADMIN_WEBIDS can name it directly.
+   */
+  router.get('/auth/solid/client.jsonld', (_req, res) => {
+    res.type('application/ld+json').set('Cache-Control', 'public, max-age=300').send(JSON.stringify(clientIdDocument(), null, 2));
+  });
+
+  router.get('/auth/solid', async (req, res) => {
+    if (!config.solidOidc.enabled) throw new HttpError(404, 'Signing in with Solid is turned off on this server');
+    const returnTo = safeReturn(req.query.returnTo);
+    // Only from Concord's own login page (or a typed address): otherwise a link elsewhere could
+    // use this route to send people to any site that calls itself a Solid provider.
+    if (req.get('sec-fetch-site') === 'cross-site' || req.get('sec-fetch-site') === 'same-site')
+      return loginError(res, returnTo, 'Start signing in with your WebID from this page.');
+    const input = typeof req.query.webId === 'string' ? req.query.webId.trim().slice(0, 2000) : '';
+    if (!input) return loginError(res, returnTo, 'Enter your WebID, or the address of your Solid provider.');
+    try {
+      const { issuer } = await resolveIssuer(input);
+      const { loginId, url } = await startLogin(issuer, returnTo);
+      res.cookie(SOLID_COOKIE, loginId, tmpCookie());
+      res.redirect(url);
+    } catch (err) {
+      if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] could not start sign-in: ${(err as Error).message}`);
+      loginError(res, returnTo, err instanceof SolidLoginError ? err.message : 'Couldn’t reach that Solid provider. Check the address and try again.');
+    }
+  });
+
+  router.get('/auth/solid/callback', async (req, res) => {
+    if (!config.solidOidc.enabled) throw new HttpError(404, 'Signing in with Solid is turned off on this server');
+    const loginId = req.cookies?.[SOLID_COOKIE] as string | undefined;
+    res.clearCookie(SOLID_COOKIE, { path: '/' });
+    let done;
+    try {
+      done = await finishLogin(loginId, `${config.publicUrl}${req.originalUrl}`);
+    } catch (err) {
+      if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] sign-in failed: ${(err as Error).message}`);
+      return loginError(res, '/', err instanceof SolidLoginError ? err.message : 'Sign-in with Solid failed. Please try again.');
+    }
+    if (managedWebId(done.webId)) {
+      await endLogin(done.loginId);
+      return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
+    }
+    const user = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
+    // Keep an administrator's login (to read testers' pods as them); drop everyone else's tokens.
+    await endAdminLogin(user.id);
+    if (isAdmin(user)) adminLogins.set(user.id, done.loginId);
+    else await endLogin(done.loginId);
+    res.redirect(`${config.webUrl}${done.returnTo}`);
   });
 }

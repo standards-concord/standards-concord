@@ -1,4 +1,5 @@
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
+import http from 'node:http';
 import https from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import type { Readable } from 'node:stream';
@@ -123,6 +124,10 @@ export interface SafeFetchOptions {
   allowPrivate?: boolean;
   /** Tests only: trust this CA certificate (PEM) as well. */
   ca?: string;
+  /** Accept header (default application/json). */
+  accept?: string;
+  /** Allow plain http too. Only for hosts the operator configured as trusted (and tests). */
+  allowHttp?: boolean;
 }
 
 /** The URL's host as an IP address, if it is written as one (WHATWG URLs normalise 2130706433 to 127.0.0.1). */
@@ -140,7 +145,7 @@ export function ipLiteral(url: URL): string | undefined {
 export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<string> {
   const maxBytes = opts.maxBytes ?? 64 * 1024;
   const timeoutMs = opts.timeoutMs ?? 5000;
-  if (url.protocol !== 'https:') return Promise.reject(new FetchError('bad-response', 'Only https URLs can be fetched'));
+  if (url.protocol !== 'https:' && !(opts.allowHttp && url.protocol === 'http:')) return Promise.reject(new FetchError('bad-response', 'Only https URLs can be fetched'));
   const literal = ipLiteral(url);
   if (literal && !opts.allowPrivate && !isPublicAddress(literal)) return Promise.reject(new FetchError('bad-response', `Refusing to connect to ${literal}: not a public address`));
   if (active >= MAX_CONCURRENT) return Promise.reject(new FetchError('busy', 'Too many metadata fetches in progress'));
@@ -157,11 +162,11 @@ export function safeFetchText(url: URL, opts: SafeFetchOptions = {}): Promise<st
       if (err) reject(err instanceof FetchError ? err : new FetchError('unavailable', err.message));
       else resolve(value!);
     };
-    const req = https.request(
+    const req = (url.protocol === 'http:' ? http : https).request(
       url,
       {
         method: 'GET',
-        headers: { Accept: 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': 'Concord OAuth' },
+        headers: { Accept: opts.accept ?? 'application/json', 'Accept-Encoding': 'identity', 'User-Agent': 'Concord' },
         // A fresh connection each time: no pooled socket outlives the fetch.
         agent: false,
         ...(opts.ca ? { ca: opts.ca } : {}),

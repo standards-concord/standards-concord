@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Session } from '@inrupt/solid-client-authn-node';
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
-import { get, put } from '../db.js';
+import { get, list, put } from '../db.js';
 import { slugify } from '../ids.js';
 
 /**
@@ -100,7 +100,8 @@ export const solid = {
     const base = config.solid.serverUrl!;
     const token = await platformAccountToken(base);
     const headers = { 'content-type': 'application/json', authorization: `CSS-Account-Token ${token}` };
-    const { controls } = await json(await fetch(`${base}/.account/`, { headers }));
+    // No content-type on the GET: CSS 7.3 then tries to parse the empty body as JSON and fails with a 500.
+    const { controls } = await json(await fetch(`${base}/.account/`, { headers: { authorization: headers.authorization } }));
     const name = `${slugify(user.name).slice(0, 24)}-${user.id.slice(-6)}`.toLowerCase();
     const pod = await json(await fetch(controls.account.pod, { method: 'POST', headers, body: JSON.stringify({ name }) }));
     const podUrl: string = pod.pod ?? `${base}/${name}/`;
@@ -148,6 +149,54 @@ export const solid = {
     return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
   },
 
+  /** Pods this server provisioned (user id and pod URL; never the credentials). */
+  pods(): { userId: string; podUrl: string; webId: string }[] {
+    return list<PodRecord>('kv')
+      .filter((r) => typeof r.id === 'string' && r.id.startsWith('pod:') && typeof r.podUrl === 'string')
+      .map((r) => ({ userId: r.id.slice(4), podUrl: r.podUrl, webId: r.webId }));
+  },
+
+  /** URL of a folder (relative path ending in /) in a user's pod, when it lives on the Solid server. */
+  folderUrl(userId: string, relFolder: string): string | undefined {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    return this.enabled && rec ? `${rec.podUrl}concord/${relFolder}` : undefined;
+  },
+
+  /**
+   * Give `readers` (WebIDs) read-only access to a folder in a user's pod and
+   * everything in it, alongside the pod owner's full control. Writes the folder's
+   * access control resource: a WAC .acl, or an ACP .acr if the server uses ACP.
+   * Rewritten whole each time, so a WebID taken off the list loses access.
+   * Skips the write when the folder is already shared with exactly these readers.
+   */
+  async shareRead(userId: string, relFolder: string, readers: string[], opts: { create?: boolean; force?: boolean } = {}): Promise<'shared' | 'unchanged' | 'missing' | 'local'> {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    if (!this.enabled || !rec) return 'local';
+    const want = [...new Set(readers)].sort();
+    const key = `share:${userId}:${relFolder}`;
+    const prev = get<Kv<string[]>>('kv', key);
+    if (!opts.force && prev && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
+    const s = await sessionFor({ ...rec, id: userId });
+    const folder = `${rec.podUrl}concord/${relFolder}`;
+    let head = await s.fetch(folder, { method: 'HEAD' });
+    if (head.status === 404) {
+      if (!opts.create) return 'missing';
+      const made = await s.fetch(folder, { method: 'PUT', headers: { 'content-type': 'text/turtle' }, body: '' });
+      if (!made.ok) throw new Error(`PUT ${folder} → ${made.status}`);
+      head = await s.fetch(folder, { method: 'HEAD' });
+    }
+    if (!head.ok) throw new Error(`HEAD ${folder} → ${head.status}`);
+    const link = parseLinks(head.headers.get('link'), folder);
+    const acl = link.find((l) => l.rel === 'acl')?.url;
+    if (!acl) throw new Error(`${folder} has no access control resource (Link rel="acl")`);
+    const acp = acl.endsWith('.acr') || link.some((l) => l.rel === 'type' && l.url === 'http://www.w3.org/ns/solid/acp#AccessControlResource');
+    const body = acp ? acpDocument(folder, rec.webId, want) : wacDocument(folder, rec.webId, want);
+    const res = await s.fetch(acl, { method: 'PUT', headers: { 'content-type': 'text/turtle' }, body });
+    if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
+    put('kv', { id: key, value: want });
+    return 'shared';
+  },
+
   /** A minimal WebID profile document for locally-hosted WebIDs. */
   profileDocument(user: User): string {
     const me = this.localWebId(user.id);
@@ -163,6 +212,78 @@ export const solid = {
 `;
   },
 };
+
+/** Parse an HTTP Link header into absolute URLs and their rel values. */
+export function parseLinks(header: string | null, base: string): { url: string; rel: string }[] {
+  if (!header) return [];
+  const out: { url: string; rel: string }[] = [];
+  for (const m of header.matchAll(/<([^>]*)>\s*((?:;\s*[^;,]+)*)/g)) {
+    const rels = m[2]?.match(/rel\s*=\s*"?([^";,]+)"?/i)?.[1]?.trim().split(/\s+/) ?? [];
+    let url: string;
+    try {
+      url = new URL(m[1]!, base).href;
+    } catch {
+      continue;
+    }
+    for (const rel of rels) out.push({ url, rel });
+  }
+  return out;
+}
+
+const iri = (u: string) => {
+  // Only http(s) IRIs without characters that would break out of <...>.
+  if (!/^https?:\/\/[^\s<>"{}|\\^`]+$/.test(u)) throw new Error(`Not a usable IRI: ${u}`);
+  return `<${u}>`;
+};
+
+/** WAC: the owner keeps full control; readers may read the folder and everything in it. */
+export function wacDocument(folder: string, owner: string, readers: string[]): string {
+  const lines = [
+    '@prefix acl: <http://www.w3.org/ns/auth/acl#> .',
+    '',
+    `<#owner> a acl:Authorization ;
+  acl:agent ${iri(owner)} ;
+  acl:accessTo ${iri(folder)} ;
+  acl:default ${iri(folder)} ;
+  acl:mode acl:Read, acl:Write, acl:Control .`,
+  ];
+  if (readers.length)
+    lines.push(
+      '',
+      '# Concord administrators (ADMIN_WEBIDS) can read testers\' feedback. Testers are told this.',
+      `<#concord-admins> a acl:Authorization ;
+  acl:agent ${readers.map(iri).join(', ')} ;
+  acl:accessTo ${iri(folder)} ;
+  acl:default ${iri(folder)} ;
+  acl:mode acl:Read .`,
+    );
+  return `${lines.join('\n')}\n`;
+}
+
+/** ACP: the same policy as wacDocument, for servers that use Access Control Policies. */
+export function acpDocument(folder: string, owner: string, readers: string[]): string {
+  const controls = ['<#owner-access>', ...(readers.length ? ['<#admin-access>'] : [])].join(', ');
+  const lines = [
+    '@prefix acp: <http://www.w3.org/ns/solid/acp#> .',
+    '@prefix acl: <http://www.w3.org/ns/auth/acl#> .',
+    '',
+    `<> a acp:AccessControlResource ;
+  acp:resource ${iri(folder)} ;
+  acp:accessControl ${controls} ;
+  acp:memberAccessControl ${controls} .`,
+    '',
+    `<#owner-access> a acp:AccessControl ;
+  acp:apply [ a acp:Policy ; acp:allow acl:Read, acl:Write, acl:Control ; acp:anyOf [ a acp:Matcher ; acp:agent ${iri(owner)} ] ] .`,
+  ];
+  if (readers.length)
+    lines.push(
+      '',
+      '# Concord administrators (ADMIN_WEBIDS) can read testers\' feedback. Testers are told this.',
+      `<#admin-access> a acp:AccessControl ;
+  acp:apply [ a acp:Policy ; acp:allow acl:Read ; acp:anyOf [ a acp:Matcher ; acp:agent ${readers.map(iri).join(', ')} ] ] .`,
+    );
+  return `${lines.join('\n')}\n`;
+}
 
 /** Serialise an interview transcript as Turtle (schema.org Conversation) for the pod. */
 export function transcriptToTurtle(sessionId: string, title: string, messages: { role: string; content: string; at: string }[]): string {
