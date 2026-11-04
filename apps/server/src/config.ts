@@ -70,10 +70,10 @@ export const config = {
     /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
     perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
     /**
-     * GitHub accounts the triage routine comments as (comma-separated). Withdrawal deletes
-     * their footer-signed comments. Defaults to the token's own account.
+     * Bearer token for the triage routine's endpoints (/api/feedback/triage/...). The routine
+     * comments and labels only through them, so each comment's id is recorded for withdrawal.
      */
-    triageLogins: (process.env.FEEDBACK_TRIAGE_LOGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    triageToken: process.env.FEEDBACK_TRIAGE_TOKEN || undefined,
   },
 
   meetBot: {

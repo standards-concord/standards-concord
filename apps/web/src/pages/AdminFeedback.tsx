@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from 'react';
 import type { FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
 import { Download, Mic, ListChecks } from 'lucide-react';
-import { api } from '../api';
+import { api, type PublicationNeedingAdmin } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { download, formatDate } from '../lib/format';
 import { Page } from '../components/Shell';
@@ -13,50 +13,96 @@ function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
   return Array.isArray(v) ? v.join('; ') : String(v);
 }
 
-/** The tester's opt-in public summary: its issue, or where it is in the queue, with actions when it needs an administrator. */
+/** The tester's opt-in public summary on its feedback row: its issue, or where it is in the queue. */
 function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
-  const [state, setState] = useState(p.state);
-  const [stuck, setStuck] = useState(!!p.adminNeeded);
-  const resolve = useAction(async (action: 'check' | 'repost' | 'confirm') => {
-    const next = await api.resolveFeedbackPublication(p.id!, action);
-    setState(next.state);
-    setStuck(false);
-  });
   return (
-    <span className="block text-xs" onClick={(e) => e.stopPropagation()} title={p.summary}>
+    <span className="block text-xs" title={p.summary}>
       {p.issue ? (
-        <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer">
+        <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
           Public: issue #{p.issue.number}
         </a>
       ) : (
-        <span className="text-muted">Public summary: {state}</span>
-      )}
-      {state === 'needs-admin' && (
-        <span className="mt-1 block">
-          {p.lastError && <span className="block text-muted">{p.lastError}</span>}
-          {p.marker && <span className="block text-muted">Search GitHub for {p.marker} before posting again.</span>}
-          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('check')}>
-            Check GitHub again
-          </Button>
-          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('repost')}>
-            Post again
-          </Button>
+        <span className="text-muted">
+          Public summary: {p.state}
+          {p.adminNeeded || p.state === 'needs-admin' ? ' (see “Public summaries waiting for you”)' : ''}
         </span>
       )}
-      {state === 'withdrawing' && stuck && (
-        <span className="mt-1 block">
-          {p.lastError && <span className="block text-muted">{p.lastError}</span>}
-          {p.marker && <span className="block text-muted">Search GitHub for {p.marker}. If it is there, delete or edit it by hand.</span>}
-          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('check')}>
-            Check GitHub again
-          </Button>
-          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('confirm')}>
-            Confirm nothing is posted
-          </Button>
-        </span>
-      )}
-      <InlineError error={resolve.error} />
     </span>
+  );
+}
+
+/** One summary waiting for a decision: say which issue is ours, or that none is. */
+function PublicationDecision({ p, onDone }: { p: PublicationNeedingAdmin; onDone: () => void }) {
+  const [issue, setIssue] = useState('');
+  const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[1]) => {
+    await api.resolveFeedbackPublication(p.id, body);
+    onDone();
+  });
+  const withdrawing = p.state === 'withdrawing';
+  const n = Number(issue);
+  return (
+    <li className="space-y-2 border-t border-border p-4 first:border-t-0" aria-label={`Public summary: ${p.summary}`}>
+      <p className="text-sm">
+        <Badge>{withdrawing ? 'Withdrawal' : 'Post with unknown outcome'}</Badge> {p.feedbackDeleted && <Badge>Feedback deleted</Badge>}
+      </p>
+      <blockquote className="border-l-2 border-border pl-3 text-sm">{p.summary}</blockquote>
+      {p.reason && <p className="text-xs text-muted">{p.reason}</p>}
+      <p className="text-xs text-muted">
+        Its marker on GitHub is <code>{p.marker}</code> in {p.repo}.
+      </p>
+      {!p.issue && (
+        <div className="flex flex-wrap items-center gap-2">
+          {p.candidates.map((c) => (
+            <span key={c.number} className="flex items-center gap-1">
+              <a className="text-sm text-accent underline" href={c.url} target="_blank" rel="noreferrer">
+                Issue #{c.number}
+              </a>
+              <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'adopt', issue: c.number })}>
+                This is it (#{c.number})
+              </Button>
+            </span>
+          ))}
+          {!p.candidates.length && <span className="text-xs text-muted">No likely issues were found.</span>}
+          <label className="flex items-center gap-1 text-xs">
+            Issue number
+            <input className="w-20 rounded border border-border bg-transparent px-1 py-0.5" inputMode="numeric" value={issue} onChange={(e) => setIssue(e.target.value.replace(/\D/g, ''))} />
+          </label>
+          <Button size="sm" variant="ghost" disabled={!(n > 0)} loading={act.pending} onClick={() => void act.run({ action: 'adopt', issue: n })}>
+            Use this issue
+          </Button>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'check' })}>
+          Check GitHub again
+        </Button>
+        {withdrawing ? (
+          <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'confirm' })}>
+            Confirm nothing is left on GitHub
+          </Button>
+        ) : (
+          <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'repost' })}>
+            None is ours: post again
+          </Button>
+        )}
+      </div>
+      <InlineError error={act.error} />
+    </li>
+  );
+}
+
+function PublicationsNeedingAdmin() {
+  const list = useAsync(() => api.publicationsNeedingAdmin(), []);
+  if (!list.data?.length) return null;
+  return (
+    <Card className="mb-6">
+      <CardHeader title="Public summaries waiting for you" />
+      <ul>
+        {list.data.map((p) => (
+          <PublicationDecision key={p.id} p={p} onDone={list.reload} />
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -151,6 +197,7 @@ export function AdminFeedbackPage() {
         }
       />
       <InlineError error={sum.error} />
+      <PublicationsNeedingAdmin />
       {summary && (
         <Card className="mb-6">
           <CardHeader icon={ListChecks} title="Summary" />

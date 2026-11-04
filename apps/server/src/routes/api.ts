@@ -12,7 +12,22 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
-import { checkPublicSummary, issuesEnabled, processWithin, publicationFor, queuePublication, resolvePublication, marker, status, withdrawPublication } from '../services/feedbackIssues.js';
+import {
+  checkPublicSummary,
+  issuesEnabled,
+  processWithin,
+  publicationFor,
+  publicationsNeedingAdmin,
+  queuePublication,
+  resolvePublication,
+  status,
+  triageEnabled,
+  triagePublication,
+  triageQueue,
+  triageTokenMatches,
+  withdrawPublication,
+  type AdminAction,
+} from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -96,6 +111,8 @@ const PUBLIC_READS = [
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
   /^\/feedback\/publishing$/,
+  // Checks the triage routine's own bearer token.
+  /^\/feedback\/triage\/queue$/,
   /^\/oauth\/requests\/[^/]+$/,
 ];
 
@@ -530,9 +547,34 @@ export function apiRouter(): Router {
   });
   r.post('/feedback/:id/publication/resolve', (req, res) => {
     feedbackAdmin(req);
-    const action = req.body?.action;
-    if (action !== 'check' && action !== 'repost' && action !== 'confirm') throw new HttpError(400, 'action must be check, repost or confirm');
-    res.json(resolvePublication(String(req.params.id), action));
+    const { action, issue } = req.body ?? {};
+    let a: AdminAction;
+    if (action === 'adopt') {
+      if (!Number.isInteger(issue) || issue <= 0) throw new HttpError(400, 'issue must be an issue number');
+      a = { action, issue };
+    } else if (action === 'check' || action === 'repost' || action === 'confirm') a = { action };
+    else throw new HttpError(400, 'action must be check, adopt, repost or confirm');
+    res.json(resolvePublication(String(req.params.id), a));
+  });
+  // Public summaries waiting for an administrator, listed apart from feedback (whose row may be deleted).
+  r.get('/feedback/publications/attention', (req, res) => {
+    feedbackAdmin(req);
+    res.json(publicationsNeedingAdmin());
+  });
+  // The hourly triage routine: reads its queue and writes only through these, with its own token.
+  const triageAuth = (req: Request) => {
+    if (!triageEnabled()) throw new HttpError(404, 'Triage is not switched on');
+    if (!triageTokenMatches(req.header('authorization'))) throw new HttpError(401, 'Triage token required');
+  };
+  r.get('/feedback/triage/queue', (req, res) => {
+    triageAuth(req);
+    res.json(triageQueue());
+  });
+  r.post('/feedback/triage/:issue', async (req, res) => {
+    triageAuth(req);
+    const n = Number(req.params.issue);
+    if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'Not an issue number');
+    res.json(await triagePublication(n, req.body ?? {}));
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
@@ -545,8 +587,7 @@ export function apiRouter(): Router {
     res.json(
       listFeedback().map((s) => {
         const pub = publicationFor(s.id);
-        const waiting = pub?.state === 'needs-admin' || !!pub?.adminNeeded;
-        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError, adminNeeded: pub.adminNeeded, marker: waiting ? marker(pub.pubId) : undefined } } : s;
+        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, adminNeeded: pub.adminNeeded } } : s;
       }),
     );
   });

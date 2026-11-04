@@ -155,6 +155,20 @@ export type VoteChoice = 'yes' | 'no' | 'abstain';
 
 /* ---------------------------------------------------------------- routes */
 
+/** A public feedback summary waiting for an administrator's decision. */
+export interface PublicationNeedingAdmin {
+  id: string;
+  state: 'needs-admin' | 'withdrawing';
+  summary: string;
+  repo: string;
+  marker: string;
+  issue?: { number: number; url: string };
+  candidates: { number: number; url: string }[];
+  reason?: string;
+  feedbackDeleted: boolean;
+  createdAt: string;
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
@@ -256,7 +270,9 @@ export const api = {
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
   feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
   withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
-  resolveFeedbackPublication: (feedbackId: string, action: 'check' | 'repost' | 'confirm') => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { action }),
+  resolveFeedbackPublication: (feedbackId: string, body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number }) =>
+    post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, body),
+  publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),

@@ -15,8 +15,7 @@ To post anything, a tester ticks **Also post a short public summary as a GitHub 
 - **Consent is recorded.** Each publication stores the version of the notice the tester agreed to (`PUBLIC_NOTICE_VERSION`).
 - **Withdrawable.** After submitting, the tester can withdraw the summary.
   - If it hasn't been posted, it never will be.
-  - If it has, the issue's title and text are replaced, the issue is closed, and the triage routine's comments on it are deleted. For a day afterwards, the server also deletes any triage comment that raced the withdrawal. GitHub keeps an edit history that people who can see the repository can open.
-  - Only the routine's own comments are deleted: written by one of its accounts (`FEEDBACK_TRIAGE_LOGINS`, or else the token's own account), read from GitHub's author field, and ending with its exact footer. Every page of comments is read before any is deleted; if there are more than 5,000, the withdrawal stays open and is retried rather than reported done.
+  - If it has, the issue's title and text are replaced, the issue is closed, and the triage comments the server posted on it are deleted by their recorded ids. Nothing else is deleted: other people's comments, and any comment the server didn't post itself, stay. GitHub keeps an edit history that people who can see the repository can open.
   - If the feedback itself is deleted, its summary is withdrawn the same way, whatever state it is in (including waiting for an administrator).
 
 Feedback given before this existed is never posted, because those testers didn't opt in.
@@ -29,12 +28,13 @@ Each submission gets one record in `feedbackPublications`, keyed by the feedback
 - **Fenced state machine.** The states are `queued → sending → filed`. An unknown outcome becomes `unknown`, then either `filed` or `needs-admin`. A withdrawal moves the record to `withdrawing`, then `withdrawn`, which is terminal.
   - A worker changes a record only while it holds the record's claim id. A worker whose claim ran out can't change it any more.
   - The transaction that authorises a POST re-checks that the record is still queued, that the feedback still exists, that the queue isn't paused, and that there's room under the cap. It saves the send time in the same step.
-- **No automatic reposting.** If a POST's outcome is unknown (timeout, dropped connection, 5xx, or a worker that vanished), the server never posts again on its own.
-  - It searches every issue the token's own account created since just before the send, and accepts the one carrying this summary's marker. The marker is a random id written into the body before the POST, so an issue is still found after someone edits its title or text.
-  - Several matches, too many issues to search, or three complete searches with no match all leave the record `needs-admin`.
-  - On the Feedback admin page, an administrator can **Check GitHub again** or, after searching GitHub for the marker shown there, **Post again**.
-- **Ids are saved as soon as they are known.** The issue number is saved the moment the POST answers or a search finds it, and a withdrawal saves that it has replaced the issue and which comments it still has to delete before it deletes them. A withdrawal interrupted part-way carries on from those ids; it never searches by title or matches on text.
-- **A withdrawal never succeeds by not finding something.** If a summary might have been posted but no issue with its marker can be found, the withdrawal stays open. After three searches it asks an administrator, who can **Check GitHub again** or, after searching for the marker, **Confirm nothing is posted**.
+- **Nothing is matched on content.** The server only acts on ids it recorded itself: the issue number from GitHub's answer to the POST (or from an administrator), and the id of each comment it posted for the triage routine.
+- **No automatic reposting or adopting.** If a POST's outcome is unknown (timeout, dropped connection, 5xx, or a worker that vanished), the server never posts again and never picks an issue on its own.
+  - It lists candidates: issues the token's own account created since just before the send that carry the summary's marker or title. They are only shown, never used.
+  - The record goes to `needs-admin`. Under **Public summaries waiting for you** on the Feedback admin page, an administrator opens the candidates and chooses **This is it**, types an issue number they found, **Checks GitHub again**, or chooses **None is ours: post again**.
+- **Ids are saved as soon as they are known.** A withdrawal saves that it has replaced the issue, and deletes the recorded comment ids one at a time, removing each from the record as it goes (a comment that's already gone counts as deleted). A withdrawal interrupted part-way carries on from what's saved.
+- **A withdrawal never succeeds by not finding something.** If a summary may have been posted but its issue number was never recorded, or a triage comment may have been posted without its id being recorded, the withdrawal waits for an administrator. They say which issue it is, or check GitHub by hand and **Confirm nothing is left on GitHub**.
+- **Administrators see every record waiting for them**, in its own list, even when the feedback it came from has been deleted.
 - **Rate limits.**
   - At most `FEEDBACK_ISSUES_PER_HOUR` issues are created in any rolling hour (default 10, matching the triage routine). The cap is stored per repository in the database.
   - The shared pause is checked before every request: posts, searches, edits and comment deletions.
@@ -61,4 +61,11 @@ Without the token, the option isn't shown.
 
 ## Hourly triage
 
-A scheduled Claude session can triage these issues every hour. It only adds labels and posts one comment per issue, and never closes issues or changes code. Its prompt, what has to be in place before it's switched on, and the labels it uses are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until its tools are restricted at claude.ai.
+A scheduled Claude session can triage these issues every hour. It writes nothing to GitHub itself: it reads its queue from the server and sends its decision back, and the server posts the one comment and applies labels from a fixed list. That way the server records every comment's id (so a withdrawal deletes exactly those), refuses to comment once a summary is withdrawn, and makes a withdrawal wait while a comment is being posted.
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /api/feedback/triage/queue` | Up to 10 filed summaries not yet triaged, oldest first (`issue`, `url`, `summary`), and the last 100 triaged ones for spotting duplicates |
+| `POST /api/feedback/triage/<issue>` | `{ kind, size, needsJesse?, possibleDuplicateOf?, comment }`. `kind` is one of bug, enhancement, ux, docs, question, insight; `size` is size:small or size:large. The comment follows the same rules as testers' summaries (plain text, no links, email addresses or @mentions, at most 500 characters). The server adds the footer, the labels and `triaged`, and removes `needs-triage`. A second call on the same issue is refused; after a failure part-way it finishes the labels without a second comment. |
+
+Both need `Authorization: Bearer <FEEDBACK_TRIAGE_TOKEN>`; without that key on the server they answer 404. The routine's prompt and what has to be in place before it's switched on are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until then.
