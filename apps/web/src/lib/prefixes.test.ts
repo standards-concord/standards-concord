@@ -37,3 +37,19 @@ describe('insertTerm', () => {
     expect(insertTerm(`PREFIX vol: <https://other.example/>\n`, 'sparql', 'vol', NS, IRI)).toEqual({ text: `<${IRI}>` });
   });
 });
+
+describe('declaredPrefixes: the awkward cases', () => {
+  it('ignores declarations inside long strings', () => {
+    const doc = `SELECT * WHERE { ?s ?p """\nPREFIX vol: <${NS}>\n""" }`;
+    expect(declaredPrefixes(doc).has('vol')).toBe(false);
+    expect(insertTerm(doc, 'sparql', 'vol', NS, IRI).declaration).toBeDefined();
+  });
+  it('reads a declaration with comments between its tokens', () => {
+    const doc = `PREFIX # the wrong one\nvol: <https://wrong.example/>\nSELECT * WHERE { ?x a `;
+    expect(declaredPrefixes(doc).get('vol')).toBe('https://wrong.example/');
+    expect(insertTerm(doc, 'sparql', 'vol', NS, IRI)).toEqual({ text: `<${IRI}>` });
+  });
+  it('does not take part of a prefixed name for the keyword', () => {
+    expect(declaredPrefixes(`SELECT * WHERE { ?s ex:PREFIX vol: <${NS}> }`).has('vol')).toBe(false);
+  });
+});

@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { ArrowRight, CornerDownRight, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { FILTER_LABELS, isRequired, newStep, pathLabels, updateStep, allSteps, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
+import { FILTER_LABELS, fitsControl, isRequired, newStep, pathLabels, updateStep, allSteps, usesBooleanChoice, usesNumberInput, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
 import { Button, Input, Select, Toggle } from '../ui';
 import { GROUP_LABELS, propertyOptions, type PropertyOption } from './schema';
 
@@ -70,7 +70,15 @@ function StepRow({
         <span className="mx-1 h-5 w-px bg-line" />
         <Select
           value={step.filter?.op ?? ''}
-          onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: e.target.value ? { op: e.target.value as FilterOp, value: s.filter?.value ?? '' } : undefined }))}
+          onChange={(e) =>
+            onChange(step.id, (s) => {
+              if (!e.target.value) return { ...s, filter: undefined };
+              const op = e.target.value as FilterOp;
+              // Keep the value only if the new operator's control can show it, so the screen and the query agree.
+              const kept = s.filter?.value ?? '';
+              return { ...s, filter: { op, value: fitsControl(type, op, kept) ? kept : '' } };
+            })
+          }
           aria-label="Filter"
           className="h-8 w-auto! text-xs"
         >
@@ -82,10 +90,10 @@ function StepRow({
           ))}
         </Select>
         {step.filter &&
-          (type === 'boolean' && (step.filter.op === 'equals' || step.filter.op === 'notEquals') ? (
+          (usesBooleanChoice(type, step.filter.op) ? (
             // Yes/no values get a yes/no choice, so "1" or "yes" can't silently compare as text.
             <Select
-              value={step.filter.value}
+              value={fitsControl(type, step.filter.op, step.filter.value) ? step.filter.value : ''}
               onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
               aria-label="Filter value"
               className="h-8 w-auto! text-xs"
@@ -101,7 +109,7 @@ function StepRow({
               value={step.filter.value}
               onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
               placeholder={type === 'resource' ? 'prefix:name or https://…' : type === 'number' ? 'a number' : 'some text'}
-              type={type === 'number' && ['equals', 'notEquals', 'gt', 'lt'].includes(step.filter.op) ? 'number' : 'text'}
+              type={usesNumberInput(type, step.filter.op) ? 'number' : 'text'}
               step="any"
               aria-label="Filter value"
               className="h-8 w-40! text-xs"

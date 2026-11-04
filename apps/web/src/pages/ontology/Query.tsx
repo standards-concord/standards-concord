@@ -118,22 +118,29 @@ export function QueryTab() {
   return <QueryWorkspace key={id} />;
 }
 
-/** Records in the sample data, by class: typed subjects, read by parsing the Turtle. */
-async function countRecords(data: string): Promise<Map<string, number>> {
+/**
+ * Records in the sample data: typed subjects, read by parsing the Turtle. Per
+ * class for choosing where to start, and in total counting each subject once
+ * even when it has several types.
+ */
+async function countRecords(data: string): Promise<{ byClass: Map<string, number>; total: number }> {
   const { SparqStore } = await sparqModule();
   const counts = new Map<string, number>();
+  let total = 0;
   try {
     const s = await SparqStore.fromString(data, 'turtle');
     try {
       const json = JSON.parse(s.queryJson('SELECT ?c (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a ?c } GROUP BY ?c')) as { results: { bindings: { c: { value: string }; n: { value: string } }[] } };
       for (const b of json.results.bindings) counts.set(b.c.value, Number(b.n.value));
+      const all = JSON.parse(s.queryJson('SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a ?c }')) as { results: { bindings: { n: { value: string } }[] } };
+      total = Number(all.results.bindings[0]?.n.value ?? 0);
     } finally {
       s.free();
     }
   } catch {
     /* Unparseable data counts as no records; Check data reports the error. */
   }
-  return counts;
+  return { byClass: counts, total };
 }
 
 function QueryWorkspace() {
@@ -188,7 +195,7 @@ function QueryWorkspace() {
   const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
 
   // How many records of each class the sample data has, for the dataset summary and the starting class.
-  const [recordCounts, setRecordCounts] = useState<Map<string, number>>();
+  const [recordCounts, setRecordCounts] = useState<{ byClass: Map<string, number>; total: number }>();
   useEffect(() => {
     let cancelled = false;
     const t = setTimeout(() => void countRecords(data).then((c) => !cancelled && setRecordCounts(c)), recordCounts ? 400 : 0);
@@ -198,7 +205,7 @@ function QueryWorkspace() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- recount when the data changes
   }, [data]);
-  const recordTotal = recordCounts ? [...recordCounts.values()].reduce((a, b) => a + b, 0) : undefined;
+  const recordTotal = recordCounts?.total;
 
   // Builder state: start from the first class that has instances in the sample data.
   const [model, setModel] = useLocalStorage<BuilderModel | null>(`concord.query.${id}.builder`, null);
@@ -207,7 +214,7 @@ function QueryWorkspace() {
     if (model && view.data.classes.some((c) => c.iri === model.rootClass)) return;
     // Prefer a class the sample data has records of, so the first run finds something.
     const live = view.data.classes.filter((c) => !c.deprecated);
-    const records = (iri: string) => recordCounts.get(iri) ?? 0;
+    const records = (iri: string) => recordCounts.byClass.get(iri) ?? 0;
     const preferred = [...live].sort((a, b) => records(b.iri) - records(a.iri))[0];
     if (!preferred) return;
     // Start with the class's first attribute (e.g. its title) as a column, so the first run shows something readable.

@@ -131,6 +131,36 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueTy
   return `STR(${v}) ${cmp} ${literal(value)}`;
 }
 
+/** Number properties compare numerically, through a number field. */
+export function usesNumberInput(type: ValueType, op: FilterOp): boolean {
+  return type === 'number' && (op === 'equals' || op === 'notEquals' || op === 'gt' || op === 'lt');
+}
+
+/** Yes/no properties pick true or false. */
+export function usesBooleanChoice(type: ValueType, op: FilterOp): boolean {
+  return type === 'boolean' && (op === 'equals' || op === 'notEquals');
+}
+
+/** Whether a filter value fits the control its operator shows, so what's on screen is what runs. */
+export function fitsControl(type: ValueType, op: FilterOp, value: string): boolean {
+  const v = value.trim();
+  if (usesNumberInput(type, op)) return isNumber(v);
+  if (usesBooleanChoice(type, op)) return v === 'true' || v === 'false';
+  return true;
+}
+
+/**
+ * The filter that actually applies: none when the value is empty or doesn't
+ * fit the control (e.g. "sixteen" left over in a restored draft after
+ * switching to "is more than", which the number field shows as empty).
+ */
+export function activeFilter(step: PathStep): { op: FilterOp; value: string } | undefined {
+  const f = step.filter;
+  const value = f?.value.trim();
+  if (!f || !value || !fitsControl(step.valueType ?? 'text', f.op, value)) return undefined;
+  return { op: f.op, value };
+}
+
 /**
  * True when this step must match because of something on it or below it: a
  * filter here or further down, or a step further down that records must have
@@ -139,7 +169,7 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueTy
  * control stays editable.
  */
 export function isRequired(step: PathStep): boolean {
-  return !!step.filter?.value.trim() || step.children.some((c) => !c.optional || isRequired(c));
+  return !!activeFilter(step) || step.children.some((c) => !c.optional || isRequired(c));
 }
 
 /** Readable names for every step's column: "offered by › label". */
@@ -185,11 +215,11 @@ export function buildSparql(model: BuilderModel, ctx: BuilderContext): BuiltQuer
       const pred = step.property === RDF_TYPE ? 'a' : compact(step.property);
       // A filtered path is required end to end: "offered by an organisation whose name
       // contains X" must not keep opportunities with another organisation, or none.
-      const filtered = !!step.filter?.value.trim();
+      const active = activeFilter(step);
       const wrap = step.optional && !isRequired(step);
       const ind = wrap ? `${indent}  ` : indent;
       const inner = [`${ind}?${subject} ${pred} ?${name} .`, ...walk(name, step.children, ind, name)];
-      const f = step.filter && filtered ? filterExpr(`?${name}`, step.filter, step.valueType ?? 'text', compact, ctx.prefixes) : null;
+      const f = active ? filterExpr(`?${name}`, active, step.valueType ?? 'text', compact, ctx.prefixes) : null;
       if (f) inner.push(`${ind}FILTER(${f})`);
       out.push(...(wrap ? [`${indent}OPTIONAL {`, ...inner, `${indent}}`] : inner));
     }

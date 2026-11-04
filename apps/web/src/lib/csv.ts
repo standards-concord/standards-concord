@@ -1,6 +1,12 @@
-/** One CSV field, quoted when it holds a comma, quote or line break (RFC 4180). */
+/**
+ * One CSV field, quoted when it holds a comma, quote or line break (RFC 4180).
+ * Text a spreadsheet would run as a formula (starting with =, +, -, @, tab or
+ * carriage return) gets a leading apostrophe so it opens as text, following
+ * OWASP's CSV injection advice. Plain numbers such as -5 are left alone.
+ */
 export function csvField(s: string): string {
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const safe = /^[=+\-@\t\r]/.test(s) && !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s) ? `'${s}` : s;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 /** Query results as CSV, with readable headings where there are labels. Headings are escaped like cells. */

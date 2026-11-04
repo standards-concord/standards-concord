@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SparqStore } from '@sparq-org/sparq';
-import { buildSparql, isRequired, newStep, pathLabels, updateStep, type BuilderModel } from './sparql-builder';
+import { activeFilter, buildSparql, isRequired, newStep, pathLabels, updateStep, type BuilderModel } from './sparql-builder';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -84,6 +84,19 @@ describe('buildSparql', () => {
     expect(isRequired(name)).toBe(false);
     const { query } = buildSparql(model({ steps: [org] }), { prefixes });
     expect(query).not.toContain('OPTIONAL');
+  });
+
+  it('a value its control can’t show is not applied, so the screen and the query agree', () => {
+    const age = { ...newStep(`${VOL}minimumAge`, 'number'), filter: { op: 'gt' as const, value: 'sixteen' } };
+    const active = { ...newStep(`${VOL}active`, 'boolean'), filter: { op: 'equals' as const, value: '1' } };
+    expect(activeFilter(age)).toBeUndefined();
+    expect(activeFilter(active)).toBeUndefined();
+    expect(isRequired(age)).toBe(false);
+    const { query } = buildSparql(model({ steps: [age, active] }), { prefixes });
+    expect(query).not.toContain('FILTER');
+    // Text operators still accept any text on a number property.
+    expect(activeFilter({ ...age, filter: { op: 'contains', value: 'sixteen' } })).toEqual({ op: 'contains', value: 'sixteen' });
+    expect(activeFilter({ ...active, filter: { op: 'equals', value: 'true' } })).toEqual({ op: 'equals', value: 'true' });
   });
 
   it('labels each column by its path', () => {

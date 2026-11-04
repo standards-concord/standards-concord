@@ -94,7 +94,9 @@ export function OntologyLayout() {
 
   const ctx = useMemo<OntologyCtx | undefined>(() => {
     const o = state.data;
-    if (!o) return undefined;
+    // While another ontology loads, the previous one's data is still here: wait rather than pair
+    // the new id with the old ontology's metadata (pages key drafts and defaults on both).
+    if (!o || (o.id !== id && o.slug !== id)) return undefined;
     const uid = session?.user?.id;
     const myRoles = o.members?.find((m) => m.userId === uid)?.roles ?? [];
     const users = new Map((o.members ?? []).map((m) => [m.userId, m.user]));

@@ -168,6 +168,12 @@ test.describe('Query tab', () => {
     await expect(page).toHaveURL(new RegExp(`/o/${b.id}/query`));
     const editor = page.getByTestId('sparql-editor');
     await expect(editor).not.toContainText('draft A');
+    // B's first draft starts from B's own defaults, not A's prefix or A's volunteering sample data.
+    await expect(editor).toContainText('sec:');
+    await expect(editor).not.toContainText('vol:');
+    await toggle(page, 'Check data').click();
+    await expect(page.getByTestId('data-editor')).not.toContainText('Northvale');
+    await toggle(page, 'Query ontology').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?b WHERE { ?b ?p ?o } # draft B');
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${a}`));
@@ -191,6 +197,25 @@ test.describe('Query tab', () => {
     // Sorting names each column by its path.
     await moreOptions(page);
     await expect(page.getByLabel('Sort by').locator('option', { hasText: 'offered by › label' })).toHaveCount(1);
+  });
+
+  test('changing the condition never leaves a hidden value in the query', async ({ page }) => {
+    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
+    const age = page.getByTestId('builder-step').filter({ hasText: 'minimum age' });
+    await age.getByLabel('Filter', { exact: true }).selectOption('contains');
+    await age.getByLabel('Filter value').fill('sixteen');
+    await page.getByText('The SPARQL this builds').click();
+    const sparql = page.getByText('The SPARQL this builds').locator('..').locator('..');
+    await expect(sparql).toContainText('CONTAINS(LCASE(STR(?minimumAge)), "sixteen")');
+    // A number condition shows a number field: the leftover text is cleared, and nothing hidden runs.
+    await age.getByLabel('Filter', { exact: true }).selectOption('lt');
+    await expect(age.getByLabel('Filter value')).toHaveAttribute('type', 'number');
+    await expect(age.getByLabel('Filter value')).toHaveValue('');
+    await expect(sparql).not.toContainText('FILTER');
+    await age.getByLabel('Filter value').fill('15');
+    await expect(sparql).toContainText('FILTER(?minimumAge < 15)');
+    await run(page);
+    await expect(results(page)).toContainText('Park clean-up');
   });
 
   test('the query shows which data it runs over, with a shortcut to edit it', async ({ page }) => {

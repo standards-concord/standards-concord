@@ -5,7 +5,11 @@
  */
 export function declaredPrefixes(doc: string): Map<string, string> {
   const out = new Map<string, string>();
-  const re = /<[^<>\s]*>|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|#[^\n]*|(?:@prefix|\bPREFIX)\s+([A-Za-z][\w.-]*)?:\s*<([^<>\s]*)>/gi;
+  // In order: IRIs (which may contain '#'); long strings, possibly unterminated while typing;
+  // short strings; comments; a declaration, with whitespace or comments allowed between its
+  // tokens; and any other word, so "ex:PREFIX" isn't read as the keyword.
+  const re =
+    /<[^<>\s]*>|"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|#[^\n]*|(?<![\w:?$@-])(?:@prefix|PREFIX)(?:\s|#[^\n]*(?:\n|$))+([A-Za-z][\w.-]*)?:(?:\s|#[^\n]*(?:\n|$))*<([^<>\s]*)>|[\w:?$@-]+/gi;
   for (const m of doc.matchAll(re)) {
     if (m[2] !== undefined) out.set(m[1] ?? '', m[2]);
   }
