@@ -8,7 +8,7 @@ import type {
   ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
   PropertyView, Restriction, TermAnnotations, TermView,
 } from './types.js';
-import { NS, RDF_TYPE, STANDARD_PREFIXES, localName, today } from './ns.js';
+import { NS, RDF_TYPE, STANDARD_PREFIXES, isSafeNamespace, isSafePrefix, localName, today } from './ns.js';
 import {
   cloneStore, firstObject, hasType, langLit, manchesterExpr, namedNode, nn, objects, readList,
   subjects, typedLit, quad, defaultGraph,
@@ -101,7 +101,8 @@ export class OntologyGraph {
     this.prefixes = { ...STANDARD_PREFIXES, ...prefixes };
     // Make sure the preferred prefix is usable for output.
     const pref = this.literalOf(this.ontologyIRI, NS.vann + 'preferredNamespacePrefix');
-    if (pref && !(pref in this.prefixes) && this.namespace) this.prefixes[pref] = this.namespace;
+    // Only a well-formed prefix: one from editable metadata such as "@import" must never reach a JSON-LD context.
+    if (pref && isSafePrefix(pref) && !(pref in this.prefixes) && this.namespace && isSafeNamespace(this.namespace)) this.prefixes[pref] = this.namespace;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -562,6 +563,8 @@ async function parseRdfXml(text: string, baseIRI?: string): Promise<OntologyGrap
 }
 
 async function parseJsonLd(doc: any): Promise<OntologyGraph> {
+  // An empty YAML-LD stream or null document stands for no data.
+  if (doc === null) return new OntologyGraph(new Store());
   const jsonld = (await import('jsonld')).default;
   // Never fetch remote contexts or @import: a document must not make the server request URLs.
   const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads', documentLoader: noRemoteDocuments as any }).catch((err: any) => {

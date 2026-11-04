@@ -7,7 +7,7 @@
  */
 import type { Store, Term } from 'n3';
 import type { ChangeOp, IRI, PropertyCharacteristic, Restriction, TermAnnotations } from './types.js';
-import { NS, RDF_TYPE, expandIRI, isBuiltinDatatype, isValidLocalName, isWellKnown, today } from './ns.js';
+import { NS, RDF_TYPE, expandIRI, isBuiltinDatatype, isSafeNamespace, isSafePrefix, isValidLocalName, isWellKnown, today } from './ns.js';
 import {
   blankNode, canonical, defaultGraph, langLit, literal, nn, objects, readList, removeBlankSubtree, subjects, typedLit, writeList,
   RDF_FIRST, RDF_REST,
@@ -602,6 +602,8 @@ export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): voi
     }
     const values = (Array.isArray(value) ? value : [value]).map(String).filter((v) => v !== '');
     for (const v of values) {
+      if (field === 'preferredPrefix' && !isSafePrefix(v)) fail(`preferredPrefix must be a prefix name such as vol (letters, digits, _ and -), not "${v.slice(0, 40)}"`);
+      if (field === 'preferredNamespace' && !isSafeNamespace(v)) fail(`preferredNamespace must be an absolute IRI such as https://w3id.org/odi/vol#, not "${v.slice(0, 60)}"`);
       let term: Term;
       switch (spec.kind) {
         case 'iri': term = nn(v); break;

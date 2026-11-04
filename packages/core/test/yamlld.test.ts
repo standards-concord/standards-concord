@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
-import { OntologyGraph } from '../src/index.js';
+import { OntologyGraph, applyChangeOps, serialize } from '../src/index.js';
 import { yamlLdToJson } from '../src/yamlld.js';
 
 const EX = 'https://example.org/e#';
@@ -57,7 +57,7 @@ describe('YAML-LD core requirements', () => {
     expect(() => yamlLdToJson('1: one')).toThrow(/keys must be strings/);
     expect(() => yamlLdToJson('? [a]\n: b')).toThrow(/keys must be strings/);
     expect(() => yamlLdToJson('%YAML 1.1\n---\na: no')).toThrow(/YAML 1\.2/);
-    expect(() => yamlLdToJson('just a string')).toThrow(/mapping or a sequence/);
+    expect(() => yamlLdToJson('just a string')).toThrow(/mapping, a sequence or null/);
     expect(() => yamlLdToJson('a: 1\na: 2')).toThrow();
   });
 
@@ -65,6 +65,21 @@ describe('YAML-LD core requirements', () => {
     // In YAML 1.2, no and 2020-01-01 are strings, and << is an ordinary key.
     expect(yamlLdToJson('a: no\nb: 2020-01-01\nc: 1.5\nd: null\ne: true\n"<<": x')).toEqual({ a: 'no', b: '2020-01-01', c: 1.5, d: null, e: true, '<<': 'x' });
     expect(yamlLdToJson('base: &b {x: 1}\nuse: *b')).toEqual({ base: { x: 1 }, use: { x: 1 } });
+  });
+
+  it('reads empty and null documents as no data', async () => {
+    expect(yamlLdToJson('')).toBeNull();
+    expect(yamlLdToJson('# only a comment\n')).toBeNull();
+    expect(yamlLdToJson('null')).toBeNull();
+    expect(yamlLdToJson('~')).toBeNull();
+    expect(yamlLdToJson('', { extractAllScripts: true })).toEqual([]);
+    expect(yamlLdToJson('---\n~\n---\n"@id": a\n', { extractAllScripts: true })).toEqual([{ '@id': 'a' }]);
+    expect((await OntologyGraph.parse('', 'yamlld')).store.size).toBe(0);
+  });
+
+  it('rejects a malformed stream, even past the document it reads', () => {
+    expect(() => yamlLdToJson('a: one\n---\na: [unterminated')).toThrow(/isn't valid/);
+    expect(() => yamlLdToJson('a: one\n---\n%YAML 1.1\n---\nb: two')).toThrow();
   });
 
   it('reads the first document of a stream, or all of them when asked', () => {
@@ -77,10 +92,61 @@ describe('YAML-LD core requirements', () => {
 
   it('bounds input size, nesting and expansion', () => {
     expect(() => yamlLdToJson(`a: "${'x'.repeat(2000)}"`, { maxBytes: 1000 })).toThrow(/over 1000 bytes/);
+    // Bytes, not characters: 400 two-byte characters are 800 bytes.
+    expect(() => yamlLdToJson(`a: "${'é'.repeat(400)}"`, { maxBytes: 600 })).toThrow(/over 600 bytes/);
+    expect(() => yamlLdToJson(`a: "${'é'.repeat(40)}"`, { maxExpandedBytes: 60 })).toThrow(/expands to over 60 bytes/);
+    expect(yamlLdToJson(`a: "${'é'.repeat(20)}"`, { maxExpandedBytes: 60 })).toEqual({ a: 'é'.repeat(20) });
+    // Aliases count at the depth where they are used: a shallow anchor reused deep inside nests past the limit.
+    const deep = `base: &b ${'['.repeat(40)}x${']'.repeat(40)}\nuse: ${'['.repeat(40)}*b${']'.repeat(40)}`;
+    expect(() => yamlLdToJson(deep)).toThrow(/nested more than 64/);
     expect(() => yamlLdToJson(`${'['.repeat(80)}${']'.repeat(80)}`)).toThrow(/nested more than 64/);
     // Each level doubles the size: small to write, large to expand.
     const lines = ['a0: &a0 ["xxxxxxxxxxxxxxxxxxxxxxxx"]'];
     for (let i = 1; i < 20; i++) lines.push(`a${i}: &a${i} [*a${i - 1}, *a${i - 1}]`);
     expect(() => yamlLdToJson(lines.join('\n'), { maxExpandedBytes: 1_000_000 })).toThrow(/expands to over|alias/i);
+    // Refused while building, long before 2^19 copies exist: well under a second.
+    const started = Date.now();
+    expect(() => yamlLdToJson(lines.join('\n'), { maxExpandedBytes: 50_000 })).toThrow(/expands to over 50000/);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('keeps __proto__ as an ordinary key', () => {
+    const v = yamlLdToJson('"__proto__": {polluted: true}') as Record<string, unknown>;
+    expect(Object.keys(v)).toEqual(['__proto__']);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(v)).toBe(Object.prototype);
+  });
+});
+
+describe('editable metadata can’t put JSON-LD keywords in a context', () => {
+  const ONT = (prefix: string, ns: string) => `@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+<https://example.org/e> a owl:Ontology ; vann:preferredNamespacePrefix "${prefix}" ; vann:preferredNamespaceUri "${ns}" .
+<https://example.org/e#Thing> a owl:Class .`;
+
+  it('refuses keyword prefixes and bad namespaces when metadata is edited', async () => {
+    const g = await OntologyGraph.fromTurtle(ONT('e', 'https://example.org/e#'));
+    for (const preferredPrefix of ['@import', '@context', '@vocab', 'a:b', 'has space', '']) {
+      if (!preferredPrefix) continue;
+      expect(() => applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix } }] as any), preferredPrefix).toThrow(/preferredPrefix must be a prefix name/);
+    }
+    expect(() => applyChangeOps(g, [{ op: 'setMetadata', set: { preferredNamespace: 'not an iri' } }] as any)).toThrow(/preferredNamespace must be an absolute IRI/);
+    expect(() => applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix: 'vol', preferredNamespace: 'https://w3id.org/odi/vol#' } }] as any)).not.toThrow();
+  });
+
+  it('never uses a stored keyword prefix, and never fetches its namespace, when writing JSON-LD', async () => {
+    const { hits, result } = await trap(async (base) => {
+      // As already stored on main before this check existed.
+      const g = await OntologyGraph.fromTurtle(ONT('@import', `${base}/context`));
+      expect(g.prefixes['@import']).toBeUndefined();
+      return [await serialize(g, 'jsonld'), await serialize(g, 'yamlld'), await serialize(g, 'turtle')];
+    });
+    expect(hits).toBe(0);
+    expect(result.status).toBe('fulfilled');
+    const [jsonld, yamlld, turtle] = (result as PromiseFulfilledResult<string[]>).value;
+    // The stored value is still data ("@import" as a literal), but never a context entry.
+    expect(Object.keys(JSON.parse(jsonld)['@context'])).not.toContain('@import');
+    expect(Object.keys((yamlLdToJson(yamlld) as Record<string, Record<string, unknown>>)['@context'])).not.toContain('@import');
+    expect(turtle).not.toMatch(/@prefix @import/);
   });
 });

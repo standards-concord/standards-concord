@@ -32,6 +32,18 @@ export const XSD: Record<string, string> = Object.fromEntries(
   ].map((n) => [n, NS.xsd + n]),
 );
 
+/**
+ * A namespace prefix that is safe everywhere it is written: a Turtle and
+ * SPARQL prefix name, and a JSON-LD term that is not a keyword (`@import`,
+ * `@context`) and has no colon. Anything else from editable metadata is
+ * ignored, so it can't change what a serialisation means or make JSON-LD
+ * processing load a context.
+ */
+export const isSafePrefix = (p: string): boolean => /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
+
+/** A namespace IRI safe to put in a context: absolute, with no spaces, quotes or angle brackets. */
+export const isSafeNamespace = (iri: string): boolean => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(iri);
+
 export const RDF_TYPE = NS.rdf + 'type';
 export const RDF_LANGSTRING = NS.rdf + 'langString';
 export const RDFS_LITERAL = NS.rdfs + 'Literal';

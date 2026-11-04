@@ -4,7 +4,7 @@
  */
 import type { Store, Term, Literal, Quad } from 'n3';
 import type { OutputFormat } from './types.js';
-import { NS, RDF_TYPE } from './ns.js';
+import { NS, RDF_TYPE, isSafeNamespace, isSafePrefix } from './ns.js';
 import { canonical, nn, readList } from './rdf.js';
 import { writeNTriples } from './turtle.js';
 import type { OntologyGraph } from './graph.js';
@@ -65,7 +65,8 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
   for (const q of graph.store.getQuads(null, null, null, null)) for (const t of [q.subject, q.predicate, q.object, (q.object as any).datatype]) if (t?.value) used.add(t.value);
   const context: Record<string, string> = {};
   for (const [p, ns] of Object.entries(graph.prefixes).sort(([a], [b]) => a.localeCompare(b))) {
-    if (p && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
+    // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
+    if (p && isSafePrefix(p) && isSafeNamespace(ns) && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
   }
   const compacted = await jsonld.compact(expanded, context as any, { documentLoader: noRemoteDocuments as any });
   return JSON.stringify(sortKeys(compacted), null, 2) + '\n';

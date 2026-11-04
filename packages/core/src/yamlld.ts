@@ -5,9 +5,11 @@
  * `@import` are refused, so a submitted document can't make the server fetch
  * URLs. YAML-LD is read under the W3C YAML-LD draft's core requirements: YAML
  * 1.2 with the Core schema only (no 1.1 booleans, timestamps or merge keys), no
- * custom tags, string mapping keys, finite numbers, an object or array at the
- * top, and the first document of a stream unless all are asked for. Input
- * size, nesting and the size after aliases are expanded are all bounded.
+ * custom tags, string mapping keys, finite numbers, an object, array or null at
+ * the top, and the first document of a stream unless all are asked for (the
+ * whole stream must be well formed either way). Input size in bytes, and the
+ * nesting and JSON size of the value with its aliases resolved, are bounded
+ * while it is built.
  */
 import YAML, { isAlias, isMap, isPair, isScalar, isSeq, type Document, type Node } from 'yaml';
 
@@ -34,48 +36,88 @@ const CORE_TAGS = new Set(['str', 'int', 'float', 'bool', 'null', 'map', 'seq'].
 
 export class YamlLdError extends Error {}
 
-/** The JSON-LD a YAML-LD text stands for, checked against the core requirements and the budgets. */
+const utf8 = new TextEncoder();
+const bytes = (s: string) => utf8.encode(s).length;
+
+/**
+ * The JSON-LD a YAML-LD text stands for, checked against the core requirements
+ * and the budgets. An empty stream is `null` (`[]` when reading all
+ * documents), as is a document whose content is null.
+ */
 export function yamlLdToJson(text: string, opts: YamlLdOptions = {}): unknown {
   const o = { ...DEFAULTS, ...opts };
-  if (new TextEncoder().encode(text).length > o.maxBytes) throw new YamlLdError(`YAML-LD input is over ${o.maxBytes} bytes.`);
+  if (bytes(text) > o.maxBytes) throw new YamlLdError(`YAML-LD input is over ${o.maxBytes} bytes.`);
   const docs = YAML.parseAllDocuments(text, { version: '1.2', schema: 'core', merge: false, uniqueKeys: true, customTags: [], strict: true, prettyErrors: false });
   if (!Array.isArray(docs)) throw new YamlLdError('YAML-LD stream could not be read.');
-  const chosen = o.extractAllScripts ? docs : docs.slice(0, 1);
-  if (!chosen.length) throw new YamlLdError('YAML-LD input has no document.');
-  const values = chosen.map((doc) => checked(doc, o));
-  const out = o.extractAllScripts ? values.flat() : values[0];
-  if (JSON.stringify(out).length > o.maxExpandedBytes) throw new YamlLdError(`YAML-LD expands to over ${o.maxExpandedBytes} bytes of JSON.`);
-  return out;
+  // A malformed stream is rejected as a whole, even where only its first document is read.
+  for (const doc of docs) {
+    const problem = doc.errors[0] ?? doc.warnings[0];
+    if (problem) throw new YamlLdError(`YAML-LD isn't valid: ${problem.message}`);
+    if (doc.directives?.yaml.explicit && doc.directives.yaml.version !== '1.2') throw new YamlLdError(`YAML-LD must be YAML 1.2, not ${doc.directives.yaml.version}.`);
+  }
+  const budget = { left: o.maxExpandedBytes };
+  if (!o.extractAllScripts) return docs.length ? construct(docs[0], o, budget) : null;
+  // Every document, as one array: arrays are spliced in, and empty documents add nothing.
+  return docs.flatMap((doc) => {
+    const v = construct(doc, o, budget);
+    return v === null ? [] : Array.isArray(v) ? v : [v];
+  });
 }
 
-function checked(doc: Document.Parsed, o: typeof DEFAULTS): unknown {
-  const problem = doc.errors[0] ?? doc.warnings[0];
-  if (problem) throw new YamlLdError(`YAML-LD isn't valid: ${problem.message}`);
-  if (doc.directives?.yaml.explicit && doc.directives.yaml.version !== '1.2') throw new YamlLdError(`YAML-LD must be YAML 1.2, not ${doc.directives.yaml.version}.`);
+/**
+ * Builds a document's JSON value from its syntax tree, resolving aliases.
+ * Depth and output size are counted as it goes (an alias counts as everything
+ * it repeats), so a small input can't build a huge value or nest past the
+ * limit through aliases before it is refused.
+ */
+function construct(doc: Document.Parsed, o: typeof DEFAULTS, budget: { left: number }): unknown {
   const root = doc.contents;
-  if (!isMap(root) && !isSeq(root)) throw new YamlLdError('A YAML-LD document must be a mapping or a sequence.');
-  // Walk the tree (not the expanded value), so aliases are counted once and depth is bounded before expansion.
-  const walk = (node: Node | null, depth: number) => {
-    if (!node) return;
-    if (depth > o.maxDepth) throw new YamlLdError(`YAML-LD is nested more than ${o.maxDepth} levels deep.`);
-    if (node.tag && !CORE_TAGS.has(node.tag)) throw new YamlLdError(`YAML-LD can't use the tag ${node.tag}.`);
-    if (isAlias(node)) return;
-    if (isScalar(node)) {
-      if (typeof node.value === 'number' && !Number.isFinite(node.value)) throw new YamlLdError(`YAML-LD can't hold ${String(node.source ?? node.value)}: JSON has no such number.`);
-      return;
-    }
-    if (isMap(node)) {
-      for (const pair of node.items) {
-        if (!isPair(pair)) continue;
-        const key = pair.key as Node | null;
-        if (!isScalar(key) || typeof key.value !== 'string') throw new YamlLdError(`YAML-LD mapping keys must be strings (found ${String((key as { source?: string } | null)?.source ?? key)}).`);
-        walk(key, depth + 1);
-        walk(pair.value as Node | null, depth + 1);
-      }
-      return;
-    }
-    if (isSeq(node)) for (const item of node.items) walk(item as Node | null, depth + 1);
+  const spend = (n: number) => {
+    budget.left -= n;
+    if (budget.left < 0) throw new YamlLdError(`YAML-LD expands to over ${o.maxExpandedBytes} bytes of JSON.`);
   };
-  walk(root, 0);
-  return doc.toJS({ maxAliasCount: 100 });
+  let aliases = 0;
+  const build = (node: unknown, depth: number): unknown => {
+    if (node === null || node === undefined) return spend(4), null;
+    if (depth > o.maxDepth) throw new YamlLdError(`YAML-LD is nested more than ${o.maxDepth} levels deep.`);
+    if (isAlias(node)) {
+      if (++aliases > 10_000) throw new YamlLdError('YAML-LD uses too many aliases.');
+      const target = node.resolve(doc);
+      if (!target) throw new YamlLdError(`YAML-LD alias *${node.source} has no anchor.`);
+      // The alias stands where it is, so its content counts at this depth.
+      return build(target, depth);
+    }
+    const n = node as Node;
+    if (n.tag && !CORE_TAGS.has(n.tag)) throw new YamlLdError(`YAML-LD can't use the tag ${n.tag}.`);
+    if (isScalar(n)) {
+      const v = n.value;
+      if (typeof v === 'number' && !Number.isFinite(v)) throw new YamlLdError(`YAML-LD can't hold ${String(n.source ?? v)}: JSON has no such number.`);
+      if (v !== null && typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') throw new YamlLdError('YAML-LD values must be strings, numbers, booleans or null.');
+      spend(v === null ? 4 : typeof v === 'string' ? bytes(JSON.stringify(v)) : String(v).length);
+      return v;
+    }
+    if (isMap(n)) {
+      spend(2);
+      // Own properties only, so keys such as __proto__ are data, not a prototype.
+      const out: Record<string, unknown> = {};
+      for (const pair of n.items) {
+        if (!isPair(pair)) continue;
+        let key = pair.key as unknown;
+        if (isAlias(key)) key = key.resolve(doc);
+        if (!isScalar(key) || typeof key.value !== 'string') throw new YamlLdError(`YAML-LD mapping keys must be strings (found ${String((key as { source?: string } | null)?.source ?? key)}).`);
+        if ((key as Node).tag && !CORE_TAGS.has((key as Node).tag!)) throw new YamlLdError(`YAML-LD can't use the tag ${(key as Node).tag}.`);
+        spend(bytes(JSON.stringify(key.value)) + 2);
+        Object.defineProperty(out, key.value, { value: build(pair.value, depth + 1), enumerable: true, writable: true, configurable: true });
+      }
+      return out;
+    }
+    if (isSeq(n)) {
+      spend(2);
+      return n.items.map((item) => (spend(1), build(item, depth + 1)));
+    }
+    throw new YamlLdError('YAML-LD contains something JSON can’t hold.');
+  };
+  if (root !== null && !isMap(root) && !isSeq(root) && !(isScalar(root) && root.value === null))
+    throw new YamlLdError('A YAML-LD document must be a mapping, a sequence or null.');
+  return build(root, 0);
 }
