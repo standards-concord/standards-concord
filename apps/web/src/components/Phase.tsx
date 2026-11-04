@@ -224,7 +224,8 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
         <>
           <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">Health of the working draft</h4>
           {h ? (
-            <ul className="space-y-2">
+            // A two-column grid, so every value starts in the same column whatever the label's length.
+            <ul className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
               <HealthRow
                 ok={h.consistent && reasonerRan}
                 warn={h.consistent && !reasonerRan}
@@ -264,10 +265,12 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
 function HealthRow({ ok, warn, label, value }: { ok: boolean; warn?: boolean; label: string; value: string }) {
   const Icon = ok ? CircleCheck : CircleAlert;
   return (
-    <li className="flex items-center justify-between gap-3">
-      <span className="text-muted">{label}</span>
-      <span className={cx('inline-flex items-center gap-1 font-medium', ok ? 'text-ok' : warn ? 'text-warn' : 'text-danger')}>
-        <Icon className="size-3.5" aria-hidden />
+    <li className="col-span-2 grid grid-cols-subgrid items-center">
+      <span className="text-muted" data-health-label>
+        {label}
+      </span>
+      <span className={cx('inline-flex items-center gap-1 justify-self-start font-medium', ok ? 'text-ok' : warn ? 'text-warn' : 'text-danger')} data-health-value>
+        <Icon className="size-3.5 shrink-0" aria-hidden />
         {value}
       </span>
     </li>
