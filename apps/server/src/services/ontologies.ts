@@ -59,7 +59,7 @@ export async function createProject(
     namespace?: string;
     domain?: string;
     governanceTemplate?: GovernanceTemplateId;
-    /** List the owner as dct:creator, which is public on the ontology's page. Default true. */
+    /** List the owner as dct:creator, which is public on the ontology's page. Only when they ask. */
     creditCreator?: boolean;
     seedTurtle?: string;
     demo?: boolean;
@@ -79,7 +79,7 @@ export async function createProject(
       prefix,
       title: input.title,
       description: input.description,
-      creators: input.creditCreator === false ? [] : [owner.name],
+      creators: input.creditCreator === true ? [owner.name] : [],
       license: 'https://creativecommons.org/licenses/by/4.0/',
     });
   }
