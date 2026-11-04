@@ -3,15 +3,18 @@ import { tags as t, type Tag } from '@lezer/highlight';
 import { json } from '@codemirror/lang-json';
 import { xml } from '@codemirror/lang-xml';
 import { yaml } from '@codemirror/lang-yaml';
+import { javascript, typescript } from '@codemirror/legacy-modes/mode/javascript';
 
 /**
  * Syntax highlighting for every format Concord shows. Turtle, N-Triples,
  * SPARQL and Manchester syntax share one tokenizer for RDF terms (IRIs,
  * prefixed names, literals, blank nodes), so the same term looks the same in
- * every view. XML, JSON-LD and LinkML (YAML) use CodeMirror's Lezer grammars.
+ * every view, and SHACL compact syntax adds its keywords to the Turtle rules.
+ * XML, JSON-LD and LinkML (YAML) use CodeMirror's Lezer grammars, and the
+ * generated classes CodeMirror's JavaScript mode.
  */
 
-export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'xml' | 'json' | 'yaml' | 'text';
+export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc' | 'xml' | 'json' | 'yaml' | 'javascript' | 'typescript' | 'text';
 
 /** Token names the tokenizers return, mapped to highlight tags (and so to colours). */
 const tokenTable: Record<string, Tag | readonly Tag[]> = {
@@ -59,6 +62,8 @@ const SPARQL_FUNCTIONS = new Set(
     'sha1 sha256 sha384 sha512 coalesce if strlang strdt isnumeric regex isblank isliteral bind separator'
   ).split(' '),
 );
+const SHACLC_KEYWORDS = new Set(['shape', 'shapeClass', 'IMPORTS']);
+
 const MANCHESTER_KEYWORDS = new Set(
   'some only value min max exactly and or not that inverse self Self'.split(' '),
 );
@@ -70,7 +75,7 @@ interface RdfState {
   afterCaret: boolean;
 }
 
-type Mode = 'turtle' | 'ntriples' | 'sparql' | 'manchester';
+type Mode = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc';
 
 function readString(stream: StringStream, quote: string): boolean {
   // Returns true when the closing quote was found on this line.
@@ -164,6 +169,13 @@ function rdfParser(mode: Mode): StreamParser<RdfState> {
         const word = stream.current();
         const lower = word.toLowerCase();
         if (lower === 'true' || lower === 'false') return 'bool';
+        if (mode === 'shaclc') {
+          if (lower === 'prefix' || lower === 'base') return 'directive';
+          if (SHACLC_KEYWORDS.has(word)) return 'keyword';
+          // Parameters such as datatype=, minCount=, qualifiedValueShape=
+          if (stream.peek() === '=') return 'keyword';
+          return null;
+        }
         if (mode === 'turtle' || mode === 'ntriples') {
           if (word === 'a') return 'keyword';
           if (lower === 'prefix' || lower === 'base') return 'directive';
@@ -194,6 +206,9 @@ const streamLanguages = {
   ntriples: StreamLanguage.define(rdfParser('ntriples')),
   sparql: StreamLanguage.define(rdfParser('sparql')),
   manchester: StreamLanguage.define(rdfParser('manchester')),
+  shaclc: StreamLanguage.define(rdfParser('shaclc')),
+  javascript: StreamLanguage.define(javascript),
+  typescript: StreamLanguage.define(typescript),
 };
 
 export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
@@ -202,6 +217,9 @@ export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
     case 'ntriples':
     case 'sparql':
     case 'manchester':
+    case 'shaclc':
+    case 'javascript':
+    case 'typescript':
       return new LanguageSupport(streamLanguages[lang]);
     case 'xml':
       return xml();
@@ -223,4 +241,7 @@ export const FORMAT_LANGUAGE: Record<string, CodeLanguage> = {
   jsonld: 'json',
   linkml: 'yaml',
   manchester: 'manchester',
+  shaclc: 'shaclc',
+  javascript: 'javascript',
+  typescript: 'typescript',
 };
