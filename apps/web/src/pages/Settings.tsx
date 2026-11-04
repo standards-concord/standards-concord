@@ -1,13 +1,45 @@
-import { useEffect } from 'react';
-import { KeyRound, Lock, Trash2, UserRound } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router';
+import type { AgentToken } from '@concord/shared';
+import { Bot, KeyRound, Lock, Trash2, Unplug, UserRound } from 'lucide-react';
 import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { formatDate, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
-import { TokenCreator } from './ontology/Agents';
-import { Avatar, Badge, Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading, PageHeader } from '../components/ui';
+import { Avatar, Badge, Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Loading, PageHeader } from '../components/ui';
+
+function TokenCreator({ onCreated }: { onCreated?: (t: AgentToken) => void }) {
+  const [name, setName] = useState('My coding agent');
+  const [created, setCreated] = useState<AgentToken>();
+  const create = useAction(async () => {
+    const t = await api.createAgentToken(name.trim() || 'Agent');
+    setCreated(t);
+    onCreated?.(t);
+  });
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2">
+        <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" aria-label="Token name" />
+        <Button variant="primary" icon={KeyRound} loading={create.pending} onClick={() => void create.run()}>
+          Create token
+        </Button>
+      </div>
+      <InlineError error={create.error} />
+      {created?.token && (
+        <div className="rounded-lg border border-warn/40 bg-warn-soft p-3">
+          <p className="mb-2 text-sm font-medium">Copy your token now — it won’t be shown again.</p>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 truncate rounded bg-surface px-2 py-1.5 font-mono text-xs">{created.token}</code>
+            <CopyButton text={created.token} label="Copy" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 export function SettingsPage() {
   const { session, now } = useSession();
@@ -16,8 +48,14 @@ export function SettingsPage() {
     await api.deleteAgentToken(id);
     await tokens.reload();
   });
+  const connections = useAsync(() => api.oauthConnections(), []);
+  const disconnect = useAction(async (id: string) => {
+    await api.disconnectOAuth(id);
+    await connections.reload();
+  });
   useEffect(() => {
-    if (location.hash === '#tokens') setTimeout(() => document.getElementById('tokens')?.scrollIntoView({ behavior: 'smooth' }), 100);
+    const target = location.hash.slice(1);
+    if (target === 'tokens' || target === 'agents') setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth' }), 100);
   }, []);
   const u = session?.user;
   if (!u) return null;
@@ -100,9 +138,47 @@ export function SettingsPage() {
           )}
         </Card>
 
+        <div id="agents">
+          <Card>
+            <CardHeader
+              icon={Bot}
+              title="Connected agents"
+              subtitle="Apps you’ve allowed to use Concord as you, such as Claude, Claude Code or Codex."
+              actions={<Link to="/connect" className="text-sm text-accent hover:underline">Connect an agent</Link>}
+            />
+            {connections.error && !connections.data ? (
+              <div className="px-5 pb-5">
+                <ErrorCard error={connections.error} onRetry={connections.reload} />
+              </div>
+            ) : !connections.data ? (
+              <Loading />
+            ) : (
+              <ul className="divide-y divide-line border-t border-line" data-testid="connections">
+                {connections.data.map((c) => (
+                  <li key={c.id} className="flex items-center gap-3 px-5 py-3 text-sm">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium">{c.clientName}</div>
+                      <div className="text-xs text-muted">
+                        Connected {formatDate(c.createdAt)} · {c.lastUsedAt ? `last used ${relativeTime(c.lastUsedAt, now())}` : 'not used yet'}
+                      </div>
+                    </div>
+                    <Button size="sm" variant="ghost" icon={Unplug} disabled={disconnect.pending} onClick={() => confirm(`Disconnect “${c.clientName}”? It will need to sign in again.`) && void disconnect.run(c.id)}>
+                      Disconnect
+                    </Button>
+                  </li>
+                ))}
+                {!connections.data.length && <li className="px-5 py-4 text-sm text-muted">No agents connected yet.</li>}
+              </ul>
+            )}
+            <div className="px-5 pb-3">
+              <InlineError error={disconnect.error} />
+            </div>
+          </Card>
+        </div>
+
         <div id="tokens">
           <Card>
-            <CardHeader icon={KeyRound} title="Agent tokens" subtitle="For connecting Claude Code, Codex or other MCP clients. Each ontology’s Agents tab has setup snippets." />
+            <CardHeader icon={KeyRound} title="Personal tokens" subtitle="Only for agents that can’t open a browser to sign in, such as CI jobs. Send it as an Authorization: Bearer header." />
             <div className="p-5">
               <TokenCreator onCreated={() => void tokens.reload()} />
             </div>

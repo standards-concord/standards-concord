@@ -11,7 +11,9 @@ export default defineConfig({
     proxy: {
       '/api': { target, changeOrigin: true },
       '/auth': { target, changeOrigin: true },
-      '/mcp': { target, changeOrigin: true },
+      // MCP and its OAuth endpoints keep the dev server's Host, so the URLs they advertise point back here.
+      '/mcp': { target },
+      '^/(\\.well-known/|authorize|token|register|revoke)': { target },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },

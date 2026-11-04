@@ -1,0 +1,72 @@
+# Getting Concord's MCP connector listed
+
+Where Concord's MCP server can be listed, what each listing needs, and who does what. Researched 2026-11-04; check each portal's current form before submitting, because they change often.
+
+**Server URL:** `https://standards-concord.vercel.app/mcp` (Streamable HTTP, OAuth 2.1 per the MCP authorization spec: protected resource metadata, PKCE S256, dynamic client registration and client ID metadata documents). The source of truth for this address is [server.json](../server.json); change it with `node scripts/public-url.mjs https://<new-origin>`.
+
+## Summary
+
+| Where | How people install | Status | Survives a domain change? |
+| --- | --- | --- | --- |
+| Concord's own `/connect` page | *Add to Claude* button, one-line commands for Claude Code and Codex, Cursor and VS Code links | Done | Yes: it always shows its own address |
+| Claude Code plugin marketplace (this repo) | `/plugin marketplace add jeswr/standards-concord`, then `/plugin install concord@concord` | Done | Yes: run the script and merge; plugins update on the version bump |
+| Codex plugin marketplace (this repo) | `codex plugin marketplace add jeswr/standards-concord`, then install from Plugins in the Codex app | Done | Yes, as above |
+| Official MCP Registry | Discovered by MCP clients and directories that read the registry | Publishes from CI on merge | Yes: CI publishes a new version |
+| GitHub MCP Registry (github.com/mcp) | One click into VS Code and other GitHub-connected clients | Needs an email from Jesse after the registry entry is live | Syncs from the official registry |
+| Anthropic Connectors Directory (claude.ai) | Listed in Claude's connector directory | Needs Jesse to submit; needs a privacy policy and a reviewer account | No: email Anthropic to change the URL |
+| OpenAI plugin directory (ChatGPT and Codex) | Listed in the Plugins directory of ChatGPT and the Codex app | Needs Jesse (identity verification); needs a privacy policy, terms and a demo video | No: contact OpenAI support to change the URL |
+| Docker MCP Catalog, Glama, mcp.so, Cursor directory | Their own catalogues | Optional; details below | Varies |
+
+**Before submitting to Anthropic or OpenAI, move to a stable domain** (for example a subdomain the ODI controls). Both tie the listing and its OAuth settings to the exact URL, and changing it means a support request each time. The official registry, the plugins and the `/connect` page handle moves on their own.
+
+## Official MCP Registry
+
+- Entry: [server.json](../server.json), name `io.github.jeswr/concord`, remote-only (no `packages`), schema `2025-12-11`.
+- Publishing: [.github/workflows/mcp-registry.yml](../.github/workflows/mcp-registry.yml) runs `mcp-publisher login github-oidc` and `mcp-publisher publish` when `server.json` changes on `main` (or by hand from the Actions tab). GitHub's OIDC token proves the repo belongs to `jeswr`, so no secret is needed.
+- Moving domain: `node scripts/public-url.mjs https://<new-origin>` bumps the version (registry versions are immutable) and updates the plugins too. To retire an old version: `mcp-publisher status --status deprecated --message "Moved to <new URL>" io.github.jeswr/concord <old version>`.
+- Moving to the ODI's GitHub: an `org.theodi/...` or `io.github.theodi/...` name needs an org owner to publish; until then `io.github.jeswr/concord` is fine.
+- The registry is in preview, so its data may be reset.
+
+## GitHub MCP Registry
+
+Curated from the official registry. Once the official entry is live, email partnerships@github.com asking for `io.github.jeswr/concord` to be included. Draft:
+
+> Subject: MCP Registry listing: Concord (Open Data Institute)
+>
+> Hi, Concord is the Open Data Institute's platform for designing open data ontologies together. Its remote MCP server lets agents read the hub's OWL and LinkML ontologies, query them, check data against them and report gaps to the maintainers. It is published in the official MCP Registry as io.github.jeswr/concord (https://standards-concord.vercel.app/mcp, OAuth with dynamic client registration). Could it be included in the GitHub MCP Registry? Thanks, Jesse
+
+## Anthropic Connectors Directory
+
+- Submit at https://claude.ai/directory/manage → Submit new → MCP connector (any paid Claude plan). Questions: mcp-review@anthropic.com. Terms: https://support.claude.com/en/articles/13145338, policy: https://support.claude.com/en/articles/13145358.
+- What Concord already meets: HTTPS remote server; OAuth with discovery from a 401 `WWW-Authenticate` header; `resource` equals the server URL exactly; PKCE S256; dynamic client registration and client ID metadata documents (Anthropic prefers CIMD, which Claude uses by default); Claude's callback `https://claude.ai/api/mcp/auth_callback` and Claude Code's loopback callbacks on any port work, because redirect URIs come from each client's registration; every tool has a title and a read-only or destructive hint (checked by a test).
+- Still needed from Jesse: a privacy policy URL (the ODI should own this), a support contact, an icon, a reviewer test account (demo sign-in works on the alpha, but a real Google or GitHub sign-in is better for review), and confirming it was tested as a custom connector (the *Add to Claude* button does this).
+- Listing text:
+  - **Name:** Concord
+  - **Short description:** Read, query and check data against the ODI's open data ontologies, and report what's missing.
+  - **Long description:** Concord is the Open Data Institute's platform for designing open data standards together. Connect it to Claude to look up terms in the hub's strict OWL ontologies, fetch them as Turtle, JSON-LD or LinkML for code generation, run SPARQL over them, and validate your own data against them. When a standard is missing a concept or doesn't fit your data, Claude can report it: Concord triages the report straight away (often the right terms already exist) and, where the standard should change, opens a change request that the community reviews under the standard's governance.
+  - **Example prompts:** "Which terms in the volunteering ontology describe skills, and how are they related?"; "Generate pydantic models for the volunteering standard from its LinkML."; "Check this Turtle file against the volunteering ontology and tell me what doesn't fit."; "Our data records whether an opportunity reimburses travel. Is that in the standard? If not, report it."
+  - **Documentation:** https://standards-concord.vercel.app/connect
+
+## OpenAI plugin directory (ChatGPT and Codex)
+
+- Submit at https://platform.openai.com/plugins → Submit for review. Guide: https://developers.openai.com/plugins/deploy/submission. Needs a verified individual or business identity.
+- Domain verification: set `OPENAI_APPS_CHALLENGE` on the backend (via `deploy/azure/set-key.sh`) to the token OpenAI gives; Concord serves it at `/.well-known/openai-apps-challenge`.
+- Also needed: website, support, privacy policy and terms URLs; a test account without MFA; five positive and three negative test cases; a short video walkthrough; release notes. The example prompts above work as positive cases. Negative cases: asking it to delete an ontology, to merge a change request without review, or to act on a private ontology the account can't see.
+- Static bearer tokens are not accepted for listing, which is one reason for the OAuth work.
+
+## Other directories
+
+- **Docker MCP Catalog:** open a pull request to https://github.com/docker/mcp-registry; `task remote-wizard` writes a `server.yaml` with `type: remote`, `remote.transport_type: streamable-http` and the URL.
+- **Glama:** "Add Server" at https://glama.ai/mcp/servers; a `glama.json` in this repo claims the listing. It is said to import from the official registry.
+- **PulseMCP:** imports from the official registry; nothing to do.
+- **mcp.so:** form at https://mcp.so/submit (choose "Remote Server").
+- **Cursor:** the curated marketplace is at https://cursor.com/marketplace/publish; the community directory (cursor.directory) takes a GitHub repo. The *Add to Cursor* button on `/connect` already works without a listing.
+- **Smithery:** now part of Arcade and says its proxy shut down on 31 October, so skip it for now.
+
+## Install links used on `/connect`
+
+- Claude: `https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Concord&connectorUrl=<url>` opens the prefilled dialog. Connectors added there also appear in Claude Code when it is signed in with a Claude account.
+- Claude Code: no deep link adds a server (`claude-cli://open` only prefills a prompt), so the page shows `claude mcp add --transport http concord <url>`.
+- Codex: no deep link exists; the page shows `codex mcp add concord --url <url>` and `codex mcp login concord`.
+- Cursor: `cursor://anysphere.cursor-deeplink/mcp/install?name=concord&config=<base64 {"url":...}>`.
+- VS Code: `vscode:mcp/install?<url-encoded {"name":"concord","type":"http","url":...}>`.

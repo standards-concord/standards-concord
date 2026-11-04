@@ -22,6 +22,11 @@ export type Collection =
   | 'releases'
   | 'agentTokens'
   | 'agentReports'
+  | 'oauthClients'
+  | 'oauthRequests'
+  | 'oauthCodes'
+  | 'oauthGrants'
+  | 'oauthTokens'
   | 'feedback'
   | 'activity'
   | 'kv';

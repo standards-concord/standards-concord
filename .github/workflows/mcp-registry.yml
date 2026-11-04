@@ -1,0 +1,35 @@
+name: Publish to the MCP Registry
+
+# Publishes server.json to the official MCP Registry (registry.modelcontextprotocol.io)
+# as io.github.jeswr/concord. GitHub's OIDC token proves this workflow runs in a
+# repo owned by jeswr, so no secret is needed. Directories that mirror the
+# registry (GitHub's MCP registry, PulseMCP and others) pick up changes from there.
+#
+# When Concord moves: node scripts/public-url.mjs https://<new-origin>, then merge.
+
+on:
+  push:
+    branches: [main]
+    paths: [server.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the listing
+        run: node scripts/public-url.mjs --check
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Validate
+        run: ./mcp-publisher validate
+      - name: Sign in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+      - name: Publish
+        run: ./mcp-publisher publish

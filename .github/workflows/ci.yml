@@ -39,6 +39,19 @@ jobs:
         run: pnpm -r test
       - name: Build the web app
         run: pnpm --filter @concord/web build
+      - name: Check the public MCP URL is the same in every listing
+        run: node scripts/public-url.mjs --check
+      # End-to-end: the real server serving the built app, driven by Chromium.
+      - name: Install Chromium for Playwright
+        run: pnpm --filter @concord/e2e exec playwright install --with-deps chromium
+      - name: End-to-end tests
+        run: pnpm --filter @concord/e2e e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 14
 
   # Builds the backend image the AWS server runs. The server pulls a new image every
   # five minutes, so merging to main is the deploy. Branches get their own tag.

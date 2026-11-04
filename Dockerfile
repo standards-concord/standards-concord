@@ -5,6 +5,8 @@ WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
+# Only the manifest of the end-to-end tests, so the workspace lockfile matches.
+COPY e2e/package.json ./e2e/package.json
 RUN pnpm install --frozen-lockfile && pnpm --filter @concord/web build
 
 FROM node:22-bookworm-slim
