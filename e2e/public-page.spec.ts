@@ -82,6 +82,51 @@ test.describe('Public ontology page', () => {
     await expect(page.locator(`#${id}`)).toBeInViewport();
   });
 
+  test('a deep link to a use case clears a status filter that hides it', async ({ page }) => {
+    await page.goto(`${PAGE}#tab-use-cases`);
+    const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
+    const open = panel.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' });
+    const id = (await open.getAttribute('id'))!;
+    await panel.getByRole('button', { name: /^Closed/ }).click();
+    await expect(open).toBeHidden();
+    await page.goto(`${PAGE}#${id}`);
+    await expect(open).toBeVisible();
+    await expect(open).toBeInViewport();
+    await expect(panel.getByRole('button', { name: /^All/ })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('printing shows every use case and term, whatever the filters', async ({ page }) => {
+    await page.goto(`${PAGE}#tab-use-cases`);
+    const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
+    await panel.getByRole('button', { name: /^Closed/ }).click();
+    await page.getByRole('tab', { name: 'Specification' }).click();
+    await page.getByPlaceholder('Filter terms').fill('zzzz-no-match');
+    await page.emulateMedia({ media: 'print' });
+    await expect(page.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' })).toBeVisible();
+    await expect(page.locator('#sec-index [data-term]').first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Formats' })).toBeVisible();
+    await expect(page.getByText('No terms match.')).toBeHidden();
+  });
+
+  test('keyboard users can reach every tab panel, even text-only ones', async ({ page }) => {
+    await page.goto(`${PAGE}#tab-changes`);
+    await page.getByRole('tab', { name: 'Changes' }).focus();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('tabpanel', { name: 'Changes' })).toBeFocused();
+    await page.getByRole('tab', { name: 'Changes' }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('tab', { name: 'Download and cite' })).toBeFocused();
+    await expect(page.getByRole('tab', { name: 'Download and cite' })).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('the header links this version and the latest version', async ({ page }) => {
+    await page.goto(`${PAGE}/1.0.0`);
+    await page.locator('dl.meta').getByRole('link', { name: 'https://w3id.org/odi/volunteering', exact: true }).click();
+    await expect(page).toHaveURL(/\/def\/volunteering$/);
+    await page.locator('dl.meta').getByRole('link', { name: 'https://w3id.org/odi/volunteering/1.0.0', exact: true }).click();
+    await expect(page).toHaveURL(/\/def\/volunteering\/1\.0\.0$/);
+  });
+
   test('the changes tab shows release notes and version history', async ({ page }) => {
     await page.goto(`${PAGE}#tab-changes`);
     await expect(page.getByRole('heading', { name: 'What changed in 1.0.0' })).toBeVisible();

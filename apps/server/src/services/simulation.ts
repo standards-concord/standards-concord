@@ -16,11 +16,12 @@ import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, s
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { releasePageHtml } from '../public/routes.js';
+import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseTick, voteOnRelease } from './releases.js';
 import { createUseCase } from './useCases.js';
+import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
 
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
@@ -85,24 +86,13 @@ async function seedHistory() {
   const gareth = people.get('gareth')!;
 
   // The use case behind 1.0.0, with executable competency questions run on every change.
-  const cqFile = path.join(path.dirname(FIXTURE), 'volunteering-cqs.json');
-  const dataFile = path.join(path.dirname(FIXTURE), 'volunteering-example-data.ttl');
-  if (fs.existsSync(cqFile)) {
-    const exampleData = fs.existsSync(dataFile) ? fs.readFileSync(dataFile, 'utf8') : undefined;
-    const cqs = JSON.parse(fs.readFileSync(cqFile, 'utf8')) as { question: string; sparql: string }[];
+  const cqs = aggregationCompetencyQuestions();
+  if (cqs.length) {
+    const exampleData = aggregationExampleData();
     createUseCase(project, tom, {
       source: 'form',
       status: 'synthesised',
-      sections: {
-        name: 'Aggregate volunteering opportunities across platforms',
-        goal: 'Let volunteering platforms, councils and charities publish opportunities once, so that aggregators can show them all in one search.',
-        actors: 'Volunteer-involving organisations (publishers); volunteering platforms and aggregators (consumers); prospective volunteers.',
-        description: 'Organisations publish opportunities as open data using the standard. Aggregators harvest them and let people search by cause, place, time, skills and accessibility.',
-        usageScenarios: [
-          'A national platform harvests opportunities from forty local volunteer centres and shows them in one map-based search.',
-          'A person who uses a wheelchair searches for remote or step-free opportunities supporting the environment.',
-        ],
-      },
+      sections: structuredClone(AGGREGATION_USE_CASE),
       competencyQuestions: cqs.map((q) => ({ id: newId('cq'), question: q.question, sparql: q.sparql, exampleData, status: 'answerable' as const })),
     });
   }
@@ -110,30 +100,9 @@ async function seedHistory() {
   createUseCase(project, aisha, {
     source: 'chat',
     status: 'ready',
-    sections: {
-      name: 'Find weekly shifts that need volunteers',
-      goal: 'Help council volunteer coordinators fill recurring shifts, and help residents find regular volunteering that fits around work.',
-      actors: 'Volunteer coordinator (primary); resident looking to volunteer; council volunteering website; partner charities.',
-      description: 'Coordinators publish rotas of recurring shifts at council-run and partner services. Residents search for shifts by day, place and whether they need a DBS check, and sign up to a rota.',
-      usageScenarios: [
-        'The Northvale food bank needs four people every Saturday 9am–1pm. The coordinator publishes the shift once as a weekly rota and residents sign up.',
-        'A resident who works weekdays searches for weekend shifts within two miles that reimburse bus fares and do not need a DBS check.',
-      ],
-      basicFlow: [
-        { step: 1, actorPerson: 'Coordinator', description: 'Publishes an opportunity with a recurring weekly session and the number of places.' },
-        { step: 2, actorSystem: 'Council website', description: 'Lists sessions that still have places, with location and requirements.' },
-        { step: 3, actorPerson: 'Resident', description: 'Filters by day, distance, expenses and DBS requirement, then applies.' },
-      ],
-      dataSources: [{ name: 'Council volunteering CRM' }, { name: 'Partner charity rotas (spreadsheets)' }],
-    },
-    competencyQuestions: [
-      { id: newId('cq'), question: 'Which weekly shifts near Northvale still need volunteers this Saturday?', exampleAnswer: 'Food bank, Saturday 9am–1pm, 2 places left', status: 'untested' },
-      { id: newId('cq'), question: 'Which opportunities reimburse travel expenses?', exampleAnswer: 'Library reading buddies; park clean-up', status: 'untested' },
-    ],
-    terms: [
-      { label: 'shift', kind: 'class', definition: 'A recurring session on a rota.', evidence: ['coordinators think in terms of shifts'] },
-      { label: 'expenses reimbursed', kind: 'datatypeProperty', definition: 'Whether volunteers can claim back out-of-pocket costs.', evidence: ['which opportunities pay expenses'] },
-    ],
+    sections: structuredClone(WEEKLY_SHIFTS_USE_CASE),
+    competencyQuestions: WEEKLY_SHIFTS_QUESTIONS.map((q) => ({ id: newId('cq'), ...q, status: 'untested' as const })),
+    terms: structuredClone(WEEKLY_SHIFTS_TERMS),
   });
 
   // A merged patch waiting for the next release.
@@ -250,7 +219,7 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     publishedAt: now,
     statusSince: now,
   };
-  files['index.html'] = await releasePageHtml(project, r, stamped);
+  Object.assign(files, await releasePageFiles(project, r, stamped));
   r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
   put('releases', r, project.id);
   project.currentVersion = version;

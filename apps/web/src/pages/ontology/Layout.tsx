@@ -75,7 +75,7 @@ function SectionNav({ id }: { id: string }) {
                 key={path}
                 to={href(path)}
                 className={({ isActive }) =>
-                  cx('rounded-full px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
+                  cx('rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
                 }
               >
                 {label}

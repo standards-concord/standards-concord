@@ -1,0 +1,11 @@
+# Hours volunteers have logged. All data is fictional.
+@prefix vol: <https://w3id.org/odi/volunteering#> .
+@prefix ex: <https://helping-hands.example/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:alex a vol:Volunteer .
+ex:sam a vol:Volunteer .
+
+ex:activity1 a vol:VolunteeringActivity ; vol:activityBy ex:sam ; vol:activityFor ex:parkCleanUp ; vol:hoursVolunteered "3"^^xsd:decimal ; vol:activityDate "2026-10-31"^^xsd:date .
+ex:activity2 a vol:VolunteeringActivity ; vol:activityBy ex:sam ; vol:activityFor ex:foodBank ; vol:hoursVolunteered "4.5"^^xsd:decimal ; vol:activityDate "2026-11-02"^^xsd:date .
+ex:activity3 a vol:VolunteeringActivity ; vol:activityBy ex:alex ; vol:activityFor ex:parkCleanUp ; vol:hoursVolunteered "2.5"^^xsd:decimal ; vol:activityDate "2026-10-31"^^xsd:date .

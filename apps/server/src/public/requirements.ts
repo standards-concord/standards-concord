@@ -1,6 +1,6 @@
-import type { OntologyProject, UseCase } from '@concord/shared';
-import { list } from '../db.js';
-import { getUser } from '../services/users.js';
+import type { OntologyProject } from '@concord/shared';
+import { aggregationCompetencyQuestions, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_USE_CASE } from '../services/demoUseCases.js';
+import { PERSONAS } from '../services/personas.js';
 
 /**
  * What the public ontology page shows on its "Use cases and requirements" tab.
@@ -143,38 +143,56 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
   };
 }
 
-const STATUS_FROM_USE_CASE: Partial<Record<UseCase['status'], PublicUseCaseStatus>> = {
-  ready: 'accepted',
-  synthesised: 'closed',
-};
+const personaName = (key: string) => PERSONAS.find((p) => p.key === key)?.name;
 
 /**
  * Placeholder until use case sharing modes land: nothing for real ontologies
- * (no use case is marked public yet), and for the demo only the use cases
- * written by simulated participants, never anything a tester typed.
+ * (no use case is marked public yet), and for the demo its fixed, fictional
+ * seed content. It never reads use cases from the database, because testers
+ * can sign in as a simulated persona and edit them.
  */
 export function publishedRequirements(project: OntologyProject, _version?: string): PublishedRequirements {
   if (!project.demo) return { useCases: [] };
-  const firstRelease = '1.0.0';
-  const useCases = list<UseCase>('useCases', project.id)
-    .filter((u) => STATUS_FROM_USE_CASE[u.status] && !!u.authorId && getUser(u.authorId)?.simulated)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .map((u, i): PublicUseCaseView => {
-      const status = STATUS_FROM_USE_CASE[u.status]!;
-      return {
-        id: u.id,
-        ref: `UC-${i + 1}`,
-        title: u.sections.name ?? 'Untitled use case',
-        goal: u.sections.goal,
-        description: u.sections.description,
-        actors: u.sections.actors,
-        scenarios: u.sections.usageScenarios,
-        competencyQuestions: u.competencyQuestions.map((q) => ({ question: q.question, exampleAnswer: q.exampleAnswer })),
-        status,
-        addressedIn: status === 'closed' ? firstRelease : undefined,
-        attribution: getUser(u.authorId)?.name,
-        origin: { kind: u.source === 'chat' ? 'interview' : u.source, date: u.createdAt.slice(0, 10) },
-      };
+  const useCases: PublicUseCaseView[] = [];
+  const cqs = aggregationCompetencyQuestions();
+  if (cqs.length)
+    useCases.push({
+      id: 'demo-aggregation',
+      ref: 'UC-1',
+      title: AGGREGATION_USE_CASE.name!,
+      goal: AGGREGATION_USE_CASE.goal,
+      description: AGGREGATION_USE_CASE.description,
+      actors: AGGREGATION_USE_CASE.actors,
+      scenarios: AGGREGATION_USE_CASE.usageScenarios,
+      competencyQuestions: cqs.map((q) => ({ question: q.question })),
+      status: 'closed',
+      addressedIn: '1.0.0',
+      attribution: personaName('tom'),
+      origin: { kind: 'form' },
     });
+  useCases.push({
+    id: 'demo-weekly-shifts',
+    ref: `UC-${useCases.length + 1}`,
+    title: WEEKLY_SHIFTS_USE_CASE.name!,
+    goal: WEEKLY_SHIFTS_USE_CASE.goal,
+    description: WEEKLY_SHIFTS_USE_CASE.description,
+    actors: WEEKLY_SHIFTS_USE_CASE.actors,
+    scenarios: WEEKLY_SHIFTS_USE_CASE.usageScenarios,
+    competencyQuestions: WEEKLY_SHIFTS_QUESTIONS,
+    status: 'accepted',
+    attribution: personaName('aisha'),
+    origin: { kind: 'interview' },
+  });
   return { useCases };
+}
+
+/**
+ * What a release's page shows. Each release stores a snapshot of its public
+ * use cases and requirements (requirements.json, written at publish time), so
+ * later edits never rewrite a published version. Releases from before
+ * snapshots existed, and the working draft, use the current data.
+ */
+export function requirementsFor(project: OntologyProject, version: string | undefined, snapshot: PublishedRequirements | undefined): PublishedRequirements {
+  if (!snapshot) return publishedRequirements(project, version);
+  return { document: snapshot.document ?? publishedRequirements(project, version).document, useCases: snapshot.useCases };
 }
