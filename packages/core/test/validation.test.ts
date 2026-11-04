@@ -274,6 +274,53 @@ describe('SHACL validation against the derived shapes', () => {
     expect(store.getObjects(qvs, `${SH}class`, null)[0].value).toBe('https://e/C');
   });
 
+  it('validates in batches of focus nodes exactly as in one run, keeping only the first results', async () => {
+    const { graph, validator } = await setup();
+    // Blank nodes, a subclass declared in the data, values whose types decide sh:class, nodes with two shapes.
+    const data = await parseData(
+      `${P}@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:Special rdfs:subClassOf vol:Organisation .
+      ${Array.from({ length: 30 }, (_, i) => `_:app${i} a vol:Application ; vol:submittedBy ${i % 3 ? 'ex:org' : 'ex:special'}${i % 4 ? ' ; vol:forOpportunity ex:opp' : ''} .`).join('\n')}
+      ex:org a vol:Organisation . ex:special a ex:Special .
+      ex:opp a vol:VolunteeringOpportunity, vol:Role ; vol:title "t" ; vol:offeredBy _:app1 .`,
+      'turtle',
+    );
+    const context = classHierarchy(graph);
+    const whole = await validator.validate(data, context, { batched: false });
+    const batched = await validator.validate(data, context, { batchChars: 1 });
+    expect(whole.results.length).toBeGreaterThan(10);
+    expect(batched).toEqual(whole);
+    // A limit keeps the first results and still counts every one.
+    const limited = await validator.validate(data, context, { limit: 5, batchChars: 1 });
+    expect(limited.results).toHaveLength(5);
+    expect(limited.counts).toEqual(whole.counts);
+    expect(limited.conforms).toBe(false);
+  });
+
+  it('keeps memory to a batch when data breaks thousands of constraints', async () => {
+    // A review's 31 KB document: 1,900 nodes with 4,000-character IRIs, each missing ten required properties.
+    const props = Array.from({ length: 10 }, (_, i) => `sh:property [ sh:path ex:p${i} ; sh:minCount 1 ]`).join(' ; ');
+    const validator = ShapesValidator.fromTurtle(`@prefix sh: <${SH}> . @prefix ex: <https://e/> . ex:S a sh:NodeShape ; sh:targetClass ex:T ; ${props} .`);
+    const data = await parseData(`@prefix e: <https://e/${'x'.repeat(3990)}/> . @prefix ex: <https://e/> .\n${Array.from({ length: 1900 }, (_, i) => `e:s${i} a ex:T .`).join('\n')}`, 'turtle');
+    const before = process.memoryUsage().rss;
+    const report = await validator.validate(data, [], { limit: 1000 });
+    expect(report.counts.Violation).toBe(19_000);
+    expect(report.results).toHaveLength(1000);
+    // In one run the engine's report alone was about 76 million characters.
+    expect(process.memoryUsage().rss - before).toBeLessThan(150 * 1024 * 1024);
+  });
+
+  it('keeps blank node labels N-Triples can write, and renames the others', async () => {
+    const { graph, validator } = await setup();
+    // a + U+0301, and labels with U+203F and U+200C: all valid labels.
+    for (const label of ['a\u0301', 'a\u203fb', 'a\u200cb']) {
+      const data = await parseData(`${P}_:${label} a vol:Application .`, 'turtle');
+      const report = await validator.validate(data, classHierarchy(graph));
+      expect(report.results.length, label).toBeGreaterThan(0);
+      expect(report.results[0].focusNode).toMatch(/^_:b\d+$/);
+    }
+  });
+
   it('conforms when nothing is targeted', async () => {
     const { graph, validator } = await setup();
     const report = await validator.validate(await parseData('<https://e/a> <https://e/p> "x" .', 'ntriples'), classHierarchy(graph));

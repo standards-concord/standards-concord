@@ -1,8 +1,10 @@
 // Runs on its own thread inside each validation worker process
-// (validationWorker.ts), so it keeps time even while the worker's main thread
+// (validationWorker.ts), so it keeps watch even while the worker's main thread
 // is stuck in synchronous work (converting JSON-LD, the SHACL engine). It kills
 // the process when a job overruns its deadline (the server stops it sooner,
-// but the server may be gone) or when the server process has gone away.
+// but the server may be gone), when the process uses more memory than the job
+// allows (resident set, so WebAssembly and native memory count; SIGUSR2 tells
+// the server why), or when the server process has gone away.
 const { parentPort, workerData } = require('node:worker_threads');
 const fs = require('node:fs');
 
@@ -26,10 +28,17 @@ function parentAlive() {
 }
 
 let deadline;
-// The worker sends each job's time allowance as it starts it, and 0 when it is done.
-parentPort.on('message', (ms) => {
+let memory;
+// The worker sends each job's limits as it starts it, and 0 when it is done.
+parentPort.on('message', (job) => {
   clearTimeout(deadline);
-  if (ms > 0) deadline = setTimeout(die, ms);
+  clearInterval(memory);
+  if (!job) return;
+  deadline = setTimeout(die, job.deadlineMs);
+  const limit = job.rssMb * 1024 * 1024;
+  memory = setInterval(() => {
+    if (process.memoryUsage.rss() > limit) process.kill(process.pid, 'SIGUSR2');
+  }, 2);
 });
 setInterval(() => {
   if (!parentAlive()) die();

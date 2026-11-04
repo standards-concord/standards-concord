@@ -1,8 +1,10 @@
 import { fork, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { DataError, type DataFormat } from '@concord/core';
 import type { ValidationJob, ValidationOutcome, WorkerReply } from './validationWorker.js';
+
+/** As validationWorker.ts says it (not imported: that module is the worker itself). */
+const OUT_OF_MEMORY = 'Checking the data needed more memory than the validator allows. Try smaller data.';
 
 /**
  * A few worker processes that run validations (validationWorker.ts). Each job
@@ -30,12 +32,13 @@ export const POOL_LIMITS = {
   heapMb: Number(process.env.VALIDATE_HEAP_MB ?? 192),
   /**
    * The most memory a worker process may use in all (resident set, which counts the SHACL
-   * engine's WebAssembly memory and other memory outside the heap). A worker past it is
-   * stopped (413); an idle one past `recycleMb` is replaced, to give back what it grew to.
-   * At most `workers` processes run, so validation uses at most workers × rssMb.
+   * engine's WebAssembly memory and other memory outside the heap). The worker measures
+   * itself (validationWatchdog.cjs samples it every few ms and kills it past this, and the
+   * peak the system recorded is checked when a job ends): either way the caller gets a 413.
+   * A worker whose peak passed `recycleMb` is replaced after its job, to give memory back.
    */
-  rssMb: Number(process.env.VALIDATE_RSS_MB ?? 320),
-  recycleMb: Number(process.env.VALIDATE_RECYCLE_MB ?? 224),
+  rssMb: Number(process.env.VALIDATE_RSS_MB ?? 384),
+  recycleMb: Number(process.env.VALIDATE_RECYCLE_MB ?? 256),
   /** Jobs waiting for a worker. Places in all: workers + queue. */
   queue: Number(process.env.VALIDATE_QUEUE ?? 4),
   /** How long a job may wait for a worker before the caller gets a 503. */
@@ -92,7 +95,8 @@ export function admit(client: string, format?: DataFormat | 'sniff'): Admission 
   };
 }
 
-type Pending = { job: Omit<ValidationJob, 'deadlineMs'>; resolve: (o: ValidationOutcome) => void; reject: (e: unknown) => void; wait?: NodeJS.Timeout };
+type Limits = 'deadlineMs' | 'rssMb' | 'recycleMb';
+type Pending = { job: Omit<ValidationJob, Limits>; resolve: (o: ValidationOutcome) => void; reject: (e: unknown) => void; wait?: NodeJS.Timeout };
 interface Slot {
   worker: ChildProcess;
   current?: Pending & { timer: NodeJS.Timeout };
@@ -125,47 +129,17 @@ function spawn(): Slot {
     if (reply.ok) cur.resolve(reply.outcome);
     else cur.reject(reply.status ? new DataError(reply.status as 400, reply.message) : new Error(reply.message));
     // A worker that grew large on that job is replaced rather than kept.
-    if ((residentMb(worker) ?? 0) > POOL_LIMITS.recycleMb) retire(slot, undefined);
+    if (reply.recycle) retire(slot, undefined);
     pump();
   });
   worker.on('error', (err) => retire(slot, err));
-  // A heap that runs out aborts the worker (SIGABRT): that is the data asking for too much memory.
+  // A heap that runs out aborts the worker (SIGABRT), and its watchdog stops it with SIGUSR2 when it
+  // uses too much memory in all: either way, that is the data asking for too much memory.
   worker.on('exit', (_code, signal) =>
-    retire(slot, signal === 'SIGABRT' ? new DataError(413, OUT_OF_MEMORY) : new Error('The validator stopped unexpectedly')),
+    retire(slot, signal === 'SIGABRT' || signal === 'SIGUSR2' ? new DataError(413, OUT_OF_MEMORY) : new Error('The validator stopped unexpectedly')),
   );
   slots.push(slot);
   return slot;
-}
-
-const OUT_OF_MEMORY = 'Checking the data needed more memory than the validator allows. Try smaller data.';
-
-/** A process's resident memory in MB (Linux), or undefined where that can't be read. */
-function residentMb(worker: ChildProcess): number | undefined {
-  if (!worker.pid) return undefined;
-  try {
-    return (Number(readFileSync(`/proc/${worker.pid}/statm`, 'utf8').split(' ')[1]) * 4096) / 1024 / 1024;
-  } catch {
-    return undefined;
-  }
-}
-
-let memoryWatch: NodeJS.Timeout | undefined;
-
-/** While jobs run, checks the workers' memory often, and stops one that uses too much. */
-function watchMemory() {
-  if (memoryWatch) return;
-  const check = () => {
-    const busy = slots.filter((s) => s.current);
-    if (!busy.length) {
-      clearInterval(memoryWatch);
-      memoryWatch = undefined;
-      return;
-    }
-    for (const slot of busy) if ((residentMb(slot.worker) ?? 0) > POOL_LIMITS.rssMb) retire(slot, new DataError(413, OUT_OF_MEMORY));
-  };
-  memoryWatch = setInterval(check, 20);
-  memoryWatch.unref();
-  check();
 }
 
 // Workers don't outlive the server: on exit they are killed (and each also watches for the server going away).
@@ -229,8 +203,7 @@ function pump() {
     // While it has a job, the worker's channel keeps the server waiting for the answer.
     slot.worker.channel?.ref();
     // The worker also stops itself a little after the deadline, in case this process is gone by then.
-    slot.worker.send({ ...next.job, deadlineMs: POOL_LIMITS.timeoutMs + 5000 } satisfies ValidationJob);
-    watchMemory();
+    slot.worker.send({ ...next.job, deadlineMs: POOL_LIMITS.timeoutMs + 5000, rssMb: POOL_LIMITS.rssMb, recycleMb: POOL_LIMITS.recycleMb } satisfies ValidationJob);
   }
 }
 
@@ -239,7 +212,7 @@ function pump() {
  * takes a waiting job out of the queue, or stops the worker running it, so
  * cancelled work never holds a place.
  */
-export function runValidation(job: Omit<ValidationJob, 'id' | 'deadlineMs'>, signal?: AbortSignal): Promise<ValidationOutcome> {
+export function runValidation(job: Omit<ValidationJob, 'id' | Limits>, signal?: AbortSignal): Promise<ValidationOutcome> {
   if (signal?.aborted) return Promise.reject(new Error('The validation was cancelled'));
   const lane = laneOf(job.format);
   const busy = () => new DataError(503, lane === 'jsonld' ? BUSY_JSONLD : BUSY);

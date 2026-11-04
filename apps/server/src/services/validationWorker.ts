@@ -21,6 +21,10 @@ export interface ValidationJob {
   turtle: boolean;
   /** How long the job may run before this process kills itself (the server stops it sooner while it is there). */
   deadlineMs: number;
+  /** The most memory this process may use in all, in MB (resident set: heap, WebAssembly and native memory). */
+  rssMb: number;
+  /** Past this peak, in MB, the process asks to be replaced once the job is done, to give memory back. */
+  recycleMb: number;
 }
 
 export interface ValidationOutcome {
@@ -40,7 +44,13 @@ export interface ValidationOutcome {
 /** The most results, and term issues, a reply lists. The summary still counts them all. */
 export const MAX_LISTED = 1000;
 
-export type WorkerReply = { id: number; ok: true; outcome: ValidationOutcome } | { id: number; ok: false; status?: number; message: string };
+export type WorkerReply = ({ id: number; ok: true; outcome: ValidationOutcome } | { id: number; ok: false; status?: number; message: string }) & {
+  /** Replace this process: it has grown past recycleMb. */
+  recycle?: true;
+};
+
+/** The heap ran out, or the process used more memory in all than the server allows. */
+export const OUT_OF_MEMORY = 'Checking the data needed more memory than the validator allows. Try smaller data.';
 
 const cache = new Map<string, { graph: OntologyGraph; validator: ShapesValidator; hierarchy: Quad[] }>();
 
@@ -78,21 +88,20 @@ function textSize(value: unknown, limit: number): number {
 async function run(job: ValidationJob): Promise<ValidationOutcome> {
   const data = await parseData(job.text, job.format, { baseIRI: job.baseIRI, maxTriples: job.maxTriples });
   const { graph, validator, hierarchy } = await prepared(job.hash, job.ontology);
-  // The SHACL engine makes its whole report at once. That can be large, so it runs within this
-  // process's limits: its heap (--max-old-space-size) and the memory the server lets it use in all
-  // (validationPool.ts). Only the first MAX_LISTED results are kept from here on.
-  const full = await validator.validate(data, hierarchy);
+  // Only the first MAX_LISTED results are kept, as they are made: the rest are only counted
+  // (the SHACL engine runs on batches of the data, so each of its reports stays small).
+  const full = await validator.validate(data, hierarchy, { limit: MAX_LISTED });
   const allTerms = checkTerms(graph, data);
-  const count = (s: string) => full.results.filter((r) => r.severity === s).length;
+  const total = full.counts.Violation + full.counts.Warning + full.counts.Info;
   const summary = {
-    violations: count('Violation'),
-    warnings: count('Warning'),
-    infos: count('Info'),
+    violations: full.counts.Violation,
+    warnings: full.counts.Warning,
+    infos: full.counts.Info,
     termErrors: allTerms.filter((t) => t.severity === 'error').length,
     termWarnings: allTerms.filter((t) => t.severity === 'warning').length,
   };
-  const truncated = full.results.length > MAX_LISTED || allTerms.length > MAX_LISTED;
-  const report = { ...full, results: full.results.slice(0, MAX_LISTED), sources: full.sources.slice(0, MAX_LISTED) };
+  const truncated = total > MAX_LISTED || allTerms.length > MAX_LISTED;
+  const report = full;
   const terms = allTerms.slice(0, MAX_LISTED);
   const tooBig = () => new DataError(413, 'The validation report is too large to send back. Check the data in smaller parts.');
   let size = textSize([report.results, terms], MAX_REPLY_CHARS);
@@ -100,9 +109,7 @@ async function run(job: ValidationJob): Promise<ValidationOutcome> {
   let turtle: string | undefined;
   if (job.turtle) {
     turtle = validator.reportTurtle(report, graph.prefixes);
-    if (full.results.length > MAX_LISTED) {
-      turtle = `# The first ${MAX_LISTED.toLocaleString('en')} of ${full.results.length.toLocaleString('en')} results.\n${turtle}`;
-    }
+    if (total > MAX_LISTED) turtle = `# The first ${MAX_LISTED.toLocaleString('en')} of ${total.toLocaleString('en')} results.\n${turtle}`;
     if ((size += turtle.length) > MAX_REPLY_CHARS) throw tooBig();
   }
   return {
@@ -117,21 +124,31 @@ async function run(job: ValidationJob): Promise<ValidationOutcome> {
   };
 }
 
-/** Keeps this process's deadline, and stops it if the server goes away, even while this thread is busy. */
+/**
+ * Keeps this process's deadline and memory limit, and stops it if the server goes away, even
+ * while this thread is busy (see validationWatchdog.cjs).
+ */
 const watchdog = new Worker(new URL('./validationWatchdog.cjs', import.meta.url), { workerData: { parent: process.ppid } });
 watchdog.unref();
 
 // The server went away: so does this worker.
 process.on('disconnect', () => process.exit(0));
 
+const MB = 1024 * 1024;
+
 process.on('message', async (job: ValidationJob) => {
-  watchdog.postMessage(job.deadlineMs);
+  watchdog.postMessage({ deadlineMs: job.deadlineMs, rssMb: job.rssMb });
   let reply: WorkerReply;
   try {
-    reply = { id: job.id, ok: true, outcome: await run(job) };
+    const outcome = await run(job);
+    // The watchdog samples memory as the job runs; the peak the system recorded catches anything
+    // between samples. (maxRSS is in kilobytes. It never goes down, so a process past recycleMb is replaced.)
+    const peak = process.resourceUsage().maxRSS / 1024;
+    reply = peak > job.rssMb ? { id: job.id, ok: false, status: 413, message: OUT_OF_MEMORY } : { id: job.id, ok: true, outcome };
   } catch (err) {
     reply = { id: job.id, ok: false, status: err instanceof DataError ? err.status : undefined, message: (err as Error).message };
   }
   watchdog.postMessage(0);
+  if (Math.max(process.resourceUsage().maxRSS / 1024, process.memoryUsage.rss() / MB) > job.recycleMb) reply.recycle = true;
   process.send!(reply);
 });

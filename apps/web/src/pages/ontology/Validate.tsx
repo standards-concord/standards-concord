@@ -321,8 +321,10 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
     for (const r of report.results) groups.set(r.focusNode, [...(groups.get(r.focusNode) ?? []), r]);
     return [...groups.entries()];
   }, [report.results]);
-  const { violations, warnings, infos } = report.summary;
+  const { violations, warnings, infos, termErrors, termWarnings } = report.summary;
   const problems = violations + warnings + infos;
+  // The lists may be cut short (see truncated); the summary counts everything.
+  const termIssues = termErrors + termWarnings;
   return (
     <Card>
       <CardHeader
@@ -367,14 +369,19 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
               {[violations && `${violations.toLocaleString('en')} violation${violations === 1 ? '' : 's'}`, warnings && `${warnings.toLocaleString('en')} warning${warnings === 1 ? '' : 's'}`, infos && `${infos.toLocaleString('en')} note${infos === 1 ? '' : 's'}`].filter(Boolean).join(', ') || `${problems} problems`}
             </Badge>
           )}
-          {report.terms.length > 0 ? (
-            <Badge tone={report.summary.termErrors ? 'danger' : 'warn'}>
-              {report.terms.length} term issue{report.terms.length === 1 ? '' : 's'}
+          {termIssues > 0 ? (
+            <Badge tone={termErrors ? 'danger' : 'warn'}>
+              {termIssues.toLocaleString('en')} term issue{termIssues === 1 ? '' : 's'}
             </Badge>
           ) : (
             <Badge tone="ok">Every term is defined</Badge>
           )}
         </div>
+        {report.truncated && (
+          <p className="text-xs text-muted" data-testid="validation-truncated">
+            The report lists the first 1,000 results and term issues. The counts above include them all.
+          </p>
+        )}
 
         {report.terms.length > 0 && (
           <section aria-labelledby="terms-heading" className="space-y-2">
@@ -419,11 +426,6 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
               ))}
             </ul>
             {byFocus.length > 200 && <p className="text-xs text-muted">Showing the first 200 nodes. Download the report for the rest.</p>}
-            {report.truncated && (
-              <p className="text-xs text-muted" data-testid="validation-truncated">
-                The report lists the first 1,000 results and term issues. The counts above include them all.
-              </p>
-            )}
           </section>
         )}
       </div>

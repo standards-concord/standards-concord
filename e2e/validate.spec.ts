@@ -66,6 +66,18 @@ test.describe('Validate data', () => {
     await expectNoCrash(page);
   });
 
+  test('counts every term issue and says when the list is cut short, with no shape results', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    // 1,200 properties in the ontology's namespace that it doesn't define: term errors only.
+    const data = `@prefix vol: <${VOL}> .\n${Array.from({ length: 1200 }, (_, i) => `<https://example.org/x> vol:undefined${i} "v" .`).join('\n')}\n`;
+    await setEditor(page, data);
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    await expect(page.getByTestId('validation-verdict')).toContainText('1,200 term issues');
+    await expect(page.getByTestId('validation-truncated')).toBeVisible();
+    await expect(page.getByTestId('validation-terms').getByRole('listitem')).toHaveCount(1000);
+    await expect(page.getByTestId('validation-results')).toHaveCount(0);
+  });
+
   test('uploads a file, validates against the draft and downloads both reports', async ({ page }, info) => {
     await page.goto('/o/volunteering/validate');
     const file = info.outputPath('opportunity.jsonld');

@@ -79,8 +79,6 @@ const ABSOLUTE = /^[a-z][a-z0-9+.-]*:/i;
 const BAD_IRI = /[\u0000-\u0020<>"{}|^`\\]/;
 /** BCP 47 in outline, as Turtle and N-Triples accept it. */
 const LANGUAGE = /^[a-z]{1,8}(-[a-z0-9]{1,8})*$/i;
-/** Blank node labels as N-Triples can write them. */
-const BLANK_LABEL = /^[\p{L}\p{N}_]([\p{L}\p{N}_.\-\u00b7]*[\p{L}\p{N}_\-\u00b7])?$/u;
 
 /** Refuses an IRI the validator can't use: too long (413), relative or malformed (400). */
 function checkIri(iri: string, what = '') {
@@ -113,10 +111,9 @@ export async function parseData(text: string, format: DataFormat, opts: ParseDat
     let size = 0;
     for (const t of [q.subject, q.predicate, q.object]) {
       size += t.value.length;
+      // (Blank node labels need no check: they are renamed where N-Triples can't write them, see toNTriples.)
       if (t.termType === 'NamedNode') checkIri(t.value);
-      else if (t.termType === 'BlankNode') {
-        if (!BLANK_LABEL.test(t.value)) throw new DataError(400, `The data uses a blank node label that N-Triples can't write: _:${t.value.slice(0, 80)}.`);
-      } else if (t.termType === 'Literal') {
+      else if (t.termType === 'Literal') {
         const { language, datatype } = t as Literal;
         size += language.length + datatype.value.length;
         // A datatype is an IRI like any other, and a language tag has a fixed form.
@@ -370,7 +367,27 @@ export interface ShaclReport {
 /** A report as the validator made it: `sources` holds each result's exact source shape, for the Turtle report. */
 export interface ValidatedReport extends ShaclReport {
   sources: string[];
+  /** Every result by severity, including any past the limit that aren't in `results`. */
+  counts: Record<Severity, number>;
 }
+
+export interface ValidateOptions {
+  /** Keep at most this many results (the counts still count them all). */
+  limit?: number;
+  /** About how much data text (in characters) each run of the SHACL engine is given. */
+  batchChars?: number;
+  /** false: one run over all the data, as for shapes that can't be batched. */
+  batched?: boolean;
+}
+
+/** What the derived shapes (toShacl) use; shapes using anything else are validated in one run. */
+const BATCHABLE = new Set(
+  [
+    'targetClass', 'property', 'path', 'datatype', 'class', 'minCount', 'maxCount', 'hasValue',
+    'qualifiedValueShape', 'qualifiedMinCount', 'qualifiedMaxCount', 'name', 'description', 'order', 'group', 'severity', 'message', 'deactivated',
+  ].map((k) => SH + k),
+);
+const BLANK_IRI = 'urn:x-concord-blank:';
 
 const SKOLEM = 'urn:x-concord-shape:';
 
@@ -387,6 +404,12 @@ export class ShapesValidator {
     private readonly shapesNT: string,
     /** Internal IRI of a property shape → its blank node in `shapes`, and the named shape that owns it. */
     private readonly skolems: Map<string, { node: Term; owner?: string }>,
+    /**
+     * For validating in batches: the shapes without their targets, and each target class's
+     * shapes. Undefined when the shapes use more than the derived shapes do, so that which
+     * data a focus node's checks need can't be known without running them.
+     */
+    private readonly batching?: { untargetedNT: string; targets: Map<string, string[]> },
   ) {}
 
   static fromTurtle(turtle: string): ShapesValidator {
@@ -412,41 +435,153 @@ export class ShapesValidator {
     }
     const swap = (t: Term) => (t.termType === 'BlankNode' && renamed.get(t.value)) || t;
     const working = new Store();
-    for (const q of shapes.getQuads(null, null, null, null)) working.addQuad(swap(q.subject as Term) as never, q.predicate, swap(q.object as Term) as never);
-    return new ShapesValidator(shapes, writeNTriples(working), skolems);
+    const untargeted = new Store();
+    const targets = new Map<string, string[]>();
+    let batchable = true;
+    for (const q of shapes.getQuads(null, null, null, null)) {
+      const s = swap(q.subject as Term);
+      const o = swap(q.object as Term);
+      working.addQuad(s as never, q.predicate, o as never);
+      const p = q.predicate.value;
+      if (p === SH + 'targetClass') {
+        if (s.termType !== 'NamedNode' || o.termType !== 'NamedNode') batchable = false;
+        else targets.set(o.value, [...(targets.get(o.value) ?? []), s.value]);
+        continue;
+      }
+      if (p.startsWith(SH) && !BATCHABLE.has(p)) batchable = false;
+      // A path that isn't a plain property (inverse, sequence...) reaches data the batches don't include.
+      if (p === SH + 'path' && o.termType !== 'NamedNode') batchable = false;
+      if (p === RDF_TYPE && o.value === NS.rdfs + 'Class') batchable = false; // implicit class targets
+      untargeted.addQuad(s as never, q.predicate, o as never);
+    }
+    return new ShapesValidator(shapes, writeNTriples(working), skolems, batchable ? { untargetedNT: writeNTriples(untargeted), targets } : undefined);
   }
 
-  /** Validates triples against the shapes. `context` (e.g. the class hierarchy) joins the data graph but isn't counted. */
-  async validate(data: Quad[], context: Quad[] = []): Promise<ValidatedReport> {
+  /**
+   * Validates triples against the shapes. `context` (e.g. the class hierarchy)
+   * joins the data graph but isn't counted.
+   *
+   * The SHACL engine builds its whole report in one go, so data that breaks
+   * many constraints could make a huge one. For the derived shapes the data is
+   * therefore checked in batches of focus nodes, each with only the triples
+   * its checks read (the focus nodes' own triples, the types of their values,
+   * and every rdfs:subClassOf triple), and only the first `limit` results are
+   * kept: the rest are counted and dropped batch by batch.
+   */
+  async validate(data: Quad[], context: Quad[] = [], opts: ValidateOptions = {}): Promise<ValidatedReport> {
+    const limit = opts.limit ?? Infinity;
     const { SparqStore } = await import('@sparq-org/sparq');
-    const dataNT = toNTriples([...context, ...data]);
     const store = await SparqStore.fromString('', 'ntriples');
-    let raw: SparqReport;
+    const counts: Record<Severity, number> = { Violation: 0, Warning: 0, Info: 0 };
+    const rows: { result: ShaclResult; source: string }[] = [];
+    let conforms = true;
+    const run = (dataNT: string, shapesNT: string) => {
+      const raw = store.validate(dataNT, shapesNT, 'ntriples') as SparqReport;
+      if (!raw.conforms) conforms = false;
+      for (const r of raw.results) {
+        const result = this.toResult(r);
+        counts[result.severity] = (counts[result.severity] ?? 0) + 1;
+        if (rows.length < limit) rows.push({ result, source: r.sourceShape });
+      }
+    };
     try {
-      raw = store.validate(dataNT, this.shapesNT, 'ntriples') as SparqReport;
+      if (!this.batching || opts.batched === false) run(toNTriples([...context, ...data]), this.shapesNT);
+      else for (const batch of this.batches(data, context, opts.batchChars ?? 64 * 1024)) run(batch.data, batch.shapes);
     } finally {
       store.free();
     }
-    const rows = raw.results.map((r) => {
-      const source = unwrapIri(r.sourceShape);
-      const skolem = source && this.skolems.get(source);
-      const result: ShaclResult = {
-        focusNode: ntToString(r.focusNode),
-        ...(r.path ? { path: unwrapIri(r.path) ?? r.path } : {}),
-        ...(r.value ? { value: r.value } : {}),
-        severity: (r.severity.startsWith(SH) ? r.severity.slice(SH.length) : r.severity) as Severity,
-        constraint: unwrapIri(r.sourceConstraintComponent) ?? r.sourceConstraintComponent,
-        ...(skolem ? (skolem.owner ? { shape: skolem.owner } : {}) : source && !source.startsWith(SKOLEM) ? { shape: source } : {}),
-        ...(r.message ? { message: r.message } : {}),
-      };
-      return { result, source: r.sourceShape };
-    });
     rows.sort((x, y) => {
       const a = x.result;
       const b = y.result;
       return severityRank(a.severity) - severityRank(b.severity) || a.focusNode.localeCompare(b.focusNode) || (a.path ?? '').localeCompare(b.path ?? '');
     });
-    return { conforms: raw.conforms, results: rows.map((r) => r.result), sources: rows.map((r) => r.source) };
+    return { conforms, counts, results: rows.map((r) => r.result), sources: rows.map((r) => r.source) };
+  }
+
+  /** A result as the engine reported it, in this module's terms (blank nodes as _:label again). */
+  private toResult(r: SparqReport['results'][number]): ShaclResult {
+    const source = unwrapIri(r.sourceShape);
+    const skolem = source && this.skolems.get(source);
+    const unblank = (x: string) => x.replace(/<urn:x-concord-blank:([^>]*)>/g, '_:$1');
+    return {
+      focusNode: ntToString(unblank(r.focusNode)),
+      ...(r.path ? { path: unwrapIri(r.path) ?? r.path } : {}),
+      ...(r.value ? { value: unblank(r.value) } : {}),
+      severity: (r.severity.startsWith(SH) ? r.severity.slice(SH.length) : r.severity) as Severity,
+      constraint: unwrapIri(r.sourceConstraintComponent) ?? r.sourceConstraintComponent,
+      ...(skolem ? (skolem.owner ? { shape: skolem.owner } : {}) : source && !source.startsWith(SKOLEM) ? { shape: source } : {}),
+      ...(r.message ? { message: unblank(r.message) } : {}),
+    };
+  }
+
+  /**
+   * The data in batches of focus nodes, for the derived shapes: N-Triples for
+   * each batch (blank nodes written as IRIs, so the shapes can name them as
+   * sh:targetNode) and the shapes with those targets.
+   */
+  private *batches(data: Quad[], context: Quad[], batchChars: number): Generator<{ data: string; shapes: string }> {
+    const { untargetedNT, targets } = this.batching!;
+    const SUB = NS.rdfs + 'subClassOf';
+    const all = [...context, ...data];
+    const nt = ntWriter(true);
+    // Every subClassOf triple joins every batch: sh:targetClass and sh:class follow them.
+    const hierarchy = all.filter((q) => q.predicate.value === SUB);
+    const hierarchyNT = hierarchy.map(nt).join('\n');
+    const supers = new Map<string, string[]>();
+    for (const q of hierarchy) supers.set(q.subject.value, [...(supers.get(q.subject.value) ?? []), q.object.value]);
+    const closures = new Map<string, Set<string>>();
+    const above = (cls: string) => {
+      let seen = closures.get(cls);
+      if (seen) return seen;
+      seen = new Set([cls]);
+      const todo = [cls];
+      while (todo.length) for (const c of supers.get(todo.pop()!) ?? []) if (!seen.has(c)) (seen.add(c), todo.push(c));
+      closures.set(cls, seen);
+      return seen;
+    };
+    const key = (t: Term) => `${t.termType}:${t.value}`;
+    const bySubject = new Map<string, Quad[]>();
+    for (const q of all) {
+      const k = key(q.subject as Term);
+      const list = bySubject.get(k);
+      if (list) list.push(q);
+      else bySubject.set(k, [q]);
+    }
+    // Each focus node, in order, with the shapes that target it.
+    const focus = new Map<string, { node: Term; shapes: Set<string> }>();
+    for (const q of all) {
+      if (q.predicate.value !== RDF_TYPE || q.object.termType !== 'NamedNode') continue;
+      for (const cls of above(q.object.value)) {
+        for (const shape of targets.get(cls) ?? []) {
+          const k = key(q.subject as Term);
+          if (!focus.has(k)) focus.set(k, { node: q.subject as Term, shapes: new Set() });
+          focus.get(k)!.shapes.add(shape);
+        }
+      }
+    }
+    const typesOf = (t: Term) => (bySubject.get(key(t)) ?? []).filter((q) => q.predicate.value === RDF_TYPE);
+    let lines = new Set<string>();
+    let targetsNT: string[] = [];
+    let size = 0;
+    const flush = () => {
+      const batch = { data: `${hierarchyNT}\n${[...lines].join('\n')}`, shapes: `${untargetedNT}\n${targetsNT.join('\n')}` };
+      lines = new Set();
+      targetsNT = [];
+      size = 0;
+      return batch;
+    };
+    for (const { node, shapes } of focus.values()) {
+      const term = nt.term(node);
+      for (const shape of shapes) targetsNT.push(`<${shape}> <${SH}targetNode> ${term} .`);
+      for (const q of bySubject.get(key(node)) ?? []) {
+        for (const x of [q, ...(q.object.termType === 'Literal' ? [] : typesOf(q.object as Term))]) {
+          const line = nt(x);
+          if (!lines.has(line)) (lines.add(line), (size += line.length));
+        }
+      }
+      if (size >= batchChars) yield flush();
+    }
+    if (targetsNT.length) yield flush();
   }
 
   /**
@@ -503,11 +638,13 @@ export class ShapesValidator {
 }
 
 /**
- * N-Triples for validation. Unlike writeNTriples it keeps the data's own blank
- * node labels where it can (_:alice stays _:alice), so results name them, and
- * it runs in linear time.
+ * Writes quads as N-Triples lines for validation. Unlike writeNTriples it
+ * keeps the data's own blank node labels where it can (_:alice stays
+ * _:alice), so results name them, renaming those N-Triples can't write. With
+ * `blankIris`, blank nodes are written as urn:x-concord-blank: IRIs instead,
+ * so that shapes can name them.
  */
-function toNTriples(quads: Quad[]): string {
+function ntWriter(blankIris = false) {
   const labels = new Map<string, string>();
   const used = new Set<string>();
   const label = (id: string) => {
@@ -520,8 +657,14 @@ function toNTriples(quads: Quad[]): string {
     used.add(l);
     return l;
   };
-  const t = (x: Term) => (x.termType === 'BlankNode' ? `_:${label(x.value)}` : x.termType === 'NamedNode' ? `<${x.value}>` : literalToNT(x as never));
-  return quads.map((q) => `${t(q.subject as Term)} ${t(q.predicate as Term)} ${t(q.object as Term)} .`).join('\n');
+  const term = (x: Term) =>
+    x.termType === 'BlankNode' ? (blankIris ? `<${BLANK_IRI}${label(x.value)}>` : `_:${label(x.value)}`) : x.termType === 'NamedNode' ? `<${x.value}>` : literalToNT(x as never);
+  return Object.assign((q: Quad) => `${term(q.subject as Term)} ${term(q.predicate as Term)} ${term(q.object as Term)} .`, { term });
+}
+
+/** N-Triples for validation, in linear time (see ntWriter). */
+function toNTriples(quads: Quad[]): string {
+  return quads.map(ntWriter()).join('\n');
 }
 
 const severityRank = (s: string) => (s === 'Violation' ? 0 : s === 'Warning' ? 1 : 2);
