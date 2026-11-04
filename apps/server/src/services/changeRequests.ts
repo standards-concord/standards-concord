@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { get, HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -74,6 +74,11 @@ export interface CreateInput {
   warnings?: string[];
   /** Submit straight into review (agents, synthesis) rather than leaving as a draft. */
   submit?: boolean;
+  /**
+   * Wraps the moment the request is first stored: it must call `store()`, and may check first
+   * (and refuse by throwing, in which case nothing is ever stored) and add to it after.
+   */
+  commit?: (cr: ChangeRequest, store: () => void) => Promise<void>;
 }
 
 export async function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
@@ -116,8 +121,12 @@ export async function createChangeRequest(project: OntologyProject, author: User
     warnings,
     baseCommit: ontologyStore.head(project),
   };
-  save(cr);
-  logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
+  const store = () => {
+    save(cr);
+    logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
+  };
+  if (input.commit) await input.commit(cr, store);
+  else store();
   await triage(cr);
   if (input.submit) await submit(cr, author);
   return cr;
@@ -214,14 +223,17 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   // again from what is stored and public now. Each attempt starts from the stored record, which a
   // withdrawal has already redacted, and only the fields triage owns are written back.
   const fresh = () => get<ChangeRequest>('changeRequests', cr.id);
-  let last: Pick<ChangeRequest, 'diff' | 'classification' | 'validation' | 'kgcl'> | undefined;
+  /** Make `cr` exactly the stored record: fields it lacks are dropped too. */
+  const become = (stored: ChangeRequest) => {
+    for (const k of Object.keys(cr) as (keyof ChangeRequest)[]) delete cr[k];
+    Object.assign(cr, structuredClone(stored));
+  };
   for (let attempt = 0; attempt < 3; attempt++) {
     const epoch = consentEpoch(cr.ontologyId);
+    // Triage works on stored requests only. One that has been discarded is never written back.
     const base = fresh();
-    if (base) {
-      for (const k of Object.keys(cr) as (keyof ChangeRequest)[]) if (!(k in base)) delete cr[k];
-      Object.assign(cr, structuredClone(base));
-    }
+    if (!base) return cr;
+    become(base);
     let event: ReturnType<typeof ev>;
     try {
       const p = await preview(project, cr.ops, cr.tests, author);
@@ -250,38 +262,25 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
       };
       event = ev('validated', message);
     }
-    last = { diff: cr.diff, classification: cr.classification, validation: cr.validation, kgcl: cr.kgcl };
     if (consentEpoch(cr.ontologyId) === epoch) {
       // Nothing was withdrawn meanwhile. Write triage's results onto the record as it is now.
-      const owned = { ...last, warnings: cr.warnings, analysis: cr.analysis };
+      const owned = { diff: cr.diff, classification: cr.classification, validation: cr.validation, kgcl: cr.kgcl, warnings: cr.warnings, analysis: cr.analysis };
       const latest = fresh();
-      if (latest) Object.assign(cr, latest, owned, { timeline: [...latest.timeline, event] });
-      else cr.timeline.push(event);
+      if (!latest) return cr;
+      become(latest);
+      Object.assign(cr, owned, { timeline: [...latest.timeline, event] });
       return save(cr);
     }
   }
-  // Use cases kept changing. Keep the stored (redacted) record and the structural checks, with no
-  // competency question results, no analysis and no warnings from these runs: any of them may quote
-  // what was withdrawn.
+  // Use cases kept changing. Nothing from these runs is kept, since any of it (the diff, the checks,
+  // the analysis, the warnings) may quote what was withdrawn: the stored record, which withdrawal
+  // has redacted, stays as it is, without competency question results, and asks for another triage.
   const latest = fresh();
-  if (latest) Object.assign(cr, latest);
-  if (last) Object.assign(cr, { diff: last.diff, classification: last.classification, kgcl: last.kgcl });
-  if (last?.validation) cr.validation = { ...last.validation, competencyQuestions: [] };
-  cr.timeline = [...cr.timeline, ev('validated', 'Use cases changed while the checks ran, so competency questions were left out. Run triage again to include them.')];
+  if (!latest) return cr;
+  become(latest);
+  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: [] };
+  cr.timeline = [...cr.timeline, ev('validated', 'Use cases changed while the checks ran, so the results were not updated. Run triage again.')];
   return save(cr);
-}
-
-/**
- * Delete a change request that was just created, with everything recorded about it, when the
- * request that created it fails (for example, a cited use case was withdrawn meanwhile).
- */
-export function discardChangeRequest(id: string) {
-  const cr = get<ChangeRequest>('changeRequests', id);
-  if (!cr) return;
-  for (const c of ['reviews', 'votes'] as const) for (const d of list<{ id: string }>(c, id)) remove(c, d.id);
-  const link = `/o/${cr.ontologyId}/changes/${id}`;
-  for (const a of list<{ id: string; link?: string }>('activity', cr.ontologyId)) if (a.link === link) remove('activity', a.id);
-  remove('changeRequests', id);
 }
 
 function trimDiff(d: ChangeRequest['diff']) {

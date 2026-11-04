@@ -864,7 +864,7 @@ describe('fifth review: retriage refresh, title copies, draft triage, citing dra
     expect(saved.tests ?? []).toEqual([]);
     expect(saved.validation?.competencyQuestions).toEqual([]);
     expect(JSON.stringify(saved)).not.toMatch(/CHURN_SECRET|Churn source 1/);
-    expect(saved.timeline.at(-1)!.message).toMatch(/competency questions were left out/);
+    expect(saved.timeline.at(-1)!.message).toMatch(/results were not updated/);
   });
 
   it('withdrawal takes every title the use case had out of change requests, reviews, votes, releases and activity (finding 3)', async () => {
@@ -878,8 +878,7 @@ describe('fifth review: retriage refresh, title copies, draft triage, citing dra
       title: `Add ${said}`,
       description: said,
       warnings: [`Overlaps ${said}`],
-      risks: [`Risky for ${said}`],
-      analysis: { ...(list<ChangeRequest>(demoId)[0].analysis ?? {}), summary: said },
+      analysis: { summary: said, rationale: `Because ${said}`, risks: [`Risky for ${said}`] },
       timeline: [{ at: clock.iso(), type: 'created', message: `opened for ${said}` }],
     } as Partial<ChangeRequest>);
     put('reviews', { id: `rv_${cr.id}`, changeRequestId: cr.id, comment: `Good for ${said}` }, cr.id);
@@ -981,5 +980,184 @@ describe('fifth review: retriage refresh, title copies, draft triage, citing dra
     expect(once).toBe(true);
     expect(list<ChangeRequest>(demoId).length).toBe(before);
     expect(JSON.stringify(listDocs('activity', demoId))).not.toMatch(/Cite race request/);
+  });
+});
+
+describe('sixth review: prose-only redaction, final-attempt retriage, release notes, legacy titles, uncommitted requests', () => {
+  const crCopy = (fields: Partial<ChangeRequest>) => {
+    const base = list<ChangeRequest>(demoId)[0];
+    const cr = { ...structuredClone(base), id: `cr_six_${Math.random().toString(36).slice(2, 8)}`, number: 8000 + Math.floor(Math.random() * 999), useCaseIds: [], ...fields } as ChangeRequest;
+    put('changeRequests', cr, demoId);
+    return cr;
+  };
+  const publicCase = async (who: string, name: string) => {
+    const agent = await login('contributor', who);
+    return { agent, id: await useCaseVia(agent, name, 'public') };
+  };
+  const addClass = (label: string) => ({ op: 'addClass', localName: 'Withheld' + Math.random().toString(36).slice(2, 6), label, definition: `A ${label} thing.` }) as unknown as ChangeRequest['ops'][number];
+
+  it('a title like "draft" changes no status, kind or operation name, only prose (new finding)', async () => {
+    const { agent, id } = await publicCase('Status Word Author', 'Status word placeholder');
+    expect((await agent.patch(`/api/use-cases/${id}`).send({ sections: { name: 'draft' } })).status).toBe(200);
+    const author = await login('contributor', 'Status Word CR Author');
+    const crAuthor = userNamed('Status Word CR Author');
+    const cr = crCopy({ status: 'draft', kind: 'feature', authorId: crAuthor.id, title: 'A draft of shifts', description: 'see the draft', ops: [addClass('Shift')] });
+    const rel = { ...structuredClone(list<Release>(demoId, 'releases' as never)[0]), id: `rel_six_${cr.id}`, status: 'draft' as const, notes: 'Notes on the draft' };
+    put('releases', rel, demoId);
+    withdrawUseCase(getUseCase(id), userNamed('Status Word Author'));
+    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
+    expect(saved.status).toBe('draft');
+    expect(saved.kind).toBe('feature');
+    expect(saved.ops[0].op).toBe('addClass');
+    expect(saved.title).toBe('A a use case that is no longer public of shifts');
+    expect(get<Release>('releases', rel.id)!.status).toBe('draft');
+    expect(get<Release>('releases', rel.id)!.notes).toBe('Notes on the a use case that is no longer public');
+    // The workflow still works on it.
+    expect((await author.post(`/api/change-requests/${cr.id}/submit`)).status).toBe(200);
+  });
+
+  it('IRIs and ids keep their exact value even when a title appears in them (new finding)', async () => {
+    const { agent, id } = await publicCase('Iri Word Author', 'Iri placeholder');
+    expect((await agent.patch(`/api/use-cases/${id}`).send({ sections: { name: 'Berth' } })).status).toBe(200);
+    const op = { op: 'setSuperClasses', iri: 'https://w3id.org/x#Berth', superClasses: ['https://w3id.org/x#Berth'] } as unknown as ChangeRequest['ops'][number];
+    const cr = crCopy({ title: 'Berth changes', ops: [op] });
+    withdrawUseCase(getUseCase(id), userNamed('Iri Word Author'));
+    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
+    expect(saved.ops[0]).toEqual(op);
+    expect(saved.title).toBe('a use case that is no longer public changes');
+  });
+
+  it('a one-character title is taken out too, as a word (finding 2)', async () => {
+    const { agent, id } = await publicCase('One Char Author', 'One char placeholder');
+    expect((await agent.patch(`/api/use-cases/${id}`).send({ sections: { name: 'X' } })).status).toBe(200);
+    const cr = crCopy({ title: 'X marks the spot, eXtra Xylophone', description: 'see x.' });
+    withdrawUseCase(getUseCase(id), userNamed('One Char Author'));
+    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
+    expect(saved.title).toBe('a use case that is no longer public marks the spot, eXtra Xylophone');
+    expect(saved.description).toBe('see a use case that is no longer public.');
+  });
+
+  it('a use case saved before titles were tracked still has its old public name taken out after a rename (finding 2)', async () => {
+    const { agent, id } = await publicCase('Legacy Author', 'Legacy dock ledger');
+    // As stored by an earlier version: no record of past titles or questions.
+    const legacy = getUseCase(id) as UseCase & Record<string, unknown>;
+    delete legacy.publicTitles;
+    delete legacy.publicQuestions;
+    put('useCases', legacy, demoId);
+    expect((await agent.patch(`/api/use-cases/${id}`).send({ sections: { name: 'Renamed ledger' } })).status).toBe(200);
+    const cr = crCopy({ title: 'From Legacy dock ledger', description: 'and Renamed ledger' });
+    withdrawUseCase(getUseCase(id), userNamed('Legacy Author'));
+    expect(JSON.stringify(get('changeRequests', cr.id))).not.toMatch(/Legacy dock ledger|Renamed ledger/);
+  });
+
+  it('a retriage that gives up keeps nothing from its runs: not the diff, not a new analysis (finding 1)', async () => {
+    const { triage } = await import('../src/services/changeRequests.js');
+    const sources: { id: string; n: number }[] = [];
+    for (const n of [1, 2, 3]) sources.push({ id: (await publicCase(`Final Churn ${n}`, `Final churn source ${n}`)).id, n });
+    // The secret is the last source's title, in the proposed edits and the stored diff.
+    const cr = crCopy({ title: 'Model berths', ops: [addClass('Final churn source 3')], analysis: undefined, diff: undefined, validation: undefined });
+    await triage(get<ChangeRequest>('changeRequests', cr.id)!);
+    expect(JSON.stringify(get<ChangeRequest>('changeRequests', cr.id)!.diff)).toMatch(/Final churn source 3/);
+    // Stored without an analysis, so a new one could only come from these runs.
+    const { analysis: _a, ...noAnalysis } = get<ChangeRequest>('changeRequests', cr.id)!;
+    put('changeRequests', noAnalysis, demoId);
+    let calls = 0;
+    const real = ontologyStore.working.bind(ontologyStore);
+    // Withdraw a source during each attempt; the last one is the source quoted in the edits.
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      const s = sources[calls++];
+      const out = await real(p);
+      if (s) withdrawUseCase(getUseCase(s.id), userNamed(`Final Churn ${s.n}`));
+      return out;
+    });
+    try {
+      await triage(get<ChangeRequest>('changeRequests', cr.id)!);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(calls).toBe(3);
+    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
+    expect(JSON.stringify(saved)).not.toMatch(/Final churn source/);
+    expect(saved.analysis).toBeUndefined();
+    expect(saved.timeline.at(-1)!.message).toMatch(/results were not updated/);
+    // A signed-in non-member reading it sees none of it either.
+    const outsider = await login('contributor');
+    expect((await outsider.get(`/api/change-requests/${cr.id}`)).text).not.toMatch(/Final churn source/);
+  });
+
+  it('a triage never writes back a request that is not stored (finding 3)', async () => {
+    const { triage } = await import('../src/services/changeRequests.js');
+    const ghost = { ...structuredClone(list<ChangeRequest>(demoId)[0]), id: 'cr_never_stored', title: 'Ghost request' };
+    await triage(ghost);
+    expect(get('changeRequests', 'cr_never_stored')).toBeUndefined();
+  });
+
+  it('a change request citing a use case withdrawn while it is drafted is never stored or shown (finding 3)', async () => {
+    const { agent, id } = await publicCase('Uncommitted Author', 'Uncommitted cite case');
+    const before = list<ChangeRequest>(demoId).length;
+    const real = ontologyStore.working.bind(ontologyStore);
+    let resume!: () => void;
+    let calls = 0;
+    const storedDuring: number[] = [];
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (++calls === 1) await new Promise<void>((ok) => (resume = ok));
+      // Any later read (triage) would find what has been stored so far.
+      else storedDuring.push(list<ChangeRequest>(demoId).length);
+      return real(p);
+    });
+    try {
+      const creating = agent.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Uncommitted cite request', naturalLanguage: 'Add a Berth class', useCaseIds: [id] }).then((r) => r);
+      while (!resume) await new Promise((ok) => setTimeout(ok, 10));
+      withdrawUseCase(getUseCase(id), userNamed('Uncommitted Author'));
+      resume();
+      expect((await creating).status).toBe(409);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(storedDuring.every((n) => n === before)).toBe(true);
+    expect(list<ChangeRequest>(demoId).length).toBe(before);
+    expect(JSON.stringify(listDocs('activity', demoId))).not.toMatch(/Uncommitted cite request/);
+  });
+
+  it('publishing works from the stored release, so notes scrubbed by a withdrawal mid-publication stay scrubbed (finding 2)', async () => {
+    const { publishRelease } = await import('../src/services/releases.js');
+    const { id } = await publicCase('Notes Race Author', 'Pilot boat roster');
+    await login('steward', 'Notes Race Steward');
+    const steward = userNamed('Notes Race Steward');
+    const r: Release = { ...structuredClone(list<Release>(demoId, 'releases' as never)[0]), id: 'rel_notes_race', version: '9.9.9', status: 'draft', notes: 'Adds Pilot boat roster', changeRequestIds: [], commit: undefined, publishedAt: undefined, githubUrl: undefined };
+    put('releases', r, demoId);
+    let committed: Record<string, string> = {};
+    const realWrite = ontologyStore.writeRelease.bind(ontologyStore);
+    const write = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
+      committed = args[3];
+      return realWrite(...args);
+    });
+    const realWorking = ontologyStore.working.bind(ontologyStore);
+    let resume!: () => void;
+    let calls = 0;
+    const read = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (++calls === 1) await new Promise<void>((ok) => (resume = ok));
+      return realWorking(p);
+    });
+    try {
+      const publishing = publishRelease(get<Release>('releases', r.id)!, steward);
+      while (!resume) await new Promise((ok) => setTimeout(ok, 10));
+      // Publication is reading the ontology, before it takes the consent lock: the withdrawal goes through.
+      withdrawUseCase(getUseCase(id), userNamed('Notes Race Author'));
+      expect(get<Release>('releases', r.id)!.notes).not.toMatch(/Pilot boat roster/);
+      read.mockRestore();
+      resume();
+      await publishing;
+    } finally {
+      read.mockRestore();
+      write.mockRestore();
+    }
+    expect(committed['RELEASE_NOTES.md']).toBeDefined();
+    expect(committed['RELEASE_NOTES.md']).not.toMatch(/Pilot boat roster/);
+    const stored = get<Release>('releases', r.id)!;
+    expect(stored.status).toBe('published');
+    expect(stored.notes).not.toMatch(/Pilot boat roster/);
+    const outsider = await login('contributor');
+    expect((await outsider.get(`/api/releases/${r.id}`)).text).not.toMatch(/Pilot boat roster/);
   });
 });

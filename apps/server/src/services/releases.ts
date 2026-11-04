@@ -10,7 +10,7 @@ import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
@@ -196,10 +196,17 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
       console.warn(`[release] migration script: ${(err as Error).message}`);
     }
   }
-  files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
-  // From the use cases being read for the release to the release being pushed, no one can withdraw
-  // one or change who may see it (withdrawals wait), so what is committed is what they consented to.
+  // From the use cases being read for the release to the release being pushed and saved, no one can
+  // withdraw one or change who may see it (withdrawals wait), so what is committed is what they consented to.
   await withConsentLock(project.id, async () => {
+    // A withdrawal may have redacted the release (its notes) while the ontology was being read above:
+    // work from the stored record from here on, never the copy this call started with.
+    const stored = get<Release>('releases', r.id);
+    if (!stored) throw new HttpError(404, `release ${r.id} not found`);
+    for (const k of Object.keys(r) as (keyof Release)[]) delete r[k];
+    Object.assign(r, stored);
+    if (!publishable(r).ok) throw new HttpError(409, `Not ready to publish: ${publishable(r).why}`);
+    files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
     const doc = await prepareForRelease(project, r);
     if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
     // The use case snapshot always goes in, so the release never shows live data;
@@ -245,8 +252,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
         console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
       }
     }
+    save(r);
   });
-  save(r);
   logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return r;
 }

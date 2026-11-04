@@ -472,18 +472,18 @@ export function apiRouter(): Router {
       ops: Array.isArray(b.ops) ? b.ops : undefined,
       naturalLanguage: Array.isArray(b.ops) ? undefined : (optStr(b.naturalLanguage) ?? [optStr(b.title), optStr(b.description)].filter(Boolean).join('\n\n')),
       submit: !!b.submit,
+      // A cited use case may be withdrawn while the request is drafted. So the check is made again,
+      // under the consent lock, at the moment the request is first stored, and linked in the same
+      // step: if it fails, nothing was ever stored or shown.
+      commit: useCaseIds.length
+        ? (draft, store) =>
+            useCases.withConsentLock(p.id, async () => {
+              useCases.assertCitable(useCaseIds, user, p.id);
+              store();
+              useCases.linkChangeRequest(draft, useCaseIds, user);
+            })
+        : undefined,
     });
-    if (useCaseIds.length) {
-      // The author may have withdrawn a cited use case while the request was drafted. Then nothing is kept.
-      await useCases.withConsentLock(p.id, async () => {
-        try {
-          useCases.linkChangeRequest(cr, useCaseIds, user);
-        } catch (err) {
-          crs.discardChangeRequest(cr.id);
-          throw err;
-        }
-      });
-    }
     res.status(201).json(crOut(crs.getCR(cr.id), req));
   });
 

@@ -6,6 +6,7 @@ import type {
   ElicitedTerm,
   InterviewSession,
   OntologyProject,
+  Release,
   Role,
   UseCase,
   UseCaseLink,
@@ -98,44 +99,81 @@ const questionKey = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
 const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const WITHDRAWN_PHRASE = 'a use case that is no longer public';
 
-/** Replace matches of `re` in every string inside `value` (ids left alone). Returns the new value and whether anything changed. */
-function redactDeep<T>(value: T, re: RegExp): [T, boolean] {
-  let changed = false;
-  const walk = (v: unknown, key?: string): unknown => {
-    if (typeof v === 'string') {
-      if (key && /(^id$|Id$|Ids$|^iri$|Iri$)/.test(key)) return v;
-      const out = v.replace(re, WITHDRAWN_PHRASE);
-      if (out !== v) changed = true;
-      return out;
-    }
-    if (Array.isArray(v)) return v.map((x) => walk(x, key));
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
-    return v;
-  };
-  const out = walk(value) as T;
-  return [out, changed];
+/**
+ * Redaction touches prose only: the fields people (or the model) wrote in words.
+ * Statuses, kinds, operation names, roles, ids, IRIs, dates and numbers are never
+ * rewritten, so a title such as "draft" can't change a workflow state.
+ */
+type Prose = (text: string) => string;
+const IRI_LIKE = /^(<[^>\s]*>|[a-z][\w+.-]*:[^\s]*)$/i;
+const prose = (f: Prose) => (v: unknown): unknown => (typeof v !== 'string' ? v : IRI_LIKE.test(v) ? v : f(v));
+const proseList = (f: Prose) => (v: unknown): unknown => (Array.isArray(v) ? v.map(prose(f)) : v);
+/** In an N-Triples line, only the literals are prose. */
+const literalsIn = (f: Prose) => (line: unknown): unknown =>
+  typeof line === 'string' ? line.replace(/"((?:[^"\\]|\\.)*)"/g, (_m, body: string) => `"${f(body)}"`) : line;
+const TERM_PROSE = ['label', 'definition', 'comment', 'editorialNote', 'reason', 'title', 'description'] as const;
+const TERM_PROSE_LISTS = ['altLabels', 'examples'] as const;
+function annotations<T>(o: T, f: Prose): T {
+  if (!o || typeof o !== 'object') return o;
+  const out = { ...(o as Record<string, unknown>) };
+  for (const k of TERM_PROSE) if (k in out) out[k] = prose(f)(out[k]);
+  for (const k of TERM_PROSE_LISTS) if (k in out) out[k] = proseList(f)(out[k]);
+  if (out.set && typeof out.set === 'object') out.set = annotations(out.set, f);
+  return out as T;
 }
+
+const redactors: Record<'changeRequests' | 'reviews' | 'votes' | 'releases' | 'activity', (doc: any, f: Prose) => any> = {
+  changeRequests: (cr: ChangeRequest, f) => ({
+    ...cr,
+    title: prose(f)(cr.title),
+    description: prose(f)(cr.description),
+    ops: cr.ops?.map((op) => annotations(op, f)),
+    ...(cr.warnings ? { warnings: proseList(f)(cr.warnings) } : {}),
+    ...(cr.kgcl ? { kgcl: proseList(f)(cr.kgcl) } : {}),
+    ...(cr.analysis ? { analysis: { ...cr.analysis, summary: prose(f)(cr.analysis.summary), rationale: prose(f)(cr.analysis.rationale), ...(cr.analysis.risks ? { risks: proseList(f)(cr.analysis.risks) } : {}) } } : {}),
+    ...(cr.classification ? { classification: { ...cr.classification, reasons: cr.classification.reasons.map((r) => ({ ...r, message: prose(f)(r.message) })) } } : {}),
+    ...(cr.validation ? { validation: { ...cr.validation, lint: cr.validation.lint.map((i) => ({ ...i, message: prose(f)(i.message) })) } } : {}),
+    ...(cr.diff
+      ? {
+          diff: {
+            ...cr.diff,
+            terms: cr.diff.terms.map((t) => ({ ...t, ...(t.label !== undefined ? { label: prose(f)(t.label) } : {}), details: proseList(f)(t.details), fields: t.fields.map((x) => ({ ...x, added: proseList(f)(x.added), removed: proseList(f)(x.removed) })) })),
+            addedNTriples: cr.diff.addedNTriples.map(literalsIn(f)),
+            removedNTriples: cr.diff.removedNTriples.map(literalsIn(f)),
+          },
+        }
+      : {}),
+    timeline: cr.timeline.map((e) => ({ ...e, message: prose(f)(e.message) })),
+  }),
+  reviews: (r: { comment?: string }, f) => ('comment' in r ? { ...r, comment: prose(f)(r.comment) } : r),
+  votes: (v: { comment?: string }, f) => ('comment' in v ? { ...v, comment: prose(f)(v.comment) } : v),
+  releases: (r: Release, f) => ({ ...r, notes: prose(f)(r.notes) }),
+  activity: (a: { message?: string }, f) => ({ ...a, message: prose(f)(a.message) }),
+};
 
 /**
  * When a use case stops being public, take out what was copied from it:
  * - every question it had while public (including ones since edited) from
  *   validation results saved on change requests, and from the SPARQL tests
  *   drafted from them, which carry its example data and run again on retriage;
- * - every title it had while public, wherever it was quoted: change requests
- *   (title, description, analysis, warnings, timeline, edits), their reviews and
- *   votes, releases and their votes, and the activity feed.
+ * - every title it had while public, wherever it was quoted in prose: change
+ *   requests (title, description, the labels and definitions in their edits,
+ *   analysis, warnings, check messages, the literals in their diff, timeline),
+ *   their reviews and votes, releases and their votes, and the activity feed.
+ *   Machine fields (statuses, kinds, ids, IRIs, roles) are never touched.
  * Content already merged into the ontology itself is not changed here.
  */
 onNoLongerPublic((u) => {
   const questions = new Set([...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)].map(questionKey));
   const gone = (r: { question: string }) => questions.has(questionKey(r.question));
-  const titles = [...new Set([...(u.publicTitles ?? []), u.sections.name ?? ''].map((t) => t.trim()).filter((t) => t.length >= 2))].sort((x, y) => y.length - x.length);
-  // Whole words only, so ordinary text that happens to contain a short title isn't mangled.
+  const titles = [...new Set([...(u.publicTitles ?? []), u.sections.name ?? ''].map((t) => t.trim()).filter(Boolean))].sort((x, y) => y.length - x.length);
+  // Whole words only, so a word that merely contains a title is left alone. Only prose is searched (see redactors).
   const titleRe = titles.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${titles.map(escapeRe).join('|')})(?![\\p{L}\\p{N}])`, 'giu') : undefined;
-  const redact = <T extends { id: string }>(collection: 'changeRequests' | 'reviews' | 'votes' | 'releases' | 'activity', doc: T, parent: string) => {
+  const replace: Prose = (text) => (titleRe ? text.replace(titleRe, WITHDRAWN_PHRASE) : text);
+  const redact = <T extends { id: string }>(collection: keyof typeof redactors, doc: T, parent: string) => {
     if (!titleRe) return doc;
-    const [out, changed] = redactDeep(doc, titleRe);
-    if (changed) put(collection, out, parent);
+    const out = redactors[collection](doc, replace) as T;
+    if (JSON.stringify(out) !== JSON.stringify(doc)) put(collection, out, parent);
     return out;
   };
   for (const stored of list<ChangeRequest>('changeRequests', u.ontologyId)) {
@@ -320,9 +358,12 @@ function saveUseCase(u: UseCase) {
   const before = get<UseCase>('useCases', u.id);
   // A withdrawal is final: a save from work that started earlier (an interview turn, drafting) never undoes it.
   if (before?.withdrawnAt && !u.withdrawnAt) Object.assign(u, { withdrawnAt: before.withdrawnAt, visibility: before.visibility, status: before.status });
-  if (isPublic(u)) {
-    u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)])];
-    u.publicTitles = [...new Set([...(before?.publicTitles ?? []), ...(u.publicTitles ?? []), ...(u.sections.name ? [u.sections.name] : [])])];
+  // Every title and question it has had while public, so a withdrawal can find each copy. The stored
+  // record counts too: one saved before titles were tracked still had its old name out there.
+  const shown = [...(before && isPublic(before) ? [before] : []), ...(isPublic(u) ? [u] : [])];
+  if (shown.length || before?.publicQuestions || before?.publicTitles) {
+    u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...shown.flatMap((x) => x.competencyQuestions.map((q) => q.question))])];
+    u.publicTitles = [...new Set([...(before?.publicTitles ?? []), ...(u.publicTitles ?? []), ...shown.flatMap((x) => (x.sections.name ? [x.sections.name] : []))])];
   }
   if (u.visibility === 'public' && !u.number) u.number = nextNumber(u.ontologyId);
   else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = nextNumber(u.ontologyId, 'groupNumber');
