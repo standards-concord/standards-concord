@@ -17,7 +17,7 @@ import { defaultKeymap, history, historyKeymap, isolateHistory } from '@codemirr
 import { bracketMatching, foldGutter, foldKeymap, foldService, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type Completion, type CompletionSource } from '@codemirror/autocomplete';
-import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
+import { forEachDiagnostic, lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import { languageSupport, type CodeLanguage } from './languages';
 import { highlighter } from './highlight';
 import { cx } from '../ui';
@@ -64,6 +64,21 @@ const theme = EditorView.theme({
 });
 
 /** A problem to underline in the editor, with the text of its hover popup. */
+/**
+ * An edit removes the underlines it touches straight away, instead of leaving
+ * them on the new text until the next analysis. Untouched ones move with the text.
+ */
+const dropEditedDiagnostics = EditorState.transactionExtender.of((tr) => {
+  if (!tr.docChanged) return null;
+  const keep: Diagnostic[] = [];
+  let dropped = false;
+  forEachDiagnostic(tr.startState, (d, from, to) => {
+    if (tr.changes.touchesRange(from, to)) dropped = true;
+    else keep.push({ ...d, from: tr.changes.mapPos(from, 1), to: tr.changes.mapPos(to, -1) });
+  });
+  return dropped ? setDiagnostics(tr.startState, keep) : null;
+});
+
 export interface EditorDiagnostic {
   from: number;
   to: number;
@@ -228,7 +243,7 @@ export function CodeEditor({
       wrap ? EditorView.lineWrapping : [],
       placeholder ? placeholderExt(placeholder) : [],
       keymap.of([...searchKeymap, ...foldKeymap, ...defaultKeymap]),
-      diagnostics ? lintGutter() : [],
+      diagnostics ? [lintGutter(), dropEditedDiagnostics] : [],
     ];
     if (!readOnly) {
       extensions.push(

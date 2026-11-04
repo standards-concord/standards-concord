@@ -89,6 +89,39 @@ ex:helper a vol:Role .
     await expect(list.getByRole('button', { name: /sixteen/ })).toHaveCount(0);
   });
 
+  // Used to go wrong: fixing a value in place left its old underline on the new text
+  // until typing paused for the re-check, so "16" still read as "must be of type …".
+  test('an edit clears the underline it touches at once, and leaves the others', async ({ page }) => {
+    await signIn(page, { name: 'E2E check edit', role: 'editor' });
+    await openCheck(page, id);
+    await setData(page, `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/data/> .\n\nex:foodbank a vol:VolunteerInvolvingOrganisation .\n\nex:shift a vol:VolunteeringOpportunity ;\n  vol:title "Shift" ;\n  vol:offeredBy ex:foodbank ;\n  vol:minimumAge "sixteen" .\n`);
+    await check(page);
+    const editor = page.getByTestId('data-editor');
+    await expect(editor.locator('.cm-lintRange-error', { hasText: '"sixteen"' })).toHaveCount(1);
+    await problems(page).getByRole('button', { name: /Value "sixteen"/ }).click();
+    await expect.poll(() => selection(page)).toBe('"sixteen"');
+    // Type over the value and look straight away, well inside the 250 ms before the text is read again.
+    const underlined = await page.evaluate(async () => {
+      document.execCommand('insertText', false, '16');
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return [...document.querySelectorAll('[data-testid="data-editor"] .cm-lintRange-error')].map((e) => e.textContent);
+    });
+    expect(underlined).not.toContain('16');
+    expect(underlined).toContain('ex:foodbank');
+  });
+
+  // Used to go wrong: a problem about an anonymous [ … ] record said "Not in your data", as if it wasn't real.
+  test('a problem with no place in the text says why', async ({ page }) => {
+    await signIn(page, { name: 'E2E check anon', role: 'editor' });
+    await openCheck(page, id);
+    await setData(page, `@prefix vol: <${VOL}> .\n\n[] a vol:VolunteerInvolvingOrganisation .\n`);
+    await check(page);
+    const item = problems(page).getByRole('listitem').filter({ hasText: /requires at least 1 vol:offersOpportunity/ });
+    await expect(item).toContainText('Location unavailable');
+    await expect(item).toContainText('anonymous record');
+    await expect(item.getByRole('button')).toHaveCount(0);
+  });
+
   // Used to go wrong: problems showed full <https://…> IRIs because sparq wraps IRIs in
   // angle brackets, which the prefix lookup never matched, and it only knew the ontology's prefixes.
   test('problems use the prefixes the data declares', async ({ page }) => {

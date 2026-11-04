@@ -35,6 +35,8 @@ export interface Finding {
   /** Where it is in the data: the main place (for jumping), and every place to underline. */
   at?: Span & { line: number };
   ranges: Span[];
+  /** Why there's no place to point to, when there isn't one. */
+  unlocated?: string;
 }
 
 const COMMON_PREFIXES: Record<string, string> = {
@@ -89,6 +91,10 @@ export function formatTerm(t: RdfTerm, prefixes: [string, string][]): string {
   if (t.kind === 'blank') return '[ ]';
   if (t.lang) return `${quote(t.value)}@${t.lang}`;
   if (!t.datatype || t.datatype === `${XSD}string`) return quote(t.value);
+  // Turtle's own shorthand, which means exactly the same: 3, 2.5, true.
+  if (t.datatype === `${XSD}integer` && /^[+-]?\d+$/.test(t.value)) return t.value;
+  if (t.datatype === `${XSD}decimal` && /^[+-]?\d*\.\d+$/.test(t.value)) return t.value;
+  if (t.datatype === `${XSD}boolean` && /^(true|false)$/.test(t.value)) return t.value;
   return `${quote(t.value)}^^${shortIri(t.datatype, prefixes)}`;
 }
 
@@ -123,7 +129,7 @@ function severityOf(s: string | null | undefined): Severity {
 }
 
 /** Line numbers by binary search over line starts, so locating many findings stays fast. */
-function lineFinder(text: string): (offset: number) => number {
+export function lineFinder(text: string): (offset: number) => number {
   const starts = [0];
   for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
   return (offset) => {
@@ -220,6 +226,8 @@ export class ShapesIndex {
   private readonly shapes = new Map<string, ShapeInfo>();
   private readonly byPath = new Map<string, ShapeInfo[]>();
   private readonly lists = new Map<string, RdfTerm[]>();
+  /** Every sh:message text in the shapes. */
+  readonly messages = new Set<string>();
 
   constructor(shapesTurtle: string | undefined) {
     if (!shapesTurtle) return;
@@ -229,6 +237,7 @@ export class ShapesIndex {
     for (const t of doc.triples) {
       const key = termKey(t.s.term);
       const p = t.p.term.value;
+      if (p === `${SH}message` && t.o.term.kind === 'literal') this.messages.add(t.o.term.value.trim());
       if (p === `${RDF}first`) first.set(key, t.o.term);
       else if (p === `${RDF}rest`) rest.set(key, termKey(t.o.term));
       let shape = this.shapes.get(key);
@@ -285,29 +294,23 @@ export class ShapesIndex {
   }
 }
 
-/** The messages sparq writes itself; anything else is the shape author's sh:message, shown as written. */
-const ENGINE_MESSAGES = [
-  /^Fewer than \d+ values$/,
-  /^More than \d+ values$/,
-  /^Value does not have datatype <[^<>\s]+>$/,
-  /^Value does not have class <[^<>\s]+>$/,
-  /^Value does not have any of the allowed classes/,
-  /^Value does not have node kind /,
-  /^Value is not in the enumeration$/,
-  /^Value does not conform to (any|every) member shape$/,
-  /^Value does not conform to the node shape$/,
-  /^Value conforms to the negated shape$/,
-  /^Value does not match pattern /,
-  /^Value is (longer|shorter) than /,
-  /^Value is not (less than|less than or equal to) /,
-  /^Value is out of range/,
-  /^Value is not /,
-  /^Value does not have /,
-];
-
-function isEngineMessage(m: string): boolean {
-  return ENGINE_MESSAGES.some((re) => re.test(m));
-}
+/**
+ * sparq's own message for each constraint, in full. A message that doesn't
+ * match its component's template exactly, or that a shape declares as its
+ * sh:message, is the shape author's: it's shown as written and never mined
+ * for numbers or IRIs.
+ */
+const ENGINE_TEMPLATES: Record<string, RegExp> = {
+  MinCount: /^Fewer than \d+ values$/,
+  MaxCount: /^More than \d+ values$/,
+  Datatype: /^Value does not have datatype <[^<>\s]+>$/,
+  Class: /^Value does not have class <[^<>\s]+>$/,
+  In: /^Value is not in the enumeration$/,
+  Or: /^Value does not conform to any member shape$/,
+  And: /^Value does not conform to every member shape$/,
+  Node: /^Value does not conform to the node shape$/,
+  Not: /^Value conforms to the negated shape$/,
+};
 
 /* ------------------------------------------------------------- Findings */
 
@@ -316,6 +319,12 @@ export interface DescribeContext {
   text: string;
   prefixes: [string, string][];
   shapes?: ShapesIndex;
+  /**
+   * Subjects (term keys) the ontology describes too. sparq checks the
+   * ontology and the data together, so for these the data alone doesn't say
+   * how many values there are, or which one was meant.
+   */
+  external?: Set<string>;
 }
 
 /** Indexes the document's triples by subject. */
@@ -332,20 +341,58 @@ function indexDoc(doc: TurtleDoc) {
 
 const textOf = (ps: Part[]) => ps.map((p) => (typeof p === 'string' ? p : 'code' in p ? p.code : p.strong)).join('');
 
-/** "a vol:Person", "an xsd:integer value", … for describing the alternatives of sh:or. */
+/** Shape properties that say nothing about the value, so an alternative can still be described fully without them. */
+const DESCRIPTIVE = new Set([`${RDF}type`, `${SH}name`, `${SH}description`, `${SH}message`, `${SH}severity`, `${SH}order`, `${SH}group`, `${SH}codeIdentifier`, 'http://www.w3.org/2000/01/rdf-schema#label', 'http://www.w3.org/2000/01/rdf-schema#comment']);
+
+/**
+ * One alternative of sh:or / sh:xone / sh:and in words, with every constraint
+ * it has ("a xsd:integer value of at least 10"). Returns undefined if the
+ * shape has anything it can't put into words, so a sentence never leaves a
+ * requirement out.
+ */
 function describeAlternative(t: RdfTerm, shapes: ShapesIndex, prefixes: [string, string][]): Part[] | undefined {
   const shape = shapes.shape(t);
-  if (!shape) return t.kind === 'iri' ? ['matching ', { code: shortIri(t.value, prefixes) }] : undefined;
-  const cls = shape.params.get(`${SH}class`)?.[0];
-  if (cls?.kind === 'iri') return ['a ', { code: shortIri(cls.value, prefixes) }];
-  const dt = shape.params.get(`${SH}datatype`)?.[0];
-  if (dt?.kind === 'iri') return ['a ', { code: shortIri(dt.value, prefixes) }, ' value'];
-  const kind = shape.params.get(`${SH}nodeKind`)?.[0];
-  if (kind?.kind === 'iri') return [kind.value === `${SH}IRI` ? 'an IRI' : kind.value === `${SH}Literal` ? 'a literal' : kind.value === `${SH}BlankNode` ? 'a blank node' : 'a value of the right kind'];
-  const target = shape.params.get(`${SH}targetClass`)?.[0];
-  if (target?.kind === 'iri') return ['a valid ', { code: shortIri(target.value, prefixes) }];
-  if (t.kind === 'iri') return ['matching ', { code: shortIri(t.value, prefixes) }];
-  return undefined;
+  if (!shape) return undefined;
+  const one = (p: string) => {
+    const v = shape.params.get(`${SH}${p}`);
+    return v && v.length === 1 ? v[0] : undefined;
+  };
+  for (const [p, vs] of shape.params) {
+    if (DESCRIPTIVE.has(p)) continue;
+    const known = ['class', 'datatype', 'nodeKind', 'minInclusive', 'maxInclusive', 'minExclusive', 'maxExclusive', 'minLength', 'maxLength', 'pattern', 'hasValue'].map((k) => `${SH}${k}`);
+    if (!known.includes(p) || vs.length !== 1) return undefined;
+  }
+  if (shape.params.has(`${SH}flags`)) return undefined;
+  const lit = (v: RdfTerm | undefined) => (v?.kind === 'literal' ? v.value : undefined);
+  const out: Part[] = [];
+  const cls = one('class');
+  const dt = one('datatype');
+  const kind = one('nodeKind');
+  if (cls?.kind === 'iri') out.push('a ', { code: shortIri(cls.value, prefixes) });
+  else if (dt?.kind === 'iri') out.push('a ', { code: shortIri(dt.value, prefixes) }, ' value');
+  else if (kind?.kind === 'iri') {
+    const words: Record<string, string> = { IRI: 'an IRI', Literal: 'a literal', BlankNode: 'a blank node', BlankNodeOrIRI: 'an IRI or blank node', BlankNodeOrLiteral: 'a blank node or literal', IRIOrLiteral: 'an IRI or literal' };
+    const w = words[kind.value.replace(SH, '')];
+    if (!w) return undefined;
+    out.push(w);
+  } else out.push('a value');
+  if (cls && kind) return undefined;
+  const quals: Part[][] = [];
+  const bound = (p: string, words: string) => {
+    const v = one(p);
+    if (v) quals.push([`${words} `, { code: formatTerm(v, prefixes) }]);
+  };
+  bound('minInclusive', 'of at least');
+  bound('minExclusive', 'above');
+  bound('maxInclusive', 'of at most');
+  bound('maxExclusive', 'below');
+  if (lit(one('minLength'))) quals.push([`at least ${lit(one('minLength'))} characters long`]);
+  if (lit(one('maxLength'))) quals.push([`at most ${lit(one('maxLength'))} characters long`]);
+  if (lit(one('pattern'))) quals.push(['matching the pattern ', { code: `/${lit(one('pattern'))}/` }]);
+  const hv = one('hasValue');
+  if (hv) quals.push(['equal to ', { code: formatTerm(hv, prefixes) }]);
+  quals.forEach((q, k) => out.push(k ? ' and ' : ' ', ...q));
+  return out;
 }
 
 function joinAlternatives(alts: Part[][], word: string): Part[] {
@@ -366,7 +413,8 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   const pathIri = path?.kind === 'iri' ? path.value : undefined;
   const component = (raw.sourceConstraintComponent ?? '').replace(SH, '').replace(/ConstraintComponent$/, '');
   const message = (raw.message ?? '').trim();
-  const custom = message && !isEngineMessage(message) ? message : undefined;
+  const template = ENGINE_TEMPLATES[component];
+  const custom = message && (shapes.messages.has(message) || (template && !template.test(message))) ? message : undefined;
   const fmt = (t: RdfTerm) => ({ code: formatTerm(t, prefixes) });
   const iri = (s: string) => ({ code: shortIri(s, prefixes) });
   const focusCode = focus ? formatTerm(focus, prefixes) : undefined;
@@ -375,18 +423,37 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   const focusPart: Part = focus?.kind === 'blank' ? 'A blank node' : focus ? fmt(focus) : 'A record';
   const valuePart: Part = value?.kind === 'blank' ? 'a blank node' : value ? fmt(value) : 'the value';
 
-  // Where it is. Blank nodes have labels only sparq knows, so they're never guessed at: no location.
-  const located = focus && focus.kind !== 'blank' && bySubject.has(termKey(focus));
-  const own = located ? bySubject.get(termKey(focus!))! : [];
+  // Where it is. sparq labels anonymous nodes ([ … ], ( … )) itself, so those are never guessed at.
+  // A _:label someone wrote is kept by sparq, so it can be matched.
+  const findable = (t: RdfTerm | undefined) => !!t && (t.kind !== 'blank' || !/^__ttl_anon_/.test(t.value));
+  const focusKey = focus ? termKey(focus) : undefined;
+  const shared = !!focusKey && !!ctx.external?.has(focusKey);
+  const located = findable(focus) && !shared && bySubject.has(focusKey!);
+  const own = located ? bySubject.get(focusKey!)! : [];
   const withPath = pathIri ? own.filter((t) => t.p.term.value === pathIri) : [];
-  const withValue = value && value.kind !== 'blank' ? withPath.filter((t) => termKey(t.o.term) === termKey(value)) : [];
+  const distinctObjects = new Map(withPath.map((t) => [termKey(t.o.term), t]));
+  let withValue = value && findable(value) ? withPath.filter((t) => termKey(t.o.term) === termKey(value)) : [];
+  // An anonymous value can still be placed when it's the record's only value for that property.
+  if (value?.kind === 'blank' && !withValue.length && distinctObjects.size === 1) {
+    const only = [...distinctObjects.values()][0];
+    if (only.o.term.kind === 'blank') withValue = withPath.filter((t) => t.o.term === only.o.term || termKey(t.o.term) === termKey(only.o.term));
+  }
   const subjectSpan: Placed | undefined = own[0]?.s;
   let ranges: Span[] = [];
   if (withValue.length) ranges = withValue.map((t) => ({ from: t.o.from, to: t.o.to }));
   else if (component === 'MaxCount' && withPath.length) ranges = withPath.map((t) => ({ from: t.p.from, to: t.o.to }));
-  else if (subjectSpan && !(value && withPath.length)) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
+  else if (subjectSpan && !value) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
+  // A [ … ] subject can be long: underline just its opening bracket.
+  ranges = ranges.map((r) => (subjectSpan && focus?.kind === 'blank' && r.from === subjectSpan.from && r.to === subjectSpan.to && r.to - r.from > 1 && /^\[/.test(ctx.text.slice(r.from, r.from + 1)) ? { from: r.from, to: r.from + 1 } : r));
+  let unlocated: string | undefined;
+  if (!ranges.length) {
+    if (focus?.kind === 'blank' && !findable(focus)) unlocated = 'This is about an anonymous record (written with [ … ]), which can’t be matched to one place in the text. Giving it a name (like _:b1 or ex:something) lets Concord point to it.';
+    else if (value?.kind === 'blank' && !findable(value)) unlocated = 'The value is an anonymous record (written with [ … ]), and this record has more than one, so Concord can’t tell which.';
+    else if (shared) unlocated = 'This record is described in the ontology as well as here, so Concord can’t point to one place.';
+    else unlocated = 'Concord couldn’t find this in the text.';
+  }
   // SHACL counts distinct values, so repeating a triple doesn't count twice.
-  const found = located && pathIri ? new Set(withPath.map((t) => termKey(t.o.term))).size : undefined;
+  const found = located && pathIri ? distinctObjects.size : undefined;
   const foundParts: Part[] = found === undefined ? [] : [', ', { strong: String(found) }, ' found'];
 
   let parts: Part[];
@@ -475,10 +542,13 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
       break;
     }
     case 'Node': {
+      // A shape's target says which records it checks, not what a value must be, so it's never named as a requirement.
       const shape = shapes.candidates(pathIri, `${SH}node`);
-      const node = shape.length === 1 ? shape[0].params.get(`${SH}node`)![0] : undefined;
+      const node = shape.length === 1 && shape[0].params.get(`${SH}node`)!.length === 1 ? shape[0].params.get(`${SH}node`)![0] : undefined;
       const alt = node ? describeAlternative(node, shapes, prefixes) : undefined;
-      parts = alt ? ['Value ', valuePart, ' must be ', ...alt, ', but doesn’t meet its rules'] : ['Value ', valuePart, ' doesn’t meet the rules for this property'];
+      if (alt) parts = ['Value ', valuePart, ' must be ', ...alt];
+      else if (node?.kind === 'iri') parts = ['Value ', valuePart, ' doesn’t meet the rules in the shape ', iri(node.value)];
+      else parts = ['Value ', valuePart, ' doesn’t meet the rules for this property'];
       break;
     }
     case 'Not':
@@ -501,6 +571,7 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
     hint,
     at,
     ranges,
+    unlocated,
   };
 }
 

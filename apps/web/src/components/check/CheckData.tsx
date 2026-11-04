@@ -5,8 +5,8 @@ import type { Completion } from '@codemirror/autocomplete';
 import { Badge, Button, Card, CardHeader, InlineError, cx } from '../ui';
 import { CodeEditor, type CodeEditorHandle, type EditorDiagnostic } from '../code/CodeEditor';
 import { highlightSegments } from '../code/highlight';
-import { formatTurtle, parseTurtle } from '../../lib/turtleDoc';
-import { ShapesIndex, describeFindings, displayPrefixes, parseSyntaxError, unknownTerms, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
+import { formatTurtle, parseTurtle, termKey } from '../../lib/turtleDoc';
+import { ShapesIndex, describeFindings, displayPrefixes, lineFinder, parseSyntaxError, unknownTerms, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
 
 /** How long after typing stops the Turtle is read again for underlines. */
 const ANALYSE_DELAY = 250;
@@ -49,7 +49,7 @@ const SEVERITY: Record<Severity, { icon: typeof CircleX; className: string; labe
 };
 
 /** One problem. Clicking it (or Enter on it) selects the place in the data it's about. */
-function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at'>; onReveal?: (from: number, to: number) => void }) {
+function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at' | 'unlocated'>; onReveal?: (from: number, to: number) => void }) {
   const sev = SEVERITY[finding.severity];
   // The record and property, unless the sentence already names them.
   const named = new Set(finding.parts.flatMap((p) => (typeof p !== 'string' && 'code' in p ? [p.code] : [])));
@@ -61,7 +61,7 @@ function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' 
         <span className="min-w-0 flex-1">
           <Sentence parts={finding.parts} />
         </span>
-        <span className="shrink-0 text-xs whitespace-nowrap text-muted">{finding.at ? `Line ${finding.at.line}` : 'Not in your data'}</span>
+        <span className="shrink-0 text-xs whitespace-nowrap text-muted">{finding.at ? `Line ${finding.at.line}` : 'Location unavailable'}</span>
       </span>
       {showContext && (
         <span className="mt-1 ml-6 flex flex-wrap items-center gap-1 text-xs text-muted">
@@ -74,6 +74,7 @@ function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' 
           )}
         </span>
       )}
+      {!finding.at && finding.unlocated && <span className="mt-1 ml-6 block text-xs text-muted italic">{finding.unlocated}</span>}
       {finding.hint && (
         <span className="mt-1 ml-6 block text-xs text-muted">
           <Sentence parts={finding.hint} />
@@ -89,10 +90,6 @@ function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' 
       {body}
     </button>
   );
-}
-
-function lineAt(text: string, offset: number) {
-  return text.slice(0, offset).split('\n').length;
 }
 
 /** The last check: kept by the page, so it survives switching to the query workspace and back. */
@@ -130,6 +127,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const editor = useRef<CodeEditorHandle>(null);
   const { report, checkedData, error: checkError } = result;
   const [showAll, setShowAll] = useState(false);
+  const [showAllLive, setShowAllLive] = useState(false);
   const [formatNote, setFormatNote] = useState<string>();
   const [formatting, setFormatting] = useState(false);
   const reportStale = !!report && checkedData !== data;
@@ -176,31 +174,32 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const syntaxChecked = syntax?.data === settled;
   const syntaxError = syntaxChecked ? syntax.error : undefined;
 
+  // The ontology is checked along with the data, so records it also describes can't be pinned to the data alone.
+  const ontologyDoc = useMemo(() => (ontologyTurtle ? parseTurtle(ontologyTurtle) : undefined), [ontologyTurtle]);
+  const ontologySubjects = useMemo(() => new Set(ontologyDoc?.triples.map((t) => termKey(t.s.term)) ?? []), [ontologyDoc]);
+
   // Findings belong to the data that was checked. Once it changes they're shown faded and no longer underlined or jumped to.
   const shapesIndex = useMemo(() => new ShapesIndex(shapes), [shapes]);
   const findings = useMemo(() => {
     if (!report || checkedData === undefined) return [];
     const checkedDoc = checkedData === settled ? doc : parseTurtle(checkedData, { prefixes: ontologyPrefixes });
-    return describeFindings(report.results, { doc: checkedDoc, text: checkedData, prefixes: displayPrefixes(checkedDoc, ontologyPrefixes), shapes: shapesIndex });
-  }, [report, checkedData, settled, doc, ontologyPrefixes, shapesIndex]);
+    return describeFindings(report.results, { doc: checkedDoc, text: checkedData, prefixes: displayPrefixes(checkedDoc, ontologyPrefixes), shapes: shapesIndex, external: ontologySubjects });
+  }, [report, checkedData, settled, doc, ontologyPrefixes, shapesIndex, ontologySubjects]);
 
   // Every IRI the ontology mentions counts as defined (terms, datatypes, the ontology itself).
   // If the ontology can't be read here, don't guess: no typo warnings.
-  const knownTerms = useMemo(() => {
-    if (!ontologyTurtle) return undefined;
-    const o = parseTurtle(ontologyTurtle);
-    return o.error ? undefined : new Set(o.iris.map((p) => p.term.value));
-  }, [ontologyTurtle]);
+  const knownTerms = useMemo(() => (!ontologyDoc || ontologyDoc.error ? undefined : new Set(ontologyDoc.iris.map((p) => p.term.value))), [ontologyDoc]);
   const termWarnings = useMemo(() => (knownTerms ? unknownTerms(doc, namespace, knownTerms, prefixes) : []), [doc, namespace, knownTerms, prefixes]);
 
   /** Live problems: the syntax error and misspelt terms, as list items too. */
   const live = useMemo(() => {
     const out: (Pick<Finding, 'severity' | 'parts' | 'at'> & { text: string; to: number })[] = [];
+    const lineAt = lineFinder(settled);
     if (syntaxError) {
       const to = Math.min(settled.length, syntaxError.from + Math.max(1, /^\S*/.exec(settled.slice(syntaxError.from, syntaxError.from + 200))![0].length));
-      out.push({ severity: 'error', parts: [`Syntax error: ${syntaxError.message}`], text: `Syntax error: ${syntaxError.message}`, at: { from: syntaxError.from, to, line: lineAt(settled, syntaxError.from) }, to });
+      out.push({ severity: 'error', parts: [`Syntax error: ${syntaxError.message}`], text: `Syntax error: ${syntaxError.message}`, at: { from: syntaxError.from, to, line: lineAt(syntaxError.from) }, to });
     }
-    for (const w of termWarnings) out.push({ severity: 'warning', parts: [w.message], text: w.message, at: { from: w.from, to: w.to, line: lineAt(settled, w.from) }, to: w.to });
+    for (const w of termWarnings) out.push({ severity: 'warning', parts: [w.message], text: w.message, at: { from: w.from, to: w.to, line: lineAt(w.from) }, to: w.to });
     return out;
   }, [syntaxError, termWarnings, settled]);
 
@@ -337,12 +336,17 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
         {live.length > 0 && (
           <div className="space-y-1" data-testid="data-lint">
             <ol className="space-y-1" aria-label="Problems in the Turtle">
-              {live.map((l, i) => (
+              {(showAllLive ? live : live.slice(0, FIRST_FINDINGS)).map((l, i) => (
                 <li key={i}>
                   <ProblemItem finding={l} onReveal={reveal} />
                 </li>
               ))}
             </ol>
+            {!showAllLive && live.length > FIRST_FINDINGS && (
+              <Button size="sm" variant="ghost" onClick={() => setShowAllLive(true)}>
+                Show all {live.length.toLocaleString()} problems in the Turtle
+              </Button>
+            )}
           </div>
         )}
         {checkError && !syntaxError ? <InlineError error={checkError} /> : null}

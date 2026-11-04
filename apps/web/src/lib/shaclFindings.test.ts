@@ -330,4 +330,84 @@ describe('review regressions', () => {
     const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '"x"', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' }], exCtx(text));
     expect(f.text).toBe('Value "x" must be a ex:A or a xsd:integer value');
   });
+
+  // Review 2. 4,000 nested [ … ] overflowed the stack while rendering and took the page down.
+  it('deeply nested brackets are a positioned error, not a crash', () => {
+    const text = `@prefix ex: <http://e/> .\nex:a ex:p ${'[ ex:p '.repeat(4000)}1${' ]'.repeat(4000)} .\n`;
+    const doc = parseTurtle(text);
+    expect(doc.error?.message).toMatch(/nested more than 200 levels/);
+    expect(text.slice(doc.error!.from, doc.error!.to)).toBe('[');
+    expect(formatTurtle(text)).toBeUndefined();
+  });
+
+  // Review 2. The reader named [] "_anon1", the same as an explicit _:_anon1, so two values counted as one.
+  it('anonymous nodes never share a name with a written _:label', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a ex:p [], _:_anon1 .\n';
+    const shapes = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\nex:S sh:targetNode ex:a ; sh:property [ sh:path ex:p ; sh:maxCount 1 ] .\n`;
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}p>`, sourceConstraintComponent: sh('MaxCount'), message: 'More than 1 values' }], exCtx(text, shapes));
+    expect(f.text).toBe('ex:a allows at most 1 ex:p, 2 found');
+  });
+
+  // Review 2. "Value is not a valid date; …" looked like sparq's own wording, so it wasn't shown as the author's message.
+  it('a custom message that reads like sparq’s is still shown as written', () => {
+    const message = 'Value is not a valid date; see <https://help.example/dates>';
+    const shapes = SHAPES.replace('See <https://help.example/dates> for date formats', message);
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:d "soon" .\n';
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}d>`, value: '"soon"', sourceConstraintComponent: sh('Datatype'), message }], exCtx(text, shapes));
+    expect(f.text).toBe(`Value "soon" is of type xsd:string but must be of type xsd:date. “${message}”`);
+  });
+
+  // Review 2. sh:or alternatives dropped their other constraints ("a xsd:integer value", not "… of at least 10").
+  it('describes every constraint of each alternative, and stays generic when it can’t', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:q 3 .\n';
+    const shapes = (alt: string) => `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\nex:S sh:targetClass ex:C ; sh:property [ sh:path ex:q ; sh:or ( [ sh:class ex:A ] ${alt} ) ] .\n`;
+    const result = { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' };
+    const [f] = describeFindings([result], exCtx(text, shapes('[ sh:datatype xsd:integer ; sh:minInclusive 10 ]')));
+    expect(f.text).toBe('Value 3 must be a ex:A or a xsd:integer value of at least 10');
+    const [g] = describeFindings([result], exCtx(text, shapes('[ sh:datatype xsd:integer ; sh:languageIn ( "en" ) ]')));
+    expect(g.text).not.toMatch(/must be a ex:A or a xsd:integer value$/);
+  });
+
+  // Review 2. sh:node named the shape's sh:targetClass as the type the value had to be.
+  it('never presents a shape’s target class as a requirement', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a ex:n ex:b .\nex:b ex:x 1 .\n';
+    const shapes = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\nex:Inner a sh:NodeShape ; sh:targetClass ex:Person ; sh:property [ sh:path ex:name ; sh:minCount 1 ] .\nex:Outer sh:targetNode ex:a ; sh:property [ sh:path ex:n ; sh:node ex:Inner ] .\n`;
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}n>`, value: `<${EX}b>`, sourceConstraintComponent: sh('Node'), message: 'Value does not conform to the node shape' }], exCtx(text, shapes));
+    expect(f.text).not.toMatch(/ex:Person/);
+    expect(f.text).toBe('Value ex:b doesn’t meet the rules in the shape ex:Inner');
+  });
+
+  // Review 2. Every blank node was left without a place, even ones written as _:alice.
+  it('finds _:labels the data wrote, and a sole anonymous value', () => {
+    const text = '@prefix ex: <http://e/> .\n_:alice a ex:C .\nex:a ex:q [ ex:z 1 ] .\n';
+    const [named, sole] = describeFindings(
+      [
+        { focusNode: '_:alice', path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Please supply two contacts' },
+        { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '_:__ttl_anon_9_2', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' },
+      ],
+      exCtx(text),
+    );
+    expect(text.slice(named.ranges[0].from, named.ranges[0].to)).toBe('_:alice');
+    expect(named.at?.line).toBe(2);
+    expect(text.slice(sole.ranges[0].from, sole.ranges[0].from + 1)).toBe('[');
+    expect(sole.at?.line).toBe(3);
+  });
+
+  // Review 2. "Not in your data" read as if the problem wasn't real; now it says why there's no place.
+  it('explains why a finding has no place in the text', () => {
+    const text = '@prefix ex: <http://e/> .\n[] a ex:C .\nex:a ex:q [ ex:z 1 ], [ ex:z 2 ] .\nex:shared ex:q 1 .\n';
+    const [anon, two, shared] = describeFindings(
+      [
+        { focusNode: '_:__ttl_anon_3_1', path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Please supply two contacts' },
+        { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '_:__ttl_anon_9_2', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' },
+        { focusNode: `<${EX}shared>`, path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Fewer than 2 values' },
+      ],
+      { ...exCtx(text), external: new Set([termKey({ kind: 'iri', value: `${EX}shared` })]) },
+    );
+    expect(anon.unlocated).toMatch(/anonymous record/);
+    expect(two.unlocated).toMatch(/more than one/);
+    expect(shared.unlocated).toMatch(/described in the ontology/);
+    // A record the ontology also describes may have values there, so no count is given.
+    expect(shared.text).not.toMatch(/found/);
+  });
 });

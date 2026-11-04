@@ -56,6 +56,10 @@ export interface TurtleDoc {
 export const XSD = 'http://www.w3.org/2001/XMLSchema#';
 export const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 export const RDF_TYPE = `${RDF}type`;
+/** Start of the labels this reader gives [ ] and ( ) nodes. A space can't appear in a _:label. */
+export const GENERATED_BLANK = 'generated ';
+/** How deeply [ … ] and ( … ) may nest. */
+export const MAX_NESTING = 200;
 
 type TokType = 'iri' | 'pname' | 'blank' | 'string' | 'lang' | 'hats' | 'number' | 'bool' | 'a' | 'prefix' | 'base' | 'punct' | 'comment' | 'error';
 
@@ -336,7 +340,13 @@ function parseTokens(tokens: Token[], options: { prefixes?: Record<string, strin
   const iris: PlacedIri[] = [];
   let pos = 0;
   let blankCount = 0;
-  const newBlank = (): RdfTerm => ({ kind: 'blank', value: `_anon${++blankCount}` });
+  // Generated blank nodes get labels no document can write (they contain a space), so they never clash with _:labels.
+  const newBlank = (): RdfTerm => ({ kind: 'blank', value: `${GENERATED_BLANK}${++blankCount}` });
+  // Nesting ([ … ] and ( … ) inside each other) is limited, so deeply nested input is an error, not a stack overflow.
+  let depth = 0;
+  const enter = (t: Token) => {
+    if (++depth > MAX_NESTING) fail(t, `This is nested more than ${MAX_NESTING} levels deep, which Concord doesn’t read here`);
+  };
 
   const peek = () => tokens[pos];
   const end = (): Span => {
@@ -431,12 +441,14 @@ function parseTokens(tokens: Token[], options: { prefixes?: Record<string, strin
 
   const collection = (): Placed => {
     const open = tokens[pos++];
+    enter(open);
     const items: Placed[] = [];
     while (!isPunct(peek(), ')')) {
       if (!peek()) fail(peek(), 'This list isn’t closed with “)”');
       items.push(object('object'));
     }
     const close = tokens[pos++];
+    depth--;
     const span = { from: open.from, to: close.to };
     if (!items.length) return { term: { kind: 'iri', value: `${RDF}nil` }, ...span };
     const nodes = items.map(() => newBlank());
@@ -451,15 +463,18 @@ function parseTokens(tokens: Token[], options: { prefixes?: Record<string, strin
 
   const blankNodePropertyList = (): Placed => {
     const open = tokens[pos++];
+    enter(open);
     const node = newBlank();
     if (isPunct(peek(), ']')) {
       const close = tokens[pos++];
+      depth--;
       return { term: node, from: open.from, to: close.to };
     }
     const placeholder: Placed = { term: node, from: open.from, to: open.to };
     const first = triples.length;
     predicateObjectList(placeholder);
     const close = expectPunct(']', 'Expected “]” to close this blank node');
+    depth--;
     const placed = { term: node, from: open.from, to: close.to };
     // The subject of the triples inside is the whole [ … ].
     for (let k = first; k < triples.length; k++) if (triples[k].s === placeholder) triples[k].s = placed;
@@ -525,8 +540,8 @@ function parseTokens(tokens: Token[], options: { prefixes?: Record<string, strin
   try {
     while (pos < tokens.length) statement();
   } catch (e) {
-    if (!(e instanceof Stop)) throw e;
-    error = { ...e.span, message: e.message };
+    // Anything unexpected (a bug here, or the engine running out of stack) is reported, never thrown into the page.
+    error = e instanceof Stop ? { ...e.span, message: e.message } : { ...(tokens[pos] ?? end()), message: 'Concord couldn’t read the Turtle from here on' };
   }
   return { prefixes: declared, triples, iris, error };
 }
