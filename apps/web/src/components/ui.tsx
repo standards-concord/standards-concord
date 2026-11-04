@@ -216,7 +216,7 @@ export function Field({ label, hint, children, className }: { label: ReactNode; 
   );
 }
 
-export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean; ariaLabel?: string }) {
+export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; label?: ReactNode; disabled?: boolean; /** Names the switch when it has no visible label, e.g. in a table cell. */ ariaLabel?: string }) {
   const id = useId();
   return (
     <span className="inline-flex items-center gap-2">
@@ -245,6 +245,7 @@ export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { chec
 
 export function Dialog({ open, onClose, title, children, footer, wide }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -255,9 +256,9 @@ export function Dialog({ open, onClose, title, children, footer, wide }: { open:
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={ref} role="dialog" aria-modal className={cx('flex max-h-[92vh] w-full flex-col rounded-t-2xl border border-line bg-surface shadow-2xl sm:rounded-2xl', wide ? 'sm:max-w-3xl' : 'sm:max-w-lg')}>
+      <div ref={ref} role="dialog" aria-modal aria-labelledby={titleId} className={cx('flex max-h-[92vh] w-full flex-col rounded-t-2xl border border-line bg-surface shadow-2xl sm:rounded-2xl', wide ? 'sm:max-w-3xl' : 'sm:max-w-lg')}>
         <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <h2 className="text-base font-semibold">{title}</h2>
+          <h2 id={titleId} className="text-base font-semibold">{title}</h2>
           <button onClick={onClose} className="rounded-md p-1 text-muted hover:bg-surface-2" aria-label="Close">
             <X className="size-4" />
           </button>
@@ -328,6 +329,8 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       type="button"
       disabled={disabled}
       onClick={onClick}
+      // Chips toggle (roles, filters): say whether this one is on, not just with colour and a tick.
+      aria-pressed={active === undefined ? undefined : active}
       className={cx(
         'inline-flex items-center gap-1 rounded-pill border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50',
         active ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',
