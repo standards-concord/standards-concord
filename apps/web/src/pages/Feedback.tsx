@@ -199,8 +199,10 @@ export function FeedbackPage() {
     const nextAns = value ? { ...answers, [value.qid]: value.v } : answers;
     setMessages(nextMsgs);
     setAnswers(nextAns);
-    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one.
-    void turn(scope, nextMsgs, nextAns, nextQ);
+    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one. If they've
+    // already answered it in the panel, typed text goes to the next unanswered question instead of replacing that.
+    const answering = value || !nextQ || answers[nextQ] === undefined ? nextQ : undefined;
+    void turn(scope, nextMsgs, nextAns, answering);
   };
 
   const submit = useAction(async () => {

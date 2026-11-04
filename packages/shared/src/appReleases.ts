@@ -69,6 +69,29 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.12.2',
+    date: '2026-11-04',
+    title: 'Fixes found by testing every flow',
+    pr: 45,
+    changes: [
+      {
+        id: 'a11y-names',
+        type: 'fix',
+        title: 'Dialogs, switches and answer boxes are properly named',
+        detail:
+          'Screen readers now announce each dialog by its title, and policy switches, the new-owner picker, the chat box and feedback answers have names. Chips say whether they’re on.',
+        roles: [],
+      },
+      {
+        id: 'review-comment-once',
+        type: 'fix',
+        title: 'A review comment shows once in the Discussion tab',
+        detail: 'A review comment on a change request no longer appears twice in its discussion.',
+        roles: ['steward', 'member'],
+      },
+    ],
+  },
+  {
     version: '0.12.1',
     date: '2026-11-04',
     title: 'Clearer, safer agent connections',
