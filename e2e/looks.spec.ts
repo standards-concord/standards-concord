@@ -52,6 +52,54 @@ test.describe('looks', () => {
     }
   });
 
+  test("Concord's own mark, the climbing two-halves plane, shows in every look and in the tab icon", async ({ page }) => {
+    await signIn(page, { name: 'Mark tester' });
+    const home = page.getByRole('link', { name: 'Concord: home' });
+    const mark = home.locator('svg[data-logo="concord"]');
+    const icon = () => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
+    for (const id of LOOKS) {
+      await page.goto(`/?look=${id}`);
+      await settle(page);
+      await expect(mark, id).toBeVisible();
+      const drawn = await mark.evaluate((svg) => {
+        const tile = svg.querySelector('rect:not(clipPath rect)')!;
+        const box = svg.getBoundingClientRect();
+        return {
+          size: [Math.round(box.width), Math.round(box.height)],
+          tile: getComputedStyle(tile).fill,
+          accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
+          halves: svg.querySelectorAll('path[fill-opacity]').length,
+          // The slipstream is clipped to the tile, so nothing spills past its corners.
+          clipped: !!svg.querySelector('g[clip-path] path[stroke]'),
+        };
+      });
+      expect(drawn.size, id).toEqual([28, 28]);
+      expect(drawn.halves, `${id}: the two halves are drawn in two tones`).toBe(1);
+      expect(drawn.clipped, id).toBe(true);
+      expect(await page.evaluate(([fill, accent]) => {
+        const probe = document.createElement('div');
+        probe.style.color = accent;
+        document.body.appendChild(probe);
+        const same = getComputedStyle(probe).color === fill;
+        probe.remove();
+        return same;
+      }, [drawn.tile, drawn.accent] as const), `${id}: the tile takes the look's accent`).toBe(true);
+      if (id === 'odi') {
+        // The ODI look keeps the ODI logo and its tab icon, with Concord's mark after the logo.
+        const odi = await home.getByRole('img', { name: 'Open Data Institute' }).boundingBox();
+        const ours = await mark.boundingBox();
+        expect(odi!.x + odi!.width, 'ODI logo comes first').toBeLessThan(ours!.x);
+        expect(await icon()).toContain('M160');
+      } else {
+        // The plain plane (no slipstream, which is noise at 16px), not the old two-circle mark.
+        const href = decodeURIComponent(await icon());
+        expect(href, id).toContain('rotate(45 32 32)');
+        expect(href, id).toContain("fill-opacity='.62'");
+        expect(href, id).not.toContain('circle');
+      }
+    }
+  });
+
   test('?look= switches the look and is remembered on later pages', async ({ page }) => {
     await page.goto('/login?look=civic');
     expect(await look(page)).toBe('civic');

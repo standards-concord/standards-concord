@@ -653,14 +653,14 @@
   font-weight: var(--heading-weight);
 }
 
-/* ODI: the ODI logo in the masthead, plain bold headings, underlined links, square badges. */
+/* ODI: the ODI logo in the masthead (ahead of Concord's own mark), plain bold headings,
+   underlined links, square badges. */
 .brand-odi {
   display: none;
 }
 [data-look='odi'] .brand-odi {
   display: block;
 }
-[data-look='odi'] .brand-generic,
 [data-look='odi'] .app-brand-sub {
   display: none;
 }
@@ -926,9 +926,9 @@ body {
 .tok-punct { color: var(--muted); }
 [data-language="yaml"] .tok-content { color: var(--syn-string); }
 
-/* The logo tile follows the look's corner radius. */
+/* The logo tile follows the look's corner radius (the logo is drawn on a 64-unit grid, shown at 28px). */
 .app-logo-bg {
-  rx: calc(var(--r-xl) * 1.4);
+  rx: calc(var(--r-xl) * 2.8);
 }
 
 /* Respect reduced-motion: no decorative animation, transitions or smooth scrolling. */
