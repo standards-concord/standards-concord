@@ -199,12 +199,18 @@ export const actions: Record<string, Action> = {
     const link = c.d.page.getByRole('main').locator(`a[href*="/changes/"]`);
     if (!(await c.d.click(link, 'the first change request'))) return;
     await sleep(500);
-    await ringAround(c, /Rule-based semantic versioning classification|Classification/);
-    await sleep(3500);
+    // The level badge opens the rule-based reasons for the classification.
+    if (await c.d.click(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge')) {
+      await ringAround(c, /Rule-based semantic versioning classification/);
+      await sleep(3000);
+      await c.d.page.keyboard.press('Escape');
+    }
+    // Validation lives in the Checks view.
+    await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
     await ringAround(c, /^Validation$/);
   },
   async 'highlight-governance-card'(c) {
-    await ringAround(c, /^Governance$/);
+    await ringAround(c, /^Decision$/);
   },
   async 'open-governance'(c) {
     await c.d.goto(o(c, '/governance'));

@@ -126,6 +126,8 @@ test('the floating walkthrough panel follows a tester around the app', async ({ 
   const contributor = page.getByRole('region', { name: 'Domain expert / contributor' });
   await contributor.getByRole('button').first().click();
   await contributor.getByRole('button').nth(1).click();
+  // Wait until the demo ontology is known, so the button opens it rather than the hub.
+  await expect(page.getByText(/The demo ontology is/)).toBeVisible();
   await page.getByRole('button', { name: 'Keep the guide open while I explore' }).click();
   await expect(page).toHaveURL(/\/o\/[^/]+$/);
   const panel = page.getByRole('complementary').filter({ hasText: 'Alpha walkthrough' });
