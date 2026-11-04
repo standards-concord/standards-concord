@@ -73,6 +73,8 @@ export interface RequirementsDocumentView {
 export interface PublishedRequirements {
   document?: RequirementsDocumentView;
   useCases: PublicUseCaseView[];
+  /** A release whose snapshot is missing or unreadable: shown as such, never filled with current data. */
+  snapshotMissing?: boolean;
 }
 
 /**
@@ -187,12 +189,14 @@ export function publishedRequirements(project: OntologyProject, _version?: strin
 }
 
 /**
- * What a release's page shows. Each release stores a snapshot of its public
- * use cases and requirements (requirements.json, written at publish time), so
- * later edits never rewrite a published version. Releases from before
- * snapshots existed, and the working draft, use the current data.
+ * What a release's page shows: the snapshot of its public use cases and
+ * requirements (requirements.json) written when it was published, or
+ * backfilled at startup for releases from before snapshots existed (see
+ * refreshReleasePages). Later edits never rewrite a published version, and a
+ * release without a readable snapshot says so instead of showing today's data
+ * as its history.
  */
-export function requirementsFor(project: OntologyProject, version: string | undefined, snapshot: PublishedRequirements | undefined): PublishedRequirements {
-  if (!snapshot) return publishedRequirements(project, version);
-  return { document: snapshot.document ?? publishedRequirements(project, version).document, useCases: snapshot.useCases };
+export function requirementsFor(snapshot: PublishedRequirements | undefined): PublishedRequirements {
+  if (!snapshot || !Array.isArray(snapshot.useCases)) return { useCases: [], snapshotMissing: true };
+  return { document: snapshot.document, useCases: snapshot.useCases };
 }

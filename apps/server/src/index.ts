@@ -2,12 +2,15 @@ import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
 import { meetBotTick } from './services/meetBot.js';
+import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
+// Release pages written by an older renderer (or without a use case snapshot) are regenerated.
+await refreshReleasePages().catch((err) => console.error('[public] refresh failed', err));
 
 const app = createApp();
 app.listen(config.port, () => {

@@ -16,7 +16,8 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const nav = useNavigate();
   const ontologies = useOntologies();
   const templates = useAsync(() => api.governanceTemplates(), []);
-  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '' });
+  const user = useSession().session?.user;
+  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: true });
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const create = useAction(async () => {
     const o = await api.createOntology({
@@ -25,6 +26,7 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       description: form.description.trim(),
       domain: form.domain.trim() || undefined,
       governanceTemplate: form.governanceTemplate || undefined,
+      creditCreator: form.creditCreator,
     });
     await ontologies.reload();
     onClose();
@@ -82,6 +84,23 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
             ))}
           </Select>
         </Field>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1 size-4 accent-[var(--accent)]"
+            checked={form.creditCreator}
+            onChange={(e) => setForm((f) => ({ ...f, creditCreator: e.target.checked }))}
+            data-testid="credit-creator"
+          />
+          <span>
+            Credit me as the creator
+            <span className="block text-xs text-muted">
+              {form.creditCreator
+                ? `“${user?.name ?? 'Your name'}” is shown publicly on the ontology’s page and in its metadata, before any release.`
+                : 'No creator is listed. You can add creators later in the ontology’s metadata.'}
+            </span>
+          </span>
+        </label>
         {templates.error ? <InlineError error={templates.error} /> : null}
         {chosen && <p className="rounded-lg bg-surface-2 p-3 text-xs text-muted">{chosen.description}</p>}
         <InlineError error={create.error} />
