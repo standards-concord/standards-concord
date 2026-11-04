@@ -57,7 +57,9 @@ ex:helper a vol:Role .
     );
     await check(page);
     const list = problems(page);
-    await expect(list.getByRole('button', { name: /ex:foodbank requires at least one vol:offersOpportunity, 0 found/ })).toBeVisible();
+    await expect(list.getByRole('button', { name: /ex:foodbank requires at least 1 vol:offersOpportunity, 0 found/ })).toBeVisible();
+    // The numbers stand out: required and found are bold.
+    await expect(list.getByRole('button', { name: /ex:foodbank requires/ }).locator('strong')).toHaveText(['1', '0']);
     const age = list.getByRole('button', { name: /Value "sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger/ });
     await expect(age).toContainText('Line 10');
     await expect(age).toContainText('Write it as "16"^^xsd:nonNegativeInteger');
@@ -91,7 +93,7 @@ ex:helper a vol:Role .
     await openCheck(page, id);
     await setData(page, `@prefix v: <${VOL}> .\n@prefix org: <https://example.org/orgs/> .\n\norg:northvale a v:VolunteerInvolvingOrganisation .\n`);
     await check(page);
-    await expect(problems(page).getByRole('button', { name: /org:northvale requires at least one v:offersOpportunity, 0 found/ })).toBeVisible();
+    await expect(problems(page).getByRole('button', { name: /org:northvale requires at least 1 v:offersOpportunity, 0 found/ })).toBeVisible();
     await expect(page.getByTestId('shacl-report')).not.toContainText('https://');
   });
 

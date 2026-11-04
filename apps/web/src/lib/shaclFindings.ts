@@ -17,8 +17,8 @@ export interface RawFinding {
   message?: string | null;
 }
 
-/** A piece of a sentence: plain words, or a term shown as code. */
-export type Part = string | { code: string };
+/** A piece of a sentence: plain words, a term shown as code, or a number shown in bold. */
+export type Part = string | { code: string } | { strong: string };
 
 export type Severity = 'error' | 'warning' | 'info';
 
@@ -128,7 +128,6 @@ function lineOf(text: string, offset: number): number {
   return line;
 }
 
-const countWord = (n: number) => (n === 1 ? 'one' : String(n));
 
 /** What kind of value a literal is, in words, for "is of type …". */
 function literalType(t: RdfTerm): string | undefined {
@@ -230,18 +229,18 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   let parts: Part[];
   let hint: Part[] | undefined;
   const found = subjectKey ? withPath.length : undefined;
-  const foundText = found === undefined ? '' : `, ${found} found`;
+  const foundParts: Part[] = found === undefined ? [] : [', ', { strong: String(found) }, ' found'];
   const expected = /<([^<>\s]+)>/.exec(message)?.[1];
 
   switch (component) {
     case 'MinCount': {
       const n = Number(/(\d+)/.exec(message)?.[1] ?? 1);
-      parts = [focusPart, ` requires at least ${countWord(n)} `, pathPart, foundText];
+      parts = [focusPart, ' requires at least ', { strong: String(n) }, ' ', pathPart, ...foundParts];
       break;
     }
     case 'MaxCount': {
       const n = Number(/(\d+)/.exec(message)?.[1] ?? 1);
-      parts = [focusPart, ` allows at most ${countWord(n)} `, pathPart, foundText];
+      parts = [focusPart, ' allows at most ', { strong: String(n) }, ' ', pathPart, ...foundParts];
       break;
     }
     case 'Datatype': {
@@ -302,7 +301,7 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
       parts = value ? ['Value ', fmt(value), `: ${said.replace(/^Value /, '').replace(/^./, (c) => c.toLowerCase())}`] : [said];
     }
   }
-  const textOf = (ps: Part[]) => ps.map((p) => (typeof p === 'string' ? p : p.code)).join('');
+  const textOf = (ps: Part[]) => ps.map((p) => (typeof p === 'string' ? p : 'code' in p ? p.code : p.strong)).join('');
   const sentence = textOf(parts);
   const at = ranges[0] ? { ...ranges[0], line: lineOf(text, ranges[0].from) } : undefined;
   return {

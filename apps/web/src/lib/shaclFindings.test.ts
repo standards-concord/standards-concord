@@ -82,9 +82,10 @@ text""" ; ex:b [ ex:c ex:d ] ; ex:l ( ex:x ex:y ) .
 describe('describeFindings', () => {
   it('says what is missing, with the data’s prefixes and how many were found', () => {
     const [missing] = describeFindings(REPORT, ctx(DATA));
-    expect(missing.text).toBe('ex:foodbank requires at least one vol:offersOpportunity, 0 found');
+    expect(missing.text).toBe('ex:foodbank requires at least 1 vol:offersOpportunity, 0 found');
     expect(DATA.slice(missing.at!.from, missing.at!.to)).toBe('ex:foodbank');
     expect(missing.at!.line).toBe(7);
+    expect(missing.parts.filter((p) => typeof p !== 'string' && 'strong' in p)).toEqual([{ strong: '1' }, { strong: '0' }]);
   });
 
   it('says what type a value is and what it must be, and suggests a fix', () => {
@@ -120,14 +121,14 @@ describe('describeFindings', () => {
       [{ focusNode: '<https://example.org/data/s>', path: `<${VOL}minimumAge>`, sourceConstraintComponent: 'http://www.w3.org/ns/shacl#MaxCountConstraintComponent', message: 'More than 1 values' }],
       ctx(text),
     );
-    expect(f.text).toBe('ex:s allows at most one vol:minimumAge, 2 found');
+    expect(f.text).toBe('ex:s allows at most 1 vol:minimumAge, 2 found');
     expect(f.ranges).toHaveLength(2);
   });
 
   it('prefers the data’s own prefix over the ontology’s', () => {
     const text = DATA.replace(/vol:/g, 'v:').replace('@prefix v:', '@prefix v:');
     const [missing] = describeFindings(REPORT, ctx(text));
-    expect(missing.text).toBe('ex:foodbank requires at least one v:offersOpportunity, 0 found');
+    expect(missing.text).toBe('ex:foodbank requires at least 1 v:offersOpportunity, 0 found');
   });
 });
 

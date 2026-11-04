@@ -34,7 +34,7 @@ function TermCode({ code }: { code: string }) {
 function Sentence({ parts }: { parts: Part[] }) {
   return (
     <>
-      {parts.map((p, i) => (typeof p === 'string' ? <span key={i}>{p}</span> : <TermCode key={i} code={p.code} />))}
+      {parts.map((p, i) => (typeof p === 'string' ? <span key={i}>{p}</span> : 'code' in p ? <TermCode key={i} code={p.code} /> : <strong key={i}>{p.strong}</strong>))}
     </>
   );
 }
@@ -49,7 +49,7 @@ const SEVERITY: Record<Severity, { icon: typeof CircleX; className: string; labe
 function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at'>; onReveal: (from: number, to: number) => void }) {
   const sev = SEVERITY[finding.severity];
   // The record and property, unless the sentence already names them.
-  const named = new Set(finding.parts.flatMap((p) => (typeof p === 'string' ? [] : [p.code])));
+  const named = new Set(finding.parts.flatMap((p) => (typeof p !== 'string' && 'code' in p ? [p.code] : [])));
   const showContext = !!finding.focus && !named.has(finding.focus);
   const body = (
     <>
