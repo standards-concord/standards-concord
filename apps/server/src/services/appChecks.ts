@@ -252,10 +252,12 @@ function settled(app: AppDoc, cr: ChangeRequest, revision: string, project: Onto
 }
 
 /**
- * Changes to test, most in need first: those never tested come first, then those tested longest
- * ago, so a run that can only test some of them never starves the rest.
+ * Changes to test, first come first served: each waits from when the app last tested it (or, if
+ * it never has, from when the change was proposed). A run that can only test some of them takes
+ * those waiting longest, and testing one sends it to the back, so neither a backlog nor a steady
+ * stream of new changes can starve a change whose earlier result stopped counting.
  */
-function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string, string>): (Target & { settled: boolean })[] {
+function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string, string>): (Target & { settled: boolean; waitingSince: string })[] {
   return listCRs(project.id)
     .filter(isOpen)
     .filter((cr) => !crIds || crIds[cr.id] === revisionOf(cr, project))
@@ -275,9 +277,10 @@ function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string
         lastOutcome: last?.revision === revision ? last.outcome : undefined,
         lastTestedAt: last?.at,
         settled: settled(app, cr, revision, project),
+        waitingSince: last?.at ?? cr.createdAt,
       };
     })
-    .sort((x, y) => (x.lastTestedAt ?? '').localeCompare(y.lastTestedAt ?? '') || x.number - y.number);
+    .sort((x, y) => x.waitingSince.localeCompare(y.waitingSince) || x.number - y.number);
 }
 
 /**
@@ -293,7 +296,7 @@ export function pending(app: AppDoc, all: boolean, commitParam?: unknown): Pendi
   const project = getProject(app.ontologyId);
   const base = baselineRevision(project);
   const open = targetsFor(app, project);
-  const targets = open.filter((t) => all || !(carriesOver && t.settled)).map(({ settled: _s, ...t }) => t);
+  const targets = open.filter((t) => all || !(carriesOver && t.settled)).map(({ settled: _s, waitingSince: _w, ...t }) => t);
   app.attempts = (app.attempts ?? 0) + 1;
   const attempt = app.attempts;
   app.runs = [...(app.runs ?? []), { attempt, all, baseline: base, targets: Object.fromEntries(open.map((t) => [t.changeRequestId, t.revision])) }].slice(-RUNS_KEPT);
@@ -317,7 +320,7 @@ function retestsFor(app: AppDoc, run: NonNullable<AppDoc['runs']>[number], proje
   if (run.reported?.outcome !== 'passed') return [];
   return targetsFor(app, project, run.targets)
     .filter((t) => run.all || !t.settled)
-    .map(({ settled: _s, ...t }) => t);
+    .map(({ settled: _s, waitingSince: _w, ...t }) => t);
 }
 
 const OUTCOMES: AppCheckOutcome[] = ['passed', 'failed', 'error'];

@@ -534,6 +534,42 @@ describe('autopilot', () => {
     expect((await detail(crId)).governance.approvals).toBe(1);
   });
 
+  it('with a run limit, a steady stream of new changes never starves a change whose result stopped counting', async () => {
+    const crId = await freshCR('Autopilot under a stream of new changes');
+    const wes = await login('reviewer', 'Reviewer Wes');
+    const a = await connect(wes, 'Wes’s app', { enabled: true });
+    const commit = 'arrival-v1';
+    /** One run that tests only the first change it's told to (max-changes = 1). */
+    const limitedRun = async (outcome: 'passed' | 'failed' = 'passed') => {
+      const p = await pending(a.token!, false, commit);
+      const reply = (await report(a.token!, { target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome, commit })).body;
+      if (outcome !== 'passed') return undefined;
+      const first = (reply.targets as { changeRequestId: string; revision: string }[])[0];
+      // The app passes this change; anything else couldn't be tested, so autopilot leaves it be.
+      await report(a.token!, { target: first.changeRequestId, revision: first.revision, attempt: p.attempt, outcome: first.changeRequestId === crId ? 'passed' : 'error' });
+      return first.changeRequestId;
+    };
+    // A first full run: the app passes the change (tested first), and autopilot approves it.
+    const p1 = await pending(a.token!, false, commit);
+    await report(a.token!, { target: 'baseline', revision: p1.baseline.revision, attempt: p1.attempt, outcome: 'passed', commit });
+    for (const t of [p1.targets.find((t) => t.changeRequestId === crId)!, ...p1.targets.filter((t) => t.changeRequestId !== crId)])
+      await report(a.token!, { target: t.changeRequestId, revision: t.revision, attempt: p1.attempt, outcome: t.changeRequestId === crId ? 'passed' : 'error' });
+    expect((await detail(crId)).governance.approvals).toBe(1);
+    // The app breaks on the working draft, so that approval stops counting.
+    await limitedRun('failed');
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    // New changes keep arriving, one before every run, and each run can test only one change.
+    const tested: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      await freshCR(`New arrival ${i + 1}`);
+      tested.push((await limitedRun())!);
+    }
+    // The change that waited longest goes first, so its approval comes back.
+    expect(tested[0]).toBe(crId);
+    expect(new Set(tested).size, 'each run tests a different change').toBe(tested.length);
+    expect((await detail(crId)).governance.approvals).toBe(1);
+  });
+
   it('never overrides what the person said themselves', async () => {
     const crId = await freshCR('Autopilot leaves people alone');
     const ola = await login('reviewer', 'Reviewer Ola');
@@ -769,6 +805,8 @@ console.log('ok', process.env.CONCORD_TARGET);
       CONCORD_APP_TOKEN: created.token!,
       CONCORD_TEST_COMMAND: 'node test.mjs',
       CONCORD_ONTOLOGY_PATH: 'data/volunteering.ttl',
+      // Room for every open change, however many earlier tests proposed.
+      CONCORD_MAX_CHANGES: '100',
       GITHUB_STEP_SUMMARY: summary,
       GITHUB_OUTPUT: output,
       GITHUB_RUN_ID: '42',
@@ -832,6 +870,18 @@ console.log('ok', process.env.CONCORD_TARGET);
     }
     expect(tested.size).toBe(open);
   }, 120_000);
+
+  it('without a commit, stays within the run limit and fails the job if it had to leave changes out', async () => {
+    const mo = await login('reviewer', 'Developer Mo');
+    const created = (await mo.post(`/api/ontologies/${demoId}/apps`).send({ name: 'Commit-less limited app' })).body as ConnectedApp;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-app-'));
+    const open = (await pending(created.token!, true)).targets.length;
+    expect(open).toBeGreaterThan(2);
+    const res = await runAction(dir, { CONCORD_APP_TOKEN: created.token!, CONCORD_TEST_COMMAND: 'true', CONCORD_MAX_CHANGES: '2' });
+    expect(res.code, res.out).toBe(1);
+    expect([...res.out.matchAll(/^#(\d+): passed/gm)]).toHaveLength(2);
+    expect(res.out).toMatch(new RegExp(`No app commit is known.*${open - 2} of ${open} open change`));
+  }, 60_000);
 
   it('fails the job and skips the changes when the working draft already breaks the app', async () => {
     const hal = await login('reviewer', 'Developer Hal');

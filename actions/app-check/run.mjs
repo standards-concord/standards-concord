@@ -235,13 +235,17 @@ if (baseline.outcome !== 'passed') {
   log('The working draft moved on, or a newer run already reported it, so this run stops here. The next run tests the changes.');
 } else {
   // Concord answers the draft result with what this run should test: anything that has no
-  // result counting under it, least recently tested first.
+  // result counting under it, longest waiting first.
   const all = Array.isArray(baselineReply.targets) ? baselineReply.targets : pending.targets;
-  // Without a commit, results only count for the run that made them, so this run tests them all.
-  const targets = commit ? all.slice(0, maxChanges) : all;
+  // Every run stays within max-changes, so its length is bounded however many changes are open.
+  const targets = all.slice(0, maxChanges);
   log(`${all.length} change request(s) to test${all.length > targets.length ? `, ${targets.length} this run` : ''}.`);
-  if (!commit && all.length > maxChanges)
-    log(`No app commit is known (set CONCORD_COMMIT), so all ${all.length} are tested: results from one run can't be reused by the next.`);
+  if (!commit && all.length > maxChanges) {
+    // Without a commit, results only count for the run that made them: the changes left out now
+    // keep no result that counts, so autopilot can't speak for them. Say so loudly.
+    console.error(`::error::No app commit is known, so results from one run can't be reused by the next, and ${all.length - targets.length} of ${all.length} open change(s) are left without a result that counts. Set CONCORD_COMMIT (GITHUB_SHA is used on GitHub), or raise max-changes to at least ${all.length}.`);
+    exitCode = 1;
+  }
   for (const t of targets) {
     const r = await check(`#${t.number} ${t.title}`, t.source, { CONCORD_TARGET: `cr-${t.number}`, CONCORD_CHANGE_REQUEST: String(t.number), CONCORD_REVISION: t.revision });
     const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, attempt, outcome: r.outcome, summary: r.summary, runUrl, commit })).json();

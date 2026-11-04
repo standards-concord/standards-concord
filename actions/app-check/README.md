@@ -76,7 +76,7 @@ Either give `ontology-file`, the path of the copy your app already reads, and it
 | `ontology-file` | | Copy of the ontology to swap for each version. |
 | `format` | `turtle` | `turtle`, `jsonld`, `rdfxml`, `ntriples`, `manchester`, `linkml` or `shacl`. |
 | `working-directory` | `.` | Where to run the tests. |
-| `max-changes` | `20` | Most change requests to test in one run; the rest wait for the next, never-tested and longest-ago-tested first. Ignored when no app commit is known, because then each run's results only count for that run. |
+| `max-changes` | `20` | Most change requests to test in one run, so a run's length stays bounded. The rest wait for the next run, first come first served: a change waits from when the app last tested it, or from when it was proposed if never tested. Without an app commit, results only count for the run that made them, so a run that has to leave changes out fails the job: set a commit or raise the limit. |
 | `recheck` | `false` | Test every open change again. |
 | `timeout-minutes` | `15` | Per test run; a run that times out is stopped, with everything it started, and reported as an error, not a failure. |
 | `share-output` | `false` | Send the last lines of a failing run to Concord. Off by default so nothing from your logs leaves GitHub. |
@@ -96,11 +96,11 @@ CONCORD_ONTOLOGY_PATH=data/ontology.ttl \
 node run.mjs
 ```
 
-Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run. Without `CONCORD_COMMIT` the script uses the checkout's git commit when the working tree is clean. With no commit at all, Concord can't tell versions of your app apart, so results only count from the run whose working-draft result is current, and every run tests every open change again.
+Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run. Without `CONCORD_COMMIT` the script uses the checkout's git commit when the working tree is clean. With no commit at all, Concord can't tell versions of your app apart, so results only count from the run whose working-draft result is current, and every run tests every open change again, up to `max-changes`. If more are open than that, the job fails, because the changes left out have no result that counts.
 
 ## API
 
 The script uses two endpoints, authenticated with `Authorization: Bearer cna_…`:
 
-- `GET /api/app-checks/pending?commit=<app commit>` starts a run. Changes already tested by this same app commit are left out; without `commit`, every open change is listed. The reply to the run's working-draft result carries `targets` again: what the run should test now that its draft result is in, least recently tested first. Use that list. It returns the run's `attempt` number and lists the baseline and open change requests, each with a `revision` and a `source` path. `GET /api/change-requests/:id/proposed?format=turtle` is the ontology after a change (public, no token needed).
+- `GET /api/app-checks/pending?commit=<app commit>` starts a run. Changes already tested by this same app commit are left out; without `commit`, every open change is listed. The reply to the run's working-draft result carries `targets` again: what the run should test now that its draft result is in, longest waiting first (since the app last tested it, or since it was proposed). Use that list. It returns the run's `attempt` number and lists the baseline and open change requests, each with a `revision` and a `source` path. `GET /api/change-requests/:id/proposed?format=turtle` is the ontology after a change (public, no token needed).
 - `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit? }`. A run may only report the targets and revisions it was given, and must report the working draft first: change results are tied to that run's working-draft pass and app commit, and count only while that commit's pass is the one in force. If the reply for the working draft says `stale`, a newer run has taken over and this one should stop. The reply says whether the result was `stale` (the change moved on while it was being tested, or a newer run already reported) or a `replay` of one already recorded, and what autopilot did. Within a revision, a newer attempt's result replaces an older one's; a run can't report two different outcomes for one target.
