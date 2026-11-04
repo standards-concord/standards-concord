@@ -35,7 +35,7 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
-import { approveHold, listHolds, readOntology } from '../public/holds.js';
+import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -161,6 +161,11 @@ export function apiRouter(): Router {
   const forCaller = (req: Request, s: OntologySummary) => {
     if (req.user) return s;
     const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
+    // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
+    if (isHeld(s, 'draft')) {
+      const { classes: _cl, properties: _p, individuals: _i, ...rest } = stats;
+      return { ...s, ownerIds: [], stats: rest, health: undefined };
+    }
     return { ...s, ownerIds: [], stats };
   };
 

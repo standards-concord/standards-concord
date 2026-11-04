@@ -40,7 +40,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | Status | Specs |
 | --- | --- | --- |
-| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI), #35 (privacy redaction) |
+| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI) |
+| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side |
 | `/mcp` with OAuth (discovery, registration, consent, tools) | ✅ | oauth |
 | `/mcp` with a personal token: every tool, refusal without a token, revoked token | ✅ | agents |
 | WebID profile (`/people/:id`) | ✅ | account |

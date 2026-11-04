@@ -177,7 +177,7 @@ export function HubPage() {
                         ['Members', o.stats.members],
                       ].map(([l, v]) => (
                         <div key={l}>
-                          <div className="text-base font-semibold tabular-nums">{v}</div>
+                          <div className="text-base font-semibold tabular-nums">{v ?? '—'}</div>
                           <div className="text-[0.7rem] text-muted">{l}</div>
                         </div>
                       ))}
@@ -186,7 +186,7 @@ export function HubPage() {
                       <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
                         <HealthChip o={o} />
                         v{o.currentVersion}
-                        {o.stats.openChangeRequests > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
+                        {(o.stats.openChangeRequests ?? 0) > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
                       </span>
                       <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
                     </div>

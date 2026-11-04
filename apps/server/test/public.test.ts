@@ -21,7 +21,7 @@ import { draftRelease, publishRelease } from '../src/services/releases.js';
 import { put } from '../src/db.js';
 import { createUser, getUser } from '../src/services/users.js';
 import type { OntologyView } from '@concord/core/types';
-import type { ChangeRequest, PublicHoldReview } from '@concord/shared';
+import type { ChangeRequest, OntologySummary, PublicHoldReview, Release } from '@concord/shared';
 
 const app = createApp();
 
@@ -1054,6 +1054,88 @@ describe('versions published before approval existed', () => {
       (config.github as { publishToken?: string }).publishToken = saved;
       updateProject({ ...findProject('volunteering')!, github: undefined });
     }
+  });
+
+  it('reviews the release notes the public page shows, not a rejected attempt at the same version (ninth review)', async () => {
+    // Used to: review and fingerprint the first record for 1.0.0, a rejected attempt, while the page showed the published one.
+    const project = await legacy();
+    const { list, remove } = await import('../src/db.js');
+    const published = list<Release>('releases', project.id).find((r) => r.version === '1.0.0' && r.status === 'published')!;
+    remove('releases', published.id);
+    put('releases', { ...published, id: 'rel_ninth_rejected', status: 'rejected', notes: 'Harmless notes from an attempt that was rejected.' }, project.id);
+    put('releases', { ...published, notes: `${published.notes}\nThanks to PUBLIC_NOTES_PRIVATE_NAME.` }, project.id);
+    try {
+      const { agent } = await steward('Ninth notes steward');
+      const review = () => agent.get(`/api/ontologies/${project.id}/public-holds`).then((r) => (r.body as PublicHoldReview[]).find((h) => h.version === '1.0.0')!);
+      const seen = await review();
+      expect(seen.notes).toContain('PUBLIC_NOTES_PRIVATE_NAME');
+      expect(seen.notes).not.toContain('Harmless notes');
+      // Editing the published notes after the review changes what approval covers.
+      put('releases', { ...published, notes: 'Notes changed after the review.' }, project.id);
+      expect((await agent.post(`/api/ontologies/${project.id}/public-holds/1.0.0/approve`).send({ fingerprint: seen.fingerprint })).status).toBe(409);
+      expect((await review()).notes).toBe('Notes changed after the review.');
+    } finally {
+      remove('releases', 'rel_ninth_rejected');
+      put('releases', published, project.id);
+    }
+  });
+
+  it('never pushes an older ontology’s history to GitHub, even once every version is approved (ninth review)', async () => {
+    // Used to: push main once the holds were cleared, carrying the unapproved draft it was repaired from.
+    const project = await legacy();
+    const { vi } = await import('vitest');
+    const { setRoles, updateProject } = await import('../src/services/ontologies.js');
+    const owner = await createUser({ name: 'Ninth push owner', provider: 'github', subject: 'ninth-push' });
+    setRoles(project.id, owner.id, ['owner', 'steward']);
+    // Repair the draft, then approve every held version.
+    const working = await ontologyStore.working(project);
+    await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle((await working.toTurtle()).replace(/"Raised by Legacy Hold Person in the LEGACY_HOLD_PILOT\."/, '"Repaired."')), 'Repair', { name: 'Concord' });
+    const { agent } = await steward('Ninth push steward');
+    for (const h of (await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[])
+      expect((await agent.post(`/api/ontologies/${project.id}/public-holds/${h.version}/approve`).send({ fingerprint: h.fingerprint })).status).toBe(200);
+    updateProject({ ...findProject('volunteering')!, github: { repo: 'example/volunteering' } as never });
+    const saved = config.github.publishToken;
+    (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
+    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(() => undefined);
+    try {
+      await drafted8(project);
+      const published = await publishRelease((await import('../src/db.js')).get('releases', (await draftRelease(findProject('volunteering')!, owner)).id)!, owner);
+      expect(published.status).toBe('published');
+      expect(push).not.toHaveBeenCalled();
+      // An ontology made under the approval rules is pushed as before.
+      const fresh = await createProject({ title: 'Ninth pushed vocab', description: '', prefix: 'npv' }, owner);
+      updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
+      await drafted8(fresh);
+      await publishRelease((await import('../src/db.js')).get('releases', (await draftRelease(findProject(fresh.slug)!, owner)).id)!, owner);
+      expect(push).toHaveBeenCalledTimes(1);
+    } finally {
+      push.mockRestore();
+      (config.github as { publishToken?: string }).publishToken = saved;
+      updateProject({ ...findProject('volunteering')!, github: undefined });
+    }
+  });
+
+  it('gives signed-out callers no counts or health from a working draft that is held (ninth review)', async () => {
+    // Used to: report the held draft's class count and validation health in the ontology summaries.
+    const project = await legacy();
+    const anonymous = async () => {
+      const one = (await request(app).get(`/api/ontologies/${project.id}`)).body as OntologySummary;
+      const all = ((await request(app).get('/api/ontologies')).body as OntologySummary[]).find((o) => o.id === project.id)!;
+      return [one, all];
+    };
+    for (const s of await anonymous()) {
+      expect(s.stats.classes).toBeUndefined();
+      expect(s.stats.properties).toBeUndefined();
+      expect(s.stats.individuals).toBeUndefined();
+      expect(s.health).toBeUndefined();
+      expect(s.stats.releases).toBeGreaterThan(0);
+    }
+    // Signed in, everything is there; and once the draft is approved, the public sees the counts again.
+    const { agent } = await steward('Ninth summary steward');
+    expect(((await agent.get(`/api/ontologies/${project.id}`)).body as OntologySummary).stats.classes).toBeGreaterThan(0);
+    const draft = ((await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[]).find((h) => h.version === 'draft')!;
+    expect((await agent.post(`/api/ontologies/${project.id}/public-holds/draft/approve`).send({ fingerprint: draft.fingerprint })).status).toBe(200);
+    for (const s of await anonymous()) expect(s.stats.classes).toBeGreaterThan(0);
   });
 
   it('shows names on WebID profiles only to signed-in users', async () => {

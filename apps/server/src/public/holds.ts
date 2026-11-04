@@ -9,6 +9,7 @@ import { getUser } from '../services/users.js';
 import { requireRole, updateProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { findSecrets, secretsFor } from '../services/redact.js';
+import { publishedRelease } from './published.js';
 
 /**
  * Versions published before a person approved what goes public.
@@ -42,6 +43,14 @@ export function holdOf(project: Checked): PublicHold | undefined {
   return { id: key(project.id), ontologyId: project.id, versions: ['draft', ...ontologyStore.versions(project)], since: clock.iso() };
 }
 export const isHeld = (project: Checked, version: string) => !!holdOf(project)?.versions.includes(version);
+/**
+ * Whether everything in this ontology's history was published under the
+ * approval rules: true only for ontologies created since. An older one keeps
+ * its hold record for good, even once every version is approved, because its
+ * git history still holds what was never approved (a draft repaired since,
+ * say), so its repository is never pushed anywhere as it is.
+ */
+export const historyApproved = (project: Checked) => !!project.publishedWithApproval && !get<PublicHold>('kv', key(project.id));
 /** Anything of this ontology waiting for approval (then nothing of it leaves Concord, such as a push to GitHub). */
 export const anyHeld = (project: Checked) => (holdOf(project)?.versions.length ?? 0) > 0;
 
@@ -95,7 +104,8 @@ function content(project: OntologyProject, version: string) {
   if (version === 'draft') return { turtle: ontologyStore.readWorkingText(project), notes: '', snapshot: '' };
   const rel = path.join(dir, 'releases', version);
   const read = (name: string) => (fs.existsSync(path.join(rel, name)) ? fs.readFileSync(path.join(rel, name), 'utf8') : '');
-  const release = list<{ version: string; notes: string }>('releases', project.id).find((r) => r.version === version);
+  // The record the public page shows, not a rejected attempt at the same version.
+  const release = publishedRelease(project.id, version);
   return { turtle: read('ontology.ttl'), notes: release?.notes ?? '', snapshot: read('requirements.json') };
 }
 const fingerprintOf = (c: ReturnType<typeof content>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
