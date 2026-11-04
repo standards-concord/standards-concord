@@ -104,6 +104,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #37 | One place for agents, Appearance page, role-based views | roles.spec.ts |
 | #38 | Chat-to-query beside the SPARQL editor | query.spec.ts |
 | #39 | App versions, tester record in the pod, what's changed | tester-versions.spec.ts |
+| #51 | OWL 2 DL reasoning with sparq (no HermiT), in-browser re-check | reasoner.spec.ts |
 
 ## Known gaps, in priority order
 
