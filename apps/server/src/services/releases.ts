@@ -11,7 +11,7 @@ import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
-import { releasePageHtml } from '../public/routes.js';
+import { releasePageFiles } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -193,7 +193,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
   try {
-    files['index.html'] = await releasePageHtml(project, { ...r, publishedAt: clock.iso() }, stamped);
+    Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped));
   } catch (err) {
     console.warn(`[release] public page: ${(err as Error).message}`);
   }

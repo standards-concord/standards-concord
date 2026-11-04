@@ -215,6 +215,13 @@ describe('applyChangeOps', () => {
     expect(() => applyChangeOps(graph, [{ op: 'addImport', iri: 'http://www.w3.org/ns/prov-o' }])).toThrow(/already/);
   });
 
+  it('setMetadata only accepts ISO dates for date fields', () => {
+    expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { modified: '<img src=x onerror=alert(1)>' } }])).toThrow(/ISO date/);
+    expect(() => applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: '2026-13-45' } }])).toThrow(/ISO date/);
+    const { graph } = applyChangeOps(baseOntology(), [{ op: 'setMetadata', set: { issued: '2026-11-04T10:00:00Z' } }]);
+    expect(graph.view().metadata.issued).toBe('2026-11-04T10:00:00Z');
+  });
+
   it('later ops can reference terms added by earlier ops in the same batch', () => {
     const { graph } = applyChangeOps(baseOntology(), [
       { op: 'addClass', localName: 'Skill', label: 'skill', definition: 'A learned capability.' },

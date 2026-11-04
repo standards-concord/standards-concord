@@ -171,7 +171,7 @@ details summary{cursor:pointer;font-weight:600;margin-bottom:8px}
   .story{padding:18px}
   .table{display:block;overflow-x:auto}
 }
-@media print{.tabs,.toc,.uc-filters,.filter,.skip{display:none}.panel[hidden]{display:block!important}.term,.uc{break-inside:avoid;box-shadow:none}}
+@media print{.tabs,.toc,.uc-filters,.filter,.filter-empty,.skip{display:none!important}.panel[hidden],.uc[hidden],.index-group[hidden]{display:block!important}[data-term][hidden]{display:inline-block!important}.term,.uc{break-inside:avoid;box-shadow:none}}
 `;
 
 /**
@@ -196,6 +196,8 @@ export const PAGE_SCRIPT = `
     var el=find(location.hash);
     var panel=el?(el.getAttribute('role')==='tabpanel'?el:el.closest('[role="tabpanel"]')):null;
     show(panel?panel.id:panels[0].id);
+    // A use case hidden by the status filter: clear the filter so the link lands on it.
+    if(el&&el.classList.contains('uc')&&el.hidden){var all=document.querySelector('[data-filter="all"]');if(all)all.click();}
     if(el&&panel&&el!==panel&&scroll!==false){el.scrollIntoView({block:'start'});}
   }
   tabs.forEach(function(t,i){
