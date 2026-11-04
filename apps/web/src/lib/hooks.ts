@@ -66,30 +66,45 @@ export function useAction<A extends unknown[], R>(fn: (...args: A) => Promise<R>
   return { run, pending, error, clearError: () => setError(undefined) };
 }
 
+function readStored<T>(key: string, initial: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : initial;
+  } catch {
+    return initial;
+  }
+}
+
+/**
+ * State mirrored to localStorage under `key`. When the key changes (say, a
+ * different ontology in the same mounted page) the value is re-read for the
+ * new key, so one key's state never leaks into another's.
+ */
 export function useLocalStorage<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? (JSON.parse(raw) as T) : initial;
-    } catch {
-      return initial;
-    }
-  });
+  const [state, setState] = useState(() => ({ key, value: readStored(key, initial) }));
+  let current = state;
+  if (state.key !== key) {
+    // Derived-state reset during render: React re-renders straight away with the new key's value.
+    current = { key, value: readStored(key, initial) };
+    setState(current);
+  }
   const set = useCallback(
     (v: T | ((p: T) => T)) => {
-      setValue((prev) => {
-        const next = typeof v === 'function' ? (v as (p: T) => T)(prev) : v;
+      setState((prev) => {
+        const base = prev.key === key ? prev.value : readStored(key, initial);
+        const next = typeof v === 'function' ? (v as (p: T) => T)(base) : v;
         try {
           localStorage.setItem(key, JSON.stringify(next));
         } catch {
           /* storage unavailable */
         }
-        return next;
+        return { key, value: next };
       });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial is only a fallback
     [key],
   );
-  return [value, set];
+  return [current.value, set];
 }
 
 /** Re-render every `ms` (for countdowns and relative times). */

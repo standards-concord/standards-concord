@@ -176,6 +176,9 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
         warnings: v.lint.filter((i) => i.severity === 'warning').length,
         fairScore: v.fair.score,
         consistent: v.reasoner.consistent && v.reasoner.unsatisfiable.length === 0,
+        reasoner: v.reasoner.available ? v.reasoner.engine : 'structural',
+        // Required checks that could not run. FAIR checks that need the network are left out of the score instead.
+        incomplete: v.reasoner.available ? [] : ['OWL reasoner (HermiT) did not run, so only structural checks ran'],
       };
     } catch (err) {
       console.warn(`[validate] ${p.slug}: ${(err as Error).message}`);
