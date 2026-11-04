@@ -3,34 +3,39 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Collection } from '../db.js';
-import { checkField, type DocStore, StoreBusyError } from './types.js';
+import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, TransactionAbortedError, type TxState } from './types.js';
 
-/** How long a statement keeps retrying while another connection holds the write lock, as busy_timeout did. */
-const BUSY_TIMEOUT_MS = 5000;
+interface SqliteTx {
+  state: TxState;
+}
 
 interface Ctx {
   store: SqliteStore;
-  inTransaction: boolean;
+  tx?: SqliteTx;
   noWait: boolean;
-  /** Set when the transaction ends. Work it started without awaiting (which inherits this context) then runs outside it. */
-  ended?: boolean;
+}
+
+interface Waiter {
+  grant: () => void;
+  timer: NodeJS.Timeout;
 }
 
 /**
  * The document store on one SQLite connection, for a single long-running process (the Docker image, the VM,
- * self-hosting). node:sqlite is synchronous, so each statement runs to completion without yielding; the async
- * part is the gate below.
+ * self-hosting). node:sqlite is synchronous, so each statement runs to completion without yielding.
  *
  * One connection means an open transaction is visible to every statement on it. While a transaction's fn is
  * awaiting something, statements from other requests must not run on the connection (they would join the
- * transaction and roll back with it), so they wait until it commits. Statements inside the transaction (tracked
- * with AsyncLocalStorage) go straight through.
+ * transaction and roll back with it). So the connection is a first-come, first-served lock: a transaction holds
+ * it from BEGIN to COMMIT, a statement outside one holds it for that statement, and statements inside the
+ * transaction (tracked with AsyncLocalStorage) go straight through. Releasing hands it straight to the next in
+ * line, so nobody can be overtaken.
  */
 export class SqliteStore implements DocStore {
   readonly kind = 'sqlite' as const;
   private readonly als = new AsyncLocalStorage<Ctx>();
-  /** Settles when the transaction now open on the connection ends. */
-  private active: Promise<void> | undefined;
+  private locked = false;
+  private readonly waiters: Waiter[] = [];
 
   private constructor(private readonly db: DatabaseSync) {}
 
@@ -54,33 +59,73 @@ export class SqliteStore implements DocStore {
     return new SqliteStore(db);
   }
 
-  private ctx(): Ctx | undefined {
+  private current(): { tx?: SqliteTx; noWait: boolean } {
     const c = this.als.getStore();
-    if (c?.store !== this) return undefined;
-    return c.ended ? { ...c, inTransaction: false } : c;
+    if (c?.store !== this) return { noWait: false };
+    return { tx: liveTransaction(c.tx), noWait: c.noWait };
+  }
+
+  /** Take the connection: at once (no promise) if it is free, else in arrival order, failing after BUSY_TIMEOUT_MS. */
+  private acquire(noWait: boolean): Promise<void> | undefined {
+    if (!this.locked) {
+      this.locked = true;
+      return undefined;
+    }
+    if (noWait) throw new StoreBusyError();
+    return new Promise((resolve, reject) => {
+      const w: Waiter = {
+        grant: () => {
+          clearTimeout(w.timer);
+          resolve();
+        },
+        timer: setTimeout(() => {
+          this.waiters.splice(this.waiters.indexOf(w), 1);
+          reject(new StoreBusyError());
+        }, BUSY_TIMEOUT_MS),
+      };
+      this.waiters.push(w);
+    });
+  }
+
+  /** Hand the connection to the next in line (it stays locked), or free it. */
+  private release() {
+    const next = this.waiters.shift();
+    if (next) next.grant();
+    else this.locked = false;
   }
 
   /**
-   * Run one synchronous step on the connection once no other context's transaction is open. Nothing can start
-   * a transaction between the last check and `step`, because both happen in the same tick.
-   *
-   * The connection's busy_timeout is 0, and a step blocked by another connection's lock is retried here
-   * instead: SQLite's own busy wait would freeze the event loop, and with it the transaction holding the lock
-   * if that is in this process. withoutWaiting work gives up at the first refusal.
+   * Run one synchronous statement: inside the caller's transaction, or holding the connection for just this
+   * statement. The connection's busy_timeout is 0, and a statement blocked by another connection's lock is
+   * retried here instead (SQLite's own busy wait would freeze the event loop, and with it a lock holder in this
+   * process). withoutWaiting work gives up at the first refusal.
    */
   private async run<T>(step: () => T): Promise<T> {
-    const c = this.ctx();
+    const c = this.current();
+    if (c.tx) return this.inTransaction(c.tx, step);
     const deadline = Date.now() + BUSY_TIMEOUT_MS;
     for (let wait = 1; ; wait = Math.min(wait * 2, 50)) {
-      if (!c?.inTransaction) while (this.active) await this.active;
+      const turn = this.acquire(c.noWait);
+      if (turn) await turn;
       try {
         return step();
       } catch (e) {
-        if (!isBusy(e) || c?.inTransaction) throw e;
-        if (c?.noWait) throw new StoreBusyError();
-        if (Date.now() >= deadline) throw e;
+        if (!isBusy(e)) throw e;
+        if (c.noWait || Date.now() >= deadline) throw new StoreBusyError({ cause: e });
+      } finally {
+        this.release();
       }
       await sleep(wait);
+    }
+  }
+
+  /** A statement that fails inside a transaction dooms it, as it would on Postgres. */
+  private inTransaction<T>(tx: SqliteTx, step: () => T): T {
+    try {
+      return step();
+    } catch (e) {
+      tx.state.failed ??= e;
+      throw e;
     }
   }
 
@@ -146,34 +191,44 @@ export class SqliteStore implements DocStore {
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    const outer = this.ctx();
-    if (outer?.inTransaction) return fn();
-    const noWait = outer?.noWait ?? false;
-    let done!: () => void;
-    // `active` is set in the same synchronous step as BEGIN, so no statement from another context can run inside
-    // this transaction before it is marked open.
-    await this.run(() => {
-      this.db.exec('BEGIN IMMEDIATE');
-      this.active = new Promise((resolve) => (done = resolve));
-    });
-    const ctx: Ctx = { store: this, inTransaction: true, noWait };
+    const c = this.current();
+    if (c.tx) return fn();
+    const turn = this.acquire(c.noWait);
+    if (turn) await turn;
+    const tx: SqliteTx = { state: { status: 'open' } };
     try {
-      const out = await this.als.run(ctx, fn);
-      this.db.exec('COMMIT');
+      // Holding this process's turn, wait (asynchronously) for any other process's write lock.
+      const deadline = Date.now() + BUSY_TIMEOUT_MS;
+      for (let wait = 1; ; wait = Math.min(wait * 2, 50)) {
+        try {
+          this.db.exec('BEGIN IMMEDIATE');
+          break;
+        } catch (e) {
+          if (!isBusy(e)) throw e;
+          if (c.noWait || Date.now() >= deadline) throw new StoreBusyError({ cause: e });
+        }
+        await sleep(wait);
+      }
+      let out: T;
+      try {
+        out = await this.als.run({ store: this, tx, noWait: c.noWait }, fn);
+        if (tx.state.failed !== undefined) throw new TransactionAbortedError(tx.state.failed);
+        this.db.exec('COMMIT');
+      } catch (e) {
+        if (this.db.isTransaction) this.db.exec('ROLLBACK');
+        throw e;
+      }
+      tx.state.status = 'committed';
       return out;
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
     } finally {
-      ctx.ended = true;
-      this.active = undefined;
-      done();
+      if (tx.state.status === 'open') tx.state.status = 'rolledBack';
+      this.release();
     }
   }
 
   withoutWaiting<T>(fn: () => Promise<T>): Promise<T> {
-    const outer = this.ctx();
-    return this.als.run({ store: this, inTransaction: outer?.inTransaction ?? false, noWait: true }, fn);
+    const c = this.als.getStore();
+    return this.als.run({ store: this, tx: c?.store === this ? c.tx : undefined, noWait: true }, fn);
   }
 
   /**
@@ -181,6 +236,7 @@ export class SqliteStore implements DocStore {
    * then the write-ahead log is copied in and emptied. False if another connection blocked either step.
    */
   async scrubFreeSpace(): Promise<boolean> {
+    if (this.current().tx) return false; // VACUUM can't run inside a transaction.
     try {
       return await this.run(() => {
         this.db.exec('VACUUM');
@@ -193,7 +249,8 @@ export class SqliteStore implements DocStore {
   }
 
   async close(): Promise<void> {
-    while (this.active) await this.active;
+    const turn = this.acquire(false);
+    if (turn) await turn;
     this.db.close();
   }
 }

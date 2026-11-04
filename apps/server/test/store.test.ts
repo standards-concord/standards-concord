@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { type DocStore, openStore, StoreBusyError, type StoreOptions } from '../src/store/index.js';
+import { TransactionAbortedError, TransactionEndedError } from '../src/store/types.js';
 
 /**
  * One contract, three back ends: SQLite (today's store), PGlite (Postgres in process, as tests and local dev
@@ -193,7 +194,7 @@ describe.each(backends)('document store on $name', (backend) => {
     expect(await store.claim('oauthCodes', 'r', 'usedAt', 2)).toBeUndefined();
   });
 
-  it('work a transaction starts without awaiting runs outside it once the transaction ends', async () => {
+  it('work a committed transaction started without awaiting runs outside it afterwards, waiting its turn', async () => {
     // Async code inherits the context it started in. Without care, a fire-and-forget task started inside a
     // transaction would keep using the transaction's connection after COMMIT (on Postgres, a connection already
     // back in the pool and possibly in someone else's transaction).
@@ -223,6 +224,87 @@ describe.each(backends)('document store on $name', (backend) => {
     expect((await store.list<Doc>('kv')).map((d) => d.id).sort()).toEqual(['after-tx', 'in-tx', 'own-tx']);
   });
 
+  it('work left over from a rolled-back transaction cannot save anything', async () => {
+    // Astra (PR #53 review): the other branches of a rejected Promise.all kept running after the rollback and
+    // wrote outside it, or into an unrelated transaction, saving half of the failed transaction's work.
+    const slow = gate();
+    let leftover: Promise<unknown> | undefined;
+    let leftoverNoWait: Promise<unknown> | undefined;
+    await expect(
+      store.transaction(async () => {
+        leftover = (async () => {
+          await slow.opened;
+          await store.put('kv', { id: 'leftover' });
+        })();
+        leftoverNoWait = store.withoutWaiting(async () => {
+          await slow.opened;
+          await store.put('kv', { id: 'leftover-no-wait' });
+        });
+        await Promise.all([leftover, leftoverNoWait, Promise.reject(new Error('one branch failed'))]);
+      }),
+    ).rejects.toThrow('one branch failed');
+    const g = gate();
+    const other = store.transaction(async () => {
+      await store.put('kv', { id: 'unrelated' });
+      await g.opened;
+    });
+    await sleep(20);
+    slow.open();
+    await expect(leftover).rejects.toBeInstanceOf(TransactionEndedError);
+    await expect(leftoverNoWait).rejects.toBeInstanceOf(TransactionEndedError);
+    g.open();
+    await other;
+    expect((await store.list<Doc>('kv')).map((d) => d.id)).toEqual(['unrelated']);
+  });
+
+  it('a transaction whose statement failed saves nothing, even if the callback caught the error', async () => {
+    // Astra (PR #53 review): Postgres silently committed nothing while reporting success; SQLite committed the
+    // rest. Now both reject, so callers can't mistake a lost transaction for a saved one.
+    await expect(
+      store.transaction(async () => {
+        await store.put('kv', { id: 'first' });
+        await store.put('kv', { id: null as unknown as string }).catch(() => 'caught');
+        await store.put('kv', { id: 'after' }).catch(() => 'caught'); // Postgres refuses it; SQLite would run it.
+        return 'looks fine';
+      }),
+    ).rejects.toBeInstanceOf(TransactionAbortedError);
+    expect(await store.list('kv')).toEqual([]);
+    // The store is usable afterwards.
+    await store.transaction(async () => store.put('kv', { id: 'next' }));
+    expect((await store.list<Doc>('kv')).map((d) => d.id)).toEqual(['next']);
+  });
+
+  it('claims field names that Object.prototype also has, like any other', async () => {
+    // Astra (PR #53 review): an inherited `constructor` counted as already set on Postgres.
+    await store.put('kv', { id: 'p' });
+    expect(await store.claim('kv', 'p', 'constructor', 'me')).toEqual({ id: 'p' });
+    expect(await store.claim('kv', 'p', 'toString', 1)).toEqual({ id: 'p', constructor: 'me' });
+    expect(await store.claim('kv', 'p', 'constructor', 'you')).toBeUndefined();
+  });
+
+  it('serves waiting transactions in arrival order, so none is overtaken', async () => {
+    // Astra (PR #53 review): on SQLite, newer transactions could keep overtaking one already waiting.
+    const order: string[] = [];
+    const g = gate();
+    const first = store.transaction(async () => {
+      await g.opened;
+      order.push('first');
+    });
+    await sleep(10);
+    const waiting = store.transaction(async () => {
+      order.push('waiting');
+    });
+    await sleep(10);
+    const newer = Array.from({ length: 20 }, (_, i) =>
+      store.transaction(async () => {
+        order.push(`newer-${i}`);
+      }),
+    );
+    g.open();
+    await Promise.all([first, waiting, ...newer]);
+    expect(order.slice(0, 2)).toEqual(['first', 'waiting']);
+  });
+
   it('scrubFreeSpace succeeds when nothing holds a lock, and keeps the data', async () => {
     await store.put('oauthClients', { id: 'c', secret: 'x'.repeat(1000) });
     await store.put('oauthClients', { id: 'c', secretHash: 'h' });
@@ -244,6 +326,49 @@ describe.each(backends)('document store on $name', (backend) => {
       await Promise.all(Array.from({ length: 10 }, (_, i) => bump(i % 2 ? store : other)));
       expect(await store.get('kv', 'counter')).toEqual({ id: 'counter', value: 10 });
     });
+
+    it('a writer gives up with StoreBusyError after about 5 s if another connection keeps the lock', async () => {
+      // Astra (PR #53 review): a Postgres writer waited without limit, unlike SQLite's busy timeout.
+      const other = await connect();
+      const g = gate();
+      const held = gate();
+      const tx = store.transaction(async () => {
+        await store.put('kv', { id: 'held' });
+        held.open();
+        await g.opened;
+      });
+      await held.opened;
+      const started = Date.now();
+      await expect(other.put('kv', { id: 'blocked' })).rejects.toBeInstanceOf(StoreBusyError);
+      expect(Date.now() - started).toBeGreaterThan(4000);
+      expect(Date.now() - started).toBeLessThan(9000);
+      g.open();
+      await tx;
+      await other.put('kv', { id: 'later' });
+    });
+
+    if (backend.name === 'postgres')
+      it('survives the server dropping its connections, idle or mid-transaction', async () => {
+        // Astra (PR #53 review): with no 'error' listener on the pool or its clients, a terminated backend
+        // crashed the process.
+        const admin = await connect();
+        const kill = () =>
+          (admin as unknown as { driver: { query: (s: string) => Promise<unknown> } }).driver.query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = '' AND state IS NOT NULL",
+          );
+        await store.put('kv', { id: 'before' }); // Leaves an idle connection in the pool.
+        const inTx = store.transaction(async () => {
+          await store.put('kv', { id: 'doomed' });
+          await sleep(100);
+          await store.put('kv', { id: 'doomed-2' });
+        });
+        await sleep(30);
+        await kill();
+        await expect(inTx).rejects.toThrow();
+        await sleep(50);
+        await store.put('kv', { id: 'after' });
+        expect((await store.list<Doc>('kv')).map((d) => d.id)).toEqual(['before', 'after']);
+      });
 
     it('withoutWaiting gives up at once while another connection holds the writer lock, and works once it is free', async () => {
       const other = await connect();
