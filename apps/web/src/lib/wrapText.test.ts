@@ -25,6 +25,13 @@ describe('wrapRows', () => {
     for (const r of rows) expect(c.measure(r)).toBeLessThanOrEqual(70);
   });
 
+  it('handles zero-width characters without blank rows or an early ellipsis', () => {
+    const zw = '\u200b'.repeat(700);
+    const measure = (t: string) => t.replace(/\u200b/g, '').length * 7;
+    const rows = wrapRows(`A${zw}${'B'.repeat(45)}`, measure, 312, 3);
+    expect(rows).toEqual([`A${zw}${'B'.repeat(43)}`, 'BB']);
+  });
+
   it('stops measuring once the shown rows are known, however long the text', () => {
     for (const n of [8_000, 32_000]) {
       const word = counter();

@@ -24,9 +24,13 @@ export function wrapRows(text: string, measure: (t: string) => number, max: numb
     if (cur && addRow(cur)) break;
     cur = word;
     while (cur.length > 1 && !fits(cur)) {
-      // The longest prefix that fits; no glyph is under a pixel wide, so it is at most `max` long.
+      // The longest prefix that fits: gallop out from one character until a prefix doesn't fit,
+      // then binary search, so the work depends on how much fits rather than the word's length
+      // (and zero-width characters can't cut a row short).
       let lo = 1;
-      let hi = Math.min(cur.length - 1, Math.ceil(max));
+      let hi = 2;
+      while (hi < cur.length && fits(cur.slice(0, hi))) (lo = hi), (hi *= 2);
+      hi = Math.min(hi, cur.length) - 1;
       while (lo < hi) {
         const mid = Math.ceil((lo + hi) / 2);
         if (fits(cur.slice(0, mid))) lo = mid;

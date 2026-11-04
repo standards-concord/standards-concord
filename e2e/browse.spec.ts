@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import AxeBuilder from '@axe-core/playwright';
 import type { Page } from '@playwright/test';
 import { test, expect, expectNoCrash, settle, signIn, demoOntology } from './fixtures';
@@ -457,10 +458,11 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     const word = 'Supercalifragilisticexpialidociousorganisationalidentifierwithoutanyspaces';
     const classes = [
       { ...cls('Long', [], [{ property: NS + 'collaboratesWithAnotherOrganisationOnSharedProgrammes', kind: 'some', filler: NS + 'Long' }]), label: long },
-      { ...cls('Word', ['Long']), label: word },
+      // CJK text is wider at the regular weight than the bold one in some fonts.
+      { ...cls('Word', ['Long'], [{ property: NS + 'cjk', kind: 'some', filler: NS + 'Word' }]), label: word },
     ];
     const attr = { ...prop('theFullRegisteredCharityNumberAsRecordedByTheNationalRegulator', { domain: [NS + 'Long'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' };
-    await stub(page, classes, [prop('collaboratesWithAnotherOrganisationOnSharedProgrammes')], [attr]);
+    await stub(page, classes, [prop('collaboratesWithAnotherOrganisationOnSharedProgrammes'), { ...prop('cjk'), label: '协调各地区合作伙伴开展志愿服务机会的组织'.repeat(3) }], [attr]);
     await page.goto(`${base}?view=diagram&hops=0`);
     const d = page.getByTestId('class-diagram');
     await expect(d.locator('[data-node]')).toHaveCount(2);
@@ -497,6 +499,33 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-pressed', 'true');
     await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
     expect(await overflow()).toEqual([]);
+
+    // The exported file still fits when it is opened where the font isn't available.
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as SVG' }).click();
+    const file = await (await download).path();
+    const svgText = readFileSync(file, 'utf8');
+    const viewer = await page.context().newPage();
+    for (const font of ['DejaVu Serif', 'WenQuanYi Zen Hei Mono']) {
+      await viewer.setContent(`<style>body{margin:0} svg *{font-family:'${font}' !important}</style>${svgText}`);
+      const problems = await viewer.locator('svg').first().evaluate((svg) => {
+        const out: string[] = [];
+        const view = svg.getBoundingClientRect();
+        const inside = (t: Element, box: DOMRect, what: string) => {
+          const b = t.getBoundingClientRect();
+          if (b.left < box.left - 1 || b.right > box.right + 1) out.push(`${t.textContent?.slice(0, 40)} overflows ${what}`);
+        };
+        for (const node of svg.querySelectorAll('[data-node]')) for (const t of node.querySelectorAll('text')) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
+        for (const edge of svg.querySelectorAll('[data-edge]')) {
+          const rect = edge.querySelector('rect');
+          if (rect) for (const t of edge.querySelectorAll('text')) inside(t, rect.getBoundingClientRect(), 'its label');
+        }
+        for (const t of svg.querySelectorAll('text')) inside(t, view, 'the drawing');
+        return out;
+      });
+      expect(problems, font).toEqual([]);
+    }
+    await viewer.close();
     // The full names are still there for assistive technology.
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-label', new RegExp(`^${long}`));
     await expect(d.locator(`[data-node="${NS}Word"]`)).toHaveAttribute('aria-label', new RegExp(`^${word}`));
@@ -577,14 +606,33 @@ test.describe('large and unusual ontologies (stubbed)', () => {
 });
 
 test.describe('reduced motion', () => {
-  // The graph counts the frames it draws: an animation draws many, an immediate change one or two.
-  const framesDuring = async (page: Page, action: () => Promise<void>) => {
-    const g = page.getByTestId('ontology-graph');
+  // How many times the drawing (viewport and node positions) changes, sampled every frame, while
+  // an action takes effect: an animation passes through intermediate states, an immediate
+  // change goes straight to the end. Counting frames drawn is unreliable on slow machines.
+  const changesDuring = async (page: Page, action: () => Promise<void>) => {
     await page.waitForTimeout(800);
-    const before = Number(await g.getAttribute('data-frames'));
+    await page.evaluate(() => {
+      type Cy = { pan: () => { x: number; y: number }; nodes: () => { position: () => { x: number; y: number } }[] };
+      const cy = (document.querySelector('[data-testid="ontology-graph"] [data-cy]') as HTMLElement & { cy: Cy }).cy;
+      const w = window as unknown as { states: string[]; sampling: boolean };
+      const state = () => JSON.stringify([cy.pan(), ...cy.nodes().slice(0, 8).map((n) => n.position())].map((p) => [Math.round(p.x), Math.round(p.y)]));
+      w.states = [state()];
+      w.sampling = true;
+      const tick = () => {
+        const s = state();
+        if (s !== w.states[w.states.length - 1]) w.states.push(s);
+        if (w.sampling) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     await action();
-    await page.waitForTimeout(800);
-    return Number(await g.getAttribute('data-frames')) - before;
+    await page.waitForTimeout(1200);
+    const states = await page.evaluate(() => {
+      const w = window as unknown as { states: string[]; sampling: boolean };
+      w.sampling = false;
+      return w.states.length;
+    });
+    return states - 1;
   };
 
   for (const motion of ['reduce', 'no-preference'] as const) {
@@ -595,17 +643,17 @@ test.describe('reduced motion', () => {
       await expect(g).toHaveAttribute('data-ready', 'true');
       await expect(g).toHaveAttribute('data-motion', motion === 'reduce' ? 'reduced' : 'full');
       await page.getByRole('button', { name: 'Terms' }).click();
-      const layout = await framesDuring(page, () => page.getByRole('combobox', { name: 'Graph layout' }).selectOption('radial').then(() => {}));
+      const layout = await changesDuring(page, () => page.getByRole('combobox', { name: 'Graph layout' }).selectOption('radial').then(() => {}));
       // Selecting a class recentres on it.
-      const centre = await framesDuring(page, () => tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click());
+      const centre = await changesDuring(page, () => tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click());
       if (motion === 'reduce') {
-        // Two frames locally: the change and a redraw.
-        expect(layout).toBeLessThanOrEqual(3);
-        expect(centre).toBeLessThanOrEqual(3);
+        // Straight to the new layout or position.
+        expect(layout).toBeLessThanOrEqual(1);
+        expect(centre).toBeLessThanOrEqual(1);
       } else {
-        // Eight to eleven frames locally.
-        expect(layout).toBeGreaterThanOrEqual(6);
-        expect(centre).toBeGreaterThanOrEqual(6);
+        // At least one state on the way.
+        expect(layout).toBeGreaterThanOrEqual(2);
+        expect(centre).toBeGreaterThanOrEqual(2);
       }
       await expectNoCrash(page);
     });

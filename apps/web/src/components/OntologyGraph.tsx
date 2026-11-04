@@ -171,13 +171,9 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
         if (p) onSelectRef.current?.(p);
       });
       cy.on('zoom', () => setZoom(cy.zoom()));
-      // Count drawn frames on the element, so tests can tell an animation (many frames) from
-      // an immediate change (one or two) without relying on what the code says it did.
-      let frames = 0;
-      cy.on('render', () => {
-        const host = ref.current?.parentElement;
-        if (host) host.dataset.frames = String(++frames);
-      });
+      // Tests watch the real viewport and node positions frame by frame to check whether changes
+      // animate, rather than trusting what the code says it did.
+      (ref.current as HTMLElement & { cy?: unknown }).cy = cy;
       // Fitting a handful of nodes would blow them up; keep text at a readable size.
       const clampFit = () => {
         if (cy.zoom() > 1.15) {
@@ -281,7 +277,7 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
         data-motion={prefersReducedMotion() ? 'reduced' : 'full'}
       >
         {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
-        <div ref={ref} className="size-full" />
+        <div ref={ref} className="size-full" data-cy />
         {ready && <ZoomControls k={zoom} onIn={() => zoomBy(1.2)} onOut={() => zoomBy(1 / 1.2)} onFit={() => {
               const cy = cyRef.current;
               if (!cy) return;

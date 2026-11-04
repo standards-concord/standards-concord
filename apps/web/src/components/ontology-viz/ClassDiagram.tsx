@@ -62,8 +62,10 @@ interface DEdge {
 const FONT = 'Inter, ui-sans-serif, system-ui, sans-serif';
 const TITLE_FONT = `600 13px ${FONT}`;
 const ATTR_FONT = `12px ${FONT}`;
-// Relationship labels turn bold when highlighted, so they are sized for the bold weight.
-const LABEL_FONT = `600 11px ${FONT}`;
+// Relationship labels turn bold when highlighted, so they are sized for whichever weight is
+// wider (bold usually is, but not in every font or script).
+const LABEL_FONTS = [`11px ${FONT}`, `600 11px ${FONT}`];
+const labelWidth = (s: string) => Math.max(...LABEL_FONTS.map((f) => textWidth(s, f)));
 const HEAD = 30;
 const TITLE_ROW = 16;
 const ROW = 18;
@@ -175,7 +177,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
             continue;
           }
           edges.push(e);
-          g.setEdge(iri, r, { weight: 1, minlen: 1, width: textWidth(text, LABEL_FONT) + 10 + SLACK, height: 16, labelpos: 'c' }, id);
+          g.setEdge(iri, r, { weight: 1, minlen: 1, width: labelWidth(text) + 10 + SLACK, height: 16, labelpos: 'c' }, id);
         }
       }
 
@@ -206,9 +208,9 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       { x: x + 34, y: y + 22 },
       { x, y: y + 8 },
     ];
-    e.lx = x + 40 + (textWidth(e.label!, LABEL_FONT) + SLACK) / 2;
+    e.lx = x + 40 + (labelWidth(e.label!) + SLACK) / 2;
     e.ly = y;
-    e.lw = textWidth(e.label!, LABEL_FONT) + 10 + SLACK;
+    e.lw = labelWidth(e.label!) + 10 + SLACK;
   }
   // The drawing's bounds (used to fit and export it) cover every box, edge and label.
   const gl = g.graph();
