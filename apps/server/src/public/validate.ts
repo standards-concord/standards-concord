@@ -100,9 +100,9 @@ async function validate(req: Request, res: Response) {
   }
   const base = typeof req.query.base === 'string' && /^https?:\/\//.test(req.query.base) ? req.query.base : undefined;
   const self = `${origin(req)}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}/${version}`;
-  const { body, turtle } = await validateDataAgainst(project, version, text, { format, baseIRI: base, shapesUrl: `${self}.shacl.ttl` });
+  const { body, turtle } = await validateDataAgainst(project, version, text, { format, baseIRI: base, shapesUrl: `${self}.shacl.ttl`, turtle: wants === 'text/turtle' });
   res.set('Link', `<${self}.shacl.ttl>; rel="describedby"; type="text/turtle"; profile="http://www.w3.org/ns/shacl#"`);
-  if (wants === 'text/turtle') return void res.type('text/turtle; charset=utf-8').send(turtle());
+  if (wants === 'text/turtle') return void res.type('text/turtle; charset=utf-8').send(turtle ?? '');
   res.json(body);
 }
 
@@ -123,7 +123,10 @@ export function validationRouter(): Router {
     try {
       await validate(req, res);
     } catch (err) {
-      if (err instanceof DataError) return void res.status(err.status).json({ error: err.message });
+      if (err instanceof DataError) {
+        if (err.status === 503) res.set('Retry-After', '5');
+        return void res.status(err.status).json({ error: err.message });
+      }
       next(err);
     }
   });

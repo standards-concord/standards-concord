@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { POOL_LIMITS } from '../src/services/validationPool.js';
 
 const app = createApp();
 const SH = 'http://www.w3.org/ns/shacl#';
@@ -159,7 +160,48 @@ describe('POST to the ontology IRI validates data', () => {
     for (let i = 0; i < 12_600; i++) many += `ex:r${i} a vol:Role ; vol:title "r" .\n`;
     const tooMany = await post('/def/volunteering', many);
     expect(tooMany.status).toBe(413);
-    expect(tooMany.body.error).toMatch(/limit is 25,000/);
+    expect(tooMany.body.error).toMatch(/more than 25,000 triples/);
+  });
+
+  it('refuses RDF/XML with a DTD, which could expand entities without limit', async () => {
+    const lol = `<?xml version="1.0"?><!DOCTYPE rdf:RDF [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:vol="${'https://w3id.org/odi/volunteering#'}"><vol:Role rdf:about="https://example.org/r"><vol:title>&b;</vol:title></vol:Role></rdf:RDF>`;
+    const res = await post('/def/volunteering', lol, 'application/rdf+xml');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/DOCTYPE or entity declarations is not accepted/);
+  });
+
+  it('keeps one blank node as one node throughout the Turtle report', async () => {
+    const res = await post('/def/volunteering', `${PREFIXES}_:app a vol:Application .`).set('Accept', 'text/turtle');
+    const store = new Store(new Parser({ format: 'Turtle' }).parse(res.text));
+    const focus = store.getQuads(null, `${SH}focusNode`, null, null).map((q) => q.object);
+    expect(focus.length).toBeGreaterThan(1);
+    expect(new Set(focus.map((f) => f.value)).size).toBe(1);
+    expect(focus[0].termType).toBe('BlankNode');
+  });
+
+  it('stops a validation that runs too long, and keeps serving', async () => {
+    const before = POOL_LIMITS.timeoutMs;
+    POOL_LIMITS.timeoutMs = 1;
+    try {
+      const slow = await post('/def/volunteering', VALID);
+      expect(slow.status).toBe(422);
+      expect(slow.body.error).toMatch(/took longer than/);
+    } finally {
+      POOL_LIMITS.timeoutMs = before;
+    }
+    expect((await post('/def/volunteering', VALID)).body.conforms).toBe(true);
+  });
+
+  it('answers 503 when the queue is full', async () => {
+    const before = POOL_LIMITS.queue;
+    POOL_LIMITS.queue = 0;
+    try {
+      const busy = await post('/def/volunteering', VALID);
+      expect(busy.status).toBe(503);
+      expect(busy.headers['retry-after']).toBe('5');
+    } finally {
+      POOL_LIMITS.queue = before;
+    }
   });
 
   it('answers CORS preflight for cross-site POSTs', async () => {
@@ -195,6 +237,22 @@ describe('the SHACL profile of the ontology IRI', () => {
     expect(plain.headers['accept-post']).toContain('text/turtle');
     const refused = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>;q=0');
     expect(refused.text).not.toMatch(/sh:NodeShape/);
+  });
+
+  it('lets any site read the shapes, with the profile headers', async () => {
+    const res = await request(app).get('/def/volunteering/1.0.0').set('Origin', 'https://app.example.org').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(res.headers['access-control-allow-origin']).toBe('*');
+    expect(res.headers['access-control-expose-headers']).toMatch(/Content-Profile/);
+    expect(res.headers.link).toContain('<http://www.w3.org/ns/shacl#>; rel="profile"');
+    const plain = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle');
+    expect(plain.headers.link).not.toContain('rel="profile"');
+  });
+
+  it('respects a more specific refusal of Turtle', async () => {
+    const res = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle;q=0, */*;q=1').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(res.status).toBe(406);
+    const ok = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/*;q=0, text/turtle;q=0.5').set('Accept-Profile', '<http://www.w3.org/ns/shacl#>');
+    expect(ok.status).toBe(200);
   });
 
   it('refuses the profile in a type it is not available in', async () => {

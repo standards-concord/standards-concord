@@ -90,6 +90,32 @@ test.describe('Validate data', () => {
     expect(text).toContain('sh:conforms false');
   });
 
+  test('drops an answer that arrives after the data or version changed', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route('**/def/volunteering/**', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      await held;
+      await route.continue();
+    });
+    await page.getByRole('button', { name: 'Try an example' }).click();
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    // While that request is out, switch to the draft.
+    await page.getByLabel('Version to validate against').selectOption('draft');
+    release();
+    await page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/def/volunteering/'));
+    await expect(report(page)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Validate', exact: true })).toBeEnabled();
+    await page.unroute('**/def/volunteering/**');
+
+    // Validating again reports against the draft; changing the version clears that report, so downloads always match it.
+    await page.getByRole('button', { name: 'Validate', exact: true }).click();
+    await expect(page.getByTestId('validation-subtitle')).toContainText('the working draft');
+    await page.getByLabel('Version to validate against').selectOption('1.0.0');
+    await expect(report(page)).toHaveCount(0);
+  });
+
   test('explains data it cannot read', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 400/);
     await page.goto('/o/volunteering/validate');

@@ -30,10 +30,10 @@ import { DATA_FORMATS, type DataFormat } from './dataFormats.js';
 export { DATA_FORMATS, DATA_MEDIA_TYPES, dataFormatForFile, dataFormatForMediaType, sniffDataFormat } from './dataFormats.js';
 export type { DataFormat } from './dataFormats.js';
 
-/** Data that can't be validated: unparseable (400) or too large (413). */
+/** Data that can't be validated: unparseable (400), too large (413), too slow to check (422) or the validator is busy (503). */
 export class DataError extends Error {
   constructor(
-    readonly status: 400 | 413,
+    readonly status: 400 | 413 | 422 | 503,
     message: string,
   ) {
     super(message);
@@ -53,49 +53,88 @@ const BAD_IRI = /[\u0000-\u0020<>"{}|^`\\]/;
 
 /**
  * Parses instance data into triples in the default graph (named graphs are
- * merged into it, as SHACL validates one data graph).
+ * merged into it, as SHACL validates one data graph). Parsers stream: past
+ * maxTriples, nothing more is kept, so a small document that expands to many
+ * triples can't fill memory before it is refused. RDF/XML with a DTD is
+ * refused, because entity declarations can expand without limit.
  */
 export async function parseData(text: string, format: DataFormat, opts: ParseDataOptions = {}): Promise<Quad[]> {
-  let quads: Quad[];
-  try {
-    quads = await parseQuads(text, format, opts.baseIRI);
-  } catch (err) {
-    if (err instanceof DataError) throw err;
-    throw new DataError(400, `Could not parse the data as ${DATA_FORMATS[format].label}: ${(err as Error).message}`);
-  }
-  if (opts.maxTriples !== undefined && quads.length > opts.maxTriples) {
-    throw new DataError(413, `The data has ${quads.length.toLocaleString('en')} triples; the limit is ${opts.maxTriples.toLocaleString('en')}.`);
-  }
+  const max = opts.maxTriples ?? Infinity;
   const out = new Store();
-  for (const q of quads) {
+  let seen = 0;
+  const keep = (q: Quad) => {
+    seen++;
+    if (seen > max) return;
     for (const t of [q.subject, q.predicate, q.object]) {
       if (t.termType !== 'NamedNode') continue;
       if (!ABSOLUTE.test(t.value)) throw new DataError(400, `The data uses a relative IRI <${t.value}>. Add @base (or xml:base), or pass a base IRI.`);
       if (BAD_IRI.test(t.value)) throw new DataError(400, `The data uses an IRI with characters IRIs can't contain: <${t.value}>.`);
     }
     out.addQuad(q.subject, q.predicate, q.object);
+  };
+  try {
+    await streamQuads(text, format, opts.baseIRI, keep);
+  } catch (err) {
+    if (err instanceof DataError) throw err;
+    throw new DataError(400, `Could not parse the data as ${DATA_FORMATS[format].label}: ${(err as Error).message}`);
   }
+  if (seen > max) throw new DataError(413, `The data has more than ${max.toLocaleString('en')} triples, the limit.`);
   return out.getQuads(null, null, null, null);
 }
 
-async function parseQuads(text: string, format: DataFormat, baseIRI?: string): Promise<Quad[]> {
+/** Parses N-Triples-family text, handing each quad to `emit` as it is read. */
+function streamN3(text: string, format: 'Turtle' | 'TriG' | 'N-Triples' | 'N-Quads', baseIRI: string | undefined, emit: (q: Quad) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let failed = false;
+    new Parser({ format, baseIRI }).parse(text, (err, quad) => {
+      if (failed) return;
+      if (err) {
+        failed = true;
+        return reject(err);
+      }
+      if (!quad) return resolve();
+      try {
+        emit(quad);
+      } catch (e) {
+        failed = true;
+        reject(e);
+      }
+    });
+  });
+}
+
+async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void): Promise<void> {
   switch (format) {
     case 'turtle':
-      return new Parser({ format: 'Turtle', baseIRI }).parse(text);
+      return streamN3(text, 'Turtle', baseIRI, emit);
     case 'trig':
-      return new Parser({ format: 'TriG', baseIRI }).parse(text);
+      return streamN3(text, 'TriG', baseIRI, emit);
     case 'ntriples':
-      return new Parser({ format: 'N-Triples' }).parse(text);
+      return streamN3(text, 'N-Triples', undefined, emit);
     case 'nquads':
-      return new Parser({ format: 'N-Quads' }).parse(text);
+      return streamN3(text, 'N-Quads', undefined, emit);
     case 'rdfxml': {
+      // A DTD can declare entities that expand a few bytes into gigabytes ("billion laughs").
+      if (/<!DOCTYPE|<!ENTITY/i.test(text)) throw new DataError(400, 'RDF/XML with a DOCTYPE or entity declarations is not accepted. Expand the entities and remove the DOCTYPE.');
       const { RdfXmlParser } = await import('rdfxml-streaming-parser');
       return new Promise((resolve, reject) => {
-        const out: Quad[] = [];
+        let failed = false;
         const parser = new RdfXmlParser({ baseIRI: baseIRI ?? '' });
-        parser.on('data', (q: Quad) => out.push(q));
-        parser.on('error', reject);
-        parser.on('end', () => resolve(out));
+        const fail = (e: unknown) => {
+          if (failed) return;
+          failed = true;
+          reject(e);
+        };
+        parser.on('data', (q: Quad) => {
+          if (failed) return;
+          try {
+            emit(q);
+          } catch (e) {
+            fail(e);
+          }
+        });
+        parser.on('error', fail);
+        parser.on('end', () => !failed && resolve());
         parser.write(text);
         parser.end();
       });
@@ -124,7 +163,7 @@ async function parseQuads(text: string, format: DataFormat, baseIRI?: string): P
         if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
         throw err;
       }
-      return new Parser({ format: 'N-Quads' }).parse(nquads);
+      return streamN3(nquads, 'N-Quads', undefined, emit);
     }
     default:
       throw new DataError(400, `Unsupported data format: ${format as string}`);
@@ -155,6 +194,11 @@ export interface ShaclResult {
 export interface ShaclReport {
   conforms: boolean;
   results: ShaclResult[];
+}
+
+/** A report as the validator made it: `sources` holds each result's exact source shape, for the Turtle report. */
+export interface ValidatedReport extends ShaclReport {
+  sources: string[];
 }
 
 const SKOLEM = 'urn:x-concord-shape:';
@@ -202,7 +246,7 @@ export class ShapesValidator {
   }
 
   /** Validates triples against the shapes. `context` (e.g. the class hierarchy) joins the data graph but isn't counted. */
-  async validate(data: Quad[], context: Quad[] = []): Promise<ShaclReport> {
+  async validate(data: Quad[], context: Quad[] = []): Promise<ValidatedReport> {
     const { SparqStore } = await import('@sparq-org/sparq');
     const dataNT = toNTriples([...context, ...data]);
     const store = await SparqStore.fromString('', 'ntriples');
@@ -212,10 +256,10 @@ export class ShapesValidator {
     } finally {
       store.free();
     }
-    const results = raw.results.map((r): ShaclResult => {
+    const rows = raw.results.map((r) => {
       const source = unwrapIri(r.sourceShape);
       const skolem = source && this.skolems.get(source);
-      return {
+      const result: ShaclResult = {
         focusNode: ntToString(r.focusNode),
         ...(r.path ? { path: unwrapIri(r.path) ?? r.path } : {}),
         ...(r.value ? { value: r.value } : {}),
@@ -224,56 +268,66 @@ export class ShapesValidator {
         ...(skolem ? (skolem.owner ? { shape: skolem.owner } : {}) : source && !source.startsWith(SKOLEM) ? { shape: source } : {}),
         ...(r.message ? { message: r.message } : {}),
       };
+      return { result, source: r.sourceShape };
     });
-    results.sort((a, b) => severityRank(a.severity) - severityRank(b.severity) || a.focusNode.localeCompare(b.focusNode) || (a.path ?? '').localeCompare(b.path ?? ''));
-    return { conforms: raw.conforms, results };
+    rows.sort((x, y) => {
+      const a = x.result;
+      const b = y.result;
+      return severityRank(a.severity) - severityRank(b.severity) || a.focusNode.localeCompare(b.focusNode) || (a.path ?? '').localeCompare(b.path ?? '');
+    });
+    return { conforms: raw.conforms, results: rows.map((r) => r.result), sources: rows.map((r) => r.source) };
   }
 
   /**
    * The report as a SHACL validation report in Turtle (sh:ValidationReport).
-   * Property shapes that are blank nodes in the shapes graph are copied into
-   * the report, so sh:sourceShape always points at a description.
+   * Each result names its exact source shape. Property shapes that are blank
+   * nodes in the shapes graph are copied into the report, so sh:sourceShape
+   * always points at a description. A blank node in the data is one node
+   * throughout the report, as focus node and as value.
    */
-  reportTurtle(report: ShaclReport, prefixes: Record<string, string> = {}): string {
+  reportTurtle(report: ValidatedReport, prefixes: Record<string, string> = {}): string {
     const out = new Store();
     const r = DataFactory.blankNode();
     const add = (s: Term, p: string, o: Term) => out.addQuad(s as never, nn(p), o as never);
     add(r, RDF_TYPE, nn(SH + 'ValidationReport'));
     add(r, SH + 'conforms', DataFactory.literal(String(report.conforms), nn(NS.xsd + 'boolean')));
+    const blanks = new Map<string, Term>();
+    const blank = (key: string) => {
+      let b = blanks.get(key);
+      if (!b) blanks.set(key, (b = DataFactory.blankNode()));
+      return b;
+    };
+    const term = (nt: string): Term => (nt.startsWith('_:') ? blank(`data ${nt}`) : parseTerm(nt));
     const copied = new Map<string, Term>();
-    for (const result of report.results) {
+    const shapeTerm = (raw: string | undefined, result: ShaclResult): Term => {
+      const iri = raw && unwrapIri(raw);
+      const skolem = iri && this.skolems.get(iri);
+      if (iri && skolem) {
+        let copy = copied.get(iri);
+        if (!copy) {
+          copy = copyBlankSubtree(this.shapes, out, skolem.node);
+          copied.set(iri, copy);
+          if (skolem.owner) out.addQuad(nn(skolem.owner), nn(SH + 'property'), copy as never);
+        }
+        return copy;
+      }
+      if (iri) return nn(iri);
+      if (raw?.startsWith('_:')) return blank(`shape ${raw}`);
+      return result.shape ? nn(result.shape) : DataFactory.blankNode();
+    };
+    report.results.forEach((result, i) => {
       const b = DataFactory.blankNode();
       add(r, SH + 'result', b);
       add(b, RDF_TYPE, nn(SH + 'ValidationResult'));
       add(b, SH + 'resultSeverity', nn(SH + result.severity));
-      add(b, SH + 'focusNode', parseTerm(result.focusNode.startsWith('_:') ? result.focusNode : `<${result.focusNode}>`));
+      add(b, SH + 'focusNode', term(result.focusNode.startsWith('_:') ? result.focusNode : `<${result.focusNode}>`));
       if (result.path) add(b, SH + 'resultPath', parsePath(result.path, out));
-      if (result.value) add(b, SH + 'value', parseTerm(result.value));
+      if (result.value) add(b, SH + 'value', term(result.value));
       add(b, SH + 'sourceConstraintComponent', nn(result.constraint));
-      add(b, SH + 'sourceShape', this.sourceShapeFor(result, out, copied));
+      add(b, SH + 'sourceShape', shapeTerm(report.sources[i], result));
       if (result.message) add(b, SH + 'resultMessage', DataFactory.literal(result.message));
-    }
+    });
     return writeTurtle(out, { sh: SH, xsd: NS.xsd, rdf: NS.rdf, rdfs: NS.rdfs, ...prefixes }, { sectionComments: false });
-  }
-
-  /** The shape to name as a result's sh:sourceShape: its node shape's matching property shape, copied into the report. */
-  private sourceShapeFor(result: ShaclResult, out: Store, copied: Map<string, Term>): Term {
-    const candidates = [...this.skolems.entries()].filter(([, s]) => s.owner === result.shape && result.path && this.pathOf(s.node) === result.path);
-    const pick = candidates.find(([, s]) => this.shapes.getQuads(s.node, null, null, null).some((q) => constraintFor(q.predicate.value) === result.constraint)) ?? candidates[0];
-    if (!pick) return result.shape ? nn(result.shape) : DataFactory.blankNode();
-    const [iri, { node, owner }] = pick;
-    let copy = copied.get(iri);
-    if (!copy) {
-      copy = copyBlankSubtree(this.shapes, out, node);
-      copied.set(iri, copy);
-      if (owner) out.addQuad(nn(owner), nn(SH + 'property'), copy as never);
-    }
-    return copy;
-  }
-
-  private pathOf(node: Term): string | undefined {
-    const p = this.shapes.getQuads(node, SH + 'path', null, null)[0]?.object;
-    return p?.termType === 'NamedNode' ? p.value : undefined;
   }
 }
 
@@ -297,13 +351,6 @@ function toNTriples(quads: Quad[]): string {
   };
   const t = (x: Term) => (x.termType === 'BlankNode' ? `_:${label(x.value)}` : x.termType === 'NamedNode' ? `<${x.value}>` : literalToNT(x as never));
   return quads.map((q) => `${t(q.subject as Term)} ${t(q.predicate as Term)} ${t(q.object as Term)} .`).join('\n');
-}
-
-/** The constraint component a shape predicate belongs to, e.g. sh:minCount → sh:MinCountConstraintComponent. */
-function constraintFor(predicate: string): string | undefined {
-  if (!predicate.startsWith(SH)) return undefined;
-  const local = predicate.slice(SH.length).replace(/^qualified(Min|Max)Count$/, 'QualifiedValueShape').replace(/^qualifiedValueShape$/, 'QualifiedValueShape');
-  return `${SH}${local[0].toUpperCase()}${local.slice(1)}ConstraintComponent`;
 }
 
 const severityRank = (s: string) => (s === 'Violation' ? 0 : s === 'Warning' ? 1 : 2);

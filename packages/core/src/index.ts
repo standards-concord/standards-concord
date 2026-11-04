@@ -36,7 +36,7 @@ export { toShacl } from './shacl.js';
 
 // Validating instance data
 export { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, ShapesValidator, checkTerms, classHierarchy, dataFormatForFile, dataFormatForMediaType, parseData, sniffDataFormat } from './validation.js';
-export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, TermIssue } from './validation.js';
+export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, TermIssue, ValidatedReport } from './validation.js';
 
 // Helpers
 export { compactIRI, expandIRI, localName, isValidLocalName, XSD, NS } from './ns.js';

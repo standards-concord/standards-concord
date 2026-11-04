@@ -1,6 +1,8 @@
-import { checkTerms, classHierarchy, DataError, parseData, ShapesValidator, toShacl, type DataFormat, type ShaclResult, type TermIssue } from '@concord/core';
+import { createHash } from 'node:crypto';
+import { DataError, type DataFormat, type OntologyGraph, type ShaclResult, type TermIssue } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
 import { ontologyStore } from './ontologyStore.js';
+import { runValidation } from './validationPool.js';
 
 /**
  * Validating instance data against one version of an ontology: SHACL (the
@@ -8,7 +10,7 @@ import { ontologyStore } from './ontologyStore.js';
  * Used by POST to the ontology's /def URI and by the MCP validate_data tool.
  */
 
-/** Limits for one request. The engine runs on the server's main thread, so the triple cap bounds how long it blocks. */
+/** Limits for one request. Time and memory are limited too, in validationPool.ts. */
 export const VALIDATION_LIMITS = { bytes: 5 * 1024 * 1024, triples: 25_000 };
 
 export interface DataValidation {
@@ -27,22 +29,17 @@ export interface DataValidation {
   terms: TermIssue[];
 }
 
-const cache = new Map<string, { shapes: string; validator: ShapesValidator }>();
+/** Each loaded ontology version's Turtle and its hash, for the worker's cache. */
+const sources = new WeakMap<OntologyGraph, { text: string; hash: string }>();
 
-async function validatorFor(project: OntologyProject, version: string) {
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
-  const key = `${project.id}@${version}`;
-  const hit = cache.get(key);
-  // Releases never change; the draft does, so compare its shapes.
-  if (hit && version !== 'draft') return { graph, ...hit };
-  const shapes = await toShacl(graph);
-  if (hit && hit.shapes === shapes) return { graph, ...hit };
-  const entry = { shapes, validator: ShapesValidator.fromTurtle(shapes) };
-  cache.delete(key);
-  cache.set(key, entry);
-  // Keep the cache small: the oldest entry goes first.
-  if (cache.size > 32) cache.delete(cache.keys().next().value!);
-  return { graph, ...entry };
+async function ontologySource(graph: OntologyGraph) {
+  let hit = sources.get(graph);
+  if (!hit) {
+    const text = await graph.toTurtle();
+    hit = { text, hash: createHash('sha256').update(text).digest('hex') };
+    sources.set(graph, hit);
+  }
+  return hit;
 }
 
 /** Relative IRIs in data resolve against this unless the caller gives a base (a reserved domain, so it never means a real thing). */
@@ -54,34 +51,46 @@ export interface ValidateOptions {
   baseIRI?: string;
   /** Link to the shapes used, for the report. */
   shapesUrl?: string;
+  /** Also write the SHACL validation report in Turtle. */
+  turtle?: boolean;
 }
 
-/** Parses and validates data. Throws DataError (status 400 or 413) for data that can't be validated. */
-export async function validateDataAgainst(project: OntologyProject, version: string, text: string, opts: ValidateOptions) {
+/**
+ * Parses and validates data in a worker thread (validationPool.ts). Throws
+ * DataError: 400 unparseable, 413 too large, 422 too slow, 503 busy.
+ */
+export async function validateDataAgainst(project: OntologyProject, version: string, text: string, opts: ValidateOptions): Promise<{ body: DataValidation; turtle?: string }> {
   if (Buffer.byteLength(text) > VALIDATION_LIMITS.bytes) {
     throw new DataError(413, `The data is larger than ${VALIDATION_LIMITS.bytes / 1024 / 1024} MB.`);
   }
-  const data = await parseData(text, opts.format, { baseIRI: opts.baseIRI ?? DEFAULT_DATA_BASE, maxTriples: VALIDATION_LIMITS.triples });
-  const { graph, validator } = await validatorFor(project, version);
-  const report = await validator.validate(data, classHierarchy(graph));
-  const terms = checkTerms(graph, data);
-  const count = (s: string) => report.results.filter((r) => r.severity === s).length;
+  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
+  const source = await ontologySource(graph);
+  const outcome = await runValidation({
+    hash: source.hash,
+    ontology: source.text,
+    text,
+    format: opts.format,
+    baseIRI: opts.baseIRI ?? DEFAULT_DATA_BASE,
+    maxTriples: VALIDATION_LIMITS.triples,
+    turtle: !!opts.turtle,
+  });
+  const count = (s: string) => outcome.results.filter((r) => r.severity === s).length;
   const body: DataValidation = {
     ontology: graph.ontologyIRI || project.ontologyIRI,
     version,
     ...(opts.shapesUrl ? { shapes: opts.shapesUrl } : {}),
-    conforms: report.conforms,
-    valid: report.conforms && !terms.some((t) => t.severity === 'error'),
-    triples: data.length,
+    conforms: outcome.conforms,
+    valid: outcome.valid,
+    triples: outcome.triples,
     summary: {
       violations: count('Violation'),
       warnings: count('Warning'),
       infos: count('Info'),
-      termErrors: terms.filter((t) => t.severity === 'error').length,
-      termWarnings: terms.filter((t) => t.severity === 'warning').length,
+      termErrors: outcome.terms.filter((t) => t.severity === 'error').length,
+      termWarnings: outcome.terms.filter((t) => t.severity === 'warning').length,
     },
-    results: report.results,
-    terms,
+    results: outcome.results,
+    terms: outcome.terms,
   };
-  return { body, turtle: () => validator.reportTurtle(report, graph.prefixes) };
+  return { body, turtle: outcome.turtle };
 }

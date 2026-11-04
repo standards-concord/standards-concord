@@ -45,6 +45,19 @@ describe('reading data', () => {
     expect(err.message).toMatch(/Remote JSON-LD contexts are not fetched \(https:\/\/schema\.org\//);
   });
 
+  it('stops keeping triples at the cap while it parses', async () => {
+    const many = `<https://e/a> <https://e/p> ${Array.from({ length: 1000 }, (_, i) => i).join(', ')} .`;
+    const err = await parseData(many, 'turtle', { maxTriples: 10 }).catch((e) => e);
+    expect(err.status).toBe(413);
+    expect(err.message).toMatch(/more than 10 triples/);
+  });
+
+  it('refuses RDF/XML DTDs', async () => {
+    const err = await parseData('<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "b">]><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>', 'rdfxml').catch((e) => e);
+    expect(err).toBeInstanceOf(DataError);
+    expect(err.status).toBe(400);
+  });
+
   it('reports parse errors as 400s', async () => {
     const err = await parseData('<https://e/a> <https://e/p>', 'turtle').catch((e) => e);
     expect(err).toBeInstanceOf(DataError);
@@ -84,10 +97,25 @@ describe('SHACL validation against the derived shapes', () => {
     }
   });
 
+  it('names the exact failing shape when two shapes share a path', async () => {
+    const shapes = `@prefix sh: <${SH}> . @prefix ex: <https://e/> .
+      ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+        sh:property [ sh:path ex:p ; sh:qualifiedValueShape [ sh:class ex:B ] ; sh:qualifiedMinCount 1 ] ,
+                    [ sh:path ex:p ; sh:qualifiedValueShape [ sh:class ex:C ] ; sh:qualifiedMinCount 1 ] .`;
+    const validator = ShapesValidator.fromTurtle(shapes);
+    const data = await parseData('@prefix ex: <https://e/> . ex:x a ex:T ; ex:p ex:b . ex:b a ex:B .', 'turtle');
+    const report = await validator.validate(data);
+    expect(report.results).toHaveLength(1);
+    const store = new Store(new Parser({ format: 'Turtle' }).parse(validator.reportTurtle(report)));
+    const source = store.getObjects(null, `${SH}sourceShape`, null)[0];
+    const qvs = store.getObjects(source, `${SH}qualifiedValueShape`, null)[0];
+    expect(store.getObjects(qvs, `${SH}class`, null)[0].value).toBe('https://e/C');
+  });
+
   it('conforms when nothing is targeted', async () => {
     const { graph, validator } = await setup();
     const report = await validator.validate(await parseData('<https://e/a> <https://e/p> "x" .', 'ntriples'), classHierarchy(graph));
-    expect(report).toEqual({ conforms: true, results: [] });
+    expect(report).toMatchObject({ conforms: true, results: [] });
   });
 });
 

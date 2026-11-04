@@ -102,11 +102,13 @@ export function ValidateTab() {
   const [data, setData] = useState('');
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [picked, setPicked] = useState<Picked>('auto');
-  const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat } | null>(null);
+  const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat; version: string } | null>(null);
   const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Bumped whenever the inputs change: a response for an older request is dropped.
+  const request = useRef(0);
 
   const text = file?.text ?? data;
   const format: DataFormat = picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
@@ -117,27 +119,37 @@ export function ValidateTab() {
     const n = new URLSearchParams(params);
     n.set('version', v);
     setParams(n, { replace: true });
+    invalidate();
+  };
+
+  /** The data, format or version changed: forget the report and any answer still on its way. */
+  const invalidate = () => {
+    request.current++;
     setReport(null);
+    setBusy(false);
   };
 
   const run = async () => {
-    if (!text.trim()) return;
+    if (!text.trim() || busy) return;
+    const id = ++request.current;
+    const snapshot = { text, format, version };
     setBusy(true);
     setError(undefined);
     try {
-      const result = await api.validateData(ontology.slug, version, text, DATA_FORMATS[format].mediaType);
-      setReport({ result, text, format });
+      const result = await api.validateData(ontology.slug, snapshot.version, snapshot.text, DATA_FORMATS[snapshot.format].mediaType);
+      if (id === request.current) setReport({ result, ...snapshot });
     } catch (e) {
+      if (id !== request.current) return;
       setError(e);
       setReport(null);
     } finally {
-      setBusy(false);
+      if (id === request.current) setBusy(false);
     }
   };
 
   const load = async (f: File) => {
     setError(undefined);
-    setReport(null);
+    invalidate();
     if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
     const content = await f.text();
     if (content.length > EDITOR_LIMIT) {
@@ -182,7 +194,10 @@ export function ValidateTab() {
               {latest && !published.some((r) => r.version === latest) && <option value={latest}>v{latest} (latest release)</option>}
               <option value="draft">Working draft</option>
             </Select>
-            <Select value={picked} onChange={(e) => setPicked(e.target.value as Picked)} className="max-w-64" aria-label="Data format">
+            <Select value={picked} onChange={(e) => {
+                setPicked(e.target.value as Picked);
+                invalidate();
+              }} className="max-w-64" aria-label="Data format">
               <option value="auto">{text.trim() ? `Detect format (${DATA_FORMATS[format].label})` : 'Detect format'}</option>
               {FORMAT_IDS.map((f) => (
                 <option key={f} value={f}>
@@ -211,7 +226,7 @@ export function ValidateTab() {
               onClick={() => {
                 setFile(null);
                 setPicked('auto');
-                setReport(null);
+                invalidate();
                 setData(exampleData(ontology.namespace, ontology.prefix, view.data?.classes ?? []));
               }}
             >
@@ -234,7 +249,14 @@ export function ValidateTab() {
                 <span>
                   <span className="font-medium">{file.name}</span> <span className="text-muted">({Math.round(file.text.length / 1024).toLocaleString()} KB, too large to show here)</span>
                 </span>
-                <Button size="sm" variant="ghost" onClick={() => setFile(null)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setFile(null);
+                    invalidate();
+                  }}
+                >
                   Remove
                 </Button>
               </div>
@@ -243,7 +265,7 @@ export function ValidateTab() {
                 value={data}
                 onChange={(v) => {
                   setData(v);
-                  setReport(null);
+                  invalidate();
                 }}
                 language={LANGUAGE[format]}
                 onRun={run}
@@ -260,7 +282,7 @@ export function ValidateTab() {
         </div>
       </Card>
 
-      {report && <Report report={report.result} prefixes={{ ...dataPrefixes(report.text), ...prefixes }} onTurtle={() => api.validationReportTurtle(ontology.slug, version, report.text, DATA_FORMATS[report.format].mediaType)} name={`${ontology.slug}-${version}-report`} />}
+      {report && <Report report={report.result} prefixes={{ ...dataPrefixes(report.text), ...prefixes }} onTurtle={() => api.validationReportTurtle(ontology.slug, report.version, report.text, DATA_FORMATS[report.format].mediaType)} name={`${ontology.slug}-${report.version}-report`} />}
 
       <CollapsibleCard title="Validate from your own code" subtitle="The same check is an HTTP POST to the ontology’s address" icon={Terminal} id="validate-api">
         <ApiHelp iri={iri} />

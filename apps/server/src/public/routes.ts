@@ -83,17 +83,25 @@ export function wantsShaclProfile(req: Request): boolean {
   return listed(req.get('Accept'), (part) => /;\s*profile\s*=\s*"?([^";,]+)"?/i.exec(part)?.[1]);
 }
 
-/** Whether Accept allows a media type, ignoring parameters such as profile (which req.accepts treats as must-match). */
-function acceptsIgnoringParams(req: Request, type: string): boolean {
-  const header = req.get('Accept');
+/**
+ * Whether Accept allows a media type. Parameters other than q (such as
+ * profile, which req.accepts treats as must-match) are ignored. The most
+ * specific matching range decides (RFC 9110 12.5.1), so "text/turtle;q=0, *\/*"
+ * refuses Turtle.
+ */
+export function acceptsIgnoringParams(header: string | undefined, type: string): boolean {
   if (!header?.trim()) return true;
-  const [major] = type.split('/');
-  return header.split(',').some((part) => {
+  const [major] = type.toLowerCase().split('/');
+  let best: { specificity: number; q: number } | undefined;
+  for (const part of header.split(',')) {
     const [range, ...params] = part.split(';').map((x) => x.trim().toLowerCase());
-    const q = params.find((p) => p.startsWith('q='));
-    if (q && Number(q.slice(2)) === 0) return false;
-    return range === type || range === `${major}/*` || range === '*/*';
-  });
+    const specificity = range === type.toLowerCase() ? 3 : range === `${major}/*` ? 2 : range === '*/*' ? 1 : 0;
+    if (!specificity) continue;
+    const qParam = params.find((p) => /^q\s*=/.test(p));
+    const q = qParam ? Number(qParam.split('=')[1]) : 1;
+    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q: Number.isFinite(q) ? q : 0 };
+  }
+  return !!best && best.q > 0;
 }
 
 function splitExtension(segment: string): { base: string; format?: OutputFormat | 'html' } {
@@ -250,6 +258,9 @@ async function serve(req: Request, res: Response) {
   const last = splitExtension(versionSeg ?? slugSeg);
   const slug = versionSeg === undefined ? last.base : slugSeg;
   const requested = versionSeg === undefined ? undefined : last.base;
+  // Public data: any site may read it (no credentials), including the headers that describe it.
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
 
   const project = findProject(slug);
   if (!project) return notFound(res, `There is no ontology called “${slug}”.`);
@@ -272,16 +283,18 @@ async function serve(req: Request, res: Response) {
   }
 
   let format = last.format;
+  let profiled = false;
   // Data can be POSTed here to validate it (validate.ts).
   res.set('Accept-Post', DATA_MEDIA_TYPES.join(', '));
   if (!format && wantsShaclProfile(req)) {
     res.vary('Accept');
     res.vary('Accept-Profile');
-    if (!acceptsIgnoringParams(req, 'text/turtle')) {
+    if (!acceptsIgnoringParams(req.get('Accept'), 'text/turtle')) {
       res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
       return;
     }
     res.set('Content-Profile', `<${SHACL_PROFILE}>`);
+    profiled = true;
     format = 'shacl';
   }
   if (!format) {
@@ -308,6 +321,8 @@ async function serve(req: Request, res: Response) {
       `<${self}.html>; rel="alternate"; type="text/html"`,
       ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"${f === 'shacl' ? `; profile="${SHACL_PROFILE}"` : ''}`),
       `<${self}>; rel="canonical"`,
+      // Content Negotiation by Profile: name the profile this response conforms to.
+      ...(profiled ? [`<${SHACL_PROFILE}>; rel="profile"`] : []),
     ].join(', '),
   );
 

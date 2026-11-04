@@ -133,7 +133,7 @@ function buildServer(user: User, agentName: string) {
         data: z.string().optional().describe('The instance data, in the given format'),
         turtle: z.string().optional().describe('Older name for data, as Turtle'),
         format: z.enum(Object.keys(DATA_FORMATS) as [DataFormat, ...DataFormat[]]).default('turtle'),
-        version: z.string().optional().describe('Released version such as 1.2.0, or "latest"; default is the working draft'),
+        version: z.string().optional().describe('Released version such as 1.2.0, "draft" for the working draft, or "latest"; default is the latest release, as for POST to the ontology IRI'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -141,7 +141,7 @@ function buildServer(user: User, agentName: string) {
       withProject(ontology, async (p) => {
         const text = data ?? turtle;
         if (!text) return fail('Pass the data to validate as data.');
-        const v = !version || version === 'draft' || version === 'working' ? 'draft' : version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
+        const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
         if (v !== 'draft' && !ontologyStore.versions(p).includes(v)) return fail(`${p.title} has no version "${version}".`);
         const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });
         return json(body);

@@ -218,17 +218,18 @@ describe('agents over MCP', () => {
       }),
     );
     expect(JSON.parse(data.result.content[0].text).valid).toBe(false);
-    // SHACL too, in any format, against a release.
+    // SHACL too, in any format, against the latest release by default (as for POST to the ontology IRI).
     const shacl = parse(
       await call(7, 'tools/call', {
         name: 'validate_data',
-        arguments: { ontology: 'volunteering', version: '1.0.0', format: 'jsonld', data: JSON.stringify({ '@id': 'https://example.org/opp', '@type': 'https://w3id.org/odi/volunteering#VolunteeringOpportunity' }) },
+        arguments: { ontology: 'volunteering', format: 'jsonld', data: JSON.stringify({ '@id': 'https://example.org/opp', '@type': 'https://w3id.org/odi/volunteering#VolunteeringOpportunity' }) },
       }),
     );
     const report = JSON.parse(shacl.result.content[0].text);
-    expect(report).toMatchObject({ version: '1.0.0', conforms: false });
+    expect(report.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(report.conforms).toBe(false);
     expect(report.results.some((r: { path?: string }) => r.path === 'https://w3id.org/odi/volunteering#hasRole')).toBe(true);
-    expect(report.shapes).toMatch(/\/def\/volunteering\/1\.0\.0\.shacl\.ttl$/);
+    expect(report.shapes).toMatch(new RegExp(`/def/volunteering/${report.version.replace(/\./g, '\\.')}\\.shacl\\.ttl$`));
     const gap = parse(await call(6, 'tools/call', { name: 'report_gap', arguments: { ontology: 'volunteering', kind: 'missing-concept', summary: 'No badges for volunteers', details: 'We award digital badges to volunteers for completed hours.' } }));
     const out = JSON.parse(gap.result.content[0].text);
     expect(out.recommendation).toBeDefined();
