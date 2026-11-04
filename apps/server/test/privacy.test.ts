@@ -315,6 +315,35 @@ describe('existence oracles (finding 16)', () => {
   });
 });
 
+describe('use case reads', () => {
+  it('never return private or group-only use cases to signed-out callers, by id, by slug or through a change request', async () => {
+    const author = await login('member');
+    const priv = await useCaseVia(author, 'Secret pantry rota', 'private');
+    const group = await useCaseVia(author, 'Group pantry rota', 'group');
+    const slug = findProject(demoId)!.slug;
+    for (const id of [priv, group]) {
+      const res = await request(app).get(`/api/use-cases/${id}`);
+      expect(res.status).toBe(404);
+      expect(res.text).not.toMatch(/pantry rota/);
+    }
+    for (const key of [demoId, slug]) {
+      const res = await request(app).get(`/api/ontologies/${key}/use-cases`);
+      expect(res.status).toBe(200);
+      expect(res.text).not.toMatch(/pantry rota/);
+      expect((res.body as UseCase[]).every((u) => u.visibility === 'public')).toBe(true);
+    }
+    const cr = list<ChangeRequest>(demoId)[0];
+    put('changeRequests', { ...cr, useCaseIds: [...(cr.useCaseIds ?? []), priv, group] }, demoId);
+    const res = await request(app).get(`/api/change-requests/${cr.id}`);
+    expect(res.text).not.toMatch(/pantry rota/);
+    expect(res.text).not.toContain(priv);
+    expect(res.text).not.toContain(group);
+    put('changeRequests', cr, demoId);
+    // The author still sees both.
+    expect((await author.get(`/api/use-cases/${priv}`)).status).toBe(200);
+  });
+});
+
 function list<T>(ontologyId: string, collection: 'changeRequests' | 'useCases' = 'changeRequests'): T[] {
   return listDocs<T>(collection, ontologyId);
 }

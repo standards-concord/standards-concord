@@ -1,5 +1,6 @@
 import { ArrowLeft, ArrowRight, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router';
+import { useEffect, useState } from 'react';
 import { useDemoOntology } from '../lib/ontologies';
 import { Page } from '../components/Shell';
 import { Stepper, StepBody } from '../components/Walkthrough';
@@ -10,6 +11,12 @@ export function AlphaPage() {
   const w = useWalkthrough();
   const nav = useNavigate();
   const demo = useDemoOntology();
+  // Picking a role signs the tester in, and the demo appears once their ontology list reloads,
+  // so a click before then waits for it rather than sending them home.
+  const [exploring, setExploring] = useState(false);
+  useEffect(() => {
+    if (exploring && demo) nav(`/o/${demo.id}`);
+  }, [exploring, demo, nav]);
   return (
     <Page>
       <div className="mb-6">
@@ -36,9 +43,9 @@ export function AlphaPage() {
             Restart
           </Button>
           {w.step >= 2 && (
-            <Button variant="secondary" onClick={() => {
+            <Button variant="secondary" disabled={exploring} onClick={() => {
                 w.setOpen(true);
-                nav(demo ? `/o/${demo.id}` : '/');
+                setExploring(true);
               }}
             >
               Keep the guide open while I explore
