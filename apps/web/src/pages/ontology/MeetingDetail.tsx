@@ -237,7 +237,12 @@ export function MeetingDetailPage() {
               {mt.calendar.organizer && <> · organised by {mt.calendar.organizer}</>}
             </p>
           )}
-          {mt.calendar?.approvalNote && <p className="mt-1 text-sm text-warn">{mt.calendar.approvalNote} A facilitator needs to approve it again.</p>}
+          {mt.calendar?.approvalNote && (
+            <p className="mt-1 text-sm text-warn" data-testid="approval-note">
+              {mt.calendar.approvalNote}
+              {scheduled && mt.calendar.approval === 'pending' && ' A facilitator needs to approve it again.'}
+            </p>
+          )}
           {mt.bot?.leaving && <p className="mt-1 text-sm text-warn">You ended the call, but the bot couldn’t be removed yet. Concord keeps trying and analyses the call once it has left.</p>}
           {mt.bot?.error && <p className="mt-1 text-sm text-danger">Bot error: {mt.bot.error}</p>}
           {mt.bot?.cancelError && (

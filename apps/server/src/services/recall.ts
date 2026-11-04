@@ -23,8 +23,13 @@ export function chatText(message: string) {
   return message.length <= MEET_CHAT_MAX ? message : `${message.slice(0, MEET_CHAT_MAX - 1).trimEnd()}…`;
 }
 
+/** Takes links and Meet codes out of what Recall.ai says, since its errors can echo the call's Meet link. */
+export function scrub(text: string) {
+  return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[link]').replace(/\b[a-z]{3}-[a-z]{4}-[a-z]{3}\b/gi, '[meeting code]');
+}
+
 async function failure(res: Response) {
-  return `Recall.ai returned ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`;
+  return `Recall.ai returned ${res.status}: ${scrub((await res.text().catch(() => '')).slice(0, 300))}`;
 }
 
 /**
@@ -65,7 +70,8 @@ export const recall = {
     try {
       res = await fetch(`${base()}/bot/`, {
         method: 'POST',
-        headers: headers(),
+        // Sending the same booking again (after a lost reply or a restart) returns the bot it made, rather than a second one.
+        headers: { ...headers(), ...(opts.bookingId ? { 'Idempotency-Key': opts.bookingId } : {}) },
         signal: deadline(BOOKING_MS),
         body: JSON.stringify({
           meeting_url: opts.meetingUrl,
@@ -87,7 +93,7 @@ export const recall = {
         }),
       });
     } catch (err) {
-      throw new BookingError(`Could not reach Recall.ai: ${(err as Error).message}`, true);
+      throw new BookingError(`Could not reach Recall.ai: ${scrub((err as Error).message)}`, true);
     }
     if (!res.ok) throw new BookingError(await failure(res), res.status >= 500);
     // Accepted, but the reply got lost or garbled: the bot may well exist.
@@ -126,7 +132,7 @@ export const recall = {
     }).catch(() => undefined);
     if (res?.status === 404) return true;
     if (!res?.ok) return false;
-    return ended((await res.json()) as RecallBot);
+    return ended((await res.json().catch(() => ({}))) as RecallBot);
   },
 
   /**
@@ -148,6 +154,8 @@ export const recall = {
         signal: deadline(),
       });
       if (leave.ok) return { ok: true };
+      // Recall.ai refuses both for a bot that has already finished: nothing left to cancel.
+      if (await this.hasEnded(botId)) return { ok: true };
       return {
         ok: false,
         error: `Recall.ai would not cancel the bot (${del.status}, then ${leave.status}).`,
@@ -155,7 +163,7 @@ export const recall = {
     } catch (err) {
       return {
         ok: false,
-        error: `Could not reach Recall.ai to cancel the bot: ${(err as Error).message}`,
+        error: `Could not reach Recall.ai to cancel the bot: ${scrub((err as Error).message)}`,
       };
     }
   },
@@ -170,7 +178,7 @@ export const recall = {
       });
       return res.ok ? { ok: true } : { ok: false, error: await failure(res) };
     } catch (err) {
-      return { ok: false, error: (err as Error).message };
+      return { ok: false, error: scrub((err as Error).message) };
     }
   },
 
@@ -190,7 +198,7 @@ export const recall = {
     } catch (err) {
       return {
         ok: false,
-        error: `Could not reach Recall.ai to take the bot out of the call: ${(err as Error).message}`,
+        error: `Could not reach Recall.ai to take the bot out of the call: ${scrub((err as Error).message)}`,
       };
     }
   },

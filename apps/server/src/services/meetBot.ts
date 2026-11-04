@@ -24,7 +24,7 @@ import {
   seriesApproved,
 } from './meetings.js';
 import { recall } from './recall.js';
-import { retireDue, retiringCount, watchBooking } from './retiring.js';
+import { ledgerBusy, retireDue, retiringCount, watchBooking } from './retiring.js';
 import { allUsers, logActivity } from './users.js';
 
 /**
@@ -184,23 +184,28 @@ async function readFeed(url: string) {
  * retried every minute. Once the bot is in the call, it is taken out and what it
  * heard so far is analysed. Returns whether that is done, or still being retried.
  */
-async function withdrawCall(meetingId: string): Promise<'done' | 'retrying'> {
+async function withdrawCall(meetingId: string, opts: { background?: boolean } = {}): Promise<'done' | 'retrying'> {
   const live = get<Meeting>('meetings', meetingId);
   if (live && live.status !== 'scheduled') {
     if (!botActive(live) || live.bot?.leaving) return live.bot?.leaving ? 'retrying' : 'done';
-    return endLiveMeeting(meetingId).then(
+    const ending = endLiveMeeting(meetingId).then(
       () => 'done' as const,
       () => 'retrying' as const,
     );
+    if (opts.background) {
+      void background(ending);
+      return 'retrying';
+    }
+    return ending;
   }
   return meetingLock(meetingId, async () => {
     const m = get<Meeting>('meetings', meetingId);
     if (!m) return 'done';
     // The bot is recorded for cancelling first (retried every minute until Recall.ai
     // confirms, and any line it sends meanwhile dropped), so the meeting can go now.
-    const r = await cancelMeetingBot(m);
+    const r = await cancelMeetingBot(m, opts);
     remove('meetings', m.id);
-    return r.ok ? 'done' : 'retrying';
+    return r.ok && !('queued' in r && r.queued) ? 'done' : 'retrying';
   });
 }
 
@@ -339,7 +344,7 @@ async function reconcile(
       // The booked bot is let go: recorded for cancelling (with the Meet link it was booked for,
       // retried until Recall.ai confirms), so a later approval books a fresh one.
       if ((moved || reapprove) && (m.bot?.botId || m.bot?.uncertain || m.bot?.bookingId)) {
-        const r = await cancelMeetingBot(m);
+        const r = await cancelMeetingBot(m, { background: feed === 'calendar' });
         m.bot = { provider: m.bot!.provider, status: 'scheduled', cancelError: r.ok ? undefined : r.error };
       }
       m.title = occ.title;
@@ -353,7 +358,11 @@ async function reconcile(
     }
   }
 
-  for (const id of endAfter) await endLiveMeeting(id).catch(() => undefined);
+  for (const id of endAfter) {
+    const ending = endLiveMeeting(id).catch(() => undefined);
+    if (feed === 'calendar') void background(ending);
+    else await ending;
+  }
 
   // Calls this feed no longer lists: cancelled before they start, or the bot taken out
   // if it's already in (past the scheduled end too, while the call overruns).
@@ -365,7 +374,8 @@ async function reconcile(
     // Older than the feed window: the clock ends that call by itself.
     if (new Date(cal.end).getTime() < opts.now.getTime() - OVERRUN_MAX_MS) continue;
     const gone = feed === 'calendar' ? cal.feed === 'calendar' : cal.feed === 'upload' && m.ontologyId === opts.project?.id && !!cal.uid && uids.has(cal.uid) && new Date(cal.start).getTime() < opts.now.getTime() + HORIZON_MS;
-    if (gone) await withdrawCall(m.id);
+    // From the calendar, cancelling runs beside the bookings rather than holding them up.
+    if (gone) await withdrawCall(m.id, { background: feed === 'calendar' });
   }
   return touched;
 }
@@ -508,15 +518,19 @@ async function dispatchOne(meetingId: string, now: Date) {
         changed();
         return;
       }
-      // Not listed (yet): a slow create could still land, so that booking is watched for (and cancelled if it turns up) while a new one is made.
-      watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
     }
-    // The attempt is recorded before it is sent (as unconfirmed until Recall.ai answers), so a restart
-    // mid-booking looks for this bot instead of booking another.
-    const bookingId = newId('bk');
+    // Not listed (yet): the same booking is sent again under the same idempotency key, so if the first
+    // request did land, Recall.ai answers with that bot rather than making a second one. A new booking
+    // is recorded before it is sent (as unconfirmed until Recall.ai answers), so a restart mid-booking
+    // looks for it instead of booking another.
+    const replay = m.bot?.uncertain && m.bot.bookingId && (m.bot.bookedUrl ?? m.meetingUrl) === m.meetingUrl;
+    const bookingId = replay ? m.bot!.bookingId! : newId('bk');
+    if (m.bot?.uncertain && !replay) watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
     m.bot = { provider: 'recall', status: 'scheduled', bookingId, bookedUrl: m.meetingUrl, uncertain: true, error: m.bot?.error, cancelError: m.bot?.cancelError };
     saveMeeting(m);
     const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined, bookingId);
+    // Recall.ai refused the replay outright: that booking may still exist, so keep looking for it while a new one is made next time.
+    if (replay && bot.status === 'error' && !bot.uncertain) watchBooking(m.id, bookingId, m.meetingUrl);
     // A failed booking is retried on the next tick until the call ends.
     // An unconfirmed booking keeps its booking id and Meet link, so the bot can still be found (or cancelled) later.
     if (bot.status === 'error')
@@ -546,11 +560,15 @@ async function settleLostBooking(meetingId: string) {
     const lost = await findLostBooking(m);
     if (!lost) return;
     if (lost.botId) m.bot = { ...m.bot, botId: lost.botId, status: m.bot.status === 'in-call' ? 'in-call' : 'joining', uncertain: undefined, error: undefined };
-    // Already heard in the call: keep looking rather than call it failed.
-    else if (m.bot.status === 'in-call') return;
     else {
-      watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
-      m.bot = { provider: 'recall', status: 'error', error: 'Booking the bot failed. Send it again.' };
+      // Not listed (yet): send the same booking again under its idempotency key, which returns the bot if it was made.
+      const again = await dispatchBot(m, undefined, m.bot.bookingId);
+      if (again.botId) m.bot = { ...again, status: m.bot.status === 'in-call' ? 'in-call' : 'joining' };
+      else if (again.uncertain || m.bot.status === 'in-call') m.bot = { ...m.bot, error: again.error };
+      else {
+        watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
+        m.bot = { provider: 'recall', status: 'error', error: 'Booking the bot failed. Send it again.' };
+      }
     }
     saveMeeting(m);
     emit(m, { type: 'meeting', meeting: m });
@@ -570,12 +588,27 @@ export async function dispatchDue(now = new Date(), opts: { sweep?: boolean } = 
     const quietFor = t - (lastLineTime(fresh.id) ?? 0);
     if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) await endLiveMeeting(fresh.id).catch((err) => console.warn(`[meet-bot] ending ${fresh.id}: ${(err as Error).message}`));
   }
+  if (opts.sweep !== false) await retireDue(now);
   for (const m of list<Meeting>('meetings')) {
-    // Removing a bot from a call someone ended, until Recall.ai confirms.
-    if (m.bot?.leaving) await endLiveMeeting(m.id).catch(() => undefined);
+    // A bot someone asked to leave: closed once the ledger confirms it has gone.
+    if (m.bot?.leaving) await endLiveMeeting(m.id, { auto: true }).catch(() => undefined);
     else if (m.bot?.uncertain && m.source === 'google-meet-bot') await settleLostBooking(m.id);
   }
-  if (opts.sweep !== false) await retireDue(now);
+}
+
+/** Work a calendar sync starts but doesn't wait for (cancellations, bots leaving). */
+const pending = new Set<Promise<unknown>>();
+function background<T>(p: Promise<T>) {
+  pending.add(p);
+  void p.finally(() => pending.delete(p));
+  return p;
+}
+/** Resolves once that work (and any cancellation attempts it started) has finished. For tests and shutdown. */
+export async function meetBotIdle() {
+  while (pending.size || ledgerBusy()) {
+    await Promise.all([...pending]);
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 let sweeping = false;
