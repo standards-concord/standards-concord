@@ -33,9 +33,9 @@ cp .env.example .env
 docker compose up --build   # Concord on :8787, Community Solid Server on :3000
 ```
 
-### Deploy (Vercel and AWS)
+### Deploy (Vercel and Azure)
 
-The web app is served by Vercel. Everything that needs a long-running server (the API, sign-in, the MCP endpoint, live meeting streams, the governance clock, the Solid server) runs on one small EC2 instance, launched from [deploy/aws/concord.yaml](deploy/aws/concord.yaml), which costs about $20 a month. Vercel forwards `/api`, `/auth`, `/mcp` and `/people` to it, so people only ever see the Vercel link. GitHub Actions tests every push and builds the backend image; the server picks up a new image within five minutes. Step by step: [docs/deploy.md](docs/deploy.md).
+The web app is served by Vercel. Everything that needs a long-running server (the API, sign-in, the MCP endpoint, live meeting streams, the governance clock, the Solid server) runs on one small Azure VM, launched by [deploy/azure/deploy.sh](deploy/azure/deploy.sh), which fits Azure for Students' free tier (an AWS template is kept as an alternative). Vercel forwards `/api`, `/auth`, `/mcp` and `/people` to it, so people only ever see the Vercel link. GitHub Actions tests every push and builds the backend image; the server picks up a new image within five minutes. Step by step: [docs/deploy.md](docs/deploy.md).
 
 ### Connect a coding agent
 
