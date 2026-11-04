@@ -20,7 +20,7 @@ import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId } from '../ids.js';
 import { addReview, addVote, advance, getCR, governanceFor, listCRs, reviewsFor, saveCR, votesFor } from './changeRequests.js';
-import { canVote } from './governance.js';
+import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getUser, logActivity, publicUser } from './users.js';
@@ -40,7 +40,17 @@ interface AppDoc extends ConnectedApp {
   tokenHash: string;
   /** Runs started so far (see pending()). */
   attempts?: number;
+  /** What the most recent runs were asked to test: the baseline revision and each change's revision. */
+  runs?: { attempt: number; baseline: string; targets: Record<string, string> }[];
+  /**
+   * The run from which the app has passed the current working draft without a break (same
+   * draft, same app commit). Results for changes count only from this run on, so a result
+   * from before the app broke, or from another version of the app, never comes back into force.
+   */
+  passingSince?: number;
 }
+
+const RUNS_KEPT = 20;
 
 /**
  * Change request statuses the CI is asked to test. Approved changes are still tested until they
@@ -55,7 +65,7 @@ const newAppToken = () => `cna_${randomBytes(24).toString('base64url')}`;
 const checkId = (appId: string, crId: string) => `${appId}:${crId}`;
 
 function publicApp(doc: AppDoc): ConnectedApp {
-  const { tokenHash: _h, attempts: _a, ...rest } = doc;
+  const { tokenHash: _h, attempts: _a, runs: _r, passingSince: _p, ...rest } = doc;
   const baseline = rest.baseline && { ...rest.baseline, current: rest.baseline.revision === baselineRevision(getProject(doc.ontologyId)) };
   return { ...rest, baseline, owner: publicUser(getUser(doc.ownerId)) };
 }
@@ -204,23 +214,33 @@ export async function proposedSource(cr: ChangeRequest, format: OutputFormat): P
 const latestCheck = (appId: string, crId: string) => get<AppCheck>('appChecks', checkId(appId, crId));
 const isOpen = (cr: ChangeRequest) => (CHECKABLE as readonly string[]).includes(cr.status);
 
-/** Each call starts a run: results are reported with its attempt number, and newer attempts win. */
-function nextAttempt(app: AppDoc): number {
-  app.attempts = (app.attempts ?? 0) + 1;
-  saveApp(app);
-  return app.attempts;
+/**
+ * When the app's results for changes count from: the run since which it has passed the
+ * current working draft. Undefined while it doesn't pass the current draft.
+ */
+function countsFrom(app: AppDoc, project = getProject(app.ontologyId)): number | undefined {
+  if (app.baseline?.revision !== baselineRevision(project) || app.baseline.outcome !== 'passed') return undefined;
+  return app.passingSince ?? app.baseline.attempt ?? 0;
 }
 
+/** The app's result for this version of a change, if it counts (see passingSince). */
+function resultFor(app: AppDoc, cr: ChangeRequest, revision: string, project = getProject(cr.ontologyId)): AppCheck | undefined {
+  const from = countsFrom(app, project);
+  const c = latestCheck(app.id, cr.id);
+  return from !== undefined && c?.revision === revision && (c.attempt ?? 0) >= from ? c : undefined;
+}
+
+/** Start a run: a new attempt number, and a record of exactly what this run is asked to test. */
 export function pending(app: AppDoc, all: boolean): PendingAppChecks {
   const project = getProject(app.ontologyId);
   const base = baselineRevision(project);
-  const attempt = nextAttempt(app);
   const targets = listCRs(project.id)
     .filter(isOpen)
     .sort((a, b) => a.number - b.number)
     .map((cr) => {
       const revision = revisionOf(cr, project);
       const last = latestCheck(app.id, cr.id);
+      const counted = resultFor(app, cr, revision, project);
       return {
         changeRequestId: cr.id,
         number: cr.number,
@@ -232,12 +252,16 @@ export function pending(app: AppDoc, all: boolean): PendingAppChecks {
         source: `/api/change-requests/${cr.id}/proposed`,
         page: `/o/${project.id}/changes/${cr.id}`,
         lastOutcome: last?.revision === revision ? last.outcome : undefined,
-        // 'error' means the run broke before testing anything, so it's worth another go.
-        done: last?.revision === revision && last.outcome !== 'error',
+        // Done once it has a result that counts; 'error' means the run broke before testing anything.
+        done: !!counted && counted.outcome !== 'error',
       };
     })
     .filter((t) => all || !t.done)
     .map(({ done: _d, ...t }) => t);
+  app.attempts = (app.attempts ?? 0) + 1;
+  const attempt = app.attempts;
+  app.runs = [...(app.runs ?? []), { attempt, baseline: base, targets: Object.fromEntries(targets.map((t) => [t.changeRequestId, t.revision])) }].slice(-RUNS_KEPT);
+  saveApp(app);
   return {
     app: { id: app.id, name: app.name },
     attempt,
@@ -303,6 +327,11 @@ export async function report(app: AppDoc, input: ReportInput) {
   if (!Number.isInteger(attempt) || attempt < 1) throw new HttpError(400, 'attempt is required: send the one GET /api/app-checks/pending gave this run');
   if (attempt > (app.attempts ?? 0)) throw new HttpError(400, `attempt ${attempt} was never issued to this app`);
   const project = getProject(app.ontologyId);
+  const run = app.runs?.find((r) => r.attempt === attempt);
+  // Too old to remember what it was asked: it is out of date whatever it says.
+  if (!run) return { stale: true };
+  const asked = input.target === 'baseline' ? run.baseline : typeof input.target === 'string' ? run.targets[input.target] : undefined;
+  if (asked !== revision) throw new HttpError(400, `Run ${attempt} wasn't asked to test ${input.target === 'baseline' ? 'the working draft' : 'that change'} at revision ${revision}`);
   const summary = short(input.summary, 2000);
   const runUrl = cleanUrl(input.runUrl);
   const at = clock.iso();
@@ -311,7 +340,11 @@ export async function report(app: AppDoc, input: ReportInput) {
     const order = ordering(app.baseline, { revision, attempt, outcome }, baselineRevision(project));
     if (order !== 'newer') return { stale: order === 'stale', replay: order === 'replay' };
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
-    app.baseline = { revision, outcome, summary, runUrl, at, attempt };
+    const commit = short(input.commit, 64);
+    // Still passing the same draft with the same app: earlier results for changes still count.
+    const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
+    if (outcome === 'passed' && !unbroken) app.passingSince = attempt;
+    app.baseline = { revision, outcome, summary, runUrl, at, attempt, commit };
     saveApp(app);
     if (before !== outcome && outcome === 'failed')
       logActivity({ ontologyId: project.id, actorId: app.ownerId, type: 'app.baseline-failed', message: `reports that their app ${app.name} fails against the current working draft`, link: `/o/${project.id}/apps` });
@@ -362,7 +395,7 @@ export async function report(app: AppDoc, input: ReportInput) {
 /** Report a result as an app, without its token (the demo's simulated CI). */
 export function reportAs(appId: string, input: Omit<ReportInput, 'attempt'>) {
   const app = getAppDoc(appId);
-  return report(app, { ...input, attempt: nextAttempt(app) });
+  return report(app, { ...input, attempt: pending(app, true).attempt });
 }
 
 /** Results for the change request page. */
@@ -393,27 +426,9 @@ export interface AutopilotResult {
 }
 
 type Say = Review | Vote;
+type Stage = 'review' | 'voting';
 const isYes = (x: Say) => ('decision' in x ? x.decision === 'approve' : x.choice === 'yes');
-
-/**
- * Whether a review or vote autopilot made still stands: it was made for the change's current
- * revision, autopilot is still allowed and on for every app it relied on, and each of those
- * apps' latest result for this revision still says what it said. Governance counts an
- * autopilot say only while this holds, so a result arriving at any moment (even while a
- * merge is being prepared) takes effect at once, before autopilot itself catches up.
- */
-export function autopilotStands(x: Say, cr: ChangeRequest, revision: string): boolean {
-  const mark = x.autopilot;
-  if (!mark) return true;
-  if (x.withdrawnAt || mark.revision !== revision || !mark.apps.length) return false;
-  if (getProject(cr.ontologyId).governance.automation.appAutopilot === false) return false;
-  const want: AppCheckOutcome = isYes(x) ? 'passed' : 'failed';
-  return mark.apps.every((m) => {
-    const app = get<AppDoc>('apps', m.id);
-    const check = latestCheck(m.id, cr.id);
-    return !!app && app.ownerId === x.userId && app.autopilot.enabled && check?.revision === revision && check.outcome === want;
-  });
-}
+const stageOf = (x: Say): Stage => ('decision' in x ? 'review' : 'voting');
 
 interface Decision {
   say: 'yes' | 'no' | 'none';
@@ -421,27 +436,48 @@ interface Decision {
   apps: AppDoc[];
 }
 
-/** What autopilot should be saying for this person on this change right now. */
-function decide(cr: ChangeRequest, userId: string, stage: 'review' | 'voting'): Decision {
+/** People who reviewed (not just commented) or voted on this version of the change themselves. */
+export function peopleWhoSpoke(cr: ChangeRequest): Set<string> {
+  const since = cr.opsUpdatedAt ?? cr.createdAt;
+  const ids = new Set<string>();
+  for (const r of reviewsFor(cr.id)) if (!r.autopilot && r.decision !== 'comment' && r.at >= since) ids.add(r.userId);
+  for (const v of votesFor(cr.id)) if (!v.autopilot && v.at >= since) ids.add(v.userId);
+  return ids;
+}
+
+/**
+ * What autopilot should be saying for this person on this change, at this stage, right now.
+ * Checks every prerequisite directly, so governance can use it to decide whether a say
+ * autopilot made earlier still counts.
+ */
+function decide(cr: ChangeRequest, userId: string, stage: Stage, spoke = peopleWhoSpoke(cr)): Decision {
   const none = (why: string): Decision => ({ say: 'none', why, apps: [] });
   const project = getProject(cr.ontologyId);
   if (project.governance.automation.appAutopilot === false) return none('this ontology’s governance policy has autopilot turned off');
-  const apps = list<AppDoc>('apps', cr.ontologyId).filter((a) => a.ownerId === userId && a.autopilot.enabled);
+  if (spoke.has(userId)) return none('they reviewed or voted on this change themselves');
+  const apps = list<AppDoc>('apps', cr.ontologyId)
+    .filter((a) => a.ownerId === userId && a.autopilot.enabled)
+    .sort((a, b) => a.id.localeCompare(b.id));
   if (!apps.length) return none('no app has autopilot on');
-  const revision = revisionOf(cr, project);
-  const base = baselineRevision(project);
+  const level = cr.classification?.level ?? 'minor';
+  const rule = effectiveRule(project.governance, level, 'change');
+  const roles = rolesFor(cr.ontologyId, userId);
+  // Only people whose say counts at this stage get one from autopilot, yes or no.
+  if (stage === 'voting' && !canVote(rule, roles)) return none('their role doesn’t vote on this change');
+  if (stage === 'review') {
+    if (cr.authorId === userId) return none('authors can’t approve their own change');
+    if (!rule.approverRoles.some((r) => roles.includes(r))) return none('their role’s approvals don’t count for this change, so autopilot will vote if it goes to a vote');
+  }
   const names = (as: AppDoc[]) => as.map((a) => a.name).join(', ');
-
   // An app that fails (or hasn't been tested on) the working draft says nothing about a change.
+  const base = baselineRevision(project);
   const brokenBase = apps.filter((a) => a.baseline?.revision === base && a.baseline.outcome !== 'passed');
   if (brokenBase.length) return none(`${names(brokenBase)} doesn’t pass the working draft, so its results don’t say anything about this change`);
   const untestedBase = apps.filter((a) => a.baseline?.revision !== base);
   if (untestedBase.length) return none(`waiting for ${names(untestedBase)} to test the current working draft`);
 
-  const result = (a: AppDoc) => {
-    const c = latestCheck(a.id, cr.id);
-    return c?.revision === revision ? c.outcome : undefined;
-  };
+  const revision = revisionOf(cr, project);
+  const result = (a: AppDoc) => resultFor(a, cr, revision, project)?.outcome;
   const failed = apps.filter((a) => result(a) === 'failed');
   if (failed.length) {
     const opposing = failed.filter((a) => a.autopilot.onFailure === 'oppose');
@@ -450,29 +486,37 @@ function decide(cr: ChangeRequest, userId: string, stage: 'review' | 'voting'): 
   }
   const waiting = apps.filter((a) => result(a) !== 'passed');
   if (waiting.length) return none(`waiting for ${names(waiting)} to test this version of the change`);
-  const level = cr.classification?.level ?? 'minor';
   const notFor = apps.filter((a) => !a.autopilot.levels.includes(level));
   if (notFor.length) return none(`autopilot for ${names(notFor)} isn’t on for ${level} changes`);
-
-  const g = governanceFor(cr, { status: stage });
-  const roles = rolesFor(cr.ontologyId, userId);
-  if (stage === 'voting') {
-    if (!canVote(g.rule, roles)) return none('your role doesn’t vote on this change');
-  } else {
-    if (cr.authorId === userId) return none('authors can’t approve their own change');
-    if (!g.rule.approverRoles.some((r) => roles.includes(r))) return none('your role’s approvals don’t count for this change, so autopilot will vote if it goes to a vote');
-  }
   return { say: 'yes', why: `${names(apps)} passed against this change`, apps };
 }
 
+/** Does this autopilot say match what autopilot would say now: same answer, same apps, same version? */
+function matches(x: Say, d: Decision, revision: string): boolean {
+  if (x.withdrawnAt || !x.autopilot || x.autopilot.revision !== revision || d.say === 'none') return false;
+  if (isYes(x) !== (d.say === 'yes')) return false;
+  const ids = x.autopilot.apps.map((a) => a.id).sort();
+  return ids.length === d.apps.length && d.apps.every((a, i) => a.id === ids[i]);
+}
+
 /**
- * Make autopilot's say for one person on one change match what their apps found. Safe to call
+ * Whether a review or vote autopilot made still stands: autopilot, deciding afresh from
+ * everything as it is now, would say the same thing for the same version on the strength of
+ * the same apps. Governance counts an autopilot say only while this holds, so a result, a
+ * person's own review, or a settings change takes effect at once, even while a merge is being
+ * prepared, without waiting for autopilot to catch up.
+ */
+export function autopilotStands(x: Say, cr: ChangeRequest, revision: string, spoke?: Set<string>): boolean {
+  if (!x.autopilot) return true;
+  return matches(x, decide(cr, x.userId, stageOf(x), spoke), revision);
+}
+
+/**
+ * Make autopilot's say for one person on one change match what decide() says now. Safe to call
  * any time. It says yes or no through a normal review or vote (marked as autopilot), and takes
  * its say back by marking it withdrawn, so an older review or vote never comes back into force.
- * Once the person has reviewed or voted on this version of the change themselves, at any stage,
- * autopilot leaves them alone.
  */
-export async function applyAutopilot(crId: string, userId: string): Promise<AutopilotResult> {
+export async function applyAutopilot(crId: string, userId: string, depth = 0): Promise<AutopilotResult> {
   const none = (message: string): AutopilotResult => ({ action: 'none', message });
   let cr = getCR(crId);
   const stage = cr.status === 'approved' ? cr.approvedFrom : cr.status;
@@ -481,23 +525,23 @@ export async function applyAutopilot(crId: string, userId: string): Promise<Auto
   if (!user) return none('Unknown person.');
 
   const since = cr.opsUpdatedAt ?? cr.createdAt;
-  const mine = <T extends Say>(xs: T[]) => xs.filter((x) => x.userId === userId && x.at >= since);
-  const reviews = mine(reviewsFor(cr.id)).filter((r) => r.decision !== 'comment');
-  const votes = mine(votesFor(cr.id));
-  if ([...reviews, ...votes].some((x) => !x.autopilot)) return none('You reviewed or voted on this change yourself, so autopilot leaves it to you.');
-
   const revision = revisionOf(cr);
-  const d = decide(cr, userId, stage);
+  const spoke = peopleWhoSpoke(cr);
+  const mine = <T extends Say>(xs: T[]) => xs.filter((x) => x.userId === userId && x.at >= since && x.autopilot);
+  const says = [...mine(reviewsFor(cr.id)), ...mine(votesFor(cr.id))];
+  const d = decide(cr, userId, stage, spoke);
   const why = d.why.charAt(0).toUpperCase() + d.why.slice(1);
-  const active = [...reviews, ...votes].filter((x) => !x.withdrawnAt && x.autopilot!.revision === revision);
-  const latestVote = votes.at(-1);
-  const latestReview = reviews.at(-1);
-  const standing = (x: Say | undefined) => (x && !x.withdrawnAt && x.autopilot!.revision === revision ? x : undefined);
+  const canSay = d.say !== 'none' && cr.status === stage;
+  const sayIn: 'review' | 'vote' = stage === 'voting' ? 'vote' : 'review';
 
-  // Take back anything autopilot said that it wouldn't say now. (A new yes or no replaces an
-  // opposite vote by itself, so only a change to "nothing", or from yes to no, needs this.)
-  const wrong = d.say === 'yes' ? [] : active.filter((x) => d.say === 'none' || isYes(x));
-  if (wrong.length) {
+  // Autopilot's says that are still in force (current version, not withdrawn) but that it
+  // wouldn't make now. A new say in the same place replaces the person's latest one by itself;
+  // anything else is withdrawn.
+  const latestIn = (where: 'review' | 'vote') => says.filter((x) => ('decision' in x ? 'review' : 'vote') === where).at(-1);
+  const inForce = [latestIn('review'), latestIn('vote')].filter((x): x is Say => !!x && !x.withdrawnAt && x.autopilot!.revision === revision);
+  const replaced = (x: Say) => canSay && ('decision' in x ? 'review' : 'vote') === sayIn;
+  const wrong = inForce.filter((x) => !autopilotStands(x, cr, revision, spoke) && !replaced(x));
+  if (wrong.length && depth < 3) {
     const at = clock.iso();
     for (const x of wrong) put('decision' in x ? 'reviews' : 'votes', { ...x, withdrawnAt: at }, cr.id);
     cr = getCR(cr.id);
@@ -506,32 +550,20 @@ export async function applyAutopilot(crId: string, userId: string): Promise<Auto
     // Withdrawing can move the change (an approval that no longer holds goes back a stage),
     // so decide again from where it ends up.
     await advance(getCR(cr.id));
-    const then = await applyAutopilot(crId, userId);
+    const then = await applyAutopilot(crId, userId, depth + 1);
     return then.action === 'none' ? { action: 'withdrew', message: `Withdrew the autopilot ${wrong.some(isYes) ? 'yes' : 'no'}. ${why}.` } : then;
   }
+  if (!canSay) return none(`${why}.`);
 
-  const mark = (): AutopilotMark => ({ revision, apps: d.apps.map((a) => ({ id: a.id, name: a.name, runUrl: latestCheck(a.id, cr.id)?.runUrl })) });
-  if (d.say === 'yes') {
-    if (cr.status === 'voting') {
-      const v = standing(latestVote);
-      if (v && isYes(v)) return none('Autopilot already voted yes.');
-      await addVote(cr, user, 'yes', `Autopilot: ${d.why}.`, mark());
-      return { action: 'voted-yes', message: `Voted yes. ${why}.` };
-    }
-    if (cr.status === 'review') {
-      if (standing(latestReview)) return none('Autopilot already approved this.');
-      await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, mark());
-      return { action: 'approved', message: `Approved. ${why}.` };
-    }
-    return none(why);
+  const latest = latestIn(sayIn);
+  if (latest && matches(latest, d, revision)) return none(`Autopilot already ${d.say === 'yes' ? (sayIn === 'vote' ? 'voted yes' : 'approved this') : 'voted no'}.`);
+  const mark: AutopilotMark = { revision, apps: d.apps.map((a) => ({ id: a.id, name: a.name, runUrl: latestCheck(a.id, cr.id)?.runUrl })) };
+  if (sayIn === 'vote') {
+    await addVote(cr, user, d.say === 'yes' ? 'yes' : 'no', `Autopilot: ${d.why}.`, mark);
+    return { action: d.say === 'yes' ? 'voted-yes' : 'voted-no', message: `Voted ${d.say}. ${why}.` };
   }
-  if (d.say === 'no' && cr.status === 'voting') {
-    const v = standing(latestVote);
-    if (v && !isYes(v)) return none('Autopilot already voted no.');
-    await addVote(cr, user, 'no', `Autopilot: ${d.why}.`, mark());
-    return { action: 'voted-no', message: `Voted no. ${why}.` };
-  }
-  return none(`${why}.`);
+  await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, mark);
+  return { action: 'approved', message: `Approved. ${why}.` };
 }
 
 /** Everyone autopilot might speak for on a change: app owners, and anyone it has spoken for. */
@@ -541,19 +573,28 @@ function autopilotPeople(cr: ChangeRequest): string[] {
   return [...ids];
 }
 
-const autopilotStage = (cr: ChangeRequest) => isOpen(cr) || (cr.status === 'approved' && !!cr.approvedFrom);
+const autopilotStage = (cr: ChangeRequest) => cr.status === 'review' || cr.status === 'voting' || (cr.status === 'approved' && !!cr.approvedFrom);
+
+/** One person's autopilot never stops anyone else's: errors are logged and the rest carry on. */
+async function applyFor(crId: string, userIds: string[]) {
+  for (const userId of userIds) {
+    try {
+      await applyAutopilot(crId, userId);
+    } catch (err) {
+      console.warn(`autopilot for ${userId} on ${crId}:`, (err as Error).message);
+    }
+  }
+}
 
 /** Bring autopilot up to date on every open change of an ontology, for some people or everyone. */
 export async function reconcile(ontologyId: string, userIds?: string[]) {
   for (const { id } of listCRs(ontologyId)) {
     const cr = getCR(id);
-    if (!autopilotStage(cr)) continue;
-    for (const userId of userIds ?? autopilotPeople(cr)) await applyAutopilot(id, userId);
+    if (autopilotStage(cr)) await applyFor(id, userIds ?? autopilotPeople(cr));
   }
 }
 
 /** When a change enters review or a vote, act on any results that are already in. */
 export async function onStatusChanged(cr: ChangeRequest) {
-  if (!isOpen(cr)) return;
-  for (const userId of autopilotPeople(cr)) await applyAutopilot(cr.id, userId);
+  if (cr.status === 'review' || cr.status === 'voting') await applyFor(cr.id, autopilotPeople(cr));
 }

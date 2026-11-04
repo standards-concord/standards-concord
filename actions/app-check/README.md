@@ -17,12 +17,13 @@ The job fails if the working draft breaks the app, or if any proposed change cou
 
 On the **App checks** page of the ontology (Changes → App checks), turn on autopilot for your app and Concord says yes for you when your apps pass: it approves the change in review (if your role's approvals count for that level of change) and votes yes when it goes to a vote. You choose which levels it may say yes to (patch and minor by default, not breaking changes).
 
-- It says yes only once every one of your apps with autopilot on has passed both the current working draft and the current version of the change.
+- It says yes only once every one of your apps with autopilot on has passed both the current working draft and the current version of the change. Results count only from the run since which the app has passed the working draft without a break, with the same app commit, so a result from before the app broke, or from another version of it, never comes back. Those changes are tested again.
+- It speaks only where your say counts: it approves only if your role's approvals count for that level of change, and votes (yes or no) only if your role votes on it.
 - If an app fails, the yes is taken back, and if you choose, autopilot votes no in a vote. While an app fails the working draft itself, its results say nothing about the changes, so autopilot says nothing at all.
 - A yes counts only for the version it was given for. If the change is edited or the working draft moves on, it stops counting until your app passes again.
 - Anything that removes the basis for a yes takes it back: a failure or error, turning autopilot off, deleting the app, connecting another autopilot app that hasn't reported yet, or the ontology's owner turning autopilot off in its governance policy. A taken-back yes stays on the record, marked withdrawn; it never brings an older review or vote back into force.
 - If an approved change loses an autopilot yes it needed, even while it is being merged, it goes back to review (or its vote reopens) instead of being merged.
-- Once you review or vote on a version of a change yourself, at any stage, autopilot leaves that change to you.
+- Once you review or vote on a version of a change yourself, at any stage, autopilot takes back anything it said for you on that version and leaves the change to you.
 
 ## Set up
 
@@ -102,4 +103,4 @@ Set `CONCORD_RUN_URL` and `CONCORD_COMMIT` so results link back to your run.
 The script uses two endpoints, authenticated with `Authorization: Bearer cna_…`:
 
 - `GET /api/app-checks/pending` starts a run. It returns the run's `attempt` number and lists the baseline and open change requests, each with a `revision` and a `source` path. `GET /api/change-requests/:id/proposed?format=turtle` is the ontology after a change (public, no token needed).
-- `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit? }`. The reply says whether the result was `stale` (the change moved on while it was being tested, or a newer run already reported) or a `replay` of one already recorded, and what autopilot did. Within a revision, a newer attempt's result replaces an older one's; a run can't report two different outcomes for one target.
+- `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit? }`. A run may only report the targets and revisions it was given. The reply says whether the result was `stale` (the change moved on while it was being tested, or a newer run already reported) or a `replay` of one already recorded, and what autopilot did. Within a revision, a newer attempt's result replaces an older one's; a run can't report two different outcomes for one target.

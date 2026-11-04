@@ -9,7 +9,7 @@ import type { ChangeRequestDetail, ConnectedApp, PendingAppChecks } from '@conco
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { appForToken, report as reportResult } from '../src/services/appChecks.js';
-import { getCR, merge } from '../src/services/changeRequests.js';
+import { getCR, merge, saveCR } from '../src/services/changeRequests.js';
 import { getProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -246,6 +246,7 @@ describe('connected apps', () => {
     const revision = newer.p.targets.find((t) => t.changeRequestId === minorId)!.revision;
     expect((await report(created.token!, { target: minorId, revision, outcome: 'passed' })).status, 'attempt is required').toBe(400);
     expect((await report(created.token!, { target: minorId, revision, attempt: newer.p.attempt + 50, outcome: 'passed' })).status, 'attempt must have been issued').toBe(400);
+    expect((await report(created.token!, { target: minorId, revision: 'never-given', attempt: newer.p.attempt, outcome: 'passed' })).status, 'a run reports only what it was asked').toBe(400);
 
     expect((await newer.post(minorId, 'failed')).stale).toBe(false);
     const events = (await detail(minorId)).timeline.length;
@@ -265,10 +266,11 @@ describe('connected apps', () => {
     expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
   });
 
-  it('ignores results for an old revision of the change', async () => {
+  it('ignores a result for a version of the change that has since moved on', async () => {
     const run = await ciRun(created.token!);
-    const res = await report(created.token!, { target: minorId, revision: 'old-revision', attempt: run.p.attempt, outcome: 'failed' });
-    expect(res.body.stale).toBe(true);
+    touchWorkingDraft();
+    const res = await run.post(minorId, 'failed');
+    expect(res.stale).toBe(true);
     expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
   });
 
@@ -328,7 +330,10 @@ describe('autopilot', () => {
     await human.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
     expect((await detail(crId)).governance.approvals).toBe(2);
 
+    const oldRun = await ciRun(a.token!);
     touchWorkingDraft();
+    // A run that started before the draft moved can't bring the approval back.
+    expect((await oldRun.post(crId, 'passed')).stale).toBe(true);
     const after = await detail(crId);
     expect(after.revision).not.toBe(before.revision);
     // The person's own approval still counts; autopilot's was for a version that no longer exists.
@@ -395,6 +400,45 @@ describe('autopilot', () => {
     expect(d.reviews.filter((r) => r.autopilot && !r.withdrawnAt && r.autopilot.revision === d.revision)).toHaveLength(0);
   });
 
+  it('replaces an approval when one of the apps behind it is removed', async () => {
+    const crId = await freshCR('Autopilot after an app is removed');
+    const ray = await login('reviewer', 'Reviewer Ray');
+    const a = await connect(ray, 'Ray’s first app', { enabled: true });
+    const b = await connect(ray, 'Ray’s second app', { enabled: true });
+    await ci(a.token!, { [crId]: 'passed' });
+    expect((await ci(b.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    let d = await detail(crId);
+    expect(d.governance.approvals).toBe(1);
+    expect(d.reviews.find((r) => r.autopilot && !r.withdrawnAt)!.autopilot!.apps).toHaveLength(2);
+    expect((await ray.delete(`/api/apps/${b.id}`)).status).toBe(204);
+    d = await detail(crId);
+    // The remaining app still passes, so autopilot approves again on its strength alone.
+    expect(d.governance.approvals).toBe(1);
+    const standingNow = d.reviews.filter((r) => r.autopilot && !r.withdrawnAt).at(-1)!;
+    expect(standingNow.autopilot!.apps.map((x) => x.name)).toEqual(['Ray’s first app']);
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('none');
+    expect((await detail(crId)).governance.approvals).toBe(1);
+  });
+
+  it('doesn’t bring back a result from before the app broke', async () => {
+    const crId = await freshCR('Autopilot and old results');
+    const sky = await login('reviewer', 'Reviewer Sky');
+    const a = await connect(sky, 'Sky’s app', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    // The app breaks against the working draft, then a new version of it is fixed.
+    const broken = await ciRun(a.token!);
+    await broken.post('baseline', 'failed', { commit: 'v2' });
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    const fixed = await ciRun(a.token!);
+    await fixed.post('baseline', 'passed', { commit: 'v3' });
+    // The pass from before the break is for another version of the app: it doesn't count, and
+    // the change is listed for testing again.
+    expect((await detail(crId)).governance.approvals).toBe(0);
+    expect((await pending(a.token!)).targets.some((t) => t.changeRequestId === crId)).toBe(true);
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    expect((await detail(crId)).governance.approvals).toBe(1);
+  });
+
   it('never overrides what the person said themselves', async () => {
     const crId = await freshCR('Autopilot leaves people alone');
     const ola = await login('reviewer', 'Reviewer Ola');
@@ -402,7 +446,7 @@ describe('autopilot', () => {
     expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
     await ola.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'object', comment: 'I would rather model this as a class.' });
     const res = await ci(a.token!, { [crId]: 'failed' });
-    expect(res.autopilot!.message).toMatch(/yourself/);
+    expect(res.autopilot!.message).toMatch(/themselves/);
     const d = await detail(crId);
     expect(d.reviews.filter((r) => r.userId === d.reviews.find((x) => x.decision === 'object')!.userId).map((r) => r.decision)).toEqual(['approve', 'object']);
   });
@@ -421,9 +465,30 @@ describe('autopilot', () => {
     expect(d.classification?.level).toBe('major');
 
     // Obi objected, so autopilot doesn't vote yes for them even though their app passes.
-    expect((await ci(obiApp.token!, { [majorId]: 'passed' })).autopilot!.message).toMatch(/yourself/);
+    expect((await ci(obiApp.token!, { [majorId]: 'passed' })).autopilot!.message).toMatch(/themselves/);
     d = await detail(majorId);
     expect(d.votes.some((v) => v.autopilot && v.userId === d.reviews.find((r) => r.decision === 'object' && r.comment?.includes('several sites'))!.userId)).toBe(false);
+
+    // Someone without a vote with an opposing app that fails: autopilot says nothing for them
+    // (and doesn't stop anyone else's autopilot).
+    const cora = await login('contributor', 'Contributor Cora');
+    const coraApp = await connect(cora, 'Cora’s app', { enabled: true, levels: ['patch', 'minor', 'major'], onFailure: 'oppose' });
+    const coraRes = await ci(coraApp.token!, { [majorId]: 'failed' });
+    expect(coraRes.autopilot!.action).toBe('none');
+    expect(coraRes.autopilot!.message).toMatch(/doesn’t vote/);
+
+    // A member whose autopilot votes yes, then objects themselves: the yes stops counting.
+    const una = await login('reviewer', 'Member Una');
+    const unaApp = await connect(una, 'Una’s app', { enabled: true, levels: ['patch', 'minor', 'major'] });
+    expect((await ci(unaApp.token!, { [majorId]: 'passed' })).autopilot!.action).toBe('voted-yes');
+    const withUna = (await detail(majorId)).governance.vote!;
+    await una.post(`/api/change-requests/${majorId}/reviews`).send({ decision: 'object', comment: 'On reflection, no.' });
+    d = await detail(majorId);
+    expect(d.governance.vote!.cast).toBe(withUna.cast - 1);
+    expect(d.governance.vote!.yes).toBe(withUna.yes - 1);
+    expect(d.votes.find((v) => v.autopilot?.apps[0].name === 'Una’s app')!.withdrawnAt).toBeTruthy();
+    expect((await ci(unaApp.token!, { [majorId]: 'passed' })).autopilot!.message).toMatch(/themselves/);
+    expect((await detail(majorId)).governance.vote!.yes).toBe(withUna.yes - 1);
 
     const gee = await login('reviewer', 'Member Gee');
     const map = await connect(gee, 'Map export', { enabled: true, onFailure: 'oppose' });
@@ -502,6 +567,45 @@ describe('autopilot', () => {
       expect(merged.status).toBe('review');
       expect(ontologyStore.head(project)).toBe(head);
       expect((await detail(crId)).status).toBe('review');
+    });
+
+    it('a working draft failure that arrives while the merge is being prepared stops it', async () => {
+      expect((await ci(token, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+      expect((await detail(crId)).status).toBe('approved');
+      const project = getProject(demoId);
+      const head = ontologyStore.head(project);
+      const run = await pending(token, true);
+      const merging = merge(getCR(crId), undefined);
+      const reporting = reportResult(appForToken(`Bearer ${token}`), { target: 'baseline', revision: run.baseline.revision, attempt: run.attempt, outcome: 'failed' });
+      const merged = await merging;
+      await reporting;
+      expect(merged.status).toBe('review');
+      expect(ontologyStore.head(project)).toBe(head);
+      // Fixed again for the next test.
+      await ci(token, { [crId]: 'passed' });
+    });
+
+    it('never merges edits other than the ones it is about to commit', async () => {
+      await ci(token, { [crId]: 'passed' });
+      expect((await detail(crId)).status).toBe('approved');
+      const project = getProject(demoId);
+      const merging = merge(getCR(crId), undefined);
+      // While the merge is prepared, the request's edits change (still marked approved).
+      const changed = getCR(crId);
+      const op = changed.ops[0] as { localName: string };
+      changed.ops = [{ ...op, localName: 'swappedInMidMerge' } as never];
+      changed.opsUpdatedAt = new Date(Date.parse(changed.opsUpdatedAt ?? changed.createdAt) + 1000).toISOString();
+      saveCR(changed);
+      const merged = await merging;
+      const text = ontologyStore.readWorkingText(project);
+      // Either it merged exactly the new edits, or it stopped; never the old edits under the new ones.
+      if (merged.status === 'merged') {
+        expect(text).toContain('swappedInMidMerge');
+        expect(text).not.toContain(op.localName);
+      } else {
+        expect(text).not.toContain(op.localName);
+        expect(merged.status).toBe('review');
+      }
     });
   });
 
@@ -617,6 +721,8 @@ console.log('ok', process.env.CONCORD_TARGET);
       `if [ "$CONCORD_TARGET" = baseline ]; then exit 0; fi
 node -e "setInterval(() => {}, 1000)" &
 echo $! >> pids
+node -e "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)" > /dev/null 2>&1 &
+echo $! >> pids
 wait
 `,
     );
@@ -630,7 +736,7 @@ wait
     expect(res.out).toMatch(/could not be tested/);
     expect(res.out).toMatch(/timed out after 0\.01 minutes/);
     const pids = fs.readFileSync(path.join(dir, 'pids'), 'utf8').trim().split('\n').map(Number);
-    expect(pids.length).toBe(1);
+    expect(pids.length).toBe(2);
     // Gone, or a zombie waiting to be reaped (the container's init may not reap promptly).
     const alive = (pid: number) => {
       try {

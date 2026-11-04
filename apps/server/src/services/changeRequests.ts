@@ -31,7 +31,7 @@ import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
-import { autopilotStands, checksFor, onStatusChanged, revisionOf } from './appChecks.js';
+import { applyAutopilot, autopilotStands, checksFor, onStatusChanged, peopleWhoSpoke, revisionOf } from './appChecks.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -298,10 +298,10 @@ export const votesFor = (subjectId: string) => list<Vote>('votes', subjectId);
  * that no longer stands (see autopilotStands), leaves that person with no say: an older
  * review or vote never comes back into force.
  */
-export function effectiveSay<T extends Review | Vote>(items: T[], cr: ChangeRequest, revision: string): T[] {
+export function effectiveSay<T extends Review | Vote>(items: T[], cr: ChangeRequest, revision: string, spoke = peopleWhoSpoke(cr)): T[] {
   const latest = new Map<string, T>();
   for (const x of [...items].sort((a, b) => a.at.localeCompare(b.at))) latest.set(x.userId, x);
-  return [...latest.values()].filter((x) => !x.withdrawnAt && autopilotStands(x, cr, revision));
+  return [...latest.values()].filter((x) => !x.withdrawnAt && autopilotStands(x, cr, revision, spoke));
 }
 
 export function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest['status']; voteClosed?: boolean } = {}) {
@@ -309,6 +309,7 @@ export function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest[
   const since = cr.opsUpdatedAt ?? cr.createdAt;
   const revision = revisionOf(cr, project);
   const reviews = reviewsFor(cr.id).filter((r) => r.at >= since);
+  const spoke = peopleWhoSpoke(cr);
   return evaluate({
     policy: project.governance,
     level: cr.classification?.level ?? 'minor',
@@ -317,8 +318,8 @@ export function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest[
     statusSince: cr.statusSince,
     reviewStartedAt: cr.reviewStartedAt ?? cr.statusSince,
     authorId: cr.authorId,
-    reviews: effectiveSay(reviews.filter((r) => r.decision !== 'comment'), cr, revision),
-    votes: effectiveSay(votesFor(cr.id).filter((v) => v.at >= since), cr, revision),
+    reviews: effectiveSay(reviews.filter((r) => r.decision !== 'comment'), cr, revision, spoke),
+    votes: effectiveSay(votesFor(cr.id).filter((v) => v.at >= since), cr, revision, spoke),
     members: members(cr.ontologyId),
     validationOk: validationPassed(cr.validation),
     now: clock.now(),
@@ -400,7 +401,10 @@ export async function addReview(cr: ChangeRequest, actor: User, decision: Review
   cr.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
   save(cr);
   logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb}${autopilot ? ' (autopilot)' : ''} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
-  return advance(cr);
+  const out = await advance(cr);
+  // Their own say replaces anything autopilot said for them, at every stage.
+  if (!autopilot && decision !== 'comment') return afterOwnSay(out, actor.id);
+  return out;
 }
 
 export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, autopilot?: AutopilotMark) {
@@ -414,7 +418,16 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
   cr.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
   save(cr);
   logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice}${autopilot ? ' (autopilot)' : ''} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
-  return advance(cr);
+  const out = await advance(cr);
+  if (!autopilot) return afterOwnSay(out, actor.id);
+  return out;
+}
+
+/** Someone reviewed or voted themselves: withdraw what autopilot said for them on this change. */
+async function afterOwnSay(cr: ChangeRequest, userId: string): Promise<ChangeRequest> {
+  if (![...reviewsFor(cr.id), ...votesFor(cr.id)].some((x) => x.userId === userId && x.autopilot && !x.withdrawnAt)) return cr;
+  await applyAutopilot(cr.id, userId);
+  return getCR(cr.id);
 }
 
 /** Re-evaluate governance and apply any transition it allows. Safe to call any time. */
@@ -468,35 +481,44 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
   if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   const project = getProject(cr.ontologyId);
-  const author = getUser(cr.authorId);
-  let turtle: string | undefined;
-  for (let attempt = 0; attempt < 3 && turtle === undefined; attempt++) {
-    const head = ontologyStore.head(project);
+  const id = cr.id;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Prepare the merge from the request exactly as it is now. Its revision covers both its edits
+    // and the working draft they apply to.
+    const prepared = getCR(id);
+    if (prepared.status !== 'approved') return prepared;
+    const revision = revisionOf(prepared, project);
+    const author = getUser(prepared.authorId);
     const working = await ontologyStore.working(project);
-    let after: OntologyGraph;
+    let turtle: string;
     try {
-      after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+      const after = applyChangeOps(working, prepared.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${prepared.number}` }).graph;
+      turtle = await after.toTurtle();
     } catch (err) {
-      setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-      return save(cr);
+      const now = getCR(id);
+      if (revisionOf(now, project) !== revision) continue;
+      setStatus(now, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
+      return save(now);
     }
-    const text = await after.toTurtle();
-    // Another merge landed while this one was being prepared: redo it on the new head.
-    if (ontologyStore.head(project) === head) turtle = text;
+    // From here to the commit nothing else can run. Things may have changed while the merge was
+    // being prepared: the edits, the working draft (another merge), an app's result, a review.
+    const fresh = getCR(id);
+    if (fresh.status !== 'approved') return fresh;
+    if (revisionOf(fresh, project) !== revision) continue;
+    const held = approvalHolds(fresh);
+    if (!held.ok) {
+      revokeApproval(fresh, held.reason);
+      save(fresh);
+      if (actor) throw new HttpError(409, `The approval no longer holds${held.reason ? `: ${held.reason}` : ''}`);
+      return fresh;
+    }
+    return finishMerge(fresh, project, turtle, actor);
   }
-  if (turtle === undefined) throw new HttpError(409, 'The working draft kept changing; try merging again');
-  // Things may have changed while the merge was prepared (an app failed, autopilot withdrew a
-  // yes, someone withdrew the request). From here to the commit nothing else can run.
-  const fresh = getCR(cr.id);
-  if (fresh.status !== 'approved') return fresh;
-  const held = approvalHolds(fresh);
-  if (!held.ok) {
-    revokeApproval(fresh, held.reason);
-    save(fresh);
-    if (actor) throw new HttpError(409, `The approval no longer holds${held.reason ? `: ${held.reason}` : ''}`);
-    return fresh;
-  }
-  cr = fresh;
+  throw new HttpError(409, 'The change or the working draft kept changing while it was being merged; try again');
+}
+
+async function finishMerge(cr: ChangeRequest, project: OntologyProject, turtle: string, actor: User | undefined): Promise<ChangeRequest> {
+  const author = getUser(cr.authorId);
   cr.mergedCommit = ontologyStore.commitWorkingText(project, turtle, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
     name: author?.name ?? 'Concord',
   });

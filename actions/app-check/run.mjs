@@ -124,13 +124,18 @@ function runTests(extraEnv) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(hardKill);
+      // Whatever the test started and left behind (even something that ignores SIGTERM) is
+      // stopped before the next version is swapped in, so runs can't leak into each other.
+      stop(child, 'SIGKILL');
       running = undefined;
       resolve(r);
     };
+    let hardKill;
     const timer = setTimeout(() => {
       timedOut = true;
       stop(child, 'SIGTERM');
-      setTimeout(() => stop(child, 'SIGKILL'), 5000).unref();
+      hardKill = setTimeout(() => stop(child, 'SIGKILL'), 5000);
     }, timeoutMs);
     child.stdout.on('data', (c) => keep(c, process.stdout));
     child.stderr.on('data', (c) => keep(c, process.stderr));

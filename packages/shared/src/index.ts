@@ -614,7 +614,7 @@ export interface ConnectedApp {
   token?: string;
   autopilot: AutopilotSettings;
   /** The app's result against the current working draft, before any proposed change. */
-  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; current?: boolean };
+  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; commit?: string; current?: boolean };
   lastSeenAt?: string;
   createdAt: string;
   owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
