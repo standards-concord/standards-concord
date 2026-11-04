@@ -1,5 +1,6 @@
 import { ArrowLeft, ArrowRight, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router';
+import { api } from '../api';
 import { useDemoOntology } from '../lib/ontologies';
 import { Page } from '../components/Shell';
 import { Stepper, StepBody } from '../components/Walkthrough';
@@ -36,9 +37,11 @@ export function AlphaPage() {
             Restart
           </Button>
           {w.step >= 2 && (
-            <Button variant="secondary" onClick={() => {
+            <Button variant="secondary" onClick={async () => {
                 w.setOpen(true);
-                nav(demo ? `/o/${demo.id}` : '/');
+                // Just after picking a role the ontology list may still be loading; don't drop the tester on the hub.
+                const target = demo ?? (await api.ontologies().then((all) => all.find((o) => o.demo) ?? all[0]).catch(() => undefined));
+                nav(target ? `/o/${target.id}` : '/');
               }}
             >
               Keep the guide open while I explore
