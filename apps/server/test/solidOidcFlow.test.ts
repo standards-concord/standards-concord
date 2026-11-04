@@ -2,7 +2,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
-import { finishLogin, guardedFetch, guardedRequests, podReader, resolveIssuer, startLogin } from '../src/solidOidc.js';
+import { clientCredentialsLogin, finishLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
 
 /**
  * The Solid-OIDC flow against a scripted OpenID provider on 127.0.0.1, which
@@ -46,6 +46,11 @@ let expectedNonce = '';
 let sawDpop = false;
 /** Requests the provider received, and requests the guarded transport made. */
 let seen: string[] = [];
+/** The provider rotates refresh tokens: only the latest one works, once. */
+let refreshToken = 'rt-1';
+let refreshes = 0;
+/** Authorization headers the pod documents were requested with. */
+let podAuth: string[] = [];
 let guarded: string[] = [];
 const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
 const otherKeys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
@@ -99,14 +104,35 @@ beforeAll(async () => {
     }
     if (url.pathname === '/register') return json(201, { client_id: 'concord-test', redirect_uris: [`${config.publicUrl}/auth/solid/callback`], token_endpoint_auth_method: 'none' });
     if (url.pathname === '/jwks') return send('application/json', JSON.stringify({ keys: [jwk] }), behaviour.padJwks, behaviour.stallJwks);
-    if (url.pathname === '/pod/big.json') return send('application/json', JSON.stringify({ id: 'x' }), behaviour.padPod, behaviour.stallPod);
+    if (url.pathname === '/pod/big.json') {
+      podAuth.push(String(req.headers.authorization));
+      return send('application/json', JSON.stringify({ id: 'x' }), behaviour.padPod, behaviour.stallPod);
+    }
     if (url.pathname === '/token') {
       sawDpop = typeof req.headers.dpop === 'string';
+      const form = new URLSearchParams(await new Promise<string>((r) => {
+        let b = '';
+        req.on('data', (c) => (b += c)).on('end', () => r(b));
+      }));
+      if (form.get('grant_type') === 'client_credentials') {
+        // RFC 6749 §2.3.1: each part is form-urlencoded before base64.
+        const [id, secret] = Buffer.from(String(req.headers.authorization).replace(/^Basic /, ''), 'base64').toString().split(':').map((x) => decodeURIComponent(x.replace(/\+/g, ' ')));
+        const ok = id === 'cc-id' && secret === 'cc-secret';
+        return ok ? json(200, { access_token: 'at-cc', token_type: 'DPoP', expires_in: 300 }) : json(401, { error: 'invalid_client' });
+      }
+      if (form.get('grant_type') === 'refresh_token') {
+        refreshes++;
+        if (form.get('refresh_token') !== refreshToken) return json(400, { error: 'invalid_grant' });
+        refreshToken = `rt-${refreshes + 1}`;
+        await new Promise((r) => setTimeout(r, 50));
+        return json(200, { access_token: `at-r${refreshes}`, token_type: 'DPoP', expires_in: 300, refresh_token: refreshToken });
+      }
       const now = Math.floor(Date.now() / 1000);
       const body = {
         access_token: 'at-1',
         token_type: behaviour.tokenType ?? 'DPoP',
         expires_in: 300,
+        refresh_token: refreshToken,
         id_token: await idToken({ iss: behaviour.iss ?? issuer, sub: webId(), webid: webId(), aud: 'concord-test', iat: now, exp: now + 300, nonce: behaviour.nonce ?? expectedNonce }),
       };
       return send('application/json', JSON.stringify(body), behaviour.padToken, behaviour.stallToken);
@@ -129,6 +155,9 @@ beforeEach(() => {
   sawDpop = false;
   seen = [];
   guarded = [];
+  podAuth = [];
+  refreshToken = 'rt-1';
+  refreshes = 0;
   guardedRequests.observe = (method, url) => guarded.push(`${method} ${url}`);
   vi.stubGlobal('fetch', () => {
     throw new Error('The plain fetch was used');
@@ -141,10 +170,11 @@ afterEach(() => {
   for (const r of seen) expect(guarded, `${r} bypassed guardedFetch`).toContain(r);
 });
 
-/** Start a login and come back from the provider with a code. */
-async function signIn(input = webId()) {
+/** Start a login and come back from the provider with a code (`between` runs while the browser is at the provider). */
+async function signIn(input = webId(), between?: () => void) {
   const { as } = await resolveIssuer(input);
   const { loginId, url } = await startLogin(as, '/somewhere');
+  between?.();
   const auth = new URL(url);
   expectedNonce = auth.searchParams.get('nonce')!;
   expect(auth.searchParams.get('code_challenge_method')).toBe('S256');
@@ -160,6 +190,16 @@ describe('Solid-OIDC against a scripted provider', () => {
     expect(done.login.accessToken).toBe('at-1');
     // Discovery, the profile, registration, token, JWKS and the profile again: all guarded (checked after each test).
     expect(seen.map((r) => new URL(r.split(' ')[1]!).pathname)).toEqual(expect.arrayContaining(['/.well-known/openid-configuration', '/register', '/token', '/jwks', '/alice/profile/card']));
+  });
+
+  it('finishes with the provider metadata it started with, never fetching it again', async () => {
+    // While the browser is away, the provider's metadata changes to point the token endpoint elsewhere.
+    const done = await signIn(webId(), () => (behaviour.tokenEndpoint = `${base}/elsewhere/token`));
+    expect(done.webId).toBe(webId());
+    const paths = seen.map((r) => new URL(r.split(' ')[1]!).pathname);
+    expect(paths.filter((p) => p === '/.well-known/openid-configuration')).toHaveLength(1);
+    expect(paths).toContain('/token');
+    expect(paths).not.toContain('/elsewhere/token');
   });
 
   it('refuses an ID token from another issuer than the provider we started with', async () => {
@@ -183,14 +223,14 @@ describe('Solid-OIDC against a scripted provider', () => {
   });
 
   it('never sends the token request to an address that isn’t public', async () => {
-    // A real listener on another private address, which isn't trusted: it must never be connected to.
+    // A real listener on a port that isn't trusted (only the provider's own origin is): it must never be connected to.
     let connections = 0;
     const inside = http.createServer((_req, res) => res.writeHead(200).end('{}'));
     inside.on('connection', () => connections++);
-    await new Promise<void>((r) => inside.listen(0, '127.0.0.2', r));
+    await new Promise<void>((resolve, reject) => inside.once('error', reject).listen(0, '127.0.0.1', resolve));
     try {
       // Metadata from a trusted provider pointing its token endpoint there.
-      behaviour.tokenEndpoint = `https://127.0.0.2:${(inside.address() as AddressInfo).port}/token`;
+      behaviour.tokenEndpoint = `https://127.0.0.1:${(inside.address() as AddressInfo).port}/token`;
       await expect(signIn()).rejects.toThrow(/Sign-in failed: .*not a public address/);
       expect(connections).toBe(0);
     } finally {
@@ -243,6 +283,28 @@ describe('reading a pod as the signed-in WebID', () => {
     await expect(get(`${base}/pod/big.json`, 'application/json')).rejects.toThrow(/Timed out/);
     expect(Date.now() - t).toBeLessThan(8900);
   }, 20_000);
+
+  it('refreshes an expiring login once, however many requests need it at the same moment', async () => {
+    const { login } = await signIn();
+    const get = (await podReader(login))!;
+    // The token expires while the reader is in use.
+    login.expiresAt = 0;
+    const results = await Promise.all([1, 2, 3, 4].map(() => get(`${base}/pod/big.json`, 'application/json')));
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    expect(refreshes).toBe(1);
+    expect(new Set(podAuth)).toEqual(new Set(['DPoP at-r1']));
+  });
+
+  it('acts as a pod owner with client credentials, through the guarded transport', async () => {
+    const login = await clientCredentialsLogin(webId(), 'cc-id', 'cc-secret');
+    expect(login.accessToken).toBe('at-cc');
+    const req = (await podRequester(login))!;
+    expect((await req('GET', `${base}/pod/big.json`)).status).toBe(200);
+    expect(podAuth).toEqual(['DPoP at-cc']);
+    expect(seen.some((r) => r.startsWith('POST ') && r.endsWith('/token'))).toBe(true);
+    // Every request (discovery, token, pod) was guarded: checked after each test.
+    await expect(clientCredentialsLogin(webId(), 'cc-id', 'wrong')).rejects.toThrow();
+  });
 });
 
 describe('guardedFetch', () => {

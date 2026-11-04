@@ -74,6 +74,7 @@ function toCsv(subs: FeedbackSubmission[], qs: FeedbackQuestion[]) {
 
 const FOLDER_STATUS: Record<PodFeedbackFolder['status'], { label: string; tone: 'ok' | 'danger' | 'neutral' | 'warn' }> = {
   ok: { label: 'Readable', tone: 'ok' },
+  partial: { label: 'Partly read', tone: 'warn' },
   forbidden: { label: 'Not shared with you', tone: 'danger' },
   missing: { label: 'No feedback', tone: 'neutral' },
   error: { label: 'Couldn’t read', tone: 'warn' },
@@ -132,11 +133,17 @@ function PodFeedback() {
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{f.testerName}</span>
                       <Badge tone={FOLDER_STATUS[f.status].tone}>{FOLDER_STATUS[f.status].label}</Badge>
-                      {f.status === 'ok' && <span className="text-xs text-muted">{f.items.length} submission{f.items.length === 1 ? '' : 's'}</span>}
+                      {(f.status === 'ok' || f.status === 'partial') && <span className="text-xs text-muted">{f.items.length} submission{f.items.length === 1 ? '' : 's'}</span>}
+                      {!!f.unread && <span className="text-xs text-warn">{f.unread} couldn’t be read</span>}
                       <a href={f.url} target="_blank" rel="noreferrer" className="ml-auto truncate font-mono text-xs text-accent hover:underline">
                         {f.url}
                       </a>
                     </div>
+                    {f.sharingError && (
+                      <p className="text-xs text-danger" data-testid="pod-sharing-error">
+                        Couldn’t share this folder with the admins: {f.sharingError}
+                      </p>
+                    )}
                     {f.items.slice(0, 5).map((s) => (
                       <div key={s.id} className="text-xs text-muted">
                         {formatDate(s.createdAt)} · {s.pathway}

@@ -116,6 +116,26 @@ export class FetchError extends Error {
 
 let active = 0;
 const MAX_CONCURRENT = 4;
+/** Requests waiting for one of the MAX_CONCURRENT connections, in order. Beyond MAX_QUEUED, new ones are refused as 'busy'. */
+const waiting: (() => void)[] = [];
+const MAX_QUEUED = 500;
+
+/** Wait for a connection slot (first come, first served). */
+function acquire(): Promise<void> {
+  if (active < MAX_CONCURRENT) {
+    active++;
+    return Promise.resolve();
+  }
+  if (waiting.length >= MAX_QUEUED) return Promise.reject(new FetchError('busy', 'Too many fetches waiting'));
+  // The slot is handed over by release() without decrementing, so it can't be taken by a newcomer in between.
+  return new Promise((resolve) => waiting.push(resolve));
+}
+
+function release() {
+  const next = waiting.shift();
+  if (next) next();
+  else active--;
+}
 
 export interface SafeFetchOptions {
   maxBytes?: number;
@@ -163,8 +183,11 @@ export function safeRequest(url: URL, opts: SafeRequestOptions = {}): Promise<Sa
   if (url.username || url.password) return Promise.reject(new FetchError('bad-response', 'URLs with credentials are not fetched'));
   const literal = ipLiteral(url);
   if (literal && !opts.allowPrivate && !isPublicAddress(literal)) return Promise.reject(new FetchError('bad-response', `Refusing to connect to ${literal}: not a public address`));
-  if (active >= MAX_CONCURRENT) return Promise.reject(new FetchError('busy', 'Too many fetches in progress'));
-  active++;
+  return acquire().then(() => connect(url, opts, maxBytes, timeoutMs));
+}
+
+/** One request, holding a connection slot until it settles. */
+function connect(url: URL, opts: SafeRequestOptions, maxBytes: number, timeoutMs: number): Promise<SafeResponse> {
   return new Promise<SafeResponse>((resolve, reject) => {
     let settled = false;
     const done = (err: Error | undefined, value?: SafeResponse) => {
@@ -173,7 +196,7 @@ export function safeRequest(url: URL, opts: SafeRequestOptions = {}): Promise<Sa
       clearTimeout(timer);
       // Tear the connection down before giving the slot back: nothing more is read once we've decided.
       req.destroy();
-      active--;
+      release();
       if (err) reject(err instanceof FetchError ? err : new FetchError('unavailable', err.message));
       else resolve(value!);
     };

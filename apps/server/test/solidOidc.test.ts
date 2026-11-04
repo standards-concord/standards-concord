@@ -6,10 +6,10 @@ import type { User } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { isAdmin } from '../src/auth.js';
 import { config } from '../src/config.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
 import { parseLinks, shareFolder, wacMerge } from '../src/services/solid.js';
 import type { PodRequest } from '../src/solidOidc.js';
-import { feedbackMembers } from '../src/services/feedback.js';
+import { feedbackMembers, readPodFeedback, shareFeedbackFolder } from '../src/services/feedback.js';
 import { clientIdDocument, issuerListed, nameFromWebId, parseProfile, resolveIssuer, sameIssuer, SolidLoginError } from '../src/solidOidc.js';
 
 const app = createApp();
@@ -198,7 +198,7 @@ describe('sharing a pod folder with the admins', () => {
  * and honour If-Match / If-None-Match on PUT. `status` overrides a container's
  * HEAD; `beforePut` runs just before a PUT is checked (a concurrent edit).
  */
-function fakePod(opts: { acp?: boolean; noEtag?: boolean } = {}) {
+function fakePod(opts: { acp?: boolean; noEtag?: boolean; acpTypeOn?: string; aclName?: string } = {}) {
   const root = 'https://pods.example/t1/';
   const folder = `${root}concord/feedback/`;
   const containers = new Set([root, `${root}concord/`, folder]);
@@ -214,9 +214,11 @@ function fakePod(opts: { acp?: boolean; noEtag?: boolean } = {}) {
     if (method === 'HEAD') {
       if (status.has(url)) return new Response(null, { status: status.get(url) });
       if (!containers.has(url)) return new Response(null, { status: 404 });
-      return new Response(null, { status: 200, headers: { link: opts.acp ? '<.acr>; rel="acl"' : '<.acl>; rel="acl", <http://www.w3.org/ns/ldp#Container>; rel="type"' } });
+      return new Response(null, { status: 200, headers: { link: opts.acp ? '<.acr>; rel="acl"' : `<${opts.aclName ?? '.acl'}>; rel="acl", <http://www.w3.org/ns/ldp#Container>; rel="type"` } });
     }
     if (method === 'GET') {
+      // An ACP server says so on the access control resource's own response, whatever its URL.
+      if (opts.acpTypeOn === url) return new Response('', { status: docs.has(url) ? 200 : 404, headers: { link: '<http://www.w3.org/ns/solid/acp#AccessControlResource>; rel="type"', etag: '"x"' } });
       const d = docs.get(url);
       if (!d) return new Response('', { status: 404 });
       return new Response(d.body, { status: 200, headers: { 'content-type': 'text/turtle', ...(opts.noEtag ? {} : { etag: etag(url) }) } });
@@ -308,11 +310,55 @@ describe('writing the sharing rule to a pod', () => {
     expect(pod.puts).toHaveLength(0);
   });
 
+  it('refuses ACP whatever the access control resource is called: its own response, an ancestor’s, or its type in the body', async () => {
+    const opaque = fakePod({ aclName: '.access' });
+    opaque.set(`${opaque.root}.access`, rootAcl);
+    const own = fakePod({ aclName: '.access', acpTypeOn: 'https://pods.example/t1/concord/feedback/.access' });
+    const ancestor = fakePod({ aclName: '.access', acpTypeOn: 'https://pods.example/t1/.access' });
+    const typed = fakePod();
+    typed.set(typed.acl, '<> a <http://www.w3.org/ns/solid/acp#AccessControlResource> .');
+    for (const pod of [own, ancestor, typed]) {
+      await expect(shareFolder(pod.req, pod.folder, pod.root, owner, [admin])).rejects.toThrow(/uses ACP access control/);
+      expect(pod.puts).toHaveLength(0);
+    }
+    // The same opaque name on a WAC server is fine.
+    expect(await shareFolder(opaque.req, opaque.folder, opaque.root, owner, [admin])).toBe('shared');
+  });
+
   it('refuses to change an ACL that has no ETag', async () => {
     const pod = fakePod({ noEtag: true });
     pod.set(pod.acl, rootAcl);
     await expect(shareFolder(pod.req, pod.folder, pod.root, owner, [admin])).rejects.toThrow(/no ETag/);
     expect(pod.puts).toHaveLength(0);
+  });
+});
+
+describe('the admin’s view of the pods', () => {
+  it('reports documents it couldn’t read, and why a folder couldn’t be shared, instead of hiding them', async () => {
+    const saved = config.solid.serverUrl;
+    // A pod server that refuses connections at once (trusted, being the configured one).
+    config.solid.serverUrl = 'http://127.0.0.1:1';
+    try {
+      const id = 'u-podview1';
+      put('users', { id, name: 'Pod Viewer', email: '', createdAt: new Date().toISOString() } as unknown as User);
+      put('kv', { id: `pod:${id}`, podUrl: 'http://127.0.0.1:1/viewer/', webId: 'http://127.0.0.1:1/viewer/profile/card#me', clientId: 'c', clientSecret: 's' });
+      expect(await shareFeedbackFolder(id)).toBe('error');
+      const folder = 'http://127.0.0.1:1/viewer/concord/feedback/';
+      const doc = (n: string) => JSON.stringify({ id: n, createdAt: `2026-11-0${n}T00:00:00Z`, answers: { general: n } });
+      const get = async (url: string) => {
+        if (url === folder) return new Response(['1', '2', '3'].map((n) => `<> <http://www.w3.org/ns/ldp#contains> <${n}.json> .`).join('\n'), { status: 200 });
+        if (url.endsWith('2.json')) throw new Error('Too many fetches waiting');
+        return new Response(doc(url.slice(-6, -5)), { status: 200 });
+      };
+      const report = await readPodFeedback({ webId: 'https://jesse.example/#me', get });
+      const f = report.folders.find((x) => x.testerId === id)!;
+      expect(f.status).toBe('partial');
+      expect(f.unread).toBe(1);
+      expect(f.items.map((x) => x.id)).toEqual(['3', '1']);
+      expect(f.sharingError).toMatch(/./);
+    } finally {
+      config.solid.serverUrl = saved;
+    }
   });
 });
 

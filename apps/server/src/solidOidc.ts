@@ -442,9 +442,21 @@ export async function clientCredentialsLogin(webId: string, clientId: string, cl
   return login;
 }
 
+/** A refresh in progress, per login: requests that find the token expiring wait for the same one (refresh tokens may rotate, so only one use counts). */
+const refreshing = new WeakMap<SolidLogin, Promise<boolean>>();
+
 /** Refresh the access token if it is (nearly) expired. Returns false when the login can't continue. */
-async function fresh(login: SolidLogin): Promise<boolean> {
-  if (Date.now() < login.expiresAt - 30_000) return true;
+function fresh(login: SolidLogin): Promise<boolean> {
+  if (Date.now() < login.expiresAt - 30_000) return Promise.resolve(true);
+  let p = refreshing.get(login);
+  if (!p) {
+    p = renew(login).finally(() => refreshing.delete(login));
+    refreshing.set(login, p);
+  }
+  return p;
+}
+
+async function renew(login: SolidLogin): Promise<boolean> {
   try {
     if (login.clientSecret) {
       await grantClientCredentials(login);

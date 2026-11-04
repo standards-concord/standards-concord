@@ -234,14 +234,24 @@ function aclOf(link: string | null, resource: string) {
   return { acl, acp };
 }
 
-/** GET an RDF document and its ETag; undefined when it doesn't exist. Any other answer than 200 or 404 is an error. */
-async function readRdf(req: PodRequest, url: string): Promise<{ quads: Quad[]; etag: string } | undefined> {
+const acpRefusal = (resource: string) => new Error(`${resource} is on a pod that uses ACP access control. Concord only shares folders on WAC pods, so nothing was changed.`);
+
+/**
+ * GET an access control document and its ETag; undefined when it doesn't exist.
+ * Any other answer than 200 or 404 is an error. An ACP server marks its access
+ * control resources on their own responses (Link rel="type" acp:AccessControlResource),
+ * whatever their URL looks like, so that, and an ACR's own type in the body, refuse.
+ */
+async function readAcl(req: PodRequest, url: string, resource: string): Promise<{ quads: Quad[]; etag: string } | undefined> {
   const r = await req('GET', url, { headers: { accept: 'text/turtle' } });
+  if (parseLinks(r.headers.get('link'), url).some((l) => l.rel === 'type' && l.url === `${ACP}AccessControlResource`)) throw acpRefusal(resource);
   if (r.status === 404) return undefined;
   if (r.status !== 200) throw new Error(`GET ${url} → ${r.status}`);
   const etag = r.headers.get('etag');
   if (!etag) throw new Error(`${url} has no ETag, so it can’t be changed safely`);
-  return { quads: new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await r.text()), etag };
+  const quads = new Parser({ baseIRI: url, format: 'text/turtle' }).parse(await r.text());
+  if (quads.some((x) => x.predicate.value === RDF_TYPE && x.object.value === `${ACP}AccessControlResource`)) throw acpRefusal(resource);
+  return { quads, etag };
 }
 
 /**
@@ -254,7 +264,9 @@ async function inheritedAcl(req: PodRequest, folder: string, podUrl: string): Pr
   while (container.startsWith(podUrl)) {
     const head = await req('HEAD', container);
     if (head.status === 200) {
-      const found = await readRdf(req, aclOf(head.headers.get('link'), container).acl);
+      const { acl, acp } = aclOf(head.headers.get('link'), container);
+      if (acp) throw acpRefusal(folder);
+      const found = await readAcl(req, acl, folder);
       if (found) return { container, quads: found.quads };
     } else if (head.status !== 404) throw new Error(`Couldn’t tell what ${folder} inherits: ${container} answered ${head.status}. Nothing was changed.`);
     if (container === podUrl) break;
@@ -280,9 +292,9 @@ export async function shareFolder(req: PodRequest, folder: string, podUrl: strin
   }
   if (head.status !== 200) throw new Error(`HEAD ${folder} → ${head.status}`);
   const { acl, acp } = aclOf(head.headers.get('link'), folder);
-  if (acp) throw new Error(`${folder} is on a pod that uses ACP access control. Concord only shares folders on WAC pods, so nothing was changed.`);
+  if (acp) throw acpRefusal(folder);
   for (let attempt = 1; ; attempt++) {
-    const existing = await readRdf(req, acl);
+    const existing = await readAcl(req, acl, folder);
     // No ACL of its own yet: it inherits one. Writing one stops the inheritance, so carry the inherited rules over.
     const inherited = existing ? undefined : await inheritedAcl(req, folder, podUrl);
     const body = await wacMerge(folder, acl, existing?.quads, inherited, owner, readers);

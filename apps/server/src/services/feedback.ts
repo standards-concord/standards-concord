@@ -2,7 +2,7 @@ import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, t
 import { Parser } from 'n3';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get as get_, HttpError, list, put } from '../db.js';
+import { get as get_, HttpError, list, put, remove } from '../db.js';
 import * as oauth from 'oauth4webapi';
 import { newId } from '../ids.js';
 import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
@@ -250,12 +250,20 @@ export const FEEDBACK_FOLDER = 'feedback/';
  */
 export async function shareFeedbackFolder(userId: string, opts: { create?: boolean; force?: boolean } = {}) {
   try {
-    return await solid.shareRead(userId, FEEDBACK_FOLDER, config.adminWebIds, opts);
+    const r = await solid.shareRead(userId, FEEDBACK_FOLDER, config.adminWebIds, opts);
+    if (r === 'shared' || r === 'unchanged') remove('kv', shareErrorKey(userId));
+    return r;
   } catch (err) {
-    console.warn(`[solid] could not share the feedback folder of ${userId}: ${(err as Error).message}`);
+    const message = (err as Error).message.slice(0, 300);
+    console.warn(`[solid] could not share the feedback folder of ${userId}: ${message}`);
+    // Shown to the admins beside that tester's folder.
+    put('kv', { id: shareErrorKey(userId), value: message, at: clock.iso() });
     return 'error' as const;
   }
 }
+
+const shareErrorKey = (userId: string) => `share-error:${userId}`;
+const sharingError = (userId: string) => get_<{ value: string }>('kv', shareErrorKey(userId))?.value;
 
 /** Bring every tester's feedback folder in line with ADMIN_WEBIDS (run at start-up: the list may have changed). */
 export async function syncFeedbackSharing() {
@@ -324,7 +332,7 @@ export function feedbackMembers(folder: string, turtle: string): string[] {
 
 async function readFolder(get: PodGet, testerId: string, url: string): Promise<PodFeedbackFolder> {
   const testerName = get_<User>('users', testerId)?.name ?? testerId;
-  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[] };
+  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[], sharingError: sharingError(testerId) };
   let res: Response;
   try {
     res = await get(url, 'text/turtle');
@@ -342,15 +350,20 @@ async function readFolder(get: PodGet, testerId: string, url: string): Promise<P
   } catch {
     return { ...base, status: 'error' };
   }
-  const items = await pool(members.slice(0, MAX_POD_ITEMS), 4, async (m) => {
-    try {
-      const r = await get(m, 'application/json');
-      return r.ok ? asSubmission(await r.json()) : undefined;
-    } catch {
-      return undefined;
-    }
-  });
-  return { ...base, status: 'ok', items: items.filter((x): x is FeedbackSubmission => !!x).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) };
+  // Requests queue for the transport's few connections (see safeRequest), so this needn't be throttled; what fails is counted, never dropped silently.
+  const read = await Promise.all(
+    members.slice(0, MAX_POD_ITEMS).map(async (m) => {
+      try {
+        const r = await get(m, 'application/json');
+        return r.ok ? asSubmission(await r.json()) : undefined;
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  const items = read.filter((x): x is FeedbackSubmission => !!x).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const unread = read.length - items.length;
+  return { ...base, status: unread ? 'partial' : 'ok', items, ...(unread ? { unread } : {}) };
 }
 
 /**
@@ -362,6 +375,7 @@ export async function readPodFeedback(as: { webId: string; get: PodGet }): Promi
   if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
   const pods = solid.pods().filter((p) => !get_<User>('users', p.userId)?.simulated);
   const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
+  // A few folders at a time keeps the transport's queue short (each folder queues up to MAX_POD_ITEMS reads).
   const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
   // Testers who never sent feedback have no folder: leave them out.
   return { readAs: as.webId, readers: config.adminWebIds, folders: read.filter((f) => f.status !== 'missing') };
