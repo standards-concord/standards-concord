@@ -80,16 +80,6 @@ export const config = {
     calendarPollMs: Number(process.env.MEET_BOT_POLL_SECONDS ?? 60) * 1000,
     /** Ontology (slug or id) for invites that don't say which ontology they're about. */
     defaultOntology: process.env.MEET_BOT_DEFAULT_ONTOLOGY?.trim() || undefined,
-    /**
-     * Calendar invites can't prove who sent them: the organiser in an invite is
-     * just text. So by default every call that arrives by invite waits for one of
-     * the ontology's owners, stewards or editors to approve it (once per series).
-     * Set this to trust the organiser instead, when the organiser is one of them
-     * (matched by their Concord account's email) and nobody sent it on their
-     * behalf. Only do that if the bot's calendar accepts invites from known
-     * senders only, for example a Workspace account limited to your domain.
-     */
-    trustOrganizer: bool(process.env.MEET_BOT_TRUST_ORGANIZER, false),
     /** Whether calls that arrive by invite post the bot's prompts into the Meet chat. */
     postToChatDefault: bool(process.env.MEET_BOT_POST_TO_CHAT, false),
   },

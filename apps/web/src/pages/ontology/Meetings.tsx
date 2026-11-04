@@ -14,7 +14,7 @@ export function MeetingStatus({ m }: { m: Meeting }) {
   if (m.status === 'scheduled')
     return (
       <Badge tone={m.calendar?.skip ? 'neutral' : 'accent'} icon={CalendarClock}>
-        {m.calendar?.approval === 'pending' ? 'Needs approval' : m.calendar?.skip ? 'Bot skipping' : m.bot?.botId ? 'Bot booked' : 'Scheduled'}
+        {m.calendar?.approval === 'pending' ? 'Needs approval' : m.calendar?.skip ? 'Bot skipping' : isBooked(m) ? 'Bot booked' : 'Scheduled'}
       </Badge>
     );
   if (m.status === 'live' && m.bot?.status === 'joining')
@@ -167,10 +167,18 @@ function BotDialog({
     nav(`/o/${id}/meetings/${m.id}`);
   });
   const schedule = useAction(async () => {
-    const { meetings: ms, cancelled } = await api.scheduleFromInvite(id, ics, postToChat);
+    const { meetings: ms, cancelled, cancelRetrying } = await api.scheduleFromInvite(id, ics, postToChat);
     onClose();
-    if (ms.length === 1 && !cancelled) nav(`/o/${id}/meetings/${ms[0].id}`);
-    else onScheduled(cancelled ? `The bot won’t join ${cancelled === 1 ? 'the cancelled call' : `the ${cancelled} cancelled calls`}.` : undefined);
+    if (ms.length === 1 && !cancelled && !cancelRetrying) nav(`/o/${id}/meetings/${ms[0].id}`);
+    else
+      onScheduled(
+        [
+          cancelled ? `The bot won’t join ${cancelled === 1 ? 'the cancelled call' : `the ${cancelled} cancelled calls`}.` : '',
+          cancelRetrying ? `Recall.ai hasn’t confirmed cancelling the bot for ${cancelRetrying === 1 ? 'one call' : `${cancelRetrying} calls`} yet; Concord keeps trying.` : '',
+        ]
+          .filter(Boolean)
+          .join(' ') || undefined,
+      );
   });
   const preview = ics ? icsPreview(ics) : undefined;
   return (
@@ -298,14 +306,17 @@ function icsPreview(ics: string) {
   return `“${summary}”${weekly ? ', a recurring series' : ''}${cancelled ? ' (includes a cancellation)' : ''}`;
 }
 
+/** Facilitators see the bot's id; everyone else just whether one is booked. */
+const isBooked = (m: Meeting) => !!(m.bot?.botId || m.bot?.booked);
+
 /** Where the bot stands for one upcoming call: what will happen, separate from the switch saying what should. */
 function BookingState({ m }: { m: Meeting }) {
   if (m.calendar?.approval === 'pending') return <Badge tone="warn" title={m.calendar.approvalNote}>{m.calendar.approvalNote ? 'Needs approval again' : 'Needs approval'}</Badge>;
   if (m.calendar?.skip) return <Badge tone="neutral">Skipping</Badge>;
   if (m.calendar?.cancelPending) return <Badge tone="danger">Cancelling the bot failed; retrying</Badge>;
   if (m.bot?.provider === 'simulated') return <Badge tone="neutral" title={m.bot.error}>No bot provider on this server</Badge>;
-  if (m.bot?.botId && m.bot.error) return <Badge tone="danger" title={m.bot.error}>Cancelling the bot failed; retrying</Badge>;
-  if (m.bot?.botId) return <Badge tone="ok">Bot booked</Badge>;
+  if (isBooked(m) && m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Cancelling the bot failed; retrying</Badge>;
+  if (isBooked(m)) return <Badge tone="ok">Bot booked</Badge>;
   if (m.bot?.uncertain) return <Badge tone="warn" title={m.bot.error}>Checking an unconfirmed booking</Badge>;
   if (m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Booking failed; retrying</Badge>;
   return <Badge tone="outline">Books 15 min before</Badge>;

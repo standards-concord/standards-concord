@@ -84,7 +84,15 @@ export const recall = {
       throw new BookingError(`Could not reach Recall.ai: ${(err as Error).message}`, true);
     }
     if (!res.ok) throw new BookingError(await failure(res), res.status >= 500);
-    return (await res.json()) as { id: string };
+    // Accepted, but the reply got lost or garbled: the bot may well exist.
+    let body: { id?: string };
+    try {
+      body = (await res.json()) as { id?: string };
+    } catch (err) {
+      throw new BookingError(`Recall.ai accepted the booking but its reply was unreadable: ${(err as Error).message}`, true);
+    }
+    if (!body.id) throw new BookingError('Recall.ai accepted the booking but sent no bot id.', true);
+    return { id: body.id };
   },
 
   /**

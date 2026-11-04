@@ -509,7 +509,9 @@ export function apiRouter(): Router {
   /* ------------------------------ activity --------------------------- */
   r.get('/activity', (req, res) => {
     const id = optStr(req.query.ontologyId);
-    res.json(listActivity(id ? mustFindProject(id).id : undefined, 100));
+    const all = listActivity(id ? mustFindProject(id).id : undefined, 100);
+    // Meetings are for signed-in people, and so is what happens to them.
+    res.json(req.user ? all : all.filter((a) => !a.type.startsWith('meeting.')));
   });
 
   /* ------------------------------ feedback --------------------------- */

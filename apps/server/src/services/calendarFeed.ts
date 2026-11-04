@@ -125,11 +125,22 @@ function readEvents(ics: string): Grouped {
  * it is read separately from the occurrences.
  */
 export function parseCancellations(ics: string): { uids: string[]; keys: string[] } {
+  // Read straight from the components: a cancellation needn't repeat the event's start (RFC 5546 §3.2.5).
+  const root = new ICAL.Component(ICAL.parse(ics));
+  const method = str(root.getFirstPropertyValue('method')).toUpperCase();
+  for (const tz of root.getAllSubcomponents('vtimezone')) {
+    const tzid = str(tz.getFirstPropertyValue('tzid'));
+    if (tzid && !ICAL.TimezoneService.has(tzid)) ICAL.TimezoneService.register(new ICAL.Timezone(tz));
+  }
   const uids: string[] = [];
   const keys: string[] = [];
-  for (const [uid, { master, exceptions }] of readEvents(ics)) {
-    if (master && details(master.component).cancelled) uids.push(uid);
-    for (const ex of exceptions) if (details(ex.component).cancelled) keys.push(`${uid}@${iso(ex.recurrenceId ?? ex.startDate)}`);
+  for (const c of root.getAllSubcomponents('vevent')) {
+    const uid = str(c.getFirstPropertyValue('uid'));
+    const cancelled = method === 'CANCEL' || str(c.getFirstPropertyValue('status')).toUpperCase() === 'CANCELLED';
+    if (!uid || !cancelled) continue;
+    const rid = c.getFirstPropertyValue('recurrence-id');
+    if (rid instanceof ICAL.Time) keys.push(`${uid}@${iso(rid)}`);
+    else uids.push(uid);
   }
   return { uids, keys };
 }

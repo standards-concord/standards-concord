@@ -381,6 +381,8 @@ export interface Meeting {
   bot?: {
     provider: 'recall' | 'simulated';
     botId?: string;
+    /** Shown instead of botId to people who can't see it: a bot is booked. */
+    booked?: boolean;
     status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error';
     error?: string;
     /** A booking request whose answer was lost: Recall.ai is checked for the bot before booking again. */
@@ -753,7 +755,7 @@ export interface SessionInfo {
  *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
  *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl, postPromptsToChat?} -> Meeting   (invites the co-lead bot)
- *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> {meetings: Meeting[]; cancelled: number}   (imports a calendar invite or its cancellation)
+ *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> {meetings: Meeting[]; cancelled: number; cancelRetrying: number}   (imports a calendar invite or its cancellation)
  *  GET  /api/meet-bot                                -> MeetBotInfo
  *  POST /api/meet-bot/sync                           -> MeetBotInfo   (re-read the bot's calendar now)
  *  PATCH /api/meetings/:id {postPromptsToChat?, skip?, approve?} -> Meeting   (owners, stewards and editors)

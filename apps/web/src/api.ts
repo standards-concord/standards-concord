@@ -199,7 +199,7 @@ export const api = {
   meetings: (id: string) => get<Meeting[]>(`/api/ontologies/${e(id)}/meetings`),
   uploadMeeting: (id: string, title: string, transcript: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/upload`, { title, transcript }),
   inviteBot: (id: string, title: string, meetingUrl: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/bot`, { title, meetingUrl, postPromptsToChat }),
-  scheduleFromInvite: (id: string, ics: string, postPromptsToChat = false) => post<{ meetings: Meeting[]; cancelled: number }>(`/api/ontologies/${e(id)}/meetings/calendar`, { ics, postPromptsToChat }),
+  scheduleFromInvite: (id: string, ics: string, postPromptsToChat = false) => post<{ meetings: Meeting[]; cancelled: number; cancelRetrying: number }>(`/api/ontologies/${e(id)}/meetings/calendar`, { ics, postPromptsToChat }),
   simulateMeeting: (id: string, title: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title, postPromptsToChat }),
   meetBot: () => get<MeetBotInfo>('/api/meet-bot'),
   syncMeetBot: () => post<MeetBotInfo>('/api/meet-bot/sync'),

@@ -15,11 +15,9 @@ The bot's calendar accepts invites from anyone, and an invite can't prove who se
 - One approval covers a whole recurring series, including weeks that appear later, for as long as the series keeps the same organiser and Meet link. If either changes, any booked bot is cancelled and the call needs approving again.
 - Sending the invite, or being its organiser, gives nobody any say over the call. Only the ontology's owners, stewards and editors can approve, skip, end or post in it.
 - Declined invites, and invites the bot isn't on, are ignored. The ontology tag only says where the call is filed; it never grants permission.
-- Importing an .ics file counts as the importer's approval, because only facilitators can import.
+- Importing an .ics file counts as the importer's approval (for a call already waiting, too), because only facilitators can import.
 
-`MEET_BOT_TRUST_ORGANIZER=true` skips approval for invites whose organiser is one of the ontology's owners, stewards or editors (matched by the email on their Concord account) and that nobody sent on their behalf (no `SENT-BY`). Only turn it on if the bot's calendar accepts invites from known senders only, for example a Google Workspace account limited to your own domain.
-
-Meetings are visible to signed-in people only. Calls waiting for approval, Meet links and organisers' addresses are shown to facilitators only.
+Meetings, and the activity about them, are visible to signed-in people only. Calls waiting for approval, Meet links and organisers' addresses are shown to facilitators only.
 
 ## Which ontology a call belongs to
 
@@ -51,7 +49,7 @@ By default the bot's prompts only show on the meeting's page in Concord, for the
    ./deploy/azure/set-key.sh MEET_BOT_ICS_URL    # the secret iCal address
    ```
 
-   Optional: `MEET_BOT_TRUST_ORGANIZER` (see above), `RECALL_REGION`, `MEET_BOT_NAME` (the name shown in the call, "Concord co-facilitator" by default), `MEET_BOT_DEFAULT_ONTOLOGY` and `MEET_BOT_POST_TO_CHAT`.
+   Optional: `RECALL_REGION`, `MEET_BOT_NAME` (the name shown in the call, "Concord co-facilitator" by default), `MEET_BOT_DEFAULT_ONTOLOGY` and `MEET_BOT_POST_TO_CHAT`.
 
    `PUBLIC_URL` must be the server's public HTTPS address, because Recall.ai sends the live transcript to `PUBLIC_URL/api/webhooks/recall`.
 
@@ -66,7 +64,7 @@ By default the bot's prompts only show on the meeting's page in Concord, for the
 
 ## How it works
 
-Every minute the server reads the bot's calendar feed, lists the calls in the next two weeks that have a Meet link and include the bot as an attendee (each week of a recurring series separately, with moved, skipped and cancelled weeks handled), and keeps a scheduled meeting for each. Fifteen minutes before an approved call it books a Recall.ai bot to join at the start time; Recall.ai asks for ten minutes' notice to guarantee one is free. If the call moves, the booking is cancelled and made again; if it is cancelled, or the bot is taken off the invite, the booking is cancelled and the meeting removed. A booking is only forgotten once Recall.ai confirms the cancellation, and a failed cancellation is retried every minute even if that bot has joined the call (anything it transcribes is dropped). If the answer to a booking request is lost, Concord asks Recall.ai whether the bot exists before booking another. **End call** only reports success once the bot has left; otherwise it says so and keeps trying, and analyses the call afterwards. Recall.ai sends the live transcript to `/api/webhooks/recall`, which the co-lead bot reads as it arrives. Ten minutes after the call's slot ends and the transcript has gone quiet (or three hours after the end at the latest), the bot leaves and Concord analyses the call.
+Every minute the server reads the bot's calendar feed, lists the calls in the next two weeks that have a Meet link and include the bot as an attendee (each week of a recurring series separately, with moved, skipped and cancelled weeks handled), and keeps a scheduled meeting for each. Fifteen minutes before an approved call it books a Recall.ai bot to join at the start time; Recall.ai asks for ten minutes' notice to guarantee one is free. If the call moves, the booking is cancelled and made again; if it is cancelled, or the bot is taken off the invite, the booking is cancelled and the meeting removed. A booking is only forgotten once Recall.ai confirms the cancellation, and a failed cancellation is retried every minute even if that bot has joined the call (anything it transcribes is dropped). A call cancelled after the bot has joined has the bot taken out, and what it heard so far is analysed. If the answer to a booking request is lost, Concord asks Recall.ai whether the bot exists before booking another. **End call** only reports success once the bot has left; otherwise it says so and keeps trying, and analyses the call afterwards. Recall.ai sends the live transcript to `/api/webhooks/recall`, which the co-lead bot reads as it arrives. Ten minutes after the call's slot ends and the transcript has gone quiet (or three hours after the end at the latest), the bot leaves and Concord analyses the call.
 
 Reading the calendar as an iCal feed needs no Google sign-in or OAuth app, only the secret address. The server never shows that address: errors reading the feed are reported with the address removed. How quickly Google updates the feed isn't guaranteed and can be several minutes or more, so send invites well ahead of a call. If that proves too slow, the next step is reading the calendar through the Google Calendar API instead.
 
