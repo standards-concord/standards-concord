@@ -11,7 +11,7 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
-import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, noteStray, tracked } from './botLifecycle.js';
+import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, normalise, noteStray, settled, tracked } from './botLifecycle.js';
 import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
@@ -63,7 +63,7 @@ export const botActive = (m: Meeting) =>
   tracked(m) ? (m.bot.phase === 'booking' || m.bot.phase === 'booked') && m.status !== 'scheduled' : !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
 
 /** Whether a Recall.ai bot may still be around: booked, unanswered, or not yet confirmed gone. */
-export const botOutstanding = (m: Meeting) => tracked(m) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing');
+export const botOutstanding = (m: Meeting) => tracked(m) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing' || !!m.bot.strays?.length);
 
 /**
  * What a signed-in person may see of a meeting. Invites waiting for approval, and
@@ -71,6 +71,8 @@ export const botOutstanding = (m: Meeting) => tracked(m) && (m.bot.phase === 'bo
  * are the call's Meet link, organiser, bot and booking ids, and Recall.ai's errors.
  */
 export function visibleMeeting(m: Meeting, user: User | undefined): Meeting | undefined {
+  // A withdrawn call whose bots are all gone is only kept to keep looking for a dismissed booking: it is gone for everyone.
+  if (m.withdrawn && tracked(m) && settled(m.bot)) return undefined;
   if (canFacilitate(m, user)) return m;
   if (m.calendar?.approval === 'pending' || m.withdrawn) return undefined;
   const { meetingUrl: _url, ...rest } = m;
@@ -614,6 +616,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
     { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative },
     {
       accept: (x) => {
+        normalise(x);
         if (!tracked(x)) return false;
         const b = x.bot;
         if (fromBot && knownGone(b, fromBot)) return false;
@@ -677,8 +680,10 @@ export async function endLiveMeeting(meetingId: string) {
     });
     await drive(meetingId);
     const m = getMeeting(meetingId);
-    if (tracked(m) && m.bot.phase !== 'done') {
-      throw new HttpError(502, `${m.bot.fault ?? 'The bot hasn’t left yet.'} Concord will keep trying; the call is analysed once the bot has left.`);
+    // Every bot of the call's, strays included, must be confirmed gone.
+    if (tracked(m) && (m.bot.phase !== 'done' || !settled(m.bot))) {
+      const what = m.bot.phase === 'done' ? 'Another bot that turned up in this call hasn’t been removed yet.' : 'The bot hasn’t left yet.';
+      throw new HttpError(502, `${m.bot.fault ?? what} Concord will keep trying; the call is analysed once the bot has left.`);
     }
     return finishCall(meetingId);
   }

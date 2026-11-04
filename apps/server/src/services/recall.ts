@@ -55,6 +55,9 @@ export class BookingError extends Error {
  */
 export const BOT_LIFETIME = { waiting_room_timeout: 20 * 60, noone_joined_timeout: 20 * 60, in_call_recording_timeout: 6 * 60 * 60 };
 
+/** The answers to a booking that mean Recall.ai read it and made no bot from its key. */
+const DEFINITE_REFUSALS = new Set([400, 422]);
+
 /** How long Recall.ai honours an idempotency key; a replay is only sent well inside it. */
 export const IDEMPOTENCY_KEY_MS = 50 * 60 * 1000;
 
@@ -108,8 +111,11 @@ export const recall = {
     } catch (err) {
       throw new BookingError(`Could not reach Recall.ai: ${scrub((err as Error).message)}`, true);
     }
-    // 409: a request with this idempotency key is still being handled, so the bot may well exist.
-    if (!res.ok) throw new BookingError(await failure(res), res.status >= 500 || res.status === 409);
+    // Only a request Recall.ai read and rejected (400 or 422) means this key made no bot: a replay
+    // of an accepted booking returns that booking's bot. Anything else says nothing about an
+    // earlier send: 401/403 (key disabled or missing), 404, 409 (this key still being handled),
+    // 429, 5xx. So the bot may well exist.
+    if (!res.ok) throw new BookingError(await failure(res), !DEFINITE_REFUSALS.has(res.status));
     // Accepted, but the reply got lost or garbled: the bot may well exist.
     let body: unknown;
     try {

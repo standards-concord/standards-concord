@@ -8,8 +8,8 @@ import { newId } from '../ids.js';
 import { withLock } from '../locks.js';
 import { parseCancellations, parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
 import { findProject } from './ontologies.js';
-import { beginBooking, beginRelease, background, bump, drive, driveDue, idleBot, lanesIdle, releasingCount, settled, tracked } from './botLifecycle.js';
-import { botActive, dropMeeting, emit, endLiveMeeting, lastLineTime, meetingLock, NO_BOT_PROVIDER, pruneSecrets, recordSeriesApproval, saveMeeting, seriesApproved } from './meetings.js';
+import { beginBooking, beginRelease, background, bump, drive, driveDue, droppable, idleBot, lanesIdle, normalise, releasingCount, settled, tracked } from './botLifecycle.js';
+import { botActive, botOutstanding, dropMeeting, emit, endLiveMeeting, lastLineTime, meetingLock, NO_BOT_PROVIDER, pruneSecrets, recordSeriesApproval, saveMeeting, seriesApproved } from './meetings.js';
 import { recall } from './recall.js';
 import { allUsers, logActivity } from './users.js';
 
@@ -163,47 +163,50 @@ async function readFeed(url: string) {
 /* Keeping scheduled meetings in line with the calendar                        */
 /* ------------------------------------------------------------------------ */
 
+/** What's left to do for a call once the calendar has been read: run after the calendar lock is let go, so it never holds up other calls. */
+type Finish = () => Promise<'done' | 'retrying'>;
+
 /**
  * A call that has been cancelled (or the bot taken off it). Before it starts, it is
  * withdrawn: hidden, its bot released, and deleted once Recall.ai confirms the bot
  * has gone. Once the bot is in the call, it is taken out (End call) and what it
- * heard so far is analysed. Returns whether that is done, or still under way.
+ * heard so far is analysed. The decision is recorded now, under the call's lock;
+ * the requests to Recall.ai are what the returned step does.
  */
-async function withdrawCall(meetingId: string, opts: { background?: boolean } = {}): Promise<'done' | 'retrying'> {
+async function withdrawCall(meetingId: string): Promise<Finish> {
   const live = get<Meeting>('meetings', meetingId);
-  if (!live) return 'done';
+  if (!live) return async () => 'done';
   if (live.status !== 'scheduled') {
-    if (!botActive(live) && !live.bot?.leaving) return 'done';
-    const ending = endLiveMeeting(meetingId).then(
-      () => 'done' as const,
-      () => 'retrying' as const,
-    );
-    if (opts.background) {
-      void background(ending);
-      return 'retrying';
-    }
-    return ending;
+    if (!botActive(live) && !botOutstanding(live)) return async () => 'done';
+    return () =>
+      endLiveMeeting(meetingId).then(
+        () => 'done' as const,
+        () => 'retrying' as const,
+      );
   }
   await meetingLock(meetingId, () => {
     const m = get<Meeting>('meetings', meetingId);
     if (!m) return;
+    normalise(m);
+    const gen = m.bot?.gen;
+    const was = m.withdrawn;
     m.withdrawn = true;
     beginRelease(m, 'cancel', 'idle');
     // Nothing booked: it goes now. Otherwise it is kept (hidden) until the bot is confirmed gone.
-    if (!tracked(m) || settled(m.bot)) dropMeeting(m.id);
-    else emit(saveMeeting(m), { type: 'meeting', meeting: m });
+    if (!tracked(m) || droppable(m.bot)) dropMeeting(m.id);
+    else if (!was || m.bot.gen !== gen) emit(saveMeeting(m), { type: 'meeting', meeting: m });
   });
-  if (!get('meetings', meetingId)) return 'done';
-  if (opts.background) {
-    void background(drive(meetingId));
-    return 'retrying';
-  }
-  await drive(meetingId);
-  return get('meetings', meetingId) ? 'retrying' : 'done';
+  return async () => {
+    if (get('meetings', meetingId)) await drive(meetingId);
+    const m = get<Meeting>('meetings', meetingId);
+    return !m || !tracked(m) || settled(m.bot) ? 'done' : 'retrying';
+  };
 }
 
 /** Calendar calls still on the books (withdrawn ones only wait for their bot to go). */
 const calendarMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite' && m.calendar && !m.withdrawn);
+/** Every calendar call Concord still holds, withdrawn ones included: each occurrence has one record until its bots are gone. */
+const heldMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite' && m.calendar);
 
 /**
  * Brings the scheduled meetings in line with a feed's occurrences. One meeting per
@@ -215,8 +218,10 @@ async function reconcile(
   occs: CalendarOccurrence[],
   feed: 'calendar' | 'upload',
   opts: { now: Date; project?: OntologyProject; actor?: User; postPromptsToChat?: boolean; cancelled?: { uids: string[]; keys: string[] } },
+  later: Finish[],
 ) {
-  const byKey = new Map(calendarMeetings().map((m) => [m.calendar!.key, m]));
+  // A withdrawn record still waiting for its bot to go keeps its occurrence: if the call comes back, it is that record again.
+  const byKey = new Map(heldMeetings().map((m) => [m.calendar!.key, m]));
   const touched: Meeting[] = [];
   const seen = new Set<string>();
   /** Live calls whose invite changed under them: the bot is taken out once the loop is done. */
@@ -292,6 +297,10 @@ async function reconcile(
     const updated = await meetingLock(existing.id, async () => {
       const m = get<Meeting>('meetings', existing.id);
       if (!m) return undefined;
+      normalise(m);
+      // Back on the calendar after being withdrawn: the same call, with the same bot record (still
+      // releasing its old bot, if that isn't confirmed gone yet; a fresh one is booked after that).
+      if (m.withdrawn) m.withdrawn = undefined;
       // The calendar is the better source: it reports moves and cancellations.
       if (feed === 'calendar' && m.calendar!.feed === 'upload') m.calendar!.feed = 'calendar';
       const cal = m.calendar!;
@@ -352,16 +361,15 @@ async function reconcile(
     }
   }
 
-  // From the calendar, all this runs beside the bookings rather than holding them up.
-  for (const id of endAfter) {
-    const ending = endLiveMeeting(id).catch(() => undefined);
-    if (feed === 'calendar') void background(ending);
-    else await ending;
-  }
-  for (const id of releasing) {
-    if (feed === 'calendar') void background(drive(id));
-    else await drive(id);
-  }
+  // Requests to Recall.ai run once the calendar lock is let go (see Finish).
+  for (const id of endAfter)
+    later.push(() =>
+      endLiveMeeting(id).then(
+        () => 'done' as const,
+        () => 'retrying' as const,
+      ),
+    );
+  for (const id of releasing) later.push(() => drive(id).then(() => 'done' as const));
 
   // Calls this feed no longer lists: cancelled before they start, or the bot taken out
   // if it's already in (past the scheduled end too, while the call overruns).
@@ -373,34 +381,37 @@ async function reconcile(
     // Older than the feed window: the clock ends that call by itself.
     if (new Date(cal.end).getTime() < opts.now.getTime() - OVERRUN_MAX_MS) continue;
     const gone = feed === 'calendar' ? cal.feed === 'calendar' : cal.feed === 'upload' && m.ontologyId === opts.project?.id && !!cal.uid && uids.has(cal.uid) && new Date(cal.start).getTime() < opts.now.getTime() + HORIZON_MS;
-    // From the calendar, cancelling runs beside the bookings rather than holding them up.
-    if (gone) await withdrawCall(m.id, { background: feed === 'calendar' });
+    if (gone) later.push(await withdrawCall(m.id));
   }
   return touched;
 }
 
-/** Calls an imported cancellation names (a whole event or series, or single weeks), in this ontology: how many are done, and how many are still being retried. */
+/**
+ * Calls an imported cancellation names (a whole event or series, or single weeks), in
+ * this ontology, withdrawn ones still getting rid of a bot included: a step for each,
+ * which says whether it is done or still being retried.
+ */
 async function applyCancellations(project: OntologyProject, cancelled: { uids: string[]; keys: string[] }) {
-  const out = { cancelled: 0, retrying: 0 };
-  for (const m of calendarMeetings()) {
+  const steps: Finish[] = [];
+  for (const m of heldMeetings()) {
     const cal = m.calendar!;
-    if (m.ontologyId !== project.id || (m.status !== 'scheduled' && !botActive(m))) continue;
+    if (m.ontologyId !== project.id || (m.status !== 'scheduled' && !botActive(m) && !botOutstanding(m))) continue;
     if (!cancelled.keys.includes(cal.key) && !(cal.uid && cancelled.uids.includes(cal.uid))) continue;
-    if ((await withdrawCall(m.id)) === 'done') out.cancelled++;
-    else out.retrying++;
+    steps.push(await withdrawCall(m.id));
   }
-  return out;
+  return steps;
 }
 
 /** Re-reads the bot's calendar. Without MEET_BOT_ICS_URL this does nothing. */
 export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastSync']> {
   const url = config.meetBot.calendarIcsUrl;
   if (!url) return undefined;
-  return withLock('meet-bot:calendar', async () => {
+  const later: Finish[] = [];
+  const result = await withLock('meet-bot:calendar', async () => {
     let state: SyncState;
     try {
       const occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
-      await reconcile(occs, 'calendar', { now });
+      await reconcile(occs, 'calendar', { now }, later);
       state = { at: now.toISOString(), ok: true, events: occs.filter((o) => o.meetingUrl && (!config.meetBot.inviteEmail || botAttendee(o))).length };
     } catch (err) {
       state = { at: now.toISOString(), ok: false, events: 0, error: sanitise((err as Error).message) };
@@ -409,6 +420,9 @@ export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastS
     put('kv', { id: SYNC_KEY, ...state });
     return state;
   });
+  // Beside the bookings, never holding them (or the calendar) up.
+  for (const step of later) void background(step());
+  return result;
 }
 
 /**
@@ -429,10 +443,14 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
   const cancels = cancelled.uids.length + cancelled.keys.length > 0;
   if (!occs.length && !cancels) throw new HttpError(400, 'That invite has no calls in the next two weeks.');
   if (occs.length && !occs.some((o) => o.meetingUrl)) throw new HttpError(400, 'That invite has no Google Meet link.');
-  const { touched, c } = await withLock('meet-bot:calendar', async () => ({
-    c: cancels ? await applyCancellations(project, cancelled) : { cancelled: 0, retrying: 0 },
-    touched: occs.length ? await reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat }) : [],
+  const later: Finish[] = [];
+  const { touched, steps } = await withLock('meet-bot:calendar', async () => ({
+    steps: cancels ? await applyCancellations(project, cancelled) : [],
+    touched: occs.length ? await reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat }, later) : [],
   }));
+  // Recall.ai is asked once the calendar lock is let go, so the clock's bookings go ahead meanwhile.
+  const [outcomes] = await Promise.all([Promise.all(steps.map((step) => step())), Promise.all(later.map((step) => step()))]);
+  const c = { cancelled: outcomes.filter((o) => o === 'done').length, retrying: outcomes.filter((o) => o === 'retrying').length };
   if (c.cancelled + c.retrying)
     logActivity({
       ontologyId: project.id,
@@ -460,6 +478,8 @@ function planOne(meetingId: string, now: Date) {
     const m = get<Meeting>('meetings', meetingId);
     if (!m?.calendar || m.withdrawn) return;
     const before = JSON.stringify(m);
+    // A record from before the state machine is read as one first (and saved so), never replaced unread.
+    normalise(m);
     const cal = m.calendar;
     const t = now.getTime();
     const start = new Date(cal.start).getTime();
@@ -468,7 +488,7 @@ function planOne(meetingId: string, now: Date) {
     const withdraw = () => {
       m.withdrawn = true;
       beginRelease(m, 'cancel', 'idle');
-      if (!tracked(m) || settled(m.bot)) dropMeeting(m.id);
+      if (!tracked(m) || droppable(m.bot)) dropMeeting(m.id);
       else emit(saveMeeting(m), { type: 'meeting', meeting: m });
     };
 

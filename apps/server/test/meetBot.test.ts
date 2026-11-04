@@ -28,7 +28,7 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0 };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[] };
 /** Bots the stand-in has created, for listing and status. */
 const idempotent = new Map<string, string>();
 const bots = new Map<string, { id: string; meeting_url: string; metadata?: Record<string, string>; status_changes: { code: string }[] }>();
@@ -47,6 +47,8 @@ beforeAll(async () => {
           res.statusCode = status;
           res.end(body);
         }, delay);
+      // The API key was disabled: every request is turned away before Recall.ai looks at it.
+      if (stubMode.authFail) return reply(401, '{"detail":"Invalid API token"}');
       if (req.method === 'POST' && req.url === '/bot/') {
         // Recall.ai is down: nothing is booked, and nothing said.
         if (stubMode.failCreate) return reply(503, '{"detail":"Service unavailable"}');
@@ -82,7 +84,9 @@ beforeAll(async () => {
       }
       const own = req.url?.match(/^\/bot\/(bot-\d+)\/$/);
       if (req.method === 'GET' && own) return reply(bots.has(own[1]) ? 200 : 404, JSON.stringify(bots.get(own[1]) ?? {}));
-      if (stubMode.failCancel && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}');
+      // failCancel: every bot refuses to be removed; refuseIds: just these ones.
+      const refuses = stubMode.failCancel || stubMode.refuseIds.some((id) => req.url?.startsWith(`/bot/${id}/`));
+      if (refuses && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}');
       if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : reply(200, '{}', stubMode.chatDelayMs);
       const done = req.url?.match(/^\/bot\/(bot-\d+)\/(?:leave_call\/)?$/);
       if (done && (req.method === 'DELETE' || req.method === 'POST')) bots.get(done[1])?.status_changes.push({ code: 'done' });
@@ -105,7 +109,7 @@ afterAll(() => {
 
 beforeEach(() => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0 });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] });
   for (const m of list<Meeting>('meetings')) if (m.source === 'calendar-invite') remove('meetings', m.id);
   for (const k of list<{ id: string }>('kv')) if (/^meet-bot:(approval|retire|retired):/.test(k.id)) remove('kv', k.id);
 });
@@ -1814,6 +1818,295 @@ describe('invite-by-email', () => {
     await meetBotIdle();
     expect(getMeeting(m.id).transcript.map((l) => l.text)).toEqual(['Hello everyone.']);
     expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: m.bot!.botId, bookingId: m.bot!.bookingId });
+  });
+
+  /* ----- Fixes from the ninth review ----- */
+
+  it('9.1: a lost booking whose lookup and replay are refused for authentication stays unconfirmed, so End doesn’t finish the call', async () => {
+    // Used to count any 4xx as "no bot was made", so a disabled API key let End mark the call done and analyse it.
+    stubMode.dropCreate = true;
+    const { m, s } = await joinNow('Auth refused');
+    stubMode.dropCreate = false;
+    const lost = `bot-${nextBot}`;
+    await line(m.id, 'Said while the booking was unconfirmed.');
+    stubMode.authFail = true;
+    const res = await s.post(`/api/meetings/${m.id}/end`);
+    expect(res.status).toBe(502);
+    expect(getMeeting(m.id)).toMatchObject({ status: 'live', bot: { phase: 'releasing', uncertain: true } });
+    expect((await s.post(`/api/meetings/${m.id}/analyse`)).status).toBe(409);
+    await dispatchDue(new Date(Date.now() + 5 * 60_000));
+    expect(getMeeting(m.id).status).toBe('live');
+    // With the key working again, the bot is found and taken out, and only then is the call analysed.
+    stubMode.authFail = false;
+    await dispatchDue(new Date(Date.now() + 40 * 60_000));
+    await meetBotIdle();
+    expect(calls.some((c) => c.method !== 'GET' && c.url.startsWith(`/bot/${lost}/`))).toBe(true);
+    expect(getMeeting(m.id)).toMatchObject({ status: 'analysed', bot: { phase: 'done', botId: lost } });
+  });
+
+  it('9.1: only a request Recall.ai read and rejected (400) counts as no bot; a first booking turned away for authentication stays unconfirmed', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    stubMode.authFail = true;
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booking', uncertain: true });
+    stubMode.authFail = false;
+    stubMode.rejectCreate = true;
+    await dispatchDue(at('2026-11-10T14:48:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'idle' });
+    expect(getMeeting(m.id).bot?.fault).toMatch(/400/);
+  });
+
+  it('9.2: a call taken off the calendar and put back while its bot can’t be cancelled stays one call with one bot', async () => {
+    // Used to make a second record for the same occurrence, and book a second bot while the first was still in the call.
+    const invite = () => oneOff({ uid: 'back-again', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' });
+    writeFeed(invite());
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    const first = getMeeting(m.id).bot!.botId!;
+    stubMode.failCancel = true;
+    writeFeed();
+    await sync(at('2026-11-10T14:47:00Z'));
+    expect(withdrawnMeetings().map((x) => x.id)).toEqual([m.id]);
+    writeFeed(invite());
+    await sync(at('2026-11-10T14:48:00Z'));
+    await dispatchDue(at('2026-11-10T14:48:00Z'));
+    const held = list<Meeting>('meetings').filter((x) => x.calendar?.uid === 'back-again');
+    expect(held.map((x) => x.id)).toEqual([m.id]);
+    expect(held[0].withdrawn).toBeFalsy();
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'releasing', botId: first });
+    expect(bookings()).toHaveLength(1);
+    // Once the old bot is confirmed gone, the call books its fresh one.
+    stubMode.failCancel = false;
+    await dispatchDue(at('2026-11-10T14:52:00Z'));
+    await dispatchDue(at('2026-11-10T14:53:00Z'));
+    const removed = calls.findIndex((c) => c.method === 'DELETE' && c.url === `/bot/${first}/`);
+    const rebooked = calls.findIndex((c, i) => i > 0 && c.method === 'POST' && c.url === '/bot/' && calls.slice(0, i).some((p) => p.method === 'POST' && p.url === '/bot/'));
+    expect(removed).toBeGreaterThan(-1);
+    expect(rebooked).toBeGreaterThan(removed);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked' });
+    expect(getMeeting(m.id).bot!.botId).not.toBe(first);
+  });
+
+  it('9.3: End call waits for a bot that turned up uninvited and refuses to leave, and the call isn’t analysed meanwhile', async () => {
+    // Used to say the call ended (and analyse it) while the stray bot was still recording.
+    const m = await liveCall();
+    bots.set('bot-777', { id: 'bot-777', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-777'];
+    await line(m.id, 'Someone else’s bot.', 'bot-777');
+    await meetBotIdle();
+    expect(getMeeting(m.id).bot!.strays).toEqual(['bot-777']);
+    const s = await steward('Steward Stray');
+    expect((await s.post(`/api/meetings/${m.id}/end`)).status).toBe(502);
+    expect(getMeeting(m.id)).toMatchObject({ status: 'live', bot: { phase: 'done', strays: ['bot-777'] } });
+    expect((await s.post(`/api/meetings/${m.id}/analyse`)).status).toBe(409);
+    stubMode.refuseIds = [];
+    await dispatchDue(new Date(Date.now() + 40 * 60_000));
+    await meetBotIdle();
+    expect(getMeeting(m.id)).toMatchObject({ status: 'analysed', bot: { phase: 'done' } });
+    expect(getMeeting(m.id).bot!.strays).toBeUndefined();
+  });
+
+  it('9.3: a call doesn’t book its bot while another bot of its own still refuses to leave', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    const [m] = calendarMeetings();
+    bots.set('bot-778', { id: 'bot-778', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-778'];
+    put('kv', { id: `meeting-secret:${m.id}`, secret: 'early-secret' });
+    await line(m.id, 'Before the call.', 'bot-778');
+    await meetBotIdle();
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    expect(bookings()).toHaveLength(0);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'idle', strays: ['bot-778'] });
+    stubMode.refuseIds = [];
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    await dispatchDue(at('2026-11-10T14:51:00Z'));
+    expect(bookings()).toHaveLength(1);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked' });
+  });
+
+  it('9.4: dismissing a withdrawn call’s unconfirmed booking keeps its record and webhook secret, so its bot is still caught and cancelled', async () => {
+    // Used to delete the call and its secret at once: the bot's own lines were then refused, and nothing could find it again.
+    const { m, lost } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    writeFeed();
+    await sync(at('2026-11-10T14:50:00Z'));
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const s = await steward('Steward Dismiss');
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    // Gone for everyone, but kept, with its secret, while the booking is still looked for.
+    expect((await s.get(`/api/meetings/${m.id}`)).status).toBe(404);
+    expect(list<Meeting>('meetings').some((x) => x.id === m.id)).toBe(true);
+    expect(secretOf(m.id)).toBeTruthy();
+    // The bot speaks up: it is cancelled.
+    await line(m.id, 'Still here.', lost);
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${lost}/` }));
+    expect(getMeeting(m.id).transcript).toHaveLength(0);
+    // Once a lookup shows what the booking made has ended, the call (and its secret) go.
+    stubMode.listHides = false;
+    stubMode.failCreate = false;
+    await dispatchDue(new Date(Date.now() + 7 * 3600e3));
+    expect(list<Meeting>('meetings').some((x) => x.id === m.id)).toBe(false);
+    expect(list<{ id: string }>('kv').some((k) => k.id === `meeting-secret:${m.id}`)).toBe(false);
+  });
+
+  it('9.4: a dismissed booking is still looked for, every six hours, and its bot cancelled when it turns up', async () => {
+    const { m, lost } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const s = await steward('Steward Lookout');
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    expect(getMeeting(m.id).bot!.dismissed).toHaveLength(1);
+    const t = Date.now() + 24 * 3600e3;
+    await dispatchDue(new Date(t));
+    stubMode.listHides = false;
+    calls.length = 0;
+    await dispatchDue(new Date(t + 3600e3));
+    expect(calls.filter((c) => c.method === 'GET' && c.url.startsWith('/bot/?'))).toHaveLength(0);
+    await dispatchDue(new Date(t + 6 * 3600e3 + 60_000));
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${lost}/` }));
+    expect(getMeeting(m.id).bot!.dismissed).toBeUndefined();
+  });
+
+  it('9.5: a bot first taken for a stray, then found to be the booking’s own, is adopted and never cancelled', async () => {
+    // Used to stay in the strays list after adoption, so the call's own bot was cancelled.
+    // The booking's reply carries no bot id (as good as lost).
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    stubMode.nullCreate = true;
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    stubMode.nullCreate = false;
+    const [m] = calendarMeetings();
+    const lost = `bot-${nextBot}`;
+    stubMode.failList = true;
+    stubMode.failCreate = true;
+    stubMode.failCancel = true;
+    // Its line carries no booking metadata, so it can't be taken for the booking's bot yet.
+    await recallWebhook(m.id, secretOf(m.id), { event: 'transcript.data', data: { bot: { id: lost }, data: { participant: { name: 'Aisha Rahman' }, words: [{ text: 'No metadata.' }] } } });
+    await meetBotIdle();
+    await dispatchDue(at('2026-11-10T14:47:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booking', strays: [lost] });
+    stubMode.failList = false;
+    // Backing off by now: the next lookup is at its next turn.
+    await dispatchDue(at('2026-11-10T14:58:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: lost });
+    const adoptedAt = calls.length;
+    stubMode.failCancel = false;
+    stubMode.failCreate = false;
+    await dispatchDue(at('2026-11-10T15:10:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: lost });
+    expect(getMeeting(m.id).bot!.strays).toBeUndefined();
+    expect(getMeeting(m.id).bot!.released ?? []).not.toContain(lost);
+    // Its cancellation as a stray was refused earlier; once adopted, nothing tries to remove it again.
+    expect(calls.slice(adoptedAt).some((c) => (c.method === 'DELETE' || c.url.includes('leave_call')) && c.url.startsWith(`/bot/${lost}/`))).toBe(false);
+    expect(bots.get(lost)!.status_changes.map((x) => x.code)).not.toContain('done');
+    await line(m.id, 'Heard now.', lost);
+    expect(getMeeting(m.id).transcript.map((l) => l.text)).toContain('Heard now.');
+  });
+
+  it('9.6: a booked record from before the state machine is read as booked, never replaced by a second booking', async () => {
+    // Used to be overwritten with an idle record by the next sweep, which then booked another bot.
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    const b = getMeeting(m.id).bot!;
+    saveMeeting({ ...getMeeting(m.id), bot: { provider: 'recall', status: 'scheduled', botId: b.botId, bookingId: b.bookingId, bookedUrl: b.bookedUrl } });
+    await dispatchDue(at('2026-11-10T14:47:00Z'));
+    expect(bookings()).toHaveLength(1);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: b.botId });
+    // And cancelling the call cancels that bot.
+    writeFeed();
+    await sync(at('2026-11-10T14:48:00Z'));
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${b.botId}/` }));
+  });
+
+  it('9.7: an imported cancellation waiting on Recall.ai doesn’t hold up the clock’s bookings for other calls', async () => {
+    // Used to hold the calendar lock while cancelling, so the clock's sync (and the bookings after it) waited.
+    const start = new Date(Date.now() + 10 * 60_000);
+    const end = new Date(start.getTime() + 3600e3);
+    const x = (status?: string) => calendar(oneOff({ uid: 'imported-x', meet: 'https://meet.google.com/imp-ortx-cal', start: start.toISOString(), end: end.toISOString(), status }));
+    const s = await steward('Steward Lanes');
+    await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: x() });
+    expect(bookings()).toHaveLength(1);
+    writeFeed(oneOff({ uid: 'feed-b', meet: 'https://meet.google.com/fee-dbbb-cal', start: start.toISOString(), end: end.toISOString() }));
+    await sync(new Date());
+    stubMode.cancelDelayMs = 1500;
+    const cancelling = s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: x('CANCELLED') }).then((r) => r);
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
+    await syncNow(new Date());
+    await dispatchDue(new Date());
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(calendarMeetings().find((mm) => mm.calendar!.uid === 'feed-b')!.bot!.botId).toBeTruthy();
+    expect((await cancelling).body).toMatchObject({ cancelled: 1, cancelRetrying: 0 });
+    stubMode.cancelDelayMs = 0;
+  });
+
+  it('9.8: importing the same cancellation again still counts a bot that is being cancelled as retrying', async () => {
+    // Used to skip calls already releasing, so the second import said nothing was left to do.
+    const start = new Date(Date.now() + 10 * 60_000);
+    const one = (status?: string) => calendar(oneOff({ uid: 'twice-cancelled', start: start.toISOString(), end: new Date(start.getTime() + 3600e3).toISOString(), status }));
+    const s = await steward('Steward Twice');
+    await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one() });
+    stubMode.failCancel = true;
+    expect((await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one('CANCELLED') })).body).toMatchObject({ cancelled: 0, cancelRetrying: 1 });
+    expect((await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one('CANCELLED') })).body).toMatchObject({ cancelled: 0, cancelRetrying: 1 });
+    stubMode.failCancel = false;
+    expect((await s.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: one('CANCELLED') })).body).toMatchObject({ cancelled: 1, cancelRetrying: 0 });
+  });
+
+  it('8.7 (scheduled call): skipping and unskipping while the old bot is being cancelled books its replacement only after Recall.ai confirms', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    const first = getMeeting(m.id).bot!.botId!;
+    const s = await steward('Steward Toggle');
+    stubMode.cancelDelayMs = 400;
+    const skipping = s.patch(`/api/meetings/${m.id}`).send({ skip: true }).then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    const unskip = await s.patch(`/api/meetings/${m.id}`).send({ skip: false });
+    expect(unskip.status).toBe(200);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'releasing', botId: first });
+    expect(bookings()).toHaveLength(1);
+    expect((await skipping).status).toBe(200);
+    await meetBotIdle();
+    stubMode.cancelDelayMs = 0;
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'idle' });
+    await dispatchDue(at('2026-11-10T14:47:00Z'));
+    const removed = calls.findIndex((c) => c.method === 'DELETE' && c.url === `/bot/${first}/`);
+    expect(bookings()).toHaveLength(2);
+    expect(calls.indexOf(bookings()[1])).toBeGreaterThan(removed);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked' });
+    expect(getMeeting(m.id).bot!.botId).not.toBe(first);
+  });
+
+  it('8.7 (targeted): Recall.ai confirming one bot gone never settles a record that is now releasing another', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    const [m] = calendarMeetings();
+    const s = await steward('Steward Stale');
+    stubMode.cancelDelayMs = 300;
+    const skipping = s.patch(`/api/meetings/${m.id}`).send({ skip: true }).then((r) => r);
+    await new Promise((r) => setTimeout(r, 100));
+    // While the first bot's cancellation is in flight, the record comes to be releasing another bot.
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, botId: 'bot-other', gen: (x.bot!.gen ?? 0) + 1 };
+    });
+    await skipping;
+    await meetBotIdle();
+    stubMode.cancelDelayMs = 0;
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'releasing', botId: 'bot-other' });
   });
 
   it('the calendar reader agrees with the cancellation reader', () => {

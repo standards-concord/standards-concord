@@ -45,13 +45,21 @@ const RELEASED_KEEP = 20;
 export const tracked = (m: Meeting | undefined): m is Tracked => !!m?.bot && m.bot.provider === 'recall' && !!m.bot.phase;
 /** Nothing booked, nothing being released, no stray bots. */
 export const settled = (b: Bot) => (b.phase === 'idle' || b.phase === 'done' || !b.phase) && !b.strays?.length;
+/**
+ * Settled, and no dismissed booking still being looked for: only then may a withdrawn
+ * meeting (and its webhook secret) go. A dismissed booking's bot may still turn up, by
+ * a lookup or by its own transcript line, and is then cancelled as a stray.
+ */
+export const droppable = (b: Bot) => settled(b) && !b.dismissed?.length;
+/** What every new shape of the record keeps: bots to cancel, bots known gone, dismissed bookings still looked for. */
+const carry = (b: Bot) => ({ strays: b.strays, released: b.released, dismissed: b.dismissed, lookAgainAt: b.lookAgainAt });
 /** Whether the booking can still be sent again under its idempotency key. */
 export const withinKey = (b: Pick<Bot, 'bookedAt'>, t: number) => !!b.bookedAt && t - Date.parse(b.bookedAt) < IDEMPOTENCY_KEY_MS;
 
 export const idleBot = (): Bot => ({ provider: 'recall', phase: 'idle', gen: 0, status: 'scheduled' });
 
-/** Records from before the state machine. */
-function normalise(m: Meeting) {
+/** Records from before the state machine (applied before anything reads or replaces the record). */
+export function normalise(m: Meeting) {
   const b = m.bot;
   if (!b || b.provider !== 'recall' || b.phase) return;
   b.gen = 0;
@@ -103,7 +111,7 @@ export function bump(m: Meeting) {
 /* ------------------------------------------------------------------------ */
 
 function commit(m: Meeting) {
-  if (m.withdrawn && (!m.bot || settled(m.bot))) {
+  if (m.withdrawn && (!m.bot || droppable(m.bot))) {
     dropMeeting(m.id);
     return m;
   }
@@ -135,7 +143,8 @@ export function transition(id: string, when: (m: Tracked) => boolean, change: (m
 export function beginBooking(m: Meeting, joinAt: string | undefined, at: Date) {
   normalise(m);
   const b = m.bot;
-  if (!m.meetingUrl || (tracked(m) && m.bot.phase !== 'idle')) return false;
+  // Only from idle, and only once every other bot of this meeting's is confirmed gone.
+  if (!m.meetingUrl || (tracked(m) && (m.bot.phase !== 'idle' || !!m.bot.strays?.length))) return false;
   m.bot = {
     provider: 'recall',
     phase: 'booking',
@@ -148,8 +157,7 @@ export function beginBooking(m: Meeting, joinAt: string | undefined, at: Date) {
     chat: !!m.postPromptsToChat,
     attempts: 0,
     fault: b?.fault,
-    strays: b?.strays,
-    released: b?.released,
+    ...(b ? carry(b) : {}),
   };
   bump(m);
   return true;
@@ -191,8 +199,19 @@ function finishRelease(m: Tracked) {
   const released = [...(b.released ?? []), ...(b.botId ? [b.botId] : [])].slice(-RELEASED_KEEP);
   m.bot =
     b.after === 'done'
-      ? { provider: 'recall', phase: 'done', gen: b.gen, status: 'done', botId: b.botId, inCall: b.inCall, strays: b.strays, released }
-      : { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', strays: b.strays, released };
+      ? { provider: 'recall', phase: 'done', gen: b.gen, status: 'done', botId: b.botId, inCall: b.inCall, ...carry(b), released }
+      : { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', ...carry(b), released };
+}
+
+/**
+ * The record's own bot is known to be gone (it finished, or was cancelled as a stray
+ * before Recall.ai named it this booking's): releasing settles; a booking books
+ * afresh if there's still time.
+ */
+function botGone(m: Tracked) {
+  const b = m.bot;
+  if (b.phase === 'releasing') return finishRelease(m);
+  m.bot = { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', ...carry(b), released: [...(b.released ?? []), ...(b.botId ? [b.botId] : [])].slice(-RELEASED_KEEP) };
 }
 
 function addStrays(m: Tracked, ids: string[]) {
@@ -219,24 +238,25 @@ export function adoptInPlace(m: Tracked, bookingId: string | undefined, found: {
   if (!bookingId || b.bookingId !== bookingId || (b.phase !== 'booking' && b.phase !== 'releasing')) return false;
   const mine = b.botId ?? (found.find((f) => !f.ended) ?? found[0])?.id;
   if (!mine) return false;
+  // Taken for a stray before Recall.ai said whose it was: it is this booking's bot, not one to cancel.
+  if (b.strays?.includes(mine)) b.strays = b.strays.filter((s) => s !== mine).length ? b.strays.filter((s) => s !== mine) : undefined;
   const others = found.filter((f) => f.id !== mine);
   addStrays(
     m,
     others.filter((f) => !f.ended).map((f) => f.id),
   );
-  const finished = found.find((f) => f.id === mine)?.ended;
+  // Already cancelled as a stray, or finished: nothing of it is left.
+  const finished = found.find((f) => f.id === mine)?.ended || !!b.released?.includes(mine);
   Object.assign(b, {
     botId: mine,
     attempts: 0,
     nextAt: undefined,
     fault: undefined,
-    released: [...(b.released ?? []), ...others.filter((f) => f.ended).map((f) => f.id)].slice(-RELEASED_KEEP),
+    released: [...(b.released ?? []).filter((r) => r !== mine), ...others.filter((f) => f.ended).map((f) => f.id)].slice(-RELEASED_KEEP),
   });
-  if (finished) {
-    // Already over: nothing left to release. A booking whose bot has finished books afresh if there's still time.
-    if (b.phase === 'releasing') finishRelease(m);
-    else m.bot = { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', strays: b.strays, released: [...(b.released ?? []), mine].slice(-RELEASED_KEEP) };
-  } else if (b.phase === 'booking') b.phase = 'booked';
+  // Already over: nothing left to release. A booking whose bot has finished books afresh if there's still time.
+  if (finished) botGone(m);
+  else if (b.phase === 'booking') b.phase = 'booked';
   return true;
 }
 
@@ -291,7 +311,12 @@ export function drive(id: string, now?: number): Promise<void> {
 }
 
 async function work(id: string, now?: number) {
-  for (let pass = 0; pass < 6; pass++) {
+  const first = get<Meeting>('meetings', id);
+  if (!first) return;
+  normalise(first);
+  // From the clock, a record backing off only gets its dismissed bookings looked for (if their turn has come).
+  const waiting = now !== undefined && first.bot?.nextAt !== undefined && first.bot.nextAt > now;
+  for (let pass = 0; pass < 6 && !waiting; pass++) {
     const m = get<Meeting>('meetings', id);
     if (!m) return;
     normalise(m);
@@ -302,13 +327,19 @@ async function work(id: string, now?: number) {
     else if (b.phase === 'releasing') progressed = await releaseBot(m, now);
     if (!progressed) break;
   }
-  await cancelStrays(id, now);
+  await lookForDismissed(id, now);
+  if (!waiting) await cancelStrays(id, now);
   // A withdrawn meeting goes once nothing is outstanding.
   await transition(
     id,
-    (m) => !!m.withdrawn && settled(m.bot),
+    (m) => !!m.withdrawn && droppable(m.bot),
     () => undefined,
   );
+}
+
+/** Once the bot (and every stray) is confirmed gone from a finished call, what it heard is analysed. */
+function whenFinished(m: Meeting | undefined) {
+  if (m && tracked(m) && m.bot.phase === 'done' && settled(m.bot) && !m.withdrawn) background(finishCall(m.id));
 }
 
 function backoff(b: Bot, now: number) {
@@ -404,7 +435,7 @@ async function settleBooking(m: Tracked, now?: number): Promise<boolean> {
       (x) => x.bot.bookingId === bookingId && !x.bot.botId && (x.bot.phase === 'booking' || x.bot.phase === 'releasing'),
       (x) => {
         if (x.bot.phase === 'releasing') finishRelease(x);
-        else x.bot = { provider: 'recall', phase: 'idle', gen: x.bot.gen, status: 'scheduled', fault: r.error, strays: x.bot.strays, released: x.bot.released };
+        else x.bot = { provider: 'recall', phase: 'idle', gen: x.bot.gen, status: 'scheduled', fault: r.error, ...carry(x.bot) };
       },
     ));
   }
@@ -420,7 +451,7 @@ async function adopt(id: string, bookingId: string, found: { id: string; ended?:
     (m) => void adoptInPlace(m, bookingId, found),
   );
   if (done) {
-    if (tracked(done) && done.bot.phase === 'done') background(finishCall(id));
+    whenFinished(done);
     return true;
   }
   // The record has moved on (the bot was named meanwhile, say): anything else found is cancelled.
@@ -451,7 +482,7 @@ async function releaseBot(m: Tracked, now?: number): Promise<boolean> {
     (x) => x.bot.phase === 'releasing' && x.bot.botId === botId,
     (x) => finishRelease(x),
   );
-  if (done && tracked(done) && done.bot.phase === 'done') background(finishCall(m.id));
+  whenFinished(done);
   return !!done;
 }
 
@@ -459,20 +490,65 @@ async function cancelStrays(id: string, now?: number) {
   const m = get<Meeting>('meetings', id);
   if (!tracked(m) || !m.bot.strays?.length) return;
   for (const stray of m.bot.strays) {
-    const gen = get<Meeting>('meetings', id)?.bot?.gen ?? 0;
+    const latest = get<Meeting>('meetings', id);
+    // Adopted meanwhile (Recall.ai said it is this booking's bot): not a stray any more.
+    if (!tracked(latest) || !latest.bot.strays?.includes(stray)) continue;
+    const gen = latest.bot.gen;
     const r = await recall.release(stray, 'cancel');
     if (r.ok)
-      await transition(
-        id,
-        (x) => !!x.bot.strays?.includes(stray),
-        (x) => {
-          x.bot.strays = x.bot.strays!.filter((s) => s !== stray);
-          if (!x.bot.strays.length) x.bot.strays = undefined;
-          x.bot.released = [...(x.bot.released ?? []), stray].slice(-RELEASED_KEEP);
-        },
+      whenFinished(
+        await transition(
+          id,
+          (x) => !!x.bot.strays?.includes(stray) || x.bot.botId === stray,
+          (x) => {
+            x.bot.strays = x.bot.strays?.filter((s) => s !== stray);
+            if (!x.bot.strays?.length) x.bot.strays = undefined;
+            // Adopted while it was being cancelled: the record's own bot is gone, and the record says so.
+            if (x.bot.botId === stray) botGone(x);
+            x.bot.released = [...(x.bot.released ?? []).filter((s) => s !== stray), stray].slice(-RELEASED_KEEP);
+          },
+        ),
       );
     else await failed(id, gen, r.error, now);
   }
+}
+
+/**
+ * Bookings a facilitator dismissed are still looked for, every six hours (their bot
+ * may yet turn up). What turns up is cancelled as a stray, and its booking is then
+ * no longer looked for.
+ */
+async function lookForDismissed(id: string, now?: number) {
+  const m = get<Meeting>('meetings', id);
+  if (!tracked(m) || !m.bot.dismissed?.length) return;
+  const t = now ?? Date.now();
+  if (m.bot.lookAgainAt !== undefined && m.bot.lookAgainAt > t) return;
+  const results: { bookingId: string; found?: { id: string; ended: boolean }[] }[] = [];
+  for (const d of m.bot.dismissed) {
+    try {
+      results.push({ bookingId: d.bookingId, found: (await recall.findBots(d.url, id)).filter((f) => f.booking === d.bookingId) });
+    } catch {
+      results.push({ bookingId: d.bookingId });
+    }
+  }
+  await transition(
+    id,
+    (x) => !!x.bot.dismissed?.length,
+    (x) => {
+      const b = x.bot;
+      for (const r of results) {
+        if (!r.found?.length) continue;
+        addStrays(
+          x,
+          r.found.filter((f) => !f.ended).map((f) => f.id),
+        );
+        b.released = [...(b.released ?? []), ...r.found.filter((f) => f.ended && !b.released?.includes(f.id)).map((f) => f.id)].slice(-RELEASED_KEEP);
+        b.dismissed = b.dismissed?.filter((d) => d.bookingId !== r.bookingId);
+      }
+      if (b.dismissed?.length) b.lookAgainAt = t + 6 * HOUR;
+      else Object.assign(b, { dismissed: undefined, lookAgainAt: undefined });
+    },
+  );
 }
 
 /* ------------------------------------------------------------------------ */
@@ -481,10 +557,12 @@ async function cancelStrays(id: string, now?: number) {
 
 /** Whether the record has something to do with Recall.ai, and its turn has come. */
 export function due(m: Meeting, t: number) {
+  normalise(m);
   if (!tracked(m)) return false;
   const b = m.bot;
-  const work = b.phase === 'booking' || b.phase === 'releasing' || !!b.strays?.length || (!!m.withdrawn && settled(b));
-  return work && (b.nextAt === undefined || b.nextAt <= t);
+  const work = b.phase === 'booking' || b.phase === 'releasing' || !!b.strays?.length || (!!m.withdrawn && droppable(b));
+  const lookFor = !!b.dismissed?.length && (b.lookAgainAt === undefined || b.lookAgainAt <= t);
+  return (work && (b.nextAt === undefined || b.nextAt <= t)) || lookFor;
 }
 
 /** Starts the lanes of every record whose turn has come (lanes already running are left to finish). */
@@ -500,17 +578,22 @@ export const releasingCount = () => list<Meeting>('meetings').filter((m) => trac
 /**
  * A facilitator's confirmation that an unconfirmed booking can be let go: only one
  * that can no longer be sent again safely (its key has expired) and that Recall.ai
- * hasn't listed. Booking: the call may book again. Releasing: release is done.
+ * hasn't listed. Booking: the call may book again. Releasing: release is done. Either
+ * way the booking is still looked for (and its bot cancelled if it turns up), and a
+ * withdrawn meeting, with its webhook secret, is kept for that.
  */
 export async function dismissUnconfirmed(id: string) {
   const m = await transition(
     id,
     (x) => (x.bot.phase === 'booking' || x.bot.phase === 'releasing') && !x.bot.botId && !!x.bot.bookingId && !!x.bot.unconfirmed,
     (x) => {
-      if (x.bot.phase === 'releasing') finishRelease(x);
-      else x.bot = { provider: 'recall', phase: 'idle', gen: x.bot.gen, status: 'scheduled', strays: x.bot.strays, released: x.bot.released };
+      const b = x.bot;
+      b.dismissed = [...(b.dismissed ?? []), { bookingId: b.bookingId!, url: b.bookedUrl ?? x.meetingUrl! }].slice(-RELEASED_KEEP);
+      b.lookAgainAt = undefined;
+      if (b.phase === 'releasing') finishRelease(x);
+      else x.bot = { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', ...carry(b) };
     },
   );
-  if (m && tracked(m) && m.bot.phase === 'done') background(finishCall(id));
+  whenFinished(m);
   return m;
 }
