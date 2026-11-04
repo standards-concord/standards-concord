@@ -223,15 +223,31 @@ describe('SHACL compact syntax', () => {
     // Three types that reduce to one (SZ) give one shape.
     const xs = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xs'), null);
     expect(xs.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value)).toEqual(['https://example.org/e#SZ']);
-    // Datatypes that may overlap (0 is both non-negative and non-positive): only the first is checked, and a note says so,
-    // as SHACL would otherwise reject the overlap.
+    // Datatypes neither of which is narrower are both checked, never neither, and a note says SHACL's exact
+    // datatype check rejects the overlap of their value spaces (0 is both non-negative and non-positive).
     const xn = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xn'), null);
-    expect(xn.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null))).toHaveLength(1);
+    expect(xn.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value).sort()).toEqual([NS.xsd + 'nonNegativeInteger', NS.xsd + 'nonPositiveInteger']);
     const ttl = await toShacl(await edge());
-    expect(ttl).toMatch(/^# Note: <https:\/\/example\.org\/e#XN> <https:\/\/example\.org\/e#xn>: values must also be <http:\/\/www\.w3\.org\/2001\/XMLSchema#non(Positive|Negative)Integer>, but SHACL can only require one datatype/m);
+    expect(ttl).toMatch(/^# Note: <https:\/\/example\.org\/e#XN> <https:\/\/example\.org\/e#xn>: values must be all of <[^>]+>, <[^>]+>\. SHACL checks a literal's datatype exactly/m);
     const shaclc = await toShaclc(await edge()); // and SHACLC says the same
     expect(shaclc).toMatch(/^# Note: <https:\/\/example\.org\/e#XN>/m);
   });
+
+  it('combines many restrictions on one property quickly', async () => {
+    const lines = ['@prefix owl: <http://www.w3.org/2002/07/owl#> .', '@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .', '@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .',
+      '@prefix m: <https://example.org/m#> .', '<https://example.org/m> a owl:Ontology .', 'm:p a owl:DatatypeProperty .'];
+    const restrictions: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      lines.push(`m:S${i} a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:maxLength ${i + 1} ] ) ] .`);
+      restrictions.push(`[ a owl:Restriction ; owl:onProperty m:p ; owl:allValuesFrom m:S${i} ]`);
+    }
+    lines.push(`m:C a owl:Class ; rdfs:subClassOf ${restrictions.join(' , ')} .`);
+    const g = await OntologyGraph.fromTurtle(lines.join('\n'));
+    const started = Date.now();
+    const ttl = await toShacl(g);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(ttl.match(/sh:datatype m:S/g)).toHaveLength(400);
+  }, 30_000);
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
     const ttl = await toShacl(await loadFixture());

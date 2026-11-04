@@ -14,7 +14,7 @@ import { blankNode, canonical, literal, nn, objects, readList, typedLit } from '
 import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
-import { codeModel, derivesFrom, disjointDatatypes, type PropertyInfo } from './codemodel.js';
+import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -34,12 +34,6 @@ export interface PropShape {
    * property shape of its own.
    */
   alsoTypes?: { cls?: string; datatype?: string }[];
-  /**
-   * Further datatypes the values must also have, whose value spaces may overlap
-   * the main datatype's: SHACL can only require one datatype IRI of a literal,
-   * so these aren't checked, and a note says so.
-   */
-  unchecked?: string[];
   qualified: { shape: { cls?: string; datatype?: string }; min?: number; max?: number }[];
 }
 
@@ -116,16 +110,13 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
     for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? [], narrowerOrEqual);
-    // Two datatypes neither of which is narrower: separate shapes are right when their value spaces are disjoint
-    // (no value can have both, as OWL says), but would reject the overlap of two that may overlap.
+    // Two datatypes neither of which is narrower each get a shape, so SHACL checks both. sh:datatype checks a
+    // literal's datatype IRI exactly, so values that OWL allows in the overlap of their value spaces (0 for
+    // xsd:nonNegativeInteger and xsd:nonPositiveInteger) are rejected: stricter, never laxer. A note says so.
     for (const ps of byPath.values()) {
-      if (!ps.datatype || !ps.alsoTypes) continue;
-      const overlapping = ps.alsoTypes.filter((t) => t.datatype && !disjointDatatypes(ps.datatype!, t.datatype, bases));
-      if (!overlapping.length) continue;
-      ps.alsoTypes = ps.alsoTypes.filter((t) => !overlapping.includes(t));
-      if (!ps.alsoTypes.length) delete ps.alsoTypes;
-      ps.unchecked = overlapping.map((t) => t.datatype!);
-      notes.push(`<${k.iri}> <${ps.path}>: values must also be ${ps.unchecked.map((d) => `<${d}>`).join(', ')}, but SHACL can only require one datatype of a value, so only <${ps.datatype}> is checked.`);
+      const dts = [ps.datatype, ...(ps.alsoTypes ?? []).map((t) => t.datatype)].filter((d): d is string => Boolean(d));
+      if (dts.length > 1)
+        notes.push(`<${k.iri}> <${ps.path}>: values must be all of ${dts.map((d) => `<${d}>`).join(', ')}. SHACL checks a literal's datatype exactly, so any value typed with only one of them is rejected, even one in both value spaces.`);
     }
     shapes.push({
       iri: `${shapesNs}${localName(k.iri)}Shape`,
@@ -545,16 +536,20 @@ type ValueType = { cls?: string; datatype?: string };
  */
 function addOnlyType(ps: PropShape, t: ValueType, narrowerOrEqual: (a: ValueType, b: ValueType) => boolean): void {
   const cur: ValueType | undefined = ps.datatype ? { datatype: ps.datatype } : ps.cls ? { cls: ps.cls } : undefined;
-  const fromRange = ps.fromRange;
+  const range = ps.fromRange ? cur : undefined;
   delete ps.fromRange;
-  // Every type that applies, in order of preference: the restrictions in order, then the range's.
-  const all = [...(cur && !fromRange ? [cur] : []), ...(ps.alsoTypes ?? []), t, ...(cur && fromRange ? [cur] : [])];
-  // Keep only the narrowest: drop a type when another is narrower, or equivalent and earlier.
-  const minimal = all.filter((x, i) => !all.some((y, j) => j !== i && narrowerOrEqual(y, x) && (!narrowerOrEqual(x, y) || j < i)));
+  // The types so far are already the narrowest, in order of preference. One as narrow as the new type
+  // makes it redundant; otherwise it replaces those it is narrower than. A restriction goes before the range's.
+  let types = [...(cur ? [cur] : []), ...(ps.alsoTypes ?? [])];
+  if (!types.some((x) => narrowerOrEqual(x, t))) {
+    types = types.filter((x) => !narrowerOrEqual(t, x));
+    if (range && types[0] === range) types.unshift(t);
+    else types.push(t);
+  }
   delete ps.cls;
   delete ps.datatype;
-  Object.assign(ps, minimal[0]);
-  if (minimal.length > 1) ps.alsoTypes = minimal.slice(1);
+  Object.assign(ps, types[0]);
+  if (types.length > 1) ps.alsoTypes = types.slice(1);
   else delete ps.alsoTypes;
 }
 
