@@ -57,10 +57,24 @@ export function applyLook(id: LookId, persist = true) {
   window.dispatchEvent(new CustomEvent('concord-look', { detail: id }));
 }
 
-/** Run once before the first render: honour ?look=, else the remembered look. */
+/**
+ * Run once before the first render: a valid ?look= wins and is remembered, else the
+ * remembered look, else the default. The inline script in index.html applies the same
+ * rules before first paint; e2e/looks.spec.ts checks they agree.
+ */
 export function initLook() {
   const param = new URLSearchParams(window.location.search).get('look');
   applyLook(isLook(param) ? param : storedLook(), isLook(param));
+}
+
+/** A choice made in the app replaces any ?look= in the address, so a reload keeps it. */
+export function chooseLook(id: LookId) {
+  applyLook(id);
+  const url = new URL(window.location.href);
+  if (url.searchParams.has('look')) {
+    url.searchParams.delete('look');
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+  }
 }
 
 export function currentLook(): LookId {

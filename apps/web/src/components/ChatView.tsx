@@ -125,7 +125,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
               }}
               placeholder={dict.listening ? 'Listening… speak naturally' : placeholder}
               className={cx(
-                'block w-full resize-none rounded-xl border border-line-strong bg-surface px-3.5 py-2.5 text-sm placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-60',
+                'block w-full resize-none rounded-xl border border-control bg-surface px-3.5 py-2.5 text-sm placeholder:text-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-60',
                 dict.listening && 'border-danger/60',
               )}
             />

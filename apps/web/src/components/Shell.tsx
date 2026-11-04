@@ -25,7 +25,7 @@ function OntologySwitcher() {
         aria-label="Switch ontology"
         value={currentId ?? ''}
         onChange={(e) => nav(e.target.value ? `/o/${e.target.value}` : '/')}
-        className="h-8 max-w-56 appearance-none truncate rounded-lg border border-line bg-surface py-0 pr-8 pl-3 text-sm hover:border-line-strong focus:border-accent focus:outline-none"
+        className="h-8 max-w-56 appearance-none truncate rounded-lg border border-control bg-surface py-0 pr-8 pl-3 text-sm hover:border-line-strong focus:border-accent focus:outline-none"
       >
         <option value="">All ontologies</option>
         {data.map((o) => (
@@ -34,7 +34,7 @@ function OntologySwitcher() {
           </option>
         ))}
       </select>
-      <ChevronDown className="pointer-events-none absolute top-2 right-2.5 size-4 text-muted" />
+      <ChevronDown className="app-header-muted pointer-events-none absolute top-2 right-2.5 size-4 text-muted" />
     </div>
   );
 }
@@ -74,10 +74,10 @@ function UserMenu() {
       <button onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
         <Avatar name={user.name} src={user.avatarUrl} size={30} />
         <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
-        <ChevronDown className="hidden size-3.5 text-muted lg:inline" />
+        <ChevronDown className="app-header-muted hidden size-3.5 text-muted lg:inline" />
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-xl" onClick={() => setOpen(false)}>
+        <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
           <div className="border-b border-line px-4 py-3">
             <div className="truncate text-sm font-medium">{user.name}</div>
             {user.email && <div className="truncate text-xs text-muted">{user.email}</div>}

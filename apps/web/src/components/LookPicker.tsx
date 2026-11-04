@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Check, Palette } from 'lucide-react';
-import { applyLook, currentLook, LOOKS, type LookId } from '../lib/look';
+import { chooseLook, currentLook, LOOKS, type LookId } from '../lib/look';
 import { Card, CardHeader, cx } from './ui';
 
 /** Hook for the active look; updates when it changes anywhere in the app. */
@@ -11,7 +11,7 @@ export function useLook(): [LookId, (id: LookId) => void] {
     window.addEventListener('concord-look', on);
     return () => window.removeEventListener('concord-look', on);
   }, []);
-  return [look, applyLook];
+  return [look, chooseLook];
 }
 
 /** Choose the app's visual style. Each option previews itself in its own look. */

@@ -18,6 +18,9 @@
 /* ------------------------------------------------------------ Original (classic) */
 :root,
 [data-look='classic'] {
+  --danger-fg: #ffffff;
+  --control-line: #8c9096;
+  --header-focus: var(--focus);
   --bg: #fafaf9;
   --surface: #ffffff;
   --surface-2: #f4f4f3;
@@ -86,6 +89,8 @@
 @media (prefers-color-scheme: dark) {
   :root,
   [data-look='classic'] {
+    --danger-fg: #1a0b0a;
+    --control-line: #646a72;
     --bg: #0f1012;
     --surface: #16181b;
     --surface-2: #1d2024;
@@ -126,6 +131,8 @@
 
 /* ------------------------------------------------------------ Specification */
 [data-look='spec'] {
+  --danger-fg: #ffffff;
+  --control-line: #8c8679;
   --bg: #f7f6f2;
   --surface: #fffefb;
   --surface-2: #f0eee8;
@@ -188,6 +195,8 @@
 
 /* ------------------------------------------------------------ Civic grid */
 [data-look='civic'] {
+  --danger-fg: #ffffff;
+  --control-line: var(--line-strong);
   --bg: #ffffff;
   --surface: #ffffff;
   --surface-2: #f3f3f1;
@@ -251,6 +260,9 @@
 
 /* ------------------------------------------------------------ Workbench */
 [data-look='workbench'] {
+  --danger-fg: #ffffff;
+  --control-line: #7d8882;
+  --header-focus: #7fd6b4;
   --bg: #eef0ed;
   --surface: #fbfcfa;
   --surface-2: #e7ebe7;
@@ -315,6 +327,8 @@
 
 @media (prefers-color-scheme: dark) {
   [data-look='spec'] {
+    --danger-fg: #1a0b0a;
+    --control-line: #6d685e;
     --bg: #141311;
     --surface: #1b1a17;
     --surface-2: #24221e;
@@ -355,6 +369,7 @@
     color-scheme: dark;
   }
   [data-look='civic'] {
+    --danger-fg: #1a0b0a;
     --bg: #0b0b0b;
     --surface: #0b0b0b;
     --surface-2: #1a1a1a;
@@ -396,6 +411,8 @@
     color-scheme: dark;
   }
   [data-look='workbench'] {
+    --danger-fg: #1a0b0a;
+    --control-line: #5f6b65;
     --bg: #0f1412;
     --surface: #161c19;
     --surface-2: #1e2622;
@@ -460,6 +477,8 @@
   --color-warn-soft: var(--warn-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --color-danger-fg: var(--danger-fg);
+  --color-control: var(--control-line);
   --radius-xs: var(--r-xs);
   --radius-sm: var(--r-sm);
   --radius-md: var(--r-md);
@@ -494,8 +513,16 @@
   color: var(--header-fg);
   border-top: var(--header-rule) solid var(--accent);
 }
-.app-header .app-brand-sub {
+.app-header .app-brand-sub,
+.app-header .app-header-muted {
   color: var(--header-muted);
+}
+.app-header :focus-visible {
+  outline-color: var(--header-focus);
+}
+/* Menus that drop out of the masthead sit on the page surface, so they use page colours. */
+.app-header [role='menu'] {
+  color: var(--fg);
 }
 .page-title {
   font-size: var(--title-size);
@@ -514,9 +541,8 @@
   font-weight: 600;
 }
 [data-look='spec'] .ui-badge {
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.04em;
-  font-size: 0.8rem;
+  letter-spacing: 0.01em;
+  font-size: 0.8125rem;
   font-weight: 600;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent);
 }
@@ -542,7 +568,7 @@
 [data-look='civic'] .ui-badge {
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-size: 0.65rem;
+  font-size: 0.75rem;
   font-weight: 700;
   box-shadow: inset 0 0 0 1px currentColor;
 }
@@ -565,7 +591,7 @@
   text-transform: none;
 }
 [data-look='workbench'] .ui-badge {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   font-weight: 500;
 }
 [data-look='workbench'] .ui-stat-value {
@@ -737,4 +763,16 @@ body {
 /* The logo tile follows the look's corner radius. */
 .app-logo-bg {
   rx: calc(var(--r-xl) * 1.4);
+}
+
+/* Respect reduced-motion: no decorative animation, transitions or smooth scrolling. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

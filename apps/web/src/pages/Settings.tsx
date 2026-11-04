@@ -19,7 +19,7 @@ export function SettingsPage() {
   });
   useEffect(() => {
     const target = { '#tokens': 'tokens', '#appearance': 'appearance' }[location.hash];
-    if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth' }), 100);
+    if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }), 100);
   }, []);
   const u = session?.user;
   if (!u) return null;

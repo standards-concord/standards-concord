@@ -10,13 +10,17 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Source+Sans+3:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=Public+Sans:wght@400;500;600;700&family=Archivo:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
     <script>
       // Apply the chosen look before first paint (see src/lib/look.ts).
-      try {
-        var l = new URLSearchParams(location.search).get('look') || localStorage.getItem('concord-look');
-        if (['spec', 'civic', 'workbench', 'classic'].indexOf(l) >= 0) document.documentElement.dataset.look = l;
-        else document.documentElement.dataset.look = 'spec';
-      } catch (e) {
-        document.documentElement.dataset.look = 'spec';
-      }
+      (function () {
+        var looks = ['spec', 'civic', 'workbench', 'classic'];
+        var look = 'spec';
+        try {
+          var stored = localStorage.getItem('concord-look');
+          if (looks.indexOf(stored) >= 0) look = stored;
+        } catch (e) {}
+        var param = new URLSearchParams(location.search).get('look');
+        if (looks.indexOf(param) >= 0) look = param;
+        document.documentElement.dataset.look = look;
+      })();
     </script>
     <title>Concord</title>
   </head>
