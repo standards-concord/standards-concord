@@ -3,8 +3,10 @@
  * exist, which one each extends, the accessors each declares and their names.
  *
  * OWL allows things a class hierarchy in code can't express directly, so:
- * - A class's accessors are its effective properties: its own, merged with
- *   those of every superclass (so a second superclass's properties aren't lost).
+ * - A class's accessors are its effective properties: its own constraints and
+ *   those of every superclass all apply, so for each property the counts are
+ *   the tightest and the value type the narrowest. A restriction that only sets
+ *   a count keeps the inherited value type; the global range is a fallback.
  * - A class extends its first named superclass only when every property it
  *   inherits would have the same accessor type in both. A narrower restriction
  *   (say `exactly 1` where the parent allows many) can't override a parent
@@ -120,50 +122,81 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   const taken = new Set<string>();
   const names = new Map<string, string>();
   for (const s of shapes) names.set(s.iri, allocate(identifierFrom(localName(s.targetClass), 'pascal'), taken, RESERVED_CLASSES));
-  let needThing = false;
 
-  /** The value type of a property shape: a class (by its shape) or a datatype. */
-  const resolve = (ps: PropShape): Pick<CodeProperty, 'node' | 'datatype'> => {
-    const pi = info.get(ps.path);
-    const range = pi?.range ?? [];
+  type Raw = Omit<CodeProperty, 'name'>;
+  type ValueType = Pick<CodeProperty, 'node' | 'datatype'>;
+
+  /** The value type a property shape states itself (sh:datatype, or a class from a restriction). */
+  const statedType = (ps: PropShape): ValueType | undefined => {
     if (ps.datatype) return { datatype: ps.datatype };
-    const cls = ps.cls ?? (pi?.objectProperty && range.length === 1 ? range[0] : undefined);
-    if (cls || pi?.objectProperty) {
-      const target = cls && byClass.get(cls);
-      if (target) return { node: target.iri };
-      needThing = true;
-      return { node: THING };
-    }
+    if (ps.cls) return { node: byClass.get(ps.cls)?.iri ?? THING };
+    return undefined;
+  };
+  /** The value type from the property's global range, for a property shape that states none. */
+  const rangeType = (path: string): ValueType => {
+    const pi = info.get(path);
+    const range = pi?.range ?? [];
+    if (pi?.objectProperty) return { node: (range.length === 1 && byClass.get(range[0])?.iri) || THING };
     if (range.length === 1) return { datatype: range[0] };
     return {};
   };
+  /** Whether shape `a`'s class is (transitively) a subclass of shape `b`'s. */
+  const isSub = (a: string, b: string, seen = new Set<string>()): boolean => {
+    if (a === b) return true;
+    if (seen.has(a)) return false;
+    seen.add(a);
+    return (byIri.get(a)?.superClasses ?? []).some((c) => {
+      const ss = byClass.get(c);
+      return ss !== undefined && isSub(ss.iri, b, seen);
+    });
+  };
+  /**
+   * Both constraints apply, so the value type is the narrower of the two when
+   * one class is a subclass of the other; otherwise `preferred` wins (a class's
+   * own statement over an inherited one, the first superclass over later ones).
+   */
+  const narrower = (preferred: ValueType, other: ValueType): ValueType => {
+    if (preferred.node && other.node && preferred.node !== THING && other.node !== THING && isSub(other.node, preferred.node)) return other;
+    if (preferred.node === THING && other.node) return other;
+    if (!preferred.node && !preferred.datatype) return other;
+    return preferred;
+  };
+  /** Both constraints apply: the larger minimum, the smaller maximum, the narrower type. */
+  const merge = (preferred: Raw, other: Raw): Raw => {
+    const max = Math.min(preferred.maxCount ?? Infinity, other.maxCount ?? Infinity);
+    const t = narrower({ node: preferred.node, datatype: preferred.datatype }, { node: other.node, datatype: other.datatype });
+    return {
+      path: preferred.path,
+      ...(t.node ? { node: t.node } : {}),
+      ...(t.datatype ? { datatype: t.datatype } : {}),
+      minCount: Math.max(preferred.minCount ?? 0, other.minCount ?? 0) || undefined,
+      maxCount: max === Infinity ? undefined : max,
+    };
+  };
 
-  // Effective properties: superclasses first, then the class's own constraints narrow them.
-  const effectiveRaw = new Map<string, Map<string, Omit<CodeProperty, 'name'>>>();
-  const effectiveOf = (iri: string, stack: Set<string>): Map<string, Omit<CodeProperty, 'name'>> => {
+  // Effective properties: constraints from every superclass and the class's own all apply together.
+  const effectiveRaw = new Map<string, Map<string, Raw>>();
+  const effectiveOf = (iri: string, stack: Set<string>): Map<string, Raw> => {
     const done = effectiveRaw.get(iri);
     if (done) return done;
     const s = byIri.get(iri)!;
-    const out = new Map<string, Omit<CodeProperty, 'name'>>();
+    const out = new Map<string, Raw>();
     const next = new Set(stack).add(iri);
     for (const sup of s.superClasses) {
       const ss = byClass.get(sup);
       if (!ss || next.has(ss.iri)) continue;
-      for (const [path, p] of effectiveOf(ss.iri, next)) if (!out.has(path)) out.set(path, { ...p });
+      for (const [path, p] of effectiveOf(ss.iri, next)) {
+        const prev = out.get(path);
+        out.set(path, prev ? merge(prev, p) : { ...p });
+      }
     }
     for (const ps of s.properties) {
       if (!safeIri(ps.path)) continue;
-      const own = { path: ps.path, ...resolve(ps), minCount: ps.minCount, maxCount: ps.maxCount };
       const prev = out.get(ps.path);
-      if (!prev) out.set(ps.path, own);
-      else
-        out.set(ps.path, {
-          path: ps.path,
-          node: own.node ?? (own.datatype ? undefined : prev.node),
-          datatype: own.datatype ?? (own.node ? undefined : prev.datatype),
-          minCount: Math.max(own.minCount ?? 0, prev.minCount ?? 0) || undefined,
-          maxCount: Math.min(own.maxCount ?? Infinity, prev.maxCount ?? Infinity) === Infinity ? undefined : Math.min(own.maxCount ?? Infinity, prev.maxCount ?? Infinity),
-        });
+      // A shape that only restricts cardinality keeps the inherited value type; the global range is only a fallback.
+      const type = statedType(ps) ?? (prev ? {} : rangeType(ps.path));
+      const own: Raw = { path: ps.path, ...type, minCount: ps.minCount, maxCount: ps.maxCount };
+      out.set(ps.path, prev ? merge(own, prev) : own);
     }
     // Only cache results computed without a cycle cut short.
     if (stack.size === 0) effectiveRaw.set(iri, out);
@@ -217,6 +250,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   };
   for (const s of shapes) build(s.iri);
 
+  const needThing = classes.some((c) => [...c.effective.values()].some((p) => p.node === THING));
   const thingName = needThing ? allocate('Thing', taken, RESERVED_CLASSES) : undefined;
   return { classes, byShape, thingName, taken };
 }

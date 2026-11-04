@@ -4,8 +4,10 @@
  * functional characteristics. Qualified constraints are used where OWL semantics
  * require them (`p some F` does not mean every value is an F).
  */
-import { Store } from 'n3';
-import type { Term } from 'n3';
+import { DataFactory, Store } from 'n3';
+import type { Quad, Term } from 'n3';
+import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import type { Restriction } from './types.js';
 import { NS, RDF_TYPE, localName } from './ns.js';
 import { blankNode, canonical, literal, nn, objects, readList, typedLit } from './rdf.js';
@@ -189,13 +191,13 @@ export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): 
   for (const p of dropped) for (const q of store.getQuads(null, nn(p), null, null)) store.removeQuad(q);
 
   const { write } = await import('shaclc-write');
-  const { parse } = await import('shaclc-parse');
-  const iris = namedIris(store);
-  // A prefix is only used when every IRI it would abbreviate is safe to abbreviate (ex:p* would read as a path).
-  const prefixes = Object.fromEntries(
-    Object.entries(derived.prefixes).filter(([p, ns]) => p && iris.every((iri) => !iri.startsWith(ns) || SAFE_LOCAL.test(iri.slice(ns.length)))),
-  );
-  const { text } = await write(store.getQuads(null, null, null, null) as any, {
+  // shaclc-write abbreviates any IRI whose namespace has a prefix, including its
+  // built-in rdf:, rdfs:, sh:, xsd: and owl:, and `ex:p*` would read back as a
+  // path. So IRIs that aren't safe to abbreviate are swapped for placeholders it
+  // writes in full, and put back afterwards.
+  const { quads, restore } = shieldUnsafeIris(store);
+  const prefixes = Object.fromEntries(Object.entries(derived.prefixes).filter(([p]) => p));
+  const { text } = await write(quads as any, {
     prefixes,
     extendedSyntax: Boolean(opts.extended),
     // Without an ontology IRI there is no BASE to write.
@@ -204,13 +206,67 @@ export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): 
   const header = opts.extended
     ? `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax with shaclc-write's extended syntax.\n`
     : `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax.\n# Shape names and the shapes graph's label are in the Turtle shapes (.shacl.ttl); SHACLC has no place for them.\n`;
-  const out = header + explicitDatatypes(text, store, prefixes) + (text.endsWith('\n') ? '' : '\n');
+  const body = restore(explicitDatatypes(text, new Store(quads), prefixes));
+  const out = header + body + (body.endsWith('\n') ? '' : '\n');
 
   // Check: the SHACLC must parse back to exactly the shapes it was written from.
-  const back = new Store(parse(out, { extendedSyntax: Boolean(opts.extended) }) as any);
+  const back = new Store(await parseShaclc(out, Boolean(opts.extended)));
   const diff = graphDifference(store, back);
   if (diff) throw new Error(`SHACLC output would change the shapes (${diff}); use the Turtle shapes instead`);
   return out;
+}
+
+/** shaclc-write's split of an IRI into namespace and local name. */
+const writerNamespace = (iri: string) => /^[^]*[#/]/.exec(iri)?.[0] ?? '';
+
+/**
+ * Swaps every IRI whose local name isn't safe to abbreviate for a placeholder
+ * IRI with no namespace, which shaclc-write can only write in full. `restore`
+ * puts the real IRIs back into the written text.
+ */
+function shieldUnsafeIris(store: Store): { quads: Quad[]; restore: (text: string) => string } {
+  const nonce = randomBytes(8).toString('hex');
+  const swap = new Map<string, string>();
+  const shield = <T extends Term>(t: T): T => {
+    if (t.termType !== 'NamedNode' || SAFE_LOCAL.test(t.value.slice(writerNamespace(t.value).length))) return t;
+    if (!swap.has(t.value)) swap.set(t.value, `urn:x-concord-iri:${nonce}:${swap.size}`);
+    return nn(swap.get(t.value)!) as unknown as T;
+  };
+  const quads = store.getQuads(null, null, null, null).map((q) => DataFactory.quad(shield(q.subject), shield(q.predicate), shield(q.object), q.graph));
+  const back = new Map([...swap].map(([iri, ph]) => [`<${ph}>`, `<${iri}>`]));
+  const restore = (text: string) => (back.size ? text.replace(new RegExp(`<urn:x-concord-iri:${nonce}:\\d+>`, 'g'), (m) => back.get(m) ?? m) : text);
+  return { quads, restore };
+}
+
+/** Escapes N3's string literal parser understands. */
+const STRING_ESCAPES = { '\\': '\\', "'": "'", '"': '"', n: '\n', r: '\r', t: '\t', f: '\f', b: '\b' };
+
+/**
+ * shaclc-parse 2.0.0 unescapes literals with a private N3 lexer method that, in
+ * n3 2.x, needs a table of escapes, which shaclc-parse doesn't pass; so any
+ * literal with a backslash escape (a newline, a quote) fails to parse. The
+ * table is supplied for the duration of the (synchronous) parse.
+ */
+export async function parseShaclc(text: string, extended: boolean): Promise<Quad[]> {
+  const { parse } = await import('shaclc-parse');
+  const lexer = shaclcN3().Lexer.prototype as unknown as {
+    _unescape: (item: string, replacements?: Record<string, string>) => string | null;
+  };
+  const original = lexer._unescape;
+  lexer._unescape = function (item, replacements) {
+    return original.call(this, item, replacements ?? STRING_ESCAPES);
+  };
+  try {
+    return parse(text, { extendedSyntax: extended }) as unknown as Quad[];
+  } finally {
+    lexer._unescape = original;
+  }
+}
+
+/** The n3 module shaclc-parse itself loads. */
+function shaclcN3(): typeof import('n3') {
+  const req = createRequire(import.meta.url);
+  return createRequire(req.resolve('shaclc-parse'))('n3');
 }
 
 const commentLine = (s: string) => s.replace(/[\r\n\u2028\u2029]+/g, ' ');
@@ -273,7 +329,7 @@ function explicitDatatypes(text: string, store: Store, prefixes: Record<string, 
     .join('\n');
 }
 
-/** Prefixes `datatype=` to whole tokens in `tokens`, skipping string literals and the first token (the path). */
+/** Prefixes `datatype=` to whole tokens in `tokens`, skipping string literals, the insides of IRIs and the first token (the path). */
 function rewriteTokens(line: string, tokens: Set<string>): string {
   let out = '';
   let i = 0;
@@ -297,7 +353,9 @@ function rewriteTokens(line: string, tokens: Set<string>): string {
       continue;
     }
     let j = i;
-    while (j < line.length && !/[\s"']/.test(line[j])) j++;
+    // An IRI reference runs to its closing '>' (it may contain quotes); otherwise a token ends at whitespace or a quote.
+    if (c === '<') j = line.indexOf('>', i) < 0 ? line.length : line.indexOf('>', i) + 1;
+    else while (j < line.length && !/[\s"']/.test(line[j])) j++;
     const tok = line.slice(i, j);
     out += !first && tokens.has(tok) ? `datatype=${tok}` : tok;
     first = false;

@@ -7,6 +7,7 @@ import { DataFactory, Parser, Store } from 'n3';
 import * as wrapper from '@rdfjs/wrapper';
 import { NS, OntologyGraph, applyChangeOps, npmPackage, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '../src/index.js';
 import { canonical } from '../src/rdf.js';
+import { parseShaclc } from '../src/shacl.js';
 import { RESERVED_CLASSES } from '../src/codemodel.js';
 import { X, baseOntology, loadFixture } from './helpers.js';
 
@@ -65,6 +66,16 @@ e:right a owl:DatatypeProperty ; rdfs:domain e:Right ; rdfs:range xsd:string .
 e:X a owl:Class ; rdfs:subClassOf e:Y .
 e:Y a owl:Class ; rdfs:subClassOf e:X .
 e:y a owl:DatatypeProperty ; rdfs:domain e:Y ; rdfs:range xsd:string .
+<http://www.w3.org/1999/02/22-rdf-syntax-ns#p*> a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range xsd:string .
+e:C rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:note ; owl:hasValue "line\\nnext \\"quoted\\"\\ttab \\\\ back" ] .
+<https://outside.example/O'Reilly> a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range xsd:anyURI .
+e:Animal a owl:Class . e:Dog a owl:Class ; rdfs:subClassOf e:Animal .
+e:pet a owl:ObjectProperty ; rdfs:range e:Animal .
+e:Owner a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:pet ; owl:allValuesFrom e:Dog ] .
+e:OneDogOwner a owl:Class ; rdfs:subClassOf e:Owner , [ a owl:Restriction ; owl:onProperty e:pet ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
+e:SA a owl:Class . e:SB a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:sp ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
+e:SC a owl:Class ; rdfs:subClassOf e:SA , e:SB .
+e:sp a owl:DatatypeProperty ; rdfs:domain e:SA ; rdfs:range xsd:string .
 `;
 const edge = () => OntologyGraph.fromTurtle(EDGE);
 
@@ -110,15 +121,28 @@ describe('SHACL compact syntax', () => {
 
   it('keeps meaning with unsafe local names, datatype names inside strings and colliding shape names', async () => {
     const g = await edge();
-    const text = await toShaclc(g); // throws if the output would parse to different shapes
-    // ex:star* would read as a path: the namespace is written in full instead.
-    expect(text).toContain('<https://example.org/e#star*>');
-    expect(text).not.toMatch(/e:star\*/);
-    expect(text).toContain('hasValue="use xsd:anyURI here"');
-    expect(text).toContain('<https://example.org/e#link> datatype=xsd:anyURI .');
-    // The qualified shape for A / p / BShape doesn't take the name of the shape for class A-p-B.
-    expect(text).toContain('qualifiedValueShape=esh:A-p-BShape2');
-    expect(text).toMatch(/shape esh:A-p-BShape -> <https:\/\/example\.org\/e#A-p-B> \{\s*\}/);
+    for (const extended of [false, true]) {
+      const text = await toShaclc(g, { extended }); // throws if the output would parse to different shapes
+      // e:star* and rdf:p* would read as paths, so those IRIs are written in full, even under a built-in prefix.
+      expect(text).toContain('<https://example.org/e#star*>');
+      expect(text).toContain('<http://www.w3.org/1999/02/22-rdf-syntax-ns#p*>');
+      expect(text).not.toMatch(/e:star\*|rdf:p\*/);
+      // Other IRIs in the namespace still use the prefix.
+      expect(text).toContain('e:link datatype=xsd:anyURI .');
+      expect(text).toContain('hasValue="use xsd:anyURI here"');
+      // An apostrophe inside an IRI isn't the start of a string.
+      expect(text).toContain("<https://outside.example/O'Reilly> datatype=xsd:anyURI");
+      // The qualified shape for A / p / BShape doesn't take the name of the shape for class A-p-B.
+      expect(text).toContain('qualifiedValueShape=esh:A-p-BShape2');
+      expect(text).toMatch(/shape esh:A-p-BShape -> e:A-p-B \{\s*\}/);
+    }
+    // Literals with escapes (newline, quotes, tab, backslash) round-trip.
+    const fromC = new Store((await parseShaclc(await toShaclc(g), false)) as any);
+    const paths = fromC.getObjects(null, DataFactory.namedNode(SH + 'path'), null);
+    expect(paths.filter((t) => t.termType === 'NamedNode').map((t) => t.value)).toEqual(expect.arrayContaining([
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#p*', 'https://example.org/e#star*', "https://outside.example/O'Reilly",
+    ]));
+    expect(fromC.getObjects(null, DataFactory.namedNode(SH + 'hasValue'), null).map((o) => o.value)).toContain('line\nnext "quoted"\ttab \\ back');
   });
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -244,6 +268,13 @@ describe('Generated JavaScript classes', () => {
     expect(mod.ts).toMatch(/export class Narrow extends TermWrapper[\s\S]*?get tag\(\): string \{/);
     // Both keeps the second superclass's property.
     expect(cls('Both').properties.map((p) => p.name).sort()).toEqual(['left', 'right']);
+    // A child that only adds a cardinality keeps the inherited value type: Owner's pets are Dogs, so OneDogOwner's one pet is a Dog.
+    expect(mod.ts).toMatch(/export class Owner extends TermWrapper[\s\S]*?get pet\(\): Set<Dog>/);
+    expect(cls('OneDogOwner').extends).toBeUndefined();
+    expect(mod.ts).toMatch(/export class OneDogOwner extends TermWrapper[\s\S]*?get pet\(\): Dog \{/);
+    // Constraints on one path from two superclasses both apply: SA allows many sp, SB exactly one, so SC has one.
+    expect(cls('SC').extends).toBeUndefined();
+    expect(mod.ts).toMatch(/export class SC extends TermWrapper[\s\S]*?get sp\(\): string \{/);
     // The X/Y cycle still gives a loadable order.
     expect(mod.ts.indexOf('export class Y ')).toBeLessThan(mod.ts.indexOf('export class X extends Y'));
 
@@ -262,6 +293,13 @@ describe('Generated JavaScript classes', () => {
       expect([...child.name]).toEqual(['n']);
       expect([...child.name2]).toEqual([3]);
       expect(new m.X('https://x/x', store, DataFactory)).toBeInstanceOf(m.Y);
+      const owner = new m.OneDogOwner('https://x/o', store, DataFactory);
+      owner.pet = new m.Dog('https://x/rex', store, DataFactory);
+      expect(owner.pet).toBeInstanceOf(m.Dog);
+      expect(owner.pet.value).toBe('https://x/rex');
+      const sc = new m.SC('https://x/sc', store, DataFactory);
+      sc.sp = 'one';
+      expect(sc.sp).toBe('one');
       writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, module: 'nodenext', moduleResolution: 'nodenext', target: 'es2022', noEmit: true, types: [] }, files: ['source.ts', 'index.d.ts'] }));
       execFileSync(path.join(here, '..', 'node_modules', '.bin', 'tsc'), ['-p', dir], { stdio: 'pipe' });
     } catch (err: any) {

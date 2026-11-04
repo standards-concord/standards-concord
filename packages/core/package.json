@@ -18,6 +18,7 @@
     "n3": "^2.13.12",
     "oxigraph": "^0.5.11",
     "rdfxml-streaming-parser": "^3.3.0",
+    "shaclc-parse": "2.0.0",
     "shaclc-write": "1.6.3",
     "yaml": "^2.9.1"
   },
@@ -26,7 +27,6 @@
     "@types/jsonld": "^1.5.15",
     "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",
-    "shaclc-parse": "2.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
