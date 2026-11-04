@@ -15,6 +15,8 @@ http
       if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
       if (req.method === 'GET' && url.pathname === '/__issues') return send(res, 200, issues);
       if (req.method === 'GET' && url.pathname === '/user') return send(res, 200, { login: 'concord-e2e-bot' });
+      // No triage comments in e2e: an empty list, so withdrawal has none to delete.
+      if (req.method === 'GET' && /^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/comments$/.test(url.pathname)) return send(res, 200, []);
       const list = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues$/);
       const one = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
       if (list && req.method === 'GET') return send(res, 200, [...issues].reverse().map((i) => ({ number: i.number, html_url: i.html_url, title: i.title, body: i.body, created_at: i.created_at, user: { login: 'concord-e2e-bot' } })));
