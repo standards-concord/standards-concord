@@ -17,6 +17,8 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const INSTALL = 'apps/web/src/lib/install.ts';
+// The move tooling and its guide name the old address on purpose.
+const KEEP = ['scripts/move-repo.mjs', 'scripts/move-to-org.sh', 'docs/moving-accounts.md'];
 const SKIP = [/^pnpm-lock\.yaml$/, /^docs\/research\//, /\.(png|jpe?g|gif|webp|ico|mp4|webm|woff2?|ttf|wasm|zip|gz)$/i];
 
 const current = readFileSync(path.join(root, INSTALL), 'utf8').match(/MARKETPLACE_REPO = '([^'/]+)\/([^']+)'/);
@@ -25,7 +27,7 @@ const [, oldOwner, oldName] = current;
 
 const files = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
   .split('\n')
-  .filter((f) => f && !SKIP.some((re) => re.test(f)) && f !== 'scripts/move-repo.mjs');
+  .filter((f) => f && !SKIP.some((re) => re.test(f)) && !KEEP.includes(f));
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const read = (f) => {

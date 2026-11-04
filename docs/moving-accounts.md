@@ -9,27 +9,45 @@ Concord shares GitHub Actions minutes and Vercel's daily deployment cap with eve
 3. In the new organisation: **Settings → Packages**, under **Package creation**, tick **Public**, so the backend image can stay public (the server pulls it without a token).
 4. Optional but useful: **Settings → Billing and licensing → Budgets and alerts**, add a budget for **Actions** (even $10 to $20 a month) so CI doesn't stop dead at 2,000 minutes.
 
-## 2. Transfer the repository
+## 2. Run the move script
 
-1. Note the repository's Actions secret **names**: **Settings → Secrets and variables → Actions**. Today they are `ELEVENLABS_API_KEY`, `OPENAI_API_KEY` and `GOOGLE_TTS_API_KEY` (all optional, used only to voice the walkthrough video).
-2. **Settings → General → Danger Zone → Transfer ownership**, choose the organisation, type the repository name, confirm.
-3. GitHub redirects the old URLs (web, `git`, API) to the new home, so nothing breaks at once.
-4. Check the secrets came across (**Settings → Secrets and variables → Actions** on the transferred repo). If any are missing, add them again by the same names.
+[scripts/move-to-org.sh](../scripts/move-to-org.sh) does the GitHub side. It needs `gh` signed in as you (`gh auth login`), and is best run from an up-to-date checkout of this repository with no uncommitted changes.
+
+```sh
+scripts/move-to-org.sh <org>            # dry run: checks access and prints every step, changes nothing
+scripts/move-to-org.sh <org> --apply    # does it, asking y/N before each step
+```
+
+With `--apply` it:
+
+1. **Transfers** `jeswr/standards-concord` to the organisation (add more `owner/repo` arguments to move others too). GitHub keeps issues, PRs, webhooks, secrets and deploy keys, and redirects the old web, `git` and API addresses. Only an owner of the organisation can transfer it back, so this step is the one to be sure about.
+2. Checks **Actions** is allowed in the organisation and on the repository, and turns it on if not.
+3. Checks every Actions **secret** came across (`ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_TTS_API_KEY` today). For any that didn't, or all of them with `--reset-secrets`, it asks for the value at a hidden prompt and pipes it straight to `gh secret set`. Values are never shown, logged, saved or put on a command line. Actions **variables**, which aren't secret, are copied as they were.
+4. Points this checkout's `origin` at the new address.
+5. Opens a PR that repoints the repository's own links, by running `node scripts/move-repo.mjs <org>`: the plugin and marketplace listings, the Connect page's install commands, the container image in the deploy scripts and the MCP Registry name (`io.github.<org>/concord`). CI checks every link agrees (`node scripts/move-repo.mjs --check`). If this branch isn't merged yet, run the script from it, and the repoint PR will include it.
+6. Reconnects the **Vercel** project's Git link with `vercel git connect`, if the `vercel` CLI is installed and this folder is linked (`vercel link`). Otherwise it prints the two clicks to do it in the dashboard.
+7. Starts a **CI run** on `main` in the organisation and waits until its first job is really running. A job that stops before any step is how GitHub refuses work for billing, and the script says so.
+
+It ends by listing what only the browser can do, which is step 3 below.
+
+Options: `--yes` (don't ask before each step), `--reset-secrets`, `--no-pr`, `--no-check`.
 
 ## 3. Give Claude access
 
 1. Install the Claude GitHub app on the organisation: <https://github.com/apps/claude/installations/select_target>, choose the organisation, and give it **standards-concord** (or all repositories).
 2. In the Claude project, open **Project settings → Repositories** and replace `jeswr/standards-concord` with the new address.
-3. Merge the PR that repoints the repository's own links. It is one command, `node scripts/move-repo.mjs <org>`, which updates the plugin and marketplace listings, the install commands on the Connect page, the container image the deploy scripts pull, and the MCP Registry name (`io.github.<org>/concord`). CI checks every link agrees (`node scripts/move-repo.mjs --check`).
+3. Merge the repoint PR from step 2.5 once its CI is green.
 
-## 4. Point the backend at the new image
+## 4. The backend image (only while the Azure VM is in use)
 
-The next `main` build publishes `ghcr.io/<org>/standards-concord`. The old `ghcr.io/jeswr/standards-concord` stops updating, so:
+The backend is moving to Vercel, after which this step goes away. Until then: the next `main` build publishes `ghcr.io/<org>/standards-concord`, and the old `ghcr.io/jeswr/standards-concord` stops updating, so:
 
 1. After that build, open the organisation's **Packages → standards-concord → Package settings → Change visibility → Public**.
 2. On the VM, change `IMAGE=` in `/opt/concord/stack.env` to the new image, then `systemctl start concord-refresh.service`. With the Azure CLI: `az vm run-command invoke -g concord -n concord --command-id RunShellScript --scripts "sed -i 's#^IMAGE=.*#IMAGE=ghcr.io/<org>/standards-concord:latest#' /opt/concord/stack.env && systemctl start concord-refresh.service"`.
 
 ## 5. Move the site to the new Vercel account
+
+If you keep the current Vercel account for now, step 2.6 (or reconnecting the Git repository in the project's **Settings → Git**) is all Vercel needs. To move to a new Vercel account as well:
 
 The site should keep its address, `standards-concord.vercel.app`, because it is in the MCP listings, the OAuth set-up and testers' bookmarks. The steps below keep it.
 
