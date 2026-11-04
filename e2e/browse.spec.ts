@@ -423,30 +423,31 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     return readFileSync(await (await download).path(), 'utf8');
   }
 
-  /**
-   * Opens an exported SVG on its own and, for every run of text fixed to its on-screen length,
-   * measures how long the file's embedded font draws it without that hint. The two match when
-   * the file reproduces what was on screen.
-   */
+  type Run = { text: string; width: number; weight: string; style: string };
+  // Every run of text in an SVG (a text element's rows, or the element itself) as drawn.
+  const drawnRuns = async (svg: Element) => {
+    await document.fonts.ready;
+    return [...svg.querySelectorAll('text')]
+      .flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]))
+      .map((t) => {
+        const cs = getComputedStyle(t);
+        return { text: t.textContent ?? '', width: (t as SVGTextContentElement).getComputedTextLength(), weight: cs.fontWeight, style: cs.fontStyle };
+      });
+  };
+  const onScreen = (d: ReturnType<Page['locator']>) => d.locator('svg[data-width]').evaluate(drawnRuns);
+  /** Opens an exported SVG on its own page, as a browser would, and measures its text. */
   async function openExport(page: Page, svgText: string) {
     const viewer = await page.context().newPage();
     await viewer.setContent(`<body style="margin:0">${svgText}</body>`);
-    const runs = await viewer.locator('svg').first().evaluate(async (svg) => {
-      await document.fonts.ready;
-      const out: { text: string; fixed: number; natural: number; weight: string; style: string }[] = [];
-      for (const el of svg.querySelectorAll<SVGTextContentElement>('[textLength]')) {
-        const fixed = Number(el.getAttribute('textLength'));
-        el.removeAttribute('textLength');
-        const cs = getComputedStyle(el);
-        out.push({ text: el.textContent ?? '', fixed, natural: el.getComputedTextLength(), weight: cs.fontWeight, style: cs.fontStyle });
-        el.setAttribute('textLength', String(fixed));
-      }
-      return out;
-    });
-    return { viewer, runs };
+    return { viewer, runs: await viewer.locator('svg').first().evaluate(drawnRuns) };
   }
-  // Within a pixel, or rounding over a long run in a fallback font (characters Inter lacks).
-  const mismatched = (runs: { text: string; fixed: number; natural: number }[]) => runs.filter((r) => Math.abs(r.fixed - r.natural) > Math.max(1, r.fixed * 0.002)).map((r) => `${r.text.slice(0, 40)}: ${r.natural} drawn, ${r.fixed} on screen`);
+  // Runs the file draws at a different width from the screen: within a pixel, or rounding over
+  // a long run in a fallback font (characters Inter lacks).
+  const mismatched = (shown: Run[], saved: Run[]) =>
+    shown.length !== saved.length
+      ? [`${saved.length} runs saved, ${shown.length} on screen`]
+      : saved.flatMap((r, i) => (Math.abs(r.width - shown[i].width) > Math.max(1, shown[i].width * 0.002) ? [`${r.text.slice(0, 40)}: ${r.width} drawn, ${shown[i].width} on screen`] : []));
+  const fontFaces = (svgText: string) => svgText.match(/@font-face\{/g)?.length ?? 0;
 
   test('exported diagrams keep real text, carry the font and draw it as on screen', async ({ page }) => {
     // Kerned capitals, arrows Inter draws as one glyph, and enough attributes for the italic
@@ -466,17 +467,46 @@ test.describe('large and unusual ontologies (stubbed)', () => {
 
     const svgText = await exportSvg(page, d);
     expect(svgText).toMatch(/@font-face\{font-family:Inter;font-weight:600;font-style:normal;unicode-range:[^;]+;src:url\(data:font\/woff2;base64,/);
+    // Only the Latin subset, in the three faces the diagram uses: this text needs nothing else.
+    expect(fontFaces(svgText)).toBe(3);
     expect(svgText).toMatch(/<(text|tspan)[^>]*>AVATAR WAVE -&gt; Tokyo</);
+    // Nothing is stretched to fit, and nothing is outlined.
+    expect(svgText).not.toContain('textLength');
     expect(svgText).not.toContain('<use');
 
+    const shown = await onScreen(d);
     const { viewer, runs } = await openExport(page, svgText);
     expect(runs.length).toBeGreaterThanOrEqual(14);
     expect(runs.map((r) => r.style)).toContain('italic');
     expect(runs.map((r) => r.weight)).toContain('600');
-    expect(mismatched(runs)).toEqual([]);
+    expect(mismatched(shown, runs)).toEqual([]);
     // Its text can be found and selected.
     expect(await viewer.evaluate(() => (window as unknown as { find: (s: string) => boolean }).find('AVATAR WAVE'))).toBe(true);
     expect(await viewer.evaluate(() => String(getSelection()))).toBe('AVATAR WAVE');
+    await viewer.close();
+  });
+
+  test('Greek, Cyrillic, Vietnamese and combining accents are drawn in Inter in the file too; emoji are left alone', async ({ page }) => {
+    const labels = {
+      Greek: 'Οργανισμός εθελοντικής δράσης',
+      Cyrillic: 'Добровольческая организация',
+      Vietnamese: 'Tổ chức tình nguyện',
+      Combining: 'Cafe\u0301 nai\u0308ve',
+      Emoji: 'Family 👨‍👩‍👧 🏳️‍🌈 🇬🇧 👍🏽',
+    };
+    await stub(page, Object.entries(labels).map(([k, label]) => ({ ...cls(k), label })));
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(5);
+    const svgText = await exportSvg(page, d);
+    // Latin plus the Greek, Cyrillic and Vietnamese subsets (and whichever cover the accents).
+    expect(fontFaces(svgText)).toBeGreaterThanOrEqual(4);
+    // Emoji keep their shapes: nothing in the file stretches text.
+    expect(svgText).not.toContain('textLength');
+    const shown = await onScreen(d);
+    const { viewer, runs } = await openExport(page, svgText);
+    expect(mismatched(shown, runs)).toEqual([]);
+    for (const label of Object.values(labels)) expect(runs.map((r) => r.text)).toContain(label);
     await viewer.close();
   });
 
@@ -512,16 +542,14 @@ test.describe('large and unusual ontologies (stubbed)', () => {
       releasePage();
     });
     expect(svgText).toMatch(new RegExp(`<text[^>]*font-weight="600"[^>]*>${rel}\\b`));
-    // Every length in the file is Inter's, so the snapshot was taken after it loaded.
+    // The file matches the page as it is now, laid out again in Inter: the snapshot was taken
+    // after the font loaded, and the boxes were sized for it.
     const { viewer, runs } = await openExport(page, svgText);
     expect(runs.length).toBeGreaterThanOrEqual(3);
-    expect(mismatched(runs)).toEqual([]);
+    expect(mismatched(await onScreen(d), runs)).toEqual([]);
+    const sizes = (root: Page) => root.locator('[data-node] rect:not([data-focus-ring])').evaluateAll((els) => els.map((e) => Math.round((e as SVGGraphicsElement).getBBox().width)));
+    expect(await sizes(viewer)).toEqual(await sizes(page));
     await viewer.close();
-    // And the page laid itself out again in Inter, matching the file.
-    const live = await d.locator('svg[data-width]').evaluate((svg) =>
-      [...svg.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])).map((t) => Math.round((t as SVGTextContentElement).getComputedTextLength())),
-    );
-    expect(live).toEqual(runs.map((r) => Math.round(r.fixed)));
   });
 
   test('a diagram can be saved as a PNG at twice its size', async ({ page }) => {
@@ -537,6 +565,46 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     const png = readFileSync(await file.path());
     expect(png.subarray(1, 4).toString()).toBe('PNG');
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual(size.map((n) => n * 2));
+  });
+
+  test('a PNG too large for the browser is saved smaller, and one it cannot make says so', async ({ page }) => {
+    // A browser that can't allocate canvases above a given size (as large canvases fail on
+    // memory-constrained devices), and then one that can't encode any PNG at all.
+    await page.addInitScript(() => {
+      const w = window as unknown as { canvasLimit?: number; failEncode?: boolean };
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...a: Parameters<typeof getContext>) {
+        return w.canvasLimit && this.width * this.height > w.canvasLimit ? null : getContext.apply(this, a);
+      } as typeof getContext;
+      const toBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (this: HTMLCanvasElement, cb: BlobCallback, ...a: [string?, number?]) {
+        return w.failEncode ? setTimeout(() => cb(null)) && undefined : toBlob.call(this, cb, ...a);
+      };
+    });
+    await stub(page, [cls('Owner'), cls('Pet')]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    const [w, h] = await d.locator('svg[data-width]').evaluate((svg) => [Number((svg as SVGSVGElement).dataset.width) + 40, Number((svg as SVGSVGElement).dataset.height) + 40]);
+    await page.evaluate((limit) => ((window as unknown as { canvasLimit: number }).canvasLimit = limit), w * h * 4 - 1);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    const png = readFileSync(await (await download).path());
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([w, h]);
+    await expect(d.getByRole('alert')).toHaveCount(0);
+
+    await page.evaluate(() => ((window as unknown as { failEncode: boolean }).failEncode = true));
+    let downloads = 0;
+    page.on('download', () => downloads++);
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    await expect(d.getByRole('alert')).toContainText("Couldn't save the diagram as PNG");
+    expect(downloads).toBe(0);
+    // Trying again clears the message once it works.
+    await page.evaluate(() => ((window as unknown as { failEncode: boolean }).failEncode = false));
+    const again = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    await again;
+    await expect(d.getByRole('alert')).toHaveCount(0);
   });
 
   test('exporting a large diagram stays compact and quick', async ({ page }) => {
@@ -555,8 +623,8 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     const started = Date.now();
     const svgText = await exportSvg(page, d);
     const took = Date.now() - started;
-    // The diagram's own markup, its text lengths and about 250 kB of embedded font.
-    expect(svgText.length).toBeLessThan(plain * 1.3 + 300_000);
+    // The diagram's own markup and about 80 kB of embedded font (the Latin subset, three faces).
+    expect(svgText.length).toBeLessThan(plain * 1.1 + 150_000);
     expect(took).toBeLessThan(5_000);
   });
 
@@ -665,37 +733,42 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
     expect(await overflow()).toEqual([]);
 
-    // Saved and reopened where Inter can't be used (a viewer ignoring the embedded font),
-    // left-to-right text is held to its on-screen length, so it still fits. Right-to-left text
-    // isn't (Inkscape then draws nothing for it), so the Arabic label is left to the wrapping.
+    // Saved and reopened, the file draws every label at its on-screen width, inside its box.
     const svgText = await exportSvg(page, d);
-    expect(svgText).toMatch(/<(text|tspan)(?![^>]*textLength)[^>]*>ع/);
-    const viewer = await page.context().newPage();
-    for (const font of ['DejaVu Serif', 'WenQuanYi Zen Hei Mono']) {
-      await viewer.setContent(`<style>body{margin:0} svg *{font-family:'${font}' !important}</style>${svgText}`);
-      const problems = await viewer.locator('svg').first().evaluate((svg) => {
-        const out: string[] = [];
-        const view = svg.getBoundingClientRect();
-        const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])).filter((t) => !/[֐-ࣿ]/.test(t.textContent ?? ''));
-        const inside = (t: Element, box: DOMRect, what: string) => {
-          const b = t.getBoundingClientRect();
-          if (b.width && (b.left < box.left - 1 || b.right > box.right + 1)) out.push(`${t.textContent?.slice(0, 40)} overflows ${what}`);
-        };
-        for (const node of svg.querySelectorAll('[data-node]')) for (const t of runs(node)) inside(t, node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect(), 'its box');
-        for (const edge of svg.querySelectorAll('[data-edge]')) {
-          const rect = edge.querySelector('rect');
-          if (rect) for (const t of runs(edge)) inside(t, rect.getBoundingClientRect(), 'its label');
-        }
-        for (const t of runs(svg)) inside(t, view, 'the drawing');
-        return out;
-      });
-      expect(problems, font).toEqual([]);
-    }
-    await viewer.close();
-    // In Inter, the file draws every label at its on-screen length.
+    expect(svgText).not.toContain('textLength');
+    const shown = await onScreen(d);
     const reopened = await openExport(page, svgText);
     expect(reopened.runs.length).toBeGreaterThan(8);
-    expect(mismatched(reopened.runs)).toEqual([]);
+    expect(mismatched(shown, reopened.runs)).toEqual([]);
+    await reopened.viewer.setContent(`<body style="margin:0">${svgText}</body>`);
+    const saved = reopened.viewer.locator('svg').first();
+    expect(await saved.evaluate((svg) => document.fonts.ready.then(() => svg.querySelectorAll('[data-node]').length))).toBe(4);
+    // (The same checks as on screen, run on the file.)
+    const problems = await saved.evaluate((svg) => {
+      const out: string[] = [];
+      for (const node of svg.querySelectorAll('[data-node]')) {
+        const box = node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect();
+        for (const t of node.querySelectorAll('text')) {
+          const b = t.getBoundingClientRect();
+          if (b.left < box.left - 1 || b.right > box.right + 1) out.push(`${t.textContent?.slice(0, 40)} overflows its box`);
+        }
+      }
+      for (const edge of svg.querySelectorAll('[data-edge]')) {
+        const rect = edge.querySelector('rect');
+        const t = edge.querySelector('text');
+        if (!rect || !t) continue;
+        const r = rect.getBBox();
+        const b = t.getBBox();
+        if (b.x < r.x + 3 || b.x + b.width > r.x + r.width - 3) out.push(`${t.textContent} (${b.width}) is too wide for its label box (${r.width})`);
+      }
+      const view = svg.getBoundingClientRect();
+      for (const t of svg.querySelectorAll('text')) {
+        const b = t.getBoundingClientRect();
+        if (b.left < view.left || b.right > view.right) out.push(`${t.textContent?.slice(0, 40)} is outside the drawing`);
+      }
+      return out;
+    });
+    expect(problems).toEqual([]);
     await reopened.viewer.close();
     // The full names are still there for assistive technology.
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-label', new RegExp(`^${long}`));

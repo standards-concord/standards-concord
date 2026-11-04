@@ -1,32 +1,71 @@
 /**
  * Saving a drawn diagram as an SVG or PNG file.
  *
- * The SVG keeps real text (searchable, selectable, readable by assistive technology) with the
- * diagram's font stack, and embeds Inter (Latin subsets) so browsers draw it exactly as on
- * screen. Each left-to-right run of text is also fixed to its on-screen length, which keeps it
- * inside its box in viewers that ignore embedded fonts but honour textLength (Inkscape does;
- * librsvg honours neither). The PNG is drawn from that same SVG, for output that is pixel-exact
- * anywhere.
+ * The SVG keeps plain text (searchable, selectable, readable by assistive technology) with the
+ * diagram's font stack, and embeds every subset of Inter the labels use, taken from the page's
+ * own @font-face rules, so a browser draws it as the page does. Text is fitted to its boxes by
+ * measuring and wrapping on the page; nothing stretches it. A viewer that ignores embedded fonts
+ * substitutes its own and may draw text wider (librsvg and Inkscape do). Characters Inter lacks
+ * (CJK, Arabic, emoji) use the viewer's fonts. The PNG, rasterised here from the same SVG with
+ * the same fonts, is the pixel-exact option.
  */
-import latin400 from '@fontsource/inter/files/inter-latin-400-normal.woff2?url';
-import latin600 from '@fontsource/inter/files/inter-latin-600-normal.woff2?url';
-import latin400i from '@fontsource/inter/files/inter-latin-400-italic.woff2?url';
-import latinExt400 from '@fontsource/inter/files/inter-latin-ext-400-normal.woff2?url';
-import latinExt600 from '@fontsource/inter/files/inter-latin-ext-600-normal.woff2?url';
-import latinExt400i from '@fontsource/inter/files/inter-latin-ext-400-italic.woff2?url';
 
-// The unicode-range values from @fontsource/inter's CSS.
-const LATIN = 'U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD';
-const LATIN_EXT = 'U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF';
+/** "U+0000-00FF,U+0131,U+04??" as [from, to] pairs. */
+export function parseUnicodeRange(range: string): [number, number][] {
+  return range
+    .split(',')
+    .map((r) => r.trim().replace(/^u\+/i, ''))
+    .filter(Boolean)
+    .map((r) => {
+      const [a, b] = r.split('-');
+      if (b !== undefined) return [parseInt(a, 16), parseInt(b, 16)];
+      return [parseInt(a.replace(/\?/g, '0'), 16), parseInt(a.replace(/\?/g, 'F'), 16)];
+    });
+}
 
-const FACES: { url: string; weight: number; style: string; range: string }[] = [
-  { url: latin400, weight: 400, style: 'normal', range: LATIN },
-  { url: latin600, weight: 600, style: 'normal', range: LATIN },
-  { url: latin400i, weight: 400, style: 'italic', range: LATIN },
-  { url: latinExt400, weight: 400, style: 'normal', range: LATIN_EXT },
-  { url: latinExt600, weight: 600, style: 'normal', range: LATIN_EXT },
-  { url: latinExt400i, weight: 400, style: 'italic', range: LATIN_EXT },
-];
+/** The weight and style each CSS font shorthand ("italic 600 12px Inter, …") draws with. */
+export function facesOf(fonts: string[]) {
+  return new Set(fonts.map((f) => `${/\b([1-9]00)\b/.exec(f)?.[1] ?? '400'}|${/\b(italic|oblique)\b/.test(f) ? 'italic' : 'normal'}`));
+}
+
+type Face = { weight: string; style: string; range: string; url: string };
+
+/** The page's own @font-face rules for `family`, with each one's (first, preferably WOFF2) file. */
+function pageFaces(family: string): Face[] {
+  const out: Face[] = [];
+  const visit = (rules: CSSRuleList, base: string) => {
+    for (const rule of rules) {
+      if (rule instanceof CSSImportRule && rule.styleSheet) {
+        try {
+          visit(rule.styleSheet.cssRules, rule.styleSheet.href ?? base);
+        } catch {
+          /* cross-origin */
+        }
+      } else if (rule instanceof CSSFontFaceRule) {
+        const st = rule.style;
+        if (st.getPropertyValue('font-family').replace(/["']/g, '').trim() !== family) continue;
+        const src = st.getPropertyValue('src');
+        const urls = [...src.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)\s*(?:format\(\s*["']?([\w-]+))?/g)];
+        const pick = urls.find((u) => u[3] === 'woff2' || /\.woff2(\?|$)/.test(u[2])) ?? urls[0];
+        if (!pick) continue;
+        out.push({
+          weight: st.getPropertyValue('font-weight').trim() || '400',
+          style: st.getPropertyValue('font-style').trim() || 'normal',
+          range: st.getPropertyValue('unicode-range').trim() || 'U+0-10FFFF',
+          url: new URL(pick[2], base).href,
+        });
+      }
+    }
+  };
+  for (const sheet of document.styleSheets) {
+    try {
+      visit(sheet.cssRules, sheet.href ?? document.baseURI);
+    } catch {
+      /* cross-origin stylesheet (e.g. a font service): not readable */
+    }
+  }
+  return out;
+}
 
 const dataUrl = (blob: Blob) =>
   new Promise<string>((resolve, reject) => {
@@ -36,49 +75,56 @@ const dataUrl = (blob: Blob) =>
     r.readAsDataURL(blob);
   });
 
-let fontCss: Promise<string> | undefined;
-/** @font-face rules carrying Inter's Latin subsets inline (fetched once, on first export). */
-function embeddedFonts() {
-  fontCss ??= Promise.all(
-    FACES.map(async (f) => {
-      const src = await dataUrl(await (await fetch(f.url)).blob());
-      return `@font-face{font-family:Inter;font-weight:${f.weight};font-style:${f.style};unicode-range:${f.range};src:url(${src.replace(/^data:[^;,]*/, 'data:font/woff2')}) format('woff2')}`;
-    }),
-  ).then((rules) => rules.join(''));
-  fontCss.catch(() => (fontCss = undefined));
-  return fontCss;
+const files = new Map<string, Promise<string>>();
+function inlined(url: string) {
+  let p = files.get(url);
+  if (!p) {
+    p = fetch(url)
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`${r.status} ${url}`))))
+      .then(dataUrl);
+    files.set(url, p);
+    p.catch(() => files.delete(url));
+  }
+  return p;
 }
 
-/** Letters of right-to-left scripts (Hebrew, Arabic, Syriac, Thaana, N'Ko and others). */
-const RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
+/**
+ * @font-face rules carrying, inline, every subset of Inter that `text` needs in the given faces,
+ * exactly as the page declares them.
+ */
+export async function embeddedFonts(text: string, fonts: string[], family = 'Inter') {
+  const wanted = facesOf(fonts);
+  const points = [...new Set(Array.from(text, (ch) => ch.codePointAt(0)!))];
+  const needed = pageFaces(family).filter((f) => wanted.has(`${f.weight}|${f.style}`) && parseUnicodeRange(f.range).some(([a, b]) => points.some((p) => p >= a && p <= b)));
+  const rules = await Promise.all(
+    needed.map(async (f) => {
+      const src = (await inlined(f.url)).replace(/^data:[^;,]*/, f.url.includes('.woff2') ? 'data:font/woff2' : 'data:font/woff');
+      return `@font-face{font-family:${family};font-weight:${f.weight};font-style:${f.style};unicode-range:${f.range};src:url(${src})}`;
+    }),
+  );
+  return rules.join('');
+}
 
 const frame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
-/** The runs of text in an SVG: each text element's tspans, or the element itself. */
-const runs = (root: Element) => [...root.querySelectorAll('text')].flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t])) as SVGTextContentElement[];
-
 /**
  * A standalone copy of a diagram's SVG. It waits for the fonts (and for a diagram laid out again
- * once they load to be drawn), then copies the drawing and reads every length from the page in
- * one go, so the file is a single consistent state.
+ * once they load to be drawn), then copies the drawing in one go, so the file is one consistent
+ * state. `fonts` are the CSS font shorthands the diagram draws with.
  */
 export async function exportableSvg(live: SVGSVGElement, bg: string, fonts: string[] = []) {
-  const css = await embeddedFonts().catch(() => '');
   // Load every face and script subset the labels need (fonts load lazily), let them settle, and
   // give a diagram that lays itself out again once they arrive two frames to draw.
-  const text = live.textContent ?? '';
-  await Promise.all(fonts.map((f) => document.fonts.load(f, text).catch(() => [])));
+  const before = live.textContent ?? '';
+  await Promise.all(fonts.map((f) => document.fonts.load(f, before).catch(() => [])));
   await document.fonts.ready;
   await frame();
   await frame();
 
   const clone = live.cloneNode(true) as SVGSVGElement;
-  const liveRuns = runs(live);
-  runs(clone).forEach((el, i) => {
-    const len = liveRuns[i]?.getComputedTextLength();
-    // Inkscape draws nothing at all for right-to-left text given a textLength, so that is left
-    // to the wrapping alone.
-    if (len && !RTL.test(el.textContent ?? '')) (el.setAttribute('textLength', len.toFixed(2)), el.setAttribute('lengthAdjust', 'spacingAndGlyphs'));
+  const css = await embeddedFonts(clone.textContent ?? '', fonts).catch((err) => {
+    console.warn('Could not embed the diagram font', err);
+    return '';
   });
   if (css) {
     const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
@@ -112,10 +158,19 @@ export async function downloadSvg(live: SVGSVGElement | null, filename: string, 
   save(new Blob([svg], { type: 'image/svg+xml' }), filename);
 }
 
-/** Canvases much larger than this fail in some browsers. */
-const MAX_SIDE = 16000;
+/** Browsers refuse canvases beyond about this many pixels a side or in total (64 MP is 256 MB). */
+export const PNG_MAX_SIDE = 16_384;
+export const PNG_MAX_PIXELS = 64_000_000;
 
-/** The same drawing as a PNG, at twice its size where that fits, for pixel-exact output. */
+/** Twice the drawing's size, or the largest scale that keeps within the limits. */
+export function pngScale(width: number, height: number) {
+  return Math.min(2, PNG_MAX_SIDE / width, PNG_MAX_SIDE / height, Math.sqrt(PNG_MAX_PIXELS / (width * height)));
+}
+
+/**
+ * The same drawing as a PNG. If the browser can't allocate or encode a canvas that large, it
+ * tries again at half the scale, a few times, and then throws.
+ */
 export async function downloadPng(live: SVGSVGElement | null, filename: string, bg: string, fonts: string[] = []) {
   if (!live) return;
   const { svg, width, height } = await exportableSvg(live, bg, fonts);
@@ -124,16 +179,23 @@ export async function downloadPng(live: SVGSVGElement | null, filename: string, 
   try {
     img.src = url;
     await img.decode();
-    const scale = Math.min(2, MAX_SIDE / width, MAX_SIDE / height);
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const png = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
-    if (png) save(png, filename);
+    let scale = pngScale(width, height);
+    for (let attempt = 0; attempt < 4; attempt++, scale /= 2) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(width * scale));
+      canvas.height = Math.max(1, Math.floor(height * scale));
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const png = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
+        if (png) return save(png, filename);
+      }
+      // Free the memory before trying smaller.
+      canvas.width = canvas.height = 0;
+    }
+    throw new Error('The browser could not create an image this large.');
   } finally {
     URL.revokeObjectURL(url);
   }

@@ -4,9 +4,10 @@ import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { downloadPng, downloadSvg } from '../../lib/exportSvg';
+import { clearTextWidths, svgTextWidth as textWidth } from '../../lib/measureText';
 import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
-import { curve, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
+import { curve, themeColours, usePanZoom, ZoomControls } from './PanZoom';
 
 /**
  * A UML-style class diagram, the notation data modellers already read (and the one LinkML
@@ -75,7 +76,7 @@ const ROW = 18;
 const PADX = 12;
 const MAX_ATTRS = 12;
 const MAX_WIDTH = 340;
-// Text measured on a canvas can render a little wider in SVG, so wrapping leaves some slack.
+// A safety margin, so text stays clear of its box's edge (and of rounding).
 const SLACK = 4;
 const UP = '↑ ';
 
@@ -290,7 +291,11 @@ export function ClassDiagram({
     const set = document.fonts;
     if (!set) return;
     let live = true;
-    const bump = () => live && setFonts((n) => n + 1);
+    const bump = () => {
+      if (!live) return;
+      clearTextWidths();
+      setFonts((n) => n + 1);
+    };
     Promise.all(DIAGRAM_FONTS.map((f) => set.load(f).catch(() => []))).then(() => set.ready).then(bump);
     set.addEventListener?.('loadingdone', bump);
     return () => {
@@ -346,6 +351,14 @@ export function ClassDiagram({
   const subs = layout.edges.filter((e) => e.kind === 'sub');
   const assocs = layout.edges.filter((e) => e.kind === 'assoc');
   const slug = title.toLowerCase().replace(/\W+/g, '-');
+  const [exportError, setExportError] = useState<string>();
+  const save = (download: typeof downloadSvg, ext: 'svg' | 'png') => {
+    setExportError(undefined);
+    download(svg.current, `${slug}.${ext}`, colours.surface, DIAGRAM_FONTS).catch((err: unknown) => {
+      console.warn(`Saving the diagram as ${ext.toUpperCase()} failed`, err);
+      setExportError(`Couldn't save the diagram as ${ext.toUpperCase()}${ext === 'png' ? ': it may be too large for this browser. Try SVG, or draw fewer classes.' : '.'}`);
+    });
+  };
   const name = (iri: string) => byIri.get(iri)?.title ?? label(iri);
   const summaryId = `${uid}-summary`;
   const listId = `${uid}-list`;
@@ -395,9 +408,14 @@ export function ClassDiagram({
             Go to details of {name(selected)}
           </a>
         )}
-        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${slug}.svg`, c.surface, DIAGRAM_FONTS)} onExportPng={() => downloadPng(svg.current, `${slug}.png`, c.surface, DIAGRAM_FONTS)}>
+        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => save(downloadSvg, 'svg')} onExportPng={() => save(downloadPng, 'png')}>
           {toolbar}
         </ZoomControls>
+        {exportError && (
+          <p role="alert" className="absolute top-12 right-2 z-10 max-w-xs rounded-md border border-line-strong bg-surface px-3 py-2 text-sm text-fg shadow-sm">
+            {exportError}
+          </p>
+        )}
         <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
           <defs>
             <marker id={`${uid}-tri`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
