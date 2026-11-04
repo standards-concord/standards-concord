@@ -52,7 +52,7 @@ export function UseCaseRefLink({ ontologyId, r, showStatus = true }: { ontologyI
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <Link to={`/o/${ontologyId}/use-cases/${r.id}`} className="text-sm hover:text-accent">
-        <span className="font-mono text-xs text-muted">{useCaseLabel(r.number)}</span> {r.title}
+        <span className="font-mono text-xs text-muted">{useCaseLabel(r)}</span> {r.title}
       </Link>
       {showStatus && <UseCaseStatusBadge status={r.status} />}
       {r.visibility !== 'public' && <VisibilityBadge visibility={r.visibility} />}

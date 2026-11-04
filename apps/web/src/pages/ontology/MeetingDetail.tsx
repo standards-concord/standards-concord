@@ -157,7 +157,7 @@ export function MeetingDetailPage() {
                   <p className="text-sm leading-relaxed">{l.text}</p>
                   {lineUseCases.get(i)?.map((u) => (
                     <Link key={u.id} to={`/o/${id}/use-cases/${u.id}`} className="mt-1 mr-1 inline-block rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[0.65rem] text-accent hover:underline" title="This line fed into a use case">
-                      {useCaseLabel(u.number)}
+                      {useCaseLabel(u)}
                     </Link>
                   ))}
                 </div>

@@ -328,8 +328,13 @@ export interface AnonymisedDraft {
 
 export interface UseCase {
   id: string;
-  /** Per-ontology sequence number, shown as UC-3. 0 while private: numbers are given on sharing, so gaps don't reveal private drafts. */
+  /**
+   * Per-ontology public sequence number, shown as UC-3. 0 until the use case is
+   * made public, so gaps never reveal private or working-group-only submissions.
+   */
   number: number;
+  /** Working group sequence number, shown as WG-2, given when a use case is first shared with the group only. */
+  groupNumber?: number;
   ontologyId: string;
   /** Hidden from everyone but the author when `anonymous` is true. */
   authorId: string;
@@ -346,6 +351,8 @@ export interface UseCase {
   anonymisation?: { status: 'proposed' | 'published' | 'declined' | 'withdrawn'; draft?: AnonymisedDraft; proposedAt: string; decidedAt?: string; publishedId?: string };
   /** Set when the author withdrew a shared or anonymised use case: only they can see it now. */
   withdrawnAt?: string;
+  /** Every competency question this use case has had while public, so withdrawal can remove each from saved results and tests. Never shown to others. */
+  publicQuestions?: string[];
   /**
    * Demo only: the content a simulated persona's use case was seeded with. Testers
    * can sign in as personas and edit their use cases, so public pages show this
@@ -372,11 +379,12 @@ export interface UseCase {
 
 /** A short reference to a use case, used in links from other things. */
 /** "UC-3", or "Private draft" before a use case is shared and numbered. */
-export const useCaseLabel = (number: number) => (number ? `UC-${number}` : 'Private draft');
+export const useCaseLabel = (u: { number: number; groupNumber?: number }) => (u.number ? `UC-${u.number}` : u.groupNumber ? `WG-${u.groupNumber}` : 'Private draft');
 
 export interface UseCaseRef {
   id: string;
   number: number;
+  groupNumber?: number;
   title: string;
   status: UseCaseStatus;
   visibility: UseCaseVisibility;
@@ -696,6 +704,8 @@ export interface RequirementItem {
   useCaseIds: string[];
   /** Ontology terms that meet it. */
   termIris: string[];
+  /** Terms it needs that the ontology doesn't have (yet): it can't be met while any are missing. */
+  missingTerms?: string[];
   status: 'met' | 'partial' | 'open';
 }
 
@@ -729,11 +739,39 @@ export interface RequirementsDocument {
   coverage: { total: number; closed: number; addressed: number; open: number };
   /** Set when serving a published document from which withdrawn use cases were removed. */
   withdrawnNote?: string;
+  /**
+   * Every use case the document was written from. Kept even when one drops out
+   * of `useCases`, so a document is known to depend on it and is written again
+   * (never patched) if it stops being public. Not served.
+   */
+  sourceIds?: string[];
+  /** A draft whose content was dropped because a use case it drew on stopped being public: written again on the next read. Not served. */
+  invalidated?: boolean;
 }
 
 /* ------------------------------------------------------------------------ */
 /* Agents (MCP) and agent reports                                            */
 /* ------------------------------------------------------------------------ */
+
+/** What the consent page shows when an MCP client asks to connect (GET /api/oauth/requests/:id). */
+export interface OAuthRequestInfo {
+  id: string;
+  clientName: string;
+  clientUri?: string;
+  logoUri?: string;
+  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code. */
+  redirectHost: string;
+  localRedirect: boolean;
+  resource?: string;
+}
+
+/** An app the person has connected with OAuth (Settings → Connected agents). */
+export interface OAuthConnection {
+  id: string;
+  clientName: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
 
 export interface AgentToken {
   id: string;
@@ -918,7 +956,11 @@ export interface SessionInfo {
  *  DELETE /api/agent-tokens/:id
  *  GET  /api/ontologies/:id/agent-reports            -> AgentReport[]
  *  POST /api/ontologies/:id/agent-reports {...}      -> AgentReport
- *  POST /mcp  (Streamable HTTP MCP endpoint, Bearer token)
+ *  GET  /api/oauth/requests/:id                     -> OAuthRequestInfo  (consent page for an MCP client)
+ *  POST /api/oauth/requests/:id/approve|deny        -> { redirect }
+ *  GET  /api/oauth/connections                       -> OAuthConnection[]
+ *  DELETE /api/oauth/connections/:id
+ *  POST /mcp  (Streamable HTTP MCP endpoint; OAuth 2.1 per the MCP authorization spec, or a personal token)
  *
  * Simulation (alpha walkthrough)
  *  POST /api/simulation/step {ontologyId}            -> { events: ActivityItem[] }  (simulated people act: comment, vote, add use case)

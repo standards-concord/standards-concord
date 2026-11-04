@@ -3,7 +3,7 @@ import type { TermView } from '@concord/core/types';
 import type { OntologyProject, PublicUseCase, Release, RequirementItem, RequirementsDocument, UseCase, User } from '@concord/shared';
 import { useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, put, remove } from '../db.js';
+import { get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { REQUIREMENTS_WRITER } from '../llm/prompts.js';
@@ -41,8 +41,10 @@ function projectedStatus(u: UseCase, release?: { version: string; changeRequestI
   const status = u.status as PublicUseCase['status'];
   if (u.status === 'closed') return { status, coveredIn: u.resolution?.version };
   if (release && ['accepted', 'in-progress', 'addressed'].includes(u.status)) {
-    const live = changeRequestsFor(u).filter((c) => c.status !== 'rejected' && c.status !== 'withdrawn');
-    if (live.length && live.every((c) => c.status === 'released' || release.changeRequestIds.includes(c.id))) return { status: 'closed', coveredIn: release.version };
+    const all = changeRequestsFor(u);
+    const live = all.filter((c) => c.status !== 'rejected' && c.status !== 'withdrawn');
+    // As in traceability.ts: with a change dropped along the way, an editor decides whether it is covered.
+    if (live.length && live.length === all.length && live.every((c) => c.status === 'released' || release.changeRequestIds.includes(c.id))) return { status: 'closed', coveredIn: release.version };
   }
   return { status };
 }
@@ -62,7 +64,7 @@ export function toPublic(u: UseCase, release?: { version: string; changeRequestI
   const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x : undefined);
   const base = {
     id: u.id,
-    ref: useCaseLabel(u.number),
+    ref: useCaseLabel(u),
     title: str(s.name) ?? 'Untitled use case',
     goal: str(s.goal),
     description: str(s.description),
@@ -102,18 +104,47 @@ const docs = (ontologyId: string) => list<RequirementsDocument>('requirementsDoc
 export const findDocument = (ontologyId: string, version: string) => docs(ontologyId).find((d) => d.version === version.replace(/^v/, ''));
 
 /**
- * A document as served. Published documents are frozen, but a use case its
- * author withdrew afterwards is no longer shown (the copy committed to git can't
- * be recalled, and the note says so). The group-only count is for the group.
+ * The only way a document leaves the server: built field by field. Published
+ * documents are frozen, but if a use case they drew on was withdrawn (or is no
+ * longer public) afterwards, nothing written from it is served: its snapshot,
+ * the requirements that came only from it, every section that cites it, and the
+ * introduction, which may summarise it. The note says so, and that the copy in
+ * the released files on GitHub can't be recalled. The group-only count is for the group.
  */
 function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
-  const byId = new Map(allUseCases(d.ontologyId).map((u) => [u.id, u]));
-  const gone = new Set(d.useCases.filter((pu) => { const u = byId.get(pu.id); return !u || u.withdrawnAt || u.visibility !== 'public'; }).map((u) => u.id));
-  const out: RequirementsDocument = { ...d, useCases: d.useCases.filter((u) => !gone.has(u.id)), requirements: d.requirements.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)) })) };
-  if (gone.size) out.withdrawnNote = `${gone.size} use case${gone.size === 1 ? ' was' : 's were'} withdrawn by ${gone.size === 1 ? 'its author' : 'their authors'} after this version was published, so ${gone.size === 1 ? 'it is' : 'they are'} no longer shown. The story above may still draw on ${gone.size === 1 ? 'it' : 'them'}, and the copy in the released files on GitHub cannot be recalled.`;
-  if (!viewer || !isGroupMember(d.ontologyId, viewer)) delete out.unpublished;
+  const gone = withdrawnSince(d.ontologyId, [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])]);
+  const cites = (ids: string[], md = '') => ids.some((id) => gone.has(id)) || [...gone].some((id) => md.includes(`#uc-${id}`));
+  const requirements = d.requirements
+    .map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), termIris: r.termIris, ...(r.missingTerms?.length ? { missingTerms: r.missingTerms } : {}), status: r.status }))
+    .filter((r, i) => r.useCaseIds.length > 0 || d.requirements[i].useCaseIds.length === 0);
+  const useCases = d.useCases.filter((u) => !gone.has(u.id));
+  const out: RequirementsDocument = {
+    id: d.id,
+    ontologyId: d.ontologyId,
+    ...(d.releaseId ? { releaseId: d.releaseId } : {}),
+    version: d.version,
+    title: d.title,
+    status: d.status,
+    generatedAt: d.generatedAt,
+    ...(d.simulated ? { simulated: true } : {}),
+    intro: gone.size ? '' : d.intro,
+    sections: d.sections.filter((x) => !cites(x.useCaseIds, x.markdown)).map((x) => ({ id: x.id, heading: x.heading, markdown: x.markdown, useCaseIds: x.useCaseIds })),
+    requirements,
+    useCases,
+    ...(d.unpublished && isGroupMember(d.ontologyId, viewer) ? { unpublished: { group: d.unpublished.group } } : {}),
+    coverage: gone.size ? coverageOf(useCases) : d.coverage,
+  };
+  if (gone.size)
+    out.withdrawnNote = `${gone.size} use case${gone.size === 1 ? ' this document drew on was' : 's this document drew on were'} withdrawn by ${gone.size === 1 ? 'its author' : 'their authors'} after it was written, so the introduction and every part of the story citing ${gone.size === 1 ? 'it' : 'them'} are no longer shown. The copy in the released files on GitHub cannot be recalled.`;
   return out;
 }
+
+const coverageOf = (useCases: PublicUseCase[]) => ({
+  total: useCases.length,
+  closed: useCases.filter((u) => u.status === 'closed').length,
+  addressed: useCases.filter((u) => u.status === 'addressed').length,
+  open: useCases.filter((u) => !['closed', 'addressed', 'deferred', 'out-of-scope'].includes(u.status)).length,
+});
 
 /** Of these use case ids, the ones that are gone or no longer public (withdrawn, made private or group-only). */
 export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
@@ -125,11 +156,17 @@ export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
   );
 }
 
-/** True when a draft cites a use case that is no longer public: it must be written again, not patched. */
+/**
+ * True when a draft was invalidated, or any use case it was written from is no
+ * longer public: it must be written again, not patched. Checked against every
+ * source, not just the snapshots still in it.
+ */
 const isStale = (d: RequirementsDocument) => {
+  if (d.invalidated) return true;
   const byId = new Map(allUseCases(d.ontologyId).map((u) => [u.id, u]));
-  return d.useCases.some((pu) => { const u = byId.get(pu.id); return !u || !isPublishable(u); });
+  return [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])].some((id) => { const u = byId.get(id); return !u || !isPublishable(u); });
 };
+const dependsOn = (d: RequirementsDocument, id: string) => (d.sourceIds ?? []).includes(id) || d.useCases.some((x) => x.id === id);
 
 /** For the public spec pages: the published document for a version, if there is one. */
 export function requirementsDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
@@ -138,10 +175,11 @@ export function requirementsDocument(ontologyId: string, version: string): Requi
   return d?.status === 'published' ? served(d) : undefined;
 }
 
+
 /** While a release is being published: its prepared (not yet frozen) document, as the public will see it. */
 export function releasingDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
   const d = findDocument(ontologyId, version);
-  return d && !isStale(d) ? served(d) : undefined;
+  return d && (d.status === 'published' || !isStale(d)) ? served(d) : undefined;
 }
 
 /** Documents a viewer may read: published ones for anyone, drafts for the working group. */
@@ -156,7 +194,7 @@ export function listDocuments(ontologyId: string, viewer?: User) {
 export async function documentFor(ontologyId: string, version: string, viewer?: User): Promise<RequirementsDocument> {
   let d = findDocument(ontologyId, version);
   if (!d || (d.status !== 'published' && !isGroupMember(ontologyId, viewer))) throw new HttpError(404, `No use cases and requirements document for ${version}`);
-  // A draft that cites a use case which is no longer public is written again before anyone reads it.
+  // A draft that was invalidated, or depends on a use case which is no longer public, is written again before anyone reads it.
   if (d.status === 'draft' && isStale(d)) {
     const release = d.releaseId ? get<Release>('releases', d.releaseId) : undefined;
     d = await generateRequirements(getProject(ontologyId), { version: d.version, release });
@@ -165,12 +203,14 @@ export async function documentFor(ontologyId: string, version: string, viewer?: 
 }
 
 /**
- * When a use case stops being public: drop every draft document that cites it
- * (they are written again on the next read, release draft or publish). Its
- * questions also leave saved validation results; see onNoLongerPublic.
+ * When a use case stops being public: empty every draft document written from
+ * it, keeping only what is needed to write it again (on the next read, release
+ * draft or publish). Its questions also leave saved validation results; see onNoLongerPublic.
  */
 onNoLongerPublic((u) => {
-  for (const d of docs(u.ontologyId)) if (d.status === 'draft' && d.useCases.some((x) => x.id === u.id)) remove('requirementsDocs', d.id);
+  for (const d of docs(u.ontologyId))
+    if (d.status === 'draft' && dependsOn(d, u.id))
+      put('requirementsDocs', { ...d, invalidated: true, intro: '', sections: [], requirements: [], useCases: [], sourceIds: [], coverage: coverageOf([]) } satisfies RequirementsDocument, d.ontologyId);
 });
 
 const CAST = ['Sam', 'Priti', 'Jordan', 'Ada', 'Kofi', 'Morgan', 'Lena', 'Ravi'];
@@ -197,7 +237,7 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
   };
   const cast = ucs.map((_, i) => CAST[i % CAST.length]);
   const sections = ucs.map((u, i) => {
-    const ref = useCaseLabel(u.number);
+    const ref = useCaseLabel(u);
     const who = cast[i];
     const s = u.sections;
     const terms = u.terms.map((t) => t.label).filter((l) => termLabels.has(l.toLowerCase()));
@@ -289,22 +329,30 @@ function refreshStatuses(doc: RequirementsDocument, inGraph: Set<string>, releas
     const st = r.useCaseIds.map((id) => status.get(id));
     const termsThere = r.termIris.filter((iri) => inGraph.has(iri));
     const covered = st.length > 0 && st.every((s) => s === 'closed');
-    const met = covered && r.termIris.length > 0 && termsThere.length === r.termIris.length;
+    const met = covered && r.termIris.length > 0 && termsThere.length === r.termIris.length && !r.missingTerms?.length;
     const partial = st.some((s) => s === 'closed' || s === 'addressed') || termsThere.length > 0;
     return { ...r, status: met ? 'met' : partial ? 'partial' : 'open' };
   });
-  doc.coverage = {
-    total: doc.useCases.length,
-    closed: doc.useCases.filter((u) => u.status === 'closed').length,
-    addressed: doc.useCases.filter((u) => u.status === 'addressed').length,
-    open: doc.useCases.filter((u) => !['closed', 'addressed', 'deferred', 'out-of-scope'].includes(u.status)).length,
-  };
+  doc.coverage = coverageOf(doc.useCases);
   return doc;
 }
 
-/** Write (or rewrite) the document for a version. Editors, stewards and owners only, unless called by the platform. */
+/**
+ * Write (or rewrite) the document for a version. Editors, stewards and owners
+ * only, unless called by the platform. Writing takes a while: if a use case it
+ * draws on stops being public meanwhile, the result is thrown away and written
+ * again from what is public now.
+ */
 export async function generateRequirements(project: OntologyProject, opts: { version: string; release?: Release; actor?: User }): Promise<RequirementsDocument> {
   if (opts.actor && !canTriage(project.id, opts.actor)) throw new HttpError(403, 'Only editors, stewards and owners can write the use cases and requirements document');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const doc = await writeRequirements(project, opts);
+    if (doc) return doc;
+  }
+  throw new HttpError(409, 'Use cases kept changing while the document was being written. Try again.');
+}
+
+async function writeRequirements(project: OntologyProject, opts: { version: string; release?: Release; actor?: User }): Promise<RequirementsDocument | undefined> {
   const existing = findDocument(project.id, opts.version);
   if (existing?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
   const all = allUseCases(project.id);
@@ -315,7 +363,7 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
   const terms = termIndex(graph);
   const releaseLike = opts.release ? { version: opts.version, changeRequestIds: opts.release.changeRequestIds } : undefined;
   const pub = ucs.map((u) => toPublic(u, releaseLike));
-  const refToId = new Map(ucs.map((u) => [useCaseLabel(u.number), u.id]));
+  const refToId = new Map(ucs.map((u) => [useCaseLabel(u), u.id]));
 
   const { value, simulated } = ucs.length
     ? await llm.json<RequirementsDraft>({
@@ -344,6 +392,8 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
     text: r.text,
     useCaseIds: r.useCaseRefs.map((ref) => refToId.get(ref.trim())).filter((x): x is string => !!x),
     termIris: [...new Set(r.terms.map(terms.resolve).filter((x): x is string => !!x))],
+    // Terms that don't resolve are kept as missing, so the requirement can't count as met without them.
+    missingTerms: [...new Set(r.terms.filter((t) => !terms.resolve(t)).map((t) => t.trim()).filter(Boolean))],
     status: 'open',
   }));
   const reqIds = new Set(requirements.map((r) => r.id));
@@ -365,9 +415,14 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
     })),
     requirements,
     useCases: pub,
+    sourceIds: ucs.map((u) => u.id),
     unpublished,
-    coverage: { total: 0, closed: 0, addressed: 0, open: 0 },
+    coverage: coverageOf([]),
   };
+  // Consent is checked again now the writing is done, and nothing below waits, so nothing can change before it is stored.
+  if (isStale(doc)) return undefined;
+  const latest = findDocument(project.id, opts.version);
+  if (latest?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
   refreshStatuses(doc, termIris(graph), releaseLike);
   put('requirementsDocs', doc, project.id);
   if (opts.actor)
@@ -378,12 +433,14 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
 /** Before a release is committed: make sure its document exists, is current, and reflects what the release closes. */
 export async function prepareForRelease(project: OntologyProject, r: Release): Promise<RequirementsDocument | undefined> {
   try {
+    const inGraph = termIris(await ontologyStore.working(project));
+    // Read after the wait, and checked and stored with nothing in between.
     const existing = findDocument(project.id, r.version);
     if (existing?.status === 'published') return existing;
-    // Consent is checked again here: a draft citing anything no longer public is written again from scratch.
+    // Consent is checked again here: a draft depending on anything no longer public is written again from scratch.
     if (!existing || isStale(existing)) return await generateRequirements(project, { version: r.version, release: r });
     existing.releaseId = r.id;
-    refreshStatuses(existing, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
+    refreshStatuses(existing, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
     put('requirementsDocs', existing, project.id);
     return existing;
   } catch (err) {
@@ -395,12 +452,16 @@ export async function prepareForRelease(project: OntologyProject, r: Release): P
 /** After publishing: freeze the document. */
 export async function markPublished(doc: RequirementsDocument, r: Release) {
   const project = getProject(doc.ontologyId);
-  if (isStale(doc)) doc = await generateRequirements(project, { version: r.version, release: r });
-  doc.status = 'published';
-  doc.releaseId = r.id;
-  refreshStatuses(doc, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
-  put('requirementsDocs', doc, doc.ontologyId);
-  return doc;
+  const inGraph = termIris(await ontologyStore.working(project));
+  // Read again after the wait: a withdrawal meanwhile invalidates the stored draft.
+  let current = findDocument(project.id, r.version) ?? doc;
+  if (current.status === 'published') return current;
+  if (isStale(current)) current = await generateRequirements(project, { version: r.version, release: r });
+  current.status = 'published';
+  current.releaseId = r.id;
+  refreshStatuses(current, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
+  put('requirementsDocs', current, current.ontologyId);
+  return current;
 }
 
 /** Draft releases keep a draft document in step. Runs in the background; failures are logged. */
@@ -408,11 +469,12 @@ export function draftForRelease(r: Release) {
   void (async () => {
     try {
       const project = getProject(r.ontologyId);
+      const inGraph = termIris(await ontologyStore.working(project));
       const d = findDocument(project.id, r.version);
       if (d?.status === 'published') return;
       if (d && !isStale(d)) {
         d.releaseId = r.id;
-        refreshStatuses(d, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
+        refreshStatuses(d, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
         put('requirementsDocs', d, project.id);
       } else await generateRequirements(project, { version: r.version, release: r });
     } catch (err) {
@@ -428,6 +490,7 @@ export function renderMarkdown(doc: RequirementsDocument): string {
   return [
     `# ${doc.title}`,
     '',
+    ...(doc.withdrawnNote ? [`> ${doc.withdrawnNote}`, ''] : []),
     doc.intro,
     '',
     ...doc.sections.flatMap((s) => [`## ${s.heading}`, '', s.markdown, '']),

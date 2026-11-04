@@ -152,11 +152,27 @@ export function publishedRequirements(project: OntologyProject, version?: string
  */
 export function requirementsFor(project: OntologyProject, version: string | undefined, snapshot: PublishedRequirements | undefined): PublishedRequirements {
   if (!snapshot) return publishedRequirements(project, version);
-  // A use case its author withdrew after the release is no longer shown (the copy on GitHub can't be recalled).
-  const gone = withdrawnSince(project.id, snapshot.useCases.map((u) => u.id));
-  const document = snapshot.document ?? publishedRequirements(project, version).document;
+  // A use case withdrawn after the release is no longer shown, and neither is anything written from it:
+  // the requirements that came only from it, the sections citing it, and the introduction (the
+  // copy on GitHub can't be recalled). Same rule as served() in services/requirements.ts.
+  const cited = [...snapshot.useCases.map((u) => u.id), ...(snapshot.document?.requirements ?? []).flatMap((r) => r.useCaseIds)];
+  const gone = withdrawnSince(project.id, [...new Set(cited)]);
+  if (!snapshot.document) return { document: publishedRequirements(project, version).document, useCases: snapshot.useCases.filter((u) => !gone.has(u.id)) };
+  const d = snapshot.document;
+  const citesGone = (md: string) => [...gone].some((id) => md.includes(`#uc-${id}`));
   return {
-    document: document && { ...document, requirements: document.requirements?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)) })) },
+    document: !gone.size
+      ? d
+      : {
+          ...d,
+          intro: undefined,
+          markdown: d.markdown && !citesGone(d.markdown) ? d.markdown : undefined,
+          sections: d.sections?.filter((x) => !citesGone(x.markdown)),
+          requirements: d.requirements
+            ?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), original: r.useCaseIds.length }))
+            .filter((r) => r.useCaseIds.length > 0 || r.original === 0)
+            .map(({ original: _, ...r }) => r),
+        },
     useCases: snapshot.useCases.filter((u) => !gone.has(u.id)),
   };
 }

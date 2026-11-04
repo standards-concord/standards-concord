@@ -1,13 +1,13 @@
-import type { ChangeRequest, Release, UseCase } from '@concord/shared';
+import type { ChangeRequest, Release, UseCase, User } from '@concord/shared';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { get, list as listDocs, openDb, put } from '../src/db.js';
-import { findDocument, generateRequirements, toPublic } from '../src/services/requirements.js';
+import { findDocument, generateRequirements, markPublished, renderMarkdown, requirementsDocument, toPublic } from '../src/services/requirements.js';
 import { findProject } from '../src/services/ontologies.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { completingRelease } from '../src/services/traceability.js';
-import { getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft } from '../src/services/useCases.js';
+import { completingRelease, derivedStatus } from '../src/services/traceability.js';
+import { getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, withdrawUseCase } from '../src/services/useCases.js';
 
 /**
  * One test (or more) per finding of the privacy review of use case sharing:
@@ -152,12 +152,15 @@ describe('requirements documents (findings 6 and 11)', () => {
     expect(doc.useCases.some((u) => u.id === id)).toBe(true);
     expect(Object.keys(doc.unpublished ?? {})).toEqual(['group']);
     expect((await author.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'private' })).status).toBe(200);
-    // The draft that cited it is gone, and the next read writes a fresh one without it.
-    expect(findDocument(demoId, '9.9.9')).toBeUndefined();
-    put('requirementsDocs', doc, demoId);
+    // The draft that drew on it is emptied at once, and the next read writes a fresh one without it.
+    const stored = findDocument(demoId, '9.9.9')!;
+    expect(stored.invalidated).toBe(true);
+    expect(JSON.stringify(stored)).not.toMatch(/Withdrawn later case/);
     const read = await steward.get(`/api/ontologies/${demoId}/requirements/9.9.9`);
     expect(read.status).toBe(200);
+    expect(read.body.useCases.length).toBeGreaterThan(0);
     expect(JSON.stringify(read.body)).not.toMatch(/Withdrawn later case/);
+    expect(findDocument(demoId, '9.9.9')!.invalidated).toBeUndefined();
   });
 
   it('shows the group-only count to the group only', async () => {
@@ -341,6 +344,126 @@ describe('use case reads', () => {
     put('changeRequests', cr, demoId);
     // The author still sees both.
     expect((await author.get(`/api/use-cases/${priv}`)).status).toBe(200);
+  });
+});
+
+const userNamed = (name: string) => listDocs<User>('users').find((u) => u.name === name)!;
+
+describe('second review: races, published documents, validation, numbering and coverage', () => {
+  it('drafting that is already running never undoes a withdrawal (finding 17)', async () => {
+    const author = await login('contributor', 'Race Author A');
+    const id = await useCaseVia(author, 'Race to withdraw', 'public');
+    await login('editor', 'Race Editor A');
+    const other = userNamed('Race Editor A');
+    const running = synthesise(findProject(demoId)!, other, [id]);
+    withdrawUseCase(getUseCase(id), userNamed('Race Author A'));
+    await expect(running).rejects.toMatchObject({ status: 409 });
+    const u = get<UseCase>('useCases', id)!;
+    expect(u.withdrawnAt).toBeTruthy();
+    expect(u.visibility).toBe('private');
+    expect((await request(app).get(`/api/use-cases/${id}`)).status).toBe(404);
+    // A stale copy saved afterwards (an interview turn, say) can't bring it back either.
+    const stale = { ...u, withdrawnAt: undefined, visibility: 'public' as const, status: 'accepted' as const };
+    updateUseCase(stale, userNamed('Race Author A'), { sections: { name: 'Race to withdraw (edited)' } });
+    expect(get<UseCase>('useCases', id)!.withdrawnAt).toBeTruthy();
+    expect(get<UseCase>('useCases', id)!.visibility).toBe('private');
+  });
+
+  it('a document being written when a use case is withdrawn is written again without it (finding 18)', async () => {
+    const author = await login('contributor', 'Race Author B');
+    const id = await useCaseVia(author, 'Withdrawn mid-writing', 'public');
+    const writing = generateRequirements(findProject(demoId)!, { version: '9.8.0' });
+    withdrawUseCase(getUseCase(id), userNamed('Race Author B'));
+    const doc = await writing;
+    expect(JSON.stringify(doc)).not.toMatch(/Withdrawn mid-writing/);
+    expect(doc.sourceIds).not.toContain(id);
+    expect(JSON.stringify(findDocument(demoId, '9.8.0'))).not.toMatch(/Withdrawn mid-writing/);
+  });
+
+  it('a published document stops serving anything written from a use case withdrawn afterwards (findings 6, 15)', async () => {
+    const author = await login('contributor', 'Published Author');
+    const id = await useCaseVia(author, 'Published then withdrawn', 'public');
+    const project = findProject(demoId)!;
+    const release = { id: 'rel_pub', ontologyId: demoId, version: '9.7.0', status: 'published', changeRequestIds: [] } as unknown as Release;
+    const doc = await markPublished(await generateRequirements(project, { version: '9.7.0', release }), release);
+    expect(JSON.stringify(doc)).toMatch(/Published then withdrawn/);
+    withdrawUseCase(getUseCase(id), userNamed('Published Author'));
+    const reads = [
+      JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/requirements/9.7.0`)).body),
+      (await request(app).get(`/api/ontologies/${demoId}/requirements/9.7.0/markdown`)).text,
+      JSON.stringify(requirementsDocument(demoId, '9.7.0')),
+      renderMarkdown(requirementsDocument(demoId, '9.7.0')!),
+    ];
+    for (const text of reads) {
+      expect(text).not.toMatch(/Published then withdrawn/);
+      expect(text).not.toContain(id);
+      expect(text).toMatch(/withdrawn/i);
+    }
+    const served = requirementsDocument(demoId, '9.7.0')!;
+    expect(served.sourceIds).toBeUndefined();
+    expect(served.intro).toBe('');
+  });
+
+  it('withdrawal removes every question the use case had while public, from saved results and drafted tests (finding 4)', async () => {
+    const author = await login('contributor', 'Question Author');
+    const id = await useCaseVia(author, 'Edited question case', 'public');
+    const original = getUseCase(id).competencyQuestions[0].question;
+    const cr = list<ChangeRequest>(demoId)[0];
+    const saved = structuredClone(cr);
+    put('changeRequests', {
+      ...cr,
+      tests: [...(cr.tests ?? []), { question: original, sparql: 'SELECT * WHERE { ?s ?p ?o }', exampleData: '<urn:SECRET-EXAMPLE> a <urn:x> .' }],
+      validation: cr.validation && { ...cr.validation, competencyQuestions: [...cr.validation.competencyQuestions, { question: original, passed: true } as never] },
+    }, demoId);
+    // Edited before withdrawal: the old wording is still removed.
+    expect((await author.patch(`/api/use-cases/${id}`).send({ competencyQuestions: [{ question: 'A reworded question?' }] })).status).toBe(200);
+    expect((await author.post(`/api/use-cases/${id}/withdraw`)).status).toBe(200);
+    const after = JSON.stringify(get<ChangeRequest>('changeRequests', cr.id));
+    expect(after).not.toContain(original);
+    expect(after).not.toContain('SECRET-EXAMPLE');
+    put('changeRequests', saved, demoId);
+  });
+
+  it('numbers only public use cases in the public sequence, so group-only ones leave no gaps (finding 11)', async () => {
+    const author = await login('member');
+    const a = await useCaseVia(author, 'Numbered public A', 'public');
+    const g = await useCaseVia(author, 'Numbered group', 'group');
+    const b = await useCaseVia(author, 'Numbered public B', 'public');
+    expect(getUseCase(b).number).toBe(getUseCase(a).number + 1);
+    expect(getUseCase(g).number).toBe(0);
+    expect(getUseCase(g).groupNumber).toBeGreaterThan(0);
+    const outsider = (await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
+    expect(outsider.some((u) => u.groupNumber)).toBe(false);
+  });
+
+  it('never closes a use case automatically when one of its changes was rejected (finding 12)', () => {
+    const rel = { id: 'rel_c', ontologyId: demoId, version: '3.0.0', status: 'published', publishedAt: '2026-05-01T00:00:00Z', changeRequestIds: [] } as unknown as Release;
+    put('releases', rel, demoId);
+    const u = { id: 'uc_mixed', ontologyId: demoId, status: 'addressed', changeRequestIds: ['cr_rel', 'cr_rej'] } as unknown as UseCase;
+    const crs = [{ id: 'cr_rel', number: 101, status: 'released', releaseId: 'rel_c' }, { id: 'cr_rej', number: 102, status: 'rejected' }] as ChangeRequest[];
+    expect(derivedStatus(u, crs)?.status ?? u.status).toBe('addressed');
+    expect(derivedStatus({ ...u, changeRequestIds: ['cr_rel'] } as UseCase, [crs[0]])?.status).toBe('closed');
+  });
+
+  it('a requirement needing a term the ontology lacks is never met (finding 12)', async () => {
+    const met = findDocument(demoId, '1.0.0')!.requirements.find((r) => r.status === 'met')!;
+    const tom = getUseCase(met.useCaseIds[0]);
+    const release = { id: 'rel_terms', ontologyId: demoId, version: '9.6.0', status: 'published', changeRequestIds: [] } as unknown as Release;
+    const base = { ...findDocument(demoId, '1.0.0')!, id: 'reqdoc_terms', version: '9.6.0', status: 'draft' as const, sourceIds: [tom.id], useCases: [toPublic(tom)] };
+    put('requirementsDocs', { ...base, requirements: [{ ...met, missingTerms: ['schedule'] }] }, demoId);
+    const doc = await markPublished(findDocument(demoId, '9.6.0')!, release);
+    expect(doc.requirements[0].status).toBe('partial');
+  });
+
+  it('an archived use case is for its author and the working group only (finding 9)', async () => {
+    const author = await login('contributor');
+    const id = await useCaseVia(author, 'Archived by an editor', 'public');
+    const editor = await login('editor');
+    expect((await author.patch(`/api/use-cases/${id}`).send({ status: 'archived' })).status).toBe(200);
+    expect((await request(app).get(`/api/use-cases/${id}`)).status).toBe(404);
+    expect(JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toMatch(/Archived by an editor/);
+    expect((await editor.get(`/api/use-cases/${id}`)).status).toBe(200);
+    expect((await author.get(`/api/use-cases/${id}`)).status).toBe(200);
   });
 });
 

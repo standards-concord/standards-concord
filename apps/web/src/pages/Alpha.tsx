@@ -1,7 +1,7 @@
+import { useEffect, useState } from 'react';
 import { ArrowLeft, ArrowRight, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { useEffect, useState } from 'react';
-import { useDemoOntology } from '../lib/ontologies';
+import { useDemoOntology, useOntologies } from '../lib/ontologies';
 import { Page } from '../components/Shell';
 import { Stepper, StepBody } from '../components/Walkthrough';
 import { Button, Card } from '../components/ui';
@@ -11,12 +11,14 @@ export function AlphaPage() {
   const w = useWalkthrough();
   const nav = useNavigate();
   const demo = useDemoOntology();
-  // Picking a role signs the tester in, and the demo appears once their ontology list reloads,
-  // so a click before then waits for it rather than sending them home.
+  const { loading } = useOntologies();
+  // Wait for the ontology list before leaving, or a quick click lands on the home page instead of the demo.
   const [exploring, setExploring] = useState(false);
   useEffect(() => {
-    if (exploring && demo) nav(`/o/${demo.id}`);
-  }, [exploring, demo, nav]);
+    if (!exploring || loading) return;
+    setExploring(false);
+    nav(demo ? `/o/${demo.id}` : '/');
+  }, [exploring, loading, demo, nav]);
   return (
     <Page>
       <div className="mb-6">
@@ -43,7 +45,10 @@ export function AlphaPage() {
             Restart
           </Button>
           {w.step >= 2 && (
-            <Button variant="secondary" disabled={exploring} onClick={() => {
+            <Button
+              variant="secondary"
+              loading={exploring}
+              onClick={() => {
                 w.setOpen(true);
                 setExploring(true);
               }}

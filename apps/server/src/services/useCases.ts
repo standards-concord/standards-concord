@@ -42,10 +42,14 @@ const TRIAGE_ROLES: Role[] = ['editor', 'steward', 'owner'];
 export { isGroupMember };
 export const canTriage = (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || rolesFor(ontologyId, user.id).some((r) => TRIAGE_ROLES.includes(r)));
 
-/** Can this viewer see the use case at all? A withdrawn one is visible to its author only. */
+/**
+ * Can this viewer see the use case at all? A withdrawn one is visible to its
+ * author only, and an archived one to its author and the working group.
+ */
 export function canSee(u: UseCase, viewer?: User): boolean {
   if (viewer && u.authorId === viewer.id) return true;
   if (u.withdrawnAt) return false;
+  if (u.status === 'archived') return u.visibility !== 'private' && isGroupMember(u.ontologyId, viewer);
   if (u.visibility === 'public') return true;
   if (u.visibility === 'group') return isGroupMember(u.ontologyId, viewer);
   return false;
@@ -64,14 +68,24 @@ const noLongerPublic: ((u: UseCase) => void)[] = [];
 export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPublic.push(fn);
 const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived';
 
-/** Remove a use case's competency questions from validation results saved on change requests. */
+const questionKey = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * Remove every question the use case has had while public (including ones since
+ * edited) from validation results saved on change requests, and from the SPARQL
+ * tests drafted from them, which carry its example data and run again on retriage.
+ */
 onNoLongerPublic((u) => {
-  const questions = new Set(u.competencyQuestions.map((q) => q.question));
+  const questions = new Set([...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)].map(questionKey));
   if (!questions.size) return;
+  const gone = (r: { question: string }) => questions.has(questionKey(r.question));
   for (const cr of list<ChangeRequest>('changeRequests', u.ontologyId)) {
     const cqs = cr.validation?.competencyQuestions;
-    if (!cqs?.some((r) => questions.has(r.question))) continue;
-    cr.validation = { ...cr.validation!, competencyQuestions: cqs.filter((r) => !questions.has(r.question)) };
+    const inResults = !!cqs?.some(gone);
+    const inTests = !!cr.tests?.some(gone);
+    if (!inResults && !inTests) continue;
+    if (inResults) cr.validation = { ...cr.validation!, competencyQuestions: cqs!.filter((r) => !gone(r)) };
+    if (inTests) cr.tests = cr.tests!.filter((t) => !gone(t));
     put('changeRequests', cr, cr.ontologyId);
   }
 });
@@ -95,24 +109,30 @@ function normalise(u: UseCase): UseCase {
 
 /** Numbers are given when a use case is first shared, so gaps never reveal private drafts. */
 function ensureNumbers(ontologyId: string, all: UseCase[]) {
+  // Fills in numbers missing from older records. Group-only ones numbered before group numbers existed keep theirs.
   let max = all.reduce((m, u) => Math.max(m, u.number ?? 0), 0);
+  let maxGroup = all.reduce((m, u) => Math.max(m, u.groupNumber ?? 0), 0);
   for (const u of [...all].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-    if (u.number || u.visibility === 'private') continue;
-    u.number = ++max;
+    if (u.visibility === 'public' && !u.number) u.number = ++max;
+    else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = ++maxGroup;
+    else continue;
     put('useCases', u, ontologyId);
   }
 }
 
-const nextNumber = (ontologyId: string) => {
+/** The next number in the public (UC-n) or working group (WG-n) sequence. */
+const nextNumber = (ontologyId: string, field: 'number' | 'groupNumber' = 'number') => {
   const all = list<UseCase>('useCases', ontologyId);
   ensureNumbers(ontologyId, all);
-  return all.reduce((m, u) => Math.max(m, u.number ?? 0), 0) + 1;
+  return all.reduce((m, u) => Math.max(m, u[field] ?? 0), 0) + 1;
 };
+
+const needsNumber = (u: UseCase) => (u.visibility === 'public' && !u.number) || (u.visibility === 'group' && !u.number && !u.groupNumber);
 
 /** Raw access for services (no visibility check). */
 export const getUseCase = (id: string) => {
   const u = normalise(mustGet<UseCase>('useCases', id));
-  if (!u.number && u.visibility !== 'private') ensureNumbers(u.ontologyId, list<UseCase>('useCases', u.ontologyId));
+  if (needsNumber(u)) ensureNumbers(u.ontologyId, list<UseCase>('useCases', u.ontologyId));
   return mustGet<UseCase>('useCases', id);
 };
 
@@ -153,6 +173,7 @@ export function present(u: UseCase, viewer?: User): UseCase {
   const out: UseCase = {
     id: u.id,
     number: u.number,
+    ...(u.groupNumber && isGroupMember(u.ontologyId, viewer) ? { groupNumber: u.groupNumber } : {}),
     ontologyId: u.ontologyId,
     authorId: u.anonymous ? 'anonymous' : u.authorId,
     source: u.source,
@@ -185,6 +206,7 @@ export function getUseCaseFor(id: string, viewer?: User): UseCase {
 export const refOf = (u: UseCase): UseCaseRef => ({
   id: u.id,
   number: u.number,
+  ...(u.groupNumber && u.visibility === 'group' ? { groupNumber: u.groupNumber } : {}),
   title: u.sections.name || 'Untitled use case',
   status: u.status,
   visibility: u.visibility,
@@ -226,7 +248,11 @@ export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'
 
 function saveUseCase(u: UseCase) {
   const before = get<UseCase>('useCases', u.id);
-  if (!u.number && u.visibility !== 'private') u.number = nextNumber(u.ontologyId);
+  // A withdrawal is final: a save from work that started earlier (an interview turn, drafting) never undoes it.
+  if (before?.withdrawnAt && !u.withdrawnAt) Object.assign(u, { withdrawnAt: before.withdrawnAt, visibility: before.visibility, status: before.status });
+  if (isPublic(u)) u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)])];
+  if (u.visibility === 'public' && !u.number) u.number = nextNumber(u.ontologyId);
+  else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = nextNumber(u.ontologyId, 'groupNumber');
   u.completeness = completeness(u);
   u.updatedAt = clock.iso();
   put('useCases', u, u.ontologyId);
@@ -278,7 +304,8 @@ export function createUseCase(
   const visibility = init.visibility ?? defaultVisibility(source);
   return saveUseCase({
     id: newId('uc'),
-    number: visibility === 'private' ? 0 : nextNumber(project.id),
+    number: visibility === 'public' ? nextNumber(project.id) : 0,
+    ...(visibility === 'group' ? { groupNumber: nextNumber(project.id, 'groupNumber') } : {}),
     ontologyId: project.id,
     authorId: author.id,
     source,
@@ -362,7 +389,7 @@ export function setVisibility(u: UseCase, actor: User, visibility: UseCaseVisibi
   if (from === 'private' && visibility !== 'private' && u.status === 'draft' && interviewDone(u)) u.status = 'triage';
   if (save) saveUseCase(u);
   if (from === 'private' && visibility !== 'private') {
-    logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared ${useCaseLabel(u.number)} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared ${useCaseLabel(u)} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
   return u;
 }
@@ -419,7 +446,7 @@ export function triageUseCase(u: UseCase, actor: User, status: UseCaseStatus, no
   // Accepting a use case that already has changes in flight picks their status up straight away.
   if (status === 'accepted') syncUseCase(u);
   const label = USE_CASE_STATUS_INFO[status].label.toLowerCase();
-  logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked ${useCaseLabel(u.number)} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+  logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked ${useCaseLabel(u)} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   return u;
 }
 
@@ -718,7 +745,7 @@ export function publishAnonymised(u: UseCase, actor: User, edited?: Partial<Anon
   u.anonymisation = { ...u.anonymisation!, status: 'published', draft: final, decidedAt: clock.iso(), publishedId: published.id };
   saveUseCase(u);
   // No actor on the activity item: naming the author would undo the anonymisation.
-  logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: ${useCaseLabel(published.number)} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
+  logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: ${useCaseLabel(published)} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
   return { original: u, published };
 }
 
@@ -978,7 +1005,7 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
   } else {
     if (u.status === 'draft') u.status = 'triage';
     saveUseCase(u);
-    logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u.number)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
 }
 
@@ -1009,6 +1036,9 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     ],
     fallback: () => heuristicSynthesis(graph.view().classes.map((c) => c.label?.toLowerCase() ?? ''), ucs),
   });
+  // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
+  if (ucs.some((u) => { const now = get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !canSee(now, actor); }))
+    throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
   const cr = await createChangeRequest(project, actor, {
     title: value.title,
     description: `${value.summary}\n\n**Rationale.** ${value.rationale}\n\nFrom use cases: ${ucs.map((u) => u.sections.name ?? u.id).join('; ')}${value.conflicts.length ? `\n\n**Terminology conflicts.**\n${value.conflicts.map((c) => `- ${c}`).join('\n')}` : ''}`,
@@ -1019,7 +1049,13 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
   });
   // Carry the drafted SPARQL back onto the use cases so the tests keep running on every future change.
-  for (const u of ucs) {
+  // Each use case is read again and only the fields synthesis owns are changed, so an edit or
+  // withdrawal made while drafting is never overwritten.
+  const linked: string[] = [];
+  for (const stale of ucs) {
+    const u = get<UseCase>('useCases', stale.id);
+    if (!u || !isPublic(u)) continue;
+    linked.push(u.id);
     for (const q of u.competencyQuestions) {
       const t = value.competencyQuestionTests.find((x) => x.question.toLowerCase() === q.question.toLowerCase());
       if (t) {
@@ -1032,7 +1068,7 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     saveUseCase(u);
     syncUseCase(u, [cr]);
   }
-  cr.useCaseIds = ucs.map((u) => u.id);
+  cr.useCaseIds = linked;
   put('changeRequests', cr, cr.ontologyId);
   return cr;
 }

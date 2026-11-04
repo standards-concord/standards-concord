@@ -53,7 +53,7 @@ export function UseCaseDetailPage() {
         <div className="min-w-0 space-y-6">
           <Card className="p-6">
             <div className="mb-1 flex flex-wrap items-center gap-2">
-              <span className="font-mono text-xs text-muted">{useCaseLabel(u.number)}</span>
+              <span className="font-mono text-xs text-muted">{useCaseLabel(u)}</span>
               <UseCaseStatusBadge status={u.status} version={u.resolution?.version} />
               <VisibilityBadge visibility={u.visibility} anonymous={u.anonymous} />
               <SourceBadge source={u.source} />
@@ -361,7 +361,7 @@ function TraceCard({ uc, onChange }: { uc: UseCaseDetail; onChange: (u: UseCaseD
                   <span className="text-xs text-muted">{RELATION_LABEL[r.relation][r.direction]}</span>
                   <UseCaseRefLink ontologyId={id} r={r} />
                   {r.direction === 'out' && canLink && (
-                    <button className="text-muted hover:text-danger" aria-label={`Remove link to ${useCaseLabel(r.number)}`} onClick={() => void remove.run(r.id)}>
+                    <button className="text-muted hover:text-danger" aria-label={`Remove link to ${useCaseLabel(r)}`} onClick={() => void remove.run(r.id)}>
                       <Trash2 className="size-3.5" />
                     </button>
                   )}
@@ -438,7 +438,7 @@ function AddLink({ uc, onDone }: { uc: UseCaseDetail; onDone: (u: UseCaseDetail)
                   .sort((a, b) => a.number - b.number)
                   .map((x) => (
                     <option key={x.id} value={x.id}>
-                      {useCaseLabel(x.number)} {x.sections.name || 'Untitled'}
+                      {useCaseLabel(x)} {x.sections.name || 'Untitled'}
                     </option>
                   ))
               : (meetings.data ?? []).map((m) => (

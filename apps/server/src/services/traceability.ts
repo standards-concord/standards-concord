@@ -1,4 +1,5 @@
 import type { ChangeRequest, Release, UseCase, UseCaseStatus } from '@concord/shared';
+import { useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
 import { get, list, put } from '../db.js';
 import { logActivity } from './users.js';
@@ -9,7 +10,8 @@ import { logActivity } from './users.js';
  * A use case's status follows its change requests automatically:
  * accepted -> in-progress (a change is proposed) -> addressed (merged into the working draft)
  * -> closed (released; the resolution records the version). If every change is
- * rejected or withdrawn it goes back to accepted. Statuses an editor set by hand
+ * rejected or withdrawn it goes back to accepted; if only some are, it is never
+ * closed automatically, because the dropped ones may have been needed too. Statuses an editor set by hand
  * (deferred, out of scope, archived, or closed without a change) are left alone.
  *
  * This module only depends on the database so the change request and release
@@ -64,9 +66,12 @@ export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick
   const live = crs.filter((c) => c.status !== 'rejected' && c.status !== 'withdrawn');
   let status: UseCaseStatus;
   let resolution = u.resolution;
+  // A rejected or withdrawn change request may have been needed too, so shipping the others
+  // doesn't prove the use case is covered: it stays addressed until an editor closes it.
+  const dropped = crs.length > live.length;
   if (!live.length) status = 'accepted';
   else if (live.every((c) => c.status === 'released')) {
-    const rel = completingRelease(live);
+    const rel = dropped ? undefined : completingRelease(live);
     if (rel) {
       status = 'closed';
       // Keep the original transition (and its timestamp) when nothing has really changed.
@@ -86,6 +91,8 @@ export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick
 export function syncUseCase(u: UseCase, overrides: ChangeRequest[] = []): boolean {
   const next = derivedStatus(u, overrides);
   if (!next) return false;
+  // Never write over a withdrawal made since this copy was read.
+  if (get<UseCase>('useCases', u.id)?.withdrawnAt && !u.withdrawnAt) return false;
   const before = u.status;
   u.status = next.status;
   u.resolution = next.resolution;
@@ -95,7 +102,7 @@ export function syncUseCase(u: UseCase, overrides: ChangeRequest[] = []): boolea
     logActivity({
       ontologyId: u.ontologyId,
       type: 'usecase.closed',
-      message: `closed UC-${u.number} ${u.sections.name ?? ''}${u.resolution?.version ? ` (covered in ${u.resolution.version})` : ''}`.trim(),
+      message: `closed ${useCaseLabel(u)} ${u.sections.name ?? ''}${u.resolution?.version ? ` (covered in ${u.resolution.version})` : ''}`.trim(),
       link: `/o/${u.ontologyId}/use-cases/${u.id}`,
     });
   }

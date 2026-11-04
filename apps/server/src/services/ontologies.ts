@@ -198,7 +198,12 @@ export async function summary(p: OntologyProject, withHealth = true, viewer?: Us
       properties: view.objectProperties.length + view.datatypeProperties.length,
       individuals: view.individuals.length,
       // Only the use cases this viewer can see, so the count doesn't reveal private ones.
-      useCases: list<UseCase>('useCases', p.id).filter((u) => (viewer && u.authorId === viewer.id) || (!u.withdrawnAt && (u.visibility === 'public' || (u.visibility === 'group' && isGroupMember(p.id, viewer))))).length,
+      useCases: list<UseCase>('useCases', p.id).filter((u) => {
+        // The same rule as canSee in services/useCases.ts.
+        if (viewer && u.authorId === viewer.id) return true;
+        if (u.withdrawnAt || u.visibility === 'private') return false;
+        return (u.visibility === 'public' && u.status !== 'archived') || isGroupMember(p.id, viewer);
+      }).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: list<Release>('releases', p.id).filter((r) => r.status === 'published').length,
       members: members(p.id).length,

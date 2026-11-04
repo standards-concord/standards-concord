@@ -153,11 +153,11 @@ export function UseCasesTab() {
                   (uc.visibility !== 'public' ? (
                     <span className="mt-1 size-4 shrink-0" title="Change requests are public, so only public use cases can be used. Make it public, or publish an anonymised version of a private one." />
                   ) : (
-                    <input type="checkbox" className="mt-1 size-4 accent-[var(--accent)]" checked={selected.has(uc.id)} onChange={() => toggle(uc.id)} aria-label={`Select ${useCaseLabel(uc.number)} ${uc.sections.name || 'use case'}`} />
+                    <input type="checkbox" className="mt-1 size-4 accent-[var(--accent)]" checked={selected.has(uc.id)} onChange={() => toggle(uc.id)} aria-label={`Select ${useCaseLabel(uc)} ${uc.sections.name || 'use case'}`} />
                   ))}
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs text-muted">{useCaseLabel(uc.number)}</span>
+                    <span className="font-mono text-xs text-muted">{useCaseLabel(uc)}</span>
                     <Link to={`/o/${id}/use-cases/${uc.id}`} className="font-medium hover:text-accent">
                       {uc.sections.name || 'Untitled use case'}
                     </Link>
