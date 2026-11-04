@@ -120,7 +120,7 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
       const cy = cytoscape({
         container: ref.current,
         elements,
-        minZoom: 0.15,
+        minZoom: 0.05,
         maxZoom: 2.5,
         boxSelectionEnabled: false,
         style: [
@@ -145,7 +145,8 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
           { selector: 'node[kind = "literal"]', style: { shape: 'rectangle', 'background-color': literalFill, 'border-color': '#b8920f', color: '#3d3000', 'font-size': 10, height: 20 } },
           { selector: 'node[deprecated = 1]', style: { 'border-style': 'dashed', color: c.muted, 'border-color': c.muted, 'background-color': c.surface2 } },
           { selector: 'node:selected', style: { 'background-color': c.accent, color: c.accentFg, 'border-width': 2.5 } },
-          { selector: '.faded', style: { opacity: 0.18 } },
+          // The selection's neighbours get a heavier border. Nothing else is faded, so labels keep their contrast.
+          { selector: 'node.near', style: { 'border-width': 3, 'border-color': c.accent } },
           { selector: 'edge', style: { width: 1.3, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle', 'line-color': c.lineStrong, 'target-arrow-color': c.lineStrong, 'arrow-scale': 0.9 } },
           { selector: 'edge[kind = "sub"]', style: { 'line-color': c.muted, 'target-arrow-color': c.muted, 'target-arrow-shape': 'triangle', 'target-arrow-fill': 'hollow', 'arrow-scale': 1.3 } },
           {
@@ -154,7 +155,8 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
           },
           { selector: 'edge[kind = "dprop"]', style: { 'line-color': '#b8920f', 'target-arrow-color': '#b8920f' } },
           { selector: 'edge[kind = "disjoint"]', style: { 'line-color': c.warn, 'line-style': 'dotted', 'target-arrow-shape': 'none', 'source-arrow-shape': 'none', opacity: 0.6 } },
-          { selector: 'edge.hl', style: { width: 2.4, 'z-index': 10 } },
+          { selector: 'edge.hl', style: { width: 2.8, 'z-index': 10 } },
+          { selector: 'edge.hl[kind = "sub"]', style: { 'line-color': c.fg, 'target-arrow-color': c.fg } },
           // Relationship names appear on the selection's links, or everywhere when the graph is small.
           { selector: 'edge.labelled[label], edge.hl[label]', style: { label: 'data(label)' } },
         ],
@@ -193,12 +195,13 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy || !ready) return;
+    const reduce = prefersReducedMotion();
     const opts =
       layout === 'hierarchy'
-        ? { name: 'preset', positions: (n: { id: () => string }) => positions[n.id()] ?? { x: 0, y: 0 }, padding: 30, animate: true, animationDuration: 300 }
+        ? { name: 'preset', positions: (n: { id: () => string }) => positions[n.id()] ?? { x: 0, y: 0 }, padding: 30, animate: !reduce, animationDuration: 300 }
         : layout === 'force'
-          ? { name: 'cose', padding: 30, animate: true, animationDuration: 400, nodeRepulsion: () => 9000, idealEdgeLength: () => 110, randomize: false }
-          : { name: 'concentric', padding: 30, animate: true, animationDuration: 300, concentric: (n: { id: () => string }) => 10 - model.depth(n.id()), levelWidth: () => 1, minNodeSpacing: 30 };
+          ? { name: 'cose', padding: 30, animate: !reduce, animationDuration: 400, nodeRepulsion: () => 9000, idealEdgeLength: () => 110, randomize: false }
+          : { name: 'concentric', padding: 30, animate: !reduce, animationDuration: 300, concentric: (n: { id: () => string }) => 10 - model.depth(n.id()), levelWidth: () => 1, minNodeSpacing: 30 };
     cy.layout(opts as never).run();
   }, [layout, ready, positions, model]);
 
@@ -207,7 +210,7 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
     const cy = cyRef.current;
     if (!cy || !ready) return;
     cy.batch(() => {
-      cy.elements().removeClass('faded hl labelled');
+      cy.elements().removeClass('near hl labelled');
       cy.$(':selected').unselect();
       if (cy.edges().length <= 40) cy.edges().addClass('labelled');
       if (!selected) return;
@@ -215,11 +218,14 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
       if (n.empty() || !n.isNode()) return;
       n.select();
       const hood = n.closedNeighborhood();
-      cy.elements().not(hood).addClass('faded');
+      hood.nodes().not(n).addClass('near');
       hood.edges().addClass('hl');
     });
     const n = cy.getElementById(selected ?? '');
-    if (n.nonempty() && n.isNode()) cy.animate({ center: { eles: n }, duration: 300 });
+    if (n.nonempty() && n.isNode()) {
+      if (prefersReducedMotion()) cy.center(n);
+      else cy.animate({ center: { eles: n }, duration: 300 });
+    }
   }, [selected, ready, elements]);
 
   const exportPng = () => {
@@ -264,6 +270,7 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
         aria-label={`Graph of ${classCount} classes and ${edgeCount} links${focus ? ` around ${makeLabeler(view)(focus)}` : ''}. The Diagram view and each class's page give the same information as text.`}
         data-testid="ontology-graph"
         data-ready={ready ? 'true' : 'false'}
+        data-motion={prefersReducedMotion() ? 'reduced' : 'full'}
       >
         {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
         <div ref={ref} className="size-full" />
@@ -283,4 +290,8 @@ export function OntologyGraph({ view, selected, focus, hops = 1, onSelect, heigh
       </div>
     </div>
   );
+}
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 }

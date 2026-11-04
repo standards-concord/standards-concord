@@ -8,7 +8,8 @@ export interface Transform {
   k: number;
 }
 
-const MIN = 0.2;
+// Low enough that a diagram of a few hundred classes (often a very wide bottom rank) still fits.
+const MIN = 0.02;
 const MAX = 2.5;
 const clamp = (k: number) => Math.max(MIN, Math.min(MAX, k));
 
@@ -20,10 +21,17 @@ const clamp = (k: number) => Math.max(MIN, Math.min(MAX, k));
 export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width: number; height: number }, fitKey: unknown) {
   const [t, setT] = useState<Transform>({ x: 0, y: 0, k: 1 });
   const drag = useRef<{ x: number; y: number; tx: number; ty: number; moved: boolean } | null>(null);
+  // Once the person pans or zooms, resizes stop refitting the drawing under them.
+  const touched = useRef(false);
+  const move = useCallback((f: (p: Transform) => Transform) => {
+    touched.current = true;
+    setT(f);
+  }, []);
 
   const fit = useCallback(() => {
     const el = box.current;
-    if (!el || !size.width || !size.height) return;
+    if (!el || !size.width || !size.height || !el.clientWidth || !el.clientHeight) return;
+    touched.current = false;
     const pad = 24;
     const w = el.clientWidth - pad * 2;
     const h = el.clientHeight - pad * 2;
@@ -33,15 +41,54 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
 
   useEffect(() => fit(), [fit, fitKey]);
 
+  // Fit once the container becomes measurable (e.g. inside a <details> that opens later)
+  // and whenever it is resized, unless the person has moved the view themselves.
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let last = '';
+    const ro = new ResizeObserver(() => {
+      const key = `${el.clientWidth}x${el.clientHeight}`;
+      if (key === last) return;
+      last = key;
+      if (!touched.current) fit();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [box, fit]);
+
+  /** Pan the least distance that brings a rectangle (in drawing coordinates) into view. */
+  const reveal = useCallback(
+    (r: { x: number; y: number; width: number; height: number }) => {
+      const el = box.current;
+      if (!el) return;
+      const pad = 16;
+      setT((p) => {
+        const left = r.x * p.k + p.x;
+        const top = r.y * p.k + p.y;
+        const right = left + r.width * p.k;
+        const bottom = top + r.height * p.k;
+        let dx = 0;
+        let dy = 0;
+        if (right > el.clientWidth - pad) dx = el.clientWidth - pad - right;
+        if (left + dx < pad) dx = pad - left;
+        if (bottom > el.clientHeight - pad) dy = el.clientHeight - pad - bottom;
+        if (top + dy < pad) dy = pad - top;
+        return dx || dy ? { ...p, x: p.x + dx, y: p.y + dy } : p;
+      });
+    },
+    [box],
+  );
+
   const zoomAt = useCallback((factor: number, cx?: number, cy?: number) => {
-    setT((p) => {
+    move((p) => {
       const el = box.current;
       const px = cx ?? (el ? el.clientWidth / 2 : 0);
       const py = cy ?? (el ? el.clientHeight / 2 : 0);
       const k = clamp(p.k * factor);
       return { k, x: px - ((px - p.x) * k) / p.k, y: py - ((py - p.y) * k) / p.k };
     });
-  }, [box]);
+  }, [box, move]);
 
   useEffect(() => {
     const el = box.current;
@@ -50,11 +97,11 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
       e.preventDefault();
       const r = el.getBoundingClientRect();
       if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
-      else setT((p) => ({ ...p, x: p.x - e.deltaX, y: p.y - e.deltaY }));
+      else move((p) => ({ ...p, x: p.x - e.deltaX, y: p.y - e.deltaY }));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [box, zoomAt]);
+  }, [box, zoomAt, move]);
 
   const handlers = {
     onPointerDown: (e: React.PointerEvent) => {
@@ -68,7 +115,7 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
       const dx = e.clientX - d.x;
       const dy = e.clientY - d.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
-      setT((p) => ({ ...p, x: d.tx + dx, y: d.ty + dy }));
+      move((p) => ({ ...p, x: d.tx + dx, y: d.ty + dy }));
     },
     onPointerUp: () => {
       drag.current = null;
@@ -77,10 +124,10 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
       if ((e.target as Element).closest('[data-node]') && e.key.startsWith('Arrow')) return;
       const step = 60;
       const keys: Record<string, () => void> = {
-        ArrowLeft: () => setT((p) => ({ ...p, x: p.x + step })),
-        ArrowRight: () => setT((p) => ({ ...p, x: p.x - step })),
-        ArrowUp: () => setT((p) => ({ ...p, y: p.y + step })),
-        ArrowDown: () => setT((p) => ({ ...p, y: p.y - step })),
+        ArrowLeft: () => move((p) => ({ ...p, x: p.x + step })),
+        ArrowRight: () => move((p) => ({ ...p, x: p.x - step })),
+        ArrowUp: () => move((p) => ({ ...p, y: p.y + step })),
+        ArrowDown: () => move((p) => ({ ...p, y: p.y - step })),
         '+': () => zoomAt(1.2),
         '=': () => zoomAt(1.2),
         '-': () => zoomAt(1 / 1.2),
@@ -93,7 +140,7 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
       }
     },
   };
-  return { t, fit, zoomIn: () => zoomAt(1.2), zoomOut: () => zoomAt(1 / 1.2), handlers };
+  return { t, fit, reveal, zoomIn: () => zoomAt(1.2), zoomOut: () => zoomAt(1 / 1.2), handlers };
 }
 
 export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Download as SVG', k, children }: { onIn: () => void; onOut: () => void; onFit: () => void; onExport?: () => void; exportLabel?: string; k: number; children?: ReactNode }) {
@@ -143,6 +190,7 @@ export function themeColours() {
     line: cssVar('--line', '#e5e5e3'),
     lineStrong: cssVar('--line-strong', '#d4d4d1'),
     warn: cssVar('--warn', '#a35a00'),
+    danger: cssVar('--danger', '#c0262d'),
     ok: cssVar('--ok', '#157f3c'),
   };
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import { Bug, ChevronDown, ChevronRight, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
@@ -50,7 +50,7 @@ function Section({ title, count, children, defaultOpen = false }: { title: strin
   return (
     <details open={defaultOpen} className="group mt-4 border-t border-line pt-3">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-4 text-muted transition-transform group-open:rotate-90" aria-hidden />
+        <ChevronRight className="size-4 text-muted transition-transform group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
         {title}
         {count !== undefined && <span className="rounded-full bg-surface-2 px-1.5 text-xs font-medium text-muted">{count}</span>}
       </summary>
@@ -59,7 +59,21 @@ function Section({ title, count, children, defaultOpen = false }: { title: strin
   );
 }
 
-function TermDetailPanel({ iri, onSelect, model, showNeighbourhood, compact, onClose }: { iri: string; onSelect: (i: string) => void; model: OntologyModel; showNeighbourhood: boolean; compact?: boolean; onClose?: () => void }) {
+function TermDetailPanel({
+  iri,
+  onSelect,
+  model,
+  showNeighbourhood,
+  compact,
+  onClose,
+}: {
+  iri: string;
+  onSelect: (i: string) => void;
+  model: OntologyModel;
+  showNeighbourhood: boolean;
+  compact?: boolean;
+  onClose?: () => void;
+}) {
   const { id, label, view } = useOntology();
   const term = useAsync(() => api.term(id, iri), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
@@ -292,7 +306,11 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
               <li key={p.iri}>
                 <button
                   onClick={() => onSelect(p.iri)}
-                  className={cx('block w-full truncate rounded-md px-2 py-1 text-left text-sm', selected === p.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2', p.deprecated && 'line-through opacity-70')}
+                  className={cx(
+                    'block w-full truncate rounded-md px-2 py-1 text-left text-sm',
+                    selected === p.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2',
+                    p.deprecated && 'line-through opacity-70',
+                  )}
                 >
                   {p.label ?? label(p.iri)}
                 </button>
@@ -305,30 +323,58 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
 }
 
 type Mode = 'tree' | 'diagram' | 'graph';
-const MODES: { key: Mode; label: string; icon: typeof ListTree; hint: string }[] = [
-  { key: 'tree', label: 'Classes', icon: ListTree, hint: 'Hierarchy and term pages' },
-  { key: 'diagram', label: 'Diagram', icon: LayoutTemplate, hint: 'UML-style class diagram' },
-  { key: 'graph', label: 'Graph', icon: Network, hint: 'Network overview' },
+const MODES: {
+  key: Mode;
+  label: string;
+  icon: typeof ListTree;
+  task: string;
+}[] = [
+  {
+    key: 'tree',
+    label: 'Classes',
+    icon: ListTree,
+    task: 'Find a term and read its definition, properties and where it’s used.',
+  },
+  {
+    key: 'diagram',
+    label: 'Diagram',
+    icon: LayoutTemplate,
+    task: 'Check what data each class has: attributes, types and how many of each.',
+  },
+  {
+    key: 'graph',
+    label: 'Graph',
+    icon: Network,
+    task: 'Explore how classes connect across the whole ontology.',
+  },
 ];
 
+/** More classes than this and the diagram asks where to start rather than drawing everything. */
+export const LARGE_DIAGRAM = 80;
+
 /** Whole ontology, or a class and everything one or two links away. */
-function ScopeControl({ hops, setHops, selected, focusable }: { hops: number; setHops: (h: number) => void; selected?: string; focusable: boolean }) {
+function ScopeControl({ hops, setHops, anchor, centreOn, onCentre }: { hops: number; setHops: (h: number) => void; anchor?: string; centreOn?: string; onCentre: (iri: string) => void }) {
   const { label } = useOntology();
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label className="flex items-center gap-2 text-xs text-muted">
         Show
-        <Select value={focusable ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Scope">
+        <Select value={anchor ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Scope">
           <option value="0">Whole ontology</option>
-          <option value="1" disabled={!focusable}>
-            {focusable ? `${label(selected!)} and direct links` : 'Around a class (pick one first)'}
+          <option value="1" disabled={!anchor}>
+            {anchor ? `${label(anchor)} and direct links` : 'Around a class (pick one first)'}
           </option>
-          <option value="2" disabled={!focusable}>
-            {focusable ? `${label(selected!)}, two links out` : 'Two links out (pick a class)'}
+          <option value="2" disabled={!anchor}>
+            {anchor ? `${label(anchor)}, two links out` : 'Two links out (pick a class)'}
           </option>
         </Select>
       </label>
-      {focusable && hops > 0 && (
+      {centreOn && (
+        <Button size="sm" variant="secondary" icon={Crosshair} onClick={() => onCentre(centreOn)}>
+          Centre on {label(centreOn)}
+        </Button>
+      )}
+      {anchor && hops > 0 && (
         <Button size="sm" variant="ghost" icon={Maximize} onClick={() => setHops(0)}>
           Show entire ontology
         </Button>
@@ -337,25 +383,85 @@ function ScopeControl({ hops, setHops, selected, focusable }: { hops: number; se
   );
 }
 
-function DiagramView({ model, selected, focus, hops, onSelect }: { model: OntologyModel; selected?: string; focus?: string; hops: number; onSelect: (iri: string) => void }) {
+/** Classes with the most links, as starting points for a large ontology's diagram. */
+function hubs(model: OntologyModel, n: number) {
+  const degree = new Map<string, number>();
+  const bump = (iri: string, by = 1) => model.classes.has(iri) && degree.set(iri, (degree.get(iri) ?? 0) + by);
+  for (const [c, ps] of model.parents) for (const p of ps) (bump(c), bump(p));
+  for (const c of model.classes.keys()) for (const s of model.ownSlots(c)) for (const r of s.range) if (model.classes.has(r)) (bump(c), bump(r));
+  return [...degree]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([iri]) => iri);
+}
+
+function DiagramView({
+  model,
+  selected,
+  focus,
+  hops,
+  onSelect,
+  onCentre,
+}: {
+  model: OntologyModel;
+  selected?: string;
+  focus?: string;
+  hops: number;
+  onSelect: (iri: string) => void;
+  onCentre: (iri: string) => void;
+}) {
   const { view, label } = useOntology();
   const [opts, setOpts] = useState<DiagramOptions>(DEFAULT_DIAGRAM_OPTIONS);
+  const [drawAll, setDrawAll] = useState(false);
+  const large = !focus && model.classes.size > LARGE_DIAGRAM && !drawAll;
   const scope = useMemo(() => (focus ? neighbourhood(model, focus, hops, opts) : new Set(model.classes.keys())), [model, focus, hops, opts]);
+  const starts = useMemo(() => (large ? hubs(model, 8) : []), [large, model]);
   const toggle = (k: keyof DiagramOptions) => setOpts((o) => ({ ...o, [k]: !o[k] }));
   if (!view.data) return null;
+  if (large)
+    return (
+      <section data-testid="large-diagram" aria-labelledby="large-diagram-title">
+        <Card className="p-6">
+          <h3 id="large-diagram-title" className="font-semibold">
+            Where would you like to start?
+          </h3>
+          <p className="mt-1 max-w-prose text-sm text-muted">
+            This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, choose one from the Terms panel, or use the Graph view for an
+            overview.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Start from a class">
+            {starts.map((iri) => (
+              <Button key={iri} size="sm" variant="secondary" onClick={() => onCentre(iri)}>
+                {label(iri)}
+              </Button>
+            ))}
+          </div>
+          <Button size="sm" variant="ghost" className="mt-4" onClick={() => setDrawAll(true)}>
+            Draw all {model.classes.size} classes anyway
+          </Button>
+        </Card>
+      </section>
+    );
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
-        <Chip active={opts.attributes} onClick={() => toggle('attributes')}>Attributes</Chip>
-        <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>Inherited attributes</Chip>
-        <Chip active={opts.associations} onClick={() => toggle('associations')}>Relationships</Chip>
-        <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>Subclasses</Chip>
+        <Chip active={opts.attributes} onClick={() => toggle('attributes')}>
+          Attributes
+        </Chip>
+        <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>
+          Inherited attributes
+        </Chip>
+        <Chip active={opts.associations} onClick={() => toggle('associations')}>
+          Relationships
+        </Chip>
+        <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>
+          Subclasses
+        </Chip>
       </div>
-      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={640} />
+      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={640} detailsId="term-details" />
     </div>
   );
 }
-
 
 export function BrowseTab() {
   const { id, view, label } = useOntology();
@@ -374,31 +480,76 @@ export function BrowseTab() {
   const results = useAsync(async () => (debounced ? api.search(id, debounced) : undefined), [id, debounced]);
   const model = useMemo(() => (view.data ? buildModel(view.data) : undefined), [view.data]);
 
-  // Canvas scope: an explicit ?hops= wins; otherwise a selected class shows its direct links.
-  const focusable = !!selected && !!model?.classes.has(selected);
+  // Canvas scope. The drawing is anchored on ?around= (a class), independently of the term
+  // being inspected (?term=), so picking something shows its details without redrawing.
+  // Arriving with only a class selected anchors on that class.
+  const isClass = (iri?: string | null): iri is string => !!iri && !!model?.classes.has(iri);
+  const aroundParam = params.get('around');
   const hopsParam = params.get('hops');
-  const hops = focusable ? (hopsParam !== null ? Math.max(0, Math.min(2, Number(hopsParam) || 0)) : 1) : 0;
-  const focus = focusable && hops > 0 ? selected : undefined;
+  const around = isClass(aroundParam) ? aroundParam : hopsParam === null && isClass(selected) ? selected : undefined;
+  const hops = around ? (hopsParam !== null ? Math.max(0, Math.min(2, Number(hopsParam) || 0)) : 1) : 0;
+  const focus = around && hops > 0 ? around : undefined;
+  const scope = useMemo(() => (model && focus ? neighbourhood(model, focus, hops, DEFAULT_DIAGRAM_OPTIONS) : undefined), [model, focus, hops]);
 
   const update = (f: (p: URLSearchParams) => void, replace = false) => {
     const next = new URLSearchParams(params);
     f(next);
     setParams(next, { replace });
   };
-  const select = (iri: string) => update((p) => p.set('term', iri));
-  // Picking a node on the canvas keeps the current scope rather than jumping to its neighbourhood.
+  // Write the current scope into the URL so it survives a change of term.
+  const pin = (p: URLSearchParams) => {
+    if (focus) {
+      p.set('around', focus);
+      p.set('hops', String(hops));
+    } else {
+      p.delete('around');
+      p.set('hops', '0');
+    }
+  };
+  const centre = (iri: string) =>
+    update((p) => {
+      p.set('term', iri);
+      p.set('around', iri);
+      p.set('hops', String(hops || 1));
+    });
+  // From the term list, search or links: in a canvas view, a class outside the drawing
+  // recentres it; anything else keeps the current scope.
+  const select = (iri: string) => {
+    if (canvas && scope && isClass(iri) && !scope.has(iri)) return centre(iri);
+    update((p) => {
+      p.set('term', iri);
+      if (canvas) pin(p);
+    });
+  };
+  // Picking on the canvas only changes the details.
   const selectOnCanvas = (iri: string) =>
     update((p) => {
       p.set('term', iri);
-      p.set('hops', String(hops));
+      pin(p);
     });
-  const setHops = (h: number) => update((p) => p.set('hops', String(h)), true);
+  const setHops = (h: number) =>
+    update((p) => {
+      const anchor = around ?? (isClass(selected) ? selected : undefined);
+      if (h > 0 && anchor) {
+        p.set('around', anchor);
+        p.set('hops', String(h));
+      } else {
+        p.delete('around');
+        p.set('hops', '0');
+      }
+    }, true);
   const setMode = (m: Mode) =>
     update((p) => {
       if (m === 'tree') p.delete('view');
       else p.set('view', m);
     }, true);
-  const clear = () => update((p) => p.delete('term'));
+  const clear = () =>
+    update((p) => {
+      p.delete('term');
+      if (canvas) pin(p);
+    });
+  const anchor = focus ?? (isClass(selected) ? selected : undefined);
+  const centreOn = isClass(selected) && selected !== focus ? selected : undefined;
 
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
@@ -450,7 +601,15 @@ export function BrowseTab() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex w-full max-w-md items-center gap-2">
           {canvas && (
-            <Button size="sm" variant="secondary" icon={showNav ? PanelLeftClose : PanelLeftOpen} onClick={() => setNavOpen(!showNav)} aria-expanded={showNav} aria-controls="browse-nav" className="h-9 shrink-0">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={showNav ? PanelLeftClose : PanelLeftOpen}
+              onClick={() => setNavOpen(!showNav)}
+              aria-expanded={showNav}
+              aria-controls="browse-nav"
+              className="h-9 shrink-0"
+            >
               {showNav ? 'Hide terms' : 'Terms'}
             </Button>
           )}
@@ -473,13 +632,13 @@ export function BrowseTab() {
             )}
           </div>
         </div>
-        <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View">
+        <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View" aria-describedby="view-task">
           {MODES.map((m) => (
             <button
               key={m.key}
               role="radio"
               aria-checked={mode === m.key}
-              title={m.hint}
+              title={m.task}
               onClick={() => setMode(m.key)}
               className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === m.key ? 'bg-surface-2 font-medium' : 'text-muted hover:text-fg')}
             >
@@ -488,6 +647,9 @@ export function BrowseTab() {
           ))}
         </div>
       </div>
+      <p id="view-task" className="-mt-2 mb-4 text-sm text-muted">
+        {MODES.find((m) => m.key === mode)!.task}
+      </p>
 
       {empty ? (
         <EmptyState icon={ListTree} title="This ontology has no terms yet">
@@ -501,7 +663,8 @@ export function BrowseTab() {
               <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
             ) : (
               <EmptyState icon={ListTree} title="Pick a term">
-                Choose a class or property on the left to see its definition, properties and where it’s used. Or switch to the Diagram or Graph view above to see the whole ontology.
+                Choose a class or property on the left to see its definition, properties and where it’s used. Use the Diagram to check what data each class has, or the Graph to see how everything
+                connects.
               </EmptyState>
             )}
           </div>
@@ -511,15 +674,20 @@ export function BrowseTab() {
           {showNav && <div id="browse-nav">{nav}</div>}
           <div className={cx('grid min-w-0 gap-4', selected && 'xl:grid-cols-[1fr_380px]')}>
             <div className="min-w-0 space-y-2">
-              <ScopeControl hops={hops} setHops={setHops} selected={selected} focusable={focusable} />
+              <ScopeControl hops={hops} setHops={setHops} anchor={anchor} centreOn={centreOn} onCentre={centre} />
               {mode === 'graph' ? (
                 <OntologyGraph view={v} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} height={620} />
               ) : (
-                <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} />
+                <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} />
               )}
             </div>
             {selected && (
-              <aside className="min-w-0 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto" aria-label="Term details">
+              <aside
+                id="term-details"
+                tabIndex={-1}
+                className="min-w-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto"
+                aria-label="Term details"
+              >
                 <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={false} compact onClose={clear} />
               </aside>
             )}

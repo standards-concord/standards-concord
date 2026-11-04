@@ -214,5 +214,5 @@ export function Neighbourhood({ iri, view, model, label, onSelect }: { iri: stri
     const near = neighbourhood(model, iri, 1, DEFAULT_DIAGRAM_OPTIONS);
     return near.size < 4 ? neighbourhood(model, iri, 2, DEFAULT_DIAGRAM_OPTIONS) : near;
   }, [model, iri]);
-  return <ClassDiagram view={view} model={model} label={label} scope={scope} options={DEFAULT_DIAGRAM_OPTIONS} selected={iri} focus={iri} onSelect={onSelect} height={340} title={`Neighbourhood of ${label(iri)}`} />;
+  return <ClassDiagram view={view} model={model} label={label} scope={scope} options={DEFAULT_DIAGRAM_OPTIONS} selected={iri} focus={iri} onSelect={onSelect} height={340} title={`Neighbourhood of ${label(iri)}`} textList={false} />;
 }

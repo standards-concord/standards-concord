@@ -157,7 +157,7 @@ test.describe('class diagram', () => {
     // Session's attributes are listed in its box with type and cardinality.
     const session = d.locator(`[data-node="${VOL}Session"]`);
     await expect(session).toContainText('start date and time : dateTime [1]');
-    await expect(d).toHaveAttribute('aria-label', new RegExp(`${classes} classes`));
+    await expect(d).toHaveAccessibleDescription(new RegExp(`^${classes} classes`));
 
     // Options hide and show parts of the notation.
     await page.getByRole('button', { name: 'Attributes', exact: true }).click();
@@ -237,6 +237,234 @@ test.describe('class diagram', () => {
   });
 });
 
+test.describe('diagram scope, focus and contrast (review fixes)', () => {
+  const nodes = (page: Page) => page.getByTestId('class-diagram').locator('[data-node]');
+
+  test('picking a class or property keeps the drawing; recentring is explicit', async ({ page }) => {
+    await page.goto(`${base}?view=diagram&term=${encodeURIComponent(`${VOL}Role`)}`);
+    await settle(page);
+    const d = page.getByTestId('class-diagram');
+    const near = await nodes(page).count();
+    await expect(d.locator(`[data-node="${VOL}Location"]`)).toHaveCount(0);
+
+    // Clicking another class in the drawing shows its details but keeps the scope around Role.
+    await d.locator(`[data-node="${VOL}TimeCommitment"]`).click();
+    await expect.poll(() => term(page)).toBe(`${VOL}TimeCommitment`);
+    await expect(page).toHaveURL(new RegExp(`around=${encodeURIComponent(`${VOL}Role`)}`));
+    await expect(nodes(page)).toHaveCount(near);
+
+    // Following a property link in the details keeps it too.
+    const details = page.getByRole('complementary', { name: 'Term details' });
+    await details.getByRole('table', { name: /Properties of/ }).getByRole('button').first().click();
+    await expect.poll(() => term(page)).not.toBe(`${VOL}TimeCommitment`);
+    await expect(nodes(page)).toHaveCount(near);
+    await expect(page.getByRole('combobox', { name: 'Scope' })).toHaveValue('1');
+
+    // "Centre on" redraws around the inspected class.
+    await d.locator(`[data-node="${VOL}TimeCommitment"]`).click();
+    await page.getByRole('button', { name: 'Centre on time commitment' }).click();
+    await expect(page).toHaveURL(new RegExp(`around=${encodeURIComponent(`${VOL}TimeCommitment`)}`));
+    await expect(page.getByRole('button', { name: /^Centre on/ })).toHaveCount(0);
+
+    // Choosing a class outside the drawing from the term list recentres on it.
+    await page.getByRole('button', { name: 'Terms' }).click();
+    await tree(page).getByRole('treeitem', { name: /^location\b/ }).first().click();
+    await expect.poll(() => term(page)).toBe(`${VOL}Location`);
+    await expect(page).toHaveURL(new RegExp(`around=${encodeURIComponent(`${VOL}Location`)}`));
+    await expect(d.locator(`[data-node="${VOL}Location"]`)).toBeVisible();
+  });
+
+  test('one tab stop for the classes, and keyboard focus stays in view with a visible ring', async ({ page }) => {
+    await page.goto(`${base}?view=diagram`);
+    await settle(page);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node][tabindex="0"]')).toHaveCount(1);
+    // Zoom right in so most classes are off screen.
+    await d.focus();
+    for (let i = 0; i < 6; i++) await page.keyboard.press('+');
+    await d.locator('[data-node][tabindex="0"]').focus();
+    await expect(d.locator('[data-focus-ring]')).toHaveCount(1);
+    for (const key of ['End', 'ArrowLeft', 'ArrowUp', 'Home', 'ArrowRight', 'ArrowDown']) {
+      await page.keyboard.press(key);
+      const id = await page.evaluate(() => document.activeElement?.getAttribute('data-node'));
+      expect(id, key).toBeTruthy();
+      await expect(d.locator('[data-node][tabindex="0"]')).toHaveAttribute('data-node', id!);
+      // Panning happens on focus; give React a frame to apply it.
+      await expect
+        .poll(async () => {
+          // Both boxes are read together, since focusing can also scroll the page.
+          const [frame, b] = [(await d.boundingBox())!, (await d.locator(`[data-node="${id}"]`).boundingBox())!];
+          return b.x >= frame.x - 1 && b.y >= frame.y - 1 && b.x + Math.min(b.width, frame.width) <= frame.x + frame.width + 1 && b.y + Math.min(b.height, frame.height) <= frame.y + frame.height + 1;
+        }, { message: `${key} → ${id} is on screen` })
+        .toBe(true);
+    }
+    // Enter opens the class, and a link jumps straight to its details.
+    await page.keyboard.press('Enter');
+    const go = page.getByRole('link', { name: /^Go to details of/ });
+    await go.focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('term-details');
+  });
+
+  test('relationships are also listed as text, linked to their terms', async ({ page }) => {
+    await page.goto(`${base}?view=diagram`);
+    await settle(page);
+    const d = page.getByTestId('class-diagram');
+    // Class names include their attributes and relationships, not just counts.
+    await expect(d.locator(`[data-node="${VOL}Session"]`)).toHaveAttribute('aria-label', /attributes: .*start date and time : dateTime \[1\]/);
+    await expect(d.locator(`[data-node="${VOL}Application"]`)).toHaveAttribute('aria-label', /relationships: .*submitted by +1 person/);
+    const text = page.getByTestId('diagram-text');
+    await text.getByText(/^Relationships as text/).click();
+    const row = text.getByRole('listitem').filter({ hasText: 'submitted by' });
+    await expect(row).toContainText('application');
+    await expect(row).toContainText('[1]');
+    await expect(row).toContainText('person');
+    await expect(text.getByRole('listitem').filter({ hasText: 'is a kind of' }).first()).toBeVisible();
+    await row.getByRole('button', { name: 'person' }).click();
+    await expect.poll(() => term(page)).toBe(`${VOL}Person`);
+  });
+
+  test('selection and hover emphasise without fading, in light and dark themes', async ({ page }) => {
+    for (const scheme of ['light', 'dark'] as const) {
+      await test.step(scheme, async () => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.goto(`${base}?view=diagram&term=${encodeURIComponent(`${VOL}Application`)}&hops=0`);
+        await settle(page);
+        const d = page.getByTestId('class-diagram');
+        await expect(d.locator('[data-near]').first()).toBeAttached();
+        await d.locator(`[data-node="${VOL}Session"]`).hover();
+        await expect(d.locator('[data-edge][data-on]').first()).toBeAttached();
+        await expect(d.locator('[opacity]')).toHaveCount(0);
+        await axe(page, '[data-testid="class-diagram"]');
+      });
+    }
+  });
+
+  test('a diagram inside a closed section is fitted when the section opens', async ({ page }) => {
+    await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Session`)}`);
+    await settle(page);
+    await page.getByText('Neighbourhood diagram', { exact: false }).first().click();
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]').first()).toBeVisible();
+    const frame = (await d.boundingBox())!;
+    expect(frame.width).toBeGreaterThan(100);
+    await expect
+      .poll(async () => {
+        for (const n of await d.locator('[data-node]').all()) {
+          const b = (await n.boundingBox())!;
+          if (b.x < frame.x - 1 || b.x + b.width > frame.x + frame.width + 1) return false;
+        }
+        return true;
+      })
+      .toBe(true);
+    expect(Number((await d.getByLabel(/^Zoom \d+ percent$/).innerText()).replace('%', ''))).toBeGreaterThan(20);
+  });
+
+  test('the view switcher says what each view is for', async ({ page }) => {
+    await page.goto(base);
+    await settle(page);
+    const views = page.getByRole('radiogroup', { name: 'View' });
+    await expect(views).toHaveAccessibleDescription(/Find a term/);
+    await views.getByRole('radio', { name: 'Diagram' }).click();
+    await expect(views).toHaveAccessibleDescription(/attributes, types and how many/);
+    await views.getByRole('radio', { name: 'Graph' }).click();
+    await expect(views).toHaveAccessibleDescription(/how classes connect/);
+  });
+});
+
+test.describe('large and unusual ontologies (stubbed)', () => {
+  const NS = 'https://example.org/big#';
+  const cls = (l: string, sup: string[] = [], restrictions: unknown[] = []) => ({ kind: 'class', iri: NS + l, label: l, superClasses: sup.map((x) => NS + x), equivalentClasses: [], disjointWith: [], restrictions });
+  const prop = (l: string, extra: Record<string, unknown> = {}) => ({ kind: 'objectProperty', iri: NS + l, label: l, domain: [], range: [], superProperties: [], characteristics: [], ...extra });
+
+  async function stub(page: Page, classes: ReturnType<typeof cls>[], objectProperties: ReturnType<typeof prop>[] = []) {
+    const view = { metadata: { iri: 'https://example.org/big', title: 'Big', creators: [], contributors: [] }, classes, objectProperties, datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: { big: NS }, tripleCount: 1 };
+    await page.route(/\/api\/ontologies\/[^/]+\/view/, (r) => r.fulfill({ json: view }));
+    await page.route(/\/api\/ontologies\/[^/]+\/terms\//, (r) => {
+      const iri = decodeURIComponent(new URL(r.request().url()).pathname.split('/terms/')[1]);
+      const t = [...classes, ...objectProperties].find((x) => x.iri === iri);
+      return t ? r.fulfill({ json: { ...t, usedBy: [] } }) : r.fulfill({ status: 404, json: { error: 'not found' } });
+    });
+  }
+
+  test('a large ontology asks where to start, and can still draw everything to fit', async ({ page }) => {
+    const classes = [cls('Root')];
+    for (let i = 0; i < 12; i++) {
+      classes.push(cls(`Group${i}`, ['Root']));
+      for (let j = 0; j < 9; j++) classes.push(cls(`Item${i}x${j}`, [`Group${i}`]));
+    }
+    await stub(page, classes);
+    await page.goto(`${base}?view=diagram`);
+    const prompt = page.getByTestId('large-diagram');
+    await expect(prompt).toContainText(`${classes.length} classes`);
+    await expect(page.getByTestId('class-diagram')).toHaveCount(0);
+
+    await prompt.getByRole('group', { name: 'Start from a class' }).getByRole('button').first().click();
+    await expect(page).toHaveURL(/around=/);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]').first()).toBeVisible();
+    expect(await d.locator('[data-node]').count()).toBeLessThan(30);
+
+    await page.getByRole('button', { name: 'Show entire ontology' }).click();
+    await page.getByRole('button', { name: `Draw all ${classes.length} classes anyway` }).click();
+    await expect(d.locator('[data-node]')).toHaveCount(classes.length);
+    // Fitting a drawing this size needs to zoom out well past 20%.
+    const frame = (await d.boundingBox())!;
+    for (const n of [d.locator('[data-node]').first(), d.locator('[data-node]').last()]) {
+      const b = (await n.boundingBox())!;
+      expect(b.x).toBeGreaterThanOrEqual(frame.x - 1);
+      expect(b.x + b.width).toBeLessThanOrEqual(frame.x + frame.width + 1);
+    }
+  });
+
+  test('contradictions and qualified constraints are shown, not merged', async ({ page }) => {
+    const classes = [
+      cls('Animal'),
+      cls('Cat', ['Animal']),
+      cls('Dog', ['Animal']),
+      cls('Owner', [], [
+        { property: NS + 'hasPet', kind: 'max', filler: NS + 'Cat', cardinality: 1 },
+        { property: NS + 'hasPet', kind: 'some', filler: NS + 'Dog' },
+      ]),
+      cls('Strict', ['Owner'], [
+        { property: NS + 'hasPet', kind: 'min', cardinality: 3 },
+        { property: NS + 'hasPet', kind: 'max', cardinality: 2 },
+      ]),
+    ];
+    await stub(page, classes, [prop('hasPet', { range: [NS + 'Animal'] })]);
+    await page.goto(`${base}?term=${encodeURIComponent(NS + 'Owner')}`);
+    const table = page.getByRole('table', { name: 'Properties of Owner' });
+    const row = table.getByRole('row').filter({ hasText: 'hasPet' });
+    await expect(row.getByRole('cell').nth(1)).toHaveText('1..*');
+    await expect(row).toContainText('at most 1 Cat');
+    await expect(row).toContainText('at least one Dog');
+
+    await page.goto(`${base}?term=${encodeURIComponent(NS + 'Strict')}`);
+    const strict = page.getByRole('table', { name: 'Properties of Strict' }).getByRole('row').filter({ hasText: 'hasPet' });
+    await expect(strict).toContainText('Conflict');
+    await expect(strict).toContainText('at least 3');
+
+    // The diagram labels the relationships the same way.
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Owner"][data-target="${NS}Dog"]`)).toContainText('1..*');
+    await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Owner"][data-target="${NS}Cat"]`)).toContainText('0..1');
+    await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Strict"]`).first()).toContainText('conflict');
+  });
+});
+
+test.describe('reduced motion', () => {
+  test('the graph does not animate when reduced motion is requested', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto(`${base}?view=graph&term=${encodeURIComponent(`${VOL}Person`)}`);
+    const g = page.getByTestId('ontology-graph');
+    await expect(g).toHaveAttribute('data-ready', 'true');
+    await expect(g).toHaveAttribute('data-motion', 'reduced');
+    await page.getByRole('combobox', { name: 'Graph layout' }).selectOption('force');
+    await expectNoCrash(page);
+  });
+});
+
 test.describe('graph', () => {
   test('lays out the ontology and switches layouts and filters without errors', async ({ page }) => {
     await page.goto(`${base}?view=graph`);
@@ -272,14 +500,17 @@ test.describe('graph', () => {
     await expect.poll(() => term(page)).toBe(`${VOL}Person`);
     await expect(page).toHaveURL(/view=graph/);
     await expect(page.getByRole('complementary', { name: 'Term details' }).getByRole('heading', { name: 'person', exact: true })).toBeVisible();
-    // Arriving at a class shows its immediate neighbours, with the whole ontology a click away.
+    // Picking a term keeps the whole graph; recentring is a separate action.
     const g = page.getByTestId('ontology-graph');
+    await expect(g).not.toHaveAttribute('aria-label', /around/);
+    const all = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
+    await page.getByRole('button', { name: 'Centre on person' }).click();
     await expect(g).toHaveAttribute('aria-label', /around person/);
+    await expect(page).toHaveURL(/around=/);
     const near = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
+    expect(near).toBeLessThan(all);
     await page.getByRole('button', { name: 'Show entire ontology' }).click();
     await expect(g).not.toHaveAttribute('aria-label', /around person/);
-    const all = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
-    expect(near).toBeLessThan(all);
     await page.getByRole('button', { name: 'Close term details' }).click();
     await expect.poll(() => term(page)).toBeNull();
     // A click on a node in the canvas selects it too.

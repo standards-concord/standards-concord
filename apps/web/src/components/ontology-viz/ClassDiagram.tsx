@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
@@ -25,6 +25,7 @@ export const DEFAULT_DIAGRAM_OPTIONS: DiagramOptions = { attributes: true, inher
 interface BoxLine {
   text: string;
   inherited?: boolean;
+  conflict?: boolean;
   iri: string;
 }
 
@@ -46,6 +47,7 @@ interface DEdge {
   target: string;
   label?: string;
   property?: string;
+  conflict?: boolean;
   points: { x: number; y: number }[];
   lx?: number;
   ly?: number;
@@ -123,7 +125,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       for (const grp of groups)
         for (const s of grp.slots)
           if (s.property.kind === 'datatypeProperty' || s.range.every(isDatatype) && s.range.length)
-            lines.push({ text: slotLine(s, label), inherited: grp.from !== iri, iri: s.property.iri });
+            lines.push({ text: slotLine(s, label), inherited: grp.from !== iri, conflict: !!s.conflict, iri: s.property.iri });
     }
     const shown = lines.slice(0, MAX_ATTRS);
     if (lines.length > MAX_ATTRS) shown.push({ text: `+ ${lines.length - MAX_ATTRS} more`, iri: '' });
@@ -152,7 +154,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
           if (!nodes.has(r)) continue;
           const text = `${s.property.label ?? label(s.property.iri)}  ${card === 'conflict' ? '⚠ conflict' : card}`;
           const id = `assoc:${iri}:${s.property.iri}:${r}`;
-          const e: DEdge = { id, kind: 'assoc', source: iri, target: r, label: text, property: s.property.iri, points: [] };
+          const e: DEdge = { id, kind: 'assoc', source: iri, target: r, label: text, property: s.property.iri, conflict: card === 'conflict', points: [] };
           if (r === iri) {
             loops.push(e);
             continue;
@@ -227,6 +229,8 @@ export function ClassDiagram({
   height = 600,
   title = 'Class diagram',
   toolbar,
+  detailsId,
+  textList = true,
 }: {
   view: OntologyView;
   model: OntologyModel;
@@ -239,17 +243,37 @@ export function ClassDiagram({
   height?: number;
   title?: string;
   toolbar?: React.ReactNode;
+  /** The id of the element holding the selected term's details, for a "go to details" link. */
+  detailsId?: string;
+  /** Show the relationships as a text list under the drawing. */
+  textList?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const svg = useRef<SVGSVGElement>(null);
+  // Safe in url(#…) references and ids.
+  const uid = `cd${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const [hover, setHover] = useState<string>();
+  const [focused, setFocused] = useState<string>();
+  const [current, setCurrent] = useState<string>();
   const layout = useMemo(() => layoutDiagram(model, scope, options, label), [model, scope, options, label]);
   const colours = useMemo(() => themeColours(), [view]);
   const pz = usePanZoom(box, layout, layout);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
+  const byIri = useMemo(() => new Map(layout.nodes.map((n) => [n.iri, n])), [layout]);
 
-  const active = hover ?? selected;
+  // One tab stop for all the classes (roving tabindex); arrow keys move between them.
+  const tabStop = byIri.get(current ?? '') ?? byIri.get(selected ?? '') ?? byIri.get(focus ?? '') ?? layout.nodes[0];
+
+  // The class being pointed at, focused or selected, and its directly linked classes, are
+  // emphasised with borders and heavier lines. Nothing is faded, so all text keeps its contrast.
+  const active = hover ?? focused ?? selected;
   const touches = (e: DEdge) => !!active && (e.source === active || e.target === active);
+  const near = useMemo(() => {
+    const out = new Set<string>();
+    if (active) for (const e of layout.edges) if (e.source === active) out.add(e.target);
+      else if (e.target === active) out.add(e.source);
+    return out;
+  }, [active, layout]);
   const c = colours;
 
   const onNodeKey = (n: DNode) => (e: KeyboardEvent) => {
@@ -260,117 +284,215 @@ export function ClassDiagram({
       e.preventDefault();
       const next = nearestInDirection(n, layout.nodes, e.key);
       if (next) nodeRefs.current.get(next.iri)?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      const next = e.key === 'Home' ? layout.nodes[0] : layout.nodes[layout.nodes.length - 1];
+      if (next) nodeRefs.current.get(next.iri)?.focus();
     }
   };
 
-  const summary = `${title}: ${layout.nodes.length} classes, ${layout.edges.filter((e) => e.kind === 'sub').length} subclass links and ${layout.edges.filter((e) => e.kind === 'assoc').length} associations. Use Tab or the arrow keys to move between classes and Enter to open one.`;
+  const subs = layout.edges.filter((e) => e.kind === 'sub');
+  const assocs = layout.edges.filter((e) => e.kind === 'assoc');
+  const name = (iri: string) => byIri.get(iri)?.title ?? label(iri);
+  const summaryId = `${uid}-summary`;
+  const listId = `${uid}-list`;
+  const summary = `${layout.nodes.length} classes, ${subs.length} subclass links and ${assocs.length} relationships. Press Tab to reach the classes, the arrow keys to move between them and Enter to open one.${textList && layout.edges.length ? ' The same relationships are listed as text after the diagram.' : ''}`;
+
+  const nodeLabel = (n: DNode) => {
+    const parents = model.parents.get(n.iri)?.filter((p) => model.classes.has(p)).map(label) ?? [];
+    const attrs = n.lines.filter((l) => l.iri).map((l) => l.text);
+    const rels = assocs.filter((e) => e.source === n.iri).map((e) => `${e.label} ${name(e.target)}`);
+    return [
+      `${n.title}${n.deprecated ? ' (deprecated)' : ''}`,
+      parents.length ? `subclass of ${parents.join(' and ')}` : '',
+      attrs.length ? `attributes: ${attrs.join('; ')}` : '',
+      rels.length ? `relationships: ${rels.join('; ')}` : '',
+    ]
+      .filter(Boolean)
+      .join('. ');
+  };
 
   return (
-    <div
-      ref={box}
-      className="relative overflow-hidden rounded-lg border border-line bg-surface select-none focus-visible:outline-2 focus-visible:outline-accent"
-      style={{ height, backgroundImage: `radial-gradient(${c.line} 1px, transparent 1px)`, backgroundSize: `${20 * pz.t.k}px ${20 * pz.t.k}px`, backgroundPosition: `${pz.t.x}px ${pz.t.y}px` }}
-      tabIndex={0}
-      role="application"
-      aria-roledescription="class diagram"
-      aria-label={summary}
-      data-testid="class-diagram"
-      {...pz.handlers}
-    >
-      <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${title.toLowerCase().replace(/\W+/g, '-')}.svg`, c.surface)}>
-        {toolbar}
-      </ZoomControls>
-      <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)} role="presentation">
-        <defs>
-          <marker id="cd-tri" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
-            <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.muted} strokeWidth="1.3" />
-          </marker>
-          <marker id="cd-tri-on" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
-            <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.fg} strokeWidth="1.5" />
-          </marker>
-          <marker id="cd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
-            <path d="M1,1 L9,5 L1,9" fill="none" stroke={c.accent} strokeWidth="1.4" />
-          </marker>
-        </defs>
-        <g data-viewport transform={`translate(${pz.t.x},${pz.t.y}) scale(${pz.t.k})`} fontFamily={FONT}>
-          {layout.edges.map((e) => {
-            const on = touches(e);
-            const dim = !!active && !on;
-            const sub = e.kind === 'sub';
-            return (
-              <g key={e.id} opacity={dim ? 0.25 : 1} data-edge={e.kind} data-source={e.source} data-target={e.target}>
-                <path
-                  d={curve(e.points)}
-                  fill="none"
-                  stroke={sub ? (on ? c.fg : c.muted) : c.accent}
-                  strokeWidth={on ? 2 : 1.3}
-                  strokeDasharray={sub ? undefined : '5 4'}
-                  markerEnd={sub ? `url(#${on ? 'cd-tri-on' : 'cd-tri'})` : 'url(#cd-arrow)'}
-                />
-                {e.label && e.lx !== undefined && (
-                  <g transform={`translate(${e.lx},${e.ly})`}>
-                    <rect x={-(e.lw ?? 0) / 2} y={-9} width={e.lw} height={18} rx={4} fill={c.surface} stroke={on ? c.accent : c.line} />
-                    <text textAnchor="middle" dy="4" fontSize="11" fill={on ? c.accent : c.muted} fontWeight={on ? 600 : 400}>
-                      {e.label}
-                    </text>
-                  </g>
-                )}
-              </g>
-            );
-          })}
-          {layout.nodes.map((n) => {
-            const isSel = n.iri === selected;
-            const isFocus = n.iri === focus;
-            const dim = !!active && n.iri !== active && !layout.edges.some((e) => touches(e) && (e.source === n.iri || e.target === n.iri));
-            const sub = model.parents.get(n.iri)?.filter((p) => model.classes.has(p)).map(label) ?? [];
-            return (
-              <g
-                key={n.iri}
-                ref={(el) => {
-                  if (el) nodeRefs.current.set(n.iri, el);
-                  else nodeRefs.current.delete(n.iri);
-                }}
-                data-node={n.iri}
-                transform={`translate(${n.x},${n.y})`}
-                role="button"
-                tabIndex={0}
-                aria-pressed={isSel}
-                aria-label={`${n.title}${n.deprecated ? ' (deprecated)' : ''}${sub.length ? `, subclass of ${sub.join(' and ')}` : ''}${n.lines.length ? `, ${n.lines.length} attributes` : ''}`}
-                className="cursor-pointer outline-none [&:focus-visible>rect:first-child]:stroke-[3px]"
-                opacity={dim ? 0.45 : 1}
-                onClick={() => onSelect?.(n.iri)}
-                onKeyDown={onNodeKey(n)}
-                onMouseEnter={() => setHover(n.iri)}
-                onMouseLeave={() => setHover(undefined)}
-                onFocus={() => setHover(n.iri)}
-                onBlur={() => setHover(undefined)}
-              >
-                <title>{n.title}</title>
-                <rect width={n.width} height={n.height} rx={8} fill={c.surface} stroke={isSel ? c.accent : c.lineStrong} strokeWidth={isSel ? 2.5 : 1.2} strokeDasharray={n.deprecated ? '5 3' : undefined} />
-                {n.lines.length ? (
-                  <path d={`M0,8 a8,8 0 0 1 8,-8 h${n.width - 16} a8,8 0 0 1 8,8 v${HEAD - 8} h${-n.width} z`} fill={isFocus || isSel ? c.accent : c.accentSoft} />
-                ) : (
-                  <rect width={n.width} height={n.height} rx={8} fill={isFocus || isSel ? c.accent : c.accentSoft} />
-                )}
-                {!n.lines.length && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={isSel ? c.accent : c.lineStrong} strokeWidth={isSel ? 2.5 : 1.2} strokeDasharray={n.deprecated ? '5 3' : undefined} />}
-                <text x={n.width / 2} y={19.5} textAnchor="middle" fontSize="13" fontWeight="600" fill={isFocus || isSel ? c.accentFg : c.fg} textDecoration={n.deprecated ? 'line-through' : undefined}>
-                  {n.title}
-                </text>
-                {n.lines.length > 0 && <line x1={0} x2={n.width} y1={HEAD} y2={HEAD} stroke={c.line} />}
-                {n.lines.map((l, i) => (
-                  <text key={i} x={PADX} y={HEAD + 18 + i * ROW} fontSize="12" fill={l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
-                    {l.inherited && <tspan fill={c.subtle}>↑ </tspan>}
-                    {l.text}
+    <div className="space-y-2">
+      <div
+        ref={box}
+        className="relative overflow-hidden rounded-lg border border-line bg-surface select-none focus-visible:outline-2 focus-visible:outline-accent"
+        // The dot grid turns into a grey wash when zoomed far out, so it goes below 35%.
+        style={{ height, ...(pz.t.k >= 0.35 && { backgroundImage: `radial-gradient(${c.line} 1px, transparent 1px)`, backgroundSize: `${20 * pz.t.k}px ${20 * pz.t.k}px`, backgroundPosition: `${pz.t.x}px ${pz.t.y}px` }) }}
+        tabIndex={0}
+        role="group"
+        aria-roledescription="class diagram"
+        aria-label={title}
+        aria-describedby={summaryId}
+        data-testid="class-diagram"
+        {...pz.handlers}
+      >
+        <p id={summaryId} className="sr-only">
+          {summary}
+        </p>
+        {detailsId && selected && (
+          <a
+            href={`#${detailsId}`}
+            className="absolute top-2 left-2 z-20 -translate-y-16 rounded-md bg-accent px-3 py-1.5 text-sm text-accent-fg focus:translate-y-0"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById(detailsId)?.focus();
+            }}
+          >
+            Go to details of {name(selected)}
+          </a>
+        )}
+        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => downloadSvg(svg.current, `${title.toLowerCase().replace(/\W+/g, '-')}.svg`, c.surface)}>
+          {toolbar}
+        </ZoomControls>
+        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
+          <defs>
+            <marker id={`${uid}-tri`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+              <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.muted} strokeWidth="1.3" />
+            </marker>
+            <marker id={`${uid}-tri-on`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+              <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.fg} strokeWidth="1.6" />
+            </marker>
+            <marker id={`${uid}-arrow`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
+              <path d="M1,1 L9,5 L1,9" fill="none" stroke={c.accent} strokeWidth="1.4" />
+            </marker>
+          </defs>
+          <g data-viewport transform={`translate(${pz.t.x},${pz.t.y}) scale(${pz.t.k})`} fontFamily={FONT} aria-hidden={false}>
+            {layout.edges.map((e) => {
+              const on = touches(e);
+              const sub = e.kind === 'sub';
+              return (
+                <g key={e.id} data-edge={e.kind} data-source={e.source} data-target={e.target} data-on={on || undefined} aria-hidden>
+                  <path
+                    d={curve(e.points)}
+                    fill="none"
+                    stroke={sub ? (on ? c.fg : c.muted) : c.accent}
+                    strokeWidth={on ? 2.5 : 1.3}
+                    strokeDasharray={sub ? undefined : on ? '7 3' : '5 4'}
+                    markerEnd={sub ? `url(#${uid}-${on ? 'tri-on' : 'tri'})` : `url(#${uid}-arrow)`}
+                  />
+                  {e.label && e.lx !== undefined && (
+                    <g transform={`translate(${e.lx},${e.ly})`}>
+                      <rect x={-(e.lw ?? 0) / 2} y={-9} width={e.lw} height={18} rx={4} fill={on ? c.accentSoft : c.surface} stroke={on ? c.accent : c.line} strokeWidth={on ? 1.5 : 1} />
+                      <text textAnchor="middle" dy="4" fontSize="11" fill={e.conflict ? c.danger : on ? c.fg : c.muted} fontWeight={on ? 600 : 400}>
+                        {e.label}
+                      </text>
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+            {layout.nodes.map((n) => {
+              const isSel = n.iri === selected;
+              const isFocus = n.iri === focus;
+              const isActive = n.iri === active;
+              const isNear = near.has(n.iri);
+              const filled = isFocus || isSel;
+              const border = isSel || isActive ? c.accent : isNear ? c.accent : c.lineStrong;
+              const bw = isSel || isActive ? 2.5 : isNear ? 1.8 : 1.2;
+              return (
+                <g
+                  key={n.iri}
+                  ref={(el) => {
+                    if (el) nodeRefs.current.set(n.iri, el);
+                    else nodeRefs.current.delete(n.iri);
+                  }}
+                  data-node={n.iri}
+                  data-near={isNear || undefined}
+                  transform={`translate(${n.x},${n.y})`}
+                  role="button"
+                  tabIndex={n === tabStop ? 0 : -1}
+                  aria-pressed={isSel}
+                  aria-label={nodeLabel(n)}
+                  className="cursor-pointer outline-none"
+                  onClick={() => onSelect?.(n.iri)}
+                  onKeyDown={onNodeKey(n)}
+                  onMouseEnter={() => setHover(n.iri)}
+                  onMouseLeave={() => setHover(undefined)}
+                  onFocus={() => {
+                    setFocused(n.iri);
+                    setCurrent(n.iri);
+                    pz.reveal({ x: n.x - 8, y: n.y - 8, width: n.width + 16, height: n.height + 16 });
+                  }}
+                  onBlur={() => setFocused(undefined)}
+                >
+                  <title>{n.title}</title>
+                  {focused === n.iri && <rect data-focus-ring x={-5} y={-5} width={n.width + 10} height={n.height + 10} rx={11} fill="none" stroke={c.accent} strokeWidth={2.5} />}
+                  <rect width={n.width} height={n.height} rx={8} fill={c.surface} stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />
+                  {n.lines.length ? (
+                    <path d={`M0,8 a8,8 0 0 1 8,-8 h${n.width - 16} a8,8 0 0 1 8,8 v${HEAD - 8} h${-n.width} z`} fill={filled ? c.accent : c.accentSoft} />
+                  ) : (
+                    <rect width={n.width} height={n.height} rx={8} fill={filled ? c.accent : c.accentSoft} />
+                  )}
+                  {!n.lines.length && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />}
+                  <text x={n.width / 2} y={19.5} textAnchor="middle" fontSize="13" fontWeight="600" fill={filled ? c.accentFg : c.fg} textDecoration={n.deprecated ? 'line-through' : undefined}>
+                    {n.title}
                   </text>
-                ))}
-              </g>
-            );
-          })}
-        </g>
-      </svg>
-      <Legend />
-      {!layout.nodes.length && <p className="absolute inset-0 flex items-center justify-center text-sm text-muted">Nothing to draw with these settings.</p>}
+                  {n.lines.length > 0 && <line x1={0} x2={n.width} y1={HEAD} y2={HEAD} stroke={c.line} />}
+                  {n.lines.map((l, i) => (
+                    <text key={i} x={PADX} y={HEAD + 18 + i * ROW} fontSize="12" fill={l.conflict ? c.danger : l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
+                      {l.inherited && <tspan fill={c.subtle}>↑ </tspan>}
+                      {l.text}
+                    </text>
+                  ))}
+                </g>
+              );
+            })}
+          </g>
+        </svg>
+        <Legend />
+        {!layout.nodes.length && <p className="absolute inset-0 flex items-center justify-center text-sm text-muted">Nothing to draw with these settings.</p>}
+      </div>
+      {textList && layout.edges.length > 0 && (
+        <details className="group rounded-lg border border-line px-3 py-2 text-sm" data-testid="diagram-text">
+          <summary className="cursor-pointer text-sm font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-accent">
+            Relationships as text ({assocs.length + subs.length})
+          </summary>
+          <div id={listId} className="mt-2 grid gap-4 md:grid-cols-2">
+            {assocs.length > 0 && (
+              <div>
+                <h4 className="mb-1 text-xs font-semibold text-muted">Relationships</h4>
+                <ul className="space-y-1">
+                  {assocs.map((e) => (
+                    <li key={e.id} className="flex flex-wrap items-baseline gap-x-1.5">
+                      <TextTerm iri={e.source} name={name} onSelect={onSelect} />
+                      <span className="text-muted">→</span>
+                      {e.property ? <TextTerm iri={e.property} name={(i) => model.properties.get(i)?.label ?? label(i)} onSelect={onSelect} /> : null}
+                      <span className={e.conflict ? 'text-xs text-danger' : 'font-mono text-xs text-muted'}>[{e.label?.split('  ').pop()}]</span>
+                      <span className="text-muted">→</span>
+                      <TextTerm iri={e.target} name={name} onSelect={onSelect} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {subs.length > 0 && (
+              <div>
+                <h4 className="mb-1 text-xs font-semibold text-muted">Subclasses</h4>
+                <ul className="space-y-1">
+                  {subs.map((e) => (
+                    <li key={e.id} className="flex flex-wrap items-baseline gap-x-1.5">
+                      <TextTerm iri={e.source} name={name} onSelect={onSelect} />
+                      <span className="text-muted">is a kind of</span>
+                      <TextTerm iri={e.target} name={name} onSelect={onSelect} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </details>
+      )}
     </div>
+  );
+}
+
+function TextTerm({ iri, name, onSelect }: { iri: string; name: (iri: string) => string; onSelect?: (iri: string) => void }) {
+  if (!onSelect) return <span>{name(iri)}</span>;
+  return (
+    <button type="button" className="text-accent hover:underline" onClick={() => onSelect(iri)}>
+      {name(iri)}
+    </button>
   );
 }
 
