@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import type { AgentToken } from '@concord/shared';
 import { Bot, KeyRound, Trash2, Unplug } from 'lucide-react';
 import { api } from '../api';
@@ -9,14 +9,22 @@ import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Lo
 
 /** The signed-in person's agent access, shown under the connect instructions: OAuth connections and personal tokens. */
 
-function TokenCreator({ onCreate, pending }: { onCreate: (name: string) => void; pending: boolean }) {
+function TokenCreator({ onCreate, pending, blocked, inputRef }: { onCreate: (name: string) => void; pending: boolean; blocked?: boolean; inputRef: RefObject<HTMLInputElement | null> }) {
   const [name, setName] = useState('My coding agent');
   return (
-    <div className="flex flex-wrap gap-2">
-      <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" aria-label="Token name" />
-      <Button variant="primary" icon={KeyRound} loading={pending} onClick={() => onCreate(name.trim() || 'Agent')}>
-        Create token
-      </Button>
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap gap-2">
+        <Input ref={inputRef} value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" aria-label="Token name" />
+        <Button variant="primary" icon={KeyRound} loading={pending} disabled={blocked} aria-describedby={blocked ? 'token-blocked' : undefined} onClick={() => onCreate(name.trim() || 'Agent')}>
+          Create token
+        </Button>
+      </div>
+      {/* A new token's secret can't be shown again, so never replace one that hasn't been saved yet. */}
+      {blocked && (
+        <p id="token-blocked" className="text-xs text-muted">
+          Save the token below and choose “I’ve saved it” before creating another.
+        </p>
+      )}
     </div>
   );
 }
@@ -70,6 +78,7 @@ export function PersonalTokens() {
   const { now } = useSession();
   const tokens = useAsync(() => api.agentTokens(), []);
   const [created, setCreated] = useState<AgentToken>();
+  const nameRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState('');
   const create = useAction(async (name: string) => {
     const t = await api.createAgentToken(name);
@@ -89,7 +98,7 @@ export function PersonalTokens() {
         <CardHeader icon={KeyRound} title="Personal tokens" subtitle="Only for agents that can’t open a browser to sign in, such as CI jobs. Send it as an Authorization: Bearer header." />
         <div className="space-y-3 p-5">
           <p className="text-xs text-muted">A token acts as you, with everything your account can do, and doesn’t expire. Revoke it here when the agent no longer needs it.</p>
-          <TokenCreator onCreate={(name) => void create.run(name)} pending={create.pending} />
+          <TokenCreator onCreate={(name) => void create.run(name)} pending={create.pending} blocked={!!created?.token} inputRef={nameRef} />
           <InlineError error={create.error} />
           {created?.token && (
             <div className="rounded-lg border border-warn/40 bg-warn-soft p-3" data-testid="new-token">
@@ -97,7 +106,15 @@ export function PersonalTokens() {
               <div className="flex flex-wrap items-center gap-2">
                 <code className="min-w-0 flex-1 truncate rounded bg-surface px-2 py-1.5 font-mono text-xs">{created.token}</code>
                 <CopyButton text={created.token} label="Copy" />
-                <Button size="sm" variant="ghost" onClick={() => setCreated(undefined)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setCreated(undefined);
+                    // The button disappears with the reveal, so keep keyboard users in the token form.
+                    nameRef.current?.focus();
+                  }}
+                >
                   I’ve saved it
                 </Button>
               </div>

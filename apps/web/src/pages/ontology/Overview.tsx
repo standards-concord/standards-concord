@@ -21,11 +21,12 @@ export function OverviewTab() {
   // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
   const healthKey = wantsHealth ? loc.key : undefined;
   useEffect(() => {
-    if (!healthKey || !validation.data) return;
+    // Once the report has loaded or failed to load: either way, the health section is where focus belongs.
+    if (!healthKey || (!validation.data && !validation.error)) return;
     // Move focus as well as the view, so keyboard and screen-reader users land on the report too.
     healthRef.current?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
     healthRef.current?.focus({ preventScroll: true });
-  }, [healthKey, validation.data]);
+  }, [healthKey, validation.data, validation.error]);
   const members = o.members ?? [];
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_340px]">

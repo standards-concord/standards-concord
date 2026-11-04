@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import { Bot } from 'lucide-react';
-import { Page } from '../components/Shell';
+import { loginHref, Page } from '../components/Shell';
 import { ConnectAgent } from '../components/ConnectAgent';
 import { ConnectedAgents, PersonalTokens } from '../components/AgentAccess';
 import { Card, PageHeader } from '../components/ui';
@@ -31,6 +31,7 @@ function useHashFocus(ready: boolean) {
  */
 export function AgentHub({ example }: { example?: ReactNode }) {
   const { session } = useSession();
+  const { pathname, search, hash } = useLocation();
   const signedIn = !!session?.user;
   useHashFocus(signedIn);
   const jump = (id: string, label: string) => (
@@ -62,10 +63,17 @@ export function AgentHub({ example }: { example?: ReactNode }) {
           <PersonalTokens />
         </section>
       ) : (
-        <p className="flex items-center gap-2 text-sm text-muted">
-          <Bot className="size-4" />
-          <span>You’ll sign in to Concord when your agent first connects.</span>
-        </p>
+        <div className="space-y-2 text-sm text-muted">
+          <p className="flex items-center gap-2">
+            <Bot className="size-4" />
+            <span>You’ll sign in to Concord when your agent first connects.</span>
+          </p>
+          <p>
+            <Link to={loginHref({ pathname, search, hash: hash || '#agents' })} className="font-medium text-accent hover:underline">
+              Sign in to see your connected agents and personal tokens
+            </Link>
+          </p>
+        </div>
       )}
     </div>
   );

@@ -57,8 +57,11 @@ test.describe('role-based views', () => {
     // "Show all sections" names what it adds, brings it back, and is remembered.
     const toggle = page.getByRole('button', { name: 'Show all sections (Governance)' });
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    await toggle.click();
+    await toggle.focus();
+    await page.keyboard.press('Enter');
     await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    // Focus moves to the section it revealed, which appears before the button.
+    await expect(page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Governance' })).toBeFocused();
     expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
     await page.reload();
     await settle(page);
@@ -104,6 +107,7 @@ test.describe('role-based views', () => {
     await page.getByRole('link', { name: 'Who holds which role' }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance#roles$`));
     await expect(page.getByRole('button', { name: /Members and roles/ })).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('button', { name: /Members and roles/ })).toBeFocused();
 
     // Readers can view the policy but not edit it, and the Overview says "View members" rather than "Manage".
     await expect(page.getByRole('button', { name: 'Edit policy' })).toHaveCount(0);
@@ -121,9 +125,16 @@ test.describe('role-based views', () => {
     await page.goto(`/o/${demo.id}/releases/${releases[0].id}`);
     await settle(page);
     const approved = page.getByRole('button', { name: /How this was approved/ });
-    if (await approved.count()) await approved.click();
-    await page.getByRole('button', { name: /How releases are decided/ }).click();
+    // A published release shows today's rules as "Current release policy", outside its approval history.
+    const glance = page.getByRole('button', { name: (await approved.count()) ? /Current release policy/ : /How releases are decided/ });
+    await glance.click();
     await expect(page.getByRole('list', { name: 'What each kind of release needs' }).getByRole('listitem')).toHaveCount(3);
+    if (await approved.count()) {
+      await approved.click();
+      // Inside, the approval details show straight away, with no second toggle.
+      await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Approval details' })).toBeVisible();
+    }
   });
 
   test('only owners get Edit policy, matching what the server accepts', async ({ page }) => {

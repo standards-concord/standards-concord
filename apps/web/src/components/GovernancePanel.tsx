@@ -7,6 +7,22 @@ import { useTick } from '../lib/hooks';
 import { LevelBadge } from './badges';
 import { Badge, ProgressBar, cx } from './ui';
 import { Disclosure } from './Disclosure';
+import { acceptedOnSilence } from '../lib/governanceRules';
+
+/** "Approval details" as a disclosure, or shown directly when the panel is already behind one (no toggle inside a toggle). */
+function MaybeDisclosure({ flat, title, summary, children }: { flat?: boolean; title: string; summary: string; children: ReactNode }) {
+  if (!flat) return (
+    <Disclosure title={title} summary={summary} summaryPlacement="below" tone="muted">
+      {children}
+    </Disclosure>
+  );
+  return (
+    <div>
+      <h4 className="text-sm font-medium">{title}</h4>
+      <div className="mt-3">{children}</div>
+    </div>
+  );
+}
 
 export function GovernancePanel({
   g,
@@ -143,7 +159,7 @@ export function GovernancePanel({
         </div>
       )}
 
-      <Disclosure title="Approval details" summary={glance.join(' · ')} summaryPlacement="below" tone="muted" defaultOpen={detailsOpen}>
+      <MaybeDisclosure flat={detailsOpen} title="Approval details" summary={glance.join(' · ')}>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
             Rules for a <LevelBadge level={g.level} /> {subject}
@@ -175,7 +191,7 @@ export function GovernancePanel({
                   {g.reviewPeriodOver || Number.isNaN(reviewEnds)
                     ? `Ended ${formatDate(g.reviewPeriodEndsAt, true)}`
                     : `${duration(reviewEnds - t)} left · ends ${formatDate(g.reviewPeriodEndsAt, true)}`}
-                  {rule.lazyConsensus && !g.reviewPeriodOver && ' — approved automatically if nobody objects'}
+                  {acceptedOnSilence(rule, g.level) && !g.reviewPeriodOver && ' — approved automatically if nobody objects'}
                 </div>
               </div>
             </div>
@@ -189,7 +205,7 @@ export function GovernancePanel({
           </div>
 
         </div>
-      </Disclosure>
+      </MaybeDisclosure>
     </div>
   );
 }

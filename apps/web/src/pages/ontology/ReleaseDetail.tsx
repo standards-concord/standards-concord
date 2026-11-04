@@ -100,12 +100,13 @@ export function ReleaseDetailPage() {
                     </a>
                   )}
                 </p>
+                {/* Today's rules, not a record of the rules at the time: kept outside the approval history on purpose. */}
+                <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" title="Current release policy" className="mt-4 border-t border-line pt-3" />
               </Card>
               {/* One click reveals the whole approval history: the panel's own details start open. */}
               <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release" keepMounted>
                 <div className="space-y-4 p-5">
                   <GovernancePanel g={g} userById={userById} subject="release" detailsOpen />
-                  <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" />
                 </div>
               </CollapsibleCard>
             </>

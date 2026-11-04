@@ -39,8 +39,16 @@ function OntologySwitcher() {
   );
 }
 
+/** The sign-in page, coming back to this exact place (path, query and #section) afterwards. */
+export function loginHref(loc: { pathname: string; search: string; hash: string }) {
+  if (loc.pathname === '/login') return '/login';
+  const here = loc.pathname + loc.search + loc.hash;
+  return here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`;
+}
+
 function UserMenu() {
   const { session, setSession, refresh, isDemo } = useSession();
+  const loc = useLocation();
   const w = useWalkthrough();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -70,7 +78,7 @@ function UserMenu() {
   const testerRole = isDemo && user && w.demo ? testerRoleFor(user, w.myRoles).title : undefined;
   if (!user)
     return (
-      <Link to="/login">
+      <Link to={loginHref(loc)}>
         <Button size="sm" variant="primary">
           Sign in
         </Button>
@@ -227,7 +235,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <DemoBanner />
       <main className="flex-1">{children}</main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod where the server has one.
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used.
       </footer>
       <WalkthroughDock />
     </div>

@@ -493,8 +493,9 @@ test.describe('progressive disclosure', () => {
     await expect(how).toHaveAttribute('aria-expanded', 'false');
     await how.click();
     await expect(page.getByText('Next:', { exact: true })).toBeVisible();
-    // One click reveals the approval history: no second "Approval details" click needed.
-    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveAttribute('aria-expanded', 'true');
+    // One click reveals the approval history, with no second "Approval details" toggle inside it.
+    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Approval details' })).toBeVisible();
     await expect(page.getByText(/Rules for a .* release/)).toBeVisible();
     await page.getByRole('button', { name: /Technical details/ }).click();
     await expect(page.getByText('Version IRI:')).toBeVisible();

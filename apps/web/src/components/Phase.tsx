@@ -239,7 +239,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
                 label="Lint (OWL best practice)"
                 value={h.errors ? plural(h.errors, 'error') : h.warnings ? plural(h.warnings, 'warning') : 'No errors or warnings'}
               />
-              <HealthRow ok={h.passed} label="Overall validation" value={h.passed ? 'Passed' : 'Failing'} />
+              <HealthRow ok={h.passed && reasonerRan} warn={h.passed && !reasonerRan} label="Overall validation" value={!h.passed ? 'Failing' : reasonerRan ? 'Passed' : 'Available checks passed, reasoning incomplete'} />
             </ul>
           ) : (
             <p className="text-muted">Validation runs when the ontology changes.</p>

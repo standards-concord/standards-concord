@@ -26,6 +26,9 @@ test.describe('summaries, popups and disclosures', () => {
       await expect(chip).toContainText(o.health!.consistent && !o.health!.errors ? 'Checks incomplete' : 'Needs fixing');
       await expect(reasonerRow).toContainText(/Not run|Inconsistent/);
       await expect(panel.getByRole('note')).toContainText('Not every check could run');
+      // The popup's overall verdict says what the pass covers, too.
+      await expect(panel.getByRole('listitem').filter({ hasText: 'Overall validation' })).not.toContainText(/Passed$/);
+      if (!o.health!.errors) await expect(panel.getByRole('listitem').filter({ hasText: 'Overall validation' })).toContainText('Available checks passed, reasoning incomplete');
     } else {
       await expect(chip).not.toContainText('Checks incomplete');
       await expect(reasonerRow).not.toContainText('Not run');

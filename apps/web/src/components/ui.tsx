@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
@@ -197,7 +197,7 @@ export function ProgressBar({ value, tone = 'accent', className, marker }: { val
 const inputCls =
   'w-full rounded-lg border border-control bg-surface px-3 py-2 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60';
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
+export function Input(props: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   return <input {...props} className={cx(inputCls, 'h-9', props.className)} />;
 }
 export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {

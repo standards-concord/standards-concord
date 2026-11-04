@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { Link, Outlet, useLocation, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
@@ -78,6 +78,14 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
   // Sections this role doesn't usually need: the toggle names them, and shows or hides them.
   const extra = SECTIONS.filter((s) => s.roles && !canSee(s.roles));
   const canToggle = extra.length > 0 && (showAll || hidden.length > 0);
+  const navRef = useRef<HTMLElement>(null);
+  const focusAfterReveal = useRef<string>(undefined);
+  useEffect(() => {
+    const label = focusAfterReveal.current;
+    if (!showAll || !label) return;
+    focusAfterReveal.current = undefined;
+    [...(navRef.current?.querySelectorAll<HTMLAnchorElement>('a') ?? [])].find((a) => a.textContent?.trim() === label)?.focus();
+  }, [showAll]);
   const activeTab = TAB_ALIASES[segment] ?? segment;
   const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
   useEffect(() => {
@@ -92,7 +100,7 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
   }, [id, current, activeTab, loc.pathname, loc.search]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
-      <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
+      <nav ref={navRef} className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
         {shown.map((s) => {
           const active = s === current;
           const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
@@ -112,7 +120,11 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
             type="button"
             aria-pressed={showAll}
             aria-describedby={`${id}-more-sections`}
-            onClick={() => setShowAll(!showAll)}
+            onClick={() => {
+              // Revealed links appear before this button, so take keyboard users to the first one.
+              if (!showAll) focusAfterReveal.current = extra.find((s) => hidden.includes(s))?.label;
+              setShowAll(!showAll);
+            }}
             className="ml-auto self-center rounded-pill px-2.5 py-1 text-xs whitespace-nowrap text-muted hover:bg-surface-2 hover:text-fg aria-pressed:bg-surface-2 aria-pressed:text-fg"
           >
             Show all sections{' '}

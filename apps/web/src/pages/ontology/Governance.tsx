@@ -339,7 +339,11 @@ export function GovernanceTab() {
     setEditing(false);
   };
   useEffect(() => {
-    if (window.location.hash === '#roles') document.getElementById('roles')?.scrollIntoView({ behavior: 'smooth' });
+    if (window.location.hash !== '#roles') return;
+    // Move focus as well as the view, so keyboard and screen-reader users land on the members list too.
+    const section = document.getElementById('roles');
+    section?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    section?.querySelector<HTMLElement>('button[aria-expanded]')?.focus({ preventScroll: true });
   }, []);
 
   const edit = (p: Partial<GovernancePolicy>) => setPolicy((x) => ({ ...x, ...p, templateId: p.templateId ?? 'custom', name: p.name ?? (p.templateId ? x.name : x.templateId === 'custom' ? x.name : `${x.name} (customised)`) }));

@@ -175,6 +175,19 @@ test.describe('Connect page', () => {
     await expect(page.locator('#tokens')).toBeInViewport();
   });
 
+  test('signed out, an old token link comes back to the tokens after signing in', async ({ page }) => {
+    await page.goto('/settings#tokens');
+    await expect(page).toHaveURL(/\/connect#tokens$/);
+    // The header's Sign in and the hub's own link both keep the destination.
+    await expect(page.getByRole('banner').getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', `/login?next=${encodeURIComponent('/connect#tokens')}`);
+    await page.getByRole('link', { name: 'Sign in to see your connected agents and personal tokens' }).click();
+    await expect(page).toHaveURL(/\/login\?next=%2Fconnect%23tokens$/);
+    await page.getByRole('button', { name: 'Try the demo' }).click();
+    await expect(page).toHaveURL(/\/connect#tokens$/);
+    await expect(page.locator('#tokens')).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Create token' })).toBeVisible();
+  });
+
   test('old Settings links keep their place even when signed out', async ({ page }) => {
     await page.goto('/settings#tokens');
     await expect(page).toHaveURL(/\/connect#tokens$/);
@@ -197,8 +210,14 @@ test.describe('Connect page', () => {
     await tokens.getByRole('button', { name: 'Create token' }).click();
     await expect(page.getByTestId('new-token')).toContainText('Copy “First” now');
     await expect(page.getByRole('status')).toHaveText('Created token “First”. Copy it now.');
+    // An unsaved secret is never silently replaced: Create waits until it's dismissed.
+    await expect(tokens.getByRole('button', { name: 'Create token' })).toBeDisabled();
+    await expect(tokens.getByText('Save the token below and choose “I’ve saved it” before creating another.')).toBeVisible();
     await page.getByRole('button', { name: 'I’ve saved it' }).click();
     await expect(page.getByTestId('new-token')).toHaveCount(0);
+    // Dismissing keeps keyboard users in the form.
+    await expect(tokens.getByRole('textbox', { name: 'Token name' })).toBeFocused();
+    await expect(tokens.getByRole('button', { name: 'Create token' })).toBeEnabled();
 
     await tokens.getByRole('textbox', { name: 'Token name' }).fill('Second');
     await tokens.getByRole('button', { name: 'Create token' }).click();

@@ -3,6 +3,7 @@ import type { ApprovalRule, ChangeLevel, GovernancePolicy, Role } from '@concord
 import { pct, plural, roleLabel } from '../lib/format';
 import { LevelBadge } from './badges';
 import { Disclosure } from './Disclosure';
+import { acceptedOnSilence } from '../lib/governanceRules';
 
 /** Read-only descriptions of a governance policy, shared by the Governance page and the decision cards. */
 
@@ -17,7 +18,7 @@ const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 export function ruleSummary(r: ApprovalRule, level: ChangeLevel = 'minor', policy?: Pick<GovernancePolicy, 'odiPrivilege'>, kind: 'change' | 'release' = 'change'): string {
   // Mirrors the server's evaluate(): lazy consensus only waives sign-offs and the vote below major, and
   // only approvals from the listed roles count, so an empty list means nobody can sign off.
-  const lazySkips = r.lazyConsensus && level !== 'major';
+  const lazySkips = acceptedOnSilence(r, level);
   const signOffs = r.approverRoles.length ? `${plural(r.minApprovals, 'sign-off')} from ${r.approverRoles.map(roleLabel).join(' or ')}` : `${plural(r.minApprovals, 'sign-off')}, but no role is allowed to give them`;
   const parts: string[] = [];
   if (r.minApprovals > 0) parts.push(lazySkips ? `no sign-off unless someone objects (then ${signOffs})` : signOffs);
@@ -59,10 +60,10 @@ export function alwaysRules(policy: GovernancePolicy): string[] {
  * The whole policy, read-only and one click away, where people review, vote and approve. People whose
  * role doesn't need the Governance section still see how every kind of change or release is decided.
  */
-export function PolicyGlance({ policy, ontologyId, kind = 'change' }: { policy: GovernancePolicy; ontologyId: string; kind?: 'change' | 'release' }) {
+export function PolicyGlance({ policy, ontologyId, kind = 'change', title, className = 'border-t border-line pt-3' }: { policy: GovernancePolicy; ontologyId: string; kind?: 'change' | 'release'; title?: string; className?: string }) {
   const always = alwaysRules(policy);
   return (
-    <Disclosure tone="muted" title={`How ${kind === 'release' ? 'releases' : 'changes'} are decided`} summary={policy.name} className="border-t border-line pt-3">
+    <Disclosure tone="muted" title={title ?? `How ${kind === 'release' ? 'releases' : 'changes'} are decided`} summary={policy.name} className={className}>
       <div className="space-y-3">
         <RuleList rules={kind === 'release' ? policy.releases : policy.changes} policy={policy} kind={kind} label={kind === 'release' ? 'What each kind of release needs' : 'What each kind of change needs'} />
         {always.length > 0 && (
