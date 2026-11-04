@@ -85,6 +85,8 @@ pnpm test:e2e:live   # read-only smoke tests against the deployed site (LIVE_URL
 
 The browser tests start their own API server (on port 8797, with a throwaway data directory) and web app (port 5183), so they don't disturb a running `pnpm dev`. Set `E2E_MODE=preview` to test the production build instead of the dev server; run `pnpm --filter @concord/web build` first. CI runs both modes on every push, and the live tests after every Vercel production deploy. Add new specs as `e2e/<feature>.spec.ts`, using the `test` from `e2e/fixtures.ts`: it fails any test whose page logs a console error or crashes.
 
+Every feature comes with Playwright tests, and **every bug fix comes with a Playwright test that reproduces the bug**, so it can't come back. [docs/e2e-coverage.md](docs/e2e-coverage.md) maps each page, role and flow to the spec that covers it. More in [CLAUDE.md](CLAUDE.md).
+
 ## Docs
 
 - [Alpha walkthrough](docs/alpha-walkthrough.md)
