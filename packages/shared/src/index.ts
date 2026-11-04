@@ -371,6 +371,12 @@ export type TermEditInput = {
   previous?: TermEditValues;
   /** Why the change is needed, for reviewers. */
   reason?: string;
+  /**
+   * Required when an existing definition is reworded: 'same-meaning' records the
+   * author's confirmation that it still picks out the same things (patch);
+   * 'new-meaning' declares a change of meaning, which is reviewed as major.
+   */
+  definitionIntent?: 'same-meaning' | 'new-meaning';
   /** Submit for review straight away; otherwise the request stays a draft for its author. */
   submit?: boolean;
 };
@@ -486,6 +492,12 @@ export interface ChangeRequest {
   description: string;
   kind: ChangeRequestKind;
   origin: ChangeRequestOrigin;
+  /**
+   * A level a person declared for this change, which classification can raise
+   * to but never lower (e.g. an author saying a new definition changes what a
+   * term means). Re-applied every time the request is triaged.
+   */
+  declaredLevel?: { level: ChangeLevel; rule: string; message: string; iri?: string };
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;

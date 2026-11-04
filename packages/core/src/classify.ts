@@ -63,6 +63,7 @@ export const CLASSIFICATION_RULES: ClassificationRule[] = [
   { id: 'import-removed', level: 'major', description: 'An owl:imports was removed or replaced.' },
   { id: 'individual-assertion-removed', level: 'major', description: 'A type or property assertion was removed from an existing individual.' },
   { id: 'mapping-removed', level: 'major', description: 'A mapping annotation was removed: integrations relying on it break.' },
+  { id: 'meaning-changed', level: 'major', description: 'The person proposing a definition change said it changes what the term means. OBO principle 19 treats that as a different term, so it is reviewed as a breaking change.' },
   { id: 'label-or-definition-removed', level: 'major', description: 'The label or definition of an existing term was removed (also covers deprecated terms, OBO "M5").' },
 ];
 
@@ -355,4 +356,15 @@ function constraintSet(t: TermChange, field: 'domain' | 'range', g: OntologyGrap
   }
   const f = t.fields.find((x) => x.field === field);
   return (side === 'before' ? f?.removed ?? [] : f?.added ?? []).map(norm);
+}
+
+
+/**
+ * Raises a computed classification to a level a person declared (for example an
+ * author saying a definition change alters the term's meaning). It never lowers it.
+ */
+export function withDeclaredLevel(c: ChangeClassification, declared?: { level: ChangeLevel; rule: string; message: string; iri?: string }): ChangeClassification {
+  if (!declared) return c;
+  const reasons = [...c.reasons, { rule: declared.rule, level: declared.level, iri: declared.iri, message: declared.message }];
+  return { level: RANK[declared.level] > RANK[c.level] ? declared.level : c.level, reasons };
 }

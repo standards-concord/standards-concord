@@ -34,7 +34,11 @@ test.describe('editing a term inline', () => {
     await expect(form.getByRole('heading', { name: 'Edit “skill”' })).toBeVisible();
     await expect(form.getByLabel('Label')).toHaveValue('skill');
     await expect(form.getByLabel('Definition')).toHaveValue(ORIGINAL_DEFINITION);
-    for (const f of ['Comment', 'Also known as', 'Examples', 'Editorial note']) await expect(form.getByLabel(f)).toHaveValue('');
+    // Focus moves into the form.
+    await expect(form.getByLabel('Label')).toBeFocused();
+    for (const f of ['Comment', 'Editorial note']) await expect(form.getByLabel(f)).toHaveValue('');
+    await expect(form.getByRole('group', { name: 'Also known as' }).getByRole('textbox')).toHaveCount(0);
+    await expect(form.getByRole('group', { name: 'Examples' }).getByRole('textbox')).toHaveCount(0);
     // Explains that the edit goes through governance, with this ontology's patch rule.
     await expect(form).toContainText('proposed as a change request');
     await expect(form).toContainText(/sign-off from Editor or Steward/);
@@ -47,6 +51,8 @@ test.describe('editing a term inline', () => {
     await form.getByRole('button', { name: 'Cancel' }).click();
     await expect(editor(page)).toHaveCount(0);
     await expect(page.getByText(ORIGINAL_DEFINITION)).toBeVisible();
+    // Focus goes back to the Edit button.
+    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeFocused();
     await expectNoCrash(page);
   });
 
@@ -56,13 +62,24 @@ test.describe('editing a term inline', () => {
     const form = editor(page);
     const definition = `${ORIGINAL_DEFINITION} Volunteers can offer skills or develop them.`;
     await form.getByLabel('Definition').fill(definition);
-    await form.getByLabel('Also known as').fill('competence\n\ncompetence\nability');
+    // Rewording a definition needs an explicit answer about its meaning before it can be proposed.
+    await expect(form.getByText('Say whether the new definition keeps the meaning')).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Propose change' })).toBeDisabled();
+    await form.getByRole('radio', { name: /Yes, it is clearer wording/ }).check();
+    for (const [i, v] of ['competence', 'competence', 'ability'].entries()) {
+      await form.getByRole('button', { name: /^Add (another )?alternative label$/ }).click();
+      await expect(form.getByLabel(`alternative label ${i + 1}`, { exact: true })).toBeFocused();
+      await form.getByLabel(`alternative label ${i + 1}`, { exact: true }).fill(v);
+    }
+    await form.getByRole('button', { name: 'Remove alternative label 2' }).click();
     await form.getByLabel('Why this change? (optional)').fill('Say how skills relate to volunteers.');
     await expect(form.getByText('Changing: definition, also known as')).toBeVisible();
     await form.getByRole('button', { name: 'Propose change' }).click();
 
     const notice = page.getByRole('status').filter({ hasText: 'Proposed as' });
     await expect(notice).toContainText(/change request #\d+/);
+    // Keyboard focus lands on the result.
+    await expect(notice.getByRole('link', { name: /change request #/ })).toBeFocused();
     await expect(notice).toContainText('patch');
     await expect(notice).toContainText('In review');
     // The working draft is untouched until the change request is approved and merged.
@@ -105,5 +122,73 @@ test.describe('editing a term inline', () => {
     await notice.getByRole('button', { name: 'Dismiss' }).click();
     await expect(notice).toHaveCount(0);
     await expectNoCrash(page);
+  });
+
+  test('a definition that changes meaning is flagged as major, and multi-line examples keep their line breaks', async ({ page }) => {
+    await openTerm(page, 'Location');
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    const form = editor(page);
+    await form.getByLabel('Definition').fill('A building that a volunteering organisation owns.');
+    await form.getByRole('radio', { name: /No, it changes what the term means/ }).check();
+    await expect(form.getByText(/Changing what a term means is a/)).toBeVisible();
+    await form.getByRole('button', { name: 'Add example' }).click();
+    await form.getByLabel('example 1', { exact: true }).fill('The community hall\non Station Road');
+    await form.getByRole('button', { name: 'Save as draft' }).click();
+
+    const notice = page.getByRole('status').filter({ hasText: 'Saved as draft' });
+    await expect(notice).toContainText('major');
+    const res = await page.request.get(`/api/change-requests/${(await notice.getByRole('link').getAttribute('href'))!.split('/').pop()}`);
+    const cr = await res.json();
+    expect(cr.ops[0].set.examples).toEqual(['The community hall\non Station Road']);
+    expect(cr.ops[0].expect.examples).toEqual([]);
+    expect(cr.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('meaning-changed');
+  });
+
+  test('switching terms closes the editor, and Edit waits for the selected term to load', async ({ page }) => {
+    const id = await openTerm(page, 'Skill');
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await expect(editor(page)).toBeVisible();
+    // Hold the next term's response so we can act while it loads.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route('**/api/ontologies/*/terms/**', async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await expect(editor(page)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
+    release();
+    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await expect(editor(page).getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();
+    await expect(editor(page).getByLabel('Label')).toHaveValue('time commitment');
+    expect(page.url()).toContain(`/o/${id}/browse`);
+  });
+
+  test('a conflicting change is refused, and the latest values can be loaded without losing your text', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 409/);
+    // Pretend someone else changed the comment after this page loaded the term:
+    // the first response the editor sees carries an out-of-date comment.
+    let stale = true;
+    await page.route('**/api/ontologies/*/terms/**', async (route) => {
+      if (!stale) return route.continue();
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({ response: res, json: { ...body, comment: 'An older comment that has since been replaced.' } });
+    });
+    await openTerm(page, 'Session');
+    stale = false;
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    const form = editor(page);
+    await form.getByLabel('Comment').fill('Sessions can repeat weekly.');
+    await form.getByRole('button', { name: 'Propose change' }).click();
+    await expect(form.getByRole('alert')).toContainText('changed since you opened the editor');
+    await form.getByRole('button', { name: 'Load the latest values (keeps your text)' }).click();
+    await expect(form.getByRole('status')).toContainText('someone else changed');
+    await expect(form.getByRole('status')).toContainText('Comment');
+    await expect(form.getByLabel('Comment')).toHaveValue('Sessions can repeat weekly.');
+    await form.getByRole('button', { name: 'Propose change' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Proposed as' })).toBeVisible();
   });
 });

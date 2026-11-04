@@ -295,27 +295,38 @@ describe('anonymous access', () => {
 });
 
 describe('inline term edits', () => {
-  const SKILL = 'https://w3id.org/odi/volunteering#Skill';
-  const termPath = () => `/api/ontologies/${demoId}/terms/${encodeURIComponent(SKILL)}`;
+  const VOL = 'https://w3id.org/odi/volunteering#';
+  const SKILL = `${VOL}Skill`;
+  const termPath = (iri = SKILL) => `/api/ontologies/${demoId}/terms/${encodeURIComponent(iri)}`;
+  const edit = (agent: Agent, body: object) => agent.post(`/api/ontologies/${demoId}/term-edits`).send(body);
 
   it('opens an editorial change request with only the changed fields, leaving the working draft alone', async () => {
     const contributor = await login('contributor', 'Contributor Kit');
     const before = (await contributor.get(termPath())).body;
     const definition = `${before.definition} It is something a volunteer can offer or develop.`;
-    const res = await contributor.post(`/api/ontologies/${demoId}/term-edits`).send({
+    const body = {
       termIri: SKILL,
       set: { definition, label: before.label, altLabels: [' competence ', 'competence', ''] },
       previous: { definition: before.definition, label: before.label, altLabels: before.altLabels ?? [] },
       reason: 'Say who has skills.',
       submit: true,
-    });
+    };
+    // Rewording a definition needs the author to say whether the meaning is kept.
+    const noIntent = await edit(contributor, body);
+    expect(noIntent.status).toBe(400);
+    expect(noIntent.body.error).toMatch(/keeps the term’s meaning/);
+
+    const res = await edit(contributor, { ...body, definitionIntent: 'same-meaning' });
     expect(res.status).toBe(201);
     expect(res.body.kind).toBe('editorial');
     expect(res.body.origin).toEqual({ type: 'term-edit', termIri: SKILL });
     expect(res.body.status).toBe('review');
     expect(res.body.title).toMatch(/definition and alternative labels of “/);
     expect(res.body.description).toMatch(/Say who has skills\./);
-    expect(res.body.ops).toEqual([{ op: 'updateAnnotations', iri: SKILL, set: { definition, altLabels: ['competence'] } }]);
+    expect(res.body.description).toMatch(/confirms the new definition keeps the term’s meaning/);
+    expect(res.body.ops).toEqual([
+      { op: 'updateAnnotations', iri: SKILL, set: { definition, altLabels: ['competence'] }, expect: { definition: before.definition, altLabels: before.altLabels ?? [] } },
+    ]);
     expect(res.body.classification.level).toBe('patch');
     expect(res.body.validation.passed).toBe(true);
     // Nothing changes until the change request is approved and merged.
@@ -332,27 +343,111 @@ describe('inline term edits', () => {
     expect(after.altLabels).toEqual(['competence']);
   });
 
-  it('keeps a draft when not submitted, and classifies removing a definition as major', async () => {
+  it('never lets a later merge silently overwrite an earlier edit to the same field', async () => {
+    const TC = `${VOL}TimeCommitment`;
+    const a = await login('contributor', 'Contributor Ana');
+    const b = await login('contributor', 'Contributor Ben');
+    const editor = await login('editor', 'Editor Oz');
+    const original = (await a.get(termPath(TC))).body.comment ?? '';
+    // Both start from the same original comment.
+    const first = await edit(a, { termIri: TC, set: { comment: 'Usually agreed with the organisation.' }, previous: { comment: original }, submit: true });
+    const second = await edit(b, { termIri: TC, set: { comment: 'Measured in hours per week.' }, previous: { comment: original }, submit: true });
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    await editor.post(`/api/change-requests/${first.body.id}/reviews`).send({ decision: 'approve' });
+    await editor.post(`/api/change-requests/${second.body.id}/reviews`).send({ decision: 'approve' });
+    await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
+
+    const states = await Promise.all([first, second].map(async (r) => (await editor.get(`/api/change-requests/${r.body.id}`)).body));
+    const merged = states.filter((c) => c.status === 'merged');
+    const blocked = states.filter((c) => c.status !== 'merged');
+    expect(merged).toHaveLength(1);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].status).toBe('needs-work');
+    expect(JSON.stringify(blocked[0])).toMatch(/comment of <.*TimeCommitment> has changed since this edit was proposed/);
+    // The term keeps the merged edit, not a silent overwrite by the other.
+    expect((await a.get(termPath(TC))).body.comment).toBe(merged[0].ops[0].set.comment);
+  });
+
+  it('keeps a draft when not submitted, and classifies removing a definition or changing its meaning as major', async () => {
     const contributor = await login('contributor', 'Contributor Lou');
-    const res = await contributor.post(`/api/ontologies/${demoId}/term-edits`).send({ termIri: SKILL, set: { definition: '' } });
+    const res = await edit(contributor, { termIri: SKILL, set: { definition: '' } });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('draft');
     expect(res.body.ops[0].set).toEqual({ definition: '' });
     expect(res.body.classification.level).toBe('major');
+
+    const current = (await contributor.get(termPath())).body.definition;
+    const meaning = await edit(contributor, { termIri: SKILL, set: { definition: 'A paid employment contract held by a volunteer.' }, previous: { definition: current }, definitionIntent: 'new-meaning' });
+    expect(meaning.status).toBe(201);
+    expect(meaning.body.classification.level).toBe('major');
+    expect(meaning.body.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('meaning-changed');
+    expect(meaning.body.description).toMatch(/changes what the term means/);
+  });
+
+  it('lets oversized existing text be shortened', async () => {
+    const editor = await login('editor', 'Editor Long');
+    const steward = await login('steward', 'Steward Long');
+    const LOC = `${VOL}Location`;
+    const long = 'x'.repeat(4100);
+    const created = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Long note', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: LOC, set: { editorialNote: long } }], submit: true });
+    await steward.post(`/api/change-requests/${created.body.id}/reviews`).send({ decision: 'approve' });
+    await steward.post('/api/simulation/clock').send({ advanceDays: 2 });
+    expect((await editor.get(termPath(LOC))).body.editorialNote).toBe(long);
+
+    const contributor = await login('contributor', 'Contributor Short');
+    const res = await edit(contributor, { termIri: LOC, set: { editorialNote: 'Short note.' }, previous: { editorialNote: long } });
+    expect(res.status).toBe(201);
+    expect((await edit(contributor, { termIri: LOC, set: { comment: 'y'.repeat(4001) } })).status).toBe(400);
+  });
+
+  it('limits how many edits one person can propose', async () => {
+    const { termEditLimits } = await import('../src/services/termEdits.js');
+    const saved = { ...termEditLimits };
+    termEditLimits.max = 2;
+    try {
+      const contributor = await login('contributor', 'Contributor Busy');
+      for (const [i, expected] of [[1, 201], [2, 201], [3, 429]] as const) {
+        const r = await edit(contributor, { termIri: SKILL, set: { examples: [`example ${i}`] } });
+        expect(r.status, `edit ${i}`).toBe(expected);
+      }
+      // Someone else is unaffected.
+      expect((await edit(await login('contributor', 'Contributor Calm'), { termIri: SKILL, set: { examples: ['calm'] } })).status).toBe(201);
+    } finally {
+      Object.assign(termEditLimits, saved);
+    }
   });
 
   it('refuses no-op, empty-label, unknown-term, stale and anonymous edits', async () => {
     const contributor = await login('contributor', 'Contributor Mo');
     const current = (await contributor.get(termPath())).body;
-    const post = (body: object) => contributor.post(`/api/ontologies/${demoId}/term-edits`).send(body);
-    expect((await post({ termIri: SKILL, set: { label: current.label } })).status).toBe(400);
-    expect((await post({ termIri: SKILL, set: { label: '   ' } })).status).toBe(400);
-    expect((await post({ termIri: SKILL, set: { altLabels: 'not a list' } })).status).toBe(400);
-    expect((await post({ termIri: 'https://w3id.org/odi/volunteering#NoSuchTerm', set: { label: 'x' } })).status).toBe(404);
-    const stale = await post({ termIri: SKILL, set: { comment: 'New comment' }, previous: { comment: 'Something someone else replaced' } });
+    expect((await edit(contributor, { termIri: SKILL, set: { label: current.label } })).status).toBe(400);
+    expect((await edit(contributor, { termIri: SKILL, set: { label: '   ' } })).status).toBe(400);
+    expect((await edit(contributor, { termIri: SKILL, set: { altLabels: 'not a list' } })).status).toBe(400);
+    expect((await edit(contributor, { termIri: SKILL, set: { comment: 'x' }, definitionIntent: 'maybe' })).status).toBe(400);
+    expect((await edit(contributor, { termIri: `${VOL}NoSuchTerm`, set: { label: 'x' } })).status).toBe(404);
+    const stale = await edit(contributor, { termIri: SKILL, set: { comment: 'New comment' }, previous: { comment: 'Something someone else replaced' } });
     expect(stale.status).toBe(409);
     expect(stale.body.error).toMatch(/changed since you opened the editor/);
     const anon = await request(app).post(`/api/ontologies/${demoId}/term-edits`).send({ termIri: SKILL, set: { comment: 'x' } });
     expect(anon.status).toBe(401);
+  });
+
+  it('keeps multi-line examples intact', async () => {
+    const contributor = await login('contributor', 'Contributor Lines');
+    const editor = await login('editor', 'Editor Lines');
+    const SESSION = `${VOL}Session`;
+    const multi = 'Saturday 10:00 to 12:00\nat the community garden';
+    const created = await edit(contributor, { termIri: SESSION, set: { examples: [multi, 'A one-off beach clean'] }, submit: true });
+    expect(created.status).toBe(201);
+    await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ decision: 'approve' });
+    await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
+    const examples = (await contributor.get(termPath(SESSION))).body.examples;
+    expect(examples).toHaveLength(2);
+    expect(examples).toContain(multi);
+    // Editing another field with the multi-line examples as the starting point is not a conflict.
+    const next = await edit(contributor, { termIri: SESSION, set: { comment: 'Sessions can repeat.', examples }, previous: { examples, comment: '' } });
+    expect(next.status).toBe(201);
+    expect(Object.keys(next.body.ops[0].set)).toEqual(['comment']);
   });
 });

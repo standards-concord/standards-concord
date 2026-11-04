@@ -6,6 +6,7 @@ import {
   diffOntologies,
   toKGCL,
   validate,
+  withDeclaredLevel,
   type OntologyGraph,
 } from '@concord/core';
 import type { ChangeOp, ValidationReport } from '@concord/core/types';
@@ -71,6 +72,8 @@ export interface CreateInput {
   warnings?: string[];
   /** Submit straight into review (agents, synthesis) rather than leaving as a draft. */
   submit?: boolean;
+  /** A minimum level someone declared, e.g. a definition edit its author says changes the meaning. */
+  declaredLevel?: ChangeRequest['declaredLevel'];
 }
 
 export async function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
@@ -100,6 +103,7 @@ export async function createChangeRequest(project: OntologyProject, author: User
     description: input.description,
     kind: input.kind,
     origin: input.origin,
+    declaredLevel: input.declaredLevel,
     authorId: author.id,
     ops,
     status: 'draft',
@@ -208,15 +212,15 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   try {
     const p = await preview(project, cr.ops, cr.tests, author);
     cr.diff = trimDiff(p.diff);
-    cr.classification = p.classification;
+    cr.classification = withDeclaredLevel(p.classification, cr.declaredLevel);
     cr.validation = p.validation;
     cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
     cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
     cr.timeline.push(
       ev(
         'triaged',
-        `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
-          .filter((r) => r.level === p.classification.level)
+        `Classified as ${cr.classification.level.toUpperCase()} (${cr.classification.reasons
+          .filter((r) => r.level === cr.classification!.level)
           .map((r) => r.rule)
           .slice(0, 3)
           .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
