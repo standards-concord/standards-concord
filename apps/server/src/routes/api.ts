@@ -85,6 +85,17 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
 
 const project = (req: Request) => mustFindProject(String(req.params.id));
 
+/** GET routes anyone may call without signing in. */
+const PUBLIC_READS = [
+  /^\/ontologies$/,
+  /^\/ontologies\/[^/]+$/,
+  /^\/ontologies\/[^/]+\/(view|search|source|validation)$/,
+  /^\/ontologies\/[^/]+\/terms\/.+$/,
+  /^\/governance\/templates$/,
+  /^\/feedback\/questions$/,
+  /^\/oauth\/requests\/[^/]+$/,
+];
+
 export function apiRouter(): Router {
   const r = Router();
   r.use(express.json({ limit: '5mb' }));
@@ -128,6 +139,19 @@ export function apiRouter(): Router {
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
 
+  /*
+   * Reads below need a signed-in user, except the ontologies themselves (also
+   * public at /def/<slug>) and a few public lists. Use cases, interviews,
+   * meeting transcripts, change requests, releases, agent reports, activity
+   * and feedback can all hold material that isn't public, so an anonymous GET
+   * for them gets 401. Writes check the user themselves (a few, like feedback
+   * and webhooks, are meant to work without one).
+   */
+  r.use((req, _res, next) => {
+    if (req.user || (req.method !== 'GET' && req.method !== 'HEAD') || PUBLIC_READS.some((re) => re.test(req.path))) return next();
+    next(new HttpError(401, 'Sign in first'));
+  });
+
   /* --------------------------- ontologies --------------------------- */
   r.get('/ontologies', async (_req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
@@ -146,7 +170,9 @@ export function apiRouter(): Router {
 
   r.get('/ontologies/:id', async (req, res) => {
     const p = project(req);
-    res.json({ ...(await summary(p)), members: membersWithUsers(p.id), versions: ontologyStore.versions(p), history: ontologyStore.log(p, 30) });
+    // Who is in the working group, and who made each commit, is for signed-in users.
+    const signedIn = !!req.user;
+    res.json({ ...(await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {

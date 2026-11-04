@@ -202,7 +202,7 @@ test.describe('Public ontology page', () => {
     await page.goto(`/o/${id}`);
     const link = page.getByTestId('public-page-link');
     await expect(link).toHaveAttribute('href', '/def/volunteering');
-    const releases = await (await request.get(`/api/ontologies/${id}/releases`)).json();
+    const releases = await (await page.request.get(`/api/ontologies/${id}/releases`)).json();
     const published = releases.find((r: { status: string; version: string }) => r.status === 'published' && r.version === '1.0.0');
     await page.goto(`/o/${id}/releases/${published.id}`);
     await expect(page.getByTestId('release-public-page')).toHaveAttribute('href', '/def/volunteering/1.0.0');
