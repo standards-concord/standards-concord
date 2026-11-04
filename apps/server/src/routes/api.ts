@@ -12,6 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
+import { fileWithin, markSwitchOn } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -503,8 +504,8 @@ export function apiRouter(): Router {
   });
   r.post('/feedback', async (req, res) => {
     const b = req.body ?? {};
-    res.status(201).json(
-      await submitFeedback(req.user, {
+    markSwitchOn();
+    const sub = await submitFeedback(req.user, {
         pathway: b.pathway === 'general' ? 'general' : 'structured',
         answers: b.answers ?? {},
         transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
@@ -512,9 +513,11 @@ export function apiRouter(): Router {
         name: optStr(b.name),
         email: optStr(b.email),
         role: optStr(b.role),
-        themes: Array.isArray(b.themes) ? b.themes : undefined,
-      }),
-    );
+        themes: Array.isArray(b.themes) ? b.themes.filter((t: unknown) => typeof t === 'string').slice(0, 20) : undefined,
+      });
+    // Filed as an anonymised GitHub issue when that's switched on; the tester is told if it's quick.
+    const githubIssue = await fileWithin(sub);
+    res.status(201).json(githubIssue ? { ...sub, githubIssue } : sub);
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles

@@ -615,6 +615,8 @@ export interface FeedbackSubmission {
   usedVoice: boolean;
   /** AI-extracted themes for the general pathway */
   themes?: string[];
+  /** The anonymised GitHub issue this feedback was filed as, when issue filing is on. */
+  githubIssue?: { number: number; url: string };
   createdAt: string;
 }
 

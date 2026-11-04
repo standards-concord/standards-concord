@@ -190,6 +190,11 @@ export function FeedbackPage() {
           <Heart className="mx-auto size-8 text-accent" />
           <h1 className="mt-3 text-xl font-semibold">Thank you!</h1>
           <p className="mt-2 text-sm text-muted">Your feedback goes straight to the Open Data Institute team building Concord. It genuinely shapes what we build next.</p>
+          {submitted.githubIssue && (
+            <p className="mt-3 text-sm text-muted" data-testid="feedback-issue">
+              We’ve logged it for the team to act on as issue #{submitted.githubIssue.number}, without your name, email or the chat transcript.
+            </p>
+          )}
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/">
               <Button>Back to the hub</Button>
@@ -305,7 +310,7 @@ export function FeedbackPage() {
             <Field label="Name (optional)">
               <Input value={name} onChange={(e) => setName(e.target.value)} />
             </Field>
-            <Field label="Email (optional)" hint="Only if you’re happy for us to follow up.">
+            <Field label="Email (optional)" hint="Only if you’re happy for us to follow up. Your name and email stay with the team and are never added to the issue tracker.">
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
             </Field>
             <Button variant={done ? 'primary' : 'secondary'} className="w-full" icon={Send} loading={submit.pending} disabled={!messages.some((m) => m.role === 'user')} onClick={() => void submit.run()}>

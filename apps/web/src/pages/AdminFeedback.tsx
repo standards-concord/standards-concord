@@ -164,7 +164,14 @@ export function AdminFeedbackPage() {
                           {s.usedVoice && <Mic className="size-3.5 text-muted" aria-label="Used voice" />}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">{Object.keys(s.answers).length}</td>
+                      <td className="px-4 py-2.5">
+                        {Object.keys(s.answers).length}
+                        {s.githubIssue && (
+                          <a className="block text-xs text-accent underline" href={s.githubIssue.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+                            Issue #{s.githubIssue.number}
+                          </a>
+                        )}
+                      </td>
                       <td className="px-4 py-2.5">
                         <div className="flex flex-wrap gap-1">
                           {(s.themes ?? []).map((t) => (
