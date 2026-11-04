@@ -80,6 +80,68 @@ describe('ontology model: cardinality semantics', () => {
     expect(slot(m, 'Owner', 'hasPet')!.conflict).toBeTruthy();
   });
 
+  it('combines several constraints on the same type, in either order', () => {
+    const p = prop('p', { domain: [I('Owner')] });
+    for (const rs of [
+      [r('p', 'min', 'Cat', 2), r('p', 'max', 'Cat', 3)],
+      [r('p', 'max', 'Cat', 3), r('p', 'min', 'Cat', 2)],
+    ]) {
+      const s = slot(model([...animals, cls('Owner', { r: rs })], [p]), 'Owner', 'p')!;
+      expect(s.targets.find((t) => t.filler === I('Cat'))).toMatchObject({ min: 2, max: 3 });
+      expect(s.conflict).toBeUndefined();
+    }
+  });
+
+  it('gives each qualified type its own bounds, separate from the total', () => {
+    const p = prop('p', { domain: [I('Owner')] });
+    const m = model([...animals, cls('Owner', { r: [r('p', 'max', 'Cat', 1), r('p', 'some', 'Dog')] })], [p]);
+    const s = slot(m, 'Owner', 'p')!;
+    expect(slotCard(s)).toBe('1..*');
+    expect(s.targets.find((t) => t.filler === I('Cat'))).toMatchObject({ min: 0, max: 1 });
+    expect(s.targets.find((t) => t.filler === I('Dog'))).toMatchObject({ min: 1, max: '*' });
+    // "Points here" uses the bounds for that type, not the total.
+    expect(m.incoming(I('Cat')).find((x) => x.from === I('Owner'))!.card).toBe('0..1');
+    expect(m.incoming(I('Dog')).find((x) => x.from === I('Owner'))!.card).toBe('1..*');
+  });
+
+  it('caps a qualified type by the total maximum', () => {
+    const m = model([...animals, cls('Owner', { r: [r('hasPet', 'some', 'Dog')] })], [prop('hasPet', { range: [I('Animal')], characteristics: ['functional'] })]);
+    expect(slot(m, 'Owner', 'hasPet')!.targets.find((t) => t.filler === I('Dog'))).toMatchObject({ min: 1, max: 1 });
+  });
+
+  it('flags qualified bounds that contradict each other with no range declared', () => {
+    const m = model([...animals, cls('Owner', { r: [r('p', 'min', 'Cat', 2), r('p', 'max', 'Cat', 1)] })], [prop('p', { domain: [I('Owner')] })]);
+    const s = slot(m, 'Owner', 'p')!;
+    expect(s.conflict).toBeTruthy();
+    expect(s.targets.find((t) => t.filler === I('Cat'))!.conflict).toBeTruthy();
+    expect(m.incoming(I('Cat')).find((x) => x.from === I('Owner'))!.card).toBe('conflict');
+  });
+
+  it('flags values required of types disjoint with the expected type', () => {
+    const pets = [cls('Animal'), { ...cls('Cat', { sup: ['Animal'] }), disjointWith: [I('Dog')] }, cls('Dog', { sup: ['Animal'] })];
+    const m = model([...pets, cls('Owner', { r: [r('hasPet', 'only', 'Cat'), r('hasPet', 'some', 'Dog')] })], [hasPet]);
+    expect(slot(m, 'Owner', 'hasPet')!.conflict).toMatch(/disjoint/);
+  });
+
+  it('counts values of disjoint types separately', () => {
+    const pets = [cls('Animal'), cls('Cat', { sup: ['Animal'] }), { ...cls('Dog', { sup: ['Animal'] }), disjointWith: [I('Cat')] }, cls('Kitten', { sup: ['Cat'] })];
+    const functionalPet = prop('hasPet', { range: [I('Animal')], characteristics: ['functional'] });
+    const m = model([...pets, cls('Owner', { r: [r('hasPet', 'some', 'Cat'), r('hasPet', 'some', 'Dog')] })], [functionalPet]);
+    expect(slot(m, 'Owner', 'hasPet')!.conflict).toBeTruthy();
+    // Disjointness is inherited: a Kitten can't be a Dog either.
+    const m2 = model([...pets, cls('Owner', { r: [r('hasPet', 'some', 'Kitten'), r('hasPet', 'some', 'Dog')] })], [hasPet]);
+    expect(slotCard(slot(m2, 'Owner', 'hasPet')!)).toBe('2..*');
+    // Without disjointness one value could be both, so no conflict.
+    const m3 = model([...animals, cls('Owner', { r: [r('hasPet', 'some', 'Cat'), r('hasPet', 'some', 'Dog')] })], [functionalPet]);
+    expect(slot(m3, 'Owner', 'hasPet')!.conflict).toBeUndefined();
+  });
+
+  it('treats a sub-property of a functional property as functional', () => {
+    const props = [prop('q', { characteristics: ['functional'] }), prop('p', { domain: [I('Owner')], superProperties: [I('q')] })];
+    const m = model([cls('Owner', { r: [r('p', 'min', undefined, 2)] })], props);
+    expect(slot(m, 'Owner', 'p')!.conflict).toBeTruthy();
+  });
+
   it('flags a qualified minimum above a maximum that covers it', () => {
     const m = model([...animals, cls('Owner', { r: [r('hasPet', 'min', 'Cat', 3), r('hasPet', 'max', 'Animal', 2)] })], [hasPet]);
     expect(slot(m, 'Owner', 'hasPet')!.conflict).toMatch(/at least 3/);
@@ -101,8 +163,23 @@ describe('ontology model: cardinality semantics', () => {
   });
 
   it('includes ranges inherited from a super-property', () => {
-    const m = model([...animals, cls('Owner')], [hasPet, prop('hasCat', { domain: [I('Owner')], range: [I('Cat')], superProperties: [I('hasPet')] })]);
-    expect(slot(m, 'Owner', 'hasCat')!.range).toEqual([I('Cat')]);
+    // hasCompanion declares no range of its own, so Animal can only come from hasPet.
+    const m = model([...animals, cls('Owner')], [hasPet, prop('hasCompanion', { domain: [I('Owner')], superProperties: [I('hasPet')] })]);
+    expect(slot(m, 'Owner', 'hasCompanion')!.range).toEqual([I('Animal')]);
+  });
+
+  it('applies restrictions all the way round a subclass cycle', () => {
+    const m = model([...animals, cls('A', { sup: ['B'], r: [r('hasPet', 'min', undefined, 1)] }), cls('B', { sup: ['A'], r: [r('hasPet', 'max', undefined, 2)] })], [hasPet]);
+    expect(slotCard(slot(m, 'A', 'hasPet')!)).toBe('1..2');
+    expect(slotCard(slot(m, 'B', 'hasPet')!)).toBe('1..2');
+  });
+
+  it('keeps one of two ranges that imply each other', () => {
+    const m = model([cls('A', { sup: ['B'] }), cls('B', { sup: ['A'] }), cls('Owner', { r: [r('p', 'max', 'A', 1)] })], [prop('p', { domain: [I('Owner')], range: [I('A'), I('B')] })]);
+    const s = slot(m, 'Owner', 'p')!;
+    expect(s.range).toHaveLength(1);
+    // Every value is an A, so "at most 1 A" bounds the total.
+    expect(slotCard(s)).toBe('0..1');
   });
 
   it('treats a property as functional when its inverse is inverse-functional', () => {
@@ -118,6 +195,38 @@ describe('ontology model: cardinality semantics', () => {
     c.superClassExpressions = ['hasPet some (Cat or Dog)'];
     const m = model([...animals, c, cls('Kid', { sup: ['Owner'] })], [hasPet]);
     expect(m.unsummarised(I('Kid'))).toEqual([{ on: I('Owner'), text: 'SubClassOf: hasPet some (Cat or Dog)' }]);
+  });
+});
+
+describe('ontology model: intersections', () => {
+  it('summarises a superclass that is an intersection of restrictions, parsed from Turtle', async () => {
+    const ttl = `@prefix : <${NS}> . @prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      <https://example.org/t> a owl:Ontology .
+      :Thing2 a owl:Class . :A a owl:Class ; rdfs:subClassOf [ owl:intersectionOf ( :Thing2 [ a owl:Restriction ; owl:onProperty :p ; owl:minCardinality "2"^^xsd:nonNegativeInteger ] [ a owl:Restriction ; owl:onProperty :p ; owl:maxCardinality "3"^^xsd:nonNegativeInteger ] ) ] .
+      :B a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty [ owl:inverseOf :p ] ; owl:minCardinality "2"^^xsd:nonNegativeInteger ] .
+      :p a owl:ObjectProperty .`;
+    const m = buildModel((await OntologyGraph.fromTurtle(ttl)).view());
+    expect(slotCard(slot(m, 'A', 'p')!)).toBe('2..3');
+    expect(m.parents.get(I('A'))).toEqual([I('Thing2')]);
+    expect(m.unsummarised(I('A'))).toEqual([]);
+    // An inverse restriction can't be summarised, so it is listed.
+    expect(m.unsummarised(I('B'))).toHaveLength(1);
+    expect(m.allSlots(I('B')).flatMap((g) => g.slots)).toHaveLength(0);
+  });
+});
+
+describe('ontology model: performance', () => {
+  it('derives slots quickly for a deep hierarchy with many restrictions', () => {
+    const fillers = Array.from({ length: 10 }, (_, i) => cls(`F${i}`));
+    const chain = [cls('C0', { r: fillers.map((f, i) => r('p', 'some', `F${i}`)) })];
+    for (let i = 1; i < 400; i++) chain.push(cls(`C${i}`, { sup: [`C${i - 1}`], r: [...fillers.map((_, j) => r('p', 'some', `F${j}`)), r('q', 'some', `F${i % 10}`)] }));
+    const m = model([...fillers, ...chain], [prop('p'), prop('q')]);
+    const t = performance.now();
+    for (const c of m.classes.keys()) m.ownSlots(c);
+    m.incoming(I('F0'));
+    // About 65 ms locally; it took about 2 s before restrictions were merged level by level.
+    expect(performance.now() - t).toBeLessThan(400);
+    expect(slotCard(slot(m, 'C399', 'p')!)).toBe('1..*');
   });
 });
 

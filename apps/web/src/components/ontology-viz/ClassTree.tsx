@@ -63,12 +63,20 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
   // Multiple inheritance can make a fully expanded tree far longer than the class count,
   // so only this many rows are rendered at a time, with a button for more.
   const [limit, setLimit] = useState(ROW_LIMIT);
+  // Rows on the path to the selection are always rendered, whatever the budget.
+  const keep = useMemo(() => {
+    const out = new Set<string>();
+    const path = selected && model.classes.has(selected) ? model.paths(selected, 1).paths[0] : undefined;
+    let key = '';
+    for (const iri of path ?? []) out.add((key = key ? `${key}/${iri}` : iri));
+    return out;
+  }, [model, selected]);
   const { rows, truncated } = useMemo(() => {
     const out: Row[] = [];
     let truncated = false;
     const visit = (iri: string, level: number, parentKey: string | undefined, seen: Set<string>) => {
       if (matches && !matches.has(iri)) return;
-      if (out.length >= limit) {
+      if (out.length >= limit && !keep.has(parentKey ? `${parentKey}/${iri}` : iri)) {
         truncated = true;
         return;
       }
@@ -80,7 +88,7 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
     };
     for (const r of model.roots) visit(r, 1, undefined, new Set());
     return { rows: out, truncated };
-  }, [model, open, matches, limit]);
+  }, [model, open, matches, limit, keep]);
 
   const activeKey = rows.find((r) => r.key === active)?.key ?? rows.find((r) => r.iri === selected)?.key ?? rows[0]?.key;
 

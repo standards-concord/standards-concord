@@ -86,7 +86,7 @@ function TermDetailPanel({
   const slotCount = isClass ? model.allSlots(t.iri).reduce((n, g) => n + g.slots.length, 0) : 0;
   const rules =
     t.kind === 'class'
-      ? t.restrictions.length + t.equivalentClasses.length + t.disjointWith.length
+      ? t.restrictions.length + t.equivalentClasses.length + t.disjointWith.length + (t.superClassExpressions?.length ?? 0) + (t.equivalentExpressions?.length ?? 0)
       : isProp
         ? t.superProperties.length + (t.inverseOf ? 1 : 0) + t.characteristics.length
         : t.kind === 'individual'
@@ -189,6 +189,24 @@ function TermDetailPanel({
                         {restrictionText(r, label)}
                       </button>
                     </li>
+                  ))}
+                </ul>
+              </Row>
+            )}
+            {t.kind === 'class' && !!t.superClassExpressions?.length && (
+              <Row k="Also a subclass of">
+                <ul className="space-y-1 font-mono text-[0.8rem]">
+                  {t.superClassExpressions.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              </Row>
+            )}
+            {t.kind === 'class' && !!t.equivalentExpressions?.length && (
+              <Row k="Defined as">
+                <ul className="space-y-1 font-mono text-[0.8rem]">
+                  {t.equivalentExpressions.map((e, i) => (
+                    <li key={i}>{e}</li>
                   ))}
                 </ul>
               </Row>

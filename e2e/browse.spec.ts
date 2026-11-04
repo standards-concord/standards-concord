@@ -125,7 +125,7 @@ test.describe('class tree and class pages', () => {
     await expect.poll(() => term(page)).toBe(`${VOL}Volunteer`);
     await crumbs.getByRole('button', { name: 'agent' }).click();
     await expect.poll(() => term(page)).toBe(`${VOL}Agent`);
-    await expect(panel.getByText('Subclasses')).toBeVisible();
+    await expect(panel.getByText('Subclasses', { exact: true }).first()).toBeVisible();
     await expect(panel.getByRole('button', { name: 'organisation' }).first()).toBeVisible();
   });
 
@@ -219,6 +219,17 @@ test.describe('class diagram', () => {
     await d.focus();
     await page.keyboard.press('-');
     await expect(pct).not.toHaveText(before);
+
+    // Resizing refits (recentres) the drawing, unless it has been moved by hand.
+    const viewport = d.locator('[data-viewport]');
+    const moved = await viewport.getAttribute('transform');
+    await page.setViewportSize({ width: 1000, height: 950 });
+    await page.waitForTimeout(200);
+    await expect(viewport).toHaveAttribute('transform', moved!);
+    await d.getByRole('button', { name: 'Fit to view' }).click();
+    const fitted = await viewport.getAttribute('transform');
+    await page.setViewportSize({ width: 1400, height: 950 });
+    await expect(viewport).not.toHaveAttribute('transform', fitted!);
 
     const download = page.waitForEvent('download');
     await d.getByRole('button', { name: 'Download as SVG' }).click();
@@ -417,6 +428,20 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     }
   });
 
+  test('a long class list is shown in pages, and the selected class is always in it', async ({ page }) => {
+    const classes = Array.from({ length: 450 }, (_, i) => cls(`Class${String(i).padStart(3, '0')}`));
+    await stub(page, classes);
+    await page.goto(`${base}?term=${encodeURIComponent(NS + 'Class449')}`);
+    await expect(tree(page).getByRole('treeitem', { name: /^Class449/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(tree(page).getByRole('treeitem', { name: /^Class399/ })).toHaveCount(1);
+    await expect(tree(page).getByRole('treeitem', { name: /^Class400/ })).toHaveCount(0);
+    // The selected row is the tree's tab stop.
+    await expect(tree(page).locator('[role="treeitem"][tabindex="0"]')).toHaveAccessibleName(/^Class449/);
+    await page.getByRole('button', { name: /^Show more classes/ }).click();
+    await expect(tree(page).getByRole('treeitem', { name: /^Class400/ })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: /^Show more classes/ })).toHaveCount(0);
+  });
+
   test('contradictions and qualified constraints are shown, not merged', async ({ page }) => {
     const classes = [
       cls('Animal'),
@@ -426,6 +451,11 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         { property: NS + 'hasPet', kind: 'max', filler: NS + 'Cat', cardinality: 1 },
         { property: NS + 'hasPet', kind: 'some', filler: NS + 'Dog' },
       ]),
+      cls('Breeder', [], [
+        { property: NS + 'hasPet', kind: 'max', filler: NS + 'Cat', cardinality: 3 },
+        { property: NS + 'hasPet', kind: 'min', filler: NS + 'Cat', cardinality: 2 },
+      ]),
+      { ...cls('Lonely'), superClassExpressions: ['inverse hasPet min 2 Owner'] },
       cls('Strict', ['Owner'], [
         { property: NS + 'hasPet', kind: 'min', cardinality: 3 },
         { property: NS + 'hasPet', kind: 'max', cardinality: 2 },
@@ -450,19 +480,33 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Owner"][data-target="${NS}Dog"]`)).toContainText('1..*');
     await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Owner"][data-target="${NS}Cat"]`)).toContainText('0..1');
     await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Strict"]`).first()).toContainText('conflict');
+    // Several constraints on one type combine into one range of counts.
+    await expect(d.locator(`[data-edge="assoc"][data-source="${NS}Breeder"][data-target="${NS}Cat"]`)).toContainText('2..3');
+
+    // Axioms that can't be summarised are shown even when there's no property table.
+    await page.goto(`${base}?term=${encodeURIComponent(NS + 'Lonely')}`);
+    await expect(page.getByRole('note')).toContainText('inverse hasPet min 2 Owner');
   });
 });
 
 test.describe('reduced motion', () => {
-  test('the graph does not animate when reduced motion is requested', async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    await page.goto(`${base}?view=graph&term=${encodeURIComponent(`${VOL}Person`)}`);
-    const g = page.getByTestId('ontology-graph');
-    await expect(g).toHaveAttribute('data-ready', 'true');
-    await expect(g).toHaveAttribute('data-motion', 'reduced');
-    await page.getByRole('combobox', { name: 'Graph layout' }).selectOption('force');
-    await expectNoCrash(page);
-  });
+  for (const motion of ['reduce', 'no-preference'] as const) {
+    test(`the graph ${motion === 'reduce' ? 'does not animate' : 'animates'} with reduced motion ${motion === 'reduce' ? 'on' : 'off'}`, async ({ page }) => {
+      const animated = String(motion !== 'reduce');
+      await page.emulateMedia({ reducedMotion: motion });
+      await page.goto(`${base}?view=graph`);
+      const g = page.getByTestId('ontology-graph');
+      await expect(g).toHaveAttribute('data-ready', 'true');
+      await expect(g).toHaveAttribute('data-motion', motion === 'reduce' ? 'reduced' : 'full');
+      await page.getByRole('combobox', { name: 'Graph layout' }).selectOption('force');
+      await expect(g).toHaveAttribute('data-layout-animated', animated);
+      // Selecting a class recentres on it.
+      await page.getByRole('button', { name: 'Terms' }).click();
+      await tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click();
+      await expect(g).toHaveAttribute('data-centre-animated', animated);
+      await expectNoCrash(page);
+    });
+  }
 });
 
 test.describe('graph', () => {

@@ -75,6 +75,11 @@ export interface ClassView extends TermBase {
   restrictions: Restriction[];
   /** Addition: anonymous non-restriction superclasses (e.g. unions), in Manchester syntax. */
   superClassExpressions?: string[];
+  /**
+   * Addition: for each anonymous superclass that is an intersection of named classes and
+   * simple restrictions, its parts (the expression is also in superClassExpressions).
+   */
+  superClassConjuncts?: { expression: string; classes: IRI[]; restrictions: Restriction[] }[];
   /** Addition: anonymous equivalent class expressions (logical definitions), in Manchester syntax. */
   equivalentExpressions?: string[];
 }

@@ -2,7 +2,7 @@ import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
+import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { cx } from '../ui';
 import { curve, downloadSvg, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
 
@@ -73,20 +73,12 @@ function slotLine(s: Slot, label: Labeler) {
 }
 
 /**
- * The classes an object property slot links to, each with the cardinality to draw: every
- * named class in its (intersected) range at the slot's overall cardinality, plus each named
- * class in a qualified constraint the range doesn't already cover (e.g. "at least one Dog").
+ * The classes an object property slot links to, each with its own bounds: the range classes,
+ * plus any class named in a qualified restriction (e.g. "0..1 Cat" and "1..* Dog").
  */
 export function slotTargets(model: OntologyModel, s: Slot): { target: string; card: string }[] {
   if (s.property.kind !== 'objectProperty') return [];
-  const out = new Map<string, string>();
-  for (const r of s.range) if (model.classes.has(r)) out.set(r, slotCard(s));
-  for (const q of s.qualified) {
-    if (q.implied || !q.filler || !model.classes.has(q.filler) || out.has(q.filler)) continue;
-    const card = q.kind === 'some' || q.kind === 'value' ? '1..*' : q.kind === 'min' ? `${q.n}..*` : q.kind === 'max' ? `0..${q.n}` : String(q.n);
-    out.set(q.filler, card);
-  }
-  return [...out].map(([target, card]) => ({ target, card }));
+  return s.targets.filter((t) => model.classes.has(t.filler)).map((t) => ({ target: t.filler, card: t.conflict ? 'conflict' : cardText(t.min, t.max) }));
 }
 
 /** Classes within `hops` links of `focus`, following the relationships that are drawn. */

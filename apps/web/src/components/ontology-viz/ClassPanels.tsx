@@ -123,7 +123,26 @@ export function PropertyTable({ iri, model, label, onSelect, compact }: { iri: s
   const groups = model.allSlots(iri);
   const total = groups.reduce((n, g) => n + g.slots.length, 0);
   const extra = model.unsummarised(iri);
-  if (!total) return <p className="text-sm text-muted">No properties have this class (or its parents) as their domain yet.</p>;
+  const notes = extra.length > 0 && (
+    <div className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-xs" role="note">
+      <p className="font-medium">{total ? 'Not all axioms are summarised in this table.' : 'This class has axioms that aren’t summarised here.'}</p>
+      <ul className="mt-1 space-y-0.5 font-mono">
+        {extra.map((u, i) => (
+          <li key={i}>
+            {u.text}
+            {u.on !== iri && <span className="font-sans text-muted"> (on {label(u.on)})</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+  if (!total)
+    return (
+      <div>
+        <p className="text-sm text-muted">No properties have this class (or its parents) as their domain yet.</p>
+        {notes}
+      </div>
+    );
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm" aria-label={`Properties of ${label(iri)}`}>
@@ -156,19 +175,8 @@ export function PropertyTable({ iri, model, label, onSelect, compact }: { iri: s
           </tbody>
         ))}
       </table>
-      {extra.length > 0 && (
-        <div className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-xs">
-          <p className="font-medium">Not all axioms are summarised in this table.</p>
-          <ul className="mt-1 space-y-0.5 font-mono">
-            {extra.map((u, i) => (
-              <li key={i}>
-                {u.text}
-                {u.on !== iri && <span className="font-sans text-muted"> (on {label(u.on)})</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {notes}
+      <p className="mt-2 text-xs text-muted">Summarised from the stated axioms. The consistency check (a full OWL reasoner) is the authority on contradictions.</p>
     </div>
   );
 }
@@ -214,5 +222,5 @@ export function Neighbourhood({ iri, view, model, label, onSelect }: { iri: stri
     const near = neighbourhood(model, iri, 1, DEFAULT_DIAGRAM_OPTIONS);
     return near.size < 4 ? neighbourhood(model, iri, 2, DEFAULT_DIAGRAM_OPTIONS) : near;
   }, [model, iri]);
-  return <ClassDiagram view={view} model={model} label={label} scope={scope} options={DEFAULT_DIAGRAM_OPTIONS} selected={iri} focus={iri} onSelect={onSelect} height={340} title={`Neighbourhood of ${label(iri)}`} textList={false} />;
+  return <ClassDiagram view={view} model={model} label={label} scope={scope} options={DEFAULT_DIAGRAM_OPTIONS} selected={iri} focus={iri} onSelect={onSelect} height={340} title={`Neighbourhood of ${label(iri)}`} />;
 }
