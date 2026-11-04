@@ -1,0 +1,41 @@
+name: Publish to the MCP Registry
+
+# Publishes server.json to the official MCP Registry (registry.modelcontextprotocol.io)
+# as io.github.jeswr/concord. GitHub's OIDC token proves this workflow runs in a
+# repo owned by jeswr, so no secret is needed. Directories that mirror the
+# registry (GitHub's MCP registry, PulseMCP and others) pick up changes from there.
+#
+# When Concord moves: node scripts/public-url.mjs https://<new-origin>, then merge.
+
+on:
+  push:
+    branches: [main]
+    paths: [server.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the listing
+        run: node scripts/public-url.mjs --check
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      # Built from source at a pinned release. Go's checksum database verifies the module
+      # matches what everyone else gets for that version, so a later upstream release (or a
+      # tampered download) can't change what runs with publishing rights.
+      - name: Install the MCP Registry publisher
+        run: go install github.com/modelcontextprotocol/registry/cmd/publisher@v1.8.6
+      - name: Validate
+        run: '"$(go env GOPATH)/bin/publisher" validate'
+      - name: Sign in with GitHub OIDC
+        run: '"$(go env GOPATH)/bin/publisher" login github-oidc'
+      - name: Publish
+        run: '"$(go env GOPATH)/bin/publisher" publish'
