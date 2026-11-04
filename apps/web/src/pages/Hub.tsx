@@ -8,7 +8,7 @@ import { useOntologies } from '../lib/ontologies';
 import { useSession } from '../lib/session';
 import { relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
-import { HealthBadges } from '../components/badges';
+import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea } from '../components/ui';
 
@@ -164,7 +164,11 @@ export function HubPage() {
                       ))}
                     </div>
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                      <HealthBadges o={o} />
+                      <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
+                        <HealthChip o={o} />
+                        v{o.currentVersion}
+                        {o.stats.openChangeRequests > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
+                      </span>
                       <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
                     </div>
                   </Card>

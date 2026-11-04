@@ -141,8 +141,11 @@ export function UseCaseDocument({ uc, live, highlight = [] }: { uc: UseCase; liv
   return (
     <div className="space-y-6">
       {SECTION_GROUPS.map((g) => {
-        const keys = live ? g.keys : g.keys.filter((k) => isFilled(s[k]));
-        if (!keys.length) return null;
+        // While live, show what has been captured (and what is being asked about now) in full,
+        // and list the sections still to cover as one compact line instead of empty boxes.
+        const keys = g.keys.filter((k) => isFilled(s[k]) || (live && highlight.includes(k)));
+        const todo = live ? g.keys.filter((k) => !keys.includes(k)) : [];
+        if (!keys.length && !todo.length) return null;
         return (
           <section key={g.title}>
             <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">{g.title}</h3>
@@ -155,11 +158,16 @@ export function UseCaseDocument({ uc, live, highlight = [] }: { uc: UseCase; liv
                       {live && (filled ? <CircleCheck className="size-3.5 text-ok" /> : <Circle className="size-3.5 text-line-strong" />)}
                       {USE_CASE_SECTION_LABELS[k]}
                     </div>
-                    {filled ? <SectionValue k={k} s={s} /> : <p className="text-xs text-subtle">Not covered yet</p>}
+                    {filled ? <SectionValue k={k} s={s} /> : <p className="text-xs text-subtle">{highlight.includes(k) ? 'The interviewer is asking about this now' : 'Not covered yet'}</p>}
                   </div>
                 );
               })}
             </div>
+            {todo.length > 0 && (
+              <p className={cx('text-xs text-subtle', keys.length > 0 && 'mt-2')}>
+                <span className="font-medium">Not covered yet:</span> {todo.map((k) => USE_CASE_SECTION_LABELS[k]).join(', ')}
+              </p>
+            )}
           </section>
         );
       })}

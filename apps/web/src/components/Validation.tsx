@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
 import type { IssueSeverity } from '@concord/core/types';
 import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
@@ -6,6 +6,7 @@ import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
 import { Badge, ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
+import { Disclosure } from './Disclosure';
 
 const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string }> = {
   error: { icon: CircleX, cls: 'text-danger', label: 'Errors' },
@@ -16,12 +17,13 @@ const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string
 export function ValidationSummary({ report }: { report: ValidationReport }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
+  const infos = report.lint.filter((i) => i.severity === 'info').length;
   const r = report.reasoner;
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <SummaryTile ok={report.passed} title={report.passed ? 'Passed' : 'Failing'} sub="Overall validation" />
       <SummaryTile ok={r.consistent && !r.unsatisfiable.length} title={!r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'} sub={`Reasoner (${r.engine})`} warn={!r.available} />
-      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub="Lint (OWL best practice)" />
+      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
       <div className="rounded-lg border border-line p-3">
         <div className="text-lg font-semibold tabular-nums">{pct(report.fair.score)}</div>
         <div className="text-xs text-muted">FAIR score</div>
@@ -190,5 +192,40 @@ export function CqResults({ report }: { report: ValidationReport }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
+export function ValidationDetails({ report, label, openLint, lintNote }: { report: ValidationReport; label: Labeler; openLint?: boolean; lintNote?: ReactNode }) {
+  const errors = report.lint.filter((i) => i.severity === 'error').length;
+  const warnings = report.lint.filter((i) => i.severity === 'warning').length;
+  const infos = report.lint.length - errors - warnings;
+  const lintSummary = report.lint.length
+    ? [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ')
+    : 'none';
+  const fairPassed = report.fair.checks.filter((c) => c.passed).length;
+  const cqOk = report.competencyQuestions.filter((q) => q.satisfied).length;
+  return (
+    <div className="space-y-5">
+      <ValidationSummary report={report} />
+      <ReasonerResult report={report} label={label} />
+      <div className="divide-y divide-line rounded-lg border border-line">
+        <Disclosure className="px-4 py-3" title="Lint findings" summary={lintSummary} defaultOpen={openLint || errors > 0 || warnings > 0}>
+          <LintIssues report={report} label={label} />
+          {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
+        </Disclosure>
+        <Disclosure className="px-4 py-3" title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length}>
+          <FairChecks report={report} />
+        </Disclosure>
+        <Disclosure
+          className="px-4 py-3"
+          title="Competency questions"
+          summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
+          defaultOpen={cqOk < report.competencyQuestions.length}
+        >
+          <CqResults report={report} />
+        </Disclosure>
+      </div>
+    </div>
   );
 }
