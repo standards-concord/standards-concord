@@ -69,6 +69,11 @@ export const config = {
     apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
     /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
     perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
+    /**
+     * GitHub accounts the triage routine comments as (comma-separated). Withdrawal deletes
+     * their footer-signed comments. Defaults to the token's own account.
+     */
+    triageLogins: (process.env.FEEDBACK_TRIAGE_LOGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
   },
 
   meetBot: {

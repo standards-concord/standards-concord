@@ -652,6 +652,8 @@ export interface FeedbackPublicationStatus {
   issue?: { number: number; url: string };
   /** Only in the response to the submission: lets the tester withdraw the summary later. */
   withdrawToken?: string;
+  /** A withdrawal that can't find its issue and needs an administrator to confirm. Administrators only. */
+  adminNeeded?: boolean;
   /** Administrators only. */
   id?: string;
   summary?: string;

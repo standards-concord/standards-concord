@@ -12,12 +12,12 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | --- | --- | --- | --- |
 | `/login` | Try the demo; deep link `?next=` returns to the page; signed-in people are sent on; walkthrough link | ✅ | app, account |
 | `/alpha` | Guided walkthrough: welcome, pick a role, tasks per role, simulate the others, feedback; floating panel | ✅ | alpha |
-| `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out | ✅ | feedback |
+| `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out. Opt-in public summary posted as a GitHub issue exactly as previewed, then withdrawn | ✅ | feedback, feedback-issues (against a GitHub stand-in) |
 | `/connect` | Pick an app, install links and commands, copy buttons | ✅ | connect |
 | `/oauth/authorize` | Consent: sign in, allow, decline; refuses script and plain-http redirects, background approval, stale links | ✅ | oauth |
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
 | `/settings` | Profile and WebID, pod, sign-in providers, connected agents (disconnect), personal tokens (create, revoke), appearance | ✅ | account, agents, oauth, looks |
-| `/admin/feedback` | Read and summarise tester feedback (platform admins only) | 🟡 | security (refusal for non-admins). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests |
+| `/admin/feedback` | Read and summarise tester feedback (platform admins only) | 🟡 | security (refusal for non-admins). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests, including the public-summary actions (check again, post again, confirm a withdrawal) in `apps/server/test/feedbackIssues.test.ts` |
 | `/o/:id` overview | Lifecycle bubble, health chip, lint, FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |

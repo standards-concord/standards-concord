@@ -16,7 +16,8 @@ To post anything, a tester ticks **Also post a short public summary as a GitHub 
 - **Withdrawable.** After submitting, the tester can withdraw the summary.
   - If it hasn't been posted, it never will be.
   - If it has, the issue's title and text are replaced, the issue is closed, and the triage routine's comments on it are deleted. For a day afterwards, the server also deletes any triage comment that raced the withdrawal. GitHub keeps an edit history that people who can see the repository can open.
-  - If the feedback itself is deleted, its summary is withdrawn the same way.
+  - Only the routine's own comments are deleted: written by one of its accounts (`FEEDBACK_TRIAGE_LOGINS`, or else the token's own account), read from GitHub's author field, and ending with its exact footer. Every page of comments is read before any is deleted; if there are more than 5,000, the withdrawal stays open and is retried rather than reported done.
+  - If the feedback itself is deleted, its summary is withdrawn the same way, whatever state it is in (including waiting for an administrator).
 
 Feedback given before this existed is never posted, because those testers didn't opt in.
 
@@ -29,12 +30,15 @@ Each submission gets one record in `feedbackPublications`, keyed by the feedback
   - A worker changes a record only while it holds the record's claim id. A worker whose claim ran out can't change it any more.
   - The transaction that authorises a POST re-checks that the record is still queued, that the feedback still exists, that the queue isn't paused, and that there's room under the cap. It saves the send time in the same step.
 - **No automatic reposting.** If a POST's outcome is unknown (timeout, dropped connection, 5xx, or a worker that vanished), the server never posts again on its own.
-  - It searches every issue the token's own account created since just before the send. It accepts only an issue whose marker, title and body all match exactly.
+  - It searches every issue the token's own account created since just before the send, and accepts the one carrying this summary's marker. The marker is a random id written into the body before the POST, so an issue is still found after someone edits its title or text.
   - Several matches, too many issues to search, or three complete searches with no match all leave the record `needs-admin`.
   - On the Feedback admin page, an administrator can **Check GitHub again** or, after searching GitHub for the marker shown there, **Post again**.
+- **Ids are saved as soon as they are known.** The issue number is saved the moment the POST answers or a search finds it, and a withdrawal saves that it has replaced the issue and which comments it still has to delete before it deletes them. A withdrawal interrupted part-way carries on from those ids; it never searches by title or matches on text.
+- **A withdrawal never succeeds by not finding something.** If a summary might have been posted but no issue with its marker can be found, the withdrawal stays open. After three searches it asks an administrator, who can **Check GitHub again** or, after searching for the marker, **Confirm nothing is posted**.
 - **Rate limits.**
   - At most `FEEDBACK_ISSUES_PER_HOUR` issues are created in any rolling hour (default 10, matching the triage routine). The cap is stored per repository in the database.
   - The shared pause is checked before every request: posts, searches, edits and comment deletions.
+  - A 429, or a 403 that has `x-ratelimit-remaining: 0`, a `Retry-After` header, or a message about a rate limit (GitHub's secondary limits), counts as a rate limit.
   - `Retry-After` or `x-ratelimit-reset` sets the pause. Without them, consecutive rate-limit responses back off 1, 2, 4… minutes, up to an hour.
   - Definite refusals back off from five minutes up to six hours. After eight of them, the record goes to an administrator.
 - **The token is never logged.**

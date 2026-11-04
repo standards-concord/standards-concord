@@ -530,7 +530,9 @@ export function apiRouter(): Router {
   });
   r.post('/feedback/:id/publication/resolve', (req, res) => {
     feedbackAdmin(req);
-    res.json(resolvePublication(String(req.params.id), req.body?.action === 'repost' ? 'repost' : 'check'));
+    const action = req.body?.action;
+    if (action !== 'check' && action !== 'repost' && action !== 'confirm') throw new HttpError(400, 'action must be check, repost or confirm');
+    res.json(resolvePublication(String(req.params.id), action));
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
@@ -543,7 +545,8 @@ export function apiRouter(): Router {
     res.json(
       listFeedback().map((s) => {
         const pub = publicationFor(s.id);
-        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError, marker: pub.state === 'needs-admin' ? marker(pub.pubId) : undefined } } : s;
+        const waiting = pub?.state === 'needs-admin' || !!pub?.adminNeeded;
+        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError, adminNeeded: pub.adminNeeded, marker: waiting ? marker(pub.pubId) : undefined } } : s;
       }),
     );
   });

@@ -16,7 +16,12 @@ function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
 /** The tester's opt-in public summary: its issue, or where it is in the queue, with actions when it needs an administrator. */
 function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
   const [state, setState] = useState(p.state);
-  const resolve = useAction(async (action: 'check' | 'repost') => setState((await api.resolveFeedbackPublication(p.id!, action)).state));
+  const [stuck, setStuck] = useState(!!p.adminNeeded);
+  const resolve = useAction(async (action: 'check' | 'repost' | 'confirm') => {
+    const next = await api.resolveFeedbackPublication(p.id!, action);
+    setState(next.state);
+    setStuck(false);
+  });
   return (
     <span className="block text-xs" onClick={(e) => e.stopPropagation()} title={p.summary}>
       {p.issue ? (
@@ -35,6 +40,18 @@ function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication
           </Button>
           <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('repost')}>
             Post again
+          </Button>
+        </span>
+      )}
+      {state === 'withdrawing' && stuck && (
+        <span className="mt-1 block">
+          {p.lastError && <span className="block text-muted">{p.lastError}</span>}
+          {p.marker && <span className="block text-muted">Search GitHub for {p.marker}. If it is there, delete or edit it by hand.</span>}
+          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('check')}>
+            Check GitHub again
+          </Button>
+          <Button size="sm" variant="ghost" loading={resolve.pending} onClick={() => void resolve.run('confirm')}>
+            Confirm nothing is posted
           </Button>
         </span>
       )}
