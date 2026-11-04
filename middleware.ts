@@ -3,7 +3,7 @@ import { rewrite } from '@vercel/functions/middleware';
 /**
  * Vercel routing middleware. The web app is static on Vercel; everything that
  * needs a long-running server (the API, sign-in, the MCP endpoint for agents,
- * WebIDs, OAuth for MCP clients, live meeting streams, the governance clock) is forwarded to the
+ * WebIDs, public ontology pages at /def, OAuth for MCP clients, live meeting streams, the governance clock) is forwarded to the
  * backend at BACKEND_URL (see deploy/aws). Cookies, bodies and streamed
  * responses pass through unchanged, so the browser only ever talks to one origin.
  */
@@ -15,6 +15,7 @@ export const config = {
     '/mcp',
     '/mcp/:path*',
     '/people/:path*',
+    '/def/:path*',
     '/healthz',
     // OAuth for MCP clients (discovery, client registration, sign-in, tokens).
     '/.well-known/:path*',
