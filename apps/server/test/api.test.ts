@@ -129,6 +129,25 @@ describe('change request lifecycle', () => {
     expect(res.body.governance.validationOk).toBe(false);
   });
 
+  // A preferred prefix of "@import" used to be stored and then written into the
+  // JSON-LD context, which made the server fetch the namespace URL whenever it
+  // wrote JSON-LD. The browser has no control for this field, so it is tested here.
+  it('refuses a change request that sets a JSON-LD keyword as the preferred prefix', async () => {
+    const editor = await login('editor', 'Editor Ike');
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Change the prefix',
+      description: 'Sets a keyword prefix.',
+      kind: 'feature',
+      ops: [{ op: 'setMetadata', set: { preferredPrefix: '@import', preferredNamespace: 'http://127.0.0.1:9/context' } }],
+    });
+    // Like any edit that can't be applied, it is kept as a draft that fails validation, so it can never merge.
+    expect(res.status).toBe(201);
+    expect(res.body.validation.passed).toBe(false);
+    expect(res.body.validation.lint.map((l: { message: string }) => l.message).join('\n')).toMatch(/preferredPrefix must be a prefix name/);
+    const jsonld = await editor.get(`/api/ontologies/${demoId}/source?format=jsonld`);
+    expect(Object.keys(JSON.parse(jsonld.text)['@context'])).not.toContain('@import');
+  });
+
   it('drafts edits from plain language offline', async () => {
     const editor = await login('editor', 'Editor Nat');
     const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: '', description: '', kind: 'feature', naturalLanguage: 'Add a class called Badge as a subclass of vol:Skill' });
@@ -218,20 +237,6 @@ describe('agents over MCP', () => {
       }),
     );
     expect(JSON.parse(data.result.content[0].text).valid).toBe(false);
-    // The same data as YAML-LD, with an inline context; a remote one is refused, never fetched.
-    const yamlld = parse(
-      await call(51, 'tools/call', {
-        name: 'validate_data',
-        arguments: { ontology: 'volunteering', format: 'yamlld', turtle: '"@context":\n  vol: https://w3id.org/odi/volunteering#\n"@id": https://example.org/x\n"@type": vol:VolunteeringOpportunity\nvol:notATerm: x\n' },
-      }),
-    );
-    const report = JSON.parse(yamlld.result.content[0].text);
-    expect(report.valid).toBe(false);
-    expect(JSON.stringify(report.issues)).toMatch(/notATerm/);
-    const remote = parse(
-      await call(52, 'tools/call', { name: 'validate_data', arguments: { ontology: 'volunteering', format: 'jsonld', turtle: '{"@context": "http://127.0.0.1:9/context", "@id": "https://example.org/x"}' } }),
-    );
-    expect(JSON.stringify(remote)).toMatch(/Remote JSON-LD documents are not loaded/);
     const gap = parse(await call(6, 'tools/call', { name: 'report_gap', arguments: { ontology: 'volunteering', kind: 'missing-concept', summary: 'No badges for volunteers', details: 'We award digital badges to volunteers for completed hours.' } }));
     const out = JSON.parse(gap.result.content[0].text);
     expect(out.recommendation).toBeDefined();

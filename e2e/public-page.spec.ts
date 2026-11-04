@@ -141,7 +141,7 @@ test.describe('Public ontology page', () => {
     await page.goto(`${PAGE}#tab-download`);
     const links = page.getByRole('tabpanel', { name: 'Download and cite' }).locator('table a', { hasText: 'View' });
     const hrefs = await links.evaluateAll((as) => as.map((a) => [(a as HTMLAnchorElement).href, a.getAttribute('type')]));
-    expect(hrefs.length).toBe(11); // eight RDF and LinkML formats, SHACLC, and the JavaScript and TypeScript classes
+    expect(hrefs.length).toBe(10); // seven RDF and LinkML formats, SHACLC, and the JavaScript and TypeScript classes
     for (const [href, type] of hrefs) {
       const res = await request.get(href!);
       expect(res.status(), href!).toBe(200);
@@ -160,9 +160,6 @@ test.describe('Public ontology page', () => {
     expect(await turtle.text()).toContain('owl:Ontology');
     const jsonld = await request.get(PAGE, { headers: { Accept: 'application/ld+json' } });
     expect(jsonld.headers()['content-type']).toContain('application/ld+json');
-    const yamlld = await request.get(PAGE, { headers: { Accept: 'application/ld+yaml' } });
-    expect(yamlld.headers()['content-type']).toContain('application/ld+yaml');
-    expect(await yamlld.text()).toContain('"@context":');
     const html = await request.get(PAGE, { headers: { Accept: 'text/html' } });
     expect(html.headers()['content-type']).toContain('text/html');
   });

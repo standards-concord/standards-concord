@@ -9,7 +9,6 @@ const FORMATS = [
   { tab: 'Turtle', id: 'turtle', language: 'turtle', text: '@prefix vol:', tokens: ['tok-meta', 'tok-iri', 'tok-prefix', 'tok-name', 'tok-keyword', 'tok-string'] },
   { tab: 'RDF/XML', id: 'rdfxml', language: 'xml', text: '<rdf:RDF', tokens: ['tok-tag', 'tok-attr', 'tok-string'] },
   { tab: 'JSON-LD', id: 'jsonld', language: 'json', text: '"@context"', tokens: ['tok-attr', 'tok-string'] },
-  { tab: 'YAML-LD', id: 'yamlld', language: 'yaml', text: '"@context":', tokens: ['tok-attr'] },
   { tab: 'N-Triples', id: 'ntriples', language: 'ntriples', text: '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>', tokens: ['tok-iri', 'tok-punct'] },
   { tab: 'Manchester', id: 'manchester', language: 'manchester', text: 'Prefix:', tokens: ['tok-meta', 'tok-iri', 'tok-name'] },
   { tab: 'LinkML', id: 'linkml', language: 'yaml', text: 'classes:', tokens: ['tok-attr'] },

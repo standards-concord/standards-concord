@@ -7,7 +7,7 @@ import type { Request, Response } from 'express';
 import * as z from 'zod';
 import { config } from './config.js';
 import { list } from './db.js';
-import { DATA_FORMATS, reportGap, sparql, validateData } from './services/agents.js';
+import { reportGap, sparql, validateData } from './services/agents.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
@@ -123,16 +123,11 @@ function buildServer(user: User, agentName: string) {
     'validate_data',
     {
       title: 'Validate instance data',
-      description:
-        'Check instance data against the ontology: undefined or deprecated terms, and logical contradictions (e.g. disjoint types, wrong ranges). Data can be Turtle, N-Triples, JSON-LD or YAML-LD; JSON-LD contexts must be inline.',
-      inputSchema: {
-        ontology: ontologyArg,
-        turtle: z.string().describe('Instance data, with prefixes or an inline @context (despite the name, in any `format`)'),
-        format: z.enum(DATA_FORMATS).default('turtle').describe('The format of the data'),
-      },
+      description: 'Check Turtle instance data against the ontology: undefined or deprecated terms, and logical contradictions (e.g. disjoint types, wrong ranges).',
+      inputSchema: { ontology: ontologyArg, turtle: z.string().describe('Instance data in Turtle, with prefixes') },
       annotations: { readOnlyHint: true },
     },
-    ({ ontology, turtle, format }) => withProject(ontology, async (p) => json(await validateData(p, turtle, format))),
+    ({ ontology, turtle }) => withProject(ontology, async (p) => json(await validateData(p, turtle))),
   );
 
   server.registerTool(

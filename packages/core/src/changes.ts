@@ -592,18 +592,29 @@ export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): voi
   const s = g.store;
   const o = g.ontologyIRI;
   const used: string[] = [];
+  // The prefix and namespace are written into every serialisation's prefix
+  // declarations and JSON-LD context, so they are checked before anything is
+  // changed. An empty one is refused too: these fields are never cleared.
+  for (const [field, value] of Object.entries(set)) {
+    if (value === undefined || (field !== 'preferredPrefix' && field !== 'preferredNamespace')) continue;
+    const vs = (Array.isArray(value) ? value : [value]).map(String);
+    if (vs.length !== 1) fail(`${field} takes exactly one value`);
+    for (const v of vs) {
+      if (field === 'preferredPrefix' && !isSafePrefix(v)) fail(`preferredPrefix must be a prefix name such as vol (starting with a letter; letters, digits, _, - and inner dots), not "${v.slice(0, 40)}"`);
+      if (field === 'preferredNamespace' && !isSafeNamespace(v)) fail(`preferredNamespace must be an absolute IRI such as https://w3id.org/odi/vol#, not "${v.slice(0, 60)}"`);
+    }
+  }
   for (const [field, value] of Object.entries(set)) {
     const spec = METADATA_PREDICATES[field];
     if (!spec) fail(`unknown metadata field "${field}"`);
     if (value === undefined) continue;
+    const given = (Array.isArray(value) ? value : [value]).map(String);
     for (const q of s.getQuads(nn(o), nn(spec.p), null, null)) {
       s.removeQuad(q);
       removeBlankSubtree(s, q.object as Term);
     }
-    const values = (Array.isArray(value) ? value : [value]).map(String).filter((v) => v !== '');
+    const values = given.filter((v) => v !== '');
     for (const v of values) {
-      if (field === 'preferredPrefix' && !isSafePrefix(v)) fail(`preferredPrefix must be a prefix name such as vol (letters, digits, _ and -), not "${v.slice(0, 40)}"`);
-      if (field === 'preferredNamespace' && !isSafeNamespace(v)) fail(`preferredNamespace must be an absolute IRI such as https://w3id.org/odi/vol#, not "${v.slice(0, 60)}"`);
       let term: Term;
       switch (spec.kind) {
         case 'iri': term = nn(v); break;

@@ -14,7 +14,7 @@ import {
   subjects, typedLit, quad, defaultGraph,
 } from './rdf.js';
 import { writeTurtle } from './turtle.js';
-import { noRemoteDocuments, yamlLdToJson, type YamlLdOptions } from './yamlld.js';
+import { REMOTE_REFUSED, noRemoteDocuments } from './jsonld-loader.js';
 
 export const CHARACTERISTIC_TYPES: Record<PropertyCharacteristic, string> = {
   functional: NS.owl + 'FunctionalProperty',
@@ -116,14 +116,12 @@ export class OntologyGraph {
     return parseN3(turtle, 'Turtle', baseIRI);
   }
 
-  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'yamlld' | 'ntriples', opts: { yamlld?: YamlLdOptions } = {}): Promise<OntologyGraph> {
+  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'ntriples'): Promise<OntologyGraph> {
     switch (format) {
       case 'turtle': return OntologyGraph.fromTurtle(text);
       case 'ntriples': return parseN3(text, 'N-Triples');
       case 'rdfxml': return parseRdfXml(text);
       case 'jsonld': return parseJsonLd(JSON.parse(text));
-      // YAML-LD is JSON-LD written as YAML, read under the YAML-LD core requirements.
-      case 'yamlld': return parseJsonLd(yamlLdToJson(text, opts.yamlld));
       default: throw new Error(`Unsupported input format: ${format as string}`);
     }
   }
@@ -563,13 +561,11 @@ async function parseRdfXml(text: string, baseIRI?: string): Promise<OntologyGrap
 }
 
 async function parseJsonLd(doc: any): Promise<OntologyGraph> {
-  // An empty YAML-LD stream or null document stands for no data.
-  if (doc === null) return new OntologyGraph(new Store());
   const jsonld = (await import('jsonld')).default;
   // Never fetch remote contexts or @import: a document must not make the server request URLs.
   const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads', documentLoader: noRemoteDocuments as any }).catch((err: any) => {
     // jsonld wraps the loader's refusal in a generic dereferencing error: say plainly what happened.
-    for (let e = err; e; e = e.details?.cause ?? e.cause) if (/Remote JSON-LD documents are not loaded/.test(String(e.message))) throw new Error(e.message);
+    for (let e = err; e; e = e.details?.cause ?? e.cause) if (String(e.message).startsWith(REMOTE_REFUSED)) throw new Error(e.message);
     throw err;
   })) as unknown as string;
   const g = await parseN3(nquads, 'N-Quads');

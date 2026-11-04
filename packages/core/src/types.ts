@@ -16,7 +16,6 @@ export type OutputFormat =
   | 'ntriples'
   | 'rdfxml'
   | 'jsonld'
-  | 'yamlld'
   | 'manchester'
   | 'linkml'
   | 'shacl'

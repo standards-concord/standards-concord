@@ -98,7 +98,7 @@ describe('Turtle output', () => {
 });
 
 describe('serialisation round-trips', () => {
-  for (const format of ['turtle', 'ntriples', 'rdfxml', 'jsonld', 'yamlld'] as const) {
+  for (const format of ['turtle', 'ntriples', 'rdfxml', 'jsonld'] as const) {
     it(`turtle → ${format} → parse gives an isomorphic graph`, async () => {
       const g = await loadFixture();
       const text = await serialize(g, format);

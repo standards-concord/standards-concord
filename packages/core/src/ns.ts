@@ -34,15 +34,49 @@ export const XSD: Record<string, string> = Object.fromEntries(
 
 /**
  * A namespace prefix that is safe everywhere it is written: a Turtle and
- * SPARQL prefix name, and a JSON-LD term that is not a keyword (`@import`,
- * `@context`) and has no colon. Anything else from editable metadata is
- * ignored, so it can't change what a serialisation means or make JSON-LD
- * processing load a context.
+ * SPARQL prefix name (starting with a letter, never ending in a dot), and a
+ * JSON-LD term that is not a keyword (`@import`, `@context`) and has no colon.
+ * Anything else from editable metadata is refused or ignored, so it can't
+ * change what a serialisation means or make JSON-LD processing load a context.
  */
-export const isSafePrefix = (p: string): boolean => /^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
+export const isSafePrefix = (p: string): boolean => /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
 
-/** A namespace IRI safe to put in a context: absolute, with no spaces, quotes or angle brackets. */
-export const isSafeNamespace = (iri: string): boolean => /^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(iri);
+/** Characters RFC 3987 never allows unescaped in an IRI (besides controls, spaces and surrogates). */
+const IRI_FORBIDDEN = new Set([...'<>"{}|\\^`']);
+
+/**
+ * A namespace IRI safe to put in a context or a prefix declaration: an
+ * absolute IRI (RFC 3987) with a scheme, no spaces, controls, lone
+ * surrogates, quotes or angle brackets, and every `%` followed by two hex
+ * digits. http(s) IRIs must also parse as URLs, which is where square
+ * brackets (IPv6 hosts) are allowed.
+ */
+export function isSafeNamespace(iri: string): boolean {
+  const m = /^([A-Za-z][A-Za-z0-9+.-]*):(.+)$/s.exec(iri);
+  if (!m) return false;
+  const web = /^https?$/i.test(m[1]);
+  const rest = m[2];
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const d = rest.charCodeAt(i + 1);
+      if (!(d >= 0xdc00 && d <= 0xdfff)) return false;
+      i++;
+      continue;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) return false;
+    if (c <= 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0xfffe || c === 0xffff) return false;
+    const ch = rest[i];
+    if (IRI_FORBIDDEN.has(ch)) return false;
+    if (ch === '%' && !/^[0-9A-Fa-f]{2}$/.test(rest.slice(i + 1, i + 3))) return false;
+    if ((ch === '[' || ch === ']') && !web) return false;
+  }
+  if (web) {
+    try { new URL(iri); } catch { return false; }
+    if (!/^https?:\/\/[^/?#]/i.test(iri)) return false;
+  }
+  return true;
+}
 
 export const RDF_TYPE = NS.rdf + 'type';
 export const RDF_LANGSTRING = NS.rdf + 'langString';
