@@ -5,6 +5,7 @@
  */
 import type {
   ActivityItem,
+  FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
   OAuthConnection,
@@ -253,6 +254,9 @@ export const api = {
   feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
+  withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
+  retryFeedbackPublication: (publicationId: string) => post<FeedbackPublicationStatus>(`/api/feedback/publications/${encodeURIComponent(publicationId)}/retry`),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),

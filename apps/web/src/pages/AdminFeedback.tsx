@@ -13,6 +13,29 @@ function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
   return Array.isArray(v) ? v.join('; ') : String(v);
 }
 
+/** The tester's opt-in public summary: its issue, or where it is in the queue, with a retry when it gave up. */
+function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
+  const [state, setState] = useState(p.state);
+  const retry = useAction(async () => setState((await api.retryFeedbackPublication(p.id!)).state));
+  return (
+    <span className="block text-xs" onClick={(e) => e.stopPropagation()} title={p.summary}>
+      {p.issue ? (
+        <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer">
+          Public: issue #{p.issue.number}
+        </a>
+      ) : (
+        <span className="text-muted">Public summary: {state}</span>
+      )}
+      {state === 'failed' && (
+        <Button size="sm" variant="ghost" loading={retry.pending} onClick={() => void retry.run()} title={p.lastError}>
+          Retry
+        </Button>
+      )}
+      <InlineError error={retry.error} />
+    </span>
+  );
+}
+
 /** Single-series horizontal bars: one hue, counts as direct labels, hover title per bar. */
 function Distribution({ q, subs }: { q: FeedbackQuestion; subs: FeedbackSubmission[] }) {
   const buckets = useMemo(() => {
@@ -166,11 +189,7 @@ export function AdminFeedbackPage() {
                       </td>
                       <td className="px-4 py-2.5">
                         {Object.keys(s.answers).length}
-                        {s.githubIssue && (
-                          <a className="block text-xs text-accent underline" href={s.githubIssue.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-                            Issue #{s.githubIssue.number}
-                          </a>
-                        )}
+                        {s.publication && <PublicationCell p={s.publication} />}
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="flex flex-wrap gap-1">

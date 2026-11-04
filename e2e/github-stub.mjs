@@ -1,23 +1,33 @@
-// A stand-in for GitHub's issues API, so the e2e server can file feedback issues offline.
-// POST /repos/:owner/:repo/issues records the issue; GET /__issues lists what was received.
+// A stand-in for GitHub's issues API, so the e2e server can post public feedback summaries offline.
+// POST /repos/:owner/:repo/issues creates, GET lists, PATCH /repos/:owner/:repo/issues/:n edits.
+// GET /__issues lists everything received, for the tests.
 import http from 'node:http';
 
 const port = Number(process.env.PORT ?? 8799);
 const issues = [];
+const send = (res, status, body) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
 http
   .createServer((req, res) => {
-    if (req.method === 'GET' && (req.url === '/__issues' || req.url === '/healthz')) {
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(req.url === '/healthz' ? { ok: true } : issues));
-      return;
-    }
     let data = '';
     req.on('data', (c) => (data += c));
     req.on('end', () => {
-      const m = req.method === 'POST' && req.url?.match(/^\/repos\/([^/]+)\/([^/]+)\/issues$/);
-      if (!m) return void res.writeHead(404).end('{}');
-      const number = issues.length + 1;
-      issues.push({ number, repo: `${m[1]}/${m[2]}`, authorized: req.headers.authorization === 'Bearer e2e-feedback-token', ...JSON.parse(data) });
-      res.writeHead(201, { 'content-type': 'application/json' }).end(JSON.stringify({ number, html_url: `https://github.com/${m[1]}/${m[2]}/issues/${number}` }));
+      const url = new URL(req.url ?? '/', 'http://stub');
+      if (req.method === 'GET' && url.pathname === '/healthz') return send(res, 200, { ok: true });
+      if (req.method === 'GET' && url.pathname === '/__issues') return send(res, 200, issues);
+      const list = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues$/);
+      const one = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/);
+      if (list && req.method === 'GET') return send(res, 200, issues.map((i) => ({ number: i.number, html_url: i.html_url, body: i.body })));
+      if (list && req.method === 'POST') {
+        const number = issues.length + 1;
+        const html_url = `https://github.com/${list[1]}/${list[2]}/issues/${number}`;
+        issues.push({ number, html_url, state: 'open', repo: `${list[1]}/${list[2]}`, authorized: req.headers.authorization === 'Bearer e2e-feedback-token', ...JSON.parse(data) });
+        return send(res, 201, { number, html_url });
+      }
+      if (one && req.method === 'PATCH' && issues[Number(one[3]) - 1]) {
+        Object.assign(issues[Number(one[3]) - 1], JSON.parse(data));
+        return send(res, 200, {});
+      }
+      send(res, 404, {});
     });
   })
   .listen(port, () => console.log(`GitHub stub on ${port}`));

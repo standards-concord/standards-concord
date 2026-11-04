@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import type { ChatMessage, FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
+import { PUBLIC_NOTICE, PUBLIC_SUMMARY_MAX, publicSummary, type ChatMessage, type FeedbackPublicationStatus, type FeedbackQuestion, type FeedbackSubmission } from '@concord/shared';
 import { ArrowLeft, Heart, ListChecks, MessageCircle, Mic, Send } from 'lucide-react';
 import { api, type FeedbackAnswers } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
@@ -118,6 +118,74 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   return <Textarea rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
 }
 
+const withdrawKey = (feedbackId: string) => `concord-feedback-withdraw:${feedbackId}`;
+
+/** Opt-in: a short summary, written by the tester, posted exactly as previewed. */
+function PublicSummaryOption({ on, setOn, text, setText }: { on: boolean; setOn: (v: boolean) => void; text: string; setText: (v: string) => void }) {
+  const preview = publicSummary(text);
+  return (
+    <div className="rounded-lg border border-line p-3">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-0.5" checked={on} onChange={(e) => setOn(e.target.checked)} />
+        <span>Also post a short public summary as a GitHub issue</span>
+      </label>
+      {on && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-muted">{PUBLIC_NOTICE}</p>
+          <Field label="Public summary">
+            <Textarea rows={3} maxLength={PUBLIC_SUMMARY_MAX} value={text} placeholder="e.g. The diff view is hard to read without colours" onChange={(e) => setText(e.target.value)} />
+          </Field>
+          <div>
+            <div className="text-xs font-medium">Posted exactly as:</div>
+            <blockquote data-testid="public-summary-preview" className="mt-1 border-l-2 border-line pl-2 text-xs whitespace-pre-wrap text-muted">
+              {preview || <span className="text-subtle">Nothing yet</span>}
+            </blockquote>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PublicationNote({ feedbackId, publication }: { feedbackId: string; publication: FeedbackPublicationStatus }) {
+  const [current, setCurrent] = useState(publication);
+  const withdraw = useAction(async () => {
+    let token = publication.withdrawToken;
+    try {
+      token ??= localStorage.getItem(withdrawKey(feedbackId)) ?? undefined;
+    } catch {
+      /* storage unavailable */
+    }
+    if (!token) throw new Error('This browser no longer has the link to withdraw it.');
+    const s = await api.withdrawFeedbackPublication(feedbackId, token);
+    setCurrent(s);
+    try {
+      localStorage.removeItem(withdrawKey(feedbackId));
+    } catch {
+      /* storage unavailable */
+    }
+  });
+  const text =
+    current.state === 'withdrawn'
+      ? 'Your public summary has been withdrawn. If it had been posted, its text was replaced and the issue closed; GitHub keeps an edit history.'
+      : current.state === 'withdrawing'
+        ? 'Withdrawing your public summary…'
+        : current.issue
+          ? `Your public summary is posted as issue #${current.issue.number}.`
+          : 'Your public summary will be posted shortly.';
+  return (
+    <div className="mt-3 text-sm text-muted" data-testid="feedback-publication">
+      <p>{text}</p>
+      {current.state !== 'withdrawn' && current.state !== 'withdrawing' && (
+        <Button size="sm" variant="ghost" className="mt-1" loading={withdraw.pending} onClick={() => void withdraw.run()}>
+          Withdraw the public summary
+        </Button>
+      )}
+      <InlineError error={withdraw.error} />
+    </div>
+  );
+}
+
 export function FeedbackPage() {
   const { session } = useSession();
   const w = useWalkthrough();
@@ -133,6 +201,9 @@ export function FeedbackPage() {
   const [name, setName] = useState(session?.user?.simulated ? '' : (session?.user?.name ?? ''));
   const [email, setEmail] = useState(session?.user?.simulated ? '' : (session?.user?.email ?? ''));
   const [submitted, setSubmitted] = useState<FeedbackSubmission>();
+  const publishing = useAsync(() => api.feedbackPublishing(), []);
+  const [publishOn, setPublishOn] = useState(false);
+  const [publicText, setPublicText] = useState('');
   const voice = dictationSupport() !== 'none';
 
   const turn = async (p: Pathway, msgs: ChatMessage[], ans: FeedbackAnswers) => {
@@ -179,8 +250,17 @@ export function FeedbackPage() {
       answers,
       transcript: messages,
       usedVoice,
+      publish: publishOn ? { summary: publicSummary(publicText) } : undefined,
     });
+    if (s.publication?.withdrawToken)
+      try {
+        localStorage.setItem(withdrawKey(s.id), s.publication.withdrawToken);
+      } catch {
+        /* storage unavailable */
+      }
     setSubmitted(s);
+    setPublishOn(false);
+    setPublicText('');
   });
 
   if (submitted)
@@ -190,11 +270,7 @@ export function FeedbackPage() {
           <Heart className="mx-auto size-8 text-accent" />
           <h1 className="mt-3 text-xl font-semibold">Thank you!</h1>
           <p className="mt-2 text-sm text-muted">Your feedback goes straight to the Open Data Institute team building Concord. It genuinely shapes what we build next.</p>
-          {submitted.githubIssue && (
-            <p className="mt-3 text-sm text-muted" data-testid="feedback-issue">
-              We’ve logged it for the team to act on as issue #{submitted.githubIssue.number}, without your name, email or the chat transcript.
-            </p>
-          )}
+          {submitted.publication && <PublicationNote feedbackId={submitted.id} publication={submitted.publication} />}
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/">
               <Button>Back to the hub</Button>
@@ -276,7 +352,7 @@ export function FeedbackPage() {
           {done && (
             <div className="mt-3 rounded-lg bg-ok-soft p-3 text-sm">
               That’s everything — review your answers on the right, then submit.{' '}
-              <Button size="sm" variant="primary" className="ml-2" loading={submit.pending} onClick={() => void submit.run()}>
+              <Button size="sm" variant="primary" className="ml-2" loading={submit.pending} disabled={publishOn && !publicSummary(publicText)} onClick={() => void submit.run()}>
                 Submit feedback
               </Button>
             </div>
@@ -310,10 +386,11 @@ export function FeedbackPage() {
             <Field label="Name (optional)">
               <Input value={name} onChange={(e) => setName(e.target.value)} />
             </Field>
-            <Field label="Email (optional)" hint="Only if you’re happy for us to follow up. Your name and email stay with the team and are never added to the issue tracker.">
+            <Field label="Email (optional)" hint="Only if you’re happy for us to follow up.">
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
             </Field>
-            <Button variant={done ? 'primary' : 'secondary'} className="w-full" icon={Send} loading={submit.pending} disabled={!messages.some((m) => m.role === 'user')} onClick={() => void submit.run()}>
+            {publishing.data?.enabled && <PublicSummaryOption on={publishOn} setOn={setPublishOn} text={publicText} setText={setPublicText} />}
+            <Button variant={done ? 'primary' : 'secondary'} className="w-full" icon={Send} loading={submit.pending} disabled={!messages.some((m) => m.role === 'user') || (publishOn && !publicSummary(publicText))} onClick={() => void submit.run()}>
               {done ? 'Submit feedback' : 'Submit what I’ve said so far'}
             </Button>
             <InlineError error={submit.error} />

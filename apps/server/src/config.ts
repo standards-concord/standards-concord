@@ -60,16 +60,14 @@ export const config = {
 
   feedbackIssues: {
     /**
-     * Fine-grained GitHub token with Issues: read and write on `repo`. When set, each
-     * piece of tester feedback is filed, anonymised, as an issue labelled "feedback".
+     * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers
+     * can choose to post a short summary of their feedback as an issue labelled "feedback".
      */
     token: process.env.FEEDBACK_GITHUB_TOKEN || undefined,
     repo: process.env.FEEDBACK_GITHUB_REPO || 'jeswr/standards-concord',
     /** Overridable for tests. */
     apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
-    /** Also file feedback stored before the token was set. Off by default: those testers weren't told. */
-    backfill: bool(process.env.FEEDBACK_ISSUES_BACKFILL, false),
-    /** Cap on new issues an hour; the rest are filed later. */
+    /** Cap on new issues in any rolling hour, across all server processes; the rest are posted later. */
     perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 30),
   },
 

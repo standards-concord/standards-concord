@@ -2,7 +2,7 @@ import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, User } from '@concord/shared';
-import { ROLE_INFO } from '@concord/shared';
+import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
@@ -12,7 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
-import { fileWithin, markSwitchOn } from '../services/feedbackIssues.js';
+import { checkPublicSummary, issuesEnabled, processWithin, publicationFor, queuePublication, retryPublication, status, withdrawPublication } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -95,6 +95,7 @@ const PUBLIC_READS = [
   /^\/ontologies\/[^/]+\/terms\/.+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
+  /^\/feedback\/publishing$/,
   /^\/oauth\/requests\/[^/]+$/,
 ];
 
@@ -502,9 +503,12 @@ export function apiRouter(): Router {
     const b = req.body ?? {};
     res.json(await feedbackChat({ pathway: b.pathway === 'general' ? 'general' : 'structured', messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [], answers: b.answers ?? {}, currentQuestionId: optStr(b.currentQuestionId) }));
   });
+  r.get('/feedback/publishing', (_req, res) => res.json({ enabled: issuesEnabled(), noticeVersion: PUBLIC_NOTICE_VERSION }));
   r.post('/feedback', async (req, res) => {
     const b = req.body ?? {};
-    markSwitchOn();
+    // An opt-in public summary is checked before anything is stored, so the tester can fix it.
+    const summary: string | undefined = b.publish && typeof b.publish === 'object' ? b.publish.summary : undefined;
+    if (b.publish) checkPublicSummary(summary);
     const sub = await submitFeedback(req.user, {
         pathway: b.pathway === 'general' ? 'general' : 'structured',
         answers: b.answers ?? {},
@@ -515,9 +519,20 @@ export function apiRouter(): Router {
         role: optStr(b.role),
         themes: Array.isArray(b.themes) ? b.themes.filter((t: unknown) => typeof t === 'string').slice(0, 20) : undefined,
       });
-    // Filed as an anonymised GitHub issue when that's switched on; the tester is told if it's quick.
-    const githubIssue = await fileWithin(sub);
-    res.status(201).json(githubIssue ? { ...sub, githubIssue } : sub);
+    if (summary === undefined) return void res.status(201).json(sub);
+    // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
+    const { withdrawToken } = queuePublication(sub.id, summary);
+    const queued = publicationFor(sub.id);
+    // A duplicate waits on the original's issue.
+    await processWithin(queued.duplicateOf ?? queued.id);
+    res.status(201).json({ ...sub, publication: { ...status(publicationFor(sub.id)), withdrawToken } });
+  });
+  r.post('/feedback/:id/publication/withdraw', async (req, res) => {
+    res.json(await withdrawPublication(String(req.params.id), req.body?.token));
+  });
+  r.post('/feedback/publications/:id/retry', (req, res) => {
+    feedbackAdmin(req);
+    res.json(retryPublication(String(req.params.id)));
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
@@ -527,7 +542,12 @@ export function apiRouter(): Router {
   };
   r.get('/feedback', (req, res) => {
     feedbackAdmin(req);
-    res.json(listFeedback());
+    res.json(
+      listFeedback().map((s) => {
+        const pub = publicationFor(s.id);
+        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, lastError: pub.lastError } } : s;
+      }),
+    );
   });
   r.get('/feedback/summary', async (req, res) => {
     feedbackAdmin(req);
