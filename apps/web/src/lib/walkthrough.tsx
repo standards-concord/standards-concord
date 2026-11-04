@@ -114,7 +114,7 @@ export function tasksFor(roles: Role[], ontologyId?: string): TourTask[] {
     meeting: { id: 'meeting', label: 'Upload or simulate a meeting', detail: 'Run a simulated live call and see the co-lead bot raise follow-up questions.', to: `${o}/meetings` },
     review: { id: 'review', label: 'Open a change request and review it', detail: 'Read the AI analysis and validation, then approve, request changes or object.', to: `${o}/changes` },
     vote: { id: 'vote', label: 'Vote on a change', detail: 'Find a request in “Voting” and cast your vote; watch quorum and threshold.', to: `${o}/changes?status=voting` },
-    synthesise: { id: 'synthesise', label: 'Synthesise changes from use cases', detail: 'Select ready use cases and let the platform draft ontology changes.', to: `${o}/use-cases` },
+    synthesise: { id: 'synthesise', label: 'Draft changes from use cases', detail: 'Press Draft changes, pick the ready use cases and let the platform draft ontology changes.', to: `${o}/use-cases` },
     merge: { id: 'merge', label: 'Merge an approved change and draft a release', detail: 'Approved changes go into the working draft; releases get a semver number.', to: `${o}/releases` },
     governance: { id: 'governance', label: 'Change the governance policy', detail: 'Pick a template or tune approvals, votes, lazy consensus and ODI privilege.', to: `${o}/governance` },
     agent: { id: 'agent', label: 'Connect a coding agent', detail: 'Add the MCP connector to Claude, Claude Code or Codex and sign in when it asks.', to: `${o}/agents` },

@@ -1,9 +1,14 @@
 /**
  * FAIR assessment of an ontology, modelled on the FOOPS! checks (Garijo, Corcho &
- * Poveda-Villalón 2021) and the FAIR vocabulary best practices. Checks that need
- * network access (resolvability, registries) are approximated or informational.
+ * Poveda-Villalón 2021) and the FAIR vocabulary best practices.
+ *
+ * Scoring follows FOOPS!: each principle (Findable, Accessible, Interoperable,
+ * Reusable) gets the share of its checks that pass, and the overall score is the
+ * mean of the four, so a principle with many checks doesn't outweigh one with few.
+ * Checks that need the network (does the IRI resolve?) use the caller's
+ * FairContext; without it they are reported as not checked and left out.
  */
-import type { FairCheck, FairReport } from './types.js';
+import type { FairCheck, FairContext, FairPrinciple, FairReport } from './types.js';
 import { NS, isWellKnown } from './ns.js';
 import { objects } from './rdf.js';
 import type { OntologyGraph } from './graph.js';
@@ -14,13 +19,13 @@ const PERSISTENT_HOSTS = [
 ];
 const KNOWN_LICENSES = /creativecommons\.org|opensource\.org|spdx\.org|opendatacommons\.org|nationalarchives\.gov\.uk\/doc\/open-government-licence/i;
 
-export function fairCheck(graph: OntologyGraph): FairReport {
+export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairReport {
   const m = graph.metadata();
   const iri = graph.ontologyIRI;
   const s = graph.store;
   const checks: FairCheck[] = [];
-  const add = (id: string, principle: FairCheck['principle'], title: string, passed: boolean, message: string, reference: string) =>
-    checks.push({ id, principle, title, passed, message, reference });
+  const add = (id: string, principle: FairPrinciple, title: string, passed: boolean | undefined, message: string, reference: string) =>
+    checks.push({ id, principle, title, passed: passed === true, status: passed === undefined ? 'not-checked' : passed ? 'pass' : 'fail', message, reference });
 
   let host = '';
   try { host = new URL(iri).host; } catch { /* not a URL */ }
@@ -47,18 +52,27 @@ export function fairCheck(graph: OntologyGraph): FairReport {
     prefixOk ? `${m.preferredPrefix}: <${m.preferredNamespace}>` : 'missing vann:preferredNamespacePrefix and/or vann:preferredNamespaceUri',
     'FOOPS! FIND1; FAIR vocabulary BP 2');
 
-  add('A1-content-negotiation', 'A', 'Available in standard RDF serialisations over HTTP', true,
-    'the platform serves Turtle, RDF/XML, N-Triples and JSON-LD via content negotiation', 'FOOPS! CN1, RDF1; FAIR A1');
+  const http = /^https?:\/\//.test(iri);
+  add('A1.1-open-protocol', 'A', 'Ontology IRI uses an open protocol (HTTP or HTTPS)', http,
+    http ? `${iri} can be dereferenced over HTTP(S)` : iri ? `${iri} is not an HTTP(S) IRI, so it cannot be looked up on the web` : 'no ontology IRI',
+    'FOOPS! HTTP1; FAIR A1.1');
+  const res = http ? ctx.resolution : undefined;
+  add('A1-rdf', 'A', 'Ontology IRI returns RDF (content negotiation)', res?.rdf,
+    !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.rdf ? 'returns an RDF serialisation when asked for one' : `does not return RDF${res.detail ? ` (${res.detail})` : ''}; point the IRI's redirect at a published release`,
+    'FOOPS! CN1, RDF1; FAIR A1');
+  add('A1-html', 'A', 'Ontology IRI returns human-readable documentation', res?.html,
+    !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.html ? 'returns HTML when asked by a browser' : 'does not return HTML documentation to browsers',
+    'FOOPS! CN1 (HTML); FAIR A1');
 
-  const metaPreds = iri ? [...new Set(s.getQuads(null, null, null, null).filter((q) => q.subject.value === iri).map((q) => q.predicate.value))] : [];
+  const metaPreds = iri ? [...new Set(s.getQuads(null, null, null, null).filter((q) => q.subject.value === iri).map((q) => q.predicate.value))].filter((p) => p !== NS.rdf + 'type') : [];
   const standard = metaPreds.filter(isWellKnown);
   const share = metaPreds.length ? standard.length / metaPreds.length : 0;
-  add('I1-standard-metadata-vocabularies', 'I', 'Metadata uses standard vocabularies (DCTERMS, OWL, VANN, DCAT, schema.org...)', share >= 0.8,
-    `${standard.length}/${metaPreds.length} header properties are from standard vocabularies`, 'FOOPS! VOC1; FAIR I1');
+  add('I1-standard-metadata-vocabularies', 'I', 'Metadata uses standard vocabularies (DCTERMS, OWL, VANN, DCAT, schema.org...)', metaPreds.length > 0 && share >= 0.8,
+    metaPreds.length ? `${standard.length}/${metaPreds.length} header properties are from standard vocabularies` : 'the ontology header has no metadata', 'FOOPS! VOC1; FAIR I1');
 
   const badImports = m.imports.filter((i) => !/^https?:\/\//.test(i));
-  add('I2-imports', 'I', 'Imports use resolvable HTTP(S) IRIs', badImports.length === 0,
-    m.imports.length ? (badImports.length ? `non-HTTP imports: ${badImports.join(', ')}` : `${m.imports.length} import(s), all HTTP(S) (resolution not checked)`) : 'no imports',
+  add('I2-imports', 'I', 'Imports use resolvable HTTP(S) IRIs', m.imports.length ? badImports.length === 0 : undefined,
+    m.imports.length ? (badImports.length ? `non-HTTP imports: ${badImports.join(', ')}` : `${m.imports.length} import(s), all HTTP(S) (resolution not checked)`) : 'not applicable: no imports',
     'FOOPS! VOC2; FAIR I2');
 
   const licenseOk = !!m.license;
@@ -85,9 +99,16 @@ export function fairCheck(graph: OntologyGraph): FairReport {
   const labelled = terms.filter((t) => t.label).length;
   const defined = terms.filter((t) => t.definition).length;
   const cov = terms.length ? Math.min(labelled, defined) / terms.length : 1;
-  add('R1-term-documentation', 'R', 'Terms have labels and definitions (≥ 90%)', cov >= 0.9,
-    `${labelled}/${terms.length} labelled, ${defined}/${terms.length} defined`, 'FOOPS! VOC3/VOC4; FAIR R1, I2');
+  add('R1-term-documentation', 'R', 'Terms have labels and definitions (≥ 90%)', terms.length ? cov >= 0.9 : undefined,
+    terms.length ? `${labelled}/${terms.length} labelled, ${defined}/${terms.length} defined` : 'not applicable: no terms yet', 'FOOPS! VOC3/VOC4; FAIR R1, I2');
 
-  const passed = checks.filter((c) => c.passed).length;
-  return { score: Math.round((passed / checks.length) * 1000) / 1000, checks };
+  const byPrinciple = {} as FairReport['byPrinciple'];
+  for (const pr of ['F', 'A', 'I', 'R'] as FairPrinciple[]) {
+    const run = checks.filter((c) => c.principle === pr && c.status !== 'not-checked');
+    const ok = run.filter((c) => c.passed).length;
+    byPrinciple[pr] = { passed: ok, total: run.length, score: run.length ? ok / run.length : 1 };
+  }
+  const scored = Object.values(byPrinciple).filter((p) => p.total > 0);
+  const score = scored.reduce((a, p) => a + p.score, 0) / (scored.length || 1);
+  return { score: Math.round(score * 1000) / 1000, byPrinciple, checks };
 }
