@@ -1,7 +1,8 @@
 import type { AgentReport, ChangeRequest, InterviewSession, Meeting, Release, ReleaseDetail, RequirementsDocument, UseCaseDetail, UseCaseRef, User } from '@concord/shared';
 import { get, list } from '../db.js';
 import { changeRequestsFor, useCaseIdsForCR } from './traceability.js';
-import { allUseCases, canSee, canSeeMeeting, canTriage, isGroupMember, getUseCaseFor, present, refOf, useCaseRefs } from './useCases.js';
+import { allUseCases, canSee, canSeeMeeting, canTriage, crForViewer, isGroupMember, getUseCaseFor, present, refOf, useCaseRefs } from './useCases.js';
+import { documentSummary } from './requirements.js';
 
 /**
  * Everything a use case is linked to, in both directions, as one viewer may see it:
@@ -67,7 +68,7 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
     trace: {
       source,
       // Change requests are behind sign-in, and so are their titles.
-      changeRequests: viewer ? crs.map((c) => ({ id: c.id, number: c.number, title: c.title, status: c.status, releaseId: c.releaseId })) : [],
+      changeRequests: viewer ? crs.map((c) => crForViewer(c, viewer)).map((c) => ({ id: c.id, number: c.number, title: c.title, status: c.status, releaseId: c.releaseId })) : [],
       releases: releases.map((r) => ({ id: r.id, version: r.version, status: r.status })),
       related: related.sort((a, b) => a.number - b.number),
       other,
@@ -95,7 +96,11 @@ export function releaseTrace(r: Release, viewer?: User): Pick<ReleaseDetail, 'us
   const doc = list<RequirementsDocument>('requirementsDocs', r.ontologyId).find((d) => d.version === r.version);
   return {
     useCases: useCaseRefs([...ids], viewer),
-    requirements: doc ? { id: doc.id, version: doc.version, status: doc.status, generatedAt: doc.generatedAt, title: doc.title } : undefined,
+    // The document's own access rule and serving projection: no draft for outsiders, no withdrawn title for anyone.
+    requirements: (() => {
+      const s = doc && documentSummary(doc, viewer);
+      return s ? { id: s.id, version: s.version, status: s.status, generatedAt: s.generatedAt, title: s.title } : undefined;
+    })(),
   };
 }
 

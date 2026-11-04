@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
+import { releaseForViewer } from '../services/releases.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
@@ -145,7 +146,7 @@ export async function pageInput(
     view: graph.view(),
     kind: isDraft ? 'draft' : 'release',
     version,
-    release: release && !isDraft ? { level: release.level, notes: release.notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
+    release: release && !isDraft ? { level: release.level, notes: releaseForViewer(release, undefined).notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
     releases: releases.map((r) => ({ version: r.version, level: r.level, publishedAt: r.publishedAt, href: `${root}/${r.version}` })),
     latestVersion: latest,
     downloads,

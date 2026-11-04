@@ -17,7 +17,7 @@ import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
-import { withConsentLock } from './useCases.js';
+import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
 import { syncUseCasesForCR } from './traceability.js';
 import { getUser, logActivity } from './users.js';
 
@@ -55,10 +55,21 @@ export function releaseGovernance(r: Release) {
   });
 }
 
-export function releaseDetail(r: Release): ReleaseDetail {
-  const crs = r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id));
+/**
+ * A release as a viewer may see it. Its notes list its change requests by title, so when one of
+ * them is withheld from the viewer (a use case it came from is no longer shared with them), the
+ * notes they see are written again from the requests as they may see them. Stored notes are kept.
+ */
+export function releaseForViewer(r: Release, viewer?: User): Release {
+  const crs = r.changeRequestIds.flatMap((id) => get<ChangeRequest>('changeRequests', id) ?? []);
+  if (!crs.some((c) => crWithheld(c, viewer))) return r;
+  return { ...r, notes: draftNotes(getProject(r.ontologyId), crs.map((c) => crForViewer(c, viewer)), r.level, r.version, 'the previous release') };
+}
+
+export function releaseDetail(r: Release, viewer?: User): ReleaseDetail {
+  const crs = r.changeRequestIds.map((id) => crForViewer(mustGet<ChangeRequest>('changeRequests', id), viewer));
   return {
-    ...r,
+    ...releaseForViewer(r, viewer),
     votes: list<Vote>('votes', r.id),
     governance: releaseGovernance(r),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
@@ -66,14 +77,14 @@ export function releaseDetail(r: Release): ReleaseDetail {
 }
 
 /** Release notes grouped by level, from the merged change requests. */
-function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
+function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string, prior: string = project.currentVersion) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
     items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${c.title}${c.kgcl?.length ? `\n${c.kgcl.slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
-      ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
-      : `${version} is backward compatible with ${project.currentVersion}.`;
+      ? `**Breaking release.** ${version} is not backward compatible with ${prior}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
+      : `${version} is backward compatible with ${prior}.`;
   return [header, section('Breaking changes', by('major')), section('New terms and features', by('minor')), section('Fixes and clarifications', by('patch'))]
     .filter(Boolean)
     .join('\n');
@@ -206,7 +217,9 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     for (const k of Object.keys(r) as (keyof Release)[]) delete r[k];
     Object.assign(r, stored);
     if (!publishable(r).ok) throw new HttpError(409, `Not ready to publish: ${publishable(r).why}`);
-    files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
+    // What goes into the public files is what anyone may see.
+    const publicNotes = releaseForViewer(r, undefined).notes;
+    files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${publicNotes}\n`;
     const doc = await prepareForRelease(project, r);
     if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
     // The use case snapshot always goes in, so the release never shows live data;
@@ -214,13 +227,13 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     const requirements = releaseRequirements(project, r.version);
     files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
     try {
-      Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
+      Object.assign(files, await releasePageFiles(project, { ...r, notes: publicNotes, publishedAt: clock.iso() }, stamped, requirements));
     } catch (err) {
       console.warn(`[release] public page: ${(err as Error).message}`);
     }
 
     const author = actor ?? getUser(r.createdBy);
-    r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
+    r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, publicNotes, { name: author?.name ?? 'Concord' });
     r.status = 'published';
     r.publishedAt = clock.iso();
     r.statusSince = r.publishedAt;

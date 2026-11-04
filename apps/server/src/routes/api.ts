@@ -90,7 +90,7 @@ const project = (req: Request) => mustFindProject(String(req.params.id));
 /** Change request detail plus the use cases it addresses that the viewer may see. */
 const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...useCases.crForViewer(crs.detail(c), req.user), useCases: useCasesForCR(c, req.user) });
 /** Release detail plus the use cases it closes and its requirements document. */
-const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r), ...releaseTrace(r, req.user) });
+const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r, req.user), ...releaseTrace(r, req.user) });
 /** GET routes anyone may call without signing in. */
 const PUBLIC_READS = [
   /^\/ontologies$/,
@@ -236,9 +236,11 @@ export function apiRouter(): Router {
   r.get('/ontologies/:id/validation', async (req, res) => {
     const p = project(req);
     const ref = optStr(req.query.ref);
-    if (!ref || ref === 'working') return void res.json(await workingValidation(p));
+    // Each competency question result names the use case it came from, and is shown only if the
+    // viewer may see that use case now: a report that was running when one was withdrawn drops it.
+    if (!ref || ref === 'working') return void res.json(useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+    res.json(useCases.validationForViewer(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
@@ -527,7 +529,7 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ releases --------------------------- */
-  r.get('/ontologies/:id/releases', (req, res) => res.json(releases.listReleases(project(req).id)));
+  r.get('/ontologies/:id/releases', (req, res) => res.json(releases.listReleases(project(req).id).map((r) => releases.releaseForViewer(r, req.user))));
   r.post('/ontologies/:id/releases', async (req, res) => {
     res.status(201).json(relOut(req, await releases.draftRelease(project(req), requireUser(req), optStr(req.body?.notes))));
   });

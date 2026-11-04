@@ -32,7 +32,7 @@ import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
-import { consentEpoch } from './useCases.js';
+import { SOURCE_GONE, sourcesPublic, withConsentLock } from './useCases.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
@@ -217,69 +217,52 @@ function validationPassed(v: ValidationReport | undefined) {
 export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  // Validation runs the use cases' competency questions over their example data. If a use case
-  // stops being public while it runs (or while the analysis is written), the results may include
-  // its questions, and the record being worked on may hold its title, so the whole thing runs
-  // again from what is stored and public now. Each attempt starts from the stored record, which a
-  // withdrawal has already redacted, and only the fields triage owns are written back.
+  // Works from the stored record and writes back only the fields triage owns, onto the record as it
+  // is when the checks finish. Competency question results carry the use case each came from, and
+  // readers see only those they may (visibleCQResults), so a withdrawal while this runs needs no redo.
   const fresh = () => get<ChangeRequest>('changeRequests', cr.id);
   /** Make `cr` exactly the stored record: fields it lacks are dropped too. */
   const become = (stored: ChangeRequest) => {
     for (const k of Object.keys(cr) as (keyof ChangeRequest)[]) delete cr[k];
     Object.assign(cr, structuredClone(stored));
   };
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const epoch = consentEpoch(cr.ontologyId);
-    // Triage works on stored requests only. One that has been discarded is never written back.
-    const base = fresh();
-    if (!base) return cr;
-    become(base);
-    let event: ReturnType<typeof ev>;
-    try {
-      const p = await preview(project, cr.ops, cr.tests, author);
-      cr.diff = trimDiff(p.diff);
-      cr.classification = p.classification;
-      cr.validation = p.validation;
-      cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
-      cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
-      event = ev(
-        'triaged',
-        `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
-          .filter((r) => r.level === p.classification.level)
-          .map((r) => r.rule)
-          .slice(0, 3)
-          .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
-      );
-      if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
-    } catch (err) {
-      const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
-      cr.validation = {
-        lint: [{ severity: 'error', code: 'change-not-applicable', message }],
-        fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
-        reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
-        competencyQuestions: [],
-        passed: false,
-      };
-      event = ev('validated', message);
-    }
-    if (consentEpoch(cr.ontologyId) === epoch) {
-      // Nothing was withdrawn meanwhile. Write triage's results onto the record as it is now.
-      const owned = { diff: cr.diff, classification: cr.classification, validation: cr.validation, kgcl: cr.kgcl, warnings: cr.warnings, analysis: cr.analysis };
-      const latest = fresh();
-      if (!latest) return cr;
-      become(latest);
-      Object.assign(cr, owned, { timeline: [...latest.timeline, event] });
-      return save(cr);
-    }
+  // Triage works on stored requests only. One that has been discarded is never written back.
+  const base = fresh();
+  if (!base) return cr;
+  become(base);
+  let event: ReturnType<typeof ev>;
+  try {
+    const p = await preview(project, cr.ops, cr.tests, author);
+    cr.diff = trimDiff(p.diff);
+    cr.classification = p.classification;
+    cr.validation = p.validation;
+    cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
+    cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
+    event = ev(
+      'triaged',
+      `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
+        .filter((r) => r.level === p.classification.level)
+        .map((r) => r.rule)
+        .slice(0, 3)
+        .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
+    );
+    if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
+  } catch (err) {
+    const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
+    cr.validation = {
+      lint: [{ severity: 'error', code: 'change-not-applicable', message }],
+      fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
+      reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
+      competencyQuestions: [],
+      passed: false,
+    };
+    event = ev('validated', message);
   }
-  // Use cases kept changing. Nothing from these runs is kept, since any of it (the diff, the checks,
-  // the analysis, the warnings) may quote what was withdrawn: the stored record, which withdrawal
-  // has redacted, stays as it is, without competency question results, and asks for another triage.
+  const owned = { diff: cr.diff, classification: cr.classification, validation: cr.validation, kgcl: cr.kgcl, warnings: cr.warnings, analysis: cr.analysis };
   const latest = fresh();
   if (!latest) return cr;
   become(latest);
-  if (cr.validation) cr.validation = { ...cr.validation, competencyQuestions: [] };
-  cr.timeline = [...cr.timeline, ev('validated', 'Use cases changed while the checks ran, so the results were not updated. Run triage again.')];
+  Object.assign(cr, owned, { timeline: [...latest.timeline, event] });
   return save(cr);
 }
 
@@ -362,6 +345,7 @@ export async function submit(cr: ChangeRequest, actor: User) {
   if (cr.authorId !== actor.id && !rolesFor(cr.ontologyId, actor.id).some((r) => ['steward', 'editor', 'owner'].includes(r)))
     throw new HttpError(403, 'Only the author or an editor can submit this');
   if (!['draft', 'needs-work'].includes(cr.status)) throw new HttpError(409, `Cannot submit a request that is ${cr.status}`);
+  if (!sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   setStatus(cr, 'review', 'submitted for review', actor.id);
   save(cr);
   return advance(cr);
@@ -370,6 +354,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
 export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?: string; description?: string; ops?: ChangeOp[] }) {
   if (cr.authorId !== actor.id) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'edit this change request');
   if (['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status)) throw new HttpError(409, `Cannot edit a ${cr.status} request`);
+  // Checked as the edit is stored (no await before the save), so a withdrawal during an AI revision counts.
+  if (!sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   if (patch.title) cr.title = patch.title;
   if (patch.description !== undefined) cr.description = patch.description;
   if (patch.ops) {
@@ -412,6 +398,14 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
 
 /** Re-evaluate governance and apply any transition it allows. Safe to call any time. */
 export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
+  // A request whose use case is no longer public stops where it is: it can't be approved into the ontology.
+  if (OPEN.includes(cr.status) && !sourcesPublic(cr)) {
+    if (cr.status !== 'needs-work') {
+      setStatus(cr, 'needs-work', SOURCE_GONE);
+      save(cr);
+    }
+    return cr;
+  }
   for (let i = 0; i < 4; i++) {
     if (!OPEN.includes(cr.status)) break;
     if (cr.status === 'triage') {
@@ -448,26 +442,42 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
 /** Merge into the working draft. Re-applies the edits on the current head (a rebase). */
 export async function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
-  if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  const working = await ontologyStore.working(project);
-  let after: OntologyGraph;
-  try {
-    after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
-  } catch (err) {
-    setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-    return save(cr);
-  }
-  cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
-    name: author?.name ?? 'Concord',
+  // From the consent check to the commit, no use case can be withdrawn (withdrawals wait), and the
+  // request is the stored one at that moment: what goes into the ontology is what was consented to.
+  const merged = await withConsentLock(cr.ontologyId, async () => {
+    const stored = get<ChangeRequest>('changeRequests', cr.id);
+    if (!stored) throw new HttpError(404, `change request ${cr.id} not found`);
+    for (const k of Object.keys(cr) as (keyof ChangeRequest)[]) delete cr[k];
+    Object.assign(cr, stored);
+    if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
+    if (!sourcesPublic(cr)) {
+      setStatus(cr, 'needs-work', SOURCE_GONE);
+      save(cr);
+      return false;
+    }
+    const working = await ontologyStore.working(project);
+    let after: OntologyGraph;
+    try {
+      after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    } catch (err) {
+      setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
+      save(cr);
+      return false;
+    }
+    cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
+      name: author?.name ?? 'Concord',
+    });
+    setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
+    if (project.stage === 'discovery') {
+      project.stage = 'drafting';
+      updateProject(project);
+    }
+    save(cr);
+    return true;
   });
-  setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
-  if (project.stage === 'discovery') {
-    project.stage = 'drafting';
-    updateProject(project);
-  }
-  save(cr);
+  if (!merged) return cr;
   logActivity({ ontologyId: cr.ontologyId, actorId: actor?.id, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   // Re-triage other open requests against the new head so their diffs stay accurate.
   for (const other of listCRs(cr.ontologyId).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
@@ -484,6 +494,7 @@ export async function withdraw(cr: ChangeRequest, actor: User) {
 }
 
 export async function revise(cr: ChangeRequest, actor: User, instruction: string) {
+  if (!sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   const project = getProject(cr.ontologyId);
   const working = await ontologyStore.working(project);
   const c = (iri: string) => compactIRI(iri, working.prefixes);

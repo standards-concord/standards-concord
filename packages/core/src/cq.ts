@@ -13,6 +13,8 @@ export interface CompetencyQuestion {
   question: string;
   sparql: string;
   exampleData?: string;
+  /** Where the question came from (a use case id), carried onto its result so readers can check who may see it. */
+  source?: string;
 }
 
 /** Adds PREFIX declarations for the graph's prefixes that the query uses but does not declare. */
@@ -30,7 +32,7 @@ export async function runCompetencyQuestions(graph: OntologyGraph, cqs: Competen
   const ontology = writeNTriples(graph.store);
   const results: CompetencyQuestionResult[] = [];
   for (const cq of cqs) {
-    const base: CompetencyQuestionResult = { question: cq.question, sparql: cq.sparql, ok: false, rows: [], satisfied: false };
+    const base: CompetencyQuestionResult = { question: cq.question, sparql: cq.sparql, ok: false, rows: [], satisfied: false, ...(cq.source ? { source: cq.source } : {}) };
     try {
       const store = new Store();
       store.load(ontology, { format: 'application/n-triples' });

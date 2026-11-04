@@ -11,6 +11,7 @@ import { reportGap, sparql, validateData } from './services/agents.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
+import { crForViewer } from './services/useCases.js';
 import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
 
 /**
@@ -171,7 +172,7 @@ function buildServer(user: User, agentName: string) {
     ({ ontology, title, description }) =>
       withProject(ontology, async (p) => {
         const cr = await createChangeRequest(p, user, { title, description, naturalLanguage: `${title}\n\n${description}`, kind: 'feature', origin: { type: 'agent', agentName }, submit: true });
-        return json(summariseCR(cr.id, p));
+        return json(summariseCR(cr.id, p, user));
       }),
   );
 
@@ -181,7 +182,7 @@ function buildServer(user: User, agentName: string) {
     async ({ id }) => {
       try {
         const cr = getCR(id);
-        return json(summariseCR(cr.id, resolve(cr.ontologyId)!));
+        return json(summariseCR(cr.id, resolve(cr.ontologyId)!, user));
       } catch {
         return fail(`No change request ${id}`);
       }
@@ -191,8 +192,9 @@ function buildServer(user: User, agentName: string) {
   return server;
 }
 
-function summariseCR(id: string, p: OntologyProject) {
-  const d = detail(getCR(id));
+function summariseCR(id: string, p: OntologyProject, viewer: User) {
+  // The same projection as the web API: a request based on a use case this user may not see is withheld.
+  const d = crForViewer(detail(getCR(id)), viewer);
   return {
     id: d.id,
     number: d.number,

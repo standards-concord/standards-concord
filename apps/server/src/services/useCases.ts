@@ -1,7 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   ActivityItem,
   AnonymisedDraft,
   ChangeRequest,
+  ChangeRequestDetail,
   ChatMessage,
   ElicitedTerm,
   InterviewSession,
@@ -63,22 +65,28 @@ export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, vie
 
 /**
  * Called when a use case stops being public (made private or group-only,
- * withdrawn or archived), so everything derived from it can be dropped:
- * requirements drafts (services/requirements.ts registers) and its questions in
- * saved validation results (below).
+ * withdrawn or archived). Requirements drafts written from it are emptied
+ * (services/requirements.ts registers). Nothing else is rewritten: records
+ * derived from a use case point at it by id, and every read decides what to
+ * show from its consent now (crForViewer, visibleCQResults, visibleActivity).
  */
 const noLongerPublic: ((u: UseCase) => void)[] = [];
-noLongerPublic.push((u) => consentEpochs.set(u.ontologyId, consentEpoch(u.ontologyId) + 1));
 
 const consentLocks = new Map<string, Promise<unknown>>();
+const heldLocks = new AsyncLocalStorage<Set<string>>();
 /**
  * Runs `fn` exclusively for an ontology. Everything that commits material
- * derived from use cases (a release, a drafted change request) and everything
- * that changes consent (withdrawal, visibility, archiving) goes through it, so a
- * withdrawal can't land between the consent check and the commit: it waits.
+ * derived from use cases (a release, a merge, a drafted change request) and
+ * everything that changes consent (withdrawal, visibility, archiving) goes
+ * through it, so a withdrawal can't land between the consent check and the
+ * commit: it waits. Re-entrant: work already holding the lock (a drafted
+ * request that merges straight away) runs at once.
  */
 export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T): Promise<T> {
-  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(fn);
+  const held = heldLocks.getStore();
+  if (held?.has(ontologyId)) return Promise.resolve().then(fn);
+  const inside = () => heldLocks.run(new Set([...(held ?? []), ontologyId]), fn);
+  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(inside);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);
   void tail.then(() => {
@@ -90,109 +98,51 @@ export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPubli
 /** Public, and fit to derive public material from: not withdrawn, archived, or a draft its author hasn't submitted. */
 const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived' && u.status !== 'draft';
 
-const consentEpochs = new Map<string, number>();
-/** Goes up whenever a use case of the ontology stops being public, so long-running work can tell it must start again. */
-export const consentEpoch = (ontologyId: string) => consentEpochs.get(ontologyId) ?? 0;
+/* ------------------------------------------------------------------------ */
+/* Consent at read time: records derived from use cases                      */
+/* ------------------------------------------------------------------------ */
 
-const questionKey = (q: string) => q.trim().toLowerCase().replace(/\s+/g, ' ');
-
-const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const WITHDRAWN_PHRASE = 'a use case that is no longer public';
-
-/**
- * Redaction touches prose only: the fields people (or the model) wrote in words.
- * Statuses, kinds, operation names, roles, ids, IRIs, dates and numbers are never
- * rewritten, so a title such as "draft" can't change a workflow state.
- */
-type Prose = (text: string) => string;
-const IRI_LIKE = /^(<[^>\s]*>|[a-z][\w+.-]*:[^\s]*)$/i;
-const prose = (f: Prose) => (v: unknown): unknown => (typeof v !== 'string' ? v : IRI_LIKE.test(v) ? v : f(v));
-const proseList = (f: Prose) => (v: unknown): unknown => (Array.isArray(v) ? v.map(prose(f)) : v);
-/** In an N-Triples line, only the literals are prose. */
-const literalsIn = (f: Prose) => (line: unknown): unknown =>
-  typeof line === 'string' ? line.replace(/"((?:[^"\\]|\\.)*)"/g, (_m, body: string) => `"${f(body)}"`) : line;
-const TERM_PROSE = ['label', 'definition', 'comment', 'editorialNote', 'reason', 'title', 'description'] as const;
-const TERM_PROSE_LISTS = ['altLabels', 'examples'] as const;
-function annotations<T>(o: T, f: Prose): T {
-  if (!o || typeof o !== 'object') return o;
-  const out = { ...(o as Record<string, unknown>) };
-  for (const k of TERM_PROSE) if (k in out) out[k] = prose(f)(out[k]);
-  for (const k of TERM_PROSE_LISTS) if (k in out) out[k] = proseList(f)(out[k]);
-  if (out.set && typeof out.set === 'object') out.set = annotations(out.set, f);
-  return out as T;
+/** The use cases a change request was drafted from or cites. */
+export function crSources(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>): string[] {
+  const ids = [...(cr.useCaseIds ?? [])];
+  if (cr.origin.type === 'synthesis') ids.push(...cr.origin.useCaseIds);
+  if (cr.origin.type === 'chat' && cr.origin.useCaseId) ids.push(cr.origin.useCaseId);
+  return [...new Set(ids)];
 }
 
-const redactors: Record<'changeRequests' | 'reviews' | 'votes' | 'releases' | 'activity', (doc: any, f: Prose) => any> = {
-  changeRequests: (cr: ChangeRequest, f) => ({
-    ...cr,
-    title: prose(f)(cr.title),
-    description: prose(f)(cr.description),
-    ops: cr.ops?.map((op) => annotations(op, f)),
-    ...(cr.warnings ? { warnings: proseList(f)(cr.warnings) } : {}),
-    ...(cr.kgcl ? { kgcl: proseList(f)(cr.kgcl) } : {}),
-    ...(cr.analysis ? { analysis: { ...cr.analysis, summary: prose(f)(cr.analysis.summary), rationale: prose(f)(cr.analysis.rationale), ...(cr.analysis.risks ? { risks: proseList(f)(cr.analysis.risks) } : {}) } } : {}),
-    ...(cr.classification ? { classification: { ...cr.classification, reasons: cr.classification.reasons.map((r) => ({ ...r, message: prose(f)(r.message) })) } } : {}),
-    ...(cr.validation ? { validation: { ...cr.validation, lint: cr.validation.lint.map((i) => ({ ...i, message: prose(f)(i.message) })) } } : {}),
-    ...(cr.diff
-      ? {
-          diff: {
-            ...cr.diff,
-            terms: cr.diff.terms.map((t) => ({ ...t, ...(t.label !== undefined ? { label: prose(f)(t.label) } : {}), details: proseList(f)(t.details), fields: t.fields.map((x) => ({ ...x, added: proseList(f)(x.added), removed: proseList(f)(x.removed) })) })),
-            addedNTriples: cr.diff.addedNTriples.map(literalsIn(f)),
-            removedNTriples: cr.diff.removedNTriples.map(literalsIn(f)),
-          },
-        }
-      : {}),
-    timeline: cr.timeline.map((e) => ({ ...e, message: prose(f)(e.message) })),
-  }),
-  reviews: (r: { comment?: string }, f) => ('comment' in r ? { ...r, comment: prose(f)(r.comment) } : r),
-  votes: (v: { comment?: string }, f) => ('comment' in v ? { ...v, comment: prose(f)(v.comment) } : v),
-  releases: (r: Release, f) => ({ ...r, notes: prose(f)(r.notes) }),
-  activity: (a: { message?: string }, f) => ({ ...a, message: prose(f)(a.message) }),
+const visibleTo = (id: string, viewer?: User) => {
+  const u = get<UseCase>('useCases', id);
+  return !!u && canSee(u, viewer);
 };
 
+/** True when the viewer may not see one of the use cases the request came from or cites: then only its number and state are shown. */
+export const crWithheld = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>, viewer?: User) => crSources(cr).some((id) => !visibleTo(id, viewer));
+
+/** Every use case it came from or cites is still public, so it may go into the ontology. */
+export const sourcesPublic = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>) =>
+  crSources(cr).every((id) => {
+    const u = get<UseCase>('useCases', id);
+    return !!u && isPublic(u);
+  });
+
+export const WITHHELD_TITLE = 'Withheld: based on a use case that is no longer shared';
+/** The reason a request can't go further once a use case it came from is no longer public. */
+export const SOURCE_GONE = 'A use case this request was drafted from or cites is no longer public, so it cannot go into the ontology. Open a new change request instead.';
+
 /**
- * When a use case stops being public, take out what was copied from it:
- * - every question it had while public (including ones since edited) from
- *   validation results saved on change requests, and from the SPARQL tests
- *   drafted from them, which carry its example data and run again on retriage;
- * - every title it had while public, wherever it was quoted in prose: change
- *   requests (title, description, the labels and definitions in their edits,
- *   analysis, warnings, check messages, the literals in their diff, timeline),
- *   their reviews and votes, releases and their votes, and the activity feed.
- *   Machine fields (statuses, kinds, ids, IRIs, roles) are never touched.
- * Content already merged into the ontology itself is not changed here.
+ * Competency question results the viewer may see: those from a use case they can see, and the
+ * request's own tests. A result with no recorded source that isn't one of the request's own tests
+ * (saved before sources were recorded) is left out.
  */
-onNoLongerPublic((u) => {
-  const questions = new Set([...(u.publicQuestions ?? []), ...u.competencyQuestions.map((q) => q.question)].map(questionKey));
-  const gone = (r: { question: string }) => questions.has(questionKey(r.question));
-  const titles = [...new Set([...(u.publicTitles ?? []), u.sections.name ?? ''].map((t) => t.trim()).filter(Boolean))].sort((x, y) => y.length - x.length);
-  // Whole words only, so a word that merely contains a title is left alone. Only prose is searched (see redactors).
-  const titleRe = titles.length ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${titles.map(escapeRe).join('|')})(?![\\p{L}\\p{N}])`, 'giu') : undefined;
-  const replace: Prose = (text) => (titleRe ? text.replace(titleRe, WITHDRAWN_PHRASE) : text);
-  const redact = <T extends { id: string }>(collection: keyof typeof redactors, doc: T, parent: string) => {
-    if (!titleRe) return doc;
-    const out = redactors[collection](doc, replace) as T;
-    if (JSON.stringify(out) !== JSON.stringify(doc)) put(collection, out, parent);
-    return out;
-  };
-  for (const stored of list<ChangeRequest>('changeRequests', u.ontologyId)) {
-    let cr = stored;
-    const cqs = cr.validation?.competencyQuestions;
-    if (questions.size && (cqs?.some(gone) || cr.tests?.some(gone))) {
-      cr = { ...cr, ...(cqs ? { validation: { ...cr.validation!, competencyQuestions: cqs.filter((r) => !gone(r)) } } : {}), ...(cr.tests ? { tests: cr.tests.filter((t) => !gone(t)) } : {}) };
-      put('changeRequests', cr, cr.ontologyId);
-    }
-    redact('changeRequests', cr, cr.ontologyId);
-    for (const r of list<{ id: string }>('reviews', cr.id)) redact('reviews', r, cr.id);
-    for (const v of list<{ id: string }>('votes', cr.id)) redact('votes', v, cr.id);
-  }
-  for (const rel of list<{ id: string }>('releases', u.ontologyId)) {
-    redact('releases', rel, u.ontologyId);
-    for (const v of list<{ id: string }>('votes', rel.id)) redact('votes', v, rel.id);
-  }
-  for (const a of list<{ id: string }>('activity', u.ontologyId)) redact('activity', a, u.ontologyId);
-});
+export function visibleCQResults<R extends { question: string; source?: string }>(results: R[], viewer?: User, ownTests: { question: string }[] = []): R[] {
+  const own = new Set(ownTests.map((t) => t.question));
+  return results.filter((r) => (r.source ? visibleTo(r.source, viewer) : own.has(r.question)));
+}
+
+/** A validation report as the viewer may see it. */
+export function validationForViewer<V extends { competencyQuestions: { question: string; source?: string }[] }>(v: V, viewer?: User, ownTests?: { question: string }[]): V {
+  return { ...v, competencyQuestions: visibleCQResults(v.competencyQuestions, viewer, ownTests) };
+}
 
 /** Bring documents written before sharing modes existed up to date. */
 function normalise(u: UseCase): UseCase {
@@ -358,13 +308,6 @@ function saveUseCase(u: UseCase) {
   const before = get<UseCase>('useCases', u.id);
   // A withdrawal is final: a save from work that started earlier (an interview turn, drafting) never undoes it.
   if (before?.withdrawnAt && !u.withdrawnAt) Object.assign(u, { withdrawnAt: before.withdrawnAt, visibility: before.visibility, status: before.status });
-  // Every title and question it has had while public, so a withdrawal can find each copy. The stored
-  // record counts too: one saved before titles were tracked still had its old name out there.
-  const shown = [...(before && isPublic(before) ? [before] : []), ...(isPublic(u) ? [u] : [])];
-  if (shown.length || before?.publicQuestions || before?.publicTitles) {
-    u.publicQuestions = [...new Set([...(before?.publicQuestions ?? []), ...(u.publicQuestions ?? []), ...shown.flatMap((x) => x.competencyQuestions.map((q) => q.question))])];
-    u.publicTitles = [...new Set([...(before?.publicTitles ?? []), ...(u.publicTitles ?? []), ...shown.flatMap((x) => (x.sections.name ? [x.sections.name] : []))])];
-  }
   if (u.visibility === 'public' && !u.number) u.number = nextNumber(u.ontologyId);
   else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = nextNumber(u.ontologyId, 'groupNumber');
   u.completeness = completeness(u);
@@ -456,6 +399,12 @@ export function visibleActivity(items: ActivityItem[], viewer?: User): ActivityI
       const u = get<UseCase>('useCases', uc);
       if (!u || !canSee(u, viewer)) return [];
       if (u.anonymous && !(viewer && viewer.id === u.authorId)) return [{ ...a, actorId: undefined, actorName: undefined }];
+    }
+    const crId = a.link?.match(/\/changes\/([^/?#]+)/)?.[1];
+    if (crId) {
+      // Activity about a request quotes its title: shown only to those who may see the request in full.
+      const cr = get<ChangeRequest>('changeRequests', crId);
+      if (cr && crWithheld(cr, viewer)) return [];
     }
     const mtg = a.link?.match(/\/meetings\/([^/?#]+)/)?.[1];
     if (mtg) {
@@ -624,10 +573,32 @@ export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor
  * origin) are kept only for use cases the viewer can see.
  */
 export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
-  const ok = (id: string) => {
-    const u = get<UseCase>('useCases', id);
-    return !!u && canSee(u, viewer);
-  };
+  const ok = (id: string) => visibleTo(id, viewer);
+  // Drafted from, or citing, a use case this viewer may not see (one its author withdrew, say): its
+  // text, edits, diff, checks, analysis, history, reviews and votes may all carry that use case's
+  // words, so none of it is shown. Only what identifies it and where it stands.
+  if (crWithheld(cr, viewer)) {
+    const shown: ChangeRequest = {
+      id: cr.id,
+      number: cr.number,
+      ontologyId: cr.ontologyId,
+      title: WITHHELD_TITLE,
+      description: '',
+      kind: cr.kind,
+      origin: cr.origin.type === 'synthesis' ? { type: 'synthesis', useCaseIds: [] } : cr.origin.type === 'chat' ? { type: 'chat' } : { type: 'direct' },
+      authorId: cr.authorId,
+      ops: [],
+      status: cr.status,
+      timeline: [],
+      createdAt: cr.createdAt,
+      updatedAt: cr.updatedAt,
+      statusSince: cr.statusSince,
+      useCaseIds: [],
+      withheld: true,
+    };
+    const d = cr as unknown as Partial<ChangeRequestDetail>;
+    return { ...shown, ...('reviews' in d ? { reviews: [], votes: [], governance: d.governance, author: d.author } : {}) } as unknown as T;
+  }
   const origin =
     cr.origin.type === 'synthesis'
       ? { ...cr.origin, useCaseIds: cr.origin.useCaseIds.filter(ok) }
@@ -636,7 +607,12 @@ export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
         : cr.origin.type === 'meeting' && !canSeeMeeting(get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId) ?? { ontologyId: cr.ontologyId, createdBy: '' }, viewer)
           ? { type: 'meeting' as const, meetingId: '' }
           : cr.origin;
-  return { ...cr, origin, ...(cr.useCaseIds ? { useCaseIds: cr.useCaseIds.filter(ok) } : {}) } as T;
+  return {
+    ...cr,
+    origin,
+    ...(cr.useCaseIds ? { useCaseIds: cr.useCaseIds.filter(ok) } : {}),
+    ...(cr.validation ? { validation: validationForViewer(cr.validation, viewer, cr.tests) } : {}),
+  } as T;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1059,10 +1035,15 @@ export async function startInterview(project: OntologyProject, user: User, useCa
 async function persistTranscript(session: InterviewSession, u: UseCase) {
   try {
     const turtle = transcriptToTurtle(session.id, `Requirements interview: ${u.sections.name ?? 'use case'}`, session.messages);
-    session.storage = await solid.write(session.userId, `interviews/${session.id}.ttl`, turtle);
-    u.transcriptUrl = session.storage.url;
-    put('useCases', u, u.ontologyId);
-    put('interviews', session, session.ontologyId);
+    const storage = await solid.write(session.userId, `interviews/${session.id}.ttl`, turtle);
+    session.storage = storage;
+    u.transcriptUrl = storage.url;
+    // Other changes (a withdrawal, a newer turn) may have been saved while the pod write ran: only
+    // the transcript's location is written, onto the records as they are now.
+    const freshCase = get<UseCase>('useCases', u.id);
+    if (freshCase && freshCase.transcriptUrl !== storage.url) put('useCases', { ...freshCase, transcriptUrl: storage.url }, freshCase.ontologyId);
+    const freshSession = get<InterviewSession>('interviews', session.id);
+    if (freshSession) put('interviews', { ...freshSession, storage }, freshSession.ontologyId);
   } catch (err) {
     console.warn(`[interview] could not store transcript: ${(err as Error).message}`);
   }

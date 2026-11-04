@@ -267,7 +267,13 @@ export function ChangeRequestPage() {
             </Link>
           )}
         </div>
-        {cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>}
+        {cr.withheld ? (
+          <p role="note" className="mt-2 text-sm text-muted">
+            This change request was drafted from, or cites, a use case that is no longer shared with you (its author may have withdrawn it), so its details are not shown. It can't be merged; a new request can be opened instead.
+          </p>
+        ) : (
+          cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">

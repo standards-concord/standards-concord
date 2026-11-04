@@ -635,6 +635,12 @@ export interface ChangeRequest {
   kgcl?: string[];
   /** Use cases this change addresses (traceability). */
   useCaseIds?: string[];
+  /**
+   * Set on what a viewer receives (never stored) when the request was drafted from, or cites, a
+   * use case that viewer may not see, such as one its author withdrew: only its number and state
+   * are shown.
+   */
+  withheld?: boolean;
 }
 
 export interface ChangeRequestDetail extends ChangeRequest {

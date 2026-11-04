@@ -125,7 +125,7 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
     ...(d.releaseId ? { releaseId: d.releaseId } : {}),
     version: d.version,
     // The written title may echo a withdrawn use case: a plain one replaces it.
-    title: gone.size ? plainTitle(d.ontologyId, d.version) : d.title,
+    title: gone.size || d.invalidated ? plainTitle(d.ontologyId, d.version) : d.title,
     status: d.status,
     generatedAt: d.generatedAt,
     ...(d.simulated ? { simulated: true } : {}),
@@ -190,15 +190,22 @@ export function releasingDocument(ontologyId: string, version: string): Requirem
   return d && (d.status === 'published' || !isStale(d)) ? served(d) : undefined;
 }
 
-/** Documents a viewer may read: published ones for anyone, drafts for the working group. */
+/**
+ * A document's listing entry, if the viewer may read it: published ones for anyone, drafts for the
+ * working group. Through the serving projection, so its title and counts are what the document
+ * itself shows (a plain title once a use case it drew on is gone).
+ */
+export function documentSummary(d: RequirementsDocument, viewer?: User) {
+  if (d.status !== 'published' && !isGroupMember(d.ontologyId, viewer)) return undefined;
+  const { id, version, status, generatedAt, title, releaseId, coverage } = served(d, viewer);
+  return { id, version, status, generatedAt, title, releaseId, coverage };
+}
+
+/** Documents a viewer may read. */
 export function listDocuments(ontologyId: string, viewer?: User) {
-  const group = isGroupMember(ontologyId, viewer);
   return docs(ontologyId)
-    .filter((d) => d.status === 'published' || group)
     .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-    // Through the serving projection, so titles and counts match what the document itself shows.
-    .map((d) => (d.status === 'published' ? served(d, viewer) : d))
-    .map(({ id, version, status, generatedAt, title, releaseId, coverage }) => ({ id, version, status, generatedAt, title, releaseId, coverage }));
+    .flatMap((d) => documentSummary(d, viewer) ?? []);
 }
 
 export async function documentFor(ontologyId: string, version: string, viewer?: User): Promise<RequirementsDocument> {
@@ -220,7 +227,7 @@ export async function documentFor(ontologyId: string, version: string, viewer?: 
 onNoLongerPublic((u) => {
   for (const d of docs(u.ontologyId))
     if (d.status === 'draft' && dependsOn(d, u.id))
-      put('requirementsDocs', { ...d, invalidated: true, intro: '', sections: [], requirements: [], useCases: [], sourceIds: [], coverage: coverageOf([]) } satisfies RequirementsDocument, d.ontologyId);
+      put('requirementsDocs', { ...d, invalidated: true, title: plainTitle(d.ontologyId, d.version), intro: '', sections: [], requirements: [], useCases: [], sourceIds: [], coverage: coverageOf([]) } satisfies RequirementsDocument, d.ontologyId);
 });
 
 const CAST = ['Sam', 'Priti', 'Jordan', 'Ada', 'Kofi', 'Morgan', 'Lena', 'Ravi'];

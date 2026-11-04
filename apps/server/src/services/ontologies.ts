@@ -148,12 +148,12 @@ const validationCache = new Map<string, Promise<ValidationReport>>();
 export function competencyTests(ontologyId: string) {
   return list<UseCase>('useCases', ontologyId)
     .filter((u) => u.status !== 'archived' && u.status !== 'draft' && u.visibility === 'public' && !u.withdrawnAt)
-    .flatMap((u) => u.competencyQuestions)
-    .filter((q) => q.sparql)
-    .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));
+    .flatMap((u) => u.competencyQuestions.map((q) => ({ q, source: u.id })))
+    .filter(({ q }) => q.sparql)
+    .map(({ q, source }) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData, source }));
 }
 
-export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string }[]) {
+export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string; source?: string }[]) {
   const fair = await fairContext(graph.ontologyIRI);
   const r = fair.resolution;
   key += r ? `:${+r.rdf}${+r.html}` : '';

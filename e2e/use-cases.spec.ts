@@ -109,6 +109,39 @@ test.describe('use cases', () => {
     await expectNoCrash(page);
   });
 
+  test('a change request citing a withdrawn use case is withheld from others, and its author still sees it', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await signIn(page, { name: 'Citing Cora', role: 'contributor' });
+    const s = await (await page.request.post(`/api/ontologies/${demo.id}/interviews`, { data: {} })).json();
+    const id = s.useCaseId as string;
+    expect((await page.request.patch(`/api/use-cases/${id}`, { data: { sections: { name: 'Harbour ferry passes', goal: 'Issue ferry passes' }, competencyQuestions: [{ question: 'Which ferry passes expire this week?' }] } })).ok()).toBe(true);
+    expect((await page.request.post(`/api/use-cases/${id}/visibility`, { data: { visibility: 'public' } })).ok()).toBe(true);
+    expect((await page.request.post(`/api/use-cases/${id}/submit`)).ok()).toBe(true);
+    const cr = await (
+      await page.request.post(`/api/ontologies/${demo.id}/change-requests`, { data: { title: 'Model Harbour ferry passes', naturalLanguage: 'Add a FerryPass class', useCaseIds: [id] } })
+    ).json();
+    expect((await page.request.post(`/api/use-cases/${id}/withdraw`)).ok()).toBe(true);
+
+    const other = await page.context().browser()!.newContext();
+    const p2 = await other.newPage();
+    await signIn(p2, { name: 'Outsider Olu', role: 'contributor' });
+    await p2.goto(`/o/${demo.id}/changes/${cr.id}`);
+    await settle(p2);
+    await expect(p2.getByRole('note').filter({ hasText: /no longer shared with you/ })).toBeVisible();
+    await expect(p2.getByText(/Harbour ferry passes/)).toHaveCount(0);
+    await p2.goto(`/o/${demo.id}/changes`);
+    await settle(p2);
+    await expect(p2.getByText(/Harbour ferry passes/)).toHaveCount(0);
+    await expectNoCrash(p2);
+    await other.close();
+
+    // The use case's author still sees the request in full.
+    await page.goto(`/o/${demo.id}/changes/${cr.id}`);
+    await settle(page);
+    await expect(page.getByRole('heading', { name: /Model Harbour ferry passes/ })).toBeVisible();
+    await expectNoCrash(page);
+  });
+
   test('sharing a private use case with the working group submits it for triage', async ({ page, request }) => {
     const demo = await demoOntology(request);
     const me = await signIn(page, { name: 'Sharer Sid', role: 'contributor' });
