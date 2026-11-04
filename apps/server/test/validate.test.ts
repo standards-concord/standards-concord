@@ -242,17 +242,52 @@ describe('POST to the ontology IRI validates data', () => {
     expect(ok.body.triples).toBe(1);
   });
 
-  it('answers 503 when the queue is full', async () => {
-    const before = POOL_LIMITS.queue;
-    POOL_LIMITS.queue = 0;
+  it('gives a job to a free worker even when the queue is full, and answers 503 when there is no room', async () => {
+    const before = { ...POOL_LIMITS };
     try {
+      POOL_LIMITS.queue = 0;
+      expect((await post('/def/volunteering', VALID)).status).toBe(200);
+      POOL_LIMITS.workers = 0;
       const busy = await post('/def/volunteering', VALID);
       expect(busy.status).toBe(503);
       expect(busy.headers['retry-after']).toBe('5');
     } finally {
-      POOL_LIMITS.queue = before;
+      Object.assign(POOL_LIMITS, before);
     }
   });
+
+  it('keeps places for other formats when JSON-LD has taken all of its own', async () => {
+    const held = Array.from({ length: 1 + POOL_LIMITS.jsonldQueue }, (_, i) => admit(`test:${i}`, 'jsonld'));
+    try {
+      expect(held.every((p) => p.ok)).toBe(true);
+      const jsonld = await post('/def/volunteering', JSON.stringify({ '@id': 'https://example.org/r', '@type': 'https://w3id.org/odi/volunteering#Role' }), 'application/ld+json');
+      expect([jsonld.status, jsonld.body.error]).toEqual([503, expect.stringMatching(/busy with other JSON-LD/)]);
+      expect((await post('/def/volunteering', VALID)).status).toBe(200);
+    } finally {
+      for (const p of held) if (p.ok) p.release();
+    }
+  });
+
+  it('survives data that would exhaust a worker: it answers 413 and the next request works', async () => {
+    // A review's 152 KB document: 100 relative @vocabs of 1,000 characters make a 100,000-character
+    // property, on 2,000 nodes. Written out for the SHACL engine that was 200 MB, and running out of
+    // memory in a worker thread took the whole server down.
+    const vocabs = [{ '@vocab': 'https://e/' }, ...Array.from({ length: 100 }, () => ({ '@vocab': `${'x'.repeat(1000)}/` }))];
+    const doc = { '@context': vocabs, '@graph': Array.from({ length: 2000 }, (_, i) => ({ '@id': `https://e/s${i}`, p: 1 })) };
+    const refused = await post('/def/volunteering', JSON.stringify(doc), 'application/ld+json');
+    expect([refused.status, refused.body.error]).toEqual([413, expect.stringMatching(/IRI longer than 4,096 characters/)]);
+    // Under the IRI limit, the same trick is stopped by the limit on how much text the triples hold.
+    const wide = { '@context': { '@vocab': `https://e/${'x'.repeat(3900)}/` }, '@graph': doc['@graph'].concat(doc['@graph'].map((n) => ({ ...n, '@id': `${n['@id']}b` }))) };
+    const tooMuch = await post('/def/volunteering', JSON.stringify(wide), 'application/ld+json');
+    expect([tooMuch.status, tooMuch.body.error]).toEqual([413, expect.stringMatching(/million characters of IRIs and literals/)]);
+    // And whatever gets past every limit runs in a separate process: here 50,000 terms each defined
+    // through the one before expand to gigabytes, the worker runs out of memory, and only it stops.
+    const chain: Record<string, string> = { a0: 'https://e/' };
+    for (let i = 1; i < 50_000; i++) chain[`a${i}`] = `a${i - 1}:x/`;
+    const exhausted = await post('/def/volunteering', JSON.stringify({ '@context': chain, '@id': 'https://e/s', 'a3:p': 1 }), 'application/ld+json');
+    expect([exhausted.status, exhausted.body.error]).toEqual([413, expect.stringMatching(/more memory than the validator allows/)]);
+    expect((await post('/def/volunteering', VALID)).status).toBe(200);
+  }, 60_000);
 
   describe('places in the validator, taken before the data is read', () => {
     let server: http.Server;

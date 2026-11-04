@@ -145,7 +145,7 @@ function buildServer(user: User, agentName: string) {
         const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
         if (v !== 'draft' && !ontologyStore.versions(p).includes(v)) return fail(`${p.title} has no version "${version}".`);
         // Shares the validator's places with POSTs to the ontology IRI (validationPool.ts).
-        const place = admit(`user:${user.id}`);
+        const place = admit(`user:${user.id}`, data ? format : 'turtle');
         if (!place.ok) return fail(place.message);
         try {
           const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });

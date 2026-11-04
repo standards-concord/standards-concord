@@ -1,18 +1,26 @@
-import { Worker } from 'node:worker_threads';
-import { DataError } from '@concord/core';
+import { fork, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { DataError, type DataFormat } from '@concord/core';
 import type { ValidationJob, ValidationOutcome, WorkerReply } from './validationWorker.js';
 
 /**
- * A few worker threads that run validations (validationWorker.ts). Each job
+ * A few worker processes that run validations (validationWorker.ts). Each job
  * has a deadline and each worker a heap limit: a worker that runs over is
  * stopped and replaced, and the caller gets a 422 or 413, so one input can't
- * hold up or exhaust the server. Jobs beyond the workers wait in a short
+ * hold up or exhaust the server. Workers are processes, not threads: V8 can
+ * abort the whole process when a thread's heap runs out at the wrong moment
+ * (a large string already live, then an allocation that can't be refused),
+ * so only a separate process makes the heap limit safe for the server. Jobs beyond the workers wait in a short
  * queue, for a limited time; past that the caller gets a 503.
  *
  * Callers reserve a place with admit() before they read a request body, so
  * the number of bodies held in memory is bounded too (workers + queue), and
  * one client can hold at most perClient of those places. A place is given
  * back only once its job has stopped: a caller that goes away cancels it.
+ *
+ * JSON-LD has places and a queue of its own, and only one JSON-LD job runs at
+ * a time, so JSON-LD can never hold every worker or every place: with two or
+ * more workers, a free worker always takes the next job in another format.
  */
 
 export const POOL_LIMITS = {
@@ -25,32 +33,49 @@ export const POOL_LIMITS = {
   queueWaitMs: Number(process.env.VALIDATE_QUEUE_WAIT_MS ?? 15_000),
   /** Places one client may hold at once (reading, waiting or running). */
   perClient: Number(process.env.VALIDATE_PER_CLIENT ?? 2),
+  /** JSON-LD jobs waiting for their turn. JSON-LD places: one running + this many, kept apart from the others. */
+  jsonldQueue: Number(process.env.VALIDATE_JSONLD_QUEUE ?? 2),
 };
+
+/** JSON-LD jobs that may run at once: converting JSON-LD needs the most memory, so one at a time. */
+const JSONLD_AT_ONCE = 1;
+
+/** Each format's share: JSON-LD, or everything else. */
+type Lane = 'jsonld' | 'other';
+const laneOf = (format: DataFormat | 'sniff' | undefined): Lane => (format === 'jsonld' ? 'jsonld' : 'other');
+const places = (lane: Lane) => (lane === 'jsonld' ? JSONLD_AT_ONCE + POOL_LIMITS.jsonldQueue : POOL_LIMITS.workers + POOL_LIMITS.queue);
+const queueLimit = (lane: Lane) => (lane === 'jsonld' ? POOL_LIMITS.jsonldQueue : POOL_LIMITS.queue);
+
+const BUSY = 'The validator is busy. Try again in a moment.';
+const BUSY_JSONLD = 'The validator is busy with other JSON-LD. Try again in a moment, or send the data as Turtle or N-Triples.';
 
 export type Admission = { ok: true; release: () => void } | { ok: false; status: 429 | 503; message: string };
 
 const held = new Map<string, number>();
-let admitted = 0;
+const admitted: Record<Lane, number> = { jsonld: 0, other: 0 };
 
 /**
- * Reserves a place for one validation, before its data is read. Release it
- * when the request ends, however it ends (release is safe to call twice).
+ * Reserves a place for one validation, before its data is read, in the share
+ * for its format (JSON-LD or the rest; data whose format isn't known until
+ * it is read counts as the rest). Release it when the request ends, however
+ * it ends (release is safe to call twice).
  */
-export function admit(client: string): Admission {
+export function admit(client: string, format?: DataFormat | 'sniff'): Admission {
+  const lane = laneOf(format);
   const mine = held.get(client) ?? 0;
   if (mine >= POOL_LIMITS.perClient) {
     return { ok: false, status: 429, message: `You already have ${mine} validation${mine === 1 ? '' : 's'} in progress. Wait for ${mine === 1 ? 'it' : 'them'} to finish.` };
   }
-  if (admitted >= POOL_LIMITS.workers + POOL_LIMITS.queue) return { ok: false, status: 503, message: 'The validator is busy. Try again in a moment.' };
+  if (admitted[lane] >= places(lane)) return { ok: false, status: 503, message: lane === 'jsonld' ? BUSY_JSONLD : BUSY };
   held.set(client, mine + 1);
-  admitted++;
+  admitted[lane]++;
   let released = false;
   return {
     ok: true,
     release: () => {
       if (released) return;
       released = true;
-      admitted--;
+      admitted[lane]--;
       const left = (held.get(client) ?? 1) - 1;
       if (left > 0) held.set(client, left);
       else held.delete(client);
@@ -60,35 +85,43 @@ export function admit(client: string): Admission {
 
 type Pending = { job: ValidationJob; resolve: (o: ValidationOutcome) => void; reject: (e: unknown) => void; wait?: NodeJS.Timeout };
 interface Slot {
-  worker: Worker;
+  worker: ChildProcess;
   current?: Pending & { timer: NodeJS.Timeout };
 }
 
 // A plain-JavaScript entry that registers tsx itself, then loads validationWorker.ts.
-const WORKER_URL = new URL('./validationWorker.boot.mjs', import.meta.url);
+const WORKER_PATH = fileURLToPath(new URL('./validationWorker.boot.mjs', import.meta.url));
 
 const slots: Slot[] = [];
 const queue: Pending[] = [];
 let nextId = 1;
 
 function spawn(): Slot {
-  const worker = new Worker(WORKER_URL, { execArgv: [], resourceLimits: { maxOldGenerationSizeMb: POOL_LIMITS.heapMb, maxYoungGenerationSizeMb: 32 } });
+  const worker = fork(WORKER_PATH, [], {
+    // Only these flags, not the server's own: the boot file loads TypeScript itself.
+    execArgv: [`--max-old-space-size=${POOL_LIMITS.heapMb}`, '--max-semi-space-size=16'],
+    serialization: 'advanced',
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+  });
+  // An idle worker never keeps the server (or a test run) from exiting.
   worker.unref();
+  worker.channel?.unref();
   const slot: Slot = { worker };
   worker.on('message', (reply: WorkerReply) => {
     const cur = slot.current;
     if (!cur || cur.job.id !== reply.id) return;
     clearTimeout(cur.timer);
     slot.current = undefined;
+    worker.channel?.unref();
     if (reply.ok) cur.resolve(reply.outcome);
     else cur.reject(reply.status ? new DataError(reply.status as 400, reply.message) : new Error(reply.message));
     pump();
   });
-  worker.on('error', (err: Error & { code?: string }) => {
-    const oom = err.code === 'ERR_WORKER_OUT_OF_MEMORY';
-    retire(slot, oom ? new DataError(413, 'Checking the data needed more memory than the validator allows. Try smaller data.') : err);
-  });
-  worker.on('exit', () => retire(slot, new Error('The validator stopped unexpectedly')));
+  worker.on('error', (err) => retire(slot, err));
+  // A heap that runs out aborts the worker (SIGABRT): that is the data asking for too much memory.
+  worker.on('exit', (_code, signal) =>
+    retire(slot, signal === 'SIGABRT' ? new DataError(413, 'Checking the data needed more memory than the validator allows. Try smaller data.') : new Error('The validator stopped unexpectedly')),
+  );
   slots.push(slot);
   return slot;
 }
@@ -99,7 +132,7 @@ let stoppingJsonld = 0;
 
 /**
  * Stops a worker, then fails its job and lets the queue go on. Its job's
- * caller (and so its place) is only let go once the thread has exited, so
+ * caller (and so its place) is only let go once the process has exited, so
  * a stopped worker and its replacement never run side by side.
  */
 function retire(slot: Slot, err: unknown) {
@@ -118,11 +151,11 @@ function retire(slot: Slot, err: unknown) {
     cur?.reject(err);
     pump();
   };
-  slot.worker.terminate().then(done, done);
+  const { worker } = slot;
+  if (worker.pid === undefined || worker.exitCode !== null || worker.signalCode !== null) return done();
+  worker.once('exit', done);
+  worker.kill('SIGKILL');
 }
-
-/** JSON-LD jobs that may run at once: converting JSON-LD needs the most memory, so one at a time. */
-const JSONLD_AT_ONCE = 1;
 
 function pump() {
   while (queue.length) {
@@ -146,7 +179,9 @@ function pump() {
       );
     }, POOL_LIMITS.timeoutMs);
     slot.current = { ...next, timer };
-    slot.worker.postMessage(next.job);
+    // While it has a job, the worker's channel keeps the server waiting for the answer.
+    slot.worker.channel?.ref();
+    slot.worker.send(next.job);
   }
 }
 
@@ -157,36 +192,45 @@ function pump() {
  */
 export function runValidation(job: Omit<ValidationJob, 'id'>, signal?: AbortSignal): Promise<ValidationOutcome> {
   if (signal?.aborted) return Promise.reject(new Error('The validation was cancelled'));
-  if (queue.length >= POOL_LIMITS.queue) return Promise.reject(new DataError(503, 'The validator is busy. Try again in a moment.'));
+  const lane = laneOf(job.format);
+  const busy = () => new DataError(503, lane === 'jsonld' ? BUSY_JSONLD : BUSY);
   return new Promise<ValidationOutcome>((resolve, reject) => {
     const pending: Pending = { job: { ...job, id: nextId++ }, resolve, reject };
+    queue.push(pending);
+    pump();
+    // It didn't start at once and its format's queue is full: turn it away (a free worker always takes it first).
+    if (queue.includes(pending) && queue.filter((p) => laneOf(p.job.format) === lane).length > queueLimit(lane)) {
+      queue.splice(queue.indexOf(pending), 1);
+      return reject(busy());
+    }
+    if (!queue.includes(pending)) {
+      signal?.addEventListener('abort', () => cancel(pending), { once: true });
+      return;
+    }
     // Waiting counts towards the caller's time too: a job that can't start soon is turned away.
     pending.wait = setTimeout(() => {
       const i = queue.indexOf(pending);
       if (i < 0) return;
       queue.splice(i, 1);
-      reject(new DataError(503, 'The validator is busy. Try again in a moment.'));
+      reject(busy());
     }, POOL_LIMITS.queueWaitMs);
     pending.wait.unref();
-    queue.push(pending);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        const cancelled = new Error('The validation was cancelled');
-        const i = queue.indexOf(pending);
-        if (i >= 0) {
-          queue.splice(i, 1);
-          clearTimeout(pending.wait);
-          return reject(cancelled);
-        }
-        const slot = slots.find((s) => s.current?.job.id === pending.job.id);
-        if (slot) retire(slot, cancelled);
-      },
-      { once: true },
-    );
-    pump();
+    signal?.addEventListener('abort', () => cancel(pending), { once: true });
   });
 }
 
+/** Takes a job out of the queue, or stops the worker running it. */
+function cancel(pending: Pending) {
+  const cancelled = new Error('The validation was cancelled');
+  const i = queue.indexOf(pending);
+  if (i >= 0) {
+    queue.splice(i, 1);
+    clearTimeout(pending.wait);
+    return pending.reject(cancelled);
+  }
+  const slot = slots.find((s) => s.current?.job.id === pending.job.id);
+  if (slot) retire(slot, cancelled);
+}
+
 /** Places taken and jobs waiting or running, for tests and health checks. */
-export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length, stopping, threads: slots.length + stopping, jsonld: slots.filter((s) => s.current?.job.format === 'jsonld').length + stoppingJsonld });
+export const poolState = () => ({ admitted: admitted.jsonld + admitted.other, admittedJsonld: admitted.jsonld, queued: queue.length, running: slots.filter((s) => s.current).length, stopping, threads: slots.length + stopping, jsonld: slots.filter((s) => s.current?.job.format === 'jsonld').length + stoppingJsonld });

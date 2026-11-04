@@ -75,6 +75,7 @@ export default defineConfig({
             VALIDATE_RATE_LIMIT: '1000',
             VALIDATE_PER_CLIENT: '100',
             VALIDATE_QUEUE: '32',
+            VALIDATE_JSONLD_QUEUE: '32',
           },
           stdout: 'ignore',
           stderr: 'pipe',

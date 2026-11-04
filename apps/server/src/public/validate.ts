@@ -69,7 +69,7 @@ export const BODY_LIMITS = { ms: Number(process.env.VALIDATE_BODY_MS ?? 20_000) 
  * stopped; a client that goes away cancels that validation.
  */
 const admission = (req: Request, res: Response, next: NextFunction) => {
-  const place = admit(`ip:${ipKeyGenerator(clientIp(req))}`);
+  const place = admit(`ip:${ipKeyGenerator(clientIp(req))}`, declaredFormat(req));
   if (!place.ok) {
     cors(res);
     // Don't read what they're sending; close the connection after answering.

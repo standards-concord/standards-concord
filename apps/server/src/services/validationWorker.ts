@@ -1,10 +1,9 @@
 /**
- * Runs one validation at a time for validationPool.ts, off the server's main
- * thread, so a slow or memory-hungry input can be stopped without stopping the
+ * Runs one validation at a time for validationPool.ts, in a process of its
+ * own, so a slow or memory-hungry input can be stopped without stopping the
  * server. Parsed ontologies and their shapes are kept between jobs, keyed by a
  * hash of the ontology's Turtle.
  */
-import { parentPort } from 'node:worker_threads';
 import { checkTerms, classHierarchy, DataError, OntologyGraph, parseData, ShapesValidator, toShacl, type DataFormat } from '@concord/core';
 import type { Quad } from 'n3';
 
@@ -45,27 +44,56 @@ async function prepared(hash: string, ontology: string) {
   return hit;
 }
 
+/**
+ * The most text a reply may carry, in characters (summing every string in it).
+ * The report repeats IRIs and values for each result, so even data within
+ * parseData's limits can make a large one; past this the caller gets a 413
+ * instead of a reply the server would have to copy and hold.
+ */
+export const MAX_REPLY_CHARS = 16 * 1024 * 1024;
+
+/** The characters in every string of a JSON-like value, stopping once past `limit`. */
+function textSize(value: unknown, limit: number): number {
+  let size = 0;
+  const stack = [value];
+  while (stack.length && size <= limit) {
+    const v = stack.pop();
+    if (typeof v === 'string') size += v.length;
+    else if (v && typeof v === 'object') for (const x of Array.isArray(v) ? v : Object.values(v)) stack.push(x);
+  }
+  return size;
+}
+
 async function run(job: ValidationJob): Promise<ValidationOutcome> {
   const data = await parseData(job.text, job.format, { baseIRI: job.baseIRI, maxTriples: job.maxTriples });
   const { graph, validator, hierarchy } = await prepared(job.hash, job.ontology);
   const report = await validator.validate(data, hierarchy);
   const terms = checkTerms(graph, data);
+  const tooBig = () =>
+    new DataError(413, `The validation report is too large to send back (${report.results.length.toLocaleString('en')} results). Check the data in smaller parts.`);
+  let size = textSize([report.results, terms], MAX_REPLY_CHARS);
+  if (size > MAX_REPLY_CHARS) throw tooBig();
+  const turtle = job.turtle ? validator.reportTurtle(report, graph.prefixes) : undefined;
+  if (turtle !== undefined && (size += turtle.length) > MAX_REPLY_CHARS) throw tooBig();
   return {
     conforms: report.conforms,
     valid: report.conforms && !terms.some((t) => t.severity === 'error'),
     triples: data.length,
     results: report.results,
     terms,
-    ...(job.turtle ? { turtle: validator.reportTurtle(report, graph.prefixes) } : {}),
+    ...(turtle !== undefined ? { turtle } : {}),
   };
 }
 
-parentPort?.on('message', async (job: ValidationJob) => {
+// The server went away: so does this worker.
+process.on('disconnect', () => process.exit(0));
+
+process.on('message', async (job: ValidationJob) => {
   let reply: WorkerReply;
   try {
     reply = { id: job.id, ok: true, outcome: await run(job) };
   } catch (err) {
     reply = { id: job.id, ok: false, status: err instanceof DataError ? err.status : undefined, message: (err as Error).message };
   }
-  parentPort!.postMessage(reply);
+  process.send!(reply);
 });
