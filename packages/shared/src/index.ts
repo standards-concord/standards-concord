@@ -535,6 +535,26 @@ export interface ReleaseDetail extends Release {
 /* Agents (MCP) and agent reports                                            */
 /* ------------------------------------------------------------------------ */
 
+/** What the consent page shows when an MCP client asks to connect (GET /api/oauth/requests/:id). */
+export interface OAuthRequestInfo {
+  id: string;
+  clientName: string;
+  clientUri?: string;
+  logoUri?: string;
+  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code. */
+  redirectHost: string;
+  localRedirect: boolean;
+  resource?: string;
+}
+
+/** An app the person has connected with OAuth (Settings → Connected agents). */
+export interface OAuthConnection {
+  id: string;
+  clientName: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 export interface AgentToken {
   id: string;
   userId: string;
@@ -704,7 +724,11 @@ export interface SessionInfo {
  *  DELETE /api/agent-tokens/:id
  *  GET  /api/ontologies/:id/agent-reports            -> AgentReport[]
  *  POST /api/ontologies/:id/agent-reports {...}      -> AgentReport
- *  POST /mcp  (Streamable HTTP MCP endpoint, Bearer token)
+ *  GET  /api/oauth/requests/:id                     -> OAuthRequestInfo  (consent page for an MCP client)
+ *  POST /api/oauth/requests/:id/approve|deny        -> { redirect }
+ *  GET  /api/oauth/connections                       -> OAuthConnection[]
+ *  DELETE /api/oauth/connections/:id
+ *  POST /mcp  (Streamable HTTP MCP endpoint; OAuth 2.1 per the MCP authorization spec, or a personal token)
  *
  * Simulation (alpha walkthrough)
  *  POST /api/simulation/step {ontologyId}            -> { events: ActivityItem[] }  (simulated people act: comment, vote, add use case)

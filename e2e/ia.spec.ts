@@ -293,8 +293,8 @@ test.describe('progressive disclosure', () => {
     const nav = page.getByRole('navigation', { name: 'Ontology sections' });
     await expect(nav.getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
     const sub = page.getByRole('navigation', { name: 'Requirements pages' });
-    await expect(sub.getByRole('link')).toHaveText(['Use cases', 'Meetings', 'Agents']);
-    await sub.getByRole('link', { name: 'Agents' }).click();
+    await expect(sub.getByRole('link')).toHaveText(['Use cases', 'Meetings', 'Agent reports']);
+    await sub.getByRole('link', { name: 'Agent reports' }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/agents$`));
     await expect(nav.getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
   });
@@ -404,7 +404,7 @@ test.describe('progressive disclosure', () => {
   });
 
   test('a use case opens its first group, with the rest a click away', async ({ page, request }) => {
-    const ucs = (await (await request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; completeness: number; source: string; status: string }[];
+    const ucs = (await (await page.request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; completeness: number; source: string; status: string }[];
     const uc = [...ucs].sort((a, b) => b.completeness - a.completeness)[0];
     await page.goto(`/o/${demo.id}/use-cases/${uc.id}`);
     await settle(page);
@@ -441,7 +441,7 @@ test.describe('progressive disclosure', () => {
   });
 
   test('releases are grouped into in progress, latest and previous', async ({ page, request }) => {
-    const releases = (await (await request.get(`/api/ontologies/${demo.id}/releases`)).json()) as { status: string; version: string }[];
+    const releases = (await (await page.request.get(`/api/ontologies/${demo.id}/releases`)).json()) as { status: string; version: string }[];
     await page.goto(`/o/${demo.id}/releases`);
     await settle(page);
     await expectNoCrash(page);

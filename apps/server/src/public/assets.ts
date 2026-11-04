@@ -189,8 +189,10 @@ export const PAGE_SCRIPT = `
     panels.forEach(function(p){p.hidden=p.id!==id;});
   }
   function find(hash){
-    var id=hash.replace(/^#/,'');try{id=decodeURIComponent(id);}catch(e){}
-    return id?document.getElementById(id):null;
+    // As the browser does: the fragment as written first, then percent-decoded.
+    var id=hash.replace(/^#/,'');if(!id)return null;
+    var el=document.getElementById(id);if(el)return el;
+    try{return document.getElementById(decodeURIComponent(id));}catch(e){return null;}
   }
   function route(scroll){
     var el=find(location.hash);
@@ -214,7 +216,7 @@ export const PAGE_SCRIPT = `
   window.addEventListener('popstate',function(){route(false);});
   route();
 
-  var input=document.getElementById('term-filter');
+  var input=document.querySelector('input.term-filter');
   if(input){input.addEventListener('input',function(){
     var q=input.value.trim().toLowerCase();var any=false;
     document.querySelectorAll('[data-term]').forEach(function(c){var hit=!q||c.getAttribute('data-term').indexOf(q)>=0;c.hidden=!hit;if(hit)any=true;});
