@@ -32,6 +32,7 @@ import {
 import { ontologyStore } from '../services/ontologyStore.js';
 import { PERSONAS } from '../services/personas.js';
 import * as releases from '../services/releases.js';
+import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
@@ -182,7 +183,8 @@ export function apiRouter(): Router {
     const p = project(req);
     const ref = optStr(req.query.ref);
     if (!ref || ref === 'working') return void res.json(await workingValidation(p));
-    res.json(await validate(await ontologyStore.at(p, ref), { cqs: competencyTests(p.id), reasoner: 'owl' }));
+    const graph = await ontologyStore.at(p, ref);
+    res.json(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {

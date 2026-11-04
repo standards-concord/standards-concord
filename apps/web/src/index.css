@@ -25,6 +25,20 @@
   --danger: #c0262d;
   --danger-soft: #fdecec;
   --info-soft: #eef2ff;
+  /* Syntax highlighting (code views, SPARQL editor). */
+  --syn-keyword: #8a2bb9;
+  --syn-iri: #0b6b8f;
+  --syn-prefix: #6b7280;
+  --syn-name: #1f4fe0;
+  --syn-string: #157f3c;
+  --syn-number: #b45309;
+  --syn-variable: #c0262d;
+  --syn-comment: #8a8f98;
+  --syn-meta: #a35a00;
+  --syn-func: #0f766e;
+  --syn-tag: #1f4fe0;
+  --syn-attr: #8a2bb9;
+  --syn-selection: #d6e0ff;
   color-scheme: light;
 }
 
@@ -49,6 +63,19 @@
     --danger: #f2706f;
     --danger-soft: #331718;
     --info-soft: #1a1f33;
+    --syn-keyword: #d19bff;
+    --syn-iri: #5cc8e6;
+    --syn-prefix: #9aa0a8;
+    --syn-name: #8fa8ff;
+    --syn-string: #74d68f;
+    --syn-number: #f5b36b;
+    --syn-variable: #ff8d8c;
+    --syn-comment: #7d838c;
+    --syn-meta: #f0c674;
+    --syn-func: #5ed3c2;
+    --syn-tag: #8fa8ff;
+    --syn-attr: #d19bff;
+    --syn-selection: #2b3a66;
     color-scheme: dark;
   }
 }
@@ -200,3 +227,20 @@ body {
 .mic-live {
   animation: concord-pulse-ring 1.2s infinite;
 }
+
+/* Syntax token colours, shared by the CodeMirror views and static snippets. */
+.tok-keyword { color: var(--syn-keyword); font-weight: 600; }
+.tok-meta { color: var(--syn-meta); font-weight: 600; }
+.tok-iri { color: var(--syn-iri); }
+.tok-prefix { color: var(--syn-prefix); }
+.tok-name { color: var(--syn-name); }
+.tok-string { color: var(--syn-string); }
+.tok-number { color: var(--syn-number); }
+.tok-variable { color: var(--syn-variable); }
+.tok-func { color: var(--syn-func); }
+.tok-comment { color: var(--syn-comment); font-style: italic; }
+.tok-annotation { color: var(--syn-meta); }
+.tok-tag { color: var(--syn-tag); }
+.tok-attr { color: var(--syn-attr); }
+.tok-punct { color: var(--muted); }
+[data-language="yaml"] .tok-content { color: var(--syn-string); }

@@ -4,8 +4,9 @@ import { ROLE_INFO } from '@concord/shared';
 import { ChevronDown, ChevronRight, Crown, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
-import { roleLabel } from '../../lib/format';
-import { LevelBadge } from '../../components/badges';
+import { pct, plural, roleLabel } from '../../lib/format';
+import { LevelBadge, RoleChips } from '../../components/badges';
+import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, Input, Loading, Select, Toggle, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -106,6 +107,7 @@ function Members() {
   const [adding, setAdding] = useState('');
   const [transferTo, setTransferTo] = useState('');
   const [transferResult, setTransferResult] = useState<string>();
+  const [editing, setEditing] = useState<string>();
   const canManage = hasRole('owner', 'steward');
   const act = useAction(async (fn: () => Promise<unknown>) => {
     await fn();
@@ -120,8 +122,14 @@ function Members() {
   const candidates = (personas.data ?? []).filter((p) => !memberIds.has(p.id));
 
   return (
-    <Card>
-      <CardHeader icon={Users} title="Members and roles" subtitle="A person can hold several roles. Roles decide whose approvals and votes count." />
+    <CollapsibleCard
+      id="roles"
+      icon={Users}
+      title="Members and roles"
+      subtitle="A person can hold several roles. Roles decide whose approvals and votes count."
+      summary={`${plural(ontology.members.length, 'member')}: ${ontology.members.map((m) => m.user?.name ?? m.userId).join(', ')}`}
+      defaultOpen={window.location.hash === '#roles'}
+    >
       <div className="divide-y divide-line">
         {ontology.members.map((m) => (
           <div key={m.userId} className="flex flex-wrap items-start gap-3 px-5 py-3">
@@ -133,16 +141,25 @@ function Members() {
               <div className="text-xs text-muted">{m.user?.organisation ?? m.user?.email}</div>
             </div>
             <div className="flex flex-[2] flex-wrap items-center gap-1">
-              {ALL_ROLES.map((r) => (
-                <Chip
-                  key={r}
-                  active={m.roles.includes(r)}
-                  disabled={!canManage || act.pending}
-                  onClick={() => void act.run(() => api.setMemberRoles(id, m.userId, m.roles.includes(r) ? m.roles.filter((x) => x !== r) : [...m.roles, r]))}
-                >
-                  {roleLabel(r)}
-                </Chip>
-              ))}
+              {editing === m.userId ? (
+                ALL_ROLES.map((r) => (
+                  <Chip
+                    key={r}
+                    active={m.roles.includes(r)}
+                    disabled={!canManage || act.pending}
+                    onClick={() => void act.run(() => api.setMemberRoles(id, m.userId, m.roles.includes(r) ? m.roles.filter((x) => x !== r) : [...m.roles, r]))}
+                  >
+                    {roleLabel(r)}
+                  </Chip>
+                ))
+              ) : (
+                <RoleChips roles={m.roles} />
+              )}
+              {canManage && (
+                <button className="ml-1 text-xs font-medium text-accent hover:underline" onClick={() => setEditing(editing === m.userId ? undefined : m.userId)}>
+                  {editing === m.userId ? 'Done' : 'Edit roles'}
+                </button>
+              )}
             </div>
             {canManage && !ontology.ownerIds.includes(m.userId) && (
               <button className="p-1 text-muted hover:text-danger" title="Remove member" onClick={() => confirm(`Remove ${m.user?.name}?`) && void act.run(() => api.removeMember(id, m.userId))}>
@@ -179,8 +196,7 @@ function Members() {
         </div>
       )}
       <InlineError error={act.error || personas.error} />
-      <div className="border-t border-line px-5 py-4">
-        <div className="mb-2 text-sm font-medium">Transfer ownership</div>
+      <Disclosure className="border-t border-line px-5 py-4" title="Transfer ownership">
         <p className="mb-3 text-xs text-muted">
           Under this policy: {ontology.governance.ownership.transfer === 'owner-decides' ? 'the owner decides' : ontology.governance.ownership.transfer === 'member-vote' ? 'voting members decide by vote' : 'ODI must approve the transfer'}.
         </p>
@@ -202,7 +218,41 @@ function Members() {
         {!hasRole('owner') && <p className="mt-2 text-xs text-muted">Only an owner can start a transfer.</p>}
         {transferResult && <p className="mt-2 text-sm text-ok">{transferResult}</p>}
         <InlineError error={transfer.error} />
-      </div>
+      </Disclosure>
+    </CollapsibleCard>
+  );
+}
+
+const OWNERSHIP: Record<GovernancePolicy['ownership']['model'], string> = { single: 'Single owner', group: 'Group of owners' };
+const ODI: Record<GovernancePolicy['odiPrivilege'], string> = { none: 'no ODI privilege', veto: 'ODI can veto', 'final-say': 'ODI has the final say' };
+
+/** One plain-language line per rule, e.g. "2 sign-offs from Steward or Editor · 7 days open for comment". */
+export function ruleSummary(r: ApprovalRule): string {
+  const parts: string[] = [];
+  parts.push(r.minApprovals > 0 ? `${plural(r.minApprovals, 'sign-off')} from ${r.approverRoles.map(roleLabel).join(' or ') || 'anyone'}` : 'no sign-off needed');
+  if (r.reviewPeriodDays > 0) parts.push(`${plural(r.reviewPeriodDays, 'day')} open for comment`);
+  if (r.lazyConsensus) parts.push('accepted if nobody objects');
+  if (r.vote) parts.push(`a vote (${pct(r.vote.threshold)} in favour, ${pct(r.vote.quorum)} turnout)`);
+  if (r.vetoRoles.length) parts.push(`${r.vetoRoles.map(roleLabel).join(' or ')} can block it`);
+  if (r.autoMerge) parts.push('merged automatically');
+  return parts.join(' · ');
+}
+
+function PolicySummary({ policy }: { policy: GovernancePolicy }) {
+  return (
+    <Card className="p-5">
+      <div className="text-xs font-semibold tracking-wide text-muted uppercase">In short</div>
+      <p className="mt-1 text-sm">
+        <strong className="font-medium">{policy.name}.</strong> <span className="text-muted">{policy.description}</span>
+      </p>
+      <ul className="mt-3 space-y-1.5 text-sm" aria-label="What each kind of change needs">
+        {LEVELS.map((l) => (
+          <li key={l} className="flex items-start gap-2">
+            <LevelBadge level={l} className="mt-0.5 w-14 justify-center" />
+            <span>{ruleSummary(policy.changes[l])}</span>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }
@@ -211,7 +261,6 @@ export function GovernanceTab() {
   const { id, ontology, hasRole, reload } = useOntology();
   const templates = useAsync(() => api.governanceTemplates(), []);
   const [policy, setPolicy] = useState<GovernancePolicy>(ontology.governance);
-  const [showReleases, setShowReleases] = useState(false);
   const [saved, setSaved] = useState(false);
   useEffect(() => setPolicy(ontology.governance), [ontology.governance]);
   const dirty = useMemo(() => JSON.stringify(policy) !== JSON.stringify(ontology.governance), [policy, ontology.governance]);
@@ -225,6 +274,7 @@ export function GovernanceTab() {
   useEffect(() => {
     if (window.location.hash === '#roles') document.getElementById('roles')?.scrollIntoView({ behavior: 'smooth' });
   }, []);
+
   const edit = (p: Partial<GovernancePolicy>) => setPolicy((x) => ({ ...x, ...p, templateId: p.templateId ?? 'custom', name: p.name ?? (p.templateId ? x.name : x.templateId === 'custom' ? x.name : `${x.name} (customised)`) }));
 
   return (
@@ -249,8 +299,9 @@ export function GovernanceTab() {
       {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can view the policy; only owners and stewards can change it.</p>}
       <InlineError error={save.error} />
 
-      <Card>
-        <CardHeader icon={Scale} title="Policy template" subtitle="Start from a template, then fine-tune below." />
+      <PolicySummary policy={policy} />
+
+      <CollapsibleCard icon={Scale} title="Policy template" subtitle="Start from a template, then fine-tune the rules below." summary={<>Using <strong className="font-medium">{policy.name}</strong></>}>
         <div className="p-5">
           {templates.error && !templates.data ? (
             <ErrorCard error={templates.error} onRetry={templates.reload} />
@@ -281,73 +332,67 @@ export function GovernanceTab() {
             </div>
           )}
         </div>
-      </Card>
+      </CollapsibleCard>
 
-      <Card>
-        <CardHeader title="Change requests" subtitle="Rules by semantic version level. Patch = editorial, minor = backwards-compatible additions, major = breaking." />
+      <CollapsibleCard title="Change request rules" subtitle="Rules by semantic version level. Patch = editorial, minor = backwards-compatible additions, major = breaking.">
         <div className="p-5">
           <RulesTable rules={policy.changes} onChange={(changes) => edit({ changes })} disabled={!canEdit} />
         </div>
-      </Card>
+      </CollapsibleCard>
 
-      <Card>
-        <button className="flex w-full items-center justify-between px-5 py-4 text-left" onClick={() => setShowReleases((s) => !s)}>
+      <CollapsibleCard title="Release rules" subtitle="How a new version is approved, by release level.">
+        <div className="p-5">
+          <RulesTable rules={policy.releases} onChange={(releases) => edit({ releases })} disabled={!canEdit} />
+        </div>
+      </CollapsibleCard>
+
+      <CollapsibleCard
+        title="Ownership, ODI and automation"
+        subtitle="Who owns the ontology, what the ODI can do, and which steps run automatically."
+        summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${[policy.automation.autoTriage, policy.automation.autoDraftRelease, policy.automation.reminders, policy.requireValidation].filter(Boolean).length} of 4 automations on`}
+      >
+        <div className="grid md:grid-cols-2 md:divide-x divide-line">
           <div>
-            <div className="text-sm font-semibold">Releases</div>
-            <div className="text-xs text-muted">How a new version is approved, by release level.</div>
+            <h4 className="px-5 pt-4 text-sm font-semibold">Ownership and ODI</h4>
+            <div className="space-y-4 p-5 text-sm">
+              <label className="block">
+                <span className="mb-1 block font-medium">Ownership model</span>
+                <Select value={policy.ownership.model} disabled={!canEdit} onChange={(e) => edit({ ownership: { ...policy.ownership, model: e.target.value as 'single' | 'group' } })}>
+                  <option value="single">Single owner</option>
+                  <option value="group">Group of owners</option>
+                </Select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block font-medium">Ownership transfer</span>
+                <Select value={policy.ownership.transfer} disabled={!canEdit} onChange={(e) => edit({ ownership: { ...policy.ownership, transfer: e.target.value as GovernancePolicy['ownership']['transfer'] } })}>
+                  <option value="owner-decides">The owner decides</option>
+                  <option value="member-vote">Voting members vote</option>
+                  <option value="odi-approval">ODI must approve</option>
+                </Select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block font-medium">ODI privilege</span>
+                <Select value={policy.odiPrivilege} disabled={!canEdit} onChange={(e) => edit({ odiPrivilege: e.target.value as GovernancePolicy['odiPrivilege'] })}>
+                  <option value="none">None — ODI participates like anyone else</option>
+                  <option value="veto">Veto — ODI oversight can block any change</option>
+                  <option value="final-say">Final say — ODI oversight decides</option>
+                </Select>
+              </label>
+            </div>
           </div>
-          {showReleases ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-        </button>
-        {showReleases && (
-          <div className="border-t border-line p-5">
-            <RulesTable rules={policy.releases} onChange={(releases) => edit({ releases })} disabled={!canEdit} />
+          <div>
+            <h4 className="px-5 pt-4 text-sm font-semibold">Automation</h4>
+            <div className="space-y-4 p-5">
+              <Toggle checked={policy.automation.autoTriage} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoTriage: v } })} label="AI triage: classify and validate every request on arrival" />
+              <Toggle checked={policy.automation.autoDraftRelease} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoDraftRelease: v } })} label="Draft a release automatically when approved changes accumulate" />
+              <Toggle checked={policy.automation.reminders} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, reminders: v } })} label="Nudge reviewers and voters when actions are pending" />
+              <Toggle checked={policy.requireValidation} disabled={!canEdit} onChange={(v) => edit({ requireValidation: v })} label="Changes that fail validation can never be approved" />
+            </div>
           </div>
-        )}
-      </Card>
+        </div>
+      </CollapsibleCard>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader title="Ownership and ODI" />
-          <div className="space-y-4 p-5 text-sm">
-            <label className="block">
-              <span className="mb-1 block font-medium">Ownership model</span>
-              <Select value={policy.ownership.model} disabled={!canEdit} onChange={(e) => edit({ ownership: { ...policy.ownership, model: e.target.value as 'single' | 'group' } })}>
-                <option value="single">Single owner</option>
-                <option value="group">Group of owners</option>
-              </Select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block font-medium">Ownership transfer</span>
-              <Select value={policy.ownership.transfer} disabled={!canEdit} onChange={(e) => edit({ ownership: { ...policy.ownership, transfer: e.target.value as GovernancePolicy['ownership']['transfer'] } })}>
-                <option value="owner-decides">The owner decides</option>
-                <option value="member-vote">Voting members vote</option>
-                <option value="odi-approval">ODI must approve</option>
-              </Select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block font-medium">ODI privilege</span>
-              <Select value={policy.odiPrivilege} disabled={!canEdit} onChange={(e) => edit({ odiPrivilege: e.target.value as GovernancePolicy['odiPrivilege'] })}>
-                <option value="none">None — ODI participates like anyone else</option>
-                <option value="veto">Veto — ODI oversight can block any change</option>
-                <option value="final-say">Final say — ODI oversight decides</option>
-              </Select>
-            </label>
-          </div>
-        </Card>
-        <Card>
-          <CardHeader title="Automation" />
-          <div className="space-y-4 p-5">
-            <Toggle checked={policy.automation.autoTriage} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoTriage: v } })} label="AI triage: classify and validate every request on arrival" />
-            <Toggle checked={policy.automation.autoDraftRelease} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoDraftRelease: v } })} label="Draft a release automatically when approved changes accumulate" />
-            <Toggle checked={policy.automation.reminders} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, reminders: v } })} label="Nudge reviewers and voters when actions are pending" />
-            <Toggle checked={policy.requireValidation} disabled={!canEdit} onChange={(v) => edit({ requireValidation: v })} label="Changes that fail validation can never be approved" />
-          </div>
-        </Card>
-      </div>
-
-      <div id="roles">
-        <Members />
-      </div>
+      <Members />
     </div>
   );
 }
