@@ -5,7 +5,7 @@ import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
-import { get, HttpError, list, put, transaction } from '../db.js';
+import { get, HttpError, list, put, remove, transaction } from '../db.js';
 
 /**
  * Each ontology is a git repository. The working draft is `ontology.ttl` on
@@ -20,14 +20,16 @@ import { get, HttpError, list, put, transaction } from '../db.js';
  * that stalled can't overwrite a newer draft, and a merge can't land unless its
  * change request is still exactly as it checked it.
  *
- * The database is the only source of truth; git is a projection of it. Every
- * commit is pinned by a ref (refs/concord/commits/<time>-<sha>) before the
- * pointer can name it, so git gc never removes it; pins are dropped once the
- * branch includes them, or straight away if the advance is refused. `sync`
- * (idempotent; run at start-up, after every advance, and by every read that
- * finds git out of line) brings the branch, the release tags (from the
- * published releases' records) and the checked-out files in line with the
- * database. Reads of content go to git objects, never to the checked-out files.
+ * The database is the only source of truth; git is a projection of it.
+ * Every commit is pinned by a ref of its own (refs/concord/commits/<sha>-<writer>)
+ * before the pointer can name it, so git gc never removes it. A pin is dropped
+ * by the writer that made it if its advance is refused, and otherwise only once
+ * it is provably unneeded: its commit is an ancestor of the draft the database
+ * names (whose own pin is kept). `sync` (idempotent; run at start-up, after
+ * every advance, and by every read that finds git out of line) brings the
+ * branch, the release tags (from the published releases' records) and the
+ * checked-out files in line with the database. Reads of content go to git
+ * objects, never to the checked-out files.
  */
 const FILE = 'ontology.ttl';
 
@@ -62,7 +64,39 @@ function git(dir: string, args: string[], env: Record<string, string> = {}, opts
 const graphCache = new Map<string, OntologyGraph>();
 const headKey = (project: Pick<OntologyProject, 'slug'>) => `draft-head:${project.slug}`;
 const PIN = 'refs/concord/commits/';
-const PIN_GRACE_MS = 10 * 60 * 1000;
+const syncKey = (project: Pick<OntologyProject, 'slug'>) => `git-sync:${project.slug}`;
+/** A sync that hasn't shown it is alive for this long is presumed dead, and its lease can be taken over. */
+export const SYNC_LEASE_MS = 30_000;
+
+/**
+ * Who is syncing a repository: a lease in the database, so taking it, renewing
+ * it and giving it up are each atomic across processes. A sync checks it still
+ * holds the lease before each change it makes to git, and only ever gives up
+ * its own, so one that was presumed dead and replaced stops instead of undoing
+ * its successor's work, and can't release its successor's lease.
+ */
+const syncLease = {
+  take(project: Pick<OntologyProject, 'slug'>, token: string): boolean {
+    return transaction(() => {
+      const held = get<{ token: string; until: number }>('kv', syncKey(project));
+      if (held && held.until > Date.now()) return false;
+      put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
+      return true;
+    });
+  },
+  /** Throws if this sync has lost the lease; otherwise renews it. */
+  renew(project: Pick<OntologyProject, 'slug'>, token: string): void {
+    transaction(() => {
+      if (get<{ token: string }>('kv', syncKey(project))?.token !== token) throw new Error('another sync took over');
+      put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
+    });
+  },
+  give(project: Pick<OntologyProject, 'slug'>, token: string): void {
+    transaction(() => {
+      if (get<{ token: string }>('kv', syncKey(project))?.token === token) remove('kv', syncKey(project));
+    });
+  },
+};
 
 /** The tags git should have: one per published release, on its recorded commit. */
 function releaseTags(project: Pick<OntologyProject, 'slug'>): [string, string, string][] {
@@ -99,7 +133,16 @@ function branchSha(dir: string): string | undefined {
   }
 }
 const stampFile = (dir: string) => path.join(dir, '.git', 'concord-synced');
-const syncLockFile = (dir: string) => path.join(dir, '.git', 'concord-sync.lock');
+
+/** Whether the index and checked-out files are exactly `commit`'s (git compares them; the stamp alone can't show it). */
+function checkedOut(dir: string, commit: string): boolean {
+  try {
+    git(dir, ['diff-index', '--quiet', commit, '--']);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** A commit on `base` that writes `files` (repository path → content, or null to delete), or `base` itself if nothing changes. Moves nothing. */
 function buildCommit(dir: string, base: string, files: Record<string, string | null>, message: string, author: CommitAuthor): string {
@@ -171,8 +214,16 @@ export const ontologyStore = {
    */
   advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => void): void {
     const dir = repoDir(project);
-    // Pinned before the database can point at it; unpinned again if it doesn't.
-    const pin = `${PIN}${Date.now()}-${commit}`;
+    // The draft only ever moves forward, which is what lets pins of its ancestors be dropped (see prunePins).
+    if (commit !== base) {
+      try {
+        git(dir, ['merge-base', '--is-ancestor', base, commit]);
+      } catch {
+        throw new Error(`${commit} does not build on ${base}`);
+      }
+    }
+    // Pinned (by a ref only this writer uses) before the database can point at it; unpinned again if it doesn't.
+    const pin = `${PIN}${commit}-${randomUUID()}`;
     git(dir, ['update-ref', pin, commit]);
     try {
       transaction(() => {
@@ -184,7 +235,7 @@ export const ontologyStore = {
       try {
         git(dir, ['update-ref', '-d', pin]);
       } catch {
-        /* pruned later */
+        /* left over: harmless */
       }
       throw err;
     }
@@ -197,10 +248,11 @@ export const ontologyStore = {
   },
 
   /**
-   * Brings git in line with the database if it isn't: checks the branch and
-   * the record of the last completed sync against the database (not anything
-   * cached in this process), so it notices another process's half-done or
-   * older sync. Every read calls it.
+   * Brings git in line with the database if it isn't: checks the branch, the
+   * tags, the record of the last completed sync and the checked-out files
+   * themselves against the database (not anything cached in this process), so
+   * it notices another process's half-done, older or overtaken sync. Every
+   * read calls it.
    */
   ensureSynced(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
@@ -212,7 +264,7 @@ export const ontologyStore = {
       /* never synced */
     }
     const tags = releaseTags(project);
-    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`))) return;
+    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`)) && checkedOut(dir, head)) return;
     try {
       this.sync(project);
     } catch (err) {
@@ -223,26 +275,22 @@ export const ontologyStore = {
   /**
    * Idempotently brings the git branch, release tags and checked-out files in
    * line with the database. Safe to run any time, from any process: syncs run
-   * one at a time and each reads the database afresh, so an older one can't
-   * undo a newer one, and the record of the last completed sync says exactly
-   * what it synced.
+   * one at a time (see `syncLease`) and each reads the database afresh, so an
+   * older one can't undo a newer one, and the record of the last completed
+   * sync says exactly what it synced. Whatever a sync that was overtaken
+   * writes anyway is caught by the next read (see `ensureSynced`).
    */
   sync(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
-    const lock = syncLockFile(dir);
-    try {
-      fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      // Someone else is syncing (from a fresh read, so they will finish the job), unless they died doing it.
-      if (Date.now() - fs.statSync(lock).mtimeMs < 30_000) return;
-      fs.rmSync(lock, { force: true });
-      fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
-    }
+    const token = randomUUID();
+    // Someone else is syncing, from a fresh read, so they will finish the job (if they died, their lease lapses).
+    if (!syncLease.take(project, token)) return;
+    const owner = () => syncLease.renew(project, token);
     try {
       fs.rmSync(stampFile(dir), { force: true });
       const target = this.head(project);
       const tags = releaseTags(project);
+      owner();
       if (git(dir, ['rev-parse', 'HEAD']) !== target) git(dir, ['update-ref', '-m', 'concord: sync working draft', 'HEAD', target]);
       for (const [name, commit, message] of tags) {
         let at = '';
@@ -251,24 +299,36 @@ export const ontologyStore = {
         } catch {
           /* missing */
         }
-        if (at !== commit) git(dir, ['tag', '-f', '-a', name, '-m', message, commit]);
+        if (at !== commit) {
+          owner();
+          git(dir, ['tag', '-f', '-a', name, '-m', message, commit]);
+        }
       }
       // Checked-out files: reset the index and files to the commit (not just compare refs).
+      owner();
       this.checkout(project, target);
-      this.prunePins(project, target);
+      this.prunePins(project);
+      owner();
       fs.writeFileSync(stampFile(dir), `${expectedState(target, tags)}\n`);
     } finally {
-      fs.rmSync(lock, { force: true });
+      syncLease.give(project, token);
     }
   },
 
-  /** Drops pins the branch now includes, and pins of advances that never happened (after a grace period for ones in flight). */
-  prunePins(project: Pick<OntologyProject, 'slug'>, branch: string): void {
+  /**
+   * Drops the pins that are provably unneeded: those on strict ancestors of the
+   * draft the database names now. The draft's own pins are kept, so it (and
+   * through it every ancestor) stays reachable whatever any branch says. The
+   * database's draft only ever moves to descendants, so this holds however
+   * stale the caller is. Pins of commits that never became the draft are left
+   * to the writer that made them, which may still be about to use them.
+   */
+  prunePins(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
-    const merged = new Set(git(dir, ['for-each-ref', `--merged=${branch}`, '--format=%(refname)', PIN]).split('\n').filter(Boolean));
-    for (const ref of git(dir, ['for-each-ref', '--format=%(refname)', PIN]).split('\n').filter(Boolean)) {
-      const at = Number(ref.slice(PIN.length).split('-')[0]);
-      if (merged.has(ref) || !(Date.now() - at < PIN_GRACE_MS)) git(dir, ['update-ref', '-d', ref]);
+    const head = this.head(project);
+    for (const line of git(dir, ['for-each-ref', `--merged=${head}`, '--format=%(objectname) %(refname)', PIN]).split('\n').filter(Boolean)) {
+      const [sha, ref] = line.split(' ');
+      if (sha !== head) git(dir, ['update-ref', '-d', ref, sha]);
     }
   },
 
