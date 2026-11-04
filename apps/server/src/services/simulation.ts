@@ -11,7 +11,7 @@ import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
-import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasCurrentReview, hasCurrentVote, merge, submit, tick as crTick } from './changeRequests.js';
+import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasCurrentVote, hasRespondedThisRound, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -297,8 +297,9 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
         // The reaction is to the version read above: if it changed while the persona thought, skip it.
         if (await decided(() => addVote(cr, u, r.vote, r.comment, cr.round ?? 1))) actions++;
       } else {
-        // A review from an earlier round (before a resubmission or new edits) no longer counts, so ask again.
-        if (hasCurrentReview(cr, u.id) || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
+        // A review from an earlier round (before a resubmission or new edits) no longer counts, so ask again;
+        // but anyone who has already said something this round, a comment included, isn't asked twice.
+        if (hasRespondedThisRound(cr, u.id) || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
         const r = await personaReaction(p, cr, compact);
         if (await decided(() => addReview(cr, u, r.decision, r.comment, cr.round ?? 1))) actions++;
       }

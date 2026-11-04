@@ -43,7 +43,7 @@ async function setUp(minor: Minor = {}) {
     title: 'Add shifts',
     description: 'Coordinators plan in shifts.',
     kind: 'feature',
-    ops: [{ op: 'addClass', localName: `Shift${n}`, label: `shift ${n}`, definition: 'A period of time a volunteer is scheduled to work.' }],
+    ops: [{ op: 'addClass', localName: `Shift${n}`, label: `shift ${n}`, definition: 'A period of time a volunteer is scheduled to work.', altLabels: ['rota slot'] }],
   });
   expect(cr.status).toBe(201);
   expect(cr.body.classification.level).toBe('minor');
@@ -120,6 +120,28 @@ describe('review rounds', () => {
     }
   });
 
+  // Edits written differently but with the same effect (a duplicate alias, extra whitespace, an empty
+  // optional list, a field the edit ignores) used to count as new edits and erase the ballot.
+  it('edits with the same effect keep the ballot, "no" votes included', async () => {
+    const { author, a, crId, ops } = await setUp({ minApprovals: 0, vote: { voterRoles: ['member'], threshold: 0.75, quorum: 0.5, durationDays: 5 } });
+    expect((await vote(a, crId, 'no')).status).toBe(200);
+    const op = ops[0];
+    for (const same of [
+      { ...op, altLabels: ['rota slot', 'rota slot'] },
+      { ...op, label: `  ${op.label}  ` },
+      { ...op, subClassOf: [] },
+      { ...op, ignoredByTheEdit: 'anything' },
+    ]) {
+      const res = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [same] });
+      expect(res.status).toBe(200);
+      expect(res.body.editsVersion, JSON.stringify(same)).toBe(1);
+      expect(res.body.governance.vote.no).toBe(1);
+    }
+    // A real change does start again.
+    const changed = (await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...op, altLabels: ['rota slot', 'duty'] }] })).body;
+    expect(changed.editsVersion).toBe(2);
+  });
+
   // A resubmission of the same edits used to erase the ballot, "no" votes included.
   it('votes stay with the edits they were cast on: an unchanged resubmission keeps the ballot', async () => {
     const { author, a, b, crId } = await setUp({ minApprovals: 0, vote: { voterRoles: ['member'], threshold: 0.5, quorum: 0.5, durationDays: 5 } });
@@ -173,6 +195,39 @@ describe('review rounds', () => {
     // Comments don't need it.
     expect((await b.agent.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'comment', comment: 'Looking now.' })).status).toBe(200);
     expect((await review(b, crId, 'approve', { round: 2 })).body.status).toBe('approved');
+  });
+
+  // A merge that failed because the draft had moved on said earlier approvals no longer counted, but they
+  // still did, so a later re-check could return it to Approved without anyone reviewing it again.
+  it('a merge that fails on the latest draft really sets the approvals aside', async () => {
+    const first = await setUp({ autoMerge: false });
+    expect((await review(first.b, first.crId, 'approve')).body.status).toBe('approved');
+    // A second request adding the same class to the same ontology, approved too.
+    const { ops } = first;
+    const dup = await first.author.agent.post(`/api/ontologies/${(await get(first.owner, first.crId)).ontologyId}/change-requests`).send({ title: 'Add shifts again', description: '', kind: 'feature', ops, submit: true });
+    expect(dup.status).toBe(201);
+    expect((await review(first.b, dup.body.id, 'approve')).body.status).toBe('approved');
+    expect((await first.owner.agent.post(`/api/change-requests/${first.crId}/merge`)).body.status).toBe('merged');
+    // The second no longer applies on the draft the first merged into.
+    const failed = await first.owner.agent.post(`/api/change-requests/${dup.body.id}/merge`);
+    const after = await get(first.owner, dup.body.id);
+    expect(failed.status === 409 || after.status === 'needs-work').toBe(true);
+    expect(after.status).not.toBe('approved');
+    expect(after.governance.approvals).toBe(0);
+    expect(after.reviews.find((r: { decision: string }) => r.decision === 'approve').stale).toBe(true);
+    // Something prompting a re-check (a comment) doesn't bring the approval back.
+    expect((await review(first.a, dup.body.id, 'comment', { comment: 'Hmm.' })).body.status).not.toBe('approved');
+  });
+
+  // The simulated reviewers used to post the same comment again in the same round, because only
+  // reviews that count were checked.
+  it('a comment counts as having responded in this round, but not as a review that counts', async () => {
+    const { b, crId } = await setUp();
+    await review(b, crId, 'comment', { comment: 'Reading it now.' });
+    const crs = await import('../src/services/changeRequests.js');
+    const cr = crs.getCR(crId);
+    expect(crs.hasCurrentReview(cr, b.id)).toBe(false);
+    expect(crs.hasRespondedThisRound(cr, b.id)).toBe(true);
   });
 
   // A veto recorded on an approved request left it approved, and it could still be merged.

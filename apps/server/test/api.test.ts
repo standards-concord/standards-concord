@@ -17,6 +17,41 @@ async function login(role: string, name = `Tester ${role}`): Promise<Agent> {
   return agent;
 }
 
+/**
+ * Approve a request for real, as its policy asks: approvals from people holding an approver role (not
+ * its writers) in its current round, its review period over, and, if the rule needs a vote, a "yes"
+ * from every eligible member. Then it is stored as approved, as advance() would. `as` records a level
+ * it was approved as, for tests where the request has since grown.
+ */
+async function approveForReal(id: string, { as, confirmation = false }: { as?: 'patch' | 'minor' | 'major'; confirmation?: boolean } = {}) {
+  const crsMod = await import('../src/services/changeRequests.js');
+  const { put } = await import('../src/db.js');
+  const { newId } = await import('../src/ids.js');
+  const { members } = await import('../src/services/ontologies.js');
+  const { getUser } = await import('../src/services/users.js');
+  const { effectiveRule } = await import('../src/services/governance.js');
+  const { getProject } = await import('../src/services/ontologies.js');
+  const cr = getCR(id);
+  // The rule of the level it is approved as.
+  const rule = as ? effectiveRule(getProject(cr.ontologyId).governance, as, 'change') : crsMod.governanceFor(cr).rule;
+  const role = rule.approverRoles[0];
+  let seq = cr.decisionSeq ?? 0;
+  for (let i = 0; i < rule.minApprovals; i++) {
+    const agent = await login(role, `Approver ${i + 1} of #${cr.number}`);
+    const user = getUser((await agent.get('/api/session')).body.user.id)!;
+    put('reviews', { id: newId('rev'), changeRequestId: id, userId: user.id, roles: [role], decision: 'approve', at: '2000-01-02T00:00:00Z', round: cr.round ?? 1, seq: ++seq }, id);
+  }
+  if (rule.vote)
+    for (const m of members(cr.ontologyId).filter((x) => x.roles.some((r) => rule.vote!.voterRoles.includes(r))))
+      put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: m.userId, roles: m.roles, choice: 'yes', at: '2000-01-03T00:00:00Z', round: cr.round ?? 1, editsVersion: cr.editsVersion ?? 1, seq: ++seq }, id);
+  const latest = getCR(id);
+  put(
+    'changeRequests',
+    { ...latest, decisionSeq: seq, status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: as ?? latest.classification?.level ?? 'minor', confirmation, voted: !!rule.vote } },
+    latest.ontologyId,
+  );
+}
+
 /** The review round a decision has to name: the round of the version being decided on (read from the store). */
 function roundOf(_agent: Agent, id: string): number {
   return getCR(id).round ?? 1;
@@ -691,7 +726,7 @@ describe('inline term edits', () => {
     const editor = await login('editor', 'Editor Mid-merge');
     const before = (await author.get(termPath(LOC))).body;
     const created = await edit(author, { termIri: LOC, set: { comment: 'Reviewed comment.' }, previous: { comment: before.comment ?? '' } });
-    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+    await approveForReal(created.body.id);
 
     const held = gate();
     const original = ontologyStore.working;
@@ -738,11 +773,12 @@ describe('inline term edits', () => {
     // Approved as a patch, but a major change on today's draft: back to review, nothing merged.
     const now = (await contributor.get(termPath(ORG))).body.definition;
     const grew = await edit(contributor, { termIri: ORG, set: { definition: 'An employment shift.' }, previous: { definition: now }, definitionIntent: 'new-meaning' });
-    put('changeRequests', { ...crsMod.getCR(grew.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+    await approveForReal(grew.body.id, { as: 'patch' });
     const back = await crsMod.merge(crsMod.getCR(grew.body.id), stewardUser);
     expect(back.status).not.toBe('merged');
     expect(back.status).not.toBe('approved');
-    expect(JSON.stringify(back.timeline)).toMatch(/back in review: on the latest draft this is a major change/);
+    // Approved by the patch rule, it no longer holds under the major rule: a vote opens, or it goes back to review.
+    expect(JSON.stringify(back.timeline)).toMatch(/vote opened|back in review/);
     expect((await contributor.get(termPath(ORG))).body.definition).toBe(now);
   });
 
@@ -761,7 +797,7 @@ describe('inline term edits', () => {
       const TC = `${VOL}TimeCommitment`;
       const one = await edit(a, { termIri: TC, set: { examples: ['two hours a week'] }, submit: true });
       expect((await editor.post(`/api/change-requests/${one.body.id}/retriage`)).status).toBe(200); // the editor's one allowance
-      put('changeRequests', { ...crsMod.getCR(one.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+      await approveForReal(one.body.id);
       // A manual merge re-validates the change, so it needs budget too.
       expect((await editor.post(`/api/change-requests/${one.body.id}/merge`)).status).toBe(429);
       expect(crsMod.getCR(one.body.id).status).toBe('approved');
@@ -802,17 +838,17 @@ describe('inline term edits', () => {
     const steward = await userOf(await login('steward', 'Steward Combined'));
     const create = (title: string, ops: object[]) => editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title, description: '', kind: 'change', ops });
     const approve = (r: { body: { id: string; classification: { level: 'patch' | 'minor' | 'major' } } }) =>
-      put('changeRequests', { ...crsMod.getCR(r.body.id), status: 'approved', approvedAs: { level: r.body.classification.level, confirmation: false, voted: true } }, demoId);
+      approveForReal(r.body.id);
     const helper = await create('Add helper', [{ op: 'addClass', localName: 'Helper', label: 'helper', definition: 'An agent that helps out with a volunteering opportunity.', subClassOf: [`${VOL}Agent`] }]);
-    approve(helper);
+    await approve(helper);
     expect((await crsMod.merge(crsMod.getCR(helper.body.id), steward)).status).toBe('merged');
     // Each passes on its own; together Helper would be unsatisfiable.
     const sub = await create('Helpers are people', [{ op: 'setSuperClasses', iri: HELPER, superClasses: [PERSON] }]);
     const disjoint = await create('Helpers are not people', [{ op: 'addDisjointness', classes: [HELPER, PERSON] }]);
     expect(sub.body.validation.passed).toBe(true);
     expect(disjoint.body.validation.passed).toBe(true);
-    approve(sub);
-    approve(disjoint);
+    await approve(sub);
+    await approve(disjoint);
     const { ontologyStore } = await import('../src/services/ontologyStore.js');
     const { getProject } = await import('../src/services/ontologies.js');
     const head = async () => ontologyStore.head(getProject(demoId));
@@ -890,7 +926,7 @@ describe('inline term edits', () => {
     };
     for (const [what, fn] of Object.entries(meddle)) {
       const created = await edit(contributor, { termIri: `${VOL}Role`, set: { examples: [`fenced ${what}`] }, submit: true });
-      put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+      await approveForReal(created.body.id);
       const head = ontologyStore.head(getProject(demoId));
       const original = ontologyStore.commitWorking;
       const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async function (this: typeof ontologyStore, ...args) {
@@ -914,7 +950,7 @@ describe('inline term edits', () => {
     const { put } = await import('../src/db.js');
     const contributor = await login('contributor', 'Contributor Flaky');
     const created = await edit(contributor, { termIri: `${VOL}Role`, set: { comment: 'Checked or not at all.' }, submit: true });
-    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+    await approveForReal(created.body.id);
     const head = ontologyStore.head(getProject(demoId));
     const spy = vi.spyOn(ontologyStore, 'working').mockRejectedValueOnce(new Error('transient read failure'));
     try {
@@ -961,7 +997,7 @@ describe('inline term edits', () => {
     const stewardUser = await userOf(steward);
     const contributor = await login('contributor', 'Contributor Release');
     const created = await edit(contributor, { termIri: `${VOL}Agent`, set: { comment: 'Merged while the release waited.' } });
-    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+    await approveForReal(created.body.id);
     await steward.post(`/api/ontologies/${demoId}/releases`).send({});
     const pending = list<{ id: string; status: string; ontologyId: string }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
     // Treated as ready to publish (its vote, if it needs one, is beside the point here).
@@ -1006,7 +1042,7 @@ describe('inline term edits', () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { put } = await import('../src/db.js');
     const created = await edit(await login('contributor', who), { termIri: iri, set, submit: true });
-    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+    await approveForReal(created.body.id);
     return created.body.id as string;
   };
   /** The process dies the moment the database transaction of the next advance commits: nothing after it runs, not even the git sync. */
@@ -1057,7 +1093,7 @@ describe('inline term edits', () => {
       return iso();
     });
     try {
-      expect((await editor.post(`/api/change-requests/${id}/reviews`).send({ decision: 'request-changes', comment: 'Lost with its save.' })).status).toBe(409);
+      expect((await editor.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(editor, id), decision: 'request-changes', comment: 'Lost with its save.' })).status).toBe(409);
     } finally {
       spy.mockRestore();
     }

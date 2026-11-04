@@ -4,6 +4,7 @@ import {
   classifyChange,
   compactIRI,
   diffOntologies,
+  expandIRI,
   toKGCL,
   validate,
   withDeclaredLevel,
@@ -408,6 +409,37 @@ function canonical(v: unknown, top = false): string {
 }
 export const opsKey = (ops: ChangeOp[]) => canonical(ops, true);
 
+/** What a list of edits requires of the draft (the values updateAnnotations edits expect to find), as a set. */
+function preconditions(graph: OntologyGraph, ops: ChangeOp[]) {
+  const norm = (v: unknown): unknown => (typeof v === 'string' ? v.trim() : Array.isArray(v) ? [...new Set(v.map((x) => (typeof x === 'string' ? x.trim() : x)))] : v);
+  const each = ops.flatMap((o) =>
+    o.op === 'updateAnnotations' && o.expect
+      ? [canonical({ iri: expandIRI(o.iri, graph.prefixes), expect: Object.fromEntries(Object.entries(o.expect).map(([k, v]) => [k, norm(v)])) })]
+      : [],
+  );
+  return [...new Set(each)].sort().join('\n');
+}
+
+/**
+ * Whether new edits are the same as the current ones. Edits written differently but with the same
+ * effect (keys in another order, a duplicate alias, extra whitespace, an empty optional list, a field
+ * the edit ignores, a prefixed name for a full IRI) are the same: applied to the working draft they give
+ * an identical ontology, and they require the same of the draft. If either can't be applied, only
+ * edits that are identical in canonical form are the same.
+ */
+export function sameEdits(working: OntologyGraph, a: ChangeOp[], b: ChangeOp[]) {
+  if (opsKey(a) === opsKey(b)) return true;
+  if (preconditions(working, a) !== preconditions(working, b)) return false;
+  // The same provenance for both, so only the edits themselves can differ.
+  const ctx = { author: 'Concord', date: '2000-01-01', source: 'compare' };
+  try {
+    const d = diffOntologies(applyChangeOps(working, a, ctx).graph, applyChangeOps(working, b, ctx).graph);
+    return d.addedTriples === 0 && d.removedTriples === 0;
+  } catch {
+    return false;
+  }
+}
+
 const roundOf = (cr: ChangeRequest) => cr.round ?? 1;
 const editsVersionOf = (cr: ChangeRequest) => cr.editsVersion ?? 1;
 /** Reviews and votes stored before rounds existed are placed by time: current if given since the edits last changed, otherwise earlier. */
@@ -428,6 +460,9 @@ export function roundState(cr: ChangeRequest) {
 
 /** Whether this person's review or vote counts now; someone whose review is from an earlier round is asked again. */
 export const hasCurrentReview = (cr: ChangeRequest, userId: string) => roundState(cr).counted.some((r) => r.userId === userId);
+/** Whether this person has said anything in the current round, a comment included (so they aren't asked twice). */
+export const hasRespondedThisRound = (cr: ChangeRequest, userId: string) =>
+  hasCurrentReview(cr, userId) || reviewsFor(cr.id).some((r) => r.userId === userId && reviewRound(cr, r) === roundOf(cr));
 export const hasCurrentVote = (cr: ChangeRequest, userId: string) => roundState(cr).currentVotes.some((v) => v.userId === userId);
 
 /** Decisions name the round they were made on: one made on a version that has since changed is refused, so nobody approves edits they haven't seen. */
@@ -532,6 +567,8 @@ async function updateOpsNow(
   actor: User,
   patch: EditsPatch & { basis?: string; tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
 ) {
+  // The draft the new edits are compared on (see sameEdits): read before taking the lock, and the same for both lists.
+  const working = patch.ops ? await ontologyStore.working(getProject(cr.ontologyId)) : undefined;
   await locked(cr, (c) => {
     canEdit(c, actor);
     // A revision computed from edits someone has since replaced would silently undo their work.
@@ -543,7 +580,7 @@ async function updateOpsNow(
     if (patch.title) c.title = patch.title;
     if (patch.description !== undefined) c.description = patch.description;
     // Only a real change to the edits starts a new round (the same edits written differently don't).
-    if (patch.ops && opsKey(patch.ops) !== opsKey(c.ops)) {
+    if (patch.ops && !sameEdits(working!, c.ops, patch.ops)) {
       c.ops = patch.ops;
       c.opsUpdatedAt = clock.iso();
       c.round = roundOf(c) + 1;
@@ -736,6 +773,8 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
 /** The draft moved on underneath this request: approvals given for the old draft no longer count, and it needs revising before it can be approved again. */
 function draftMovedOn(cr: ChangeRequest, why: string) {
   cr.opsUpdatedAt = clock.iso();
+  // A new round, so the approvals really stop counting (votes stay with the edits, which haven't changed).
+  cr.round = roundOf(cr) + 1;
   cr.approvedAs = undefined;
   setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${why}. Earlier approvals no longer count`);
   return save(cr);
