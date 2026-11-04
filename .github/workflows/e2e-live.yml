@@ -1,0 +1,41 @@
+name: Live site
+
+# Smoke-tests the deployed site after every successful Vercel production deployment,
+# and on demand (Actions → Live site → Run workflow, optionally with another URL).
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Site to test
+        required: false
+        default: https://standards-concord.vercel.app
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    if: github.event_name == 'workflow_dispatch' || (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Playwright (live)
+        run: pnpm test:e2e:live
+        env:
+          LIVE_URL: ${{ github.event.inputs.url || 'https://standards-concord.vercel.app' }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-live
+          path: |
+            playwright-report
+            test-results
+          retention-days: 14
