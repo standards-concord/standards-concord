@@ -51,7 +51,7 @@ export class BookingError extends Error {
  * Upper bounds on a bot's life, so a booking Concord lost track of can't linger:
  * it leaves a waiting room or an empty call after 20 minutes, and stops after six
  * hours in a call. With joining at most 15 minutes after booking, no bot outlives
- * its booking by more than about seven hours (the cancellation ledger relies on this).
+ * its booking by more than about seven hours.
  */
 export const BOT_LIFETIME = { waiting_room_timeout: 20 * 60, noone_joined_timeout: 20 * 60, in_call_recording_timeout: 6 * 60 * 60 };
 
@@ -111,29 +111,31 @@ export const recall = {
     // 409: a request with this idempotency key is still being handled, so the bot may well exist.
     if (!res.ok) throw new BookingError(await failure(res), res.status >= 500 || res.status === 409);
     // Accepted, but the reply got lost or garbled: the bot may well exist.
-    let body: { id?: string };
+    let body: unknown;
     try {
-      body = (await res.json()) as { id?: string };
+      body = await res.json();
     } catch (err) {
       throw new BookingError(`Recall.ai accepted the booking but its reply was unreadable: ${(err as Error).message}`, true);
     }
-    if (!body.id) throw new BookingError('Recall.ai accepted the booking but sent no bot id.', true);
-    return { id: body.id };
+    // Anything but an object with a bot id (null, a list, a number, an empty id) is as good as no reply.
+    const id = body && typeof body === 'object' && !Array.isArray(body) ? (body as { id?: unknown }).id : undefined;
+    if (typeof id !== 'string' || !id) throw new BookingError('Recall.ai accepted the booking but sent no bot id.', true);
+    return { id };
   },
 
   /**
-   * Bots booked for this Concord meeting that haven't finished, found by the
-   * metadata createBot attaches. Throws if Recall.ai can't be asked.
+   * Bots booked for this Concord meeting (found by the metadata createBot attaches),
+   * finished or not. Throws if Recall.ai can't be asked.
    */
-  async findBots(meetingUrl: string, meetingId: string): Promise<{ id: string; booking?: string }[]> {
-    const found: { id: string; booking?: string }[] = [];
+  async findBots(meetingUrl: string, meetingId: string): Promise<{ id: string; booking?: string; ended: boolean }[]> {
+    const found: { id: string; booking?: string; ended: boolean }[] = [];
     let url: string | null = `${base()}/bot/?meeting_url=${encodeURIComponent(meetingUrl)}`;
     for (let page = 0; url && page < 10; page++) {
       const res: Response = await fetch(url, { headers: headers(), signal: deadline() });
       if (!res.ok) throw new Error(await failure(res));
-      const body = (await res.json()) as { next?: string | null; results?: RecallBot[] };
-      for (const b of body.results ?? []) if (b.metadata?.concord_meeting === meetingId && !ended(b)) found.push({ id: b.id, booking: b.metadata?.concord_booking });
-      url = body.next ?? null;
+      const body = (await res.json()) as { next?: string | null; results?: RecallBot[] } | null;
+      for (const b of body?.results ?? []) if (b?.metadata?.concord_meeting === meetingId) found.push({ id: b.id, booking: b.metadata?.concord_booking, ended: ended(b) });
+      url = body?.next ?? null;
     }
     return found;
   },
@@ -150,36 +152,31 @@ export const recall = {
   },
 
   /**
-   * Cancels a bot: a scheduled bot is deleted; once it is joining or in the call,
-   * Recall.ai refuses deletion and the bot is told to leave instead. Returns false
-   * (and the caller keeps the bot id, to retry) when neither worked.
+   * Gets rid of a bot: a scheduled bot is deleted, and one that is joining or in
+   * the call is told to leave (Recall.ai refuses to delete those). `prefer` says
+   * which to try first. ok only on confirmation: Recall.ai did it, doesn't know the
+   * bot, or says it has finished. Otherwise the caller keeps the bot and retries.
    */
-  async cancelBot(botId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  async release(botId: string, prefer: 'cancel' | 'leave' = 'cancel'): Promise<{ ok: true } | { ok: false; error: string }> {
+    const ways = prefer === 'leave' ? (['leave', 'delete'] as const) : (['delete', 'leave'] as const);
+    const statuses: number[] = [];
     try {
-      const del = await fetch(`${base()}/bot/${botId}/`, {
-        method: 'DELETE',
-        headers: headers(),
-        signal: deadline(),
-      });
-      if (del.ok || del.status === 404) return { ok: true };
-      const leave = await fetch(`${base()}/bot/${botId}/leave_call/`, {
-        method: 'POST',
-        headers: headers(),
-        signal: deadline(),
-      });
-      if (leave.ok) return { ok: true };
-      // Recall.ai refuses both for a bot that has already finished: nothing left to cancel.
-      if (await this.hasEnded(botId)) return { ok: true };
-      return {
-        ok: false,
-        error: `Recall.ai would not cancel the bot (${del.status}, then ${leave.status}).`,
-      };
+      for (const way of ways) {
+        const res = await fetch(way === 'delete' ? `${base()}/bot/${botId}/` : `${base()}/bot/${botId}/leave_call/`, {
+          method: way === 'delete' ? 'DELETE' : 'POST',
+          headers: headers(),
+          signal: deadline(),
+        });
+        if (res.ok || res.status === 404) return { ok: true };
+        statuses.push(res.status);
+      }
     } catch (err) {
-      return {
-        ok: false,
-        error: `Could not reach Recall.ai to cancel the bot: ${scrub((err as Error).message)}`,
-      };
+      if (await this.hasEnded(botId)) return { ok: true };
+      return { ok: false, error: `Could not reach Recall.ai to remove the bot: ${scrub((err as Error).message)}` };
     }
+    // Recall.ai refuses both for a bot that has already finished: nothing left to remove.
+    if (await this.hasEnded(botId)) return { ok: true };
+    return { ok: false, error: `Recall.ai would not remove the bot (${statuses.join(', then ')}).` };
   },
 
   async sendChat(botId: string, message: string): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -193,27 +190,6 @@ export const recall = {
       return res.ok ? { ok: true } : { ok: false, error: await failure(res) };
     } catch (err) {
       return { ok: false, error: scrub((err as Error).message) };
-    }
-  },
-
-  /** Takes a bot out of its call. Fine if it has already gone; otherwise the caller keeps it and retries. */
-  async leave(botId: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    try {
-      const res = await fetch(`${base()}/bot/${botId}/leave_call/`, {
-        method: 'POST',
-        headers: headers(),
-        signal: deadline(),
-      });
-      if (res.ok || (await this.hasEnded(botId))) return { ok: true };
-      return {
-        ok: false,
-        error: `Recall.ai would not take the bot out of the call (${res.status}).`,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Could not reach Recall.ai to take the bot out of the call: ${scrub((err as Error).message)}`,
-      };
     }
   },
 };

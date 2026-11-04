@@ -307,14 +307,17 @@ function icsPreview(ics: string) {
 }
 
 /** Facilitators see the bot's id; everyone else just whether one is booked. */
-const isBooked = (m: Meeting) => !!(m.bot?.botId || m.bot?.booked);
+const isBooked = (m: Meeting) => (m.bot?.phase ? m.bot.phase === 'booked' : !!(m.bot?.botId || m.bot?.booked));
 
 /** Where the bot stands for one upcoming call: what will happen, separate from the switch saying what should. */
 function BookingState({ m }: { m: Meeting }) {
   if (m.calendar?.approval === 'pending') return <Badge tone="warn" title={m.calendar.approvalNote}>{m.calendar.approvalNote ? 'Needs approval again' : 'Needs approval'}</Badge>;
   if (m.calendar?.skip) return <Badge tone="neutral">Skipping</Badge>;
+  if (m.withdrawn) return <Badge tone="neutral" title={m.bot?.cancelError}>Cancelled; making sure the bot has gone</Badge>;
   if (m.calendar?.cancelPending) return <Badge tone="danger">Cancelling the bot failed; retrying</Badge>;
   if (m.bot?.cancelError && !isBooked(m)) return <Badge tone="warn" title={m.bot.cancelError}>Cancelling the old bot; retrying</Badge>;
+  if (m.bot?.phase === 'releasing') return <Badge tone="warn">Cancelling the old bot</Badge>;
+  if (m.bot?.unconfirmed) return <Badge tone="warn" title={m.bot.error}>Booking unconfirmed</Badge>;
   if (m.bot?.provider === 'simulated') return <Badge tone="neutral" title={m.bot.error}>No bot provider on this server</Badge>;
   if (isBooked(m) && m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Cancelling the bot failed; retrying</Badge>;
   if (isBooked(m)) return <Badge tone="ok">Bot booked</Badge>;

@@ -11,8 +11,8 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
-import { BookingError, recall } from './recall.js';
-import { bookingPending, isRetired, retireBot, retireState, watchBooking } from './retiring.js';
+import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, noteStray, tracked } from './botLifecycle.js';
+import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
@@ -59,24 +59,40 @@ export function requireAnalyst(m: Meeting, user: User | undefined) {
 }
 
 /** Whether a bot is still in (or on its way into) the call. */
-export const botActive = (m: Meeting) => !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
+export const botActive = (m: Meeting) =>
+  tracked(m) ? (m.bot.phase === 'booking' || m.bot.phase === 'booked') && m.status !== 'scheduled' : !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
+
+/** Whether a Recall.ai bot may still be around: booked, unanswered, or not yet confirmed gone. */
+export const botOutstanding = (m: Meeting) => tracked(m) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing');
 
 /**
- * What a signed-in person may see of a meeting. Invites waiting for approval are
- * for facilitators only, and so are the call's Meet link, organiser and bot id.
+ * What a signed-in person may see of a meeting. Invites waiting for approval, and
+ * withdrawn calls kept until their bot has gone, are for facilitators only, and so
+ * are the call's Meet link, organiser, bot and booking ids, and Recall.ai's errors.
  */
 export function visibleMeeting(m: Meeting, user: User | undefined): Meeting | undefined {
   if (canFacilitate(m, user)) return m;
-  if (m.calendar?.approval === 'pending') return undefined;
+  if (m.calendar?.approval === 'pending' || m.withdrawn) return undefined;
   const { meetingUrl: _url, ...rest } = m;
   // Recall.ai's diagnostics can echo the Meet link: others just learn that something went wrong.
   const problem = (e?: string) => (e ? 'Something went wrong with the bot; a facilitator can see the details.' : undefined);
+  const b = m.bot;
   return {
     ...rest,
     chatNoticeError: problem(m.chatNoticeError),
     facilitatorPrompts: m.facilitatorPrompts.map((q) => ({ ...q, postError: problem(q.postError) })),
-    // Bot ids, booking ids and the link a bot was booked for are for facilitators too.
-    bot: m.bot && { ...m.bot, botId: undefined, bookingId: undefined, bookedUrl: undefined, error: problem(m.bot.error), cancelError: problem(m.bot.cancelError), booked: !!m.bot.botId || undefined },
+    // Only what the page shows: whether a bot is booked and how it's doing.
+    bot: b && {
+      provider: b.provider,
+      phase: b.phase,
+      status: b.status,
+      booked: (b.phase ? b.phase === 'booked' : !!b.botId) || undefined,
+      uncertain: b.uncertain,
+      leaving: b.leaving,
+      unconfirmed: b.unconfirmed,
+      error: problem(b.error),
+      cancelError: problem(b.cancelError),
+    },
     calendar: m.calendar && { ...m.calendar, organizer: undefined, sentBy: undefined, uid: undefined, key: '' },
   };
 }
@@ -180,7 +196,7 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   m = getMeeting(m.id);
-  if (botActive(m) || m.bot?.uncertain || m.bot?.leaving) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
+  if (botActive(m) || botOutstanding(m)) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = getProject(m.ontologyId);
   m = await mutateMeeting(m.id, (x) => {
@@ -326,8 +342,14 @@ export async function onLiveLine(
   let accepted = true;
   const m = await meetingLock(meetingId, () => {
     const x = getMeeting(meetingId);
+    const gen = x.bot?.gen;
     if (opts.accept && !opts.accept(x)) {
       accepted = false;
+      // Refusing the line can still change the bot record (a bot named, a stray noted).
+      if (x.bot?.gen !== gen) {
+        save(x);
+        emit(x, { type: 'meeting', meeting: x });
+      }
       return x;
     }
     opts.before?.(x);
@@ -362,7 +384,7 @@ export async function onLiveLine(
 /** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
 async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
   if (m.bot?.provider === 'recall') {
-    if (!m.bot.botId || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
+    if (!m.bot.botId || m.bot.phase !== 'booked' || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
     return recall.sendChat(m.bot.botId, text);
   }
   if (m.source === 'simulation') return { ok: true };
@@ -460,12 +482,8 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
       changes.push(m.calendar!.recurring ? 'approved the co-lead bot joining the series' : 'approved the co-lead bot joining');
     }
     if (patch.skip !== undefined && patch.skip !== !!m.calendar!.skip) {
-      // A bot already booked for this call is cancelled first; if that fails, nothing changes.
-      if (patch.skip && (m.bot?.botId || m.bot?.uncertain)) {
-        const r = await cancelMeetingBot(m);
-        // Forgotten here either way: if Recall.ai didn't confirm, the cancellation is retried and anything that bot sends is dropped.
-        m.bot = { provider: m.bot.provider, status: 'scheduled', cancelError: r.ok ? undefined : r.error };
-      }
+      // A bot already booked for this call is released (anything it sends is dropped from now on), until Recall.ai confirms.
+      if (patch.skip) beginRelease(m, 'cancel', 'idle');
       m.calendar!.skip = patch.skip;
       changes.push(patch.skip ? 'told the co-lead bot to skip' : 'told the co-lead bot to join');
     }
@@ -486,6 +504,7 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
       emit(o, { type: 'meeting', meeting: o });
     }
   }
+  if (patch.skip) await drive(meetingId);
   if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
   return getMeeting(meetingId);
 }
@@ -537,8 +556,7 @@ export const NO_BOT_PROVIDER =
 
 export const isMeetUrl = (url: string) => /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(url);
 
-/** Books a Recall.ai bot for a meeting (now, or at joinAt). Returns the bot state to store. */
-/** Removes a meeting along with its webhook secret (any bot it had is in the cancellation ledger by now). */
+/** Removes a meeting along with its webhook secret (only once its bot record has settled: see botLifecycle). */
 export function dropMeeting(id: string) {
   remove('meetings', id);
   remove('kv', `meeting-secret:${id}`);
@@ -549,110 +567,25 @@ export function pruneSecrets() {
   for (const k of list<{ id: string }>('kv')) if (k.id.startsWith('meeting-secret:') && !get('meetings', k.id.slice('meeting-secret:'.length))) remove('kv', k.id);
 }
 
-/** Meetings whose "Join a call now" booking request is still out, in this process (none after a restart). */
-export const bookingsInFlight = new Set<string>();
-
-/** bookingId: the booking already recorded on the meeting before sending, when there is one. */
-export async function dispatchBot(m: Meeting, joinAt?: string, givenBookingId?: string): Promise<NonNullable<Meeting['bot']>> {
-  if (!recall.enabled()) return { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
-  let secret = get<{ id: string; secret: string }>('kv', `meeting-secret:${m.id}`)?.secret;
-  if (!secret) {
-    secret = newToken();
-    put('kv', { id: `meeting-secret:${m.id}`, secret });
-  }
-  const bookingId = givenBookingId ?? newId('bk');
-  const booking = { bookingId, bookedUrl: m.meetingUrl };
-  try {
-    const bot = await recall.createBot({
-      meetingId: m.id,
-      bookingId,
-      meetingUrl: m.meetingUrl!,
-      joinAt,
-      postPromptsToChat: !!m.postPromptsToChat,
-      webhookUrl: `${config.publicUrl}/api/webhooks/recall?meeting=${m.id}&secret=${secret}`,
-    });
-    return { provider: 'recall', botId: bot.id, status: 'joining', ...booking };
-  } catch (err) {
-    const uncertain = err instanceof BookingError && err.uncertain;
-    // An unconfirmed booking keeps its id and Meet link, to find (or cancel) that bot later.
-    return { provider: 'recall', status: 'error', error: (err as Error).message, ...(uncertain ? { uncertain: true, ...booking } : {}) };
-  }
-}
-
-/**
- * Lets go of whatever bot a meeting has booked, including one whose booking reply
- * was lost: it is recorded for cancelling (retried every minute until Recall.ai
- * confirms, whatever happens to the meeting) and tried straight away. The caller
- * forgets the bot on the meeting either way; the result says whether it's gone yet.
- */
-export async function cancelMeetingBot(m: Meeting, opts: { background?: boolean } = {}): Promise<{ ok: true } | { ok: false; error: string; watching?: boolean }> {
-  return retireBot(m.id, m.bot, m.meetingUrl, { retryNow: true, background: opts.background });
-}
-
-/**
- * After a booking whose answer was lost: adopts the bot if Recall.ai did create
- * it (cancelling any duplicates), so it isn't booked twice. Undefined when
- * Recall.ai can't be asked yet; an empty object when there is no bot.
- */
-export async function findLostBooking(m: Meeting): Promise<{ botId?: string } | undefined> {
-  let ids: string[];
-  try {
-    const want = m.bot?.bookingId;
-    // Exactly this booking: never another one for the same meeting.
-    ids = (await recall.findBots(m.bot?.bookedUrl ?? m.meetingUrl!, m.id)).filter((b) => b.booking === want).map((b) => b.id);
-  } catch {
-    return undefined;
-  }
-  for (const extra of ids.slice(1)) await retireBot(m.id, { provider: 'recall', botId: extra });
-  return { botId: ids[0] };
-}
-
+/** "Join a call now": the booking is recorded before it is sent, then sent (see botLifecycle). */
 export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string, opts: { postPromptsToChat?: boolean } = {}) {
   if (!isMeetUrl(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
   const m = newMeeting(project, user, title, 'google-meet-bot', {
     meetingUrl,
     postPromptsToChat: !!opts.postPromptsToChat,
-    // The booking is recorded before it is sent (as unconfirmed until Recall.ai answers), so the bot's
-    // first words can identify it, and a restart mid-booking looks for it instead of booking another.
-    bot: recall.enabled()
-      ? { provider: 'recall', status: 'scheduled', bookingId: newId('bk'), bookedUrl: meetingUrl, bookedAt: new Date().toISOString(), uncertain: true }
-      : { provider: 'simulated', status: 'scheduled' },
+    bot: recall.enabled() ? idleBot() : { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER },
     chatModeAnnounced: !!opts.postPromptsToChat,
   });
-  const bookingId = m.bot?.bookingId;
-  bookingsInFlight.add(m.id);
-  let bot: NonNullable<Meeting['bot']>;
-  try {
-    bot = await dispatchBot(m, undefined, bookingId);
-  } finally {
-    bookingsInFlight.delete(m.id);
+  if (recall.enabled()) {
+    await meetingLock(m.id, () => {
+      const x = getMeeting(m.id);
+      beginBooking(x, undefined, new Date());
+      return save(x);
+    });
+    await drive(m.id);
   }
-  // Transcript lines, End call or a cancellation can all happen before Recall.ai answers:
-  // the reply only fills in this booking, on the latest copy, and never undoes them.
-  let stray: string | undefined;
-  const fresh = await mutateMeeting(m.id, (x) => {
-    const b = x.bot;
-    if (!b || b.bookingId !== bookingId || b.status === 'done' || b.leaving) {
-      if (bot.botId && b?.botId !== bot.botId) stray = bot.botId;
-      return;
-    }
-    // The webhook already said which bot it is.
-    if (b.botId) {
-      if (bot.botId && bot.botId !== b.botId) stray = bot.botId;
-      x.bot = { ...b, uncertain: undefined, error: undefined };
-      return;
-    }
-    // In the call already (its lines carried no bot id): keep that, with the reply's id if there is one.
-    if (b.status === 'in-call') {
-      x.bot = bot.botId ? { ...bot, status: 'in-call' } : { ...b, uncertain: true, error: bot.error };
-      return;
-    }
-    x.bot = bot;
-  });
-  // A bot booked for a call that has already been ended (or replaced) goes straight away.
-  if (stray) await retireBot(m.id, { provider: 'recall', botId: stray });
   logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
-  return fresh;
+  return getMeeting(m.id);
 }
 
 /** Recall.ai real-time transcript webhook. */
@@ -667,127 +600,107 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
       data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } };
     };
   };
-  if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
-    const fromBot = evt.data.bot?.id;
-    const fromBooking = evt.data.bot?.metadata?.concord_booking;
-    const words = evt.data.data.words;
-    let joined = false;
-    let staleBot: string | undefined;
-    // Decided on the latest copy under the meeting's lock: a bot that should not be
-    // in this call (skipped, cancelled, unapproved, replaced or ended) is told to
-    // leave, and what it hears is dropped.
-    const kept = await onLiveLine(
-      meetingId,
-      { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative },
-      {
-        accept: (x) => {
-          // Without a confirmed bot id, only the bot of the current booking is expected (told by its booking id when Recall.ai sends it).
-          // A bot that doesn't say which booking it belongs to is never assumed to be the current one.
-          const awaited = !x.bot?.botId && !!x.bot?.bookingId && fromBooking === x.bot.bookingId;
-          const unwanted =
-            (!!fromBot && isRetired(fromBot)) ||
-            (!!fromBot && !!x.bot?.botId && fromBot !== x.bot.botId) ||
-            (!!fromBot && !x.bot?.botId && !awaited) ||
-            !!x.bot?.leaving ||
-            x.bot?.status === 'done' ||
-            (!!x.calendar && (!!x.calendar.cancelPending || !!x.calendar.skip || x.calendar.approval === 'pending'));
-          if (unwanted) staleBot = fromBot ?? x.bot?.botId;
-          return !unwanted;
-        },
-        before: (x) => {
-          joined = x.bot?.status !== 'in-call';
-          // The current booking's reply was slow or lost: the webhook (signed with this meeting's secret) says which bot it is.
-          if (x.bot && !x.bot.botId && fromBot) x.bot = { ...x.bot, botId: fromBot, uncertain: undefined, error: undefined };
-          if (x.bot) x.bot.status = 'in-call';
-          if (x.status === 'scheduled') x.status = 'live';
-        },
+  if (evt.event !== 'transcript.data' || !evt.data?.data?.words?.length) return;
+  const fromBot = evt.data.bot?.id;
+  const fromBooking = evt.data.bot?.metadata?.concord_booking;
+  const words = evt.data.data.words;
+  let joined = false;
+  let kick = false;
+  // Decided on the latest copy under the meeting's lock, by the bot's identity: only the
+  // meeting's own bot, while it is wanted, is heard. A bot of this meeting's that isn't
+  // its current one is cancelled; the current one, once unwanted, is released by the clock.
+  const kept = await onLiveLine(
+    meetingId,
+    { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative },
+    {
+      accept: (x) => {
+        if (!tracked(x)) return false;
+        const b = x.bot;
+        if (fromBot && knownGone(b, fromBot)) return false;
+        if (fromBot && fromBot !== b.botId) {
+          // The current booking's bot, before Recall.ai's reply named it (the webhook is signed with this meeting's secret).
+          // A bot that doesn't say which booking it belongs to is never taken for the current one.
+          if (!b.botId && fromBooking && adoptInPlace(x, fromBooking, [{ id: fromBot }])) {
+            bump(x);
+            if (x.bot.phase !== 'booked') {
+              kick = true;
+              return false;
+            }
+          } else {
+            kick = noteStray(x, fromBot) || kick;
+            return false;
+          }
+        }
+        const blocked = !!x.withdrawn || (!!x.calendar && (!!x.calendar.cancelPending || !!x.calendar.skip || x.calendar.approval === 'pending'));
+        return (x.bot.phase === 'booked' || x.bot.phase === 'booking') && !blocked;
       },
-    );
-    if (!kept) {
-      if (staleBot && recall.enabled()) void retireBot(meetingId, { provider: 'recall', botId: staleBot });
-      return;
-    }
-    if (joined) await announceChatMode(meetingId).catch(() => undefined);
-  }
+      before: (x) => {
+        joined = !x.bot!.inCall;
+        if (x.status === 'scheduled') x.status = 'live';
+        x.bot!.inCall = true;
+        bump(x);
+      },
+    },
+  );
+  if (kick) void background(drive(meetingId));
+  if (kept && joined) await announceChatMode(meetingId).catch(() => undefined);
+}
+
+/** After the bot has gone: what it heard is analysed (once, however many ask). */
+const finishing = new Map<string, Promise<Meeting>>();
+export function finishCall(meetingId: string): Promise<Meeting> {
+  const running = finishing.get(meetingId);
+  if (running) return running;
+  const run = (async () => {
+    const m = getMeeting(meetingId);
+    emit(m, { type: 'status', status: m.status, bot: m.bot });
+    return m.transcript.length && m.status !== 'analysed' && m.status !== 'processing' ? analyseMeeting(m) : m;
+  })().finally(() => finishing.delete(meetingId));
+  finishing.set(meetingId, run);
+  return run;
 }
 
 /**
- * Takes the bot out of the call, then analyses the transcript. If Recall.ai won't
- * remove the bot, the call stays open (marked as leaving, retried every minute)
- * and this throws, rather than say the call ended while the bot is still in it.
+ * End call: the bot is released (marked under the lock, so anything it sends is
+ * refused from now on), and the call is analysed only once Recall.ai confirms the
+ * bot has gone. Until then this throws, and the clock keeps trying.
  */
-/**
- * Takes the bot out of the call (through the cancellation ledger, so retries back
- * off and never overlap) and analyses what it heard once it has gone. A booking
- * whose reply was lost is looked up first, and the bot found becomes the one this
- * call waits for. auto: the clock retrying a bot someone already asked to leave,
- * which only checks how the ledger is getting on.
- */
-export async function endLiveMeeting(meetingId: string, opts: { auto?: boolean } = {}) {
-  // 1. Under the lock: the bot is marked as leaving (so anything it sends is refused from now on).
-  const start = await meetingLock(meetingId, async () => {
+export async function endLiveMeeting(meetingId: string) {
+  if (getMeeting(meetingId).bot?.provider === 'recall') {
+    await meetingLock(meetingId, () => {
+      const m = getMeeting(meetingId);
+      const gen = m.bot?.gen;
+      beginRelease(m, 'leave', 'done');
+      if (m.bot?.gen !== gen) emit(save(m), { type: 'meeting', meeting: m });
+    });
+    await drive(meetingId);
     const m = getMeeting(meetingId);
-    if (m.bot?.provider !== 'recall' || m.bot.status === 'done') return { m, bot: undefined };
-    if (!m.bot.leaving) {
-      m.bot = { ...m.bot, leaving: true };
-      save(m);
+    if (tracked(m) && m.bot.phase !== 'done') {
+      throw new HttpError(502, `${m.bot.fault ?? 'The bot hasn’t left yet.'} Concord will keep trying; the call is analysed once the bot has left.`);
     }
-    return { m, bot: { ...m.bot } };
-  });
-  // 2. Without the lock (Recall.ai can be slow, and other calls are being booked meanwhile).
-  let error: string | undefined;
-  let found: string | undefined;
-  let lookingFor = false;
-  const bot = start.bot;
-  if (bot && !bot.botId && (bot.uncertain || bot.bookingId)) {
-    const url = bot.bookedUrl ?? start.m.meetingUrl;
-    if (opts.auto) {
-      // The clock's retry: the ledger is looking for (or cancelling) that booking; once it has settled, so has this.
-      if (bookingPending(meetingId, bot.bookingId)) error = bot.error ?? 'Still checking with Recall.ai which bot this call has.';
-    } else {
-      const lost = await findLostBooking(start.m);
-      if (!lost) {
-        // Recall.ai can't be asked: the ledger looks for the booking (backing off), and this call waits for it.
-        watchBooking(meetingId, bot.bookingId, url);
-        error = 'Couldn’t check with Recall.ai which bot this call has.';
-      } else if (lost.botId) found = lost.botId;
-      else {
-        // Not listed: the call is closed, and the ledger keeps looking for that booking (to cancel it).
-        watchBooking(meetingId, bot.bookingId, url);
-        lookingFor = true;
-      }
-    }
+    return finishCall(meetingId);
   }
-  const botId = bot?.botId ?? found;
-  if (bot && botId && !error) {
-    const state = retireState(botId);
-    if (state === 'pending' && opts.auto) error = bot.error ?? 'The bot hasn’t left yet; Concord keeps trying.';
-    else if (state !== 'gone') {
-      const r = await retireBot(meetingId, { provider: 'recall', botId, leave: true }, undefined, { retryNow: true });
-      if (!r.ok) error = r.error;
-    }
-  }
-  // 3. Under the lock again, on the latest copy.
-  const m = await meetingLock(meetingId, async () => {
-    const m = getMeeting(meetingId);
-    if (!m.bot || m.bot.status === 'done') return m;
-    if (found && !m.bot.botId) m.bot = { ...m.bot, botId: found, uncertain: undefined };
-    if (error) m.bot = { ...m.bot, leaving: true, error };
-    else
-      m.bot = {
-        ...m.bot,
-        status: 'done',
-        leaving: undefined,
-        error: undefined,
-        uncertain: undefined,
-        cancelError: lookingFor ? 'The bot’s booking was never confirmed; Concord keeps looking for it, to make sure it has gone.' : m.bot.cancelError,
-      };
-    return save(m);
+  const m = await mutateMeeting(meetingId, (x) => {
+    if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
   });
   emit(m, { type: 'meeting', meeting: m });
-  if (error) throw new HttpError(502, `${error} Concord will keep trying; the call is analysed once the bot has left.`);
-  emit(m, { type: 'status', status: m.status, bot: m.bot });
-  return m.transcript.length && m.status !== 'analysed' ? analyseMeeting(m) : m;
+  return finishCall(meetingId);
+}
+
+/** A facilitator lets go of a booking Recall.ai never confirmed and that can no longer be checked. */
+export async function dismissBooking(meetingId: string, user: User) {
+  const before = getMeeting(meetingId);
+  requireFacilitator(before, user, 'dismiss an unconfirmed booking');
+  const m = await dismissUnconfirmed(meetingId);
+  if (!m) throw new HttpError(409, 'Only a booking Recall.ai never confirmed, and that can no longer be checked by sending it again, can be dismissed.');
+  logActivity({
+    ontologyId: before.ontologyId,
+    actorId: user.id,
+    type: 'meeting.updated',
+    message: `confirmed that an unconfirmed bot booking for ${before.calendar?.approval === 'pending' || before.withdrawn ? 'a call' : `“${before.title}”`} can be let go`,
+    link: `/o/${before.ontologyId}/meetings/${before.id}`,
+  });
+  return get<Meeting>('meetings', meetingId) ?? m;
 }
 
 /* ------------------------------------------------------------------------ */

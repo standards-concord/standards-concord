@@ -100,6 +100,13 @@ export function MeetingDetailPage() {
       void m.reload();
     }
   });
+  const dismiss = useAction(async () => {
+    try {
+      m.setData(await api.dismissBooking(meetingId));
+    } finally {
+      void m.reload();
+    }
+  });
   const { session } = useSession();
   const [posting, setPosting] = useState<number>();
   const postPrompt = useAction(async (i: number) => {
@@ -249,6 +256,21 @@ export function MeetingDetailPage() {
             <p className="mt-1 text-sm text-warn" data-testid="cancel-error">
               The bot booked earlier hasn’t been cancelled yet ({mt.bot.cancelError}). Concord keeps trying, and ignores anything it sends meanwhile.
             </p>
+          )}
+          {mt.withdrawn && (
+            <p className="mt-1 text-sm text-warn" data-testid="withdrawn-note">
+              This call was cancelled. Only facilitators see it, until Recall.ai confirms its bot has gone.
+            </p>
+          )}
+          {mt.bot?.unconfirmed && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-warn" data-testid="unconfirmed-booking">
+              <span>Recall.ai never confirmed this call’s bot booking, and it can no longer be checked by sending it again. Concord keeps looking for the bot, and won’t book another until it knows.</span>
+              {mayRun && (
+                <Button variant="secondary" loading={dismiss.pending} onClick={() => void dismiss.run()}>
+                  It has gone: let the booking go
+                </Button>
+              )}
+            </div>
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">

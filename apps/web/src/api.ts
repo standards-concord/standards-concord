@@ -209,6 +209,7 @@ export const api = {
   updateMeeting: (id: string, changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => patch<Meeting>(`/api/meetings/${e(id)}`, changes),
   postPrompt: (id: string, index: number) => post<Meeting>(`/api/meetings/${e(id)}/prompts/${index}/post`),
   endMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/end`),
+  dismissBooking: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/bot/dismiss`),
   analyseMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/analyse`),
   proposeFromMeeting: (id: string) => post<{ useCases: UseCase[]; changeRequest?: ChangeRequest }>(`/api/meetings/${e(id)}/propose`),
 

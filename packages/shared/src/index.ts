@@ -390,24 +390,55 @@ export interface Meeting {
   meetingUrl?: string;
   bot?: {
     provider: 'recall' | 'simulated';
+    /**
+     * A Recall.ai bot's state machine (one record per meeting): idle (nothing booked),
+     * booking (a booking recorded and sent, not yet answered), booked (Recall.ai named
+     * the bot), releasing (getting rid of it, until Recall.ai confirms) and done.
+     */
+    phase?: 'idle' | 'booking' | 'booked' | 'releasing' | 'done';
+    /** Bumped by every change of the record: a change decided from an older copy is refused. */
+    gen?: number;
     botId?: string;
     /** Shown instead of botId to people who can't see it: a bot is booked. */
     booked?: boolean;
+    /** For the page; follows from the phase. */
     status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error';
     error?: string;
-    /** A booking request whose answer was lost: Recall.ai is checked for the bot before booking again. */
+    /** The booking hasn't been answered: Recall.ai may or may not have made the bot. */
     uncertain?: boolean;
-    /** Identifies the current booking attempt (sent to Recall.ai as metadata). */
+    /** The current booking's id: also its idempotency key, and the metadata a bot from it carries. */
     bookingId?: string;
     /** The Meet link the current booking was made for. */
     bookedUrl?: string;
     /** When the current booking was first sent (its idempotency key is only honoured for an hour). */
     bookedAt?: string;
+    /** When the booking asks the bot to join, and whether its greeting says it will post in the chat: resent unchanged. */
+    joinAt?: string;
+    chat?: boolean;
+    /** Releasing: take the bot out of the call (leave) or cancel its booking (cancel) first. */
+    release?: 'cancel' | 'leave';
+    /** Releasing: what follows once Recall.ai confirms. done for End call; idle when the call may book again. */
+    after?: 'idle' | 'done';
+    /** Failed tries of the current step, and when the next is due (ms, by the bot clock's time). */
+    attempts?: number;
+    nextAt?: number;
+    /** The last failure of the current step (shown as error or cancelError). */
+    fault?: string;
+    /** Heard from the call. */
+    inCall?: boolean;
+    /** Other bots of this meeting's that turned up (they shouldn't exist): cancelled until confirmed. */
+    strays?: string[];
+    /** Bots Recall.ai confirmed gone: anything they still send is dropped. */
+    released?: string[];
+    /** A booking that can no longer be resent safely and hasn't turned up: a facilitator can dismiss it. */
+    unconfirmed?: boolean;
     /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */
     cancelError?: string;
-    /** Someone ended the call but the bot couldn't be removed yet; retried every minute. */
+    /** Someone ended the call but the bot hasn't been removed yet; Concord keeps trying. */
     leaving?: boolean;
   };
+  /** Cancelled, or no longer on the calendar: kept (for facilitators only) until its bot is confirmed gone. */
+  withdrawn?: boolean;
   /** Set for calls the bot was invited to through its calendar address. */
   calendar?: MeetingCalendarInfo;
   /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */

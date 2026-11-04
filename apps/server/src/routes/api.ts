@@ -361,6 +361,9 @@ export function apiRouter(): Router {
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
     res.json(await meetings.updateMeeting(String(req.params.id), requireUser(req), { postPromptsToChat: bool(b.postPromptsToChat), skip: bool(b.skip), approve: bool(b.approve) }));
   });
+  r.post('/meetings/:id/bot/dismiss', async (req, res) => {
+    res.json(await meetings.dismissBooking(String(req.params.id), requireUser(req)));
+  });
   r.post('/meetings/:id/prompts/:index/post', async (req, res) => {
     const m = meetings.getMeeting(String(req.params.id));
     meetings.requireFacilitator(m, requireUser(req), 'post in the call’s chat');
