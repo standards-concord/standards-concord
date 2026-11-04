@@ -27,7 +27,7 @@ import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
 import { RequirementsDocPage } from './pages/ontology/RequirementsDoc';
 import { GovernanceTab } from './pages/ontology/Governance';
-import { AgentsTab } from './pages/ontology/Agents';
+import { AgentReportsTab, ConnectAgentTab } from './pages/ontology/Agents';
 import { ConnectPage } from './pages/Connect';
 import { OAuthAuthorizePage } from './pages/OAuthAuthorize';
 
@@ -101,7 +101,8 @@ function Routed() {
             <Route path="releases/:releaseId" element={<ReleaseDetailPage />} />
             <Route path="requirements/:version" element={<RequirementsDocPage />} />
             <Route path="governance" element={<GovernanceTab />} />
-            <Route path="agents" element={<AgentsTab />} />
+            <Route path="agents" element={<AgentReportsTab />} />
+            <Route path="connect" element={<ConnectAgentTab />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>

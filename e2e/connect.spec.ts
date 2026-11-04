@@ -71,28 +71,29 @@ test.describe('Connect page', () => {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`codex mcp add concord --url ${baseURL}/mcp`);
   });
 
-  test('the ontology Agents tab separates reports from setup, with no tool list', async ({ page, baseURL }) => {
+  test('each ontology has a Connect an agent page under Explore, with no tool list', async ({ page, baseURL }) => {
     await signIn(page);
-    await page.goto('/o/volunteering/agents?view=connect');
-    await expect(page.getByRole('tab', { name: 'Connect an agent' })).toHaveAttribute('aria-selected', 'true');
+    await page.goto('/o/volunteering/browse');
+    const explore = page.getByRole('navigation', { name: 'Explore pages' });
+    await explore.getByRole('link', { name: 'Connect an agent' }).click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
+    await expect(page.getByRole('heading', { name: 'Connect an agent' })).toBeVisible();
     await expect(page.getByTestId('connect-agent')).toBeVisible();
     await page.getByText('Advanced setup').click();
     await expect(page.getByTestId('mcp-url')).toHaveText(`${baseURL}/mcp`);
     await expect(page.getByText('MCP tools')).toHaveCount(0);
     for (const name of TOOL_NAMES) await expect(page.getByText(name, { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Create token' })).toHaveCount(0);
-
-    await page.getByRole('tab', { name: /Reports/ }).click();
-    await expect(page).toHaveURL(/view=reports/);
-    await expect(page.getByTestId('connect-agent')).toHaveCount(0);
-    await expect(page.getByText('Agent reports')).toBeVisible();
-
-    await page.getByRole('tab', { name: 'Connect an agent' }).click();
-    await page.getByRole('link', { name: 'Open the full setup page' }).click();
-    await expect(page).toHaveURL(/\/connect$/);
+    // Cross-link to the reports, which live under Requirements.
+    await page.getByRole('link', { name: 'See agent reports' }).click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/agents$/);
+    await expect(page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
+    // Old links to the setup view land on the new page.
+    await page.goto('/o/volunteering/agents?view=connect');
+    await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
   });
 
-  test('agent reports open on the Reports view, with the analysis collapsed', async ({ page }) => {
+  test('agent reports have their own page under Requirements, with the analysis collapsed', async ({ page }) => {
     await signIn(page);
     // An agent reports a gap over the REST API (what report_gap does over MCP).
     const r = await page.request.post('/api/ontologies/volunteering/agent-reports', {
@@ -100,12 +101,15 @@ test.describe('Connect page', () => {
     });
     expect(r.ok(), await r.text()).toBeTruthy();
     await page.goto('/o/volunteering/agents');
-    await expect(page.getByRole('tab', { name: /Reports \(\d+\)/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('heading', { name: 'Agent reports' })).toBeVisible();
+    await expect(page.getByTestId('connect-agent')).toHaveCount(0);
     const item = page.getByTestId('agent-reports').getByRole('listitem').filter({ hasText: 'No way to record volunteer badges' });
     await expect(item).toBeVisible();
     await expect(item.getByText('We award digital badges')).toBeHidden();
     await item.getByText('Details and AI analysis').click();
     await expect(item.getByText('We award digital badges')).toBeVisible();
+    await page.getByRole('link', { name: 'Connect an agent' }).first().click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
   });
 
   test('the account menu links to the connect page and connected agents', async ({ page }) => {

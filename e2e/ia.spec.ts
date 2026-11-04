@@ -205,8 +205,8 @@ test.describe('progressive disclosure', () => {
     const nav = page.getByRole('navigation', { name: 'Ontology sections' });
     await expect(nav.getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
     const sub = page.getByRole('navigation', { name: 'Requirements pages' });
-    await expect(sub.getByRole('link')).toHaveText(['Use cases', 'Meetings', 'Agents']);
-    await sub.getByRole('link', { name: 'Agents' }).click();
+    await expect(sub.getByRole('link')).toHaveText(['Use cases', 'Meetings', 'Agent reports']);
+    await sub.getByRole('link', { name: 'Agent reports' }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/agents$`));
     await expect(nav.getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
   });
