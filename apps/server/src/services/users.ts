@@ -137,6 +137,3 @@ export function listActivity(ontologyId?: string, limit = 50): ActivityItem[] {
   const items = ontologyId ? list<ActivityItem>('activity', ontologyId) : list<ActivityItem>('activity');
   return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
 }
-
-/** Every user's name: what earlier merges wrote as dcterms:contributor. */
-export const userNames = () => list<User>('users').map((u) => u.name);

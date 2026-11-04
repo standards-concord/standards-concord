@@ -1,14 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { expandIRI, FORMAT_INFO, rewriteLiterals, scrubGeneratedProvenance, serialize, type OntologyGraph } from '@concord/core';
+import { expandIRI, FORMAT_INFO, generatedProvenanceTitles, rewriteLiterals, scrubGeneratedProvenance, serialize, type OntologyGraph } from '@concord/core';
 import type { ChangeOp, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, list, put } from '../db.js';
-import { allSecrets, redactText, secretsOf } from '../services/redact.js';
-import { userNames } from '../services/users.js';
+import { allSecrets, publishableNotes, redactText, secretsFor, secretsOf } from '../services/redact.js';
+import { releaseSecrets } from '../services/releases.js';
+import { getUser } from '../services/users.js';
 import { findProject } from '../services/ontologies.js';
 import { ONTOLOGY_FILE, ontologyStore } from '../services/ontologyStore.js';
 import { escapeHtml } from './markdown.js';
@@ -194,9 +195,9 @@ export async function refreshReleasePages(): Promise<void> {
     const cleanupKey = `cleanup:${project.slug}`;
     if (state[cleanupKey] !== CLEANUP_VERSION) {
       try {
-        const { changed, complete } = await remediateProvenance(project);
-        // Cleaned releases need their pages rendered again.
-        if (changed) delete state[project.slug];
+        const { complete } = await remediateProvenance(project);
+        // Pages are rendered again after every clean-up run, whatever it changed.
+        delete state[project.slug];
         // Runs once: an incomplete clean-up is tried again at the next start.
         if (complete) state[cleanupKey] = CLEANUP_VERSION;
       } catch (err) {
@@ -250,56 +251,95 @@ export async function refreshReleasePages(): Promise<void> {
 }
 
 /** Bump when the clean-up below changes, so it runs once more on every ontology. */
-const CLEANUP_VERSION = 'privacy clean-up 2';
+const CLEANUP_VERSION = 'privacy clean-up 3';
+
+/** Follows renames forward: a term a request added and a later request renamed is cleaned under both names. */
+function renameMap(crs: ChangeRequest[], g: OntologyGraph): (iris: string[]) => string[] {
+  const next = new Map<string, string>();
+  for (const cr of [...crs].sort((a, b) => a.number - b.number))
+    for (const op of cr.ops) if (op.op === 'renameTerm') next.set(expandIRI(op.iri, g.prefixes), g.namespace + op.newLocalName);
+  return (iris) => {
+    const out = new Set<string>();
+    for (let iri of iris) {
+      for (let hops = 0; hops < 50 && !out.has(iri); hops++) {
+        out.add(iri);
+        const n = next.get(iri);
+        if (!n) break;
+        iri = n;
+      }
+    }
+    return [...out];
+  };
+}
 
 /** The terms an edit adds or changes. */
 function touched(g: OntologyGraph, ops: ChangeOp[]): string[] {
-  const full = (iri: string) => expandIRI(iri, g.prefixes);
   return ops.flatMap((o) => {
     const r = o as Record<string, unknown>;
     if (typeof r.localName === 'string') return [g.namespace + r.localName];
-    if (typeof r.iri === 'string') return [full(r.iri)];
-    if (typeof r.classIri === 'string') return [full(r.classIri)];
+    if (typeof r.iri === 'string') return [expandIRI(r.iri, g.prefixes)];
+    if (typeof r.classIri === 'string') return [expandIRI(r.classIri, g.prefixes)];
     return [];
   });
 }
 
+/** Whether a stored snapshot holds only what may be published: nothing for a real ontology yet, the fixed fictional use cases for the demo. */
+export function publishableSnapshot(project: OntologyProject, version: string, data: PublishedRequirements): PublishedRequirements | undefined {
+  if (!project.demo) return !data.useCases.length && !data.document ? undefined : { useCases: [], snapshotMissing: true };
+  const canonical = validSnapshot(JSON.parse(snapshotFile(releaseRequirements(project, version))));
+  return JSON.stringify(canonical) === JSON.stringify(data) ? undefined : releaseRequirements(project, version);
+}
+
 /**
  * Removes what older versions of Concord could publish from private use
- * cases and the people behind changes, from the working draft and every
- * release (RDF, notes and use case snapshots):
- *   - generated provenance (scrubGeneratedProvenance), with only contributor
- *     names that are Concord users' (merges wrote those),
- *   - the titles and authors of the use cases each synthesised change request
- *     came from, in the terms that request added or changed,
- *   - the same in release notes (the release record, RELEASE_NOTES.md and
- *     CHANGELOG.md),
- *   - use cases in release snapshots that were never public: none are for a
- *     real ontology yet, and only the fixed fictional ones for the demo.
- * Each release is cleaned on its own, so one unreadable release can't stop
- * the others. Returns whether anything changed and whether everything could
- * be checked.
+ * cases and the people behind changes, from the working draft, every release
+ * on disk (RDF in every format, notes and use case snapshots) and every
+ * release record, drafts included:
+ *   - generated provenance (scrubGeneratedProvenance); a term's contributor
+ *     only where a merged request by that person touched the term,
+ *   - the titles and authors of the use cases each synthesised request came
+ *     from, in the terms it added or changed (followed through later renames),
+ *     and the titles generated provenance itself recorded, in those terms,
+ *   - the same in release notes (record, RELEASE_NOTES.md, CHANGELOG.md),
+ *   - release snapshots that hold anything but what may be published.
+ * Every serialisation is regenerated from the cleaned graph and compared with
+ * what's on disk, so a run interrupted half way is finished by the next.
+ * Each release is handled on its own. Returns whether everything was checked
+ * and written: only then is the clean-up recorded as done.
  */
-async function remediateProvenance(project: OntologyProject): Promise<{ changed: boolean; complete: boolean }> {
-  const names = userNames();
-  const plans = list<ChangeRequest>('changeRequests', project.id).flatMap((cr) => {
+async function remediateProvenance(project: OntologyProject): Promise<{ complete: boolean }> {
+  const crs = list<ChangeRequest>('changeRequests', project.id).filter((c) => ['merged', 'released'].includes(c.status));
+  const plans = crs.flatMap((cr) => {
     const secrets = secretsOf(cr);
     return secrets ? [{ cr, secrets }] : [];
   });
+  const dir = ontologyStore.dir(project);
+  let complete = true;
+  const harvested: string[] = [];
+
   const scrub = (g: OntologyGraph) => {
-    let n = scrubGeneratedProvenance(g, { generatedContributors: names });
-    for (const { cr, secrets } of plans) n += rewriteLiterals(g, touched(g, cr.ops), (v) => redactText(v, secrets));
+    const forward = renameMap(crs, g);
+    const byTerm = generatedProvenanceTitles(g);
+    for (const titles of byTerm.values()) harvested.push(...titles);
+    // Merges credited their author on the terms they touched.
+    const credited = new Map<string, Set<string>>();
+    for (const cr of crs) {
+      const name = getUser(cr.authorId)?.name?.normalize('NFKC').trim().toLowerCase();
+      if (name) for (const iri of forward(touched(g, cr.ops))) credited.set(iri, new Set([...(credited.get(iri) ?? []), name]));
+    }
+    let n = scrubGeneratedProvenance(g, { generatedContributor: (subject, name) => !!credited.get(subject)?.has(name.normalize('NFKC').trim().toLowerCase()) });
+    for (const { cr, secrets } of plans) n += rewriteLiterals(g, forward(touched(g, cr.ops)), (v) => redactText(v, secrets));
+    for (const [subject, titles] of byTerm) {
+      const secrets = secretsFor([], { titles });
+      n += rewriteLiterals(g, forward([subject]), (v) => redactText(v, secrets));
+    }
     return n;
   };
-  let complete = true;
-  let changedAny = false;
-  const dir = ontologyStore.dir(project);
 
   try {
     const draft = (await ontologyStore.working(project)).clone();
     if (scrub(draft)) {
       await ontologyStore.commitWorking(project, draft, 'Remove contributor names and use case titles from annotations', { name: 'Concord' });
-      changedAny = true;
       console.log(`[public] cleaned ${project.slug} working draft`);
     }
   } catch (err) {
@@ -307,44 +347,34 @@ async function remediateProvenance(project: OntologyProject): Promise<{ changed:
     console.warn(`[public] could not clean ${project.slug} working draft: ${(err as Error).message}`);
   }
 
-  const releases = new Map(list<Release>('releases', project.id).map((r) => [r.version, r]));
   const changed: Record<string, Record<string, string>> = {};
-  for (const version of ontologyStore.versions(project)) {
+  const read = (version: string, name: string) => {
+    const file = path.join(dir, 'releases', version, name);
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+  };
+  const versions = ontologyStore.versions(project);
+  for (const version of versions) {
     try {
       const files: Record<string, string> = {};
+      ontologyStore.forgetReleases(project);
       const graph = (await ontologyStore.at(project, version)).clone();
-      if (scrub(graph)) {
-        files[ONTOLOGY_FILE] = await graph.toTurtle();
-        for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
-          const name = `ontology.${FORMAT_INFO[format].extension}`;
-          if (format === 'turtle' || !fs.existsSync(path.join(dir, 'releases', version, name))) continue;
-          try {
-            files[name] = await serialize(graph, format);
-          } catch (err) {
-            console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}: ${(err as Error).message}`);
-          }
+      if (scrub(graph)) files[ONTOLOGY_FILE] = await graph.toTurtle();
+      // Every other serialisation, from the cleaned graph, wherever it differs from the file.
+      for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
+        const name = `ontology.${FORMAT_INFO[format].extension}`;
+        const current = read(version, name);
+        if (format === 'turtle' || current === undefined) continue;
+        try {
+          const fresh = await serialize(graph, format);
+          if (fresh !== current) files[name] = fresh;
+        } catch (err) {
+          console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}: ${(err as Error).message}`);
         }
-      }
-      const release = releases.get(version);
-      const secrets = allSecrets((release?.changeRequestIds ?? []).map((id) => get<ChangeRequest>('changeRequests', id)).map((cr) => (cr ? secretsOf(cr) : undefined)));
-      if (release) {
-        const notes = redactText(release.notes, secrets);
-        if (notes !== release.notes) {
-          release.notes = notes;
-          put('releases', release, release.ontologyId);
-        }
-      }
-      const notesFile = path.join(dir, 'releases', version, 'RELEASE_NOTES.md');
-      if (fs.existsSync(notesFile)) {
-        const before = fs.readFileSync(notesFile, 'utf8');
-        const after = redactText(before, secrets);
-        if (after !== before) files['RELEASE_NOTES.md'] = after;
       }
       const snapshot = readSnapshot(project, version);
       if (snapshot.state === 'ok') {
-        const fixture = project.demo ? new Set(releaseRequirements(project, version).useCases.map((u) => u.id)) : new Set<string>();
-        if (snapshot.data.useCases.some((u) => !fixture.has(u.id)))
-          files[REQUIREMENTS_SNAPSHOT] = snapshotFile(project.demo ? releaseRequirements(project, version) : { useCases: [], snapshotMissing: true });
+        const replacement = publishableSnapshot(project, version, snapshot.data);
+        if (replacement) files[REQUIREMENTS_SNAPSHOT] = snapshotFile(replacement);
       }
       if (Object.keys(files).length) changed[version] = files;
     } catch (err) {
@@ -352,27 +382,49 @@ async function remediateProvenance(project: OntologyProject): Promise<{ changed:
       console.warn(`[public] could not clean ${project.slug} ${version}: ${(err as Error).message}`);
     }
   }
+
+  // Notes, once every graph has given up the titles its provenance recorded.
+  const harvestedSecrets = secretsFor([], { titles: harvested });
+  for (const release of list<Release>('releases', project.id)) {
+    try {
+      const secrets = allSecrets([releaseSecrets(release), harvestedSecrets]);
+      const notes = publishableNotes(release.notes, secrets);
+      if (notes !== release.notes) {
+        release.notes = notes;
+        put('releases', release, release.ontologyId);
+      }
+      const file = versions.includes(release.version) ? read(release.version, 'RELEASE_NOTES.md') : undefined;
+      if (file !== undefined) {
+        const clean = publishableNotes(file, secrets);
+        if (clean !== file) changed[release.version] = { ...changed[release.version], 'RELEASE_NOTES.md': clean };
+      }
+    } catch (err) {
+      complete = false;
+      console.warn(`[public] could not clean ${project.slug} ${release.version} notes: ${(err as Error).message}`);
+    }
+  }
   if (Object.keys(changed).length) {
-    ontologyStore.updateReleaseFiles(project, changed, `Remove contributor names and use case titles from releases (${Object.keys(changed).join(', ')})`);
+    try {
+      ontologyStore.updateReleaseFiles(project, changed, `Remove contributor names and use case titles from releases (${Object.keys(changed).join(', ')})`);
+      console.log(`[public] cleaned ${project.slug} releases: ${Object.keys(changed).join(', ')}`);
+    } catch (err) {
+      complete = false;
+      console.warn(`[public] could not write ${project.slug} releases: ${(err as Error).message}`);
+    }
     ontologyStore.forgetReleases(project);
-    changedAny = true;
-    console.log(`[public] cleaned ${project.slug} releases: ${Object.keys(changed).join(', ')}`);
   }
   try {
     const changelog = path.join(dir, 'CHANGELOG.md');
     if (fs.existsSync(changelog)) {
       const before = fs.readFileSync(changelog, 'utf8');
-      const after = redactText(before, allSecrets(plans.map((p) => p.secrets)));
-      if (after !== before) {
-        ontologyStore.updateRepoFile(project, 'CHANGELOG.md', after, 'Remove use case titles from the changelog');
-        changedAny = true;
-      }
+      const after = publishableNotes(before, allSecrets([...plans.map((p) => p.secrets), harvestedSecrets]));
+      if (after !== before) ontologyStore.updateRepoFile(project, 'CHANGELOG.md', after, 'Remove use case titles from the changelog');
     }
   } catch (err) {
     complete = false;
     console.warn(`[public] could not clean ${project.slug} changelog: ${(err as Error).message}`);
   }
-  return { changed: changedAny, complete };
+  return { complete };
 }
 
 /**

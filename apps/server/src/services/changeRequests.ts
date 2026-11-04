@@ -36,8 +36,8 @@ import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
-import { getUser, logActivity, publicUser, userNames } from './users.js';
-import { redactOps, redactText, secretsOf } from './redact.js';
+import { getUser, logActivity, publicUser } from './users.js';
+import { publishableLines, redactOps, redactText, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -410,23 +410,27 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   const author = getUser(cr.authorId);
   const working = await ontologyStore.working(project);
   let after: OntologyGraph;
+  // Requests queued before redaction existed are checked again here, so a merge can't publish them.
+  const secrets = secretsOf(cr);
+  const redacted = secrets ? redactOps(cr.ops, secrets) : { ops: cr.ops, dropped: [] };
   try {
     // No author: dcterms:contributor would publish the requester's name on every new term.
-    // Who asked for each change stays in the change request and the commit.
-    // Requests queued before redaction existed are checked again here, so a merge can't publish them.
-    const secrets = secretsOf(cr);
-    const redacted = secrets ? redactOps(cr.ops, secrets) : { ops: cr.ops, dropped: [] };
-    if (redacted.dropped.length) cr.timeline.push(ev('comment', `left out ${redacted.dropped.join(', ')} when merging: the name would publish a use case title or a person's name`));
+    // Who asked for each change stays in the change request.
     after = applyChangeOps(working, redacted.ops, { date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
-    scrubGeneratedProvenance(after, { generatedContributors: userNames() });
+    scrubGeneratedProvenance(after);
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);
   }
+  if (secrets) {
+    // What was merged is what gets described from here on (commit, release notes).
+    if (redacted.dropped.length) cr.timeline.push(ev('comment', `left out ${redacted.dropped.join(', ')} when merging: the name would publish a use case title or a person's name`));
+    cr.ops = redacted.ops;
+    cr.kgcl = publishableLines(toKGCL(redacted.ops, after.prefixes), secrets);
+  }
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
-  const secrets = secretsOf(cr);
-  const message = `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`;
-  cr.mergedCommit = await ontologyStore.commitWorking(project, after, secrets ? redactText(message, secrets) : message, { name: 'Concord' });
+  const title = secrets ? redactText(cr.title, secrets) : cr.title;
+  cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: 'Concord' });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
   if (project.stage === 'discovery') {
     project.stage = 'drafting';

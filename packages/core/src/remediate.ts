@@ -11,15 +11,13 @@ import { P } from './graph.js';
  *   - the offline synthesiser's editorial note “Needed by the use case “…””
  *     and definition suffix “, as described in the use case “…”.”
  * Only these generated forms are touched, so nothing an editor wrote by hand
- * changes. A term-level contributor is removed only when it is one of
- * `generatedContributors` (the names merges wrote: Concord's users), so a
- * credit an editor added for someone else stays. Contributors on the ontology
- * itself (its metadata) are always kept. Returns how many triples changed.
+ * changes. A term-level contributor is removed only when `generatedContributor`
+ * says a merge wrote it (that term, that name), so a credit an editor added
+ * stays. Contributors on the ontology itself (its metadata) are always kept.
+ * Returns how many triples changed.
  */
-const norm = (s: string) => s.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-
-export function scrubGeneratedProvenance(g: OntologyGraph, opts: { generatedContributors?: Iterable<string> } = {}): number {
-  const generated = new Set([...(opts.generatedContributors ?? [])].map(norm).filter(Boolean));
+export function scrubGeneratedProvenance(g: OntologyGraph, opts: { generatedContributor?: (subject: string, name: string) => boolean } = {}): number {
+  const generated = opts.generatedContributor ?? (() => false);
   const s = g.store;
   const header = g.ontologyIRI;
   let changed = 0;
@@ -30,7 +28,7 @@ export function scrubGeneratedProvenance(g: OntologyGraph, opts: { generatedCont
     changed++;
   };
   for (const q of literalQuads(P.contributor)) {
-    if (q.subject.value === header || !generated.has(norm(q.object.value))) continue;
+    if (q.subject.value === header || !generated(q.subject.value, q.object.value)) continue;
     s.removeQuad(q);
     changed++;
   }
@@ -70,4 +68,28 @@ export function rewriteLiterals(g: OntologyGraph, subjects: Iterable<string>, re
     }
   }
   return changed;
+}
+
+/**
+ * The use case titles older versions wrote into generated provenance (see
+ * scrubGeneratedProvenance), by term. Read them before scrubbing, so the same
+ * titles can be found and redacted elsewhere in those terms' text.
+ */
+export function generatedProvenanceTitles(g: OntologyGraph): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (subject: string, title: string) => {
+    const t = title.trim();
+    if (t) out.set(subject, [...new Set([...(out.get(subject) ?? []), t])]);
+  };
+  const literals = (p: string) => g.store.getQuads(null, DataFactory.namedNode(p), null, null).filter((q) => q.object.termType === 'Literal');
+  for (const q of literals(P.source)) {
+    const m = /^use cases?:\s*([\s\S]*)$/i.exec(q.object.value);
+    if (m) for (const t of m[1].split(';')) add(q.subject.value, t);
+  }
+  for (const q of literals(P.editorialNote)) {
+    const m = /^Needed by the use case “([\s\S]*)”$/.exec(q.object.value);
+    if (m) add(q.subject.value, m[1]);
+  }
+  for (const q of literals(P.definition)) for (const m of q.object.value.matchAll(/, as described in the use case “([^”]*)”\./g)) add(q.subject.value, m[1]);
+  return out;
 }

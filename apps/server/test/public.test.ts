@@ -14,11 +14,12 @@ import { config } from '../src/config.js';
 import { OntologyGraph } from '@concord/core';
 import { seedDemo } from '../src/services/simulation.js';
 import { createUseCase, listUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
-import { redactOps, redactText, secretsFor } from '../src/services/redact.js';
+import { publishableNotes, redactOps, redactText, revealing, secretsFor } from '../src/services/redact.js';
 import { getCR, merge, revise } from '../src/services/changeRequests.js';
 import { put } from '../src/db.js';
 import { createUser, getUser } from '../src/services/users.js';
 import type { OntologyView } from '@concord/core/types';
+import type { ChangeRequest } from '@concord/shared';
 
 const app = createApp();
 
@@ -499,6 +500,7 @@ describe('re-review fixes', () => {
       // The demo's use cases are fixed content, so its missing snapshot is backfilled.
       expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
       expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).volunteering).toBe(PAGE_GENERATOR);
+      const canonical = fs.readFileSync(snap, 'utf8');
 
       // Up to date: nothing is rewritten or committed, whatever the page says.
       fs.writeFileSync(page, 'hand-edited');
@@ -517,21 +519,30 @@ describe('re-review fixes', () => {
         expect((await request(app).get('/def/volunteering/1.0.0')).text, broken).toContain('were not recorded when it was published');
       }
 
-      // A valid snapshot is history: only the page is re-rendered from it.
+      // A snapshot holding exactly what may be published is history: kept, and the page re-rendered from it.
       forget();
-      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'demo-aggregation', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
+      fs.writeFileSync(snap, canonical);
       await refreshReleasePages();
-      expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases[0].title).toBe('Kept as released');
-      expect(fs.readFileSync(page, 'utf8')).toContain('Kept as released');
+      expect(fs.readFileSync(snap, 'utf8')).toBe(canonical);
       expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
 
-      // ...unless it holds a use case that was never public (only the demo's fixed ones are).
-      forget();
-      fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'uc_real', ref: 'UC-9', title: 'PRIVATE_SNAPSHOT_TITLE', status: 'closed' }] }));
-      await refreshReleasePages();
-      expect(fs.readFileSync(snap, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
-      expect(fs.readFileSync(page, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
-      expect(fs.readFileSync(snap, 'utf8')).toContain('Aggregate volunteering opportunities across platforms');
+      // Anything else is replaced, even under an id the demo publishes.
+      for (const bad of [
+        { useCases: [{ id: 'uc_real', ref: 'UC-9', title: 'PRIVATE_SNAPSHOT_TITLE', status: 'closed' }] },
+        { useCases: [{ id: 'demo-aggregation', ref: 'UC-1', title: 'PRIVATE_SNAPSHOT_TITLE', description: 'PRIVATE_SNAPSHOT_TITLE', status: 'closed' }] },
+      ]) {
+        forget();
+        fs.writeFileSync(snap, JSON.stringify(bad));
+        await refreshReleasePages();
+        expect(fs.readFileSync(snap, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
+        expect(fs.readFileSync(page, 'utf8')).not.toContain('PRIVATE_SNAPSHOT_TITLE');
+        expect(fs.readFileSync(snap, 'utf8')).toBe(canonical);
+      }
+      // A real ontology publishes no use cases or requirements yet: an empty list with a document isn't empty.
+      const { publishableSnapshot } = await import('../src/public/routes.js');
+      const real = { ...project, demo: false };
+      expect(publishableSnapshot(real, '1.0.0', { useCases: [] })).toBeUndefined();
+      expect(publishableSnapshot(real, '1.0.0', { useCases: [], document: { title: 'PRIVATE', version: '1.0.0', sections: [], requirements: [] } } as never)).toEqual({ useCases: [], snapshotMissing: true });
     } finally {
       fs.writeFileSync(page, original.page);
       fs.writeFileSync(snap, original.snap);
@@ -542,12 +553,15 @@ describe('re-review fixes', () => {
 
   it('removes contributor names and use case titles that older versions wrote into the RDF', async () => {
     const project = findProject('volunteering')!;
-    // Merges wrote users' names; a credit an editor added for someone else stays.
-    await createUser({ name: 'Leaky Name', provider: 'github', subject: 'leaky-name' });
+    // Merges credited their author on the terms they touched; other credits stay, even of registered users.
+    const leaky = await createUser({ name: 'Leaky Name', provider: 'github', subject: 'leaky-name' });
+    await createUser({ name: 'Credited Member', provider: 'github', subject: 'credited-member' });
+    const template = (await import('../src/db.js')).list<ChangeRequest>('changeRequests', project.id)[0];
+    put('changeRequests', { ...template, id: 'cr_leaky', number: 9001, authorId: leaky.id, status: 'merged', origin: { type: 'direct' }, ops: [{ op: 'updateAnnotations', iri: `${'https://w3id.org/odi/volunteering#'}Volunteer`, set: {} }] }, project.id);
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
     const leak = (ttl: string) =>
-      `${ttl}\n<https://w3id.org/odi/volunteering#Volunteer> <http://purl.org/dc/terms/contributor> "Leaky Name", "Explicitly credited editor" ; <http://purl.org/dc/terms/source> "use cases: Leaky Title" ; <http://www.w3.org/2004/02/skos/core#editorialNote> "Needed by the use case “Leaky Title”" .\n`;
+      `${ttl}\n<https://w3id.org/odi/volunteering#Volunteer> <http://purl.org/dc/terms/contributor> "Leaky Name", "Explicitly credited editor", "Credited Member" ; <http://purl.org/dc/terms/source> "use cases: Leaky Title" ; <http://www.w3.org/2004/02/skos/core#editorialNote> "Needed by the use case “Leaky Title”" .\n`;
     // In the working draft...
     const working = await ontologyStore.working(project);
     const dirty = await OntologyGraph.fromTurtle(leak(await working.toTurtle()));
@@ -570,6 +584,7 @@ describe('re-review fixes', () => {
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Needed by a use case (see source).');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('NCVO definition of formal volunteering');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Explicitly credited editor');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Credited Member');
   });
 });
 
@@ -661,5 +676,111 @@ describe('third review fixes', () => {
       fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
       await refreshReleasePages();
     }
+  });
+});
+
+describe('fourth review fixes', () => {
+  const NS = 'https://w3id.org/odi/volunteering#';
+  const base = () => listUseCases(findProject('volunteering')!.id)[0];
+
+  it('catches titles in identifiers and alternative labels however they are written', async () => {
+    const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'ids-ann' });
+    const s = secretsFor([
+      { ...base(), authorId: ann.id, sections: { name: 'PENDING_SECRET_TITLE' } },
+      { ...base(), authorId: ann.id, sections: { name: 'Secret Pilot' } },
+    ]);
+    const { ops, dropped } = redactOps(
+      [
+        { op: 'addClass', localName: 'PendingSecretTitleRecord', label: 'neutral record', definition: 'x' },
+        { op: 'addClass', localName: 'pending_secret_title', label: 'neutral', definition: 'x' },
+        { op: 'addClass', localName: 'Safe', label: 'safe', definition: 'x', altLabels: ['SecretPilotRecord', 'secret-pilot', 'AnnRecord', 'fine'] },
+      ],
+      s,
+    );
+    expect(dropped).toEqual(['PendingSecretTitleRecord', 'pending_secret_title']);
+    expect(ops).toEqual([{ op: 'addClass', localName: 'Safe', label: 'safe', definition: 'x', altLabels: ['fine'] }]);
+    // Edit lists and notes lose any line that still names a secret in an identifier.
+    expect(publishableNotes('- #4 Changes for Secret Pilot\n  - `create class :SecretPilotRecord`\n  - `create class :Safe`', s)).toBe('- #4 Changes for a use case\n  - `create class :Safe`');
+  });
+
+  it('leaves ordinary words alone when a title is short or common, and never redacts twice', async () => {
+    const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'common-ann' });
+    for (const title of ['a', 'use', 'record', 'use case', 'The plan']) {
+      const s = secretsFor([{ ...base(), authorId: ann.id, sections: { name: title } }]);
+      expect(redactText('A record is a useful item for the plan.', s), title).toBe('A record is a useful item for the plan.');
+      expect(revealing('Record', s), title).toBe(false);
+    }
+    // A title or name that shares words with the replacements: running again changes nothing.
+    const p = await createUser({ name: 'Participant', provider: 'github', subject: 'common-participant' });
+    const s = secretsFor([{ ...base(), authorId: p.id, sections: { name: 'Secret Pilot' } }]);
+    const once = redactText('Secret Pilot, asked by Participant.', s);
+    expect(once).toBe('a use case, asked by a participant.');
+    expect(redactText(once, s)).toBe(once);
+    expect(redactText(redactText(once, s), s)).toBe(once);
+  });
+
+  it('describes a merged request by what was merged, in the commit and in release notes', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Kgcl Person', provider: 'github', subject: 'kgcl-leak' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'Hidden Pilot' } });
+    const cr = await synthesise(project, tester, [uc.id]);
+    const ops = [
+      { op: 'addClass', localName: 'HiddenPilotRecord', label: 'pilot record', definition: 'Private' },
+      { op: 'addClass', localName: 'SafeRecordFour', label: 'safe record four', definition: 'Fine.' },
+    ];
+    put('changeRequests', { ...getCR(cr.id), ops, kgcl: ["create class :HiddenPilotRecord 'pilot record'", "create class :SafeRecordFour 'safe record four'"], status: 'approved' }, cr.ontologyId);
+    const merged = await merge(getCR(cr.id), undefined);
+    expect(merged.status).toBe('merged');
+    expect(JSON.stringify(merged.kgcl)).not.toMatch(/HiddenPilot/);
+    expect(JSON.stringify(merged.kgcl)).toMatch(/SafeRecordFour/);
+    const { execFileSync } = await import('node:child_process');
+    const message = execFileSync('git', ['log', '-1', '--format=%B'], { cwd: ontologyStore.dir(project), encoding: 'utf8' });
+    expect(message).toContain('SafeRecordFour');
+    expect(message).not.toMatch(/Hidden ?Pilot/i);
+  });
+
+  it('cleans release drafts, renamed terms and half-written formats, and hides names from anonymous WebID lookups', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Rename Person', provider: 'github', subject: 'rename-cleanup' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'RENAMED_SECRET' } });
+    const synth = await synthesise(project, tester, [uc.id]);
+    const template = getCR(synth.id);
+    // OldRecord came from the use case, then a later request renamed it NewRecord.
+    put('changeRequests', { ...template, status: 'merged', ops: [{ op: 'addClass', localName: 'OldRecord', label: 'old record', definition: 'x' }] }, project.id);
+    put('changeRequests', { ...template, id: 'cr_rename', number: 9100, origin: { type: 'direct' }, status: 'merged', ops: [{ op: 'renameTerm', iri: `${NS}OldRecord`, newLocalName: 'NewRecord' }] }, project.id);
+    const working = await ontologyStore.working(project);
+    const dirty = await OntologyGraph.fromTurtle(
+      `${await working.toTurtle()}\n<${NS}NewRecord> a <http://www.w3.org/2002/07/owl#Class> ; <http://www.w3.org/2000/01/rdf-schema#comment> "Raised in RENAMED_SECRET by Rename Person." .\n`,
+    );
+    await ontologyStore.commitWorking(project, dirty, 'simulate a rename', { name: 'Test' });
+    // A draft release from before redaction, naming the same use case.
+    const releases = (await import('../src/db.js')).list<{ id: string; status: string; version: string; notes: string; changeRequestIds: string[]; ontologyId: string }>('releases', project.id);
+    const draft = { ...releases[0], id: 'rel_old_draft', status: 'draft', version: '9.9.0', notes: 'Changes for RENAMED_SECRET by Rename Person', changeRequestIds: [synth.id] };
+    put('releases', draft, project.id);
+    // A JSON-LD file left behind by an interrupted clean-up, beside clean Turtle.
+    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
+    const json = fs.readFileSync(path.join(dir, 'ontology.jsonld'), 'utf8');
+    fs.writeFileSync(path.join(dir, 'ontology.jsonld'), json.replace('{', '{"leak":"WRITE_FAILURE_SECRET",'));
+    try {
+      fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+      await refreshReleasePages();
+      const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
+      expect(ttl).toContain('NewRecord');
+      expect(ttl).not.toContain('RENAMED_SECRET');
+      expect(ttl).not.toContain('Rename Person');
+      const stored = (await import('../src/db.js')).get<{ notes: string }>('releases', 'rel_old_draft')!;
+      expect(stored.notes).toBe('Changes for a use case by a participant');
+      expect(fs.readFileSync(path.join(dir, 'ontology.jsonld'), 'utf8')).not.toContain('WRITE_FAILURE_SECRET');
+    } finally {
+      (await import('../src/db.js')).remove('releases', 'rel_old_draft');
+      fs.writeFileSync(path.join(dir, 'ontology.jsonld'), json);
+    }
+    // WebIDs resolve for anyone, but only signed-in users see names.
+    const anon = (await request(app).get(`/people/${tester.id}`)).text;
+    expect(anon).toContain('solid:oidcIssuer');
+    expect(anon).not.toContain('Rename Person');
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'WebID reader', role: 'contributor' });
+    expect((await agent.get(`/people/${tester.id}`)).text).toContain('Rename Person');
   });
 });

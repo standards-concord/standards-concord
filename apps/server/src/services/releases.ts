@@ -1,4 +1,4 @@
-import { redactText, secretsOf } from './redact.js';
+import { allSecrets, publishableLines, publishableNotes, redactText, secretsOf } from './redact.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -11,7 +11,7 @@ import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
@@ -68,12 +68,21 @@ const published = (c: ChangeRequest, text: string) => {
   const secrets = secretsOf(c);
   return secrets ? redactText(text, secrets) : text;
 };
+const publishedEdits = (c: ChangeRequest) => {
+  const secrets = secretsOf(c);
+  return secrets ? publishableLines(c.kgcl ?? [], secrets) : (c.kgcl ?? []);
+};
+
+/** What a release's notes must not publish: the secrets of every synthesised request it includes. */
+export function releaseSecrets(r: Pick<Release, 'changeRequestIds'>) {
+  return allSecrets(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)).map((c) => (c ? secretsOf(c) : undefined)));
+}
 
 /** Release notes grouped by level, from the merged change requests. */
 function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
-    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${c.kgcl?.length ? `\n${c.kgcl.slice(0, 6).map((k) => `  - \`${published(c, k)}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
+    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${publishedEdits(c).length ? `\n${publishedEdits(c).slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
       ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
@@ -198,6 +207,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
       console.warn(`[release] migration script: ${(err as Error).message}`);
     }
   }
+  // Notes drafted before redaction existed (or edited by hand) are checked again as they're published.
+  r.notes = publishableNotes(r.notes, releaseSecrets(r));
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
   // The use case snapshot always goes in, so the release never shows live data;
   // a rendering failure only costs the stored page (served pages render on request).
