@@ -434,6 +434,11 @@ export function apiRouter(): Router {
     res.json({ fork: out.fork, changeRequest: crs.detail(out.changeRequest) });
   });
   r.post('/ontologies/:id/forks/:fork/sync', async (req, res) => res.json(await forks.syncFork(fork(req), req.user)));
+  r.post('/ontologies/:id/forks/:fork/discard', async (req, res) => {
+    const terms = req.body?.all === true ? 'all' : Array.isArray(req.body?.terms) ? req.body.terms.filter((t: unknown): t is string => typeof t === 'string' && !!t.trim()) : [];
+    if (terms !== 'all' && !terms.length) throw new HttpError(400, 'Name the terms whose changes to discard, or send all: true');
+    res.json(await forks.discardForkChanges(fork(req), req.user, terms));
+  });
   r.post('/ontologies/:id/forks/:fork/close', async (req, res) => res.json(await forks.closeFork(fork(req), req.user)));
 
   /* ------------------------------- agents ---------------------------- */

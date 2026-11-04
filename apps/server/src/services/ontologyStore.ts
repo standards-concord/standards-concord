@@ -188,11 +188,24 @@ export const ontologyStore = {
     return g;
   },
 
+  /** The ontology as it was at a commit (a fork's base, for three-way comparisons). */
+  async graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph> {
+    const key = `${project.slug}@${commit}`;
+    let g = graphCache.get(key);
+    if (!g) {
+      g = await OntologyGraph.fromTurtle(this.readAt(project, commit));
+      graphCache.set(key, g);
+    }
+    return g;
+  },
+
   /**
    * Commit a new ontology.ttl to a fork branch without checking it out: the
    * blob goes into a throwaway index built from the branch's tree, so main's
-   * working tree is never touched. `parents` defaults to the branch head; a
-   * sync passes [branch head, upstream head] so the history shows the merge.
+   * working tree is never touched. `expectedParent` is the head the caller
+   * read the fork's graph at: the ref only moves if it is still there, so an
+   * edit based on a stale graph fails instead of overwriting a newer one. A
+   * sync passes the upstream head in `extraParents` so the history shows it.
    */
   async commitFork(
     project: Pick<OntologyProject, 'slug'>,
@@ -200,21 +213,25 @@ export const ontologyStore = {
     graph: OntologyGraph,
     message: string,
     author: CommitAuthor,
-    extraParents: string[] = [],
+    opts: { expectedParent: string; extraParents?: string[] },
   ): Promise<string> {
     const dir = repoDir(project);
     const branch = forkBranch(forkSlug);
-    const parent = this.forkHead(project, forkSlug);
-    const index = path.join(dir, '.git', `concord-fork-${process.pid}-${Date.now()}.index`);
+    const parent = opts.expectedParent;
+    const index = path.join(dir, '.git', `concord-fork-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
     try {
       const env = { GIT_INDEX_FILE: index };
       const blob = git(dir, ['hash-object', '-w', '--stdin'], env, await graph.toTurtle());
       git(dir, ['read-tree', parent], env);
       git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], env);
       const tree = git(dir, ['write-tree'], env);
-      const parents = [parent, ...extraParents.filter((p) => p !== parent)].flatMap((p) => ['-p', p]);
+      const parents = [parent, ...(opts.extraParents ?? []).filter((p) => p !== parent)].flatMap((p) => ['-p', p]);
       const commit = git(dir, ['commit-tree', tree, ...parents, '-m', message], { name: author.name, email: author.email ?? 'developer@concord' });
-      git(dir, ['update-ref', `refs/heads/${branch}`, commit, parent]);
+      try {
+        git(dir, ['update-ref', `refs/heads/${branch}`, commit, parent]);
+      } catch {
+        throw new HttpError(409, 'The fork changed while this edit was being prepared. Reload it and try again.');
+      }
       return commit;
     } finally {
       fs.rmSync(index, { force: true });

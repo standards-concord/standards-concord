@@ -19,7 +19,7 @@ test('the Forks page lists the demo fork, and its page shows how to use it', asy
   await settle(page);
   await expect(page.getByRole('heading', { name: 'CharityBase recurring shifts' })).toBeVisible();
   await expect(page.getByText('Gareth Lewis').first()).toBeVisible();
-  await expect(page.getByText('vol:recurrenceRule')).toBeVisible();
+  await expect(page.getByText('vol:recurrenceRule', { exact: true })).toBeVisible();
   await expect(page.getByText('Only in this fork')).toBeVisible();
   await expect(page.getByText(/\/def\/volunteering\/forks\/charitybase-recurring-shifts$/).first()).toBeVisible();
   await expect(page.getByRole('region', { name: 'What to do next' })).toContainText(/propose/i);
@@ -87,4 +87,36 @@ test('opening a fork IRI in a browser lands on its page in the hub', async ({ pa
   await expect(page).toHaveURL(/\/o\/volunteering\/forks\/charitybase-recurring-shifts$/);
   await settle(page);
   await expect(page.getByRole('heading', { name: 'CharityBase recurring shifts' })).toBeVisible();
+});
+
+test('conflicts with upstream are listed with a way to discard the fork change', async ({ page, request }) => {
+  await demoOntology(request);
+  await signIn(page, { name: 'Conflicted Cal', role: 'contributor' });
+  const created = await page.request.post('/api/ontologies/volunteering/forks', { data: { name: `Conflict ${Date.now().toString(36)}` } });
+  const fork = await created.json();
+  const edit = await page.request.post(`/api/ontologies/volunteering/forks/${fork.slug}/edits`, {
+    data: { ops: [{ op: 'addClass', localName: `Clash${Date.now().toString(36)}`, label: 'clash', definition: 'A class that upstream also defines differently.' }] },
+  });
+  const term = (await edit.json()).terms[0];
+  // Upstream changing the same term is covered by the server tests; here the check reports it.
+  await page.route(`**/api/ontologies/volunteering/forks/${fork.slug}/check`, async (route) => {
+    const real = await (await route.fetch()).json();
+    await route.fulfill({
+      json: { ...real, outcome: 'resolve-conflicts', message: 'Upstream has changed something the fork also changes.', conflicts: [{ iri: term.iri, curie: term.curie, message: `${term.curie} has changed upstream since this fork was last synced.` }] },
+    });
+  });
+  await page.goto(`/o/volunteering/forks/${fork.slug}`);
+  await settle(page);
+  await expectNoCrash(page);
+  const next = page.getByRole('region', { name: 'What to do next' });
+  await expect(next.getByRole('list', { name: 'Conflicts with upstream' })).toContainText(`${term.curie} has changed upstream`);
+  // No proposing while the fork conflicts with upstream.
+  await expect(page.getByRole('button', { name: 'Propose upstream' })).toHaveCount(0);
+  page.once('dialog', (d) => void d.accept());
+  await next.getByRole('button', { name: `Discard my change to ${term.curie}` }).click();
+  await expect(page.getByRole('status')).toContainText(`Discarded the change to ${term.curie}`);
+  await expect(page.getByText(term.curie, { exact: true })).toHaveCount(0);
+  await expect(page.getByText('(you)')).toBeVisible();
+  // The page re-checks after the discard; don't leave that request in flight when the test ends.
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
 });

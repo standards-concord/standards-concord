@@ -195,6 +195,12 @@ describe('development forks', () => {
     expect(released.body.fork.terms[0]).toMatchObject({ upstream: 'released', releasedIn: '1.1.0' });
     expect(released.body.replace).toContainEqual({ from: expect.stringMatching(/volunteer-hours$/), to: expect.stringMatching(/\/def\/volunteering\/1\.1\.0$/) });
     expect(released.body.replace).toContainEqual({ from: expect.stringMatching(/volunteer-hours\.ttl$/), to: expect.stringMatching(/\/def\/volunteering\/1\.1\.0\.ttl$/) });
+    // Every URL the plan points to resolves, with the fork's terms in it.
+    for (const { to } of released.body.replace) {
+      const res = await request(app).get(new URL(to).pathname);
+      expect(res.status, to).toBe(200);
+      expect(res.text, to).toMatch(/VolunteeringActivity/);
+    }
 
     const closed = await dev.post(`${forkPath}/close`);
     expect(closed.body.status).toBe('closed');
@@ -224,7 +230,7 @@ describe('fork tools over MCP', () => {
       .set('Authorization', `Bearer ${tok.body.token}`)
       .set('Accept', 'application/json, text/event-stream')
       .send({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} });
-    for (const t of ['create_fork', 'edit_fork', 'propose_fork', 'check_forks', 'sync_fork', 'list_forks', 'get_fork', 'close_fork']) expect(tools.text).toContain(`"${t}"`);
+    for (const t of ['create_fork', 'edit_fork', 'propose_fork', 'check_forks', 'sync_fork', 'list_forks', 'get_fork', 'close_fork', 'discard_fork_changes']) expect(tools.text).toContain(`"${t}"`);
 
     const none = await call('check_forks', {});
     expect(none.text).toMatch(/no forks/);

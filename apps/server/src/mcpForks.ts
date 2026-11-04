@@ -4,7 +4,7 @@ import * as z from 'zod';
 import { config } from './config.js';
 import { HttpError } from './db.js';
 import { ProposedTermSchema } from './llm/schemas.js';
-import { checkFork, closeFork, createFork, editFork, findFork, forkSummary, forksOwnedBy, listForks, proposeFork, syncFork } from './services/forks.js';
+import { checkFork, closeFork, createFork, discardForkChanges, editFork, findFork, forkSummary, forksOwnedBy, listForks, proposeFork, syncFork } from './services/forks.js';
 
 /**
  * MCP tools for development forks. The loop for an agent building an app:
@@ -38,7 +38,7 @@ function brief(f: ForkSummary) {
     appUrl: f.urls.app,
     upstream: `${f.ontology.title} ${f.ontology.currentVersion}`,
     behindUpstreamBy: f.behindBy || undefined,
-    terms: f.terms.map((t) => ({ term: t.curie, iri: t.iri, change: t.change, upstream: t.upstream, releasedIn: t.releasedIn, landedAs: t.landedAs })),
+    terms: f.terms.map((t) => ({ term: t.curie, iri: t.iri, change: t.change, upstream: t.upstream, releasedIn: t.releasedIn })),
     changeRequest: f.changeRequest,
   };
 }
@@ -162,7 +162,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
     {
       title: 'Check forks against upstream',
       description:
-        'Call this at the start of every development session. For each of your forks (or one fork), reports whether its terms are still pending review, merged into the working draft or released, and returns a migration plan: which import URLs to replace and any terms that were renamed in review.',
+        'Call this at the start of every development session. For each of your forks (or one fork), reports whether its terms are still pending review, merged into the working draft or released, and returns what to do: keep using the fork, sync it, resolve conflicts with upstream, or (once everything in the fork has landed exactly as it is in the fork) which import URLs to replace. A term that landed in a different form from the fork counts as not landed, so you never switch to a version that lacks what your code uses.',
       inputSchema: { fork: forkArg.optional().describe('Check one fork; default is all of your forks that are still in use') },
       annotations: { readOnlyHint: true },
     },
@@ -179,8 +179,8 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
             message: c.message,
             steps: c.steps,
             replace: c.replace.length ? c.replace : undefined,
-            renames: c.renames.length ? c.renames : undefined,
-            terms: c.fork.terms.map((t) => ({ term: t.curie, upstream: t.upstream, releasedIn: t.releasedIn, landedAs: t.landedAs })),
+            conflicts: c.conflicts.length ? c.conflicts : undefined,
+            terms: c.fork.terms.map((t) => ({ term: t.curie, change: t.change, upstream: t.upstream, releasedIn: t.releasedIn })),
             changeRequest: c.fork.changeRequest,
           })),
         );
@@ -191,13 +191,33 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
     'sync_fork',
     {
       title: 'Sync a fork with upstream',
-      description: 'Replay your fork\'s edits on the latest upstream draft, so the fork picks up everything the standard has changed since you forked. Edits that already landed are skipped; conflicts are reported and nothing changes.',
+      description: 'Replay your fork\'s edits on the latest upstream draft, so the fork picks up everything the standard has changed since you forked. Edits that already landed are dropped. If upstream changed a term the fork also changes, or the combination would be inconsistent, nothing changes and the conflicts are returned: resolve them with discard_fork_changes.',
       inputSchema: { fork: forkArg },
     },
     ({ fork }) =>
       withFork(fork, async (f) => {
         const r = await syncFork(f, user);
         return json({ synced: r.synced, message: r.message, conflicts: r.conflicts.length ? r.conflicts : undefined, fork: brief(r.fork) });
+      }),
+  );
+
+  server.registerTool(
+    'discard_fork_changes',
+    {
+      title: 'Discard changes in a fork',
+      description:
+        'Drop the fork\'s changes to some terms (or all of them), so the fork goes back to upstream\'s version of those terms. Use it to resolve a conflict reported by sync_fork or check_forks: discard, sync, then redo the change with edit_fork if you still need it.',
+      inputSchema: {
+        fork: forkArg,
+        terms: z.array(z.string()).optional().describe('Terms whose changes to drop, as CURIEs (vol:Shift) or IRIs, or keys from a conflict; omit with all: true to drop everything'),
+        all: z.boolean().optional().describe('Drop every change in the fork'),
+      },
+    },
+    ({ fork, terms, all }) =>
+      withFork(fork, async (f) => {
+        if (!all && !terms?.length) return fail('Name the terms whose changes to discard, or pass all: true.');
+        const r = await discardForkChanges(f, user, all ? 'all' : terms!);
+        return json({ fork: brief(r), next: r.behindBy ? 'Now call sync_fork to pick up upstream\'s changes.' : 'Done.' });
       }),
   );
 

@@ -518,8 +518,10 @@ export interface OntologyFork {
   /** Upstream commit and released version the fork was taken from (or last synced with). */
   baseCommit: string;
   baseVersion: string;
-  /** Every edit made on the fork since its base, in order. Replayed on sync and proposed upstream as one change request. */
+  /** The fork's outstanding edits since its base, in order: replayed on sync and proposed upstream as one change request. Edits that have landed upstream are dropped on sync. */
   ops: ChangeOp[];
+  /** Terms (or import:/meta: keys) whose fork changes landed upstream and were dropped from `ops` on sync, so their status is still reported. */
+  landed?: { key: string; change: 'added' | 'changed' | 'removed' }[];
   /** Increments on every edit or sync; part of the fork's version string. */
   revision: number;
   head: string;
@@ -545,14 +547,17 @@ export interface ForkTerm {
   curie: string;
   label?: string;
   kind: string;
-  /** Whether the edit adds the term or changes an existing one. */
-  change: 'added' | 'changed';
-  /** Where the term stands upstream. */
-  upstream: 'not-proposed' | 'pending' | 'merged' | 'released' | 'rejected' | 'missing';
-  /** The released version that first contains it. */
+  /** What the fork does to the term, compared with the upstream commit it is based on. */
+  change: 'added' | 'changed' | 'removed';
+  /**
+   * Where the fork's version of the term stands upstream, by content (not just
+   * by IRI): released or merged only when upstream says exactly what the fork
+   * says; pending when the open change request would make it so; diverged when
+   * upstream has a different version (changed in review, or by someone else).
+   */
+  upstream: 'not-proposed' | 'pending' | 'merged' | 'released' | 'rejected' | 'diverged';
+  /** The released version that contains the fork's version of the term. */
   releasedIn?: string;
-  /** When review renamed the term, the IRI it landed under. */
-  landedAs?: string;
 }
 
 export interface ForkSummary extends OntologyFork {
@@ -566,16 +571,31 @@ export interface ForkSummary extends OntologyFork {
   behindBy: number;
 }
 
+/** A fork edit that can't be carried onto the latest upstream draft as it is. */
+export interface ForkConflict {
+  /** The term (or `owl:imports <iri>`) both sides changed, when there is one. */
+  iri?: string;
+  curie?: string;
+  message: string;
+}
+
 /** What an agent should do about a fork at the start of a development session. */
 export interface ForkCheck {
   fork: ForkSummary;
-  outcome: 'keep-using-fork' | 'sync-fork' | 'switch-to-draft' | 'switch-to-release' | 'fork-closed';
+  outcome: 'keep-using-fork' | 'sync-fork' | 'resolve-conflicts' | 'switch-to-draft' | 'switch-to-release' | 'fork-closed';
   message: string;
-  /** Import URLs to replace in the application. */
+  /** Import URLs to replace in the application (every one of them resolves). */
   replace: { from: string; to: string }[];
-  /** Term IRIs that landed under a different name. */
-  renames: { from: string; to: string }[];
+  /** Fork edits that conflict with upstream; discard them or edit the fork. */
+  conflicts: ForkConflict[];
   steps: string[];
+}
+
+export interface ForkSyncResult {
+  synced: boolean;
+  fork: ForkSummary;
+  conflicts: ForkConflict[];
+  message: string;
 }
 
 export interface ChangeRequestDetail extends ChangeRequest {

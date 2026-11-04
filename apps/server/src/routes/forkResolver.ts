@@ -1,6 +1,7 @@
 import { FORMAT_INFO, serialize } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import { Router, type Request, type Response } from 'express';
+import { config } from '../config.js';
 import { findFork, forkUrls, forkVersion } from '../services/forks.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -81,6 +82,62 @@ async function serve(req: Request, res: Response) {
   res.type(`${info.mediaType}; charset=utf-8`);
   res.set('Content-Disposition', `inline; filename="${project.slug}-fork-${fork.slug}.${info.extension}"`);
   res.send(await serialize(graph, format));
+}
+
+/**
+ * The main ontology's versions at the URLs fork migration plans point to:
+ *
+ *   /def/<ontology>/<version>   a released version (or "latest")
+ *   /def/<ontology>/draft       the working draft, which changes until the next release
+ *
+ * with the same extensions and negotiation as forks. The public ontology
+ * pages serve these URLs with HTML documentation when they are deployed;
+ * this resolver is mounted after them, so it only answers when they don't.
+ */
+async function serveVersion(req: Request, res: Response) {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Type');
+  const project = findProject(String(req.params.slug));
+  if (!project) return plain(res, 404, `There is no ontology called “${req.params.slug}”.`);
+  const seg = splitExtension(String(req.params.version));
+  const releases = ontologyStore.versions(project);
+  const version = seg.base === 'latest' ? releases.at(-1) : seg.base;
+  if (!version || (version !== 'draft' && !releases.includes(version))) return plain(res, 404, `${project.title} has no version “${seg.base}”. Released: ${releases.join(', ') || 'none yet'}; or use “draft”.`);
+  let format: OutputFormat | 'html' | undefined = seg.format;
+  if (!format) {
+    const best = req.accepts(Object.keys(NEGOTIABLE));
+    if (!best) return plain(res, 406, `Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl`);
+    format = NEGOTIABLE[best];
+    res.vary('Accept');
+  }
+  const app = `${config.webUrl}/o/${encodeURIComponent(project.slug)}${version === 'draft' ? '' : '/releases'}`;
+  if (format === 'html') return res.redirect(303, app);
+  const graph = version === 'draft' ? await ontologyStore.working(project) : await ontologyStore.at(project, version);
+  const info = FORMAT_INFO[format];
+  const etag = version === 'draft' ? ontologyStore.head(project) : version;
+  res.set('Cache-Control', version === 'draft' ? 'no-cache' : 'public, max-age=3600');
+  res.set('ETag', `"${etag}-${format}"`);
+  if (req.fresh) return void res.status(304).end();
+  res.type(`${info.mediaType}; charset=utf-8`);
+  res.set('Content-Disposition', `inline; filename="${project.slug}-${version}.${info.extension}"`);
+  res.send(await serialize(graph, format));
+}
+
+/** Mount after any other /def handlers: answers released and draft versions of the main ontology. */
+export function versionFallback(): Router {
+  const r = Router();
+  r.options('/def/:slug/:version', (_req, res) => {
+    res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS', 'Access-Control-Allow-Headers': 'Accept' });
+    res.status(204).end();
+  });
+  r.get('/def/:slug/:version', async (req, res, next) => {
+    try {
+      await serveVersion(req, res);
+    } catch (err) {
+      next(err);
+    }
+  });
+  return r;
 }
 
 export function forkResolver(): Router {

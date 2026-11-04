@@ -17,6 +17,7 @@ import type {
   FeedbackQuestion,
   ForkCheck,
   ForkSummary,
+  ForkSyncResult,
   FeedbackSubmission,
   GovernancePolicy,
   GovernanceTemplateId,
@@ -155,7 +156,7 @@ export type ForkEditResult = {
   warnings: string[];
   validation: { passed: boolean; consistent: boolean; errors: string[]; warnings: string[] };
 };
-export type ForkSyncResult = { synced: boolean; fork: ForkSummary; conflicts: string[]; message: string };
+export type { ForkSyncResult };
 export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment';
 export type VoteChoice = 'yes' | 'no' | 'abstain';
 
@@ -238,6 +239,8 @@ export const api = {
   proposeFork: (id: string, fork: string, body: { title?: string; description?: string } = {}) =>
     post<{ fork: ForkSummary; changeRequest: ChangeRequestDetail }>(`/api/ontologies/${e(id)}/forks/${e(fork)}/propose`, body),
   syncFork: (id: string, fork: string) => post<ForkSyncResult>(`/api/ontologies/${e(id)}/forks/${e(fork)}/sync`),
+  discardForkChanges: (id: string, fork: string, terms: string[] | 'all') =>
+    post<ForkSummary>(`/api/ontologies/${e(id)}/forks/${e(fork)}/discard`, terms === 'all' ? { all: true } : { terms }),
   closeFork: (id: string, fork: string) => post<ForkSummary>(`/api/ontologies/${e(id)}/forks/${e(fork)}/close`),
 
   // Releases

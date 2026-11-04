@@ -145,6 +145,34 @@ export function canonicalTriples(store: Store): Set<string> {
   return lines;
 }
 
+/** Provenance the change engine stamps on edited terms; not part of what a term means. */
+const PROVENANCE = new Set(['http://purl.org/dc/terms/created', 'http://purl.org/dc/terms/modified', 'http://purl.org/dc/terms/contributor', 'http://purl.org/dc/terms/source']);
+
+/**
+ * Everything a graph says about one term, as a stable string: its own
+ * triples (blank-node structures such as restrictions in canonical form) and
+ * any anonymous axioms that mention it (e.g. owl:AllDisjointClasses), minus
+ * provenance. Two graphs agree on a term exactly when these strings are equal,
+ * whoever made the edit and when. An absent term gives ''.
+ */
+export function termDescription(g: OntologyGraph, iri: string): string {
+  const store = g.store;
+  const lines: string[] = [];
+  for (const q of store.getQuads(iri, null, null, null)) {
+    if (PROVENANCE.has(q.predicate.value)) continue;
+    lines.push(`<${q.predicate.value}> ${canonical(store, q.object as Term)}`);
+  }
+  const referenced = new Set<string>();
+  for (const q of store.getQuads(null, null, null, null)) if (q.object.termType === 'BlankNode') referenced.add(q.object.value);
+  const needle = `<${iri}>`;
+  for (const q of store.getQuads(null, null, null, null)) {
+    if (q.subject.termType !== 'BlankNode' || referenced.has(q.subject.value)) continue;
+    const c = canonical(store, q.subject as Term);
+    if (c.includes(needle)) lines.push(c);
+  }
+  return [...new Set(lines)].sort().join('\n');
+}
+
 export function diffOntologies(before: OntologyGraph, after: OntologyGraph): OntologyDiff {
   const prefixes = { ...before.prefixes, ...after.prefixes };
   const a = allTerms(before);

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type { ForkCheck, ForkTerm } from '@concord/shared';
-import { ArrowLeft, ArrowRight, CircleCheck, GitFork, GitPullRequest, Info, RefreshCw, Sparkles, X } from 'lucide-react';
+import type { ForkCheck, ForkConflict, ForkTerm } from '@concord/shared';
+import { ArrowLeft, ArrowRight, CircleCheck, GitFork, GitPullRequest, Info, RefreshCw, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
 import { api, type ForkDetail } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -33,8 +33,8 @@ function UpstreamChip({ t }: { t: ForkTerm }) {
       return <Badge tone="accent">In review</Badge>;
     case 'rejected':
       return <Badge tone="danger">Not accepted</Badge>;
-    case 'missing':
-      return t.landedAs ? <Badge tone="warn">Landed under another name</Badge> : <Badge tone="warn">Not in the merged change</Badge>;
+    case 'diverged':
+      return <Badge tone="warn">Changed upstream too</Badge>;
     default:
       return <Badge tone="outline">Only in this fork</Badge>;
   }
@@ -43,14 +43,35 @@ function UpstreamChip({ t }: { t: ForkTerm }) {
 const OUTCOME_TONE: Record<ForkCheck['outcome'], string> = {
   'keep-using-fork': 'border-line bg-surface-2',
   'sync-fork': 'border-warn/40 bg-warn-soft',
+  'resolve-conflicts': 'border-danger/40 bg-danger-soft',
   'switch-to-draft': 'border-ok/40 bg-ok-soft',
   'switch-to-release': 'border-ok/40 bg-ok-soft',
   'fork-closed': 'border-line bg-surface-2',
 };
 
+/** Fork changes that can't be carried onto upstream as they are, each with a way out. */
+function Conflicts({ conflicts, onDiscard, pending }: { conflicts: ForkConflict[]; onDiscard?: (c: ForkConflict) => void; pending?: boolean }) {
+  return (
+    <ul aria-label="Conflicts with upstream" className="mt-3 space-y-2">
+      {conflicts.map((c, i) => (
+        <li key={`${c.iri ?? ''}-${i}`} className="flex flex-wrap items-start gap-2 rounded-lg border border-line bg-surface p-3 text-sm">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+          <span className="min-w-0 flex-1">{c.message}</span>
+          {onDiscard && c.iri && (
+            <Button size="sm" variant="ghost" icon={Undo2} loading={pending} onClick={() => onDiscard(c)}>
+              Discard my change to {c.curie ?? 'this term'}
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** The same advice an agent gets from check_forks at the start of a session. */
-function NextSteps({ check }: { check: ForkCheck }) {
-  const Icon = check.outcome === 'switch-to-release' || check.outcome === 'switch-to-draft' ? CircleCheck : check.outcome === 'sync-fork' ? RefreshCw : Info;
+function NextSteps({ check, onDiscard, pending }: { check: ForkCheck; onDiscard?: (c: ForkConflict) => void; pending?: boolean }) {
+  const Icon =
+    check.outcome === 'switch-to-release' || check.outcome === 'switch-to-draft' ? CircleCheck : check.outcome === 'sync-fork' ? RefreshCw : check.outcome === 'resolve-conflicts' ? TriangleAlert : Info;
   return (
     <section aria-label="What to do next" className={cx('rounded-xl border p-4', OUTCOME_TONE[check.outcome])}>
       <div className="flex items-start gap-3">
@@ -64,6 +85,7 @@ function NextSteps({ check }: { check: ForkCheck }) {
               ))}
             </ol>
           )}
+          {check.conflicts.length > 0 && <Conflicts conflicts={check.conflicts} onDiscard={onDiscard} pending={pending} />}
           {check.replace.length > 0 && (
             <div className="mt-3 rounded-lg border border-line bg-surface p-3 text-xs">
               <div className="mb-1 font-medium">Replace in your imports</div>
@@ -121,11 +143,24 @@ export function ForkPage() {
   const state = useAsync(() => api.fork(id, forkSlug), [id, forkSlug]);
   const check = useAsync(() => api.checkFork(id, forkSlug), [id, forkSlug, state.data?.head, state.data?.status]);
   const [notice, setNotice] = useState<string>();
+  const [syncConflicts, setSyncConflicts] = useState<ForkConflict[]>([]);
   const act = useAction(async (fn: () => Promise<string | undefined>) => {
+    setSyncConflicts([]);
     setNotice(await fn());
     await state.reload();
     void reload();
   });
+  const discard = (c: ForkConflict) => {
+    if (!c.iri) return;
+    if (window.confirm(`Discard this fork's change to ${c.curie ?? c.iri}? The fork goes back to upstream's version of it; you can redo the change after syncing.`))
+      void act.run(async () => (await api.discardForkChanges(id, forkSlug, [c.iri!]), `Discarded the change to ${c.curie ?? c.iri}.${f.behindBy ? ' Now sync with upstream.' : ''}`));
+  };
+  const sync = () =>
+    void act.run(async () => {
+      const r = await api.syncFork(id, forkSlug);
+      setSyncConflicts(r.conflicts);
+      return r.message;
+    });
 
   if (state.error && !state.data) return <ErrorCard error={state.error} onRetry={state.reload} />;
   if (!state.data) return <Loading />;
@@ -133,9 +168,9 @@ export function ForkPage() {
   const isOwner = !!session?.user && (session.user.id === f.ownerId || !!session.user.isPlatformAdmin);
   const cr = f.changeRequest;
   const crOpen = cr && ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
-  // Edits made since the fork was last proposed are not in its change request yet.
-  const unsent = crOpen && f.revision > (f.proposedRevision ?? 0);
-  const unproposed = f.terms.some((t) => t.upstream === 'not-proposed' || t.upstream === 'rejected');
+  // Terms whose fork version isn't upstream or in the open change request (including edits made since proposing).
+  const toPropose = f.terms.some((t) => t.upstream === 'not-proposed' || t.upstream === 'rejected' || t.upstream === 'diverged');
+  const conflicted = check.data?.outcome === 'resolve-conflicts';
 
   return (
     <div>
@@ -151,6 +186,7 @@ export function ForkPage() {
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
           <span className="flex items-center gap-1.5">
             <Avatar name={f.owner?.name} src={f.owner?.avatarUrl} size={18} simulated={f.owner?.simulated} /> {f.owner?.name ?? 'Unknown'}
+            {session?.user?.id === f.ownerId && ' (you)'}
           </span>
           <span>
             Fork of {ontology.title} v{f.baseVersion}
@@ -163,7 +199,7 @@ export function ForkPage() {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-6">
-          {check.data && <NextSteps check={check.data} />}
+          {check.data && <NextSteps check={check.data} onDiscard={isOwner && f.status !== 'closed' ? discard : undefined} pending={act.pending} />}
 
           <Card>
             <CardHeader title={`Terms in this fork (${f.terms.length})`} subtitle="New terms use the standard's own namespace, so your data stays valid when they land upstream." />
@@ -174,12 +210,11 @@ export function ForkPage() {
                     <code className="font-mono text-sm">{t.curie}</code>
                     {t.label && <span className="text-sm text-muted">{t.label}</span>}
                     <span className="text-xs text-subtle">
-                      {KIND_LABEL[t.kind] ?? t.kind} · {t.change === 'added' ? 'new' : 'changed'}
+                      {KIND_LABEL[t.kind] ?? t.kind} · {t.change === 'added' ? 'new' : t.change === 'removed' ? 'removed' : 'changed'}
                     </span>
                     <span className="ml-auto">
                       <UpstreamChip t={t} />
                     </span>
-                    {t.landedAs && <span className="w-full text-xs text-muted">Now {t.landedAs}</span>}
                   </li>
                 ))}
               </ul>
@@ -257,7 +292,7 @@ export function ForkPage() {
             )}
             {isOwner && f.status !== 'closed' && (
               <div className="mt-3 flex flex-wrap gap-2">
-                {f.terms.length > 0 && (crOpen ? unsent : unproposed) && (
+                {toPropose && !conflicted && (
                   <Button
                     variant="primary"
                     icon={GitPullRequest}
@@ -273,7 +308,7 @@ export function ForkPage() {
                   </Button>
                 )}
                 {f.behindBy > 0 && (
-                  <Button icon={RefreshCw} loading={act.pending} onClick={() => void act.run(async () => (await api.syncFork(id, forkSlug)).message)}>
+                  <Button icon={RefreshCw} loading={act.pending} onClick={sync}>
                     Sync with upstream
                   </Button>
                 )}
@@ -293,6 +328,7 @@ export function ForkPage() {
                 {notice}
               </p>
             )}
+            {syncConflicts.length > 0 && !act.pending && <Conflicts conflicts={syncConflicts} onDiscard={isOwner ? discard : undefined} pending={act.pending} />}
             <InlineError error={act.error} />
           </Card>
         </aside>

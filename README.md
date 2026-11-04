@@ -63,9 +63,12 @@ Need a term the standard doesn't have yet? Fork it, add the term, and keep build
 - New terms keep the standard's namespace (`vol:VolunteeringActivity`, not a fork-specific IRI), so data written against the fork stays valid when the term lands. Moving back to the main ontology means changing the import URL.
 - It is stamped as a pre-release: `owl:versionIRI` is the fork's URL, `owl:versionInfo` is like `1.0.0-fork.volunteer-hours.2`, and `owl:priorVersion` is the release it came from.
 - Proposing the fork opens one change request with all its edits, which goes through the ontology's normal governance. Proposing again after more edits updates that request.
-- Each fork is a git branch, `forks/<fork>`, in the ontology's repository; it never touches `main`.
+- Each fork is a git branch, `forks/<fork>`, in the ontology's repository; it never touches `main`. Edits to one fork run one at a time, and each commit checks the branch hasn't moved.
+- Whether a change has landed is decided by content, three ways: for each term the fork touches, Concord compares what the fork's base, the fork, the working draft and the latest release say about it (ignoring provenance such as `dcterms:created`). A term counts as merged or released only when upstream has it exactly as the fork does, so a term renamed or reworded in review never triggers a migration.
+- Syncing moves the fork onto the latest draft and replays only the edits that haven't landed. If upstream changed a term the fork also changes, or the result would be inconsistent, nothing changes and the conflicts are listed; discard the fork's change to take upstream's version, then sync and redo it if needed.
+- Migration plans point to `/def/<ontology>/<version>` (or `/def/<ontology>/draft`), which resolve with the same extensions and negotiation as forks.
 
-In the hub, forks are under *Changes → Forks*. Over MCP: `create_fork`, `edit_fork`, `propose_fork`, `check_forks`, `sync_fork`, `list_forks`, `get_fork` and `close_fork`. Agents are told to call `check_forks` at the start of every development session: it reports whether each fork's terms are pending, merged or released, and when they have landed it returns the import URLs to replace (and any terms renamed in review).
+In the hub, forks are under *Changes → Forks*. Over MCP: `create_fork`, `edit_fork`, `propose_fork`, `check_forks`, `sync_fork`, `discard_fork_changes`, `list_forks`, `get_fork` and `close_fork`. Agents are told to call `check_forks` at the start of every development session: it says whether to keep using the fork, sync it, resolve conflicts, or switch to the draft or release, with the import URLs to replace.
 
 
 ### Optional services
