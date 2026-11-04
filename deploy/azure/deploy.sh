@@ -37,7 +37,7 @@ if ! az vm show -g "$RESOURCE_GROUP" -n "$VM" -o none 2>/dev/null; then
   az vm create -g "$RESOURCE_GROUP" -n "$VM" --size "$VM_SIZE" \
     --image Canonical:ubuntu-24_04-lts:server:latest \
     --os-disk-size-gb 64 --storage-sku Premium_LRS \
-    --public-ip-address concord-ip --nsg concord-nsg \
+    --public-ip-address concord-ip --nsg concord-nsg --nsg-rule NONE \
     --admin-username concord --generate-ssh-keys \
     --assign-identity --role Contributor --scope "$(az group show -n "$RESOURCE_GROUP" --query id -o tsv)" \
     --custom-data "$custom" -o none
