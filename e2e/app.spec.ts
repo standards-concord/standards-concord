@@ -15,7 +15,7 @@ test('signing in from the login page lands on the walkthrough', async ({ page })
 test('signed-out visitors are sent to the login page', async ({ page }) => {
   await page.goto('/settings');
   await expect(page).toHaveURL(/\/login\?next=%2Fsettings/);
-  await expect(page.getByRole('heading', { name: 'Welcome to Concord' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Concord: design open standards together' })).toBeVisible();
 });
 
 test.describe('signed in', () => {
@@ -62,7 +62,7 @@ test.describe('signed in', () => {
       });
     }
     // Every page from before the regrouping is still reachable.
-    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query & validate', 'Use cases', 'Meetings', 'Agents', 'Change requests', 'Releases', 'Governance']));
+    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query & validate', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
   });
 
   test('detail pages linked from the ontology open', async ({ page, request }) => {

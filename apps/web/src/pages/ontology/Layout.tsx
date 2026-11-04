@@ -5,6 +5,8 @@ import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
+import { ExternalLink } from 'lucide-react';
+import { publicPageUrl } from '../../lib/format';
 import { HealthBubble, LifecycleBubble } from '../../components/Phase';
 import { Badge, ErrorCard, Loading, cx } from '../../components/ui';
 
@@ -33,8 +35,10 @@ export function useOntology() {
  */
 export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
-  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate']] },
-  { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agents']], also: ['interview'] },
+  // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate'], ['connect', 'Connect an agent']] },
+  // What agents report is requirements input, next to use cases and meetings.
+  { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
   { label: 'Governance', tabs: [['governance', 'Governance']] },
 ];
@@ -73,7 +77,7 @@ function SectionNav({ id }: { id: string }) {
                 key={path}
                 to={href(path)}
                 className={({ isActive }) =>
-                  cx('rounded-full px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
+                  cx('rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
                 }
               >
                 {label}
@@ -135,7 +139,10 @@ export function OntologyLayout() {
                 {o.demo && <Badge tone="warn">Demo</Badge>}
               </div>
               <p className="mt-0.5 truncate text-xs text-subtle">
-                <span className="font-mono">{o.ontologyIRI}</span> · v{o.currentVersion}
+                <span className="font-mono">{o.ontologyIRI}</span> · v{o.currentVersion} ·{' '}
+                <a href={publicPageUrl(o.slug)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="public-page-link">
+                  Public page <ExternalLink className="size-3" aria-hidden />
+                </a>
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">

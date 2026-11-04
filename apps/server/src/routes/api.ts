@@ -34,6 +34,7 @@ import * as releases from '../services/releases.js';
 import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
+import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -84,6 +85,17 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
 
 const project = (req: Request) => mustFindProject(String(req.params.id));
 
+/** GET routes anyone may call without signing in. */
+const PUBLIC_READS = [
+  /^\/ontologies$/,
+  /^\/ontologies\/[^/]+$/,
+  /^\/ontologies\/[^/]+\/(view|search|source|validation)$/,
+  /^\/ontologies\/[^/]+\/terms\/.+$/,
+  /^\/governance\/templates$/,
+  /^\/feedback\/questions$/,
+  /^\/oauth\/requests\/[^/]+$/,
+];
+
 export function apiRouter(): Router {
   const r = Router();
   r.use(express.json({ limit: '5mb' }));
@@ -127,6 +139,21 @@ export function apiRouter(): Router {
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
 
+  /*
+   * Reads below need a signed-in user, except the ontologies themselves (also
+   * public at /def/<slug>) and a few public lists. Use cases, interviews,
+   * meeting transcripts, change requests, releases, agent reports, activity
+   * and feedback can all hold material that isn't public, so an anonymous GET
+   * for them gets 401. Writes check the user themselves (a few, like feedback
+   * and webhooks, are meant to work without one).
+   */
+  r.use((req, _res, next) => {
+    if (req.user || (req.method !== 'GET' && req.method !== 'HEAD') || PUBLIC_READS.some((re) => re.test(req.path))) return next();
+    // Unknown paths still 404 (clients probe for optional features that way).
+    const known = (r.stack as unknown as { route?: { methods?: Record<string, boolean> }; match: (path: string) => boolean }[]).some((l) => l.route?.methods?.get && l.match(req.path));
+    next(known ? new HttpError(401, 'Sign in first') : undefined);
+  });
+
   /* --------------------------- ontologies --------------------------- */
   r.get('/ontologies', async (_req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
@@ -137,7 +164,7 @@ export function apiRouter(): Router {
     const user = requireUser(req);
     const b = req.body ?? {};
     const p = await createProject(
-      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate },
+      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator !== false },
       user,
     );
     res.status(201).json(await summary(p));
@@ -145,7 +172,9 @@ export function apiRouter(): Router {
 
   r.get('/ontologies/:id', async (req, res) => {
     const p = project(req);
-    res.json({ ...(await summary(p)), members: membersWithUsers(p.id), versions: ontologyStore.versions(p), history: ontologyStore.log(p, 30) });
+    // Who is in the working group, and who made each commit, is for signed-in users.
+    const signedIn = !!req.user;
+    res.json({ ...(await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
@@ -398,6 +427,21 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------- agents ---------------------------- */
+  /* ----------------------- OAuth for MCP clients ----------------------- */
+  // The consent page: an MCP client sent the person here to approve the connection.
+  r.get('/oauth/requests/:id', async (req, res) => res.json(await describeRequest(String(req.params.id))));
+  r.post('/oauth/requests/:id/approve', (req, res) => {
+    // A JSON body forces a CORS preflight, so another site can't approve on someone's behalf with a form post.
+    if (!req.is('application/json')) throw new HttpError(415, 'Send JSON');
+    res.json(approveRequest(String(req.params.id), requireUser(req)));
+  });
+  r.post('/oauth/requests/:id/deny', (req, res) => res.json(denyRequest(String(req.params.id))));
+  r.get('/oauth/connections', (req, res) => res.json(listConnections(requireUser(req).id)));
+  r.delete('/oauth/connections/:id', (req, res) => {
+    disconnect(requireUser(req).id, String(req.params.id));
+    res.status(204).end();
+  });
+
   r.get('/agent-tokens', (req, res) => res.json(listAgentTokens(requireUser(req).id)));
   r.post('/agent-tokens', (req, res) => res.status(201).json(createAgentToken(requireUser(req).id, optStr(req.body?.name) ?? 'My agent')));
   r.delete('/agent-tokens/:id', (req, res) => {

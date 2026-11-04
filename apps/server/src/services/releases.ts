@@ -11,6 +11,7 @@ import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
+import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -191,6 +192,15 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     }
   }
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
+  // The use case snapshot always goes in, so the release never shows live data;
+  // a rendering failure only costs the stored page (served pages render on request).
+  const requirements = releaseRequirements(project, r.version);
+  files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
+  try {
+    Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
+  } catch (err) {
+    console.warn(`[release] public page: ${(err as Error).message}`);
+  }
 
   const author = actor ?? getUser(r.createdBy);
   r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });

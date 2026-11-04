@@ -25,11 +25,12 @@ beforeAll(async () => {
 
 describe('demo seed', () => {
   it('has the volunteering ontology at 1.0.0 with members and open change requests', async () => {
-    const res = await request(app).get(`/api/ontologies/volunteering`);
+    const agent = await login('member', 'Seed reader');
+    const res = await agent.get(`/api/ontologies/volunteering`);
     expect(res.status).toBe(200);
     expect(res.body.currentVersion).toBe('1.0.0');
     expect(res.body.members.length).toBeGreaterThanOrEqual(6);
-    const crs = await request(app).get(`/api/ontologies/${demoId}/change-requests`);
+    const crs = await agent.get(`/api/ontologies/${demoId}/change-requests`);
     const byTitle = Object.fromEntries(crs.body.map((c: { title: string }) => [c.title, c]));
     expect(byTitle['Clarify the definition of cause'].status).toBe('merged');
     expect(byTitle['Clarify the definition of cause'].classification.level).toBe('patch');
@@ -244,5 +245,51 @@ describe('feedback', () => {
     expect(second.body.nextQuestionId).toBe('familiarity');
     const sub = await request(app).post('/api/feedback').send({ pathway: 'structured', answers, transcript: messages, usedVoice: false });
     expect(sub.status).toBe(201);
+  });
+});
+
+describe('anonymous access', () => {
+  it('keeps use cases, interviews, meetings, change requests, releases and feedback behind sign-in', async () => {
+    const agent = await login('contributor', 'Private author');
+    const uc = await agent.post(`/api/ontologies/${demoId}/interviews`).send({});
+    expect(uc.status).toBe(201);
+    const useCaseId = uc.body.useCaseId ?? uc.body.session?.useCaseId;
+    const ucs = (await agent.get(`/api/ontologies/${demoId}/use-cases`)).body as { id: string }[];
+    const cr = (await agent.get(`/api/ontologies/${demoId}/change-requests`)).body[0] as { id: string };
+    const rel = (await agent.get(`/api/ontologies/${demoId}/releases`)).body[0] as { id: string };
+    const meetings = (await agent.get(`/api/ontologies/${demoId}/meetings`)).body as { id: string }[];
+    const paths = [
+      `/api/ontologies/${demoId}/use-cases`,
+      `/api/use-cases/${useCaseId ?? ucs[0].id}`,
+      `/api/interviews/${uc.body.id}`,
+      `/api/ontologies/${demoId}/change-requests`,
+      `/api/change-requests/${cr.id}`,
+      `/api/ontologies/${demoId}/releases`,
+      `/api/releases/${rel.id}`,
+      `/api/ontologies/${demoId}/meetings`,
+      ...(meetings[0] ? [`/api/meetings/${meetings[0].id}`] : []),
+      `/api/ontologies/${demoId}/agent-reports`,
+      '/api/activity',
+      '/api/feedback',
+      '/api/feedback/summary',
+    ];
+    for (const path of paths) {
+      expect((await agent.get(path)).status, `signed in: ${path}`).not.toBe(401);
+      const anon = await request(app).get(path);
+      expect(anon.status, `anonymous: ${path}`).toBe(401);
+      expect(JSON.stringify(anon.body)).not.toContain('Private author');
+    }
+  });
+
+  it('still serves the ontologies themselves, without members or commit authors', async () => {
+    for (const path of ['/api/ontologies', `/api/ontologies/${demoId}/view`, `/api/ontologies/${demoId}/source`, '/api/governance/templates', '/api/feedback/questions', '/api/session']) {
+      expect((await request(app).get(path)).status, path).toBe(200);
+    }
+    // Paths that don't exist are still 404, not 401.
+    expect((await request(app).get('/api/no-such-thing/pending')).status).toBe(404);
+    const detail = await request(app).get('/api/ontologies/volunteering');
+    expect(detail.status).toBe(200);
+    expect(detail.body.members).toEqual([]);
+    expect(detail.body.history).toEqual([]);
   });
 });
