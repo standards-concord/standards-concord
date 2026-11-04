@@ -108,6 +108,21 @@ function allocate(wanted: string, taken: Set<string>, reserved: Set<string>): st
 const typeKey = (p: Omit<CodeProperty, 'name' | 'path'>) =>
   `${p.maxCount === 1 ? ((p.minCount ?? 0) >= 1 ? 'one' : 'opt') : 'set'}|${p.node ?? ''}|${p.datatype ?? ''}`;
 
+/** XML Schema's built-in datatype derivations: each datatype and the one it is derived from. */
+const XSD_BASE: Record<string, string> = {
+  integer: 'decimal', nonPositiveInteger: 'integer', negativeInteger: 'nonPositiveInteger', long: 'integer', int: 'long', short: 'int', byte: 'short',
+  nonNegativeInteger: 'integer', unsignedLong: 'nonNegativeInteger', unsignedInt: 'unsignedLong', unsignedShort: 'unsignedInt', unsignedByte: 'unsignedShort',
+  positiveInteger: 'nonNegativeInteger', normalizedString: 'string', token: 'normalizedString', language: 'token', Name: 'token', NCName: 'Name',
+  NMTOKEN: 'token', ID: 'NCName', IDREF: 'NCName', ENTITY: 'NCName', dateTimeStamp: 'dateTime', yearMonthDuration: 'duration', dayTimeDuration: 'duration',
+};
+
+/** Whether datatype `a` is `b` or derived from it. */
+export function derivesFrom(a: string, b: string): boolean {
+  for (let x: string | undefined = a; x; x = x.startsWith(NS.xsd) && XSD_BASE[x.slice(NS.xsd.length)] ? NS.xsd + XSD_BASE[x.slice(NS.xsd.length)] : undefined)
+    if (x === b) return true;
+  return false;
+}
+
 export interface PropertyInfo {
   objectProperty: boolean;
   range: string[];
@@ -152,12 +167,14 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   };
   /**
    * Both constraints apply, so the value type is the narrower of the two when
-   * one class is a subclass of the other; otherwise `preferred` wins (a class's
+   * one class is a subclass of the other, or one datatype is derived from the
+   * other (xsd:positiveInteger from xsd:integer); otherwise `preferred` wins (a class's
    * own statement over an inherited one, the first superclass over later ones).
    */
   const narrower = (preferred: ValueType, other: ValueType): ValueType => {
     if (preferred.node && other.node && preferred.node !== THING && other.node !== THING && isSub(other.node, preferred.node)) return other;
     if (preferred.node === THING && other.node) return other;
+    if (preferred.datatype && other.datatype && derivesFrom(other.datatype, preferred.datatype)) return other;
     if (!preferred.node && !preferred.datatype) return other;
     return preferred;
   };

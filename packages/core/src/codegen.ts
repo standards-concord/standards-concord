@@ -75,7 +75,7 @@ export interface GeneratedModule {
 
 /** Rewrites the bare @rdfjs/wrapper import, e.g. to a CDN for use in a browser without a bundler. */
 export function withWrapperImport(code: string, specifier: string = WRAPPER_CDN): string {
-  return code.replace(/from "@rdfjs\/wrapper";/g, `from ${JSON.stringify(specifier)};`);
+  return code.replace(/from "@rdfjs\/wrapper";/g, () => `from ${JSON.stringify(specifier)};`);
 }
 
 /** Datatypes whose converter mapping is exact; every other datatype gets a typed-literal writer (see `literalWriter`). */
@@ -214,8 +214,9 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
       const writer = `literalWriter(${JSON.stringify(dt)})`;
       const before = text;
       text = text
-        .replaceAll(new RegExp(`(\\(this, ${escapeRe(iri)}, value, )LiteralFrom\\.\\w+\\)`, 'g'), `$1${writer})`)
-        .replaceAll(new RegExp(`(\\(this, ${escapeRe(iri)}, LiteralAs\\.\\w+, )LiteralFrom\\.\\w+\\)`, 'g'), `$1${writer})`);
+        // Replacer functions, so `$&` or `$1` in a datatype IRI stays literal text.
+        .replaceAll(new RegExp(`(\\(this, ${escapeRe(iri)}, value, )LiteralFrom\\.\\w+\\)`, 'g'), (_m, head: string) => `${head}${writer})`)
+        .replaceAll(new RegExp(`(\\(this, ${escapeRe(iri)}, LiteralAs\\.\\w+, )LiteralFrom\\.\\w+\\)`, 'g'), (_m, head: string) => `${head}${writer})`);
       if (text !== before) needsWriter = true;
     }
     if (/\bILangString\b/.test(text)) needsLangString = true;

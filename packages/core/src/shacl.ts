@@ -206,7 +206,7 @@ export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): 
   const header = opts.extended
     ? `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax with shaclc-write's extended syntax.\n`
     : `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax.\n# Shape names and the shapes graph's label are in the Turtle shapes (.shacl.ttl); SHACLC has no place for them.\n`;
-  const body = restore(explicitDatatypes(text, new Store(quads), prefixes));
+  const body = restore(explicitDatatypes(rawUnicodeEscapes(text), new Store(quads), prefixes));
   const out = header + body + (body.endsWith('\n') ? '' : '\n');
 
   // Check: the SHACLC must parse back to exactly the shapes it was written from.
@@ -256,11 +256,89 @@ export async function parseShaclc(text: string, extended: boolean): Promise<Quad
   lexer._unescape = function (item, replacements) {
     return original.call(this, item, replacements ?? STRING_ESCAPES);
   };
+  const { text: shielded, unshield } = shieldIriRefs(text);
   try {
-    return parse(text, { extendedSyntax: extended }) as unknown as Quad[];
+    return (parse(shielded, { extendedSyntax: extended }) as unknown as Quad[]).map(unshield);
   } finally {
     lexer._unescape = original;
   }
+}
+
+/**
+ * shaclc-parse's IRI rule leaves out `=`, which IRIs may contain (as in
+ * `?key=value`). For parsing, absolute IRI references containing one are
+ * swapped for placeholders, and put back in the parsed quads.
+ */
+function shieldIriRefs(text: string): { text: string; unshield: (q: Quad) => Quad } {
+  const nonce = randomBytes(8).toString('hex');
+  const back = new Map<string, string>();
+  let out = '';
+  scanText(text, {
+    other: (s) => (out += s),
+    string: (s) => (out += s),
+    iri: (s) => {
+      const iri = s.slice(1, -1);
+      if (!iri.includes('=') || !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(iri)) return void (out += s);
+      const ph = `urn:x-concord-iri:${nonce}:${back.size}`;
+      back.set(ph, iri);
+      out += `<${ph}>`;
+    },
+  });
+  const term = <T extends Term>(t: T): T => (t.termType === 'NamedNode' && back.has(t.value) ? (nn(back.get(t.value)!) as unknown as T) : t);
+  return { text: out, unshield: back.size ? (q) => DataFactory.quad(term(q.subject), term(q.predicate), term(q.object), q.graph) : (q) => q };
+}
+
+/**
+ * Splits SHACLC text into string literals, IRI references and everything else,
+ * so a rewrite never touches the inside of a string or an IRI.
+ */
+function scanText(text: string, on: { string: (s: string) => void; iri: (s: string) => void; other: (s: string) => void }): void {
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const end = text.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      let j = i + end.length;
+      while (j < text.length && !text.startsWith(end, j)) j += text[j] === '\\' ? 2 : 1;
+      j = Math.min(text.length, j + end.length);
+      on.string(text.slice(i, j));
+      i = j;
+    } else if (c === '<') {
+      const close = text.indexOf('>', i);
+      const j = close < 0 ? text.length : close + 1;
+      on.iri(text.slice(i, j));
+      i = j;
+    } else {
+      let j = i;
+      while (j < text.length && !'"\'<'.includes(text[j])) j++;
+      on.other(text.slice(i, j));
+      i = j;
+    }
+  }
+}
+
+/** What a character becomes inside a SHACLC string: a short escape where it needs one. */
+const SHORT_ESCAPES: Record<string, string> = { '"': '\\"', "'": "\\'", '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' };
+
+/**
+ * SHACLC strings only allow the short escapes (\n, \", ...), but shaclc-write
+ * writes characters outside ASCII as \uXXXX or \UXXXXXXXX. Those are written
+ * as the characters themselves.
+ */
+function rawUnicodeEscapes(text: string): string {
+  if (!/\\[uU]/.test(text)) return text;
+  let out = '';
+  scanText(text, {
+    other: (s) => (out += s),
+    iri: (s) => (out += s),
+    string: (s) =>
+      (out += s.replace(/\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)/gs, (m, e: string) => {
+        if (e.length === 1) return m;
+        const ch = String.fromCodePoint(parseInt(e.slice(1), 16));
+        return SHORT_ESCAPES[ch] ?? ch;
+      })),
+  });
+  return out;
 }
 
 /** The n3 module shaclc-parse itself loads. */
@@ -301,11 +379,13 @@ function graphDifference(a: Store, b: Store): string | undefined {
 
 /**
  * Datatypes SHACLC parsers recognise in the short form (`ex:p xsd:string`);
- * any other IRI there is read as a class. This is shaclc-parse's list.
+ * any other IRI there is read as a class. This is shaclc-parse's list, which
+ * leaves out xsd:unsignedInt (the specification's list has it), so that one is
+ * written explicitly too.
  */
 const SHORT_FORM_DATATYPES = new Set([
   ...['integer', 'decimal', 'float', 'double', 'string', 'boolean', 'dateTime', 'nonPositiveInteger', 'negativeInteger', 'long', 'int', 'short',
-    'byte', 'nonNegativeInteger', 'unsignedLong', 'unsignedInt', 'unsignedShort', 'unsignedByte', 'positiveInteger'].map((l) => NS.xsd + l),
+    'byte', 'nonNegativeInteger', 'unsignedLong', 'unsignedShort', 'unsignedByte', 'positiveInteger'].map((l) => NS.xsd + l),
   NS.rdf + 'langString',
 ]);
 

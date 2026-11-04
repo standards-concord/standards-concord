@@ -76,6 +76,18 @@ e:OneDogOwner a owl:Class ; rdfs:subClassOf e:Owner , [ a owl:Restriction ; owl:
 e:SA a owl:Class . e:SB a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:sp ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
 e:SC a owl:Class ; rdfs:subClassOf e:SA , e:SB .
 e:sp a owl:DatatypeProperty ; rdfs:domain e:SA ; rdfs:range xsd:string .
+e:emoji a owl:DatatypeProperty ; rdfs:range xsd:string .
+e:C rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:emoji ; owl:hasValue "😀 café \\\\u0041" ] .
+<https://outside.example/p?key=value> a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range xsd:string .
+e:count a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range xsd:unsignedInt .
+e:odd a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range <https://example.org/e#DT$&> .
+e:odd2 a owl:DatatypeProperty ; rdfs:domain e:C ; rdfs:range <https://example.org/e#DT$1> .
+e:DA a owl:Class . e:DB a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:dp ; owl:allValuesFrom xsd:positiveInteger ] .
+e:DC a owl:Class ; rdfs:subClassOf e:DA , e:DB .
+e:dp a owl:DatatypeProperty ; rdfs:domain e:DA ; rdfs:range xsd:integer .
+e:DParent a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:dq ; owl:allValuesFrom xsd:positiveInteger ] .
+e:DChild a owl:Class ; rdfs:subClassOf e:DParent , [ a owl:Restriction ; owl:onProperty e:dq ; owl:cardinality "1"^^xsd:nonNegativeInteger ] .
+e:dq a owl:DatatypeProperty ; rdfs:domain e:DChild ; rdfs:range xsd:integer .
 `;
 const edge = () => OntologyGraph.fromTurtle(EDGE);
 
@@ -135,14 +147,20 @@ describe('SHACL compact syntax', () => {
       // The qualified shape for A / p / BShape doesn't take the name of the shape for class A-p-B.
       expect(text).toContain('qualifiedValueShape=esh:A-p-BShape2');
       expect(text).toMatch(/shape esh:A-p-BShape -> e:A-p-B \{\s*\}/);
+      // Characters outside ASCII are written as themselves (SHACLC strings have no \u escapes); a literal backslash-u stays escaped.
+      expect(text).toContain('hasValue="😀 café \\\\u0041"');
+      // An IRI with `=` in it, and xsd:unsignedInt, which shaclc-parse doesn't take in the short form.
+      expect(text).toContain('<https://outside.example/p?key=value> xsd:string');
+      expect(text).toContain('e:count datatype=xsd:unsignedInt');
     }
     // Literals with escapes (newline, quotes, tab, backslash) round-trip.
     const fromC = new Store((await parseShaclc(await toShaclc(g), false)) as any);
     const paths = fromC.getObjects(null, DataFactory.namedNode(SH + 'path'), null);
     expect(paths.filter((t) => t.termType === 'NamedNode').map((t) => t.value)).toEqual(expect.arrayContaining([
-      'http://www.w3.org/1999/02/22-rdf-syntax-ns#p*', 'https://example.org/e#star*', "https://outside.example/O'Reilly",
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#p*', 'https://example.org/e#star*', "https://outside.example/O'Reilly", 'https://outside.example/p?key=value',
     ]));
     expect(fromC.getObjects(null, DataFactory.namedNode(SH + 'hasValue'), null).map((o) => o.value)).toContain('line\nnext "quoted"\ttab \\ back');
+    expect(fromC.getObjects(null, DataFactory.namedNode(SH + 'hasValue'), null).map((o) => o.value)).toContain('😀 café \\u0041');
   });
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -275,6 +293,9 @@ describe('Generated JavaScript classes', () => {
     // Constraints on one path from two superclasses both apply: SA allows many sp, SB exactly one, so SC has one.
     expect(cls('SC').extends).toBeUndefined();
     expect(mod.ts).toMatch(/export class SC extends TermWrapper[\s\S]*?get sp\(\): string \{/);
+    // Datatype constraints from two superclasses: xsd:positiveInteger from DB narrows xsd:integer from DA.
+    expect(cls('DC').extends).toBeUndefined();
+    expect(mod.ts).toMatch(/export class DC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#positiveInteger"\)/);
     // The X/Y cycle still gives a loadable order.
     expect(mod.ts.indexOf('export class Y ')).toBeLessThan(mod.ts.indexOf('export class X extends Y'));
 
@@ -300,6 +321,15 @@ describe('Generated JavaScript classes', () => {
       const sc = new m.SC('https://x/sc', store, DataFactory);
       sc.sp = 'one';
       expect(sc.sp).toBe('one');
+      // A count-only child keeps the parent's narrower datatype rather than the global range's.
+      const XSD = 'http://www.w3.org/2001/XMLSchema#';
+      const dtOf = (s: string, p: string) => store.getQuads(DataFactory.namedNode(s), DataFactory.namedNode(p), null, null)[0].object as any;
+      const dchild = new m.DChild('https://x/dchild', store, DataFactory);
+      dchild.dq = 4;
+      expect(dtOf('https://x/dchild', 'https://example.org/e#dq').datatype.value).toBe(XSD + 'positiveInteger');
+      const dc = new m.DC('https://x/dc', store, DataFactory);
+      dc.dp.add(5);
+      expect(dtOf('https://x/dc', 'https://example.org/e#dp').datatype.value).toBe(XSD + 'positiveInteger');
       writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, module: 'nodenext', moduleResolution: 'nodenext', target: 'es2022', noEmit: true, types: [] }, files: ['source.ts', 'index.d.ts'] }));
       execFileSync(path.join(here, '..', 'node_modules', '.bin', 'tsc'), ['-p', dir], { stdio: 'pipe' });
     } catch (err: any) {
