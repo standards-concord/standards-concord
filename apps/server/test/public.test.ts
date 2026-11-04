@@ -7,11 +7,16 @@ import { openDb } from '../src/db.js';
 import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
 import { pageInput, refreshReleasePages } from '../src/public/routes.js';
 import { toPublishedRequirements } from '../src/public/requirements.js';
-import { termAnchors } from '../src/public/anchors.js';
+import { fragment, termAnchors } from '../src/public/anchors.js';
 import { createProject, findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
+import { config } from '../src/config.js';
+import { OntologyGraph } from '@concord/core';
 import { seedDemo } from '../src/services/simulation.js';
-import { createUseCase, listUseCases, redactUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
+import { createUseCase, listUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
+import { redactOps, redactText, secretsFor } from '../src/services/redact.js';
+import { getCR, merge, revise } from '../src/services/changeRequests.js';
+import { put } from '../src/db.js';
 import { createUser, getUser } from '../src/services/users.js';
 import type { OntologyView } from '@concord/core/types';
 
@@ -298,16 +303,21 @@ describe('review fixes', () => {
         cls(`${NS}%41`),
         cls(`${NS}A`),
         cls(`${NS}Thing`),
+        cls(`${NS}Caf%C3%A9`),
       ],
       objectProperties: [], datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: {}, tripleCount: 0,
     } as unknown as OntologyView;
     const a = termAnchors(view, NS);
     // Own terms: exactly the fragment, whatever it looks like.
-    for (const f of ['Café', 'sec-classes', 'main', 'term-main', 'part:Child', 'part/Child', 'Child', '%41', 'A', 'Thing']) expect(a.get(`${NS}${f}`), f).toBe(f);
+    for (const f of ['sec-classes', 'main', 'term-main', 'part:Child', 'part/Child', 'Child', '%41', 'A', 'Thing']) expect(a.get(`${NS}${f}`), f).toBe(f);
     // External terms: their local name, kept clear of own fragments and page ids.
     expect(a.get('https://other.org/x#Thing')).toBe('Thing-2');
     expect(a.get('https://other.org/x#main')).toBe('term-main-2');
     expect(new Set(a.values()).size).toBe(a.size);
+    // #Café and a literal #Caf%C3%A9 are the same once encoded: the literal one (the URI form) keeps it.
+    expect(a.get(`${NS}Caf%C3%A9`)).toBe('Caf%C3%A9');
+    expect(a.get(`${NS}Café`)).toBe('Café-2');
+    expect(new Set([...a.values()].map(fragment)).size, 'hrefs are distinct').toBe(a.size);
 
     // The page's own ids step aside: #main and #sec-classes are the terms.
     const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
@@ -326,6 +336,7 @@ describe('review fixes', () => {
     expect(html).toContain('<section id="sec-classes-page" class="block">');
     // Hrefs keep % as written (the browser tries the raw fragment first) and encode what a URL can't hold.
     expect(html).toContain('href="#%41"');
+    expect(html).toContain('href="#Caf%C3%A9-2"');
     expect(html).toContain('href="#Caf%C3%A9"');
   });
 
@@ -382,26 +393,57 @@ describe('re-review fixes', () => {
     expect(ops).toContain(`/o/volunteering/use-cases/${uc.id}`);
     // The working group still sees which use case it came from.
     expect(cr.description).toContain('CONFIDENTIAL_PERSON_NAME_AND_CASE');
+
+    // Merging doesn't add the requester as dcterms:contributor either.
+    put('changeRequests', { ...cr, status: 'approved' }, cr.ontologyId);
+    const merged = await merge(getCR(cr.id), undefined);
+    expect(merged.status).toBe('merged');
+    const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
+    expect(ttl).toMatch(/RespiteBreak/);
+    expect(ttl).not.toContain('Morgan Secretname');
+    expect(ttl).not.toContain('CONFIDENTIAL_PERSON_NAME_AND_CASE');
   });
 
-  it('redacts titles and names the model quoted', () => {
+  it('redacts titles and names however they are spaced, however short, and in labels too', async () => {
     const project = findProject('volunteering')!;
-    const author = getUser(listUseCases(project.id)[0].authorId)!;
-    const uc = { ...listUseCases(project.id)[0], sections: { name: 'Secret Pilot' } };
-    const [t] = redactUseCases(
-      [{ action: 'add', kind: 'class', localName: 'X', label: 'x', definition: 'From the secret pilot case.', reason: `Asked for by ${author.name} in “Secret Pilot”` }],
-      [uc],
+    const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'short-name' });
+    const morgan = await createUser({ name: 'Morgan  Secretname', provider: 'github', subject: 'spaced-name' });
+    const base = listUseCases(project.id)[0];
+    const secrets = secretsFor([
+      { ...base, authorId: ann.id, sections: { name: 'NHS' } },
+      { ...base, authorId: morgan.id, sections: { name: 'Secret  Pilot' } },
+    ]);
+    expect(redactText('NHS for Ann.', secrets)).toBe('a use case for a participant.');
+    expect(redactText('From the secret\npilot, asked by Morgan Secretname', secrets)).toBe('From the a use case, asked by a participant');
+    // Whole words only: "Annual" and "channels" are left alone.
+    expect(redactText('Annual reports on NHS-run channels', secrets)).toBe('Annual reports on a use case-run channels');
+    const { ops, dropped } = redactOps(
+      [
+        { op: 'addClass', localName: 'SecretPilot', label: 'secret pilot', definition: 'x' },
+        { op: 'addClass', localName: 'AnnRecord', label: 'ann record', definition: 'x' },
+        { op: 'addClass', localName: 'Respite', label: 'respite', definition: 'Wanted by Ann for Secret Pilot.', altLabels: ['break', 'Secret Pilot'], editorialNote: 'From NHS' },
+      ],
+      secrets,
     );
-    expect(t.definition).toBe('From the a use case case.');
-    expect(t.reason).not.toContain('Secret Pilot');
-    expect(t.reason).not.toContain(author.name);
+    expect(dropped).toEqual(['SecretPilot', 'AnnRecord']);
+    expect(ops).toEqual([{ op: 'addClass', localName: 'Respite', label: 'respite', definition: 'Wanted by a participant for a use case.', altLabels: ['break'], editorialNote: 'From a use case' }]);
   });
 
-  it('lets an owner create an ontology without being named as its creator', async () => {
+  it('keeps titles out of AI revisions of a synthesised change request', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Rev Iser', provider: 'github', subject: 'revise-leak' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'Secret Pilot Scheme' }, terms: [{ label: 'Respite Break', kind: 'class' }] });
+    const cr = await synthesise(project, tester, [uc.id]);
+    const revised = await revise(cr, tester, 'Add a class ReviewLeak for Secret Pilot Scheme');
+    expect(JSON.stringify(revised.ops)).not.toMatch(/Secret Pilot Scheme/i);
+  });
+
+  it('names an ontology\'s owner as its creator only when they ask', async () => {
     const owner = await createUser({ name: 'Quinn Private', provider: 'github', subject: 'no-credit' });
-    const hidden = await createProject({ title: 'Uncredited vocab', description: '', prefix: 'uv', creditCreator: false }, owner);
+    // Off unless asked for, in the service and the API alike.
+    const hidden = await createProject({ title: 'Uncredited vocab', description: '', prefix: 'uv' }, owner);
     expect((await request(app).get(`/def/${hidden.slug}`)).text).not.toContain('Quinn Private');
-    const credited = await createProject({ title: 'Credited vocab', description: '', prefix: 'cv' }, owner);
+    const credited = await createProject({ title: 'Credited vocab', description: '', prefix: 'cv', creditCreator: true }, owner);
     expect((await request(app).get(`/def/${credited.slug}`)).text).toContain('Quinn Private');
   });
 
@@ -421,39 +463,83 @@ describe('re-review fixes', () => {
     }
   });
 
-  it('regenerates release pages written by an older renderer and backfills missing snapshots', async () => {
+  it('regenerates release pages from trusted state, keeps unreadable snapshots, and backfills missing ones', async () => {
     const project = findProject('volunteering')!;
     const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
     const page = path.join(dir, 'index.html');
     const snap = path.join(dir, 'requirements.json');
+    const stateFile = path.join(config.dataDir, 'public-pages.json');
     const original = { page: fs.readFileSync(page, 'utf8'), snap: fs.readFileSync(snap, 'utf8') };
+    const forget = () => fs.rmSync(stateFile, { force: true });
     try {
-      expect(original.page).toContain(PAGE_GENERATOR);
-      // A page from before the fixes, with no snapshot beside it.
-      fs.writeFileSync(page, '<html><meta name="generator" content="Concord"><img src=x onerror=alert(1)></html>');
+      // A page from before the fixes that even carries the marker text: state, not content, decides.
+      forget();
+      fs.writeFileSync(page, `<html><p>${PAGE_GENERATOR}</p><img src=x onerror=alert(1)></html>`);
       fs.rmSync(snap);
       await refreshReleasePages();
-      expect(fs.readFileSync(page, 'utf8')).toContain(PAGE_GENERATOR);
       expect(fs.readFileSync(page, 'utf8')).not.toContain('onerror');
-      const backfilled = JSON.parse(fs.readFileSync(snap, 'utf8'));
-      expect(backfilled.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+      expect(fs.readFileSync(page, 'utf8')).toContain(`content="${PAGE_GENERATOR}"`);
+      // The demo's use cases are fixed content, so its missing snapshot is backfilled.
+      expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+      expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).volunteering).toBe(PAGE_GENERATOR);
 
-      // An existing snapshot is history: only the page is re-rendered from it.
+      // Up to date: nothing is rewritten or committed, whatever the page says.
+      fs.writeFileSync(page, 'hand-edited');
+      const head = ontologyStore.head(project);
+      await refreshReleasePages();
+      expect(fs.readFileSync(page, 'utf8')).toBe('hand-edited');
+      expect(ontologyStore.head(project)).toBe(head);
+
+      // An unreadable snapshot is kept as it is, and the page says the use cases weren't recorded.
+      for (const broken of ['{not json', '{"useCases":[null]}', '{"useCases":[{"id":"x"}]}']) {
+        forget();
+        fs.writeFileSync(snap, broken);
+        await refreshReleasePages();
+        expect(fs.readFileSync(snap, 'utf8'), broken).toBe(broken);
+        expect(fs.readFileSync(page, 'utf8'), broken).toContain('were not recorded when it was published');
+        expect((await request(app).get('/def/volunteering/1.0.0')).text, broken).toContain('were not recorded when it was published');
+      }
+
+      // A valid snapshot is history: only the page is re-rendered from it.
+      forget();
       fs.writeFileSync(snap, JSON.stringify({ useCases: [{ id: 'k', ref: 'UC-9', title: 'Kept as released', status: 'closed' }] }));
-      fs.writeFileSync(page, 'stale');
       await refreshReleasePages();
       expect(JSON.parse(fs.readFileSync(snap, 'utf8')).useCases[0].title).toBe('Kept as released');
       expect(fs.readFileSync(page, 'utf8')).toContain('Kept as released');
-      // Committed to the ontology's repository, so the fix goes out with its next push.
       expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
-
-      // Up-to-date pages are left alone (no commit).
-      const head = ontologyStore.head(project);
-      await refreshReleasePages();
-      expect(ontologyStore.head(project)).toBe(head);
     } finally {
       fs.writeFileSync(page, original.page);
       fs.writeFileSync(snap, original.snap);
+      forget();
+      await refreshReleasePages();
     }
+  });
+
+  it('removes contributor names and use case titles that older versions wrote into the RDF', async () => {
+    const project = findProject('volunteering')!;
+    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
+    const leak = (ttl: string) =>
+      `${ttl}\n<https://w3id.org/odi/volunteering#Volunteer> <http://purl.org/dc/terms/contributor> "Leaky Name" ; <http://purl.org/dc/terms/source> "use cases: Leaky Title" ; <http://www.w3.org/2004/02/skos/core#editorialNote> "Needed by the use case “Leaky Title”" .\n`;
+    // In the working draft...
+    const working = await ontologyStore.working(project);
+    const dirty = await OntologyGraph.fromTurtle(leak(await working.toTurtle()));
+    await ontologyStore.commitWorking(project, dirty, 'simulate an old merge', { name: 'Test' });
+    // ...and in a released version and its other serialisations.
+    const releasedTtl = fs.readFileSync(path.join(dir, 'ontology.ttl'), 'utf8');
+    const releasedJson = fs.readFileSync(path.join(dir, 'ontology.jsonld'), 'utf8');
+    fs.writeFileSync(path.join(dir, 'ontology.ttl'), leak(releasedTtl));
+    fs.writeFileSync(path.join(dir, 'ontology.jsonld'), releasedJson.replace('{', '{"leak":"Leaky Name",'));
+    ontologyStore.forgetReleases(project);
+    await refreshReleasePages();
+    for (const url of ['/def/volunteering/draft.ttl', '/def/volunteering/1.0.0.ttl', '/def/volunteering/1.0.0', '/def/volunteering/draft']) {
+      const text = (await request(app).get(url)).text;
+      expect(text, url).not.toContain('Leaky Name');
+      expect(text, url).not.toContain('Leaky Title');
+    }
+    expect(fs.readFileSync(path.join(dir, 'ontology.jsonld'), 'utf8')).not.toContain('Leaky Name');
+    expect(fs.readFileSync(path.join(dir, 'index.html'), 'utf8')).not.toContain('Leaky');
+    // Editorial notes keep their meaning, and hand-written sources stay.
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Needed by a use case (see source).');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('NCVO definition of formal volunteering');
   });
 });
