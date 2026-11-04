@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { HttpError, list, mustGet, put, putFenced } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -44,7 +44,8 @@ export const getCR = (id: string) => mustGet<ChangeRequest>('changeRequests', id
 export const listCRs = (ontologyId: string) => list<ChangeRequest>('changeRequests', ontologyId).sort((a, b) => b.number - a.number);
 const save = (cr: ChangeRequest) => {
   cr.updatedAt = clock.iso();
-  return put('changeRequests', cr, cr.ontologyId);
+  // Fenced: a proposal from a fork that has lost its hold on the fork can't overwrite newer work.
+  return putFenced('changeRequests', cr, cr.ontologyId);
 };
 
 function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
@@ -408,7 +409,7 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   const working = await ontologyStore.working(project);
   let after: OntologyGraph;
   try {
-    after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+    after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), provenance: `${project.slug}#${cr.number}` }).graph;
   } catch (err) {
     setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
     return save(cr);

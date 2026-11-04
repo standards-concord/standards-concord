@@ -16,10 +16,10 @@ import type {
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { PUBLIC_BASE } from '../public/w3id.js';
-import { get, HttpError, list, mustGet, put, putIf } from '../db.js';
+import { get, HttpError, list, mustGet, put, putIf, withFence } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import type { ProposedTerm } from '../llm/schemas.js';
-import { createChangeRequest, draftFromNaturalLanguage, getCR, updateOps, withdraw } from './changeRequests.js';
+import { createChangeRequest, draftFromNaturalLanguage, getCR, submit, updateOps } from './changeRequests.js';
 import { fairContext } from './fairResolution.js';
 import { competencyTests, findProject, getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -207,39 +207,13 @@ function stamp(graph: OntologyGraph, p: OntologyProject, f: OntologyFork): Ontol
 /* ------------------------------------------------------------------------ */
 
 /**
- * Which dcterms:source statements the change engine stamped itself. It adds
- * one only to a term an edit creates (addClass and the like): "<ontology>#<n>"
- * when change request n is merged, "<ontology> fork <fork>" for the fork's own
- * edits. So a source counts as generated only on a term that a merged request
- * or this fork actually created; anywhere else, and for any other value, it is
- * an annotation someone asked for and is compared like the rest of the term.
- */
-type Generated = (term: string, value: string) => boolean;
-const CREATES = new Set<ChangeOp['op']>(['addClass', 'addObjectProperty', 'addDatatypeProperty', 'addIndividual']);
-const MERGED = new Set(['merged', 'released']);
-function generatedSources(p: OntologyProject, f?: Pick<OntologyFork, 'slug' | 'ops'>): Generated {
-  const stamped = new Map<string, Set<string>>();
-  const note = (ops: ChangeOp[], tag: string) => {
-    for (const op of ops) {
-      if (!CREATES.has(op.op)) continue;
-      const iri = p.namespace + (op as { localName: string }).localName;
-      if (!stamped.has(iri)) stamped.set(iri, new Set());
-      stamped.get(iri)!.add(tag);
-    }
-  };
-  for (const cr of list<ChangeRequest>('changeRequests', p.id)) if (MERGED.has(cr.status)) note(cr.ops, `${p.slug}#${cr.number}`);
-  if (f) note(f.ops, `${p.slug} fork ${f.slug}`);
-  return (term, value) => stamped.get(term)?.has(value) ?? false;
-}
-
-/**
  * A key is something an edit can change: a term IRI, `import:<iri>` for an
  * owl:imports, or `meta:<field>` for an ontology header field.
  */
-function describe(g: OntologyGraph, key: string, gen: Generated): string {
+function describe(g: OntologyGraph, key: string): string {
   if (key.startsWith('import:')) return g.metadata().imports.includes(key.slice(7)) ? 'imported' : '';
   if (key.startsWith('meta:')) return JSON.stringify((g.metadata() as unknown as Record<string, unknown>)[key.slice(5)] ?? null);
-  return termDescription(g, key, { keepSource: (v) => !gen(key, v) });
+  return termDescription(g, key);
 }
 
 function keyLabel(key: string, prefixes: Record<string, string>) {
@@ -285,10 +259,15 @@ interface Outstanding {
   keys: string[];
 }
 
-/** One header edit per field, so a field changed and changed back cancels out on its own. */
+/**
+ * One header edit per field, so a field changed and changed back cancels out
+ * on its own. Fields the fork stamps itself are dropped: stamp() overwrites
+ * them in the fork, so they never had an effect there, and must not travel
+ * upstream in a proposal (edits stored before they were refused included).
+ */
 function splitHeaderEdits(ops: ChangeOp[]): ChangeOp[] {
   return ops.flatMap((op) =>
-    op.op === 'setMetadata' && Object.keys(op.set).length > 1 ? Object.entries(op.set).map(([field, value]) => ({ op: 'setMetadata', set: { [field]: value } }) as ChangeOp) : [op],
+    op.op === 'setMetadata' ? Object.entries(op.set).filter(([field]) => !STAMPED.has(field)).map(([field, value]) => ({ op: 'setMetadata', set: { [field]: value } }) as ChangeOp) : [op],
   );
 }
 
@@ -298,17 +277,17 @@ function splitHeaderEdits(ops: ChangeOp[]): ChangeOp[] {
  * a class added and removed) are dropped, as long as the rest still rebuild
  * the fork exactly; otherwise all edits are kept.
  */
-function outstanding(base: OntologyGraph, fork: OntologyGraph, edits: ChangeOp[], gen: Generated): Outstanding {
+function outstanding(base: OntologyGraph, fork: OntologyGraph, edits: ChangeOp[]): Outstanding {
   const ops = splitHeaderEdits(edits);
   const perOp = keysPerOp(base, ops);
   const all = [...new Set(perOp.flat())];
-  const changed = all.filter((k) => describe(base, k, gen) !== describe(fork, k, gen));
+  const changed = all.filter((k) => describe(base, k) !== describe(fork, k));
   if (changed.length === all.length) return { ops, perOp, keys: changed };
   const keep = ops.map((_, i) => !perOp[i].length || perOp[i].some((k) => changed.includes(k)));
   const pruned = ops.filter((_, i) => keep[i]);
   try {
     const rebuilt = applyChangeOps(base, pruned).graph;
-    if (all.every((k) => describe(rebuilt, k, gen) === describe(fork, k, gen))) return { ops: pruned, perOp: perOp.filter((_, i) => keep[i]), keys: changed };
+    if (all.every((k) => describe(rebuilt, k) === describe(fork, k))) return { ops: pruned, perOp: perOp.filter((_, i) => keep[i]), keys: changed };
   } catch {
     // A kept edit depended on a dropped one: keep everything.
   }
@@ -321,20 +300,7 @@ function outstanding(base: OntologyGraph, fork: OntologyGraph, edits: ChangeOp[]
  * changed anonymous axioms, as term keys; header fields and imports as
  * meta:/import: keys. Engine-stamped provenance is left out.
  */
-/** The value of a canonical triple's object: a literal's text or an IRI. */
-function sourceValue(object: string): string {
-  const iri = /^<([^>]+)>/.exec(object);
-  if (iri) return iri[1];
-  const lit = /^("(?:[^"\\]|\\.)*")/.exec(object);
-  if (!lit) return object;
-  try {
-    return JSON.parse(lit[1]) as string;
-  } catch {
-    return lit[1].slice(1, -1);
-  }
-}
-
-function changedTerms(a: OntologyGraph, b: OntologyGraph, gen: Generated): string[] {
+function changedTerms(a: OntologyGraph, b: OntologyGraph): string[] {
   const la = canonicalTriples(a.store);
   const lb = canonicalTriples(b.store);
   const out = new Set<string>();
@@ -342,7 +308,9 @@ function changedTerms(a: OntologyGraph, b: OntologyGraph, gen: Generated): strin
   const visit = (line: string) => {
     const named = /^<([^>]+)> <([^>]+)> /.exec(line);
     if (named) {
-      const generated = /^http:\/\/purl\.org\/dc\/terms\/(created|modified|contributor)$/.test(named[2]) || (named[2] === 'http://purl.org/dc/terms/source' && gen(named[1], sourceValue(line.slice(named[0].length))));
+      // Engine-stamped provenance, and the declarations of the properties it uses.
+      const stampedBy = /^http:\/\/purl\.org\/dc\/terms\/(created|modified|contributor|provenance)$/;
+      const generated = stampedBy.test(named[2]) || stampedBy.test(named[1]);
       if (named[1] !== header && !generated) out.add(named[1]);
       return;
     }
@@ -415,20 +383,19 @@ interface RebasePlan {
 }
 
 async function rebasePlan(p: OntologyProject, f: OntologyFork, author?: string): Promise<RebasePlan> {
-  const gen = generatedSources(p, f);
   const upstreamHead = ontologyStore.head(p);
   const upstream = await ontologyStore.working(p);
   const base = await ontologyStore.graphAt(p, f.baseCommit);
   const fork = await ontologyStore.forkGraph(p, f.slug);
   const label = (k: string) => keyLabel(k, upstream.prefixes);
-  const out = outstanding(base, fork, f.ops, gen);
+  const out = outstanding(base, fork, f.ops);
   const landed: string[] = [];
   const conflicts: ForkConflict[] = [];
   for (const k of out.keys) {
-    const mine = describe(fork, k, gen);
-    const theirs = describe(upstream, k, gen);
+    const mine = describe(fork, k);
+    const theirs = describe(upstream, k);
     if (theirs === mine) landed.push(k);
-    else if (theirs !== describe(base, k, gen))
+    else if (theirs !== describe(base, k))
       conflicts.push({ iri: k, curie: label(k), message: `${label(k)} has changed upstream since this fork was last synced, and not in the same way as in the fork.`, discard: [k], discardLabels: [label(k)] });
   }
   // Every edit still needed: all but those whose every key has landed. (Edits outstanding() had
@@ -441,7 +408,7 @@ async function rebasePlan(p: OntologyProject, f: OntologyFork, author?: string):
   const states = [upstream];
   for (const op of remaining) {
     try {
-      result = applyChangeOps(result, [op], { author, date: clock.iso().slice(0, 10), source: `${p.slug} fork ${f.slug}` }).graph;
+      result = applyChangeOps(result, [op], { author, date: clock.iso().slice(0, 10), provenance: `${p.slug} fork ${f.slug}` }).graph;
     } catch (err) {
       const k = keysOf(op)[0];
       conflicts.push({ iri: k, curie: k ? label(k) : undefined, message: `“${describeOp(op, label)}” no longer applies to the latest draft: ${(err as Error).message}.`, discard: keysOf(op), discardLabels: keysOf(op).map(label) });
@@ -450,7 +417,7 @@ async function rebasePlan(p: OntologyProject, f: OntologyFork, author?: string):
   }
   /** The keys of the edit whose replay changed `k`: what to discard to resolve a conflict on it. */
   const cause = (k: string) => {
-    for (let i = 0; i < remaining.length; i++) if (describe(states[i], k, gen) !== describe(states[i + 1], k, gen)) return keysOf(remaining[i]);
+    for (let i = 0; i < remaining.length; i++) if (describe(states[i], k) !== describe(states[i + 1], k)) return keysOf(remaining[i]);
     return [k];
   };
   if (!conflicts.length) {
@@ -458,11 +425,11 @@ async function rebasePlan(p: OntologyProject, f: OntologyFork, author?: string):
     // class also removes the subclass axioms that point at it), must come out exactly as in the
     // fork, and upstream must not have changed it in the meantime.
     const pending = out.keys.filter((x) => !landed.includes(x));
-    const reached = new Set([...pending, ...changedTerms(upstream, result, gen)]);
+    const reached = new Set([...pending, ...changedTerms(upstream, result)]);
     for (const k of reached) {
       if (landed.includes(k)) continue;
-      const asFork = describe(result, k, gen) === describe(fork, k, gen);
-      const upstreamChanged = describe(upstream, k, gen) !== describe(base, k, gen);
+      const asFork = describe(result, k) === describe(fork, k);
+      const upstreamChanged = describe(upstream, k) !== describe(base, k);
       if (pending.includes(k) ? !asFork : !asFork || upstreamChanged) {
         const discard = pending.includes(k) ? [k] : cause(k);
         conflicts.push({
@@ -604,7 +571,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
 
     let after: OntologyGraph;
     try {
-      const r = applyChangeOps(current, ops, { author: user.name, date: clock.iso().slice(0, 10), source: `${p.slug} fork ${f.slug}` });
+      const r = applyChangeOps(current, ops, { author: user.name, date: clock.iso().slice(0, 10), provenance: `${p.slug} fork ${f.slug}` });
       after = r.graph;
       warnings = [...warnings, ...r.warnings];
     } catch (err) {
@@ -616,7 +583,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
     f.revision += 1;
     const subject = (message || input.description?.split('\n')[0] || 'Edit the fork').slice(0, 120);
     // Keep only the edits that still make a difference (an edit undone later drops out).
-    f.ops = outstanding(await ontologyStore.graphAt(p, f.baseCommit), after, [...f.ops, ...ops], generatedSources(p, f)).ops;
+    f.ops = outstanding(await ontologyStore.graphAt(p, f.baseCommit), after, [...f.ops, ...ops]).ops;
     await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, stamp(after, p, f), subject, { name: user.name, email: user.email }, { expectedParent: head }));
     logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.edited', message: `edited the fork “${f.title}”: ${subject}`, link: `/o/${p.slug}/forks/${f.slug}` });
     const summary = await forkSummary(f);
@@ -625,19 +592,26 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
   });
 }
 
-/** The open change request a fork has upstream, if any. */
-function openCR(f: OntologyFork): ChangeRequest | undefined {
-  for (const id of [...f.changeRequestIds].reverse()) {
+/**
+ * The fork's change requests, oldest first: those recorded on it, and any
+ * request made from it (origin.forkId) that a proposal interrupted before it
+ * could record it (its process stopped, or it lost its lease). So a request
+ * is never orphaned, and proposing again picks it up instead of opening
+ * another.
+ */
+function forkCRs(f: OntologyFork): ChangeRequest[] {
+  const out = new Map<string, ChangeRequest>();
+  for (const id of f.changeRequestIds) {
     const cr = get<ChangeRequest>('changeRequests', id);
-    if (cr && OPEN_CR.includes(cr.status)) return cr;
+    if (cr) out.set(cr.id, cr);
   }
-  return undefined;
+  for (const cr of list<ChangeRequest>('changeRequests', f.ontologyId)) if (cr.origin.type === 'fork' && cr.origin.forkId === f.id) out.set(cr.id, cr);
+  return [...out.values()].sort((a, b) => a.number - b.number);
 }
 
-function latestCR(f: OntologyFork): ChangeRequest | undefined {
-  const id = f.changeRequestIds.at(-1);
-  return id ? get<ChangeRequest>('changeRequests', id) : undefined;
-}
+/** The open change request a fork has upstream, if any. */
+const openCR = (f: OntologyFork) => forkCRs(f).findLast((cr) => OPEN_CR.includes(cr.status));
+const latestCR = (f: OntologyFork) => forkCRs(f).at(-1);
 
 const conflictText = (c: ForkConflict[]) => c.map((x) => x.message).join(' ');
 
@@ -676,8 +650,15 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
     // proposal, in this process or another, starts while the change request is being made.
     f.proposing = { until: Date.now() + PROPOSE_LEASE_MS };
     const claimed = save(f, from);
+    // Every write to the change request is fenced on that lease: if it runs out (this process
+    // stalled) and anything else changes the fork, this proposal's writes are refused, so it can
+    // never overwrite newer work. Nothing is ever rolled back.
+    const fence = () => {
+      if (get<OntologyFork>('forks', f.id)?.seq !== claimed.seq)
+        throw new HttpError(409, 'The fork changed while it was being proposed (this proposal took too long and lost its hold on the fork). Reload it and propose again if needed.');
+    };
     const release = () => {
-      // Give the lease back if nothing else has changed the fork since (it may have run out).
+      // Give the lease back if nothing else has changed the fork since.
       const cur = get<OntologyFork>('forks', f.id);
       if (cur && cur.seq === claimed.seq && cur.proposing) {
         delete cur.proposing;
@@ -689,35 +670,28 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
       }
     };
     if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
+    // An open request from this fork, including one an interrupted proposal created but never
+    // recorded on the fork: it is updated, not duplicated.
     const existing = openCR(f);
-    const previousOps = existing?.ops;
     let cr: ChangeRequest;
     try {
-      if (existing) {
-        cr = await updateOps(existing, user, { ops: plan.remaining, title: input.title?.trim() || undefined, description: input.description?.trim() || undefined });
-      } else {
-        cr = await createChangeRequest(p, user, { title, description, kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: plan.remaining, submit: true });
-        f.changeRequestIds.push(cr.id);
-      }
+      cr = await withFence(fence, async () => {
+        if (!existing) return createChangeRequest(p, user, { title, description, kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: plan.remaining, submit: true });
+        const updated = await updateOps(existing, user, { ops: plan.remaining, title: input.title?.trim() || undefined, description: input.description?.trim() || undefined });
+        // Interrupted before it was submitted: submit it now.
+        return updated.status === 'draft' ? submit(updated, user) : updated;
+      });
     } catch (err) {
       release();
       throw err;
     }
+    if (!f.changeRequestIds.includes(cr.id)) f.changeRequestIds.push(cr.id);
     f.status = 'proposed';
     f.proposedRevision = f.revision;
     delete f.proposing;
-    try {
-      save(f, claimed);
-    } catch (err) {
-      // Only possible if the lease ran out and another change was saved meanwhile. Undo this
-      // proposal's change to the request, unless someone has changed the request since.
-      const now = getCR(cr.id);
-      if (JSON.stringify(now.ops) === JSON.stringify(plan.remaining)) {
-        if (existing && previousOps) await updateOps(now, user, { ops: previousOps }).catch(() => undefined);
-        else if (!existing) await withdraw(now, user).catch(() => undefined);
-      }
-      throw err;
-    }
+    // Can only fail if the lease ran out and something else changed the fork after the request
+    // was written; the request stays linked to the fork through its origin either way.
+    save(f, claimed);
     if (!existing) logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.proposed', message: `proposed the fork “${f.title}” upstream as #${cr.number}`, link: `/o/${p.slug}/changes/${cr.id}` });
     return { fork: await forkSummary(f), changeRequest: getCR(cr.id) };
   });
@@ -759,11 +733,10 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
     f.baseVersion = p.currentVersion;
     f.ops = plan.remaining;
     if (plan.landed.length) {
-      const gen = generatedSources(p, f);
       const before = await ontologyStore.graphAt(p, oldBase);
       const fork = await ontologyStore.forkGraph(p, f.slug);
       const landed = new Map((f.landed ?? []).map((l) => [l.key, l]));
-      for (const k of plan.landed) if (!landed.has(k)) landed.set(k, { key: k, change: changeKind(describe(before, k, gen), describe(fork, k, gen)) });
+      for (const k of plan.landed) if (!landed.has(k)) landed.set(k, { key: k, change: changeKind(describe(before, k), describe(fork, k)) });
       f.landed = [...landed.values()];
     }
     await commitAndSave(p, f, from, () =>
@@ -794,7 +767,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     requireOpen(f);
     const p = getProject(f.ontologyId);
     const base = await ontologyStore.graphAt(p, f.baseCommit);
-    const out = outstanding(base, await ontologyStore.forkGraph(p, f.slug), f.ops, generatedSources(p, f));
+    const out = outstanding(base, await ontologyStore.forkGraph(p, f.slug), f.ops);
     const drop = terms === 'all' ? undefined : new Set(terms.map((t) => toKey(t, base.prefixes)));
     const label = (k: string) => keyLabel(k, base.prefixes);
     const keep: ChangeOp[] = [];
@@ -822,7 +795,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
       );
     let graph = base;
     try {
-      graph = applyChangeOps(base, keep, { author: user.name, date: clock.iso().slice(0, 10), source: `${p.slug} fork ${f.slug}` }).graph;
+      graph = applyChangeOps(base, keep, { author: user.name, date: clock.iso().slice(0, 10), provenance: `${p.slug} fork ${f.slug}` }).graph;
     } catch (err) {
       throw new HttpError(409, `Other changes in the fork depend on that one, so it can't be discarded on its own (${(err as Error).message}). Discard those too.`);
     }
@@ -867,7 +840,6 @@ export async function closeFork(fork: OntologyFork, user: User | undefined) {
 /* ------------------------------------------------------------------------ */
 
 async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTerm[]> {
-  const gen = generatedSources(p, f);
   const base = await ontologyStore.graphAt(p, f.baseCommit);
   const fork = await ontologyStore.forkGraph(p, f.slug);
   const working = await ontologyStore.working(p);
@@ -884,12 +856,12 @@ async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTe
   }
   const crKeys = new Set(cr ? termsOf(cr.ops, working.namespace).map((t) => t.iri) : []);
   const views = new Map([...termsOf(f.ops, base.namespace)].map((t) => [t.iri, t]));
-  const pending = outstanding(base, fork, f.ops, gen).keys;
+  const pending = outstanding(base, fork, f.ops).keys;
   const landedChange = new Map((f.landed ?? []).filter((l) => !pending.includes(l.key)).map((l) => [l.key, l.change]));
   const keys = [...pending, ...landedChange.keys()];
   return keys.map((k) => {
-    const mine = describe(fork, k, gen);
-    const before = describe(base, k, gen);
+    const mine = describe(fork, k);
+    const before = describe(base, k);
     const t = k.includes('://') && !k.startsWith('import:') && !k.startsWith('meta:') ? (fork.term(k) ?? base.term(k)) : undefined;
     const term: ForkTerm = {
       iri: k,
@@ -899,13 +871,13 @@ async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTe
       change: landedChange.get(k) ?? changeKind(before, mine),
       upstream: 'not-proposed',
     };
-    if (released && describe(released, k, gen) === mine) return { ...term, upstream: 'released', releasedIn: p.currentVersion };
-    if (describe(working, k, gen) === mine) return { ...term, upstream: 'merged' };
+    if (released && describe(released, k) === mine) return { ...term, upstream: 'released', releasedIn: p.currentVersion };
+    if (describe(working, k) === mine) return { ...term, upstream: 'merged' };
     if (crOpen) {
-      if (proposed ? describe(proposed, k, gen) === mine : crKeys.has(k)) return { ...term, upstream: 'pending' };
+      if (proposed ? describe(proposed, k) === mine : crKeys.has(k)) return { ...term, upstream: 'pending' };
       // Edited since it was proposed, or not part of the request.
     } else if (cr && (cr.status === 'rejected' || cr.status === 'withdrawn') && crKeys.has(k)) return { ...term, upstream: 'rejected' };
-    if (describe(working, k, gen) !== before) return { ...term, upstream: 'diverged' };
+    if (describe(working, k) !== before) return { ...term, upstream: 'diverged' };
     return term;
   });
 }
@@ -926,6 +898,7 @@ export async function forkSummary(f: OntologyFork): Promise<ForkSummary> {
   const cr = latestCR(f);
   return {
     ...f,
+    changeRequestIds: forkCRs(f).map((c) => c.id),
     status,
     owner: publicUser(getUser(f.ownerId)),
     ontology: { id: p.id, slug: p.slug, title: p.title, prefix: p.prefix, currentVersion: p.currentVersion },
@@ -944,18 +917,18 @@ export async function forkDetail(f: OntologyFork) {
 
 /**
  * What the fork has that the current release and the working draft don't have
- * the same way: the keys an application importing the fork would lose or see
- * change by switching to them. Upstream's changes to content the fork didn't
- * change (the fork just hasn't synced them yet) don't count; header fields
- * other than imports don't either.
+ * exactly the same way: the keys an application importing the fork would lose
+ * or see change by switching to them. That includes content the fork only
+ * inherited (unreleased draft terms it was created with, or a term upstream
+ * has since removed): switching is only offered when the target says
+ * everything the fork says. Terms only the target has don't count, nor do
+ * header fields other than imports.
  */
 async function notIn(p: OntologyProject, f: OntologyFork): Promise<{ release: string[]; draft: string[]; prefixes: Record<string, string> }> {
-  const gen = generatedSources(p, f);
-  const base = await ontologyStore.graphAt(p, f.baseCommit);
   const fork = await ontologyStore.forkGraph(p, f.slug);
   const working = await ontologyStore.working(p);
   const lacking = (target: OntologyGraph) =>
-    changedTerms(target, fork, gen).filter((k) => !k.startsWith('meta:') && (describe(fork, k, gen) !== describe(base, k, gen) || describe(working, k, gen) !== describe(target, k, gen)));
+    changedTerms(target, fork).filter((k) => !k.startsWith('meta:') && describe(fork, k) !== '' && describe(fork, k) !== describe(target, k));
   const released = p.currentVersion !== '0.0.0' && ontologyStore.versions(p).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
   return { release: released ? lacking(released) : [], draft: lacking(working), prefixes: working.prefixes };
 }
@@ -990,7 +963,7 @@ export async function checkFork(f: OntologyFork): Promise<ForkCheck> {
     return {
       fork,
       outcome: draftOk ? 'switch-to-draft' : 'keep-using-fork',
-      message: `The fork's own changes are in ${p.title} ${p.currentVersion}, but the fork also has ${what} from the working draft it was created from, which ${p.currentVersion} doesn't have yet. ${draftOk ? 'Keep using the fork until the next release, or switch to the draft.' : 'Keep using the fork.'}`,
+      message: `The fork's own changes are in ${p.title} ${p.currentVersion}, but ${p.currentVersion} doesn't have ${what} exactly as the fork does (draft content the fork was created with, for example), so switching would change them for your application. ${draftOk ? 'Keep using the fork until the next release, or switch to the draft.' : 'Keep using the fork.'}`,
       replace: draftOk ? swap(draft) : [],
       conflicts: [],
       steps: draftOk

@@ -29,6 +29,13 @@ export interface ChangeContext {
   author?: string;
   date?: string;
   source?: string;
+  /**
+   * The record that caused the change (a change request, a fork), stamped as
+   * dcterms:provenance on each term an edit creates. Unlike `source` it is
+   * kept apart from the dcterms:source annotations people ask for, so content
+   * comparisons can ignore it without losing those.
+   */
+  provenance?: string;
 }
 
 export interface ApplyResult {
@@ -135,7 +142,9 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     if (ctx.source && !(fields.source ?? []).includes(ctx.source)) add(iri, P.source, looksLikeIRI(ctx.source) ? nn(ctx.source) : literal(ctx.source));
     usedAnnotations.add(P.created).add(P.definition);
     if (ctx.author) usedAnnotations.add(P.contributor);
+    if (ctx.provenance) add(iri, P.provenance, literal(ctx.provenance));
     if (ctx.source || fields.source?.length) usedAnnotations.add(P.source);
+    if (ctx.provenance) usedAnnotations.add(P.provenance);
     touched.add(iri);
     return iri;
   };

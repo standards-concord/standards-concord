@@ -5,7 +5,9 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
-import { get, list, openDb, put, putIf } from '../src/db.js';
+import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
+import { createChangeRequest, getCR, updateOps } from '../src/services/changeRequests.js';
+import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
@@ -541,5 +543,122 @@ describe('fourth review', () => {
     expect(check.outcome).not.toBe('switch-to-release');
     expect(check.replace.map((r: { to: string }) => r.to).join(' ')).not.toMatch(/1\.0\.0/);
     expect(check.message).toMatch(/InheritedKept/);
+  });
+});
+
+describe('fifth review', () => {
+  const fork = async (path: string) => (await reader.get(path)).body;
+  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
+  /** Change the stored fork as another server process would (a conditional save). */
+  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+    const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
+    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    return next;
+  };
+
+  it('a proposal that lost its lease cannot write over a newer proposal', async () => {
+    const path = await newFork('Fenced');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('FencedOne', 'fenced one')] });
+    const f = await record(path);
+    // Process A takes the lease, then stalls past its expiry.
+    const a = elsewhere(f, { proposing: { until: Date.now() - 1 } });
+    // Process B proposes meanwhile, with an extra edit.
+    await dev.post(`${path}/edits`).send({ ops: [addClass('FencedTwo', 'fenced two')] });
+    const b = await dev.post(`${path}/propose`).send({ title: 'B’s proposal' });
+    expect(b.status).toBe(200);
+    const crId = b.body.changeRequest.id;
+    expect(getCR(crId).ops).toHaveLength(2);
+    // A wakes up and writes its (older) edits to the request: refused, and nothing changes.
+    const fence = () => {
+      if (get<OntologyFork>('forks', f.id)?.seq !== a.seq) throw new HttpError(409, 'lost the lease');
+    };
+    const owner = getUser(f.ownerId)!;
+    await expect(withFence(fence, () => updateOps(getCR(crId), owner, { ops: [addClass('FencedOne', 'fenced one')], title: 'A’s proposal' }))).rejects.toThrow(/lost the lease/);
+    expect(getCR(crId).ops).toHaveLength(2);
+    expect(getCR(crId).title).toBe('B’s proposal');
+  });
+
+  it('proposing again after an interrupted proposal picks up its request instead of opening another', async () => {
+    const path = await newFork('Interrupted');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('Interrupted', 'interrupted')] });
+    const f = await record(path);
+    const p = findProject('volunteering')!;
+    // The proposing process created and submitted the request, then stopped before recording it.
+    const orphan = await createChangeRequest(p, getUser(f.ownerId)!, { title: 'Interrupted', description: 'x', kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: f.ops, submit: true });
+    expect((await fork(path)).changeRequestIds).toEqual([orphan.id]);
+    const again = await dev.post(`${path}/propose`).send({});
+    expect(again.status).toBe(200);
+    expect(again.body.changeRequest.id).toBe(orphan.id);
+    const open = list<{ status: string; origin: { forkId?: string } }>('changeRequests', p.id).filter((cr) => cr.origin.forkId === f.id && cr.status !== 'withdrawn');
+    expect(open).toHaveLength(1);
+  });
+
+  it('stored edits to fields the fork stamps itself never reach a proposal', async () => {
+    const path = await newFork('Legacy setter');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LegacySetter', 'legacy setter')] });
+    const f = await record(path);
+    // Stored before such edits were refused.
+    elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9', priorVersion: 'https://example.org/x', modified: '2020-01-01', versionIRI: 'https://example.org/y' } }] });
+    const proposed = await dev.post(`${path}/propose`).send({});
+    expect(proposed.status).toBe(200);
+    expect(JSON.stringify(getCR(proposed.body.changeRequest.id).ops)).not.toMatch(/versionInfo|priorVersion|modified|versionIRI/);
+  });
+
+  it('discarding everything also drops stored edits that have nothing to compare', async () => {
+    const path = await newFork('Discard legacy');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('DiscardLegacy', 'discard legacy')] });
+    const f = await record(path);
+    elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
+    const all = await dev.post(`${path}/discard`).send({ all: true });
+    expect(all.status).toBe(200);
+    expect(all.body.ops).toEqual([]);
+  });
+
+  it('a requested source spelled like the fork’s own provenance is compared', async () => {
+    const path = await newFork('Own tag');
+    const slug = path.split('/').at(-1);
+    await dev.post(`${path}/edits`).send({ ops: [addClass('OwnTag', 'own tag', { source: [`volunteering fork ${slug}`] })] });
+    await upstream([addClass('OwnTag', 'own tag')]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.synced).toBe(false);
+    expect(sync.conflicts).toEqual([expect.objectContaining({ curie: 'vol:OwnTag' })]);
+  });
+
+  it('a source re-added after upstream removed it is still an edit', async () => {
+    const p = findProject('volunteering')!;
+    await upstream([addClass('ReSourced', 'resourced', { source: ['volunteering#1'] })]);
+    await upstream([{ op: 'updateAnnotations', iri: `${VOL}ReSourced`, set: { source: [] } }]);
+    expect((await ontologyStore.working(p)).term(`${VOL}ReSourced`)!.source ?? []).toEqual([]);
+    const path = await newFork('Re-source');
+    const res = await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}ReSourced`, set: { source: ['volunteering#1'] } }] });
+    expect(res.status).toBe(200);
+    expect((await fork(path)).ops).toHaveLength(1);
+  });
+
+  it('generated provenance follows a rename: the same add-then-rename upstream has landed', async () => {
+    const path = await newFork('Rename provenance');
+    const ops: ChangeOp[] = [addClass('BeforeRename', 'renamed term'), { op: 'renameTerm', iri: `${VOL}BeforeRename`, newLocalName: 'AfterRename' }];
+    expect((await dev.post(`${path}/edits`).send({ ops })).status).toBe(200);
+    // Upstream merges the same edits through a change request, which stamps its own provenance.
+    const p = findProject('volunteering')!;
+    const g = applyChangeOps(await ontologyStore.working(p), ops, { author: 'Steward', date: '2026-11-04', provenance: 'volunteering#999' }).graph;
+    await ontologyStore.commitWorking(p, g, 'Merge the same edits', { name: 'Steward', email: 'steward@example.org' });
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.conflicts).toEqual([]);
+    expect(sync.synced).toBe(true);
+    expect((await dev.get(`${path}/check`)).body.outcome).toBe('switch-to-draft');
+  });
+
+  it('does not recommend a target that lacks an inherited term upstream has since removed', async () => {
+    await upstream([addClass('InheritedThenDeleted', 'inherited then deleted')]);
+    const path = await newFork('Inherited deleted');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LandsLater', 'lands later')] });
+    await upstream([addClass('LandsLater', 'lands later'), { op: 'removeTerm', iri: `${VOL}InheritedThenDeleted` }]);
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).not.toMatch(/^switch-/);
+    expect(check.message).toMatch(/InheritedThenDeleted/);
+    // After syncing, the fork no longer has it either, and switching is safe.
+    expect((await dev.post(`${path}/sync`)).body.synced).toBe(true);
+    expect((await dev.get(`${path}/check`)).body.outcome).toBe('switch-to-draft');
   });
 });

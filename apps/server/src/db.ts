@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -88,6 +89,29 @@ export function putIf<T extends { id: string }>(collection: Collection, doc: T, 
   if (expected !== undefined) args.push(expected);
   const row = conn().prepare(`UPDATE docs SET data = ? WHERE collection = ? AND id = ? AND ${cond} RETURNING id`).get(...args);
   return !!row;
+}
+
+const fences = new AsyncLocalStorage<() => void>();
+
+/**
+ * Run `fn` with a fence: every putFenced() it makes (however deep, across
+ * awaits) first runs `guard` in the same transaction as the write, so a guard
+ * that throws stops the write atomically. This is how a slow process that has
+ * lost its hold on something (a lease that ran out) is kept from writing over
+ * newer work.
+ */
+export function withFence<T>(guard: () => void, fn: () => Promise<T>): Promise<T> {
+  return fences.run(guard, fn);
+}
+
+/** put(), checked against the current fence (if any) in the same transaction. */
+export function putFenced<T extends { id: string }>(collection: Collection, doc: T, parent?: string): T {
+  const guard = fences.getStore();
+  if (!guard) return put(collection, doc, parent);
+  return transaction(() => {
+    guard();
+    return put(collection, doc, parent);
+  });
 }
 
 export function get<T>(collection: Collection, id: string): T | undefined {

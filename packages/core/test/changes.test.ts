@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DataFactory } from 'n3';
-import { ChangeOpError, NS, XSD, applyChangeOps, lint, toKGCL } from '../src/index.js';
-import type { ClassView, IndividualView, PropertyView } from '../src/index.js';
+import { ChangeOpError, NS, XSD, applyChangeOps, lint, termDescription, toKGCL } from '../src/index.js';
+import type { ChangeOp, ClassView, IndividualView, PropertyView } from '../src/index.js';
 import { NSX, X, baseOntology } from './helpers.js';
 
 const cls = (g: ReturnType<typeof baseOntology>, l: string) => g.term(X(l)) as ClassView;
@@ -293,5 +293,19 @@ describe('toKGCL', () => {
     expect(lines).toContain("change definition of ex:Person to 'A human.'");
     expect(lines).toContain('delete edge ex:Person owl:disjointWith ex:Organisation');
     expect(lines.some((l) => l.startsWith('#') && l.includes('max 1'))).toBe(true);
+  });
+});
+
+describe('generated provenance', () => {
+  it('is stamped as dcterms:provenance, apart from requested sources, and ignored when comparing terms', () => {
+    const op = { op: 'addClass', localName: 'Volunteer', label: 'volunteer', definition: 'A person who gives time unpaid.', source: ['https://example.org/meeting/1'] } satisfies ChangeOp;
+    const a = applyChangeOps(baseOntology(), [op], { provenance: 'example#1' }).graph;
+    const b = applyChangeOps(baseOntology(), [op], { provenance: 'example fork f' }).graph;
+    const vals = (g: typeof a, p: string) => g.store.getObjects(X('Volunteer') as any, p as any, null).map((o) => o.value);
+    expect(vals(a, NS.dcterms + 'provenance')).toEqual(['example#1']);
+    expect(vals(a, NS.dcterms + 'source')).toEqual(['https://example.org/meeting/1']);
+    expect(termDescription(a, X('Volunteer'))).toBe(termDescription(b, X('Volunteer')));
+    const c = applyChangeOps(baseOntology(), [{ ...op, source: ['example#1'] }], { provenance: 'example#1' }).graph;
+    expect(termDescription(c, X('Volunteer'))).not.toBe(termDescription(a, X('Volunteer')));
   });
 });

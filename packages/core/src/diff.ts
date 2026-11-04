@@ -145,9 +145,8 @@ export function canonicalTriples(store: Store): Set<string> {
   return lines;
 }
 
-/** Provenance the change engine stamps on edited terms; not part of what a term means. */
-const DCT_SOURCE = 'http://purl.org/dc/terms/source';
-const PROVENANCE = new Set(['http://purl.org/dc/terms/created', 'http://purl.org/dc/terms/modified', 'http://purl.org/dc/terms/contributor', 'http://purl.org/dc/terms/source']);
+/** Provenance the change engine stamps on edited terms; not part of what a term means. dcterms:source is an annotation people ask for, so it is compared. */
+const PROVENANCE = new Set(['http://purl.org/dc/terms/created', 'http://purl.org/dc/terms/modified', 'http://purl.org/dc/terms/contributor', 'http://purl.org/dc/terms/provenance']);
 
 /**
  * Everything a graph says about one term, as a stable string: its own
@@ -155,16 +154,12 @@ const PROVENANCE = new Set(['http://purl.org/dc/terms/created', 'http://purl.org
  * any anonymous axioms that mention it (e.g. owl:AllDisjointClasses), minus
  * provenance. Two graphs agree on a term exactly when these strings are equal,
  * whoever made the edit and when. An absent term gives ''.
- *
- * dcterms:source is provenance when the change engine stamps it, but it can
- * also be an annotation someone asked for: `keepSource` keeps the values that
- * aren't generated.
  */
-export function termDescription(g: OntologyGraph, iri: string, opts: { keepSource?: (value: string) => boolean } = {}): string {
+export function termDescription(g: OntologyGraph, iri: string): string {
   const store = g.store;
   const lines: string[] = [];
   for (const q of store.getQuads(iri, null, null, null)) {
-    if (PROVENANCE.has(q.predicate.value) && !(q.predicate.value === DCT_SOURCE && opts.keepSource?.(q.object.value))) continue;
+    if (PROVENANCE.has(q.predicate.value)) continue;
     lines.push(`<${q.predicate.value}> ${canonical(store, q.object as Term)}`);
   }
   const referenced = new Set<string>();
