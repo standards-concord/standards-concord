@@ -278,18 +278,38 @@ export interface Issue {
   reference?: string;
 }
 
+export type FairPrinciple = 'F' | 'A' | 'I' | 'R';
+
 export interface FairCheck {
   id: string;
-  principle: 'F' | 'A' | 'I' | 'R';
+  principle: FairPrinciple;
   title: string;
   passed: boolean;
+  /** 'not-checked' when the check needs information that wasn't available (e.g. no network); it is left out of the score. */
+  status: 'pass' | 'fail' | 'not-checked';
   message: string;
   /** Addition: the FOOPS!/best-practice check this corresponds to, e.g. "FOOPS! PURL1". */
   reference?: string;
 }
 
+/** What happened when the ontology IRI was dereferenced over HTTP (done by the server, not in core). */
+export interface FairResolution {
+  /** The IRI returned an RDF serialisation when asked for one (Accept: text/turtle etc.). */
+  rdf: boolean;
+  /** The IRI returned HTML documentation when asked for text/html. */
+  html: boolean;
+  detail?: string;
+}
+
+export interface FairContext {
+  resolution?: FairResolution;
+}
+
 export interface FairReport {
-  score: number; // 0..1
+  /** 0..1: the mean of the F, A, I and R principle scores, so each principle counts equally. */
+  score: number;
+  /** Per principle: checks passed out of checks run (not-checked ones excluded). */
+  byPrinciple: Record<FairPrinciple, { passed: number; total: number; score: number }>;
   checks: FairCheck[];
 }
 

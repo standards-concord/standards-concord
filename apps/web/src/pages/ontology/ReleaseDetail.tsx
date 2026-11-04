@@ -7,6 +7,7 @@ import { useSession } from '../../lib/session';
 import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
+import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
@@ -46,21 +47,30 @@ export function ReleaseDetailPage() {
           <Card className="p-5">
             <h3 className="mb-2 text-sm font-semibold">Release notes</h3>
             {r.notes ? <Markdown text={r.notes} /> : <p className="text-sm text-muted">No notes.</p>}
-            <div className="mt-4 space-y-1 border-t border-line pt-3 text-xs text-muted">
-              <div className="flex items-center gap-1.5">
-                Version IRI: <code className="font-mono">{r.versionIRI}</code> <CopyButton text={r.versionIRI} variant="ghost" />
-                {r.status === 'published' && (
+            <p className="mt-4 border-t border-line pt-3 text-xs text-muted">
+              Drafted by {userById(r.createdBy)?.name ?? 'someone'} on {formatDate(r.createdAt)}
+              {r.publishedAt && ` · published ${formatDate(r.publishedAt, true)}`}
+              {r.status === 'published' && (
+                <>
+                  {' · '}
                   <a href={publicPageUrl(ontology.slug, r.version)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="release-public-page">
                     Public page <ExternalLink className="size-3" aria-hidden />
                   </a>
+                </>
+              )}
+            </p>
+            <Disclosure className="mt-2" tone="muted" title="Technical details" summary="version IRI, commit">
+              <div className="space-y-1 text-xs text-muted">
+                <div className="flex items-center gap-1.5">
+                  Version IRI: <code className="font-mono">{r.versionIRI}</code> <CopyButton text={r.versionIRI} variant="ghost" />
+                </div>
+                {r.commit && (
+                  <div>
+                    Commit: <code className="font-mono">{r.commit.slice(0, 10)}</code>
+                  </div>
                 )}
               </div>
-              {r.commit && <div>Commit: <code className="font-mono">{r.commit.slice(0, 10)}</code></div>}
-              <div>
-                Drafted by {userById(r.createdBy)?.name ?? 'someone'} on {formatDate(r.createdAt)}
-                {r.publishedAt && ` · published ${formatDate(r.publishedAt, true)}`}
-              </div>
-            </div>
+            </Disclosure>
           </Card>
           <Card>
             <CardHeader title={`Included changes (${r.changeRequests.length})`} />
@@ -78,12 +88,20 @@ export function ReleaseDetailPage() {
           </Card>
         </div>
         <div className="space-y-4">
-          <Card>
-            <CardHeader icon={Scale} title="Release approval" />
-            <div className="p-5">
-              <GovernancePanel g={g} userById={userById} />
-            </div>
-          </Card>
+          {r.status === 'published' ? (
+            <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release">
+              <div className="p-5">
+                <GovernancePanel g={g} userById={userById} />
+              </div>
+            </CollapsibleCard>
+          ) : (
+            <Card>
+              <CardHeader icon={Scale} title="Release approval" />
+              <div className="p-5">
+                <GovernancePanel g={g} userById={userById} />
+              </div>
+            </Card>
+          )}
           <Card className="space-y-3 p-5">
             {r.status === 'voting' && (
               <>
