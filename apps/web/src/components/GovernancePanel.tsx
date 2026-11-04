@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { GovernanceEvaluation, User } from '@concord/shared';
 import { ArrowRight, CircleCheck, CircleX, Clock, Hourglass, ShieldAlert, Vote as VoteIcon } from 'lucide-react';
 import { duration, formatDate, pct, roleLabel } from '../lib/format';
@@ -7,7 +8,21 @@ import { LevelBadge } from './badges';
 import { Badge, ProgressBar, cx } from './ui';
 import { Disclosure } from './Disclosure';
 
-export function GovernancePanel({ g, userById }: { g: GovernanceEvaluation; userById?: (id: string) => User | undefined }) {
+export function GovernancePanel({
+  g,
+  userById,
+  actions,
+  detailsOpen,
+  subject = 'change',
+}: {
+  g: GovernanceEvaluation;
+  userById?: (id: string) => User | undefined;
+  /** The viewer's available actions, shown with the blockers and next step rather than in a separate card. */
+  actions?: ReactNode;
+  /** Show the approval detail straight away, e.g. when the panel itself is already behind a disclosure. */
+  detailsOpen?: boolean;
+  subject?: 'change' | 'release';
+}) {
   const { now } = useSession();
   useTick(30_000);
   const t = now();
@@ -23,6 +38,30 @@ export function GovernancePanel({ g, userById }: { g: GovernanceEvaluation; user
     rule.reviewPeriodDays > 0 && (g.reviewPeriodOver ? 'review period over' : Number.isNaN(reviewEnds) ? undefined : `review ends in ${duration(reviewEnds - t)}`),
     v && rule.vote && (v.open ? `vote open, ${v.cast} of ${v.eligible} voted` : 'vote not open'),
   ].filter(Boolean);
+
+  const voteArithmetic =
+    v && rule.vote ? (
+      <div className="space-y-2.5 text-xs">
+        <div>
+          <div className="mb-1 flex justify-between">
+            <span>
+              Turnout {v.cast}/{v.eligible} {v.quorumMet ? <CircleCheck className="inline size-3 text-ok" /> : null}
+            </span>
+            <span className="text-muted">quorum {pct(rule.vote.quorum)}</span>
+          </div>
+          <ProgressBar value={turnout} marker={rule.vote.quorum} tone={v.quorumMet ? 'ok' : 'accent'} />
+        </div>
+        <div>
+          <div className="mb-1 flex justify-between">
+            <span>
+              In favour {pct(yesShare)} {v.thresholdMet ? <CircleCheck className="inline size-3 text-ok" /> : null}
+            </span>
+            <span className="text-muted">threshold {pct(rule.vote.threshold)}</span>
+          </div>
+          <ProgressBar value={yesShare} marker={rule.vote.threshold} tone={v.thresholdMet ? 'ok' : 'warn'} />
+        </div>
+      </div>
+    ) : null;
 
   const voteBox =
     v && rule.vote ? (
@@ -42,26 +81,13 @@ export function GovernancePanel({ g, userById }: { g: GovernanceEvaluation; user
           <Tally label="No" n={v.no} cls="text-danger" />
           <Tally label="Abstain" n={v.abstain} cls="text-muted" />
         </div>
-        <div className="space-y-2.5 text-xs">
-          <div>
-            <div className="mb-1 flex justify-between">
-              <span>
-                Turnout {v.cast}/{v.eligible} {v.quorumMet ? <CircleCheck className="inline size-3 text-ok" /> : null}
-              </span>
-              <span className="text-muted">quorum {pct(rule.vote.quorum)}</span>
-            </div>
-            <ProgressBar value={turnout} marker={rule.vote.quorum} tone={v.quorumMet ? 'ok' : 'accent'} />
-          </div>
-          <div>
-            <div className="mb-1 flex justify-between">
-              <span>
-                In favour {pct(yesShare)} {v.thresholdMet ? <CircleCheck className="inline size-3 text-ok" /> : null}
-              </span>
-              <span className="text-muted">threshold {pct(rule.vote.threshold)}</span>
-            </div>
-            <ProgressBar value={yesShare} marker={rule.vote.threshold} tone={v.thresholdMet ? 'ok' : 'warn'} />
-          </div>
-        </div>
+        {v.open ? (
+          <Disclosure tone="muted" title={<span className="text-xs">Turnout and threshold</span>} summary={`${v.quorumMet ? 'quorum met' : 'quorum not met'}, ${v.thresholdMet ? 'threshold met' : 'threshold not met'}`}>
+            {voteArithmetic}
+          </Disclosure>
+        ) : (
+          voteArithmetic
+        )}
         <p className="mt-2 text-xs text-muted">Voters: {rule.vote.voterRoles.map(roleLabel).join(', ')}</p>
       </div>
     ) : null;
@@ -110,10 +136,17 @@ export function GovernancePanel({ g, userById }: { g: GovernanceEvaluation; user
 
       {v?.open && voteBox}
 
-      <Disclosure title="Approval details" summary={glance.join(' · ')} tone="muted">
+      {actions && (
+        <div className="border-t border-line pt-4" role="group" aria-label="Your actions">
+          <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Your actions</div>
+          {actions}
+        </div>
+      )}
+
+      <Disclosure title="Approval details" summary={glance.join(' · ')} summaryPlacement="below" tone="muted" defaultOpen={detailsOpen}>
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            Rules for a <LevelBadge level={g.level} /> change
+            Rules for a <LevelBadge level={g.level} /> {subject}
             {rule.lazyConsensus && <Badge tone="accent">Lazy consensus</Badge>}
             {rule.autoMerge && <Badge tone="outline">Auto-merge</Badge>}
           </div>

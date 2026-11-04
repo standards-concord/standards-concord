@@ -54,6 +54,8 @@ test.describe('progressive disclosure', () => {
     for (const row of ['Reasoner', 'FAIR score', 'Lint (OWL best practice)', 'Overall validation']) await expect(panel.getByText(row, { exact: true })).toBeVisible();
     await panel.getByRole('link', { name: /full report/ }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}#health$`));
+    // Following the link closes the popup.
+    await expect(panel).toHaveCount(0);
     await settle(page);
     // Arriving from the chip opens the lint findings, so linting is visible straight away.
     const lint = page.getByRole('button', { name: /Lint findings/ });
@@ -61,8 +63,9 @@ test.describe('progressive disclosure', () => {
     await expect(page.locator('#health').getByText(/No lint issues|Errors \(|Warnings \(|Suggestions \(/).first()).toBeVisible();
   });
 
-  test('the overview keeps lint, FAIR and competency-question detail one click away', async ({ page, request }) => {
-    const report = await (await request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json();
+  test('the overview keeps lint, FAIR and competency-question detail one click away', async ({ page }) => {
+    // The page's own request context carries the signed-in session; validation needs it.
+    const report = await (await page.request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json();
     await page.goto(`/o/${demo.id}`);
     await settle(page);
     const health = page.locator('#health');
@@ -79,7 +82,9 @@ test.describe('progressive disclosure', () => {
     const fair = health.getByRole('button', { name: /FAIR checks/ });
     await expect(fair).toContainText(/\d+ of \d+ pass/);
     if ((await fair.getAttribute('aria-expanded')) !== 'true') await fair.click();
-    await expect(health.getByText(/All \d+ FAIR checks pass|Show all \d+ checks|Show failing only/).first()).toBeVisible();
+    // Opening the group shows every check at once: there is no second "Show all" toggle inside it.
+    await expect(health.getByText(/Show all \d+ checks|Show failing only/)).toHaveCount(0);
+    await expect(health.getByText(report.fair.checks[0].title, { exact: true }).first()).toBeVisible();
 
     const cqs = health.getByRole('button', { name: /Competency questions/ });
     if ((await cqs.getAttribute('aria-expanded')) !== 'true') await cqs.click();
@@ -105,7 +110,7 @@ test.describe('progressive disclosure', () => {
     await settle(page);
     const feed = page.locator('text=Recent activity').locator('xpath=ancestor::div[contains(@class,"rounded-xl")][1]');
     const before = await feed.locator('ol > li').count();
-    expect(before).toBeLessThanOrEqual(5);
+    expect(before).toBeLessThanOrEqual(3);
     await page.getByRole('button', { name: 'Show more activity' }).click();
     await settle(page);
     await expect.poll(() => feed.locator('ol > li').count()).toBeGreaterThanOrEqual(before);
@@ -115,16 +120,19 @@ test.describe('progressive disclosure', () => {
   test('governance leads with a plain-language summary and keeps every setting', async ({ page }) => {
     await page.goto(`/o/${demo.id}/governance`);
     await settle(page);
-    const summary = page.getByRole('list', { name: 'What each kind of change needs' });
-    await expect(summary.getByRole('listitem')).toHaveCount(3);
-    for (const level of ['patch', 'minor', 'major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
-    await expect(summary).toContainText(/sign-off|no sign-off needed/);
+    // Separate summaries for changes and releases.
+    for (const name of ['What each kind of change needs', 'What each kind of release needs']) {
+      const summary = page.getByRole('list', { name });
+      await expect(summary.getByRole('listitem')).toHaveCount(3);
+      for (const level of ['patch', 'minor', 'major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
+      await expect(summary).toContainText(/sign-off/);
+    }
 
-    // Each section is collapsed to a summary and opens to the full controls.
+    // Each section is collapsed to a summary and opens to a readable view.
     const sections: [RegExp, RegExp][] = [
-      [/Policy template/, /Lazy consensus|Steward-led/],
-      [/Change request rules/, /Minimum approvals/],
-      [/Release rules/, /Minimum approvals/],
+      [/Policy template/, /Lazy consensus|Steward-led|Working group|Membership vote|ODI stewarded/],
+      [/Change request rules/, /Compare all levels/],
+      [/Release rules/, /Compare all levels/],
       [/Ownership, ODI and automation/, /Ownership transfer/],
       [/Members and roles/, /Transfer ownership/],
     ];
@@ -139,6 +147,61 @@ test.describe('progressive disclosure', () => {
         await expect(header).toHaveAttribute('aria-expanded', 'false');
       });
     }
+    // Every setting is still there, side by side, under Compare all levels.
+    await page.getByRole('button', { name: /Change request rules/ }).click();
+    await page.getByRole('button', { name: /Compare all levels/ }).first().click();
+    for (const row of ['Approver roles', 'Minimum approvals', 'Review period', 'Lazy consensus', 'Vote', 'Veto roles', 'Auto-merge']) await expect(page.getByText(row, { exact: true }).first()).toBeVisible();
+    // Reading is not editing: no disabled Save button sits on the page.
+    await expect(page.getByRole('button', { name: 'Save policy' })).toHaveCount(0);
+  });
+
+  test('editing the policy is an explicit mode, one level at a time, with a preview', async ({ page }) => {
+    await page.goto(`/o/${demo.id}/governance`);
+    await settle(page);
+    await page.getByRole('button', { name: 'Edit policy' }).click();
+    await expect(page.getByText('Unsaved changes')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Save policy' }).first()).toBeDisabled();
+    // The template picker opens while editing.
+    await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAttribute('aria-expanded', 'true');
+
+    await page.getByRole('button', { name: /Change request rules/ }).click();
+    const levels = page.getByRole('group', { name: 'Level to edit' }).first();
+    await expect(levels.getByRole('button', { name: 'Edit minor' })).toHaveAttribute('class', /border-accent/);
+    // One column at a time; Compare all shows the three levels.
+    const table = page.locator('table').first();
+    await expect(table.locator('thead th')).toHaveCount(2);
+    await levels.getByRole('button', { name: 'Compare all' }).click();
+    await expect(table.locator('thead th')).toHaveCount(4);
+    await levels.getByRole('button', { name: 'Edit major' }).click();
+    await expect(table.locator('thead th')).toHaveCount(2);
+
+    // Changing a number marks the policy unsaved and previews it in the summary.
+    const review = table.getByRole('row').filter({ hasText: 'Review period' }).getByRole('spinbutton');
+    await review.fill('21');
+    await expect(page.getByText('Unsaved changes').first()).toBeVisible();
+    await expect(page.getByText('Preview of unsaved changes')).toBeVisible();
+    await expect(page.getByRole('list', { name: 'What each kind of change needs' })).toContainText('21 days open for comment');
+
+    // Discard leaves edit mode without saving.
+    await page.getByRole('button', { name: 'Discard' }).first().click();
+    await expect(page.getByRole('button', { name: 'Edit policy' })).toBeVisible();
+    await expect(page.getByRole('list', { name: 'What each kind of change needs' })).not.toContainText('21 days open for comment');
+  });
+
+  test('the policy summary follows lazy consensus and ODI rules', async ({ page }) => {
+    await page.goto(`/o/${demo.id}/governance`);
+    await settle(page);
+    await page.getByRole('button', { name: 'Edit policy' }).click();
+    await page.getByRole('button', { name: /Lazy consensus \(Apache/ }).click();
+    const changes = page.getByRole('list', { name: 'What each kind of change needs' });
+    // Patch and minor only go to a vote if someone objects; major always does.
+    await expect(changes.getByRole('listitem').nth(0)).toContainText('a vote only if someone objects');
+    await expect(changes.getByRole('listitem').nth(2)).not.toContainText('only if someone objects');
+    await page.getByRole('button', { name: /ODI stewarded/ }).click();
+    await expect(changes.getByRole('listitem').nth(2)).toContainText('ODI oversight must approve');
+    await expect(changes.getByRole('listitem').nth(0)).toContainText(/ODI oversight can block it/);
+    await expect(page.locator('p', { hasText: 'Always:' })).toContainText('must approve major changes and releases');
+    await page.getByRole('button', { name: 'Discard' }).first().click();
   });
 
   test('the Manage members link opens the roles section', async ({ page }) => {
@@ -162,26 +225,52 @@ test.describe('progressive disclosure', () => {
     await expect(panel.getByText('How a change request progresses')).toBeVisible();
     for (const s of ['Draft', 'Triage', 'In review', 'Approved', 'Merged', 'Released']) await expect(panel.getByText(s, { exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
-    // Validation detail is collapsed behind summaries.
-    await expect(page.getByRole('button', { name: /Lint findings/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /FAIR checks/ })).toBeVisible();
-    // What happens next comes first; the approval arithmetic is behind "Approval details".
+    await expect(panel).toHaveCount(0);
+    // Escape returns focus to the bubble.
+    await expect(bubble).toBeFocused();
+
+    // What happens next and the viewer's actions sit together; the approval arithmetic is behind "Approval details".
     await expect(page.getByText('Next:', { exact: true })).toBeVisible();
+    await expect(page.getByRole('group', { name: 'Your actions' })).toBeVisible();
     const details = page.getByRole('button', { name: /Approval details/ });
     await expect(details).toHaveAttribute('aria-expanded', 'false');
     await details.click();
     await expect(page.getByText(/Rules for a/)).toBeVisible();
-    // The AI rationale and the classification reasons open on request.
+
+    // The classification is explained from the level badge itself.
+    const level = page.getByRole('button', { name: /^Level: / });
+    if (await level.count()) {
+      await level.click();
+      await expect(page.getByRole('dialog', { name: /^Level: / }).getByText(/Rule-based semantic versioning/)).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
+
+    // Changes, Checks and Discussion are separate views.
+    const tabs = page.getByRole('tablist', { name: 'Change request views' });
+    await expect(tabs.getByRole('tab')).toHaveCount(3);
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByText(/Proposed changes \(\d+\)/)).toBeVisible();
     const rationale = page.getByRole('button', { name: /Rationale and risks/ });
     if (await rationale.count()) {
       await rationale.click();
       await expect(page.getByText('Rationale', { exact: true })).toBeVisible();
     }
-    const why = page.getByRole('button', { name: /Why it’s/ });
-    if (await why.count()) {
-      await why.click();
-      await expect(why).toHaveAttribute('aria-expanded', 'true');
-    }
+
+    await tabs.getByRole('tab', { name: /Checks/ }).click();
+    await expect(page).toHaveURL(/view=checks/);
+    await expect(page.getByText(/Proposed changes \(\d+\)/)).toHaveCount(0);
+    const lint = page.getByRole('button', { name: /Lint findings/ });
+    if (await lint.count()) {
+      await expect(lint).toBeVisible();
+      await expect(page.getByRole('button', { name: /FAIR checks/ })).toBeVisible();
+    } else await expect(page.getByText(/Not validated yet/)).toBeVisible();
+
+    await tabs.getByRole('tab', { name: /Discussion/ }).click();
+    await expect(page.getByText('Reviews and timeline')).toBeVisible();
+    // The view survives a reload.
+    await page.reload();
+    await settle(page);
+    await expect(page.getByRole('tab', { name: /Discussion/ })).toHaveAttribute('aria-selected', 'true');
     // No raw ISO timestamps leak into the page.
     await expect(page.locator('main')).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
@@ -211,18 +300,27 @@ test.describe('progressive disclosure', () => {
     await expect(nav.getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
   });
 
-  test('change requests filter by Open, All or one status', async ({ page }) => {
+  test('change requests filter by scope, then by any status', async ({ page }) => {
     await page.goto(`/o/${demo.id}/changes`);
     await settle(page);
     await expect(page.getByRole('button', { name: 'Open', exact: true })).toBeVisible();
-    const select = page.getByRole('combobox', { name: 'Filter by status' });
+    const select = page.getByRole('combobox', { name: 'Status' });
+    // Every status can be chosen, including triage, rejected and withdrawn.
+    const options = (await select.locator('option').allInnerTexts()).map((t) => t.trim());
+    for (const s of ['Draft', 'Triage', 'In review', 'Voting', 'Needs work', 'Approved', 'Merged', 'Released', 'Rejected', 'Withdrawn']) expect(options).toContain(s);
+    // The selector is compact, not a full-width row.
+    expect((await select.boundingBox())!.width).toBeLessThan(260);
     await select.selectOption('merged');
     await expect(page).toHaveURL(/status=merged/);
     await settle(page);
     await expectNoCrash(page);
+    await expect(page.getByText(/^\d+ merged ·/)).toBeVisible();
+    await page.getByRole('button', { name: 'Clear' }).click();
+    await expect(page).toHaveURL(/status=open/);
     await page.getByRole('button', { name: 'All', exact: true }).click();
     await expect(page).toHaveURL(/status=all/);
     await expect(select).toHaveValue('');
+    await expect(page.getByText(/^\d+ in total$/)).toBeVisible();
   });
 
   test('members list shows assigned roles, with the full picker behind Edit roles', async ({ page }) => {
@@ -237,6 +335,10 @@ test.describe('progressive disclosure', () => {
     await expect(section.getByRole('button', { name: 'Agent', exact: true })).toHaveCount(1);
     await section.getByRole('button', { name: 'Done' }).click();
     await expect(section.getByRole('button', { name: 'Agent', exact: true })).toHaveCount(0);
+    // Adding a person and transferring ownership are each one click away.
+    await expect(section.getByRole('combobox')).toHaveCount(0);
+    await section.getByRole('button', { name: /Add a person/ }).click();
+    await expect(section.getByRole('combobox', { name: 'Person to add' })).toBeVisible();
     await section.getByRole('button', { name: 'Transfer ownership' }).click();
     await expect(section.getByRole('combobox')).toHaveCount(2);
   });
@@ -249,8 +351,43 @@ test.describe('progressive disclosure', () => {
     await settle(page);
     await expectNoCrash(page);
     await expect(page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Requirements' })).toHaveAttribute('aria-current', 'page');
-    await expect(page.getByText('Not covered yet:').first()).toBeVisible();
+    // An interview belongs to Use cases at the second level too.
+    await expect(page.getByRole('navigation', { name: 'Requirements pages' }).getByRole('link', { name: 'Use cases' })).toHaveAttribute('aria-current', 'page');
+    // Conversation first: progress and what is still to cover on one strip, the full document on request.
+    const strip = page.getByRole('region', { name: 'Use case progress' });
+    await expect(strip.getByText('Not covered yet:')).toBeVisible();
+    await expect(strip).toContainText(/\d+ of \d+ sections filled/);
     await expect(page.getByText('Not covered yet', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Use case document' })).toHaveCount(0);
+    const layout = page.getByRole('group', { name: 'Interview layout' });
+    await layout.getByRole('button', { name: 'View document' }).click();
+    await expect(layout.getByRole('button', { name: 'View document' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('region', { name: 'Use case document' })).toBeVisible();
+    await expect(page.getByPlaceholder(/Type your answer/)).toBeHidden();
+    await layout.getByRole('button', { name: 'Side by side' }).click();
+    await expect(page.getByRole('region', { name: 'Use case document' })).toBeVisible();
+    await expect(page.getByPlaceholder(/Type your answer/)).toBeVisible();
+    // The choice is remembered.
+    await page.reload();
+    await settle(page);
+    await expect(page.getByRole('group', { name: 'Interview layout' }).getByRole('button', { name: 'Side by side' })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('group', { name: 'Interview layout' }).getByRole('button', { name: 'Conversation' }).click();
+  });
+
+  test('each section remembers the page you were last on', async ({ page }) => {
+    await page.goto(`/o/${demo.id}/query`);
+    await settle(page);
+    const nav = page.getByRole('navigation', { name: 'Ontology sections' });
+    await nav.getByRole('link', { name: 'Governance' }).click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
+    await nav.getByRole('link', { name: 'Explore' }).click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/query$`));
+    // A filter is remembered with its page; a detail page is remembered as its list.
+    await page.goto(`/o/${demo.id}/changes?status=merged`);
+    await settle(page);
+    await nav.getByRole('link', { name: 'Overview' }).click();
+    await nav.getByRole('link', { name: 'Changes' }).click();
+    await expect(page).toHaveURL(/\/changes\?status=merged$/);
   });
 
   test('use cases list stays plain until Draft changes starts a selection', async ({ page }) => {
@@ -275,6 +412,9 @@ test.describe('progressive disclosure', () => {
     await expectNoCrash(page);
     const overview = page.getByRole('button', { name: /^Overview/ });
     await expect(overview).toHaveAttribute('aria-expanded', 'true');
+    // Group toggles stay inside real headings, and say how much of each group is filled.
+    await expect(page.getByRole('heading', { level: 3, name: /^Overview/ })).toBeVisible();
+    await expect(overview).toContainText(/\d+ of \d+ filled/);
     await overview.click();
     await expect(overview).toHaveAttribute('aria-expanded', 'false');
     const terms = page.getByRole('button', { name: /Terms mentioned/ });
@@ -282,9 +422,18 @@ test.describe('progressive disclosure', () => {
     await terms.click();
     await expect(terms).toHaveAttribute('aria-expanded', 'true');
     // Competency questions show the question and status first; detail opens per question.
-    const detail = page.getByRole('button', { name: 'Example answer, terms and test' });
+    // Each question's toggle is named after its question, and one click shows the SPARQL test too.
+    const detail = page.getByRole('button', { name: /^Example answer, terms and test for “/ });
     if (await detail.count()) {
       await detail.first().click();
+      await expect(detail.first()).toHaveAttribute('aria-expanded', 'true');
+      if (await page.getByText('SPARQL test', { exact: true }).count()) await expect(page.getByText('SPARQL test', { exact: true }).first()).toBeVisible();
+    }
+    // Closing and reopening a group keeps what was open inside it.
+    const cqGroup = page.getByRole('button', { name: /^Competency questions/ });
+    if (await detail.count()) {
+      await cqGroup.click();
+      await cqGroup.click();
       await expect(detail.first()).toHaveAttribute('aria-expanded', 'true');
     }
   });
@@ -319,7 +468,19 @@ test.describe('progressive disclosure', () => {
     if (published.length) await expect(page.getByRole('region', { name: 'Latest published' })).toBeVisible();
     if (published.length > 1) {
       await page.getByRole('button', { name: /Previous releases/ }).click();
-      await expect(page.getByText(`v${published[1].version}`).first()).toBeVisible();
+      // The version link and the notes toggle are separate controls.
+      const link = page.getByRole('link', { name: `v${published[1].version}`, exact: true });
+      await expect(link).toBeVisible();
+      const notes = page.getByRole('button', { name: `Show notes for v${published[1].version}` });
+      await notes.click();
+      await expect(page.getByRole('button', { name: `Hide notes for v${published[1].version}` })).toHaveAttribute('aria-expanded', 'true');
+      await link.click();
+      await expect(page).toHaveURL(/\/releases\/[^/]+$/);
+    }
+    // Rejected attempts are a labelled section of their own, not buried in history.
+    if (releases.some((r) => r.status === 'rejected')) {
+      await page.goto(`/o/${demo.id}/releases`);
+      await expect(page.getByRole('region', { name: 'Rejected attempts' })).toBeVisible();
     }
   });
 
@@ -335,6 +496,9 @@ test.describe('progressive disclosure', () => {
     await expect(how).toHaveAttribute('aria-expanded', 'false');
     await how.click();
     await expect(page.getByText('Next:', { exact: true })).toBeVisible();
+    // One click reveals the approval history: no second "Approval details" click needed.
+    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByText(/Rules for a .* release/)).toBeVisible();
     await page.getByRole('button', { name: /Technical details/ }).click();
     await expect(page.getByText('Version IRI:')).toBeVisible();
   });

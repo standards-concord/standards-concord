@@ -175,9 +175,12 @@ describe('requirements documents (findings 6 and 11)', () => {
   });
 
   it('counts only the use cases a viewer can see (finding 11)', async () => {
-    const anonList = (await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
-    const summary = (await request(app).get(`/api/ontologies/${demoId}`)).body as { stats: { useCases: number } };
-    expect(summary.stats.useCases).toBe(anonList.length);
+    // Signed out there is no count at all; signed in, it matches the list the viewer gets.
+    expect((await request(app).get(`/api/ontologies/${demoId}`)).body.stats.useCases).toBeUndefined();
+    const outsider = await login('contributor');
+    const list = (await outsider.get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
+    const summary = (await outsider.get(`/api/ontologies/${demoId}`)).body as { stats: { useCases: number } };
+    expect(summary.stats.useCases).toBe(list.length);
   });
 
   it('numbers a use case only when it is shared, so gaps do not reveal private drafts (finding 11)', async () => {

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { ChangeLevel, Release } from '@concord/shared';
-import { ExternalLink, Package, Rocket } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink, Package, Rocket } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate } from '../../lib/format';
@@ -154,14 +154,50 @@ function ReleaseCard({ r, ontologyId, notes = 'preview' }: { r: Release; ontolog
   );
 }
 
-/** In progress first, then the latest published release, then older ones as compact rows. */
+/** A compact release row: the version link and the notes toggle are separate controls, side by side. */
+function ReleaseRow({ r, ontologyId }: { r: Release; ontologyId: string }) {
+  const [open, setOpen] = useState(false);
+  const notesId = `release-notes-${r.id}`;
+  return (
+    <li className="py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Link to={`/o/${ontologyId}/releases/${r.id}`} className="font-mono font-medium hover:text-accent">
+          v{r.version}
+        </Link>
+        <LevelBadge level={r.level} />
+        <ReleaseStatus r={r} />
+        <span className="text-xs text-muted">{r.publishedAt ? formatDate(r.publishedAt) : formatDate(r.createdAt)}</span>
+        <button
+          type="button"
+          className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-muted hover:text-fg"
+          aria-expanded={open}
+          aria-controls={notesId}
+          aria-label={`${open ? 'Hide' : 'Show'} notes for v${r.version}`}
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />} Notes
+        </button>
+      </div>
+      {open && (
+        <div id={notesId} className="mt-2">
+          {r.notes ? <Markdown text={r.notes} className="text-sm text-muted" /> : <p className="text-sm text-muted">No notes.</p>}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/**
+ * In progress first, then the latest published release, then recent rejected attempts (so a
+ * rejection is not lost among old releases), then older published releases as compact rows.
+ * Each group is newest first.
+ */
 function ReleaseGroups({ releases, ontologyId }: { releases: Release[]; ontologyId: string }) {
   const sorted = [...releases].sort((a, b) => Date.parse(b.publishedAt ?? b.createdAt) - Date.parse(a.publishedAt ?? a.createdAt));
   const inProgress = sorted.filter((r) => r.status === 'draft' || r.status === 'voting');
   const published = sorted.filter((r) => r.status === 'published');
   const rejected = sorted.filter((r) => r.status === 'rejected');
   const [latest, ...older] = published;
-  const previous = [...older, ...rejected];
   return (
     <div className="space-y-6">
       {inProgress.length > 0 && (
@@ -180,28 +216,33 @@ function ReleaseGroups({ releases, ontologyId }: { releases: Release[]; ontology
           <ReleaseCard r={latest} ontologyId={ontologyId} />
         </section>
       )}
-      {previous.length > 0 && (
-        <Card className="px-5 py-4">
-          <Disclosure title="Previous releases" summary={`${previous.length}`}>
+      {rejected.length > 0 && (
+        <section aria-label="Rejected attempts">
+          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Rejected attempts</h3>
+          <Card className="px-5 py-1">
             <ul className="divide-y divide-line">
-              {previous.map((r) => (
-                <li key={r.id} className="py-2.5">
-                  <Disclosure
-                    tone="muted"
-                    title={
-                      <span className="flex flex-wrap items-center gap-2 text-fg">
-                        <Link to={`/o/${ontologyId}/releases/${r.id}`} className="font-mono font-medium hover:text-accent" onClick={(e) => e.stopPropagation()}>
-                          v{r.version}
-                        </Link>
-                        <LevelBadge level={r.level} />
-                        <ReleaseStatus r={r} />
-                      </span>
-                    }
-                    summary={r.publishedAt ? formatDate(r.publishedAt) : formatDate(r.createdAt)}
-                  >
-                    {r.notes ? <Markdown text={r.notes} className="pl-5 text-sm text-muted" /> : <p className="pl-5 text-sm text-muted">No notes.</p>}
-                  </Disclosure>
-                </li>
+              {rejected.slice(0, 3).map((r) => (
+                <ReleaseRow key={r.id} r={r} ontologyId={ontologyId} />
+              ))}
+            </ul>
+            {rejected.length > 3 && (
+              <Disclosure className="border-t border-line py-3" tone="muted" title={`Older rejected attempts (${rejected.length - 3})`}>
+                <ul className="divide-y divide-line">
+                  {rejected.slice(3).map((r) => (
+                    <ReleaseRow key={r.id} r={r} ontologyId={ontologyId} />
+                  ))}
+                </ul>
+              </Disclosure>
+            )}
+          </Card>
+        </section>
+      )}
+      {older.length > 0 && (
+        <Card className="px-5 py-4">
+          <Disclosure title="Previous releases" summary={`${older.length}`} heading={3}>
+            <ul className="divide-y divide-line">
+              {older.map((r) => (
+                <ReleaseRow key={r.id} r={r} ontologyId={ontologyId} />
               ))}
             </ul>
           </Disclosure>

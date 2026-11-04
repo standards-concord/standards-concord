@@ -1,5 +1,5 @@
-import { createContext, useContext, useMemo } from 'react';
-import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router';
+import { createContext, useContext, useEffect, useMemo } from 'react';
+import { Link, Outlet, useLocation, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
@@ -47,20 +47,45 @@ function sectionOf(segment: string) {
   return SECTIONS.find((s) => s.tabs.some(([p]) => p === segment) || s.also?.includes(segment)) ?? SECTIONS[0];
 }
 
+/** Pages that belong under a tab without being in the nav, e.g. an interview is part of Use cases. */
+const TAB_ALIASES: Record<string, string> = { interview: 'use-cases' };
+
+/** The last page visited in each section, per ontology, so returning to a section lands where you left it. */
+const lastKey = (id: string, section: string) => `concord.nav.${id}.${section}`;
+function rememberedPath(id: string, section: string): string | undefined {
+  try {
+    return sessionStorage.getItem(lastKey(id, section)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function SectionNav({ id }: { id: string }) {
   const loc = useLocation();
   const segment = loc.pathname.split('/')[3] ?? '';
   const current = sectionOf(segment);
+  const activeTab = TAB_ALIASES[segment] ?? segment;
   const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
+  useEffect(() => {
+    if (current.tabs.length < 2) return;
+    try {
+      // Remember the page (with its filters), not a detail view inside it.
+      const onTabPage = loc.pathname.replace(/\/$/, '') === href(activeTab);
+      sessionStorage.setItem(lastKey(id, current.label), onTabPage ? loc.pathname + loc.search : href(activeTab));
+    } catch {
+      /* storage unavailable: sections open their first page */
+    }
+  }, [id, current, activeTab, loc.pathname, loc.search]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
       <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
         {SECTIONS.map((s) => {
           const active = s === current;
+          const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
           return (
             <Link
               key={s.label}
-              to={href(s.tabs[0][0])}
+              to={remembered && remembered.startsWith(`/o/${id}/`) ? remembered : href(s.tabs[0][0])}
               aria-current={active ? 'page' : undefined}
               className={cx('border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', active ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
             >
@@ -72,17 +97,19 @@ function SectionNav({ id }: { id: string }) {
       {current.tabs.length > 1 && (
         <div className="border-t border-line">
           <nav className="flex gap-1 overflow-x-auto py-2" aria-label={`${current.label} pages`}>
-            {current.tabs.map(([path, label]) => (
-              <NavLink
-                key={path}
-                to={href(path)}
-                className={({ isActive }) =>
-                  cx('rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
-                }
-              >
-                {label}
-              </NavLink>
-            ))}
+            {current.tabs.map(([path, label]) => {
+              const active = path === activeTab;
+              return (
+                <Link
+                  key={path}
+                  to={href(path)}
+                  aria-current={active ? 'page' : undefined}
+                  className={cx('rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', active ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')}
+                >
+                  {label}
+                </Link>
+              );
+            })}
           </nav>
         </div>
       )}

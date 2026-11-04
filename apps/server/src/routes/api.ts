@@ -1,7 +1,7 @@
 import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
-import type { ChangeRequestKind, GovernancePolicy, Meeting, Role, SessionInfo, UseCase, User } from '@concord/shared';
+import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
@@ -95,7 +95,8 @@ const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...rel
 const PUBLIC_READS = [
   /^\/ontologies$/,
   /^\/ontologies\/[^/]+$/,
-  /^\/ontologies\/[^/]+\/(view|search|source|validation)$/,
+  // Not validation: it runs the use cases' competency questions over their private example data.
+  /^\/ontologies\/[^/]+\/(view|search|source)$/,
   /^\/ontologies\/[^/]+\/terms\/.+$/,
   // Use cases and published requirements documents: each read checks what the viewer may see
   // (services/useCases.ts canSee, services/requirements.ts), so signed-out callers get only public ones.
@@ -172,9 +173,16 @@ export function apiRouter(): Router {
   });
 
   /* --------------------------- ontologies --------------------------- */
+  /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
+  const forCaller = (req: Request, s: OntologySummary) => {
+    if (req.user) return s;
+    const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
+    return { ...s, ownerIds: [], stats };
+  };
+
   r.get('/ontologies', async (req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
-    res.json(await Promise.all(all.map((p) => summary(p, true, req.user))));
+    res.json((await Promise.all(all.map((p) => summary(p, true, req.user)))).map((s) => forCaller(req, s)));
   });
 
   r.post('/ontologies', async (req, res) => {
@@ -191,7 +199,7 @@ export function apiRouter(): Router {
     const p = project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...(await summary(p, true, req.user)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
+    res.json({ ...forCaller(req, await summary(p, true, req.user)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
@@ -558,11 +566,14 @@ export function apiRouter(): Router {
   /* ------------------------------ simulation ------------------------- */
   r.post('/simulation/step', async (req, res) => {
     demoOnly();
+    // It acts as simulated members and returns their activity, so only for signed-in testers.
+    requireUser(req);
     const id = optStr(req.body?.ontologyId) ?? DEMO_SLUG;
     res.json({ events: await step(mustFindProject(id).id, req.user?.id) });
   });
   r.post('/simulation/clock', async (req, res) => {
     demoOnly();
+    requireUser(req);
     const days = Number(req.body?.advanceDays);
     if (!Number.isFinite(days) || days <= 0 || days > 60) throw new HttpError(400, 'advanceDays must be between 0 and 60');
     await advanceClock(days);
