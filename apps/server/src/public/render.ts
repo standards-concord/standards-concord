@@ -4,6 +4,7 @@ import type { ChangeLevel } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_CSS, PAGE_SCRIPT } from './assets.js';
+import { termAnchors } from './anchors.js';
 
 /**
  * The public page for one version of an ontology: what people see when they
@@ -61,7 +62,6 @@ export interface OntologyPageInput {
   generatedAt: string;
 }
 
-const RESERVED = /^(tab|sec|uc|req|term)-/;
 const KIND_LABEL: Record<TermView['kind'], string> = {
   class: 'Class',
   objectProperty: 'Object property',
@@ -95,6 +95,7 @@ interface Indexed {
 }
 
 const isIri = (v: string) => /^[a-z][a-z0-9+.-]*:[^\s]+$/i.test(v);
+/** Plain text, never HTML: always escape it. An unparseable value comes back as it was. */
 const formatDate = (iso?: string) => {
   if (!iso) return '';
   const d = new Date(iso);
@@ -118,18 +119,9 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     { id: 'sec-individuals', title: 'Individuals', terms: view.individuals },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
+  const anchors = termAnchors(view, project.namespace);
   const index = new Map<string, Indexed>();
-  const used = new Set<string>();
-  for (const g of groups)
-    for (const t of g.terms) {
-      let anchor = anchorSafe(localName(t.iri) || 'term');
-      if (RESERVED.test(anchor)) anchor = `term-${anchor}`;
-      let n = 2;
-      const base = anchor;
-      while (used.has(anchor)) anchor = `${base}-${n++}`;
-      used.add(anchor);
-      index.set(t.iri, { term: t, anchor, name: nameOf(t) });
-    }
+  for (const g of groups) for (const t of g.terms) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
 
   const ref = (iri: string) => {
     const hit = index.get(iri);
@@ -260,12 +252,12 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   ];
 
   const metaRows = [
-    row('This version', input.kind === 'release' && meta.versionIRI ? `<code>${esc(meta.versionIRI)}</code>` : `<a href="${esc(input.links.draft)}">Working draft</a> (no version IRI until released)`),
-    row('Latest version', `<code>${esc(meta.iri || project.ontologyIRI)}</code>`),
+    row('This version', input.kind === 'release' && meta.versionIRI ? `<a href="${esc(input.pageUrl)}"><code>${esc(meta.versionIRI)}</code></a>` : `<a href="${esc(input.links.draft)}">Working draft</a> (no version IRI until released)`),
+    row('Latest version', `<a href="${esc(input.links.latest)}"><code>${esc(meta.iri || project.ontologyIRI)}</code></a>`),
     row('Previous version', meta.priorVersion ? versionHref(meta.priorVersion) : ''),
     row('Compatibility', list(compat)),
-    row('Released', input.release?.publishedAt ? formatDate(input.release.publishedAt) : meta.issued ? formatDate(meta.issued) : ''),
-    row('Last modified', meta.modified ? formatDate(meta.modified) : ''),
+    row('Released', esc(formatDate(input.release?.publishedAt ?? meta.issued))),
+    row('Last modified', esc(formatDate(meta.modified))),
     row('Creators', people(meta.creators)),
     row('Contributors', people(meta.contributors)),
     row('Publisher', meta.publisher ? people([meta.publisher]) : ''),
@@ -464,10 +456,10 @@ ${input.downloads.map((d) => `<link rel="alternate" type="${esc(d.mediaType)}" h
   </nav>
 </div>
 <main id="main" class="wrap">
-  <section id="tab-spec" role="tabpanel" aria-labelledby="tab-spec-tab" class="panel">${spec}</section>
-  <section id="tab-use-cases" role="tabpanel" aria-labelledby="tab-use-cases-tab" class="panel">${useCasesPanel}</section>
-  <section id="tab-changes" role="tabpanel" aria-labelledby="tab-changes-tab" class="panel">${changes}</section>
-  <section id="tab-download" role="tabpanel" aria-labelledby="tab-download-tab" class="panel">${download}</section>
+  <section id="tab-spec" role="tabpanel" aria-labelledby="tab-spec-tab" class="panel" tabindex="0">${spec}</section>
+  <section id="tab-use-cases" role="tabpanel" aria-labelledby="tab-use-cases-tab" class="panel" tabindex="0">${useCasesPanel}</section>
+  <section id="tab-changes" role="tabpanel" aria-labelledby="tab-changes-tab" class="panel" tabindex="0">${changes}</section>
+  <section id="tab-download" role="tabpanel" aria-labelledby="tab-download-tab" class="panel" tabindex="0">${download}</section>
 </main>
 <footer class="foot wrap">
   <p>${esc(meta.title ?? project.title)} · ${esc(versionLabel)} · Published with Concord${input.links.app ? ` · <a href="${esc(input.links.app)}">Take part in developing this standard</a>` : ''}</p>

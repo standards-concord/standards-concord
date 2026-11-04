@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { Meeting, MeetingAnalysis, UseCase } from '@concord/shared';
-import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, GitPullRequestDraft, ScanSearch } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
@@ -259,12 +259,12 @@ export function MeetingDetailPage() {
             </Button>
           )}
           {!a && mt.status !== 'live' && !botInCall && mayAnalyse && (
-            <Button icon={Wand2} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
+            <Button icon={ScanSearch} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
               Analyse transcript
             </Button>
           )}
           {a && (
-            <Button variant="primary" icon={Sparkles} loading={propose.pending} onClick={() => void propose.run()}>
+            <Button variant="primary" icon={GitPullRequestDraft} loading={propose.pending} onClick={() => void propose.run()}>
               Turn into use cases and a change request
             </Button>
           )}
@@ -312,7 +312,7 @@ export function MeetingDetailPage() {
             {a ? (
               <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} />
             ) : (
-              <EmptyState icon={Sparkles} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
+              <EmptyState icon={ScanSearch} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
                 {live ? 'Keep watching — the transcript and bot prompts update live.' : 'Run the analysis to extract use cases, terms and questions.'}
               </EmptyState>
             )}
@@ -347,7 +347,7 @@ function SummaryView({ a, prompts, lines, onOpen }: { a: MeetingAnalysis; prompt
   ];
   return (
     <Card>
-      <CardHeader icon={Sparkles} title="Summary" />
+      <CardHeader icon={ScanSearch} title="Summary" />
       <div className="space-y-5 p-5 text-sm">
         <Markdown text={a.summary} />
         <ul className="flex flex-wrap gap-2" aria-label="What the call produced">
@@ -402,7 +402,7 @@ function ExtractedView({ a }: { a: MeetingAnalysis }) {
   const none = !a.useCases.length && !a.terms.length && !a.competencyQuestions.length && !a.openQuestions.length;
   return (
     <Card>
-      <CardHeader icon={Sparkles} title="Extracted items" subtitle="What Concord found in the call, to turn into use cases and a change request" />
+      <CardHeader icon={ScanSearch} title="Extracted items" subtitle="What Concord found in the call, to turn into use cases and a change request" />
       <div className="space-y-5 p-5 text-sm">
         {none && <p className="text-muted">Nothing was extracted from this call.</p>}
         {a.useCases.length > 0 && (
