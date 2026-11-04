@@ -141,8 +141,8 @@ test.describe('use cases', () => {
     await settle(page);
     const linked = page.getByTestId('meeting-use-cases');
     await expect(linked.getByRole('link', { name: /Publish recurring shifts once/ })).toBeVisible();
-    // The transcript lines it came from carry a chip.
-    const chips = page.locator('main').getByRole('link', { name: /^UC-\d+$/ });
+    // The transcript lines it came from carry a chip. The use case is group-only, so it is numbered in the working group's WG-n sequence.
+    const chips = page.locator('main').getByRole('link', { name: /^WG-\d+$/ });
     expect(await chips.count()).toBeGreaterThan(0);
     // Once turned into use cases, the button is gone so it can't be done twice.
     await expect(page.getByRole('button', { name: 'Turn into use cases' })).toHaveCount(0);

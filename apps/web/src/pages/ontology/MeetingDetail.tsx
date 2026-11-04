@@ -78,8 +78,8 @@ export function MeetingDetailPage() {
   });
   // Which use cases each transcript line fed into.
   const lineUseCases = useMemo(() => {
-    const map = new Map<number, { id: string; number: number }[]>();
-    for (const u of m.data?.useCases ?? []) for (const i of u.sourceLines ?? []) map.set(i, [...(map.get(i) ?? []), { id: u.id, number: u.number }]);
+    const map = new Map<number, { id: string; number: number; groupNumber?: number }[]>();
+    for (const u of m.data?.useCases ?? []) for (const i of u.sourceLines ?? []) map.set(i, [...(map.get(i) ?? []), { id: u.id, number: u.number, groupNumber: u.groupNumber }]);
     return map;
   }, [m.data?.useCases]);
 
