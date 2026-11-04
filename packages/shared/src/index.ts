@@ -531,6 +531,8 @@ export interface OntologyFork {
   seq?: number;
   /** The revision last proposed upstream; edits after it are not in the change request yet. */
   proposedRevision?: number;
+  /** Set while a proposal is being made (until: epoch ms), so no other change starts until it has finished or the lease has run out. */
+  proposing?: { until: number };
   createdAt: string;
   updatedAt: string;
 }

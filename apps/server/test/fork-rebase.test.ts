@@ -5,7 +5,7 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
-import { get, openDb, put, putIf } from '../src/db.js';
+import { get, list, openDb, put, putIf } from '../src/db.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
@@ -454,5 +454,92 @@ describe('third review', () => {
     const check = (await dev.get(`${path}/check`)).body;
     expect(check.outcome).toBe('switch-to-draft');
     expect(check.steps.join(' ')).toMatch(/draft\.ttl/);
+  });
+});
+
+describe('fourth review', () => {
+  const fork = async (path: string) => (await reader.get(path)).body;
+
+  it('a proposal in progress elsewhere holds the fork until it finishes or its lease runs out', async () => {
+    const path = await newFork('Lease');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LeasedTerm', 'leased term')] });
+    const f = get<OntologyFork>('forks', (await fork(path)).id)!;
+    // Another server process has started proposing the fork.
+    expect(putIf('forks', { ...f, proposing: { until: Date.now() + 60_000 }, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
+    for (const [route, body] of [
+      ['edits', { ops: [addClass('WhileProposing', 'while proposing')] }],
+      ['propose', {}],
+      ['sync', {}],
+      ['discard', { all: true }],
+      ['close', {}],
+    ] as const) {
+      const res = await dev.post(`${path}/${route}`).send(body);
+      expect(res.status, route).toBe(409);
+      expect(res.body.error, route).toMatch(/being proposed/);
+    }
+    // That process stopped without finishing: once the lease has run out the fork is usable again.
+    const held = get<OntologyFork>('forks', f.id)!;
+    expect(putIf('forks', { ...held, proposing: { until: Date.now() - 1 }, seq: (held.seq ?? 0) + 1 }, 'seq', held.seq)).toBe(true);
+    expect((await dev.post(`${path}/edits`).send({ ops: [addClass('AfterLease', 'after lease')] })).status).toBe(200);
+    const proposed = await dev.post(`${path}/propose`).send({});
+    expect(proposed.status).toBe(200);
+    expect(get<OntologyFork>('forks', f.id)!.proposing).toBeUndefined();
+  });
+
+  it.each([
+    ['issued', '2026-01-01', '2026-02-02'],
+    ['backwardCompatibleWith', 'https://w3id.org/odi/volunteering/0.9.0', 'https://w3id.org/odi/volunteering/0.8.0'],
+    ['incompatibleWith', 'https://w3id.org/odi/volunteering/0.7.0', 'https://w3id.org/odi/volunteering/0.6.0'],
+  ])('competing edits to the header field %s conflict on sync', async (field, mine, theirs) => {
+    const path = await newFork(`Header ${field}`);
+    const set = (v: string) => ({ [field]: field === 'issued' ? v : [v] });
+    expect((await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: set(mine) }] })).status).toBe(200);
+    await upstream([{ op: 'setMetadata', set: set(theirs) } as ChangeOp]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.synced).toBe(false);
+    expect(sync.conflicts).toEqual([expect.objectContaining({ iri: `meta:${field}` })]);
+  });
+
+  it('fields the fork stamps itself cannot be edited on a fork', async () => {
+    const path = await newFork('Own version');
+    const res = await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/versionInfo/);
+  });
+
+  it('a source naming a real change request is generated only where that request created the term', async () => {
+    const p = findProject('volunteering')!;
+    const open = list<{ number: number; status: string }>('changeRequests', p.id).find((cr) => !['merged', 'released'].includes(cr.status));
+    expect(open).toBeDefined();
+    const path = await newFork('Cites a request');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}Role`, set: { source: [`volunteering#${open!.number}`] } }] });
+    expect((await fork(path)).ops).toHaveLength(1);
+    await upstream([addClass('UnrelatedMeanwhile', 'unrelated meanwhile')]);
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).not.toMatch(/^switch-/);
+    expect(check.fork.terms).toEqual([expect.objectContaining({ curie: 'vol:Role', upstream: 'not-proposed' })]);
+  });
+
+  it('discarding everything also drops header-only edits', async () => {
+    const p = findProject('volunteering')!;
+    const issued = (await ontologyStore.working(p)).metadata().issued;
+    const path = await newFork('Discard header too');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('WithHeader', 'with header'), { op: 'setMetadata', set: { issued: '2026-03-03' } }] });
+    const all = await dev.post(`${path}/discard`).send({ all: true });
+    expect(all.status).toBe(200);
+    expect(all.body.ops).toEqual([]);
+    const f = get<OntologyFork>('forks', all.body.id)!;
+    expect((await ontologyStore.forkGraph(p, f.slug)).metadata().issued).toEqual(issued);
+    expect((await dev.post(`${path}/discard`).send({ all: true })).body.error).toMatch(/no changes to discard/);
+  });
+
+  it('does not recommend a release that lacks draft terms the fork was created with', async () => {
+    await upstream([addClass('InheritedKept', 'inherited kept'), addClass('InheritedRemoved', 'inherited removed')]);
+    const path = await newFork('Inherited content');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'removeTerm', iri: `${VOL}InheritedRemoved` }] });
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).not.toBe('switch-to-release');
+    expect(check.replace.map((r: { to: string }) => r.to).join(' ')).not.toMatch(/1\.0\.0/);
+    expect(check.message).toMatch(/InheritedKept/);
   });
 });
