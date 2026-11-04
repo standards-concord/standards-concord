@@ -218,6 +218,20 @@ describe('agents over MCP', () => {
       }),
     );
     expect(JSON.parse(data.result.content[0].text).valid).toBe(false);
+    // The same data as YAML-LD, with an inline context; a remote one is refused, never fetched.
+    const yamlld = parse(
+      await call(51, 'tools/call', {
+        name: 'validate_data',
+        arguments: { ontology: 'volunteering', format: 'yamlld', turtle: '"@context":\n  vol: https://w3id.org/odi/volunteering#\n"@id": https://example.org/x\n"@type": vol:VolunteeringOpportunity\nvol:notATerm: x\n' },
+      }),
+    );
+    const report = JSON.parse(yamlld.result.content[0].text);
+    expect(report.valid).toBe(false);
+    expect(JSON.stringify(report.issues)).toMatch(/notATerm/);
+    const remote = parse(
+      await call(52, 'tools/call', { name: 'validate_data', arguments: { ontology: 'volunteering', format: 'jsonld', turtle: '{"@context": "http://127.0.0.1:9/context", "@id": "https://example.org/x"}' } }),
+    );
+    expect(JSON.stringify(remote)).toMatch(/Remote JSON-LD documents are not loaded/);
     const gap = parse(await call(6, 'tools/call', { name: 'report_gap', arguments: { ontology: 'volunteering', kind: 'missing-concept', summary: 'No badges for volunteers', details: 'We award digital badges to volunteers for completed hours.' } }));
     const out = JSON.parse(gap.result.content[0].text);
     expect(out.recommendation).toBeDefined();

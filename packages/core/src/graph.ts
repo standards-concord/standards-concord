@@ -14,6 +14,7 @@ import {
   subjects, typedLit, quad, defaultGraph,
 } from './rdf.js';
 import { writeTurtle } from './turtle.js';
+import { noRemoteDocuments, yamlLdToJson, type YamlLdOptions } from './yamlld.js';
 
 export const CHARACTERISTIC_TYPES: Record<PropertyCharacteristic, string> = {
   functional: NS.owl + 'FunctionalProperty',
@@ -114,14 +115,14 @@ export class OntologyGraph {
     return parseN3(turtle, 'Turtle', baseIRI);
   }
 
-  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'yamlld' | 'ntriples'): Promise<OntologyGraph> {
+  static async parse(text: string, format: 'turtle' | 'rdfxml' | 'jsonld' | 'yamlld' | 'ntriples', opts: { yamlld?: YamlLdOptions } = {}): Promise<OntologyGraph> {
     switch (format) {
       case 'turtle': return OntologyGraph.fromTurtle(text);
       case 'ntriples': return parseN3(text, 'N-Triples');
       case 'rdfxml': return parseRdfXml(text);
-      case 'jsonld': return parseJsonLd(text);
-      // YAML-LD is JSON-LD written as YAML.
-      case 'yamlld': return parseJsonLd(JSON.stringify((await import('yaml')).default.parse(text)));
+      case 'jsonld': return parseJsonLd(JSON.parse(text));
+      // YAML-LD is JSON-LD written as YAML, read under the YAML-LD core requirements.
+      case 'yamlld': return parseJsonLd(yamlLdToJson(text, opts.yamlld));
       default: throw new Error(`Unsupported input format: ${format as string}`);
     }
   }
@@ -560,10 +561,14 @@ async function parseRdfXml(text: string, baseIRI?: string): Promise<OntologyGrap
   return new OntologyGraph(toDefaultGraph(quads), prefixes);
 }
 
-async function parseJsonLd(text: string): Promise<OntologyGraph> {
+async function parseJsonLd(doc: any): Promise<OntologyGraph> {
   const jsonld = (await import('jsonld')).default;
-  const doc = JSON.parse(text);
-  const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads' })) as unknown as string;
+  // Never fetch remote contexts or @import: a document must not make the server request URLs.
+  const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads', documentLoader: noRemoteDocuments as any }).catch((err: any) => {
+    // jsonld wraps the loader's refusal in a generic dereferencing error: say plainly what happened.
+    for (let e = err; e; e = e.details?.cause ?? e.cause) if (/Remote JSON-LD documents are not loaded/.test(String(e.message))) throw new Error(e.message);
+    throw err;
+  })) as unknown as string;
   const g = await parseN3(nquads, 'N-Quads');
   const prefixes: Record<string, string> = {};
   const ctxs = ([] as unknown[]).concat(doc?.['@context'] ?? []);

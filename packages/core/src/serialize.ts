@@ -13,6 +13,7 @@ import { toLinkML } from './linkml.js';
 import { toShacl, toShaclc } from './shacl.js';
 import { toWrapperClasses, withWrapperImport } from './codegen.js';
 import YAML from 'yaml';
+import { noRemoteDocuments } from './yamlld.js';
 
 export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: string; extension: string }> = {
   turtle: { label: 'Turtle', mediaType: 'text/turtle', extension: 'ttl' },
@@ -66,7 +67,7 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
   for (const [p, ns] of Object.entries(graph.prefixes).sort(([a], [b]) => a.localeCompare(b))) {
     if (p && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
   }
-  const compacted = await jsonld.compact(expanded, context as any);
+  const compacted = await jsonld.compact(expanded, context as any, { documentLoader: noRemoteDocuments as any });
   return JSON.stringify(sortKeys(compacted), null, 2) + '\n';
 }
 

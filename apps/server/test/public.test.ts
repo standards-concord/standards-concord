@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
-import { pageInput, refreshReleasePages } from '../src/public/routes.js';
+import { pageInput, refreshReleasePages, withoutProfiles } from '../src/public/routes.js';
 import { toPublishedRequirements } from '../src/public/requirements.js';
 import { termAnchors } from '../src/public/anchors.js';
 import { createProject, findProject } from '../src/services/ontologies.js';
@@ -82,7 +82,33 @@ describe('public ontology pages', () => {
     const negotiated = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'application/ld+yaml');
     expect(negotiated.headers['content-type']).toMatch(/^application\/ld\+yaml/);
     const jsonld = await request(app).get('/def/volunteering/1.0.0.jsonld');
-    expect(YAML.parse(negotiated.text)).toEqual(JSON.parse(jsonld.text));
+    // SuperAgent may buffer an unfamiliar type as bytes rather than text.
+    const body = (r: request.Response) => r.text ?? Buffer.from(r.body as Buffer).toString('utf8');
+    expect(YAML.parse(body(negotiated))).toEqual(JSON.parse(jsonld.text));
+    expect(YAML.parse(body(yamlld))).toEqual(JSON.parse(jsonld.text));
+  });
+
+  it('ignores profile parameters when negotiating, keeping q-values', async () => {
+    const custom = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'application/ld+yaml;profile="https://example.org/custom, https://example.org/other"');
+    expect(custom.status).toBe(200);
+    expect(custom.headers['content-type']).toMatch(/^application\/ld\+yaml/);
+    const jsonld = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'application/ld+json; profile=http://www.w3.org/ns/json-ld#expanded');
+    expect(jsonld.headers['content-type']).toMatch(/^application\/ld\+json/);
+    const ranked = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'application/ld+yaml;profile="x";q=0.2, text/turtle;q=0.9');
+    expect(ranked.headers['content-type']).toMatch(/^text\/turtle/);
+    expect(withoutProfiles('a/b;profile="x;y,z";q=0.5, c/d;profile=e')).toBe('a/b;q=0.5, c/d');
+  });
+
+  it('downloads each format from the Formats tab with its own media type', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'Downloader', role: 'contributor' });
+    const { id } = (await agent.get('/api/ontologies')).body.find((o: { slug: string }) => o.slug === 'volunteering');
+    for (const [format, type] of [['yamlld', 'application/ld+yaml'], ['shaclc', 'text/shaclc'], ['turtle', 'text/turtle']]) {
+      const res = await agent.get(`/api/ontologies/${id}/source?format=${format}&download=1`);
+      expect(res.status, format).toBe(200);
+      expect(res.headers['content-type'], format).toMatch(new RegExp(`^${type.replace(/[+/]/g, '\\$&')}`));
+      expect(res.headers['content-disposition'], format).toMatch(/^attachment; filename="?volunteering-working\./);
+    }
   });
 
   it('advertises alternates in the Link header', async () => {

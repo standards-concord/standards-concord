@@ -297,7 +297,13 @@ async function serve(req: Request, res: Response) {
 export function negotiate(req: Request, res: Response): PublicFormat | undefined {
   // The answer depends on Accept, including when it is a refusal.
   res.vary('Accept');
+  // Profiles (application/ld+json;profile=…) narrow a type but aren't a separate type: a client asking for
+  // one we don't know still gets the document, as JSON-LD and YAML-LD require. Express would treat the
+  // parameter as a constraint and refuse, so it is dropped before matching (q-values are kept).
+  const accept = req.headers.accept;
+  if (accept) req.headers.accept = withoutProfiles(accept);
   const best = req.accepts(Object.keys(NEGOTIABLE));
+  req.headers.accept = accept;
   if (!best) {
     res
       .status(406)
@@ -307,6 +313,11 @@ export function negotiate(req: Request, res: Response): PublicFormat | undefined
     return undefined;
   }
   return NEGOTIABLE[best];
+}
+
+/** An Accept header without profile parameters, which may be quoted and contain commas or semicolons. */
+export function withoutProfiles(accept: string): string {
+  return accept.replace(/;\s*profile\s*=\s*("(?:[^"\\]|\\.)*"|[^;,]*)/gi, '');
 }
 
 function publicHeaders(res: Response, self: string, mutable: boolean) {

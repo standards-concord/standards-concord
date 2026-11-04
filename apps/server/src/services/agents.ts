@@ -101,9 +101,13 @@ export async function reportGap(
 const WELL_KNOWN = [NS.rdf, NS.rdfs, NS.owl, NS.xsd, NS.skos, NS.dcterms, NS.schema, NS.foaf, NS.prov];
 
 /** Check instance data against the ontology: unknown terms, and logical consistency of data + ontology. */
-export async function validateData(project: OntologyProject, turtle: string) {
+/** Formats instance data can be checked in. JSON-LD and YAML-LD are read without loading remote contexts. */
+export const DATA_FORMATS = ['turtle', 'ntriples', 'jsonld', 'yamlld'] as const;
+
+export async function validateData(project: OntologyProject, text: string, format: (typeof DATA_FORMATS)[number] = 'turtle') {
   const graph = await ontologyStore.working(project);
-  const data = await OntologyGraph.fromTurtle(turtle);
+  // Agents' data is untrusted: a smaller budget than the library's default for YAML-LD.
+  const data = await OntologyGraph.parse(text, format, { yamlld: { maxBytes: 2_000_000, maxExpandedBytes: 10_000_000 } });
   const known = new Set<string>();
   for (const q of graph.store.getQuads(null, null, null, null)) known.add(q.subject.value);
   const issues: { severity: 'error' | 'warning'; message: string }[] = [];

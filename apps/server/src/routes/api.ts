@@ -210,8 +210,9 @@ export function apiRouter(): Router {
     const ref = optStr(req.query.ref);
     const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
     const info = FORMAT_INFO[format];
-    res.type(`${info.mediaType}; charset=utf-8`);
+    // attachment() sets a type from the extension (octet-stream for .yamlld or .shaclc), so the real type goes after it.
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
+    res.type(`${info.mediaType}; charset=utf-8`);
     res.send(text);
   });
 
