@@ -570,6 +570,8 @@ export interface Release {
   createdAt: string;
   publishedAt?: string;
   statusSince: string;
+  /** Bumped on every write; a write from a copy at an older revision is refused. */
+  rev?: number;
 }
 
 export interface ReleaseDetail extends Release {
