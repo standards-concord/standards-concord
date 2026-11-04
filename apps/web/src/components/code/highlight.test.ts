@@ -26,6 +26,12 @@ describe('RDF highlighting', () => {
     });
   });
 
+  it('Turtle: a statement-ending dot is not part of a prefixed name', () => {
+    const segs = highlightSegments('ex:a ex:p ex:o.', 'turtle');
+    expect(segs.find((s) => s.text === 'o')?.cls).toBe('tok-name');
+    expect(segs.at(-1)).toEqual({ text: '.', cls: 'tok-punct' });
+  });
+
   it('Turtle: long strings spanning lines stay strings', () => {
     const segs = highlightSegments('ex:a rdfs:comment """line one\nline "two"\nend""" .', 'turtle');
     expect(segs.filter((s) => s.cls === 'tok-string').map((s) => s.text).join('')).toContain('line "two"');

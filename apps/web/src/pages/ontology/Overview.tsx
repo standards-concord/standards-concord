@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router';
 import { ShieldCheck, Users } from 'lucide-react';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { formatDate } from '../../lib/format';
+import { formatDate, plural } from '../../lib/format';
 import { ActivityFeed } from '../../components/ActivityFeed';
 import { RoleChips } from '../../components/badges';
 import { Disclosure } from '../../components/Disclosure';
@@ -18,23 +18,61 @@ export function OverviewTab() {
   const wantsHealth = loc.hash === '#health';
   const healthRef = useRef<HTMLDivElement>(null);
   const [moreActivity, setMoreActivity] = useState(false);
+  // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
+  const healthKey = wantsHealth ? loc.key : undefined;
   useEffect(() => {
-    if (wantsHealth && validation.data) healthRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [wantsHealth, validation.data]);
+    if (healthKey && validation.data) healthRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [healthKey, validation.data]);
   const members = o.members ?? [];
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
       <div className="space-y-6">
         <Card className="p-5">
           <p className="text-sm leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
-          {o.domain && <p className="mt-2 text-xs text-muted">Domain: {o.domain}</p>}
-          <div className="mt-5 grid grid-cols-3 gap-4 border-t border-line pt-4 sm:grid-cols-5">
-            <Stat label="Classes" value={o.stats.classes} />
-            <Stat label="Properties" value={o.stats.properties} />
-            <Stat label="Individuals" value={o.stats.individuals} />
-            <Stat label="Use cases" value={o.stats.useCases} />
-            <Stat label="Open changes" value={o.stats.openChangeRequests} />
-          </div>
+          <Disclosure
+            className="mt-4 border-t border-line pt-3"
+            tone="muted"
+            title="Ontology details"
+            summary={`${plural(o.stats.classes, 'class', 'classes')}, ${plural(o.stats.properties, 'property', 'properties')}, ${plural(o.stats.useCases, 'use case')}`}
+          >
+            <div className="grid grid-cols-3 gap-4 sm:grid-cols-5">
+              <Stat label="Classes" value={o.stats.classes} />
+              <Stat label="Properties" value={o.stats.properties} />
+              <Stat label="Individuals" value={o.stats.individuals} />
+              <Stat label="Use cases" value={o.stats.useCases} />
+              <Stat label="Releases" value={o.stats.releases} />
+            </div>
+            <dl className="mt-4 grid gap-x-4 gap-y-1.5 text-xs sm:grid-cols-[8rem_1fr]">
+              <dt className="text-muted">Ontology IRI</dt>
+              <dd className="font-mono break-all">{o.ontologyIRI}</dd>
+              <dt className="text-muted">Current version</dt>
+              <dd>v{o.currentVersion}</dd>
+              {o.domain && (
+                <>
+                  <dt className="text-muted">Domain</dt>
+                  <dd>{o.domain}</dd>
+                </>
+              )}
+              <dt className="text-muted">Governance</dt>
+              <dd>
+                <Link to={`/o/${id}/governance`} className="font-medium text-accent hover:underline">
+                  {o.governance.name}
+                </Link>
+              </dd>
+              <dt className="text-muted">Created</dt>
+              <dd>{formatDate(o.createdAt)}</dd>
+              {o.github && (
+                <>
+                  <dt className="text-muted">Published to</dt>
+                  <dd>
+                    <a className="text-accent hover:underline" href={`https://github.com/${o.github.repo}`} target="_blank" rel="noreferrer">
+                      github.com/{o.github.repo}
+                    </a>
+                  </dd>
+                </>
+              )}
+            </dl>
+          </Disclosure>
         </Card>
 
         <div id="health" ref={healthRef} className="scroll-mt-20">
@@ -49,7 +87,7 @@ export function OverviewTab() {
                 <ValidationDetails
                   report={validation.data}
                   label={label}
-                  openLint={wantsHealth}
+                  openLintKey={healthKey}
                   lintNote={
                     <>
                       Lint runs again on every{' '}
@@ -112,25 +150,12 @@ export function OverviewTab() {
         <Card>
           <CardHeader title="Recent activity" />
           <div className="p-2">
-            <ActivityFeed ontologyId={id} limit={moreActivity ? 25 : 5} compact />
+            <ActivityFeed ontologyId={id} limit={moreActivity ? 50 : 3} compact />
             <button className="mt-1 w-full rounded-lg px-2 py-1.5 text-xs font-medium text-accent hover:bg-surface-2" onClick={() => setMoreActivity((m) => !m)}>
               {moreActivity ? 'Show less' : 'Show more activity'}
             </button>
           </div>
         </Card>
-        <p className="px-1 text-xs text-subtle">
-          Governance:{' '}
-          <Link to={`/o/${id}/governance`} className="font-medium text-muted hover:underline">
-            {o.governance.name}
-          </Link>{' '}
-          · created {formatDate(o.createdAt)}
-          {o.github && (
-            <>
-              {' '}
-              · <a className="text-accent hover:underline" href={`https://github.com/${o.github.repo}`} target="_blank" rel="noreferrer">github.com/{o.github.repo}</a>
-            </>
-          )}
-        </p>
       </div>
     </div>
   );
