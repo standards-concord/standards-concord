@@ -19,6 +19,22 @@ test.describe('Connecting an agent with OAuth (no token)', () => {
     await expect(page.getByTestId('oauth-destination')).toContainText('chatgpt.com.evil.example');
   });
 
+  test('the consent page says access goes to a native app, not the host its link names', async ({ page, baseURL }) => {
+    for (const redirect of ['com.attacker.agent://chatgpt.com/cb', 'com.attacker.agent:/cb']) {
+      const reg = await fetch(`${baseURL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_name: 'ChatGPT', redirect_uris: [redirect], token_endpoint_auth_method: 'none' }),
+      });
+      const { client_id } = (await reg.json()) as { client_id: string };
+      const q = new URLSearchParams({ response_type: 'code', client_id, redirect_uri: redirect, code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', code_challenge_method: 'S256', resource: `${baseURL}/mcp` });
+      await page.goto(`/authorize?${q}`);
+      const destination = page.getByTestId('oauth-destination');
+      await expect(destination).toContainText('an app installed on this device that opens com.attacker.agent: links');
+      await expect(destination).not.toContainText('chatgpt.com');
+    }
+  });
+
   test('a signed-out person signs in, allows the agent, and the agent can use the tools', async ({ page, baseURL }) => {
     const agent = await fakeAgent(baseURL!, 'Claude Code (playwright)');
     try {

@@ -61,11 +61,11 @@ Curated from the official registry. Once the official entry is live, email partn
   - The `resource` parameter on both the authorization and token requests, and OIDC scopes on the authorization request.
   - Refresh tokens.
 - Concord doesn't advertise `authorization_response_iss_parameter_supported`, even though its consent page returns `iss`, because some error redirects from the SDK don't include it.
-- Client authentication rules Concord enforces:
-  - A metadata-document client is accepted only if its document allows `none`: `none` is in `token_endpoint_auth_methods_supported`, or, with no list, `token_endpoint_auth_method` is `none` or absent. A client that requires `private_key_jwt` is refused rather than downgraded, so a stolen refresh token can't be used without the client's key.
-  - Requests carrying `client_assertion` or `client_assertion_type` get `invalid_client`, because Concord can't check them.
-  - Registration with any method other than `none` or `client_secret_post` is refused.
-- The consent page only vouches for what Concord checked. A metadata-document client shows "Identified by" the host that served its document. A registered client's name and website are labelled as its own claims. Either way, the host that receives access is shown prominently.
+- Client authentication rules Concord enforces (client ID metadata documents per draft-ietf-oauth-client-id-metadata-document-03):
+  - A metadata-document client is accepted only if its document allows `none`. That means `none` is in `token_endpoint_auth_methods_supported`, or, if there is no list, `token_endpoint_auth_method` is `none` or absent. The list must be non-empty strings, the singular method must be in the list, and shared-secret methods are refused. A client that requires `private_key_jwt` is refused rather than downgraded.
+  - At `/token` and `/revoke`, any credential Concord can't check gets `invalid_client` (401): `client_assertion` or `client_assertion_type`, an `Authorization` header (HTTP Basic), or a `client_secret` from a public client.
+  - Registration accepts only `none` or `client_secret_post`. If the method is left out, Concord uses `client_secret_post` and says so in the response, because RFC 7591's default, `client_secret_basic`, isn't supported. Client secrets are stored only as SHA-256 hashes and compared in constant time. They don't expire. To replace one, the client registers again and the person reconnects; disconnecting in Settings revokes the old tokens.
+- The consent page only vouches for what Concord checked. A metadata-document client shows "Identified by" the host that served its document. A registered client's name and website are labelled as its own claims. Either way, the page prominently shows where access goes: the website host, an app on this computer (localhost), or, for a native app link, only its scheme, since the rest of such a link says nothing about who receives it.
 
 ## Other directories
 

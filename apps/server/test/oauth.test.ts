@@ -539,6 +539,12 @@ describe('client metadata documents and redirect safety', () => {
       ['preference-only', undefined, 'private_key_jwt'],
       ['secret-only', ['client_secret_basic'], undefined],
       ['not-a-list', 'none', undefined],
+      // Malformed or contradictory, even though none is listed.
+      ['preference-not-listed', ['none'], 'private_key_jwt'],
+      ['non-string-method', ['none', 7], undefined],
+      ['object-preference', ['none'], { m: 'none' }],
+      ['shared-secret-listed', ['none', 'client_secret_basic'], undefined],
+      ['empty-list', [], undefined],
     ];
     for (const [label, methods, preferred] of cases) {
       const cid = `https://chatgpt.com/oauth/${label}/client.json`;
@@ -591,15 +597,73 @@ describe('client metadata documents and redirect safety', () => {
     const conf = await reg('client_secret_post');
     expect(conf.status).toBe(201);
     const tokens = await chatgptFlow(conf.body.client_id, redirect, { client_secret: conf.body.client_secret });
-    for (const auth of [{}, { client_secret: 'wrong' }] as Record<string, string>[]) {
+    for (const auth of [{}, { client_secret: 'wrong' }, { client_secret: '' }] as Record<string, string>[]) {
       const res = await token({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: conf.body.client_id, resource: `${origin}/mcp`, ...auth });
-      expect(res.status, JSON.stringify(auth)).toBe(400);
+      expect(res.status, JSON.stringify(auth)).toBe(401);
       expect(res.body.error).toBe('invalid_client');
     }
+    // The secret is stored only as a hash.
+    const stored = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', conf.body.client_id)!;
+    expect(stored.info.client_secret).toBeUndefined();
+    expect(stored.secretHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(stored)).not.toContain(conf.body.client_secret);
+    // Leaving the method out gets client_secret_post (RFC 7591's client_secret_basic default isn't supported), and says so.
+    const omitted = await reg();
+    expect(omitted.status).toBe(201);
+    expect(omitted.body.token_endpoint_auth_method).toBe('client_secret_post');
+    expect(omitted.body.client_secret).toBeTruthy();
     for (const method of ['private_key_jwt', 'client_secret_basic', 'tls_client_auth']) {
       const res = await reg(method);
       expect(res.status, method).toBe(400);
       expect(res.body.error).toBe('invalid_client_metadata');
+    }
+  });
+
+  it('refuses credentials a public client sends, and HTTP Basic from anyone', async () => {
+    docs.set(CGPT_CALLBACK, cgptDoc(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc'));
+    const tokens = await chatgptFlow(CGPT_CALLBACK, 'https://chatgpt.com/connector/oauth/cb_123abc');
+    const basic = `Basic ${Buffer.from(`${encodeURIComponent(CGPT_CALLBACK)}:x`).toString('base64')}`;
+    const refresh = { grant_type: 'refresh_token', refresh_token: tokens.refresh_token!, client_id: CGPT_CALLBACK, resource: `${origin}/mcp` };
+    expect((await token({ ...refresh, client_secret: 'bogus' })).status).toBe(401);
+    expect((await request(base).post('/token').type('form').set('Authorization', basic).send(refresh)).status).toBe(401);
+    expect((await request(base).post('/revoke').type('form').set('Authorization', basic).send({ token: tokens.refresh_token!, client_id: CGPT_CALLBACK })).status).toBe(401);
+    expect((await request(base).post('/revoke').type('form').send({ token: tokens.refresh_token!, client_id: CGPT_CALLBACK, client_secret: 'bogus' })).status).toBe(401);
+    // A registered public client too.
+    const pub = await register();
+    const { verifier, challenge } = pkce();
+    const { code } = await authorize(await signedIn(), pub.client_id, origin, { challenge, resource: `${origin}/mcp` });
+    const exchange = { grant_type: 'authorization_code', code, code_verifier: verifier, client_id: pub.client_id, redirect_uri: REDIRECT, resource: `${origin}/mcp` };
+    expect((await token({ ...exchange, client_secret: 'bogus' })).status).toBe(401);
+    // None of that used up the code or the refresh token.
+    expect((await token(exchange)).status).toBe(200);
+    expect((await token(refresh)).status).toBe(200);
+  });
+
+  it('moves a secret stored in plain text by older code into a hash, and still accepts it', async () => {
+    const id = newId('client');
+    const secret = randomBytes(32).toString('hex');
+    put('oauthClients', { id, info: { client_id: id, client_name: 'Old client', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: secret, client_secret_expires_at: 0 } });
+    const { verifier, challenge } = pkce();
+    const { code } = await authorize(await signedIn(), id, origin, { challenge, resource: `${origin}/mcp` });
+    const stored = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id)!;
+    expect(stored.info.client_secret).toBeUndefined();
+    expect(stored.secretHash).toBe(createHash('sha256').update(secret).digest('hex'));
+    const exchange = { grant_type: 'authorization_code', code, code_verifier: verifier, client_id: id, redirect_uri: REDIRECT, resource: `${origin}/mcp` };
+    expect((await token(exchange)).status).toBe(401);
+    expect((await token({ ...exchange, client_secret: secret })).status).toBe(200);
+  });
+
+  it('says plainly when access goes to a native app, whatever its link claims after the scheme', async () => {
+    for (const [uri, scheme] of [
+      ['com.attacker.agent://chatgpt.com/cb', 'com.attacker.agent:'],
+      ['com.attacker.agent:/cb', 'com.attacker.agent:'],
+    ]) {
+      const reg = await request(base).post('/register').send({ client_name: 'ChatGPT', redirect_uris: [uri], token_endpoint_auth_method: 'none' });
+      expect(reg.status).toBe(201);
+      const res = await request(base).get(authorizeUrl(reg.body.client_id, uri));
+      const id = new URL(res.headers.location).searchParams.get('request')!;
+      const info = (await (await signedIn()).get(`/api/oauth/requests/${id}`)).body;
+      expect(info, uri).toMatchObject({ redirectKind: 'native', redirectHost: scheme, localRedirect: false });
     }
   });
 
@@ -611,7 +675,7 @@ describe('client metadata documents and redirect safety', () => {
     const res = await request(base).get(authorizeUrl(reg.body.client_id, 'https://chatgpt.com.evil.example/connector/oauth/x'));
     const id = new URL(res.headers.location).searchParams.get('request')!;
     const info = (await (await signedIn()).get(`/api/oauth/requests/${id}`)).body;
-    expect(info).toMatchObject({ clientName: 'ChatGPT', clientUri: 'https://chatgpt.com', redirectHost: 'chatgpt.com.evil.example' });
+    expect(info).toMatchObject({ clientName: 'ChatGPT', clientUri: 'https://chatgpt.com', redirectHost: 'chatgpt.com.evil.example', redirectKind: 'web' });
     expect(info.publisher).toBeUndefined();
   });
 

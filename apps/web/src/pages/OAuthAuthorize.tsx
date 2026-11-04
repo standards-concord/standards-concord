@@ -80,8 +80,16 @@ export function OAuthAuthorizePage() {
             )}
           </p>
           <div className="mt-4 rounded-lg border border-line bg-surface-2 p-3 text-center text-sm" data-testid="oauth-destination">
-            Access will be sent to <strong className="font-mono">{req.data.redirectHost}</strong>
-            {req.data.localRedirect ? ' (an app on this computer)' : ''}.
+            {req.data.redirectKind === 'native' ? (
+              <>
+                Access will be sent to an app installed on this device that opens <strong className="font-mono">{req.data.redirectHost}</strong> links.
+              </>
+            ) : (
+              <>
+                Access will be sent to <strong className="font-mono">{req.data.redirectHost}</strong>
+                {req.data.localRedirect ? ' (an app on this computer)' : ''}.
+              </>
+            )}
             <div className="mt-1 text-xs text-muted">Only allow if that’s the app you’re connecting.</div>
           </div>
 
