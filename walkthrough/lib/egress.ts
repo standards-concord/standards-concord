@@ -61,7 +61,8 @@ function authority(host: string | undefined, protocol: string): string | undefin
 
 /**
  * Checks the framing of the extensions a browser's ClientHello carries whose contents are
- * lists: each must be a non-empty list whose length matches. Other extensions are checked
+ * lists: each length must match its contents, and each list must be non-empty except
+ * key_share's, which a client may leave empty to wait for the server's choice of group. Other extensions are checked
  * only for fitting in the hello; their meaning is for the TLS server (which is always an
  * allowed origin) to judge.
  */
