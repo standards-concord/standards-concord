@@ -36,6 +36,7 @@ import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/s
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -208,7 +209,17 @@ export function apiRouter(): Router {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
+    const working = !ref || ref === 'working';
+    let revision = working ? ontologyStore.head(p) : undefined;
+    let graph = await ontologyStore.at(p, ref);
+    // Name the revision this graph is (a commit can land while it loads), so the in-browser
+    // reasoner check compares with the server's report for the same revision.
+    while (working && ontologyStore.head(p) !== revision) {
+      revision = ontologyStore.head(p);
+      graph = await ontologyStore.at(p, ref);
+    }
+    if (revision) res.set('X-Concord-Revision', revision);
+    const text = await serialize(graph, format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -220,7 +231,7 @@ export function apiRouter(): Router {
     const ref = optStr(req.query.ref);
     if (!ref || ref === 'working') return void res.json(await workingValidation(p));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+    res.json(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {

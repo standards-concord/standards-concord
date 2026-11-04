@@ -12,6 +12,8 @@ export default defineConfig({
   // sparq unbundled keeps the .wasm next to the module in dev; the production
   // build already rewrites the URL to a hashed asset.
   optimizeDeps: { exclude: ['@sparq-org/sparq'] },
+  // The in-browser reasoner runs in a module Web Worker (src/lib/reasonWorker.ts), which code-splits.
+  worker: { format: 'es' },
   server: {
     port: 5173,
     proxy: {

@@ -1,4 +1,5 @@
-import { compactIRI, NS, OntologyGraph, owlReasoner, runCompetencyQuestions } from '@concord/core';
+import { compactIRI, NS, OntologyGraph, runCompetencyQuestions } from '@concord/core';
+import { reasonInWorker } from '../reasoner/pool.js';
 import type { AgentReport, AiAnalysis, OntologyProject, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { list, mustGet, put } from '../db.js';
@@ -129,8 +130,10 @@ export async function validateData(project: OntologyProject, turtle: string) {
   const merged = graph.clone();
   merged.store.addQuads(data.store.getQuads(null, null, null, null));
   // Complete OWL 2 DL check of ontology + data (sparq); falls back to the structural checks.
-  const r = await owlReasoner(merged);
+  const r = await reasonInWorker(merged);
   if (!r.consistent) issues.push({ severity: 'error', message: `The data contradicts the ontology: ${r.explanation ?? 'inconsistent'}` });
+  // Fail closed: data the OWL reasoner could not check is not reported as valid.
+  else if (r.checked === 'none') issues.push({ severity: 'error', message: `The OWL reasoner could not check the data against the ontology, so it is not known to be valid: ${r.error ?? 'no verdict'}` });
   return { valid: !issues.some((i) => i.severity === 'error'), triples: data.size, issues: dedupe(issues) };
 }
 

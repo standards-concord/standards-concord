@@ -67,7 +67,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Flow | Status | Specs |
 | --- | --- | --- |
 | Plain-language request → drafted edits → submit → classified and validated | ✅ | change-requests |
-| OWL 2 DL reasoning with sparq: working-draft health, a change that makes a class unsatisfiable, rerunning the check in the browser, signed-out visitors refused | ✅ | reasoner |
+| OWL 2 DL reasoning with sparq: working-draft health, a change that makes a class unsatisfiable, rerunning the check in the browser (in a Web Worker, compared only at the same revision), signed-out visitors refused | ✅ | reasoner |
 | Approvals from the right roles; author's own doesn't count; review period; auto-merge | ✅ | change-requests |
 | Request changes → needs work → AI revision → back in review (earlier approvals reset) | ✅ | change-requests |
 | Comments show once in the discussion | ✅ | change-requests |

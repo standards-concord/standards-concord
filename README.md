@@ -24,7 +24,7 @@ pnpm dev            # API on :8787, web app on :5173
 
 Open http://localhost:5173/alpha. With no configuration it runs entirely offline: the AI steps use deterministic fallbacks, private data is stored on local disk, and sign-in is by demo account.
 
-Full OWL 2 DL reasoning (consistency, unsatisfiable classes, the inferred hierarchy) runs on [sparq](https://github.com/sparq-org/sparq) compiled to WebAssembly, the same code on the server and in the browser, so there is nothing extra to install. `./toolkit/setup.sh` only installs LinkML, which one of the core tests uses.
+OWL 2 DL reasoning (consistency, unsatisfiable classes, the inferred hierarchy) runs on [sparq](https://github.com/sparq-org/sparq) compiled to WebAssembly, the same code on the server (in a worker thread) and in the browser (in a Web Worker), so there is nothing extra to install. sparq decides most of OWL 2 DL. When it can't decide an ontology, or runs out of its step budget, it says so, and validation doesn't pass until it can. `./toolkit/setup.sh` only installs LinkML, which one of the core tests uses.
 
 To use Claude, set `ANTHROPIC_API_KEY` (see [.env.example](.env.example) for every setting). The default model is `claude-opus-5-5`.
 

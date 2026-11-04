@@ -24,12 +24,44 @@ test.describe('OWL reasoning with sparq', () => {
     page.on('request', (r) => { if (r.url().includes('/validation')) validationCalls.push(r.url()); });
     const wasm = page.waitForResponse((r) => /sparq_dl_wasm_bg[^/]*\.wasm/.test(r.url()) && r.ok());
     const source = page.waitForResponse((r) => r.url().includes(`/api/ontologies/${demo.id}/source`) && r.ok());
+    // The reasoner runs in a Web Worker, so a large ontology doesn't freeze the page.
+    const worker = page.waitForEvent('worker', (w) => /reasonWorker/.test(w.url()));
     await health.getByRole('button', { name: 'Check again in this browser' }).click();
-    await Promise.all([wasm, source]);
+    await Promise.all([wasm, source, worker]);
     const status = health.getByRole('status');
     await expect(status).toContainText(/This browser: consistent, all classes satisfiable \(sparq · reasoning [\d.]+ ms/);
     await expect(status).toContainText('Same result as the server.');
     expect(validationCalls).toEqual([]);
+  });
+
+  test("the browser result is only compared with the server's when both are for the same revision", async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await signIn(page, { name: `Reasoner revision ${uniq()}`, role: 'steward' });
+    // Used to go wrong: the page compared a fresh in-browser run with a report from when the page
+    // loaded, so an edit in between showed up as the server "disagreeing". Here the draft moves on
+    // (a different revision is served) and then differs at the same revision.
+    let mode: 'moved' | 'tampered' = 'moved';
+    await page.route(new RegExp(`/api/ontologies/${demo.id}/source\\?`), async (route) => {
+      const res = await route.fetch();
+      const headers = { ...res.headers() };
+      let body = await res.text();
+      if (mode === 'moved') headers['x-concord-revision'] = 'a-later-revision';
+      else body += `\n<${VOL}Person> <http://www.w3.org/2002/07/owl#disjointWith> <${VOL}Volunteer> .\n`;
+      await route.fulfill({ status: res.status(), headers, body });
+    });
+    await page.goto(`/o/${demo.id}`);
+    const health = page.locator('#health');
+    await expect(health.getByText('Consistent.', { exact: true })).toBeVisible({ timeout: 30_000 });
+    const check = health.getByRole('button', { name: 'Check again in this browser' });
+    const status = health.getByRole('status');
+    await check.click();
+    await expect(status).toContainText("The draft has changed since this page loaded, so this can't be compared with the server's result. Reload to compare.");
+    await expect(status).not.toContainText('Same result as the server.');
+
+    mode = 'tampered';
+    await check.click();
+    await expect(status).toContainText('This browser: unsatisfiable:');
+    await expect(status).toContainText("The server's result for the same revision differs.");
   });
 
   test('a change that makes a class unsatisfiable is caught by sparq on the server', async ({ page, request }) => {

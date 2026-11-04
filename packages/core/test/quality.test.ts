@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DataFactory } from 'n3';
 import { NS, OntologyGraph, XSD, applyChangeOps, fairCheck, lint, owlReasoner, runCompetencyQuestions, structuralReasoner, validate } from '../src/index.js';
+import { directInferred } from '../src/reasoner.js';
 import { X, baseOntology, fixtureText, loadFixture } from './helpers.js';
 
 const { namedNode, literal } = DataFactory;
@@ -260,6 +261,36 @@ describe('owlReasoner (sparq OWL 2 DL)', () => {
     const r = await owlReasoner(await T('ex:alice ex:undeclaredProp ex:bob .'));
     expect(r).toMatchObject({ engine: 'sparq', available: true, consistent: true });
     expect(r.profile?.map((n) => n.kind)).toContain('Undeclared');
+  });
+  it('rewrites a declared data property in a vocabulary namespace as logical, and says so', async () => {
+    // dcterms:custom is declared a functional data property, so its xsd:date values matter to reasoning.
+    const r = await owlReasoner(await T('<http://purl.org/dc/terms/custom> a owl:DatatypeProperty, owl:FunctionalProperty . ex:alice <http://purl.org/dc/terms/custom> "2000-01-01"^^xsd:date .'));
+    expect(r.explanation).toMatch(/treated as rdfs:Literal: xsd:date/);
+  });
+  it('validation does not pass when the OWL reasoner gives no verdict', async () => {
+    const g = await T('ex:partOf a owl:ObjectProperty, owl:TransitiveProperty . ex:Thing1 a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:partOf ; owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .');
+    const report = await validate(g, { reasoner: 'owl' });
+    expect(report.reasoner).toMatchObject({ available: false, checked: 'none', consistent: true, unsatisfiable: [] });
+    expect(report.passed).toBe(false);
+  });
+  it('validation does not pass when only consistency was decided', async () => {
+    const g = await loadFixture();
+    const report = await validate(g, { reasoner: 'owl', owlReasoner: async (graph) => ({ ...(await owlReasoner(graph)), available: false, checked: 'consistency' }) });
+    expect(report.passed).toBe(false);
+    expect((await validate(g, { reasoner: 'owl' })).reasoner.checked).toBe('complete');
+  });
+  it('reduces a long hierarchy to direct relations quickly', () => {
+    // A 1,000-class chain: sparq reports every entailed, non-asserted pair (about half a million).
+    // The first version recomputed closures and took about 20 s here.
+    const n = 1000;
+    const ops = Array.from({ length: n }, (_, i) => ({ op: 'addClass' as const, localName: `C${i}`, label: `c ${i}`, definition: `Class number ${i}.`, subClassOf: i ? [X(`C${i - 1}`)] : [] }));
+    const g = applyChangeOps(baseOntology(), ops).graph;
+    const entailed: [string, string][] = [];
+    for (let i = 2; i < n; i++) for (let j = 0; j < i - 1; j++) entailed.push([X(`C${i}`), X(`C${j}`)]);
+    entailed.push([X('Extra'), X('C5')]);
+    const t0 = performance.now();
+    expect(directInferred(g, entailed, new Set())).toEqual([[X('Extra'), X('C5')]]);
+    expect(performance.now() - t0).toBeLessThan(3000);
   });
   it('falls back to the structural checks, saying why, when the ontology is outside OWL 2 DL', async () => {
     const r = await owlReasoner(await T('ex:partOf a owl:ObjectProperty, owl:TransitiveProperty . ex:Thing1 a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty ex:partOf ; owl:maxCardinality "1"^^xsd:nonNegativeInteger ] .'));

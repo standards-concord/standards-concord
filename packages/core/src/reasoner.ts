@@ -236,7 +236,7 @@ function undecidedReason(r: SparqOwlDlResult, g: OntologyGraph): string {
 export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions = {}): Promise<ReasonerResult> {
   const t0 = now();
   const structural = () => structuralReasoner(graph);
-  const fallback = (error: string, extra: Partial<ReasonerResult> = {}): ReasonerResult => ({ ...structural(), available: false, error, ...extra, durationMs: Math.round(now() - t0) });
+  const fallback = (error: string, extra: Partial<ReasonerResult> = {}): ReasonerResult => ({ ...structural(), available: false, checked: 'none', error, ...extra, durationMs: Math.round(now() - t0) });
   let checkOwlDl: CheckOwlDl;
   try {
     checkOwlDl = await loadSparq();
@@ -262,7 +262,7 @@ export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions
     // sparq gives the verdict; the structural checks often name the clash.
     const s = structural();
     return {
-      engine: 'sparq', available: true, consistent: false, unsatisfiable: [], inferredSubClassOf: [],
+      engine: 'sparq', available: true, checked: 'complete', consistent: false, unsatisfiable: [], inferredSubClassOf: [],
       explanation: ['The ontology is inconsistent: no interpretation satisfies all its axioms (typically an individual in disjoint classes or in an unsatisfiable class, or a value that breaks a range, cardinality or key).', !s.consistent && s.explanation ? `Likely cause: ${s.explanation}` : undefined, caveat].filter(Boolean).join('\n'),
       profile, durationMs: Math.round(now() - t0), checkMs,
     };
@@ -270,12 +270,12 @@ export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions
   if (r.classification !== 'complete') {
     const kind = r.classification && typeof r.classification === 'object' ? r.classification.unknown : 'unknown';
     // Consistency is decided; only the class-by-class tests are missing.
-    return fallback(`sparq showed the ontology is consistent but could not finish classifying it (${kind === 'ResourceBudget' ? 'it ran out of its work budget' : kind})`, { consistent: true, profile });
+    return fallback(`sparq showed the ontology is consistent but could not finish checking every class (${kind === 'ResourceBudget' ? 'it ran out of its work budget' : kind})`, { consistent: true, checked: 'consistency', profile });
   }
   const unsat = [...r.unsatisfiable].filter((c) => c !== T.Nothing).sort();
   const s = unsat.length ? structural() : undefined;
   return {
-    engine: 'sparq', available: true, consistent: true,
+    engine: 'sparq', available: true, checked: 'complete', consistent: true,
     unsatisfiable: unsat,
     inferredSubClassOf: directInferred(graph, r.inferredSubClassOf, new Set(unsat)),
     explanation: [
@@ -298,45 +298,73 @@ function profileNotes(r: SparqOwlDlResult, g: OntologyGraph): OwlProfileNote[] |
 }
 
 /**
- * Reduces sparq's entailed subsumptions (every entailed pair that is not asserted) to the
- * ones an editor wants to see: direct superclasses of each class, minus those that already
- * follow from the asserted named hierarchy.
+ * Reduces sparq's entailed subsumptions to the ones an editor wants to see: direct
+ * superclasses of each class that don't already follow from the asserted named hierarchy.
+ *
+ * sparq returns every entailed pair that isn't asserted, so together with the asserted edges
+ * `sup` is the whole (transitively closed) subsumption relation and needs no closure here.
+ * A pair implied through an asserted parent is dropped in O(parents); only the remaining,
+ * genuinely new pairs get the O(|sup(a)|) directness test. Linear in sparq's output for
+ * ordinary hierarchies, where nearly every entailed pair follows from an asserted parent.
  */
-function directInferred(graph: OntologyGraph, entailed: [string, string][], unsat: Set<string>): [string, string][] {
-  const s = graph.store;
-  const told = new Map<string, Set<string>>();
-  const link = (m: Map<string, Set<string>>, a: string, b: string) => {
+export function directInferred(graph: OntologyGraph, entailed: [string, string][], unsat: Set<string>): [string, string][] {
+  // Classes become small integers, so the hot loop hashes numbers rather than long IRIs.
+  const ids = new Map<string, number>();
+  const iris: string[] = [];
+  const id = (iri: string) => {
+    let n = ids.get(iri);
+    if (n === undefined) { n = iris.length; ids.set(iri, n); iris.push(iri); }
+    return n;
+  };
+  const sup: Set<number>[] = [];
+  const told: number[][] = [];
+  const link = (a: number, b: number, asserted: boolean) => {
     if (a === b) return;
-    if (!m.has(a)) m.set(a, new Set());
-    m.get(a)!.add(b);
+    (sup[a] ??= new Set()).add(b);
+    if (asserted) (told[a] ??= []).push(b);
   };
-  for (const q of s.getQuads(null, P.subClassOf, null, null)) if (q.subject.termType === 'NamedNode' && q.object.termType === 'NamedNode') link(told, q.subject.value, q.object.value);
-  for (const q of s.getQuads(null, P.equivalentClass, null, null)) {
-    if (q.subject.termType === 'NamedNode' && q.object.termType === 'NamedNode') { link(told, q.subject.value, q.object.value); link(told, q.object.value, q.subject.value); }
+  const s = graph.store;
+  for (const q of s.getQuads(null, P.subClassOf, null, null)) {
+    if (q.subject.termType === 'NamedNode' && q.object.termType === 'NamedNode') link(id(q.subject.value), id(q.object.value), true);
   }
-  const closure = (m: Map<string, Set<string>>, x: string) => {
-    const out = new Set<string>();
-    const stack = [x];
-    while (stack.length) for (const p of m.get(stack.pop()!) ?? []) if (!out.has(p)) { out.add(p); stack.push(p); }
-    out.delete(x);
-    return out;
-  };
-  const all = new Map<string, Set<string>>();
-  for (const [a, set] of told) for (const b of set) link(all, a, b);
-  for (const [a, b] of entailed) link(all, a, b);
-  const sup = new Map<string, Set<string>>();
-  const supOf = (x: string) => { let v = sup.get(x); if (!v) { v = closure(all, x); sup.set(x, v); } return v; };
-  const equiv = (a: string, b: string) => supOf(a).has(b) && supOf(b).has(a);
-  const out: [string, string][] = [];
-  for (const a of new Set(entailed.map(([x]) => x))) {
-    if (unsat.has(a)) continue;
-    const ups = [...supOf(a)].filter((b) => b !== T.Thing && !equiv(a, b));
-    const toldUp = closure(told, a);
-    for (const b of ups) {
-      if (toldUp.has(b)) continue;
-      const indirect = ups.some((m) => m !== b && !equiv(m, b) && supOf(m).has(b));
-      if (!indirect) out.push([a, b]);
+  for (const q of s.getQuads(null, P.equivalentClass, null, null)) {
+    if (q.subject.termType !== 'NamedNode' || q.object.termType !== 'NamedNode') continue;
+    const [a, b] = [id(q.subject.value), id(q.object.value)];
+    link(a, b, true);
+    link(b, a, true);
+  }
+  const pairs = new Int32Array(entailed.length * 2);
+  entailed.forEach(([a, b], k) => { const x = id(a), y = id(b); pairs[2 * k] = x; pairs[2 * k + 1] = y; link(x, y, false); });
+  const has = (a: number, b: number) => sup[a]?.has(b) ?? false;
+  const equiv = (a: number, b: number) => has(a, b) && has(b, a);
+  const thing = id(T.Thing);
+  /** a ⊑ b follows from an asserted edge out of a (or out of a class asserted equivalent to a). */
+  const toldImplied = (a: number, b: number) => {
+    let stack: number[] | undefined;
+    let seen: Set<number> | undefined;
+    let x: number | undefined = a;
+    while (x !== undefined) {
+      for (const p of told[x] ?? []) {
+        if (p === b) return true;
+        if (has(p, b)) {
+          if (!equiv(p, a)) return true;
+          if (!(seen ??= new Set([a])).has(p)) { seen.add(p); (stack ??= []).push(p); }
+        }
+      }
+      x = stack?.pop();
     }
+    return false;
+  };
+  const out: [string, string][] = [];
+  for (let k = 0; k < entailed.length; k++) {
+    const a = pairs[2 * k], b = pairs[2 * k + 1];
+    if (a === b || b === thing || toldImplied(a, b) || equiv(a, b) || unsat.has(iris[a])) continue;
+    // Direct: no strict intermediate between a and b.
+    let direct = true;
+    for (const m of sup[a]!) {
+      if (m !== b && has(m, b) && !equiv(m, a) && !equiv(m, b)) { direct = false; break; }
+    }
+    if (direct) out.push([iris[a], iris[b]]);
   }
   return out.sort((x, y) => x[0].localeCompare(y[0]) || x[1].localeCompare(y[1]));
 }
@@ -351,8 +379,11 @@ function directInferred(graph: OntologyGraph, entailed: [string, string][], unsa
 function owl2DatatypesOnly(graph: OntologyGraph): { store: Store; replaced: string[] } {
   const store = cloneStore(graph.store);
   const replaced = new Set<string>();
-  const annotationProps = new Set(graph.view().annotationProperties.map((p) => p.iri));
-  const isAnnotation = (p: string) => annotationProps.has(p) || p.startsWith(NS.dcterms) || p.startsWith(NS.skos) || p.startsWith(NS.rdfs);
+  const view = graph.view();
+  const annotationProps = new Set(view.annotationProperties.map((p) => p.iri));
+  // A property declared as a data or object property is logical even in a vocabulary namespace.
+  const logicalProps = new Set([...view.datatypeProperties, ...view.objectProperties].map((p) => p.iri));
+  const isAnnotation = (p: string) => !logicalProps.has(p) && (annotationProps.has(p) || p.startsWith(NS.dcterms) || p.startsWith(NS.skos) || p.startsWith(NS.rdfs));
   for (const q of store.getQuads(null, null, null, null)) {
     const o = q.object as Term;
     const p = q.predicate.value;

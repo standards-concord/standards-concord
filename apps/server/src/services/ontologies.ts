@@ -19,6 +19,7 @@ import { newId, slugify } from '../ids.js';
 import { template } from './governance.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getUser, logActivity } from './users.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 
 export const getProject = (id: string) => mustGet<OntologyProject>('ontologies', id);
 export const findProject = (idOrSlug: string) =>
@@ -149,17 +150,20 @@ export async function validateGraph(key: string, graph: Graph, cqs: { question: 
   key += r ? `:${+r.rdf}${+r.html}` : '';
   let p = validationCache.get(key);
   if (!p) {
-    p = validate(graph, { cqs, reasoner: 'owl', fair });
+    p = validate(graph, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair });
     validationCache.set(key, p);
     p.catch(() => validationCache.delete(key));
   }
   return p;
 }
 
-export async function workingValidation(p: OntologyProject) {
+export async function workingValidation(p: OntologyProject): Promise<ValidationReport> {
+  const revision = ontologyStore.head(p);
   const graph = await ontologyStore.working(p);
+  // A commit landed while the graph loaded: start again so the revision names this graph.
+  if (ontologyStore.head(p) !== revision) return workingValidation(p);
   const cqs = competencyTests(p.id);
-  return validateGraph(`${p.slug}@${ontologyStore.head(p)}:${cqs.length}`, graph, cqs);
+  return { ...(await validateGraph(`${p.slug}@${revision}:${cqs.length}`, graph, cqs)), revision };
 }
 
 export async function summary(p: OntologyProject, withHealth = true): Promise<OntologySummary> {
