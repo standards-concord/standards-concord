@@ -4,7 +4,8 @@ export default defineConfig({
   test: {
     setupFiles: ['test/setup.ts'],
     fileParallelism: false,
-    testTimeout: 60_000,
+    // Generous: the app check tests run real subprocesses, and CI machines can be slow.
+    testTimeout: 180_000,
     hookTimeout: 120_000,
   },
 });

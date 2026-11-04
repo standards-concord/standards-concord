@@ -24,6 +24,7 @@ export type Collection =
   | 'agentReports'
   | 'apps'
   | 'appChecks'
+  | 'oidcTokens'
   | 'oauthClients'
   | 'oauthRequests'
   | 'oauthCodes'
@@ -74,6 +75,23 @@ export function put<T extends { id: string }>(collection: Collection, doc: T, pa
     )
     .run(collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt);
   return doc;
+}
+
+/**
+ * Insert a document only if none has this id yet, in one statement (the primary key is the
+ * unique constraint, across processes too). True if this call inserted it.
+ */
+export function insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): boolean {
+  const row = conn()
+    .prepare(`INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(collection, id) DO NOTHING RETURNING id`)
+    .get(collection, doc.id, parent ?? null, JSON.stringify(doc), new Date().toISOString());
+  return !!row;
+}
+
+/** Delete documents in a collection whose numeric `field` is below `value`. */
+export function removeBelow(collection: Collection, field: string, value: number) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
+  conn().prepare(`DELETE FROM docs WHERE collection = ? AND json_extract(data, '$.${field}') < ?`).run(collection, value);
 }
 
 export function get<T>(collection: Collection, id: string): T | undefined {

@@ -251,6 +251,9 @@ const attempt = pending.attempt;
 // because the proof is short-lived. Only results from a vouched-for run move autopilot.
 const oidc = await runIdentity(pending.app.id);
 const baselineReply = (await api('POST', '/api/app-checks', { target: 'baseline', revision: pending.baseline.revision, attempt, outcome: baseline.outcome, summary: baseline.summary, runUrl, commit, ...(oidc && { oidc }) })).json();
+// The key proves this run's change results come from the run GitHub vouched for.
+const runKey = baselineReply.runKey;
+if (runKey && env.GITHUB_ACTIONS) console.log(`::add-mask::${runKey}`);
 if (oidc && baselineReply.verified) log('GitHub vouched for this run, so autopilot can act on its results.');
 rows.push(['Working draft', '', baseline.outcome, baselineReply.stale ? 'superseded by a newer run, or the draft moved on' : '']);
 if (baseline.outcome !== 'passed') {
@@ -275,7 +278,7 @@ if (baseline.outcome !== 'passed') {
   }
   for (const t of targets) {
     const r = await check(`#${t.number} ${t.title}`, t.source, { CONCORD_TARGET: `cr-${t.number}`, CONCORD_CHANGE_REQUEST: String(t.number), CONCORD_REVISION: t.revision });
-    const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, attempt, outcome: r.outcome, summary: r.summary, runUrl, commit })).json();
+    const out = (await api('POST', '/api/app-checks', { target: t.changeRequestId, revision: t.revision, attempt, outcome: r.outcome, summary: r.summary, runUrl, commit, ...(runKey && { runKey }) })).json();
     const note = out.stale ? 'the change moved on while testing (or a newer run reported first); it will be tested again' : out.autopilot && out.autopilot.action !== 'none' ? `autopilot: ${out.autopilot.message}` : '';
     rows.push([`[#${t.number} ${t.title}](${new URL(t.page, `${base}/`)})`, t.level ?? '', r.outcome, note]);
     log(`#${t.number}: ${r.outcome}${r.outcome === 'error' ? `: ${r.summary}` : ''}${note ? ` (${note})` : ''}`);

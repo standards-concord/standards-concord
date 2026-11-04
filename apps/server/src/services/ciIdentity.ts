@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { HttpError } from '../db.js';
+import { HttpError, insertOnce, removeBelow } from '../db.js';
 
 /**
  * Proof that a CI run really ran in a given GitHub repository: the OpenID Connect token GitHub
@@ -33,9 +33,6 @@ async function keysFor(iss: string, refresh: boolean): Promise<Jwk[]> {
   return keys;
 }
 
-/** Tokens already used, until they expire: each proves one report, once. */
-const used = new Map<string, number>();
-
 const part = (s: string) => {
   try {
     return JSON.parse(Buffer.from(s, 'base64url').toString('utf8')) as Record<string, unknown>;
@@ -44,14 +41,41 @@ const part = (s: string) => {
   }
 };
 
+/**
+ * Events a run may come from. Runs that the repository's own people start: on a schedule, by
+ * hand, on a push, or by a repository dispatch. Not pull requests (which run code the PR
+ * proposes, and whose commit is a merge commit nobody has reviewed), nor pull_request_target.
+ */
+const EVENTS = ['schedule', 'workflow_dispatch', 'push', 'repository_dispatch'];
+
+/** Longest a token may be valid for. GitHub's last minutes, not hours. */
+const MAX_LIFETIME = 60 * 60;
+
 export interface VerifiedRun {
   repository: string;
+  repositoryId: string;
+  sha: string;
+  event: string;
+  workflowRef: string;
   runId?: string;
-  sha?: string;
+  /** Issuer and token id, as recorded when the token was used. */
+  iss: string;
+  jti: string;
 }
 
-/** Check a GitHub Actions OIDC token for this audience; throws 400 with the reason if it doesn't hold. */
-export async function verifyGithubRun(token: unknown, audience: string): Promise<VerifiedRun> {
+const num = (v: unknown, what: string, required: boolean) => {
+  if (v === undefined && !required) return undefined;
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new HttpError(400, `The run identity token’s ${what} claim must be a number`);
+  return v;
+};
+
+/**
+ * Check a GitHub Actions OIDC token for this audience; throws 400 with the reason if it doesn't
+ * hold. Each token is used once: its (issuer, token id) is recorded in the database, which
+ * refuses a second use in any process. `mayReuse` lets the same report be retried with the
+ * same token (it is asked only about a token that was already used).
+ */
+export async function verifyGithubRun(token: unknown, audience: string, opts: { mayReuse?: (jti: string) => boolean } = {}): Promise<VerifiedRun> {
   if (typeof token !== 'string' || token.length > 8192) throw new HttpError(400, 'The run identity token is malformed');
   const [h, p, s, extra] = token.split('.');
   if (!h || !p || !s || extra !== undefined) throw new HttpError(400, 'The run identity token is malformed');
@@ -70,17 +94,34 @@ export async function verifyGithubRun(token: unknown, audience: string): Promise
   if (!aud.includes(audience)) throw new HttpError(400, `The run identity token is for another audience; ask GitHub for one with audience ${audience}`);
   // Real time, not the demo's simulated clock: GitHub's clock is the one that counts.
   const now = Date.now() / 1000;
-  const exp = Number(claims.exp);
-  if (!Number.isFinite(exp) || exp < now - 60) throw new HttpError(400, 'The run identity token has expired');
-  if (Number(claims.nbf ?? claims.iat ?? 0) > now + 60) throw new HttpError(400, 'The run identity token isn’t valid yet');
-  if (typeof claims.repository !== 'string' || !claims.repository) throw new HttpError(400, 'The run identity token doesn’t name a repository');
+  const exp = num(claims.exp, 'exp', true)!;
+  const iat = num(claims.iat, 'iat', true)!;
+  const nbf = num(claims.nbf, 'nbf', false);
+  if (exp < now - 60) throw new HttpError(400, 'The run identity token has expired');
+  if (iat > now + 60 || (nbf !== undefined && nbf > now + 60)) throw new HttpError(400, 'The run identity token isn’t valid yet');
+  if (exp <= iat || exp - iat > MAX_LIFETIME) throw new HttpError(400, 'The run identity token is valid for longer than GitHub issues them');
 
-  for (const [id, until] of used) if (until < now - 60) used.delete(id);
-  const jti = typeof claims.jti === 'string' && claims.jti ? claims.jti : `${h}.${p}`;
-  if (used.has(jti)) throw new HttpError(400, 'This run identity token was already used; each run asks GitHub for its own');
-  used.set(jti, exp);
+  const str = (k: string) => (typeof claims[k] === 'string' && claims[k] ? (claims[k] as string) : undefined);
+  const repository = str('repository');
+  if (!repository) throw new HttpError(400, 'The run identity token doesn’t name a repository');
+  const repositoryId = typeof claims.repository_id === 'number' ? String(claims.repository_id) : str('repository_id');
+  if (!repositoryId) throw new HttpError(400, 'The run identity token doesn’t give the repository’s id');
+  const sha = str('sha');
+  if (!sha) throw new HttpError(400, 'The run identity token doesn’t say which commit ran');
+  const event = str('event_name') ?? '';
+  if (!EVENTS.includes(event)) throw new HttpError(400, `Runs triggered by ${event || 'an unknown event'} aren’t accepted; use a schedule, a manual run, a push or a repository dispatch`);
+  // The workflow that ran must live in the same repository (not a reusable workflow elsewhere).
+  const workflowRef = str('job_workflow_ref') ?? str('workflow_ref') ?? '';
+  if (!workflowRef.toLowerCase().startsWith(`${repository.toLowerCase()}/`)) throw new HttpError(400, 'The run’s workflow isn’t in the app’s repository');
+  const jti = str('jti');
+  if (!jti) throw new HttpError(400, 'The run identity token has no id');
 
-  return { repository: claims.repository, runId: claims.run_id === undefined ? undefined : String(claims.run_id), sha: typeof claims.sha === 'string' ? claims.sha : undefined };
+  // Used once: the database refuses a second insert of the same (issuer, id), in any process.
+  removeBelow('oidcTokens', 'exp', now - 120);
+  if (!insertOnce('oidcTokens', { id: `${iss}#${jti}`, iss, jti, exp }) && !opts.mayReuse?.(jti))
+    throw new HttpError(400, 'This run identity token was already used; each run asks GitHub for its own');
+
+  return { repository, repositoryId, sha, event, workflowRef, runId: claims.run_id === undefined ? undefined : String(claims.run_id), iss, jti };
 }
 
 /** The audience an app's CI asks GitHub for: tied to the one app, so the token proves a run for it. */

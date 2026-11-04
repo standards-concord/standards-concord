@@ -129,10 +129,10 @@ test.describe('app checks', () => {
     await expect(approval.getByText('Autopilot', { exact: true })).toBeVisible();
     await expect(page.getByText(/Approvals: 1\/2|1 more approval/).first()).toBeVisible();
 
-    // A failure in the next CI run takes the approval back. It stays on record, marked withdrawn.
-    const next = await (await page.request.get('/api/app-checks/pending?all=1', { headers: auth })).json();
-    await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: next.baseline.revision, attempt: next.attempt, outcome: 'passed' } });
-    await page.request.post('/api/app-checks', { headers: auth, data: { target: crId, revision: target.revision, attempt: next.attempt, outcome: 'failed', summary: '`npm test` exited with code 1.' } });
+    // A failure in the next (verified) run takes the approval back. It stays on record, marked withdrawn.
+    const next = await (await page.request.get(`/api/app-checks/pending?all=1&appId=${appId}`)).json();
+    await page.request.post('/api/app-checks', { data: { appId, target: 'baseline', revision: next.baseline.revision, attempt: next.attempt, outcome: 'passed' } });
+    await page.request.post('/api/app-checks', { data: { appId, target: crId, revision: target.revision, attempt: next.attempt, outcome: 'failed', summary: '`npm test` exited with code 1.' } });
     await page.goto(`/o/${demo.id}/changes/${crId}?view=checks`);
     await settle(page);
     await expect(page.getByTestId('app-check').filter({ hasText: 'Family finder' })).toContainText('Failed');

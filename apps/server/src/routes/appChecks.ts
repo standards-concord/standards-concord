@@ -54,8 +54,11 @@ export function mountAppChecks(r: Router) {
   // For an app's CI, authenticated with the app's token; or for the app's owner, signed in
   // (their own runs, or a simulated one), naming the app.
   const caller = (req: Request, appId: unknown) => {
-    if (req.get('authorization') || !req.user) return { app: apps.appForToken(req.get('authorization')), by: {} };
-    return { app: apps.appForOwner(appId, req.user), by: { trusted: true } };
+    if (req.get('authorization') || !req.user) {
+      const app = apps.appForToken(req.get('authorization'));
+      return { app, by: apps.byToken(app) };
+    }
+    return { app: apps.appForOwner(appId, req.user), by: { trusted: true, ownerId: req.user.id } };
   };
   r.get('/app-checks/pending', (req, res) => {
     res.set('Cache-Control', 'no-store');

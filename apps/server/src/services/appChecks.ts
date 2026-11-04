@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { applyChangeOps, FORMAT_INFO, serialize } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type {
@@ -17,13 +17,13 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { get, HttpError, list, mustGet, put, remove, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { addReview, addVote, advance, getCR, governanceFor, listCRs, reviewsFor, saveCR, votesFor } from './changeRequests.js';
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { runAudience, verifyGithubRun } from './ciIdentity.js';
+import { runAudience, verifyGithubRun, type VerifiedRun } from './ciIdentity.js';
 import { getUser, logActivity, publicUser } from './users.js';
 
 /**
@@ -47,7 +47,15 @@ interface AppDoc extends ConnectedApp {
     baseline: string;
     targets: Record<string, string>;
     /** What this run found on the working draft, and with which app commit. Its change results are tied to it. */
-    reported?: { outcome: AppCheckOutcome; commit?: string; verified?: boolean };
+    reported?: {
+      outcome: AppCheckOutcome;
+      commit?: string;
+      verified?: boolean;
+      /** The GitHub token that proved the run, so a retry of the same report may bring it again. */
+      jti?: string;
+      /** Hash of the key change results from this run present to count as verified. */
+      keyHash?: string;
+    };
     /** The run asked to test everything again (recheck). */
     all?: boolean;
   }[];
@@ -57,6 +65,8 @@ interface AppDoc extends ConnectedApp {
    * from before the app broke, or from another version of the app, never comes back into force.
    */
   passingSince?: number;
+  /** The GitHub repository's id, pinned by the first verified run (a re-created repository has a new one). */
+  repoId?: string;
 }
 
 const RUNS_KEPT = 20;
@@ -74,7 +84,7 @@ const newAppToken = () => `cna_${randomBytes(24).toString('base64url')}`;
 const checkId = (appId: string, crId: string) => `${appId}:${crId}`;
 
 function publicApp(doc: AppDoc): ConnectedApp {
-  const { tokenHash: _h, attempts: _a, runs: _r, passingSince: _p, ...rest } = doc;
+  const { tokenHash: _h, attempts: _a, runs: _r, passingSince: _p, repoId: _i, ...rest } = doc;
   const baseline = rest.baseline && { ...rest.baseline, current: rest.baseline.revision === baselineRevision(getProject(doc.ontologyId)) };
   return { ...rest, baseline, owner: publicUser(getUser(doc.ownerId)) };
 }
@@ -144,7 +154,11 @@ function manageApp(id: string, actor: User): AppDoc {
 export async function updateApp(id: string, actor: User, patch: { name?: unknown; repo?: unknown; autopilot?: unknown }): Promise<ConnectedApp> {
   const doc = ownApp(id, actor);
   if (patch.name !== undefined) doc.name = cleanName(patch.name);
-  if (patch.repo !== undefined) doc.repo = cleanRepo(patch.repo);
+  if (patch.repo !== undefined) {
+    const repo = cleanRepo(patch.repo);
+    if (repo?.toLowerCase() !== doc.repo?.toLowerCase()) doc.repoId = undefined;
+    doc.repo = repo;
+  }
   const wasOn = doc.autopilot.enabled;
   if (patch.autopilot !== undefined) doc.autopilot = cleanAutopilot(patch.autopilot, doc.autopilot);
   saveApp(doc);
@@ -376,26 +390,36 @@ export interface ReportInput {
   commit?: unknown;
   /** With the working draft result: a GitHub Actions OIDC token proving the run (see ciIdentity). */
   oidc?: unknown;
+  /** With a change's result: the key the run's verified working-draft result was answered with. */
+  runKey?: unknown;
 }
 
 /** How a report was made: with the app token alone, or by something that vouches for the run. */
 export interface ReportedBy {
   /** The app's owner reported it signed in, or the demo's simulated CI did. */
   trusted?: boolean;
+  /** The token the report came with (its hash): it must still be the app's when the report lands. */
+  tokenHash?: string;
+  /** The signed-in owner the report came from: they must still own the app when it lands. */
+  ownerId?: string;
 }
 
 /**
  * Is this result older than the one already stored? Results for the current revision beat
- * results for an older one, and within a revision a later run beats an earlier one. The same
+ * results for an older one, verified results beat unverified ones, and otherwise a later run
+ * beats an earlier one. The same
  * run reporting the same thing again is a replay; reporting something different is a conflict.
  */
 function ordering(
-  previous: { revision: string; attempt?: number; outcome: AppCheckOutcome } | undefined,
-  next: { revision: string; attempt: number; outcome: AppCheckOutcome },
+  previous: { revision: string; attempt?: number; outcome: AppCheckOutcome; verified?: boolean } | undefined,
+  next: { revision: string; attempt: number; outcome: AppCheckOutcome; verified: boolean },
   current: string,
 ): 'newer' | 'stale' | 'replay' {
   if (next.revision !== current) return 'stale';
   if (!previous || previous.revision !== current) return 'newer';
+  // For one revision, a verified result is replaced only by another verified one, so a report
+  // made with the app token alone can't undo (or get in ahead of) what a verified run found.
+  if (!!previous.verified !== next.verified) return next.verified ? 'newer' : 'stale';
   const prev = previous.attempt ?? 0;
   if (next.attempt > prev) return 'newer';
   if (next.attempt < prev) return 'stale';
@@ -403,7 +427,48 @@ function ordering(
   throw new HttpError(409, `Run ${next.attempt} already reported ${previous.outcome} for this; a run reports each target once`);
 }
 
-export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {}) {
+export async function report(appIn: AppDoc, input: ReportInput, by: ReportedBy = {}) {
+  const appId = appIn.id;
+  // GitHub's proof is the one thing a report waits for, so it is checked first. Everything after
+  // works on the app as stored once the proof is in, in one transaction: a disconnection, a new
+  // token or a newer result that landed meanwhile is never overwritten by what was read before.
+  const attempt = Number(input.attempt);
+  const proof =
+    input.target === 'baseline' && input.oidc !== undefined
+      ? await verifyGithubRun(input.oidc, runAudience(appId), {
+          // The same report retried (say after a dropped connection) may bring the same proof again.
+          mayReuse: (jti) => get<AppDoc>('apps', appId)?.runs?.find((r) => r.attempt === attempt)?.reported?.jti === jti,
+        })
+      : undefined;
+  const step = transaction(() => applyReport(appId, input, by, proof));
+  if (step.kind === 'done') return step.reply;
+  if (step.kind === 'baseline') {
+    // The baseline decides whether this app's results mean anything, so re-decide everywhere.
+    await reconcile(step.ontologyId, [step.ownerId]);
+    // Everything this result left without a result that counts gets tested in this same run.
+    const app = get<AppDoc>('apps', appId);
+    const run = app?.runs?.find((r) => r.attempt === step.attempt);
+    return { ...step.reply, targets: app && run ? retestsFor(app, run, getProject(app.ontologyId)) : [] };
+  }
+  const autopilot = await applyAutopilot(step.crId, step.ownerId);
+  return { ...step.reply, autopilot };
+}
+
+type Step =
+  | { kind: 'done'; reply: Record<string, unknown> }
+  | { kind: 'baseline'; reply: Record<string, unknown>; ontologyId: string; ownerId: string; attempt: number }
+  | { kind: 'change'; reply: Record<string, unknown>; crId: string; ownerId: string };
+
+const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/** The synchronous part of a report, run in one transaction on the app as it is stored now. */
+function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: VerifiedRun | undefined): Step {
+  const app = get<AppDoc>('apps', appId);
+  if (!app) throw new HttpError(401, 'This app was disconnected');
+  if (by.tokenHash !== undefined && app.tokenHash !== by.tokenHash) throw new HttpError(401, 'This app token was replaced');
+  if (by.ownerId !== undefined && app.ownerId !== by.ownerId) throw new HttpError(403, 'Only the person who connected this app can report for it without its token');
+  stillConnected(app);
+
   const outcome = input.outcome as AppCheckOutcome;
   if (!OUTCOMES.includes(outcome)) throw new HttpError(400, `outcome must be one of ${OUTCOMES.join(', ')}`);
   const revision = short(input.revision, 64);
@@ -414,7 +479,7 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
   const project = getProject(app.ontologyId);
   const run = app.runs?.find((r) => r.attempt === attempt);
   // Too old to remember what it was asked: it is out of date whatever it says.
-  if (!run) return { stale: true };
+  if (!run) return { kind: 'done', reply: { stale: true } };
   const asked = input.target === 'baseline' ? run.baseline : typeof input.target === 'string' ? run.targets[input.target] : undefined;
   if (asked !== revision) throw new HttpError(400, `Run ${attempt} wasn't asked to test ${input.target === 'baseline' ? 'the working draft' : 'that change'} at revision ${revision}`);
   const summary = short(input.summary, 2000);
@@ -423,25 +488,45 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
 
   if (input.target === 'baseline') {
     let commit = short(input.commit, 64);
-    if (run.reported && (run.reported.outcome !== outcome || run.reported.commit !== commit))
-      throw new HttpError(409, `Run ${attempt} already reported ${run.reported.outcome} for the working draft; a run reports it once`);
-    // A run is verified when GitHub vouches that it ran in the app's repository (or its owner
-    // reported it signed in). Only verified results move autopilot, so a leaked token can't.
+    // A run is verified when GitHub vouches that it ran in the app's repository, or its owner
+    // reported it signed in. Only verified results move autopilot, so a leaked token can't.
     let verified = !!by.trusted;
-    if (input.oidc !== undefined && !run.reported) {
+    let jti: string | undefined;
+    let keyHash: string | undefined;
+    let runKey: string | undefined;
+    if (proof) {
       if (!app.repo) throw new HttpError(400, 'Set the app’s GitHub repository on Concord, so it can check the run comes from there');
-      const proof = await verifyGithubRun(input.oidc, runAudience(app.id));
       if (proof.repository.toLowerCase() !== app.repo.toLowerCase()) throw new HttpError(400, `The run is from ${proof.repository}, not this app’s repository ${app.repo}`);
-      if (commit && proof.sha && commit !== proof.sha) throw new HttpError(400, `The run tested commit ${proof.sha}, not ${commit}`);
-      commit = commit ?? proof.sha;
+      // The repository's id is pinned on first use, so a deleted and re-created repository of the same name doesn't count.
+      if (app.repoId && app.repoId !== proof.repositoryId)
+        throw new HttpError(400, `${app.repo} isn’t the repository this app first ran from (its id changed). If you re-created it, set the repository on Concord again.`);
+      if (commit && commit !== proof.sha) throw new HttpError(400, `The run tested commit ${proof.sha}, not ${commit}`);
+      commit = proof.sha;
+      app.repoId = proof.repositoryId;
       verified = true;
+      jti = proof.jti;
+      // Results for changes in this run prove they belong to it with this key, which only the
+      // caller holding GitHub's proof gets back.
+      runKey = `crk_${randomBytes(24).toString('base64url')}`;
+      keyHash = hash(runKey);
     }
-    if (run.reported) verified = !!run.reported.verified;
-    run.reported = { outcome, commit, verified };
+    const prior = run.reported;
+    // A verified report replaces an unverified one for the same run (which anyone with the token could have sent first).
+    if (prior && !(verified && !prior.verified)) {
+      if (prior.outcome !== outcome || prior.commit !== commit)
+        throw new HttpError(409, `Run ${attempt} already reported ${prior.outcome} for the working draft; a run reports it once`);
+      verified = !!prior.verified;
+      if (!proof) {
+        jti = prior.jti;
+        keyHash = prior.keyHash;
+      }
+    }
+    run.reported = { outcome, commit, verified, jti, keyHash };
     saveApp(app);
-    const order = ordering(app.baseline, { revision, attempt, outcome }, baselineRevision(project));
-    if (order === 'stale') return { stale: true, targets: [] };
-    if (order === 'replay') return { stale: false, replay: true, verified, targets: retestsFor(app, run, project) };
+    const keyReply = runKey ? { runKey } : {};
+    const order = ordering(app.baseline, { revision, attempt, outcome, verified }, baselineRevision(project));
+    if (order === 'stale') return { kind: 'done', reply: { stale: true, verified, ...keyReply, targets: [] } };
+    if (order === 'replay') return { kind: 'done', reply: { stale: false, replay: true, verified, ...keyReply, targets: retestsFor(app, run, project) } };
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
     // Still passing the same draft with the same app: earlier results for changes still count.
     const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
@@ -450,10 +535,7 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
     saveApp(app);
     if (before !== outcome && outcome === 'failed')
       logActivity({ ontologyId: project.id, actorId: app.ownerId, type: 'app.baseline-failed', message: `reports that their app ${app.name} fails against the current working draft`, link: `/o/${project.id}/apps` });
-    // The baseline decides whether this app's results mean anything, so re-decide everywhere.
-    await reconcile(project.id, [app.ownerId]);
-    // Everything this result left without a result that counts gets tested in this same run.
-    return { stale: false, verified, targets: retestsFor(getAppDoc(app.id), run, project) };
+    return { kind: 'baseline', reply: { stale: false, verified, ...keyReply }, ontologyId: project.id, ownerId: app.ownerId, attempt };
   }
 
   if (typeof input.target !== 'string') throw new HttpError(400, "target must be 'baseline' or a change request id");
@@ -464,9 +546,17 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
     throw new HttpError(409, `Report run ${attempt}'s result for the working draft first; change results only count from a run that passed it`);
   const commit = run.reported.commit;
   if (input.commit !== undefined && short(input.commit, 64) !== commit) throw new HttpError(400, `Run ${attempt} tested app commit ${commit ?? '(none)'} on the working draft`);
+  // Each result is verified on its own: the run must be verified, and this report must prove it
+  // belongs to that run, with the run's key or by the owner signed in. The attempt number alone
+  // proves nothing: anyone holding the app token can learn it.
+  let verified = false;
+  if (input.runKey !== undefined) {
+    if (!run.reported.keyHash || !sameHash(hash(String(input.runKey)), run.reported.keyHash)) throw new HttpError(401, `That isn’t run ${attempt}’s key`);
+    verified = !!run.reported.verified;
+  } else if (by.trusted) verified = !!run.reported.verified;
   const previous = latestCheck(app.id, cr.id);
-  const order = ordering(previous, { revision, attempt, outcome }, revisionOf(cr, project));
-  if (order !== 'newer') return { check: previous, stale: order === 'stale', replay: order === 'replay' };
+  const order = ordering(previous, { revision, attempt, outcome, verified }, revisionOf(cr, project));
+  if (order !== 'newer') return { kind: 'done', reply: { check: previous, stale: order === 'stale', replay: order === 'replay' } };
   const check: AppCheck = {
     id: checkId(app.id, cr.id),
     appId: app.id,
@@ -478,7 +568,7 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
     runUrl,
     commit,
     attempt,
-    verified: !!run.reported.verified,
+    verified,
     at,
   };
   put('appChecks', check, cr.id);
@@ -497,14 +587,16 @@ export async function report(app: AppDoc, input: ReportInput, by: ReportedBy = {
     if (outcome === 'failed')
       logActivity({ ontologyId: cr.ontologyId, actorId: app.ownerId, type: 'app.failed', message: `reports that their app ${app.name} breaks with #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
-  const autopilot = await applyAutopilot(cr.id, app.ownerId);
-  return { check, stale: false, autopilot };
+  return { kind: 'change', reply: { check, stale: false }, crId: cr.id, ownerId: app.ownerId };
 }
 
 /** Report a result as an app, without its token (the demo's simulated CI, which is trusted). */
 export function reportAs(appId: string, input: ReportInput) {
   return report(getAppDoc(appId), input, { trusted: true });
 }
+
+/** Who a token-authenticated report comes from: the app, as long as that token is still its token. */
+export const byToken = (app: AppDoc): ReportedBy => ({ tokenHash: app.tokenHash });
 
 /** Start a run as an app, without its token (the demo's simulated CI). */
 export const startRunAs = (appId: string) => pending(getAppDoc(appId), true).attempt;
