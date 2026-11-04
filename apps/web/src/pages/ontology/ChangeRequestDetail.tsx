@@ -16,9 +16,10 @@ import { Markdown } from '../../components/Markdown';
 import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+import { needsOdiApproval, odiApproved } from '../../lib/asks';
 
 function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
-  const { hasRole, myRoles } = useOntology();
+  const { hasRole, myRoles, ontology } = useOntology();
   const { session } = useSession();
   const uid = session?.user?.id;
   const [comment, setComment] = useState('');
@@ -46,6 +47,9 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c));
   const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c));
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
+  // Under final say the vote can open before the ODI approves, but cannot pass without it.
+  const odiNeeded = needsOdiApproval(ontology.governance, cr);
+  const odiDone = odiNeeded && odiApproved(cr.reviews, ontology.members ?? [], cr.opsUpdatedAt ?? cr.createdAt);
 
   if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;
 
@@ -93,6 +97,15 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </Button>
           </div>
           {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on this.</p>}
+          {odiNeeded && !odiDone && myRoles.includes('odi') && (
+            <div className="space-y-1.5 border-t border-line pt-3" data-testid="odi-approval">
+              <p className="text-xs text-muted">This major change cannot pass the vote until the ODI approves it.</p>
+              <Button variant="primary" icon={ShieldCheck} className="w-full" disabled={act.pending} onClick={() => void review('approve')}>
+                Approve for the ODI
+              </Button>
+            </div>
+          )}
+          {odiNeeded && odiDone && <p className="text-xs text-muted">The ODI has approved this change.</p>}
           {myVote && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
         </>
       )}

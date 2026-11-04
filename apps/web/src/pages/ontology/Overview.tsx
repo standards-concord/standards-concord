@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import type { ChangeRequestStatus } from '@concord/shared';
-import { askOf } from '../../lib/asks';
+import { askOf, odiApprovedFromTimeline } from '../../lib/asks';
 import { scrollBehavior } from '../../lib/motion';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
@@ -46,7 +46,12 @@ export function OverviewTab() {
     .filter((cr) => IN_PROGRESS.includes(cr.status))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
   const asks = inProgress.flatMap((cr) => {
-    const verb = askOf(cr, o.governance, myRoles, me, !!session?.user?.isPlatformAdmin);
+    const verb = askOf(cr, o.governance, {
+      roles: myRoles,
+      me,
+      isAdmin: !!session?.user?.isPlatformAdmin,
+      odiApproved: odiApprovedFromTimeline(cr, members),
+    });
     return verb ? [{ cr, verb }] : [];
   });
 

@@ -21,6 +21,8 @@
 [data-look='classic'] {
   --danger-fg: #ffffff;
   --control-line: #898d93;
+  /* The thumb of an unchecked switch, on a control-line track. */
+  --switch-thumb: #fff;
   --header-focus: var(--focus);
   --bg: #fafaf9;
   --surface: #ffffff;
@@ -485,6 +487,8 @@
   }
   [data-look='civic'] {
     --danger-fg: #1a0b0a;
+    /* The control track is near-white here, so an unchecked switch needs a dark thumb. */
+    --switch-thumb: #0b0b0b;
     --bg: #0b0b0b;
     --surface: #0b0b0b;
     --surface-2: #1a1a1a;
@@ -594,6 +598,7 @@
   --color-danger-soft: var(--danger-soft);
   --color-danger-fg: var(--danger-fg);
   --color-control: var(--control-line);
+  --color-switch-thumb: var(--switch-thumb);
   --radius-xs: var(--r-xs);
   --radius-sm: var(--r-sm);
   --radius-md: var(--r-md);

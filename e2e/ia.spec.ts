@@ -181,12 +181,54 @@ test.describe('progressive disclosure', () => {
     for (const name of [/Lint findings/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
   });
 
-  test('a contributor with nothing to act on sees no waiting panel', async ({ page }) => {
-    await signIn(page, { name: 'Bystander', role: 'contributor' });
+  test('a contributor is asked to review changes, since any member can send one back, but not to merge or vote', async ({ page }) => {
+    const me = await signIn(page, { name: 'Bystander', role: 'contributor' });
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { number: number; status: string; authorId: string }[];
+    const inReview = crs.filter((c) => c.status === 'review' && c.authorId !== me.user.id);
     await page.goto(`/o/${demo.id}`);
     await settle(page);
     await expect(page.getByTestId('changes-in-progress')).toBeVisible();
-    await expect(page.getByTestId('overview-asks')).toHaveCount(0);
+    const asks = page.getByTestId('overview-asks');
+    if (!inReview.length) return await expect(asks).toHaveCount(0);
+    const links = asks.getByRole('link', { name: /#\d+: / });
+    await expect(links).toHaveCount(Math.min(inReview.length, 5));
+    for (const text of await links.allTextContents()) expect(text).toMatch(/^Review #\d+: /);
+  });
+
+  test('the ODI is still asked to approve a major change under final say once its vote opens', async ({ page }) => {
+    const me = await signIn(page, { name: 'ODI reviewer', role: 'odi' });
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string; number: number; title: string; authorId: string }[];
+    const target = crs.find((c) => c.authorId !== me.user.id)!;
+    // Stage the case the server allows: an ODI-stewarded policy whose vote opened before the ODI approved.
+    const asVoting = <T extends object>(cr: T) => ({ ...cr, status: 'voting', classification: { ...(cr as { classification?: object }).classification, level: 'major' }, timeline: [] });
+    await page.route(new RegExp(`/api/ontologies/${demo.id}$`), async (route) => {
+      const o = await (await route.fetch()).json();
+      await route.fulfill({ json: { ...o, governance: { ...o.governance, odiPrivilege: 'final-say' } } });
+    });
+    await page.route(new RegExp(`/api/ontologies/${demo.id}/change-requests$`), async (route) => {
+      const list = (await (await route.fetch()).json()) as { id: string }[];
+      await route.fulfill({ json: list.map((c) => (c.id === target.id ? asVoting(c) : c)) });
+    });
+    let reviewed: unknown;
+    await page.route(new RegExp(`/api/change-requests/${target.id}(/reviews)?$`), async (route) => {
+      if (route.request().method() === 'POST') reviewed = route.request().postDataJSON();
+      const d = await (await page.request.get(`/api/change-requests/${target.id}`)).json();
+      const reviews = reviewed ? [{ id: 'rev-odi', changeRequestId: target.id, userId: me.user.id, roles: ['odi'], decision: 'approve', at: new Date().toISOString() }] : [];
+      await route.fulfill({ json: { ...asVoting(d), reviews, votes: [] } });
+    });
+
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const ask = page.getByTestId('overview-asks').getByRole('link', { name: `Approve #${target.number}: ${target.title}` });
+    await expect(ask).toBeVisible();
+    await ask.click();
+    await settle(page);
+    const approval = page.getByTestId('odi-approval');
+    await expect(approval).toContainText('cannot pass the vote until the ODI approves it');
+    await approval.getByRole('button', { name: 'Approve for the ODI' }).click();
+    await expect.poll(() => reviewed).toMatchObject({ decision: 'approve' });
+    await expect(page.getByText('The ODI has approved this change.')).toBeVisible();
+    await expect(approval).toHaveCount(0);
   });
 
   test('members show as avatars, with roles one click away', async ({ page }) => {

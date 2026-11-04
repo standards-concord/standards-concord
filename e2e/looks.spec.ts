@@ -210,14 +210,21 @@ test.describe('looks', () => {
       wrap(Element.prototype, 'scrollIntoView');
       wrap(Element.prototype, 'scrollTo');
     });
+    // Each page load starts a fresh record, so check every scrolling site straight after it runs.
+    const expectInstantScroll = async (where: string) => {
+      await expect.poll(() => page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls.length), { message: `${where} scrolled` }).toBeGreaterThan(0);
+      expect(await page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls), where).not.toContain('smooth');
+    };
     for (const path of [`/o/${demo.id}#health`, `/o/${demo.id}/governance#roles`, '/settings#appearance']) {
       await page.goto(path);
       await settle(page);
-      await page.waitForTimeout(300);
+      await expectInstantScroll(path);
     }
-    const scrolls = await page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls);
-    expect(scrolls.length, 'some scrolling happened').toBeGreaterThan(0);
-    expect(scrolls).not.toContain('smooth');
+    // The chat view scrolls to its newest message.
+    await page.goto('/feedback');
+    await settle(page);
+    await page.getByRole('button', { name: /Just tell us something/ }).click();
+    await expectInstantScroll('feedback chat');
   });
 
   for (const scheme of ['light', 'dark'] as const) {
@@ -254,17 +261,28 @@ test.describe('looks', () => {
             ['control-line', 'surface', 3],
             ['control-line', 'bg', 3],
             ['control-line', 'surface-2', 3],
+            // Switch thumbs against their track, unchecked and checked.
+            ['switch-thumb', 'control-line', 3],
             ['subtle', 'surface-2'],
             ['header-focus', 'header-bg', 3],
             ['focus', 'surface', 3],
           ];
           const probe = document.createElement('span');
           document.body.appendChild(probe);
-          const rgb = (v: string) => {
+          // Computed colours come back as rgb()/rgba(), or as color(srgb r g b / a) with 0–1 channels for color-mix().
+          const read = (v: string) => {
             probe.style.color = `var(--${v})`;
-            const m = getComputedStyle(probe).color.match(/[\d.]+/g)!.map(Number);
-            // Translucent colours (the classic header) sit on the page background.
-            return m.length > 3 && m[3] < 1 ? null : m.slice(0, 3);
+            const c = getComputedStyle(probe).color;
+            const n = c.match(/[\d.]+/g)!.map(Number);
+            const [r, g, b, a = 1] = c.startsWith('color(') ? [n[0] * 255, n[1] * 255, n[2] * 255, n[3]] : n;
+            return { rgb: [r, g, b], a };
+          };
+          const rgb = (v: string) => {
+            const { rgb: c, a } = read(v);
+            if (a >= 1) return c;
+            // Translucent colours (the classic header) are seen over the page background.
+            const under = read('bg').rgb;
+            return c.map((x, k) => x * a + under[k] * (1 - a));
           };
           const lum = ([r, g, b]: number[]) => {
             const f = (c: number) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -274,7 +292,6 @@ test.describe('looks', () => {
           for (const [a, b, min = 4.5] of pairs) {
             const ca = rgb(a);
             const cb = rgb(b);
-            if (!ca || !cb) continue;
             const [hi, lo] = [lum(ca), lum(cb)].sort((x, y) => y - x);
             const ratio = (hi + 0.05) / (lo + 0.05);
             if (ratio < min) out.push(`${a} on ${b}: ${ratio.toFixed(2)} < ${min}`);
@@ -312,7 +329,9 @@ test.describe('looks', () => {
   });
 
   for (const id of LOOKS)
-    test(`the ${id} masthead: readable account menu, visible focus and chevrons`, async ({ page }) => {
+    for (const scheme of ['light', 'dark'] as const)
+    test(`the ${id} masthead: readable account menu, visible focus and chevrons (${scheme})`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
       await signIn(page, { name: 'Masthead tester' });
       await page.goto(`/?look=${id}`);
       await settle(page);
@@ -338,11 +357,14 @@ test.describe('looks', () => {
       // Keyboard focus inside the menu uses the page's focus colour, not the masthead's.
       await page.keyboard.press('Shift');
       await item.focus();
-      const [visible, ringStyle, ringColor] = await item.evaluate((el) => [el.matches(':focus-visible'), getComputedStyle(el).outlineStyle, getComputedStyle(el).outlineColor]);
-      if (visible) {
-        expect(ringStyle, 'menu focus ring').not.toBe('none');
-        expect(await ratio(ringColor, menuBg), 'menu focus ring contrast').toBeGreaterThanOrEqual(3);
-      }
+      const [visible, ringStyle, ringWidth, ringColor] = await item.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return [el.matches(':focus-visible'), cs.outlineStyle, cs.outlineWidth, cs.outlineColor] as const;
+      });
+      expect(visible, 'keyboard focus is visible in the menu').toBe(true);
+      expect(ringStyle, 'menu focus ring').not.toBe('none');
+      expect(parseFloat(ringWidth), 'menu focus ring width').toBeGreaterThan(0);
+      expect(await ratio(ringColor, menuBg), 'menu focus ring contrast').toBeGreaterThanOrEqual(3);
       await page.keyboard.press('Escape');
       if (/rgba\(.*, 0?\.\d+\)$/.test(headerBg)) return; // translucent classic header: covered by the token test
       // Chevrons and the focus ring against the masthead.
