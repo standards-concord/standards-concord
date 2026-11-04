@@ -14,16 +14,25 @@ export const FILTER_LABELS: Record<FilterOp, string> = {
   contains: 'contains',
   startsWith: 'starts with',
   equals: 'is',
-  notEquals: 'is not',
+  notEquals: 'has a value other than',
   gt: 'is more than',
   lt: 'is less than',
   regex: 'matches regex',
 };
 
+/**
+ * What a property's values are, from its declared range, so filters compare
+ * like with like instead of guessing from what the user typed ("00123" is a
+ * text code, not the number 123; a URL stored as text is not a resource).
+ */
+export type ValueType = 'text' | 'number' | 'boolean' | 'resource';
+
 export interface PathStep {
   id: string;
   property: IRI;
-  /** Keep rows that have no value for this property. */
+  /** Defaults to 'text' for steps saved before value types existed. */
+  valueType?: ValueType;
+  /** Keep rows that have no value for this property. Ignored when the step or anything below it filters. */
   optional: boolean;
   /** Show the value as a column. */
   show: boolean;
@@ -91,10 +100,18 @@ function isNumber(v: string): boolean {
   return /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(v.trim());
 }
 
-function filterExpr(v: string, f: { op: FilterOp; value: string }, compact: (iri: IRI) => string): string | null {
+function iriFor(value: string, compact: (iri: IRI) => string, prefixes: Record<string, string>): string | null {
+  if (/^<[^<>\s]+>$/.test(value)) return compact(value.slice(1, -1));
+  if (/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(value) || /^urn:\S+$/i.test(value)) return compact(value);
+  const m = /^([A-Za-z][\w-]*)?:([\w-]+)$/.exec(value);
+  if (m && prefixes[m[1] ?? ''] !== undefined) return compact(`${prefixes[m[1] ?? '']}${m[2]}`);
+  return null;
+}
+
+function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueType, compact: (iri: IRI) => string, prefixes: Record<string, string>): string | null {
   const value = f.value.trim();
   if (!value) return null;
-  const asIri = /^https?:\/\/\S+$/.test(value) ? compact(value) : null;
+  // Text matching always works on the lexical form, whatever the type.
   switch (f.op) {
     case 'contains':
       return `CONTAINS(LCASE(STR(${v})), ${literal(value.toLowerCase())})`;
@@ -102,17 +119,80 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, compact: (iri
       return `STRSTARTS(LCASE(STR(${v})), ${literal(value.toLowerCase())})`;
     case 'regex':
       return `REGEX(STR(${v}), ${literal(value)}, "i")`;
-    case 'equals':
-      if (asIri) return `${v} = ${asIri}`;
-      return isNumber(value) ? `${v} = ${value}` : `STR(${v}) = ${literal(value)}`;
-    case 'notEquals':
-      if (asIri) return `${v} != ${asIri}`;
-      return isNumber(value) ? `${v} != ${value}` : `STR(${v}) != ${literal(value)}`;
-    case 'gt':
-      return isNumber(value) ? `${v} > ${value}` : `STR(${v}) > ${literal(value)}`;
-    case 'lt':
-      return isNumber(value) ? `${v} < ${value}` : `STR(${v}) < ${literal(value)}`;
   }
+  const cmp = { equals: '=', notEquals: '!=', gt: '>', lt: '<' }[f.op];
+  if (type === 'resource') {
+    const iri = iriFor(value, compact, prefixes);
+    if (iri && (f.op === 'equals' || f.op === 'notEquals')) return `${v} ${cmp} ${iri}`;
+    return `STR(${v}) ${cmp} ${literal(iri ? value.replace(/^<|>$/g, '') : value)}`;
+  }
+  if (type === 'number' && isNumber(value)) return `${v} ${cmp} ${value}`;
+  if (type === 'boolean' && /^(true|false)$/i.test(value)) return `${v} ${cmp} ${value.toLowerCase()}`;
+  return `STR(${v}) ${cmp} ${literal(value)}`;
+}
+
+/** Number properties compare numerically, through a number field. */
+export function usesNumberInput(type: ValueType, op: FilterOp): boolean {
+  return type === 'number' && (op === 'equals' || op === 'notEquals' || op === 'gt' || op === 'lt');
+}
+
+/** Yes/no properties pick true or false. */
+export function usesBooleanChoice(type: ValueType, op: FilterOp): boolean {
+  return type === 'boolean' && (op === 'equals' || op === 'notEquals');
+}
+
+/**
+ * A number as a browser number field holds it: no leading +, no spaces, and a
+ * dot only with digits after it or straight before an exponent ("1.e2", which
+ * Chrome accepts). Every form is also a valid SPARQL numeric literal.
+ */
+const HTML_NUMBER = /^-?(\d+(\.\d+)?([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?|\d+\.[eE][+-]?\d+)$/;
+
+/**
+ * Whether a filter value is exactly something its operator's control can
+ * show (a number field, or a true/false choice), so what's on screen is what
+ * runs. No trimming: " 5" or "+5" would show as an empty number field.
+ */
+export function fitsControl(type: ValueType, op: FilterOp, value: string): boolean {
+  // The browser's number field also drops numbers too big to represent (1e999), so require finite.
+  if (usesNumberInput(type, op)) return HTML_NUMBER.test(value) && Number.isFinite(Number(value));
+  if (usesBooleanChoice(type, op)) return value === 'true' || value === 'false';
+  return true;
+}
+
+/**
+ * The filter that actually applies: none when the value is empty or doesn't
+ * fit the control (e.g. "sixteen" left over in a restored draft after
+ * switching to "is more than", which the number field shows as empty).
+ */
+export function activeFilter(step: PathStep): { op: FilterOp; value: string } | undefined {
+  const f = step.filter;
+  if (!f || !fitsControl(step.valueType ?? 'text', f.op, f.value)) return undefined;
+  const value = f.value.trim();
+  if (!value) return undefined;
+  return { op: f.op, value };
+}
+
+/**
+ * True when this step must match because of something on it or below it: a
+ * filter here or further down, or a step further down that records must have
+ * ("Keep records without it" turned off). Then the whole path to it is
+ * required, not optional. The step's own optional flag isn't counted, so its
+ * control stays editable.
+ */
+export function isRequired(step: PathStep): boolean {
+  return !!activeFilter(step) || step.children.some((c) => !c.optional || isRequired(c));
+}
+
+/** Readable names for every step's column: "offered by › label". */
+export function pathLabels(steps: PathStep[], name: (iri: IRI) => string, path: string[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of steps) {
+    const here = [...path, name(s.property)];
+    out[s.id] = here.join(' › ');
+    Object.assign(out, pathLabels(s.children, name, here));
+  }
+  return out;
 }
 
 export interface BuiltQuery {
@@ -145,12 +225,13 @@ export function buildSparql(model: BuilderModel, ctx: BuilderContext): BuiltQuer
       variables[step.id] = name;
       if (step.show) shown.push(name);
       const pred = step.property === RDF_TYPE ? 'a' : compact(step.property);
-      // A filtered step is required: "title contains food" shouldn't keep rows with no title.
-      const filtered = !!step.filter?.value.trim();
-      const wrap = step.optional && !filtered;
+      // A filtered path is required end to end: "offered by an organisation whose name
+      // contains X" must not keep opportunities with another organisation, or none.
+      const active = activeFilter(step);
+      const wrap = step.optional && !isRequired(step);
       const ind = wrap ? `${indent}  ` : indent;
       const inner = [`${ind}?${subject} ${pred} ?${name} .`, ...walk(name, step.children, ind, name)];
-      const f = step.filter && filtered ? filterExpr(`?${name}`, step.filter, compact) : null;
+      const f = active ? filterExpr(`?${name}`, active, step.valueType ?? 'text', compact, ctx.prefixes) : null;
       if (f) inner.push(`${ind}FILTER(${f})`);
       out.push(...(wrap ? [`${indent}OPTIONAL {`, ...inner, `${indent}}`] : inner));
     }
@@ -175,9 +256,9 @@ export function buildSparql(model: BuilderModel, ctx: BuilderContext): BuiltQuer
 }
 
 let counter = 0;
-export function newStep(property: IRI): PathStep {
+export function newStep(property: IRI, valueType: ValueType = 'text'): PathStep {
   counter += 1;
-  return { id: `s${Date.now().toString(36)}${counter}`, property, optional: true, show: true, children: [] };
+  return { id: `s${Date.now().toString(36)}${counter}`, property, valueType, optional: true, show: true, children: [] };
 }
 
 /** Immutable update of one step anywhere in the tree. */

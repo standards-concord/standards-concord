@@ -1,5 +1,6 @@
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
+import type { ValueType } from '../../lib/sparql-builder';
 
 /** What the query builder needs to know about the ontology's terms. */
 
@@ -21,6 +22,21 @@ export interface PropertyOption {
   /** For object properties, the class at the other end (first named range). */
   range?: string;
   group: 'suggested' | 'general' | 'annotation' | 'other';
+  valueType: ValueType;
+}
+
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+const NUMERIC = new Set(
+  'integer decimal double float long int short byte nonNegativeInteger positiveInteger nonPositiveInteger negativeInteger unsignedLong unsignedInt unsignedShort unsignedByte'
+    .split(' ')
+    .map((t) => `${XSD}${t}`),
+);
+
+/** A datatype property's value type from its declared range (text when undeclared or mixed). */
+export function valueTypeForRange(range: string[]): ValueType {
+  if (range.length && range.every((r) => NUMERIC.has(r))) return 'number';
+  if (range.length && range.every((r) => r === `${XSD}boolean`)) return 'boolean';
+  return 'text';
 }
 
 export function ancestors(view: OntologyView, cls: string): Set<string> {
@@ -47,10 +63,17 @@ export function propertyOptions(view: OntologyView, cls: string | undefined, lab
   ];
   for (const { p, kind } of props) {
     const group = !cls ? 'general' : p.domain.length === 0 ? 'general' : p.domain.some((d) => anc.has(d)) ? 'suggested' : 'other';
-    out.push({ iri: p.iri, label: label(p.iri), kind, range: kind === 'object' ? p.range.find((r) => classIris.has(r)) : undefined, group });
+    out.push({
+      iri: p.iri,
+      label: label(p.iri),
+      kind,
+      range: kind === 'object' ? p.range.find((r) => classIris.has(r)) : undefined,
+      group,
+      valueType: kind === 'object' ? 'resource' : valueTypeForRange(p.range),
+    });
   }
   for (const [iri, name] of Object.entries(ANNOTATION_OPTIONS)) {
-    out.push({ iri, label: name, kind: iri === RDF_TYPE ? 'object' : 'annotation', group: 'annotation' });
+    out.push({ iri, label: name, kind: iri === RDF_TYPE ? 'object' : 'annotation', group: 'annotation', valueType: iri === RDF_TYPE ? 'resource' : 'text' });
   }
   return out.sort((a, b) => a.label.localeCompare(b.label));
 }
