@@ -36,7 +36,7 @@ import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/s
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
-import { getPublicReport, listPublicReports, removePublicReport } from '../public/report.js';
+import { claimPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { dismissWithheld, listWithheld, restoreWithheld } from '../public/routes.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -371,16 +371,35 @@ export function apiRouter(): Router {
   });
   r.post('/ontologies/:id/public-reports/:reportId/accept', async (req, res) => {
     const { p, user } = moderator(req);
-    const report = getPublicReport(p.id, String(req.params.reportId));
+    const reportId = String(req.params.reportId);
+    // Approving twice (a retry after a lost response, say) finds the request the first approval opened.
+    const opened = () => crs.listCRs(p.id).find((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
+    const already = opened();
+    if (already) {
+      removePublicReport(reportId);
+      return void res.json(crs.detail(already));
+    }
+    const report = getPublicReport(p.id, reportId);
     if (!report) throw new HttpError(404, 'That report has already been reviewed');
-    removePublicReport(report.id);
-    const cr = await crs.createChangeRequest(p, await publicReporter(), {
-      title: report.title || `Problem with ${report.termName}`,
-      description: `${report.description}\n\nTerm: <${report.termIri}>\n\nReported by a member of the public from the public page (${report.version === 'draft' ? 'working draft' : `version ${report.version}`}) and opened for discussion by ${user.name}. No edits were drafted from it.`,
-      kind: 'bug',
-      origin: { type: 'public-report', termIri: report.termIri, version: report.version },
-      ops: [],
-    });
+    const mine = claimPublicReport(report);
+    if (!mine) throw new HttpError(409, 'Someone is opening this report right now');
+    let cr;
+    try {
+      cr = await crs.createChangeRequest(p, await publicReporter(), {
+        title: mine.title || `Problem with ${mine.termName}`,
+        description: `${mine.description}\n\nTerm: <${mine.termIri}>\n\nReported by a member of the public from the public page (${mine.version === 'draft' ? 'working draft' : `version ${mine.version}`}) and opened for discussion by ${user.name}. No edits were drafted from it.`,
+        kind: 'bug',
+        origin: { type: 'public-report', termIri: mine.termIri, version: mine.version, reportId },
+        ops: [],
+      });
+    } catch (err) {
+      // Nothing was opened: the report goes back in the queue for another try.
+      if (opened()) removePublicReport(reportId);
+      else releasePublicReport(mine);
+      throw err;
+    }
+    // Only now that the request exists does the report leave the queue.
+    removePublicReport(reportId);
     res.status(201).json(crs.detail(cr));
   });
   r.post('/ontologies/:id/public-reports/:reportId/dismiss', (req, res) => {

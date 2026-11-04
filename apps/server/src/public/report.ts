@@ -5,7 +5,7 @@ import type { TermView } from '@concord/core/types';
 import type { OntologyProject, PublicReport } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, list, put, remove } from '../db.js';
+import { claim, get, insertOnce, list, put, remove, removeWhereAtMost } from '../db.js';
 import { newId } from '../ids.js';
 import { clientIp } from '../oauth.js';
 import { findProject } from '../services/ontologies.js';
@@ -27,8 +27,11 @@ import { memberReportUrl, REPORT_LIMITS, reportChoices, type FormState } from '.
  *
  * Anti-abuse:
  *   - a form token signed for this ontology, term, version and an anonymous
- *     browser session (a SameSite=Strict cookie), usable once, from 3 seconds
- *     to a day after it was issued; cross-site posts are refused;
+ *     browser session (a SameSite=Strict cookie), usable once (recorded in
+ *     the database, so a restart doesn't make it usable again), from 3
+ *     seconds to 2 hours after it was issued; cross-site posts are refused;
+ *   - a limit on attempts per visitor, checked before anything else, so
+ *     rejected posts are limited and cleaned up too;
  *   - a honeypot field, a cap on links, limits on length;
  *   - rate limits per visitor (by IPv6 /56 or IPv4 address, pseudonymised
  *     with a key of its own and kept in memory for a day at most), and per
@@ -36,30 +39,36 @@ import { memberReportUrl, REPORT_LIMITS, reportChoices, type FormState } from '.
  *   - sending the same report twice from one browser is answered as before,
  *     so nothing reveals what anyone else reported.
  * Nothing private is returned: the reply is a thank-you with an opaque
- * reference. Without a proper secret on a deployed site, public reporting is
- * switched off rather than run with a key anyone could know.
+ * reference. Public reporting needs its own secret (REPORT_SECRET, at least
+ * 32 characters); without one it is switched off rather than run with a key
+ * anyone could know. Only the test suite runs with a built-in key.
  */
 
 const TOKEN_MIN_AGE_MS = 3_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const TOKEN_MAX_AGE_MS = DAY_MS;
+const TOKEN_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const VISITOR = {
   short: { ms: 10 * 60 * 1000, max: 5 },
   day: { ms: DAY_MS, max: 10 },
 };
+/** Posts of any kind, accepted or not: enough to fix a few mistakes, not to flood. */
+const ATTEMPTS = { ms: 10 * 60 * 1000, max: 30 };
 const DAILY = { ontology: 30, all: 300 };
 const SESSION_COOKIE = 'concord_report';
-const DEV_SECRET = 'dev-only-secret-change-me';
+const TEST_SECRET = 'concord test suite: public reports';
+const MIN_SECRET = 32;
 
 /* ------------------------------- secrets ------------------------------- */
 
-const deployed = () => process.env.NODE_ENV === 'production' || (/^https:\/\//.test(config.publicUrl) && !/\/\/(localhost|127\.0\.0\.1)[:/]?/.test(config.publicUrl));
-
-/** The secret reports are keyed from: REPORT_SECRET, else the session secret. None on a deployed site without a real one. */
+/**
+ * The secret reports are keyed from: REPORT_SECRET, which must be set and
+ * strong. Nothing is guessed from the site's address, and the session secret
+ * is never borrowed. The test suite (NODE_ENV=test) alone has a built-in key.
+ */
 function baseSecret(): string | undefined {
-  const secret = process.env.REPORT_SECRET || config.sessionSecret;
-  if (deployed() && (!secret || secret === DEV_SECRET || secret.length < 16)) return undefined;
-  return secret || DEV_SECRET;
+  const secret = process.env.REPORT_SECRET;
+  if (secret) return secret.length >= MIN_SECRET && secret !== config.sessionSecret ? secret : undefined;
+  return process.env.NODE_ENV === 'test' ? TEST_SECRET : undefined;
 }
 /** A key for one purpose: signing form tokens and pseudonymising addresses never share one. */
 const keyFor = (purpose: 'sign' | 'visitor' | 'duplicate') => {
@@ -87,7 +96,9 @@ export function reportToken(scope: TokenScope, now = Date.now()): string {
 }
 
 const TOKEN_FORMAT = /^(\d{10,16})\.([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/;
-const used = new Map<string, number>();
+
+/** Records a token's nonce as used, in one statement: false if it was used before (by this process or any other, before or after a restart). */
+const consume = (nonce: string, until: number) => insertOnce('reportNonces', { id: nonce, until }, 'nonce');
 
 const EXPIRED = 'This form has expired. Reload the page and try again.';
 function tokenProblem(scope: TokenScope, token: unknown, now = Date.now()): string | undefined {
@@ -98,10 +109,10 @@ function tokenProblem(scope: TokenScope, token: unknown, now = Date.now()): stri
   const expected = signature(scope, ts, nonce);
   if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return EXPIRED;
   const issued = Number(ts);
-  if (now - issued > TOKEN_MAX_AGE_MS || used.has(nonce)) return EXPIRED;
+  if (now - issued > TOKEN_MAX_AGE_MS || issued - now > 60_000) return EXPIRED;
   if (now - issued < TOKEN_MIN_AGE_MS) return 'That was quick. Please check your report and send it again.';
   // Each token is good for one try.
-  used.set(nonce, issued + TOKEN_MAX_AGE_MS);
+  if (!consume(nonce, issued + TOKEN_MAX_AGE_MS)) return EXPIRED;
   return undefined;
 }
 
@@ -121,26 +132,36 @@ function sweep(now = Date.now(), force = false) {
     if (live.length) hits.set(k, live);
     else hits.delete(k);
   }
-  for (const [k, until] of used) if (until <= now) used.delete(k);
+  removeWhereAtMost('reportNonces', 'until', now);
   for (const [k, v] of sent) if (v.until <= now) sent.delete(k);
-  for (const m of [hits, used, sent] as Map<string, unknown>[]) for (const k of m.keys()) if (m.size > MAX_KEYS) m.delete(k);
+  for (const m of [hits, sent] as Map<string, unknown>[]) for (const k of m.keys()) if (m.size > MAX_KEYS) m.delete(k);
 }
 
 /** For tests: clears every limit, and what was remembered about past reports. */
 export function resetReportLimits() {
   hits.clear();
-  used.clear();
   sent.clear();
+  lastSweep = 0;
+  removeWhereAtMost('reportNonces', 'until', Number.MAX_SAFE_INTEGER);
   for (const d of [0, 1]) remove('kv', dailyKey(Date.now() - d * DAY_MS));
 }
 /** For tests: how many visitors and tokens are remembered. */
-export const reportMemory = () => ({ visitors: hits.size, tokens: used.size, sent: sent.size });
+export const reportMemory = () => ({ visitors: [...hits.keys()].filter((k) => k.startsWith('v:')).length, attempts: [...hits.keys()].filter((k) => k.startsWith('a:')).length, tokens: list('reportNonces', 'nonce').length, sent: sent.size });
 export const sweepReportMemory = (now: number) => sweep(now, true);
 
 function visitorLimited(who: string, now: number): boolean {
   const key = `v:${who}`;
   const ts = (hits.get(key) ?? []).filter((t) => now - t < DAY_MS);
   if (ts.filter((t) => now - t < VISITOR.short.ms).length >= VISITOR.short.max || ts.length >= VISITOR.day.max) return true;
+  hits.set(key, [...ts, now]);
+  return false;
+}
+
+/** Every post counts here, before it is checked at all. */
+function attemptsLimited(who: string, now: number): boolean {
+  const key = `a:${who}`;
+  const ts = (hits.get(key) ?? []).filter((t) => now - t < ATTEMPTS.ms);
+  if (ts.length >= ATTEMPTS.max) return true;
   hits.set(key, [...ts, now]);
   return false;
 }
@@ -277,6 +298,11 @@ class ReportError extends Error {
 }
 
 async function submit(req: Request, res: Response, project: OntologyProject) {
+  const now = Date.now();
+  // Before anything else, so posts that fail a check below are cleaned up after and limited too.
+  sweep(now);
+  const who = visitor(req);
+  if (attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
   const b = (req.body ?? {}) as Record<string, unknown>;
   const iri = clean(b.term, 2000);
   const found = iri ? await findTerm(project, clean(b.version, 40) || undefined, iri) : undefined;
@@ -292,9 +318,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   if (fields.description.length < REPORT_LIMITS.minDescription) return fail(400, 'Please describe the problem in a sentence or two.', 'description');
   if (fields.description.length > REPORT_LIMITS.description) return fail(400, `Please keep the description under ${REPORT_LIMITS.description} characters.`, 'description');
   if ((`${fields.title} ${fields.description}`.match(/https?:\/\/|www\./gi) ?? []).length > REPORT_LIMITS.links) return fail(400, `Please include at most ${REPORT_LIMITS.links} links.`, 'description');
-  const now = Date.now();
-  sweep(now);
-  if (visitorLimited(visitor(req), now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
+  if (visitorLimited(who, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
   // The same report twice from this browser: answered as the first time, and only ever about this browser's own reports.
   const fingerprint = crypto.createHmac('sha256', keyFor('duplicate')!).update([session, project.id, found.term.iri, fields.description.toLowerCase().replace(/\s+/g, ' ')].join('\n')).digest('base64url');
   const before = sent.get(fingerprint);
@@ -323,7 +347,7 @@ const UNAVAILABLE = 'Reporting from the public page isn’t available on this si
 export function reportRouter(): Router {
   const r = Router();
   const base = `${PUBLIC_BASE}/:slug/-/report`;
-  if (!publicReportsEnabled()) console.warn('[public] reports from the public page are off: set REPORT_SECRET (or a strong SESSION_SECRET) to turn them on');
+  if (!publicReportsEnabled()) console.warn(`[public] reports from the public page are off: set REPORT_SECRET (at least ${MIN_SECRET} characters, not the session secret) to turn them on`);
   const project = (req: Request, res: Response) => {
     const p = findProject(String(req.params.slug));
     if (!p) res.status(404).set('Cache-Control', 'no-store').type('text/plain').send('No such ontology');
@@ -403,3 +427,20 @@ export const getPublicReport = (ontologyId: string, id: string) => {
 };
 /** Once reviewed, a report is gone: opened as a change request, or dismissed. */
 export const removePublicReport = (id: string) => remove('publicReports', id);
+
+/** A claim older than this is from a request that never finished (the server stopped, say): it can be taken over. */
+const CLAIM_STALE_MS = 2 * 60 * 1000;
+
+/**
+ * Claims a report for opening as a change request, in one statement, so two
+ * moderators (or a double click) can't open it twice. Undefined if someone
+ * else is opening it right now.
+ */
+export function claimPublicReport(report: PublicReport, now = Date.now()): PublicReport | undefined {
+  if (report.claimedAt && now - report.claimedAt > CLAIM_STALE_MS) put('publicReports', { ...report, claimedAt: undefined }, report.ontologyId);
+  return claim<PublicReport>('publicReports', report.id, 'claimedAt', now);
+}
+/** Puts a claimed report back in the queue, as it was, when opening it failed. */
+export const releasePublicReport = (report: PublicReport) => {
+  if (get<PublicReport>('publicReports', report.id)) put('publicReports', { ...report, claimedAt: undefined }, report.ontologyId);
+};

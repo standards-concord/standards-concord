@@ -358,6 +358,80 @@ test.describe('Public ontology page', () => {
     await context.close();
   });
 
+  test('a reply to a report sent earlier never confirms the report being written now', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let posted = 0;
+    // Hold the first report's reply until a second report is being written.
+    await page.route('**/def/volunteering/-/report', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      posted++;
+      await held;
+      await route.fulfill({ status: 201, json: { reference: 'prp_first' } });
+    });
+    await page.goto(`${PAGE}#VolunteeringOpportunity`);
+    await page.locator('article.term#VolunteeringOpportunity').getByRole('link', { name: 'Report a problem with this term' }).click();
+    const dialog = page.locator('dialog.report-dialog');
+    await dialog.getByLabel('What’s the problem?').fill('The first report, about the first term.');
+    await page.waitForTimeout(3_100);
+    await dialog.getByRole('button', { name: 'Send report' }).click();
+    await expect.poll(() => posted).toBe(1);
+    await dialog.getByRole('button', { name: 'Close' }).first().click();
+    // A second term, a second report being typed when the first reply arrives.
+    await page.goto(`${PAGE}#Volunteer`);
+    await page.locator('article.term#Volunteer').getByRole('link', { name: 'Report a problem with this term' }).click();
+    await expect(dialog.getByLabel('What’s the problem?')).toHaveValue('');
+    await dialog.getByLabel('What’s the problem?').fill('The second report, not sent yet.');
+    release();
+    await page.waitForTimeout(500);
+    await expect(dialog.getByRole('heading', { name: 'Thanks for your report' })).toBeHidden();
+    await expect(dialog.getByLabel('What’s the problem?')).toHaveValue('The second report, not sent yet.');
+    await expect(dialog.getByRole('button', { name: 'Send report' })).toBeEnabled();
+  });
+
+  test('the form says what happens to a report if the working group takes it up', async ({ page }) => {
+    await page.goto(`${PAGE}#VolunteeringOpportunity`);
+    await page.locator('article.term#VolunteeringOpportunity').getByRole('link', { name: 'Report a problem with this term' }).click();
+    await expect(page.locator('dialog.report-dialog')).toContainText('it becomes a change request that people signed in to Concord can read, and AI tools may help analyse it');
+  });
+
+  test('moderators are told when the report queue can’t be loaded, and can retry', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 500/);
+    await signIn(page, { name: 'E2E queue moderator', role: 'steward' });
+    let fail = true;
+    await page.route('**/api/ontologies/*/public-reports', (route) => (fail ? route.fulfill({ status: 500, json: { error: 'The queue is unavailable' } }) : route.fulfill({ json: [] })));
+    await page.goto('/o/volunteering/changes');
+    const alert = page.getByRole('alert').filter({ hasText: 'Couldn’t load reports from the public page' });
+    await expect(alert).toBeVisible();
+    fail = false;
+    await alert.getByRole('button', { name: /Retry|Try again/ }).click();
+    await expect(alert).toHaveCount(0);
+  });
+
+  test('dismissing a report keeps keyboard focus in the queue and says what happened', async ({ page }) => {
+    await signIn(page, { name: 'E2E dismiss moderator', role: 'steward' });
+    const report = (n: number) => ({ id: `prp_focus${n}`, ontologyId: 'x', termIri: 'https://w3id.org/x#T', termName: `term ${n}`, version: 'draft', title: `Focus report ${n}`, description: 'A problem.', createdAt: new Date().toISOString() });
+    let queue = [report(1), report(2)];
+    await page.route('**/api/ontologies/*/public-reports', (route) => route.fulfill({ json: queue }));
+    await page.route('**/api/ontologies/*/public-reports/*/dismiss', async (route) => {
+      const id = new URL(route.request().url()).pathname.split('/').at(-2);
+      queue = queue.filter((r) => r.id !== id);
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.goto('/o/volunteering/changes');
+    const region = page.getByRole('region', { name: /Reports from the public page/ });
+    await region.locator('[data-public-report]').first().getByRole('button', { name: 'Dismiss' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(region.locator('[data-public-report]')).toHaveCount(1);
+    // Focus moves to the report that took its place.
+    await expect(region.locator('[data-public-report]').first().getByRole('button', { name: 'Open as bug report' })).toBeFocused();
+    await expect(region.getByRole('status')).toHaveText('Report dismissed.');
+    await region.getByRole('button', { name: 'Dismiss' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(region).toContainText('No reports left to review.');
+    await expect(page.locator('#public-reports-h')).toBeFocused();
+  });
+
   test('people without a moderating role never see public reports', async ({ page }) => {
     await signIn(page, { name: 'E2E contributor', role: 'contributor' });
     await page.goto('/o/volunteering/changes');

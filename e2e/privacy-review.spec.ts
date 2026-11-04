@@ -85,7 +85,9 @@ test.describe('privacy review', () => {
     // The row went away with the focused button: focus stays in the section.
     await expect(page.locator('#withheld-h')).toBeFocused();
     await section.getByRole('button', { name: 'Keep it out' }).click();
-    await expect(section).toHaveCount(0);
+    await expect(section).toContainText('Nothing left to review');
+    await expect(section.getByRole('status')).toHaveText('Kept off the public page.');
+    await expect(page.locator('#withheld-h')).toBeFocused();
     expect(calls).toEqual(['restore wh_1', 'dismiss wh_2']);
   });
 

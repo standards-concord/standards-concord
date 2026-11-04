@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { ChangeRequestKind, ChangeRequestStatus } from '@concord/shared';
 import { Bug, GitPullRequest, Globe, Plus } from 'lucide-react';
@@ -96,49 +96,79 @@ function PublicReports() {
   const { now } = useSession();
   const moderator = hasRole('editor', 'steward', 'owner');
   const reports = useAsync(() => (moderator ? api.publicReports(id) : Promise.resolve([])), [id, moderator]);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  // What the last action did, for screen readers; and whether to keep the panel after its last report goes.
+  const [status, setStatus] = useState('');
   const accept = useAction(async (reportId: string) => {
     const cr = await api.acceptPublicReport(id, reportId);
     nav(`/o/${id}/changes/${cr.id}`);
   });
   const dismiss = useAction(async (reportId: string) => {
+    const at = reports.data?.findIndex((r) => r.id === reportId) ?? 0;
     await api.dismissPublicReport(id, reportId);
-    reports.reload();
+    await reports.reload();
+    setStatus('Report dismissed.');
+    // The focused button went with its report: move to the report that took its place, or the heading.
+    requestAnimationFrame(() => {
+      const items = listRef.current?.querySelectorAll<HTMLElement>('[data-public-report]') ?? [];
+      const next = items[Math.min(at, items.length - 1)]?.querySelector<HTMLElement>('button');
+      (next ?? heading.current)?.focus();
+    });
   });
-  if (!moderator || !reports.data?.length) return null;
+  if (!moderator) return null;
+  if (reports.error && !reports.data)
+    return <ErrorCard className="mb-6" title="Couldn’t load reports from the public page" error={reports.error} onRetry={() => void reports.reload()} />;
+  // Nothing to show until loaded, or when there's nothing to review (unless the last one was just dealt with here).
+  if (!reports.data || (!reports.data.length && !status)) return null;
   return (
     <section aria-labelledby="public-reports-h" className="mb-6">
       <Card>
         <div className="border-b border-line px-5 py-3.5">
-          <h3 id="public-reports-h" className="flex items-center gap-2 font-semibold">
+          <h3 id="public-reports-h" ref={heading} tabIndex={-1} className="flex items-center gap-2 font-semibold outline-none">
             <Globe className="h-4 w-4 text-muted" aria-hidden="true" />
             Reports from the public page <span className="text-sm font-normal text-muted">({reports.data.length} to review)</span>
           </h3>
           <p className="mt-0.5 text-sm text-muted">Sent without an account. Only editors, stewards and owners see these. Open one as a bug report to discuss it, or dismiss it.</p>
         </div>
-        <ul className="divide-y divide-line">
-          {reports.data.map((r) => (
-            <li key={r.id} className="px-5 py-3.5" data-public-report>
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <span className="font-medium">{r.title || `Problem with ${r.termName}`}</span>
-                <span className="text-xs text-muted">
-                  <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(r.termIri)}`}>
-                    {r.termName}
-                  </Link>{' '}
-                  · {r.version === 'draft' ? 'working draft' : `version ${r.version}`} · {relativeTime(r.createdAt, now())}
-                </span>
-              </div>
-              <p className="mt-1.5 whitespace-pre-wrap break-words text-sm">{r.description}</p>
-              <div className="mt-2.5 flex gap-2">
-                <Button size="sm" variant="primary" icon={Bug} loading={accept.pending} onClick={() => void accept.run(r.id)}>
-                  Open as bug report
-                </Button>
-                <Button size="sm" variant="ghost" loading={dismiss.pending} onClick={() => void dismiss.run(r.id)}>
-                  Dismiss
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
+        <p role="status" className="sr-only">
+          {status}
+        </p>
+        {reports.data.length ? (
+          <ul ref={listRef} className="divide-y divide-line">
+            {reports.data.map((r) => (
+              <li key={r.id} className="px-5 py-3.5" data-public-report>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="font-medium">{r.title || `Problem with ${r.termName}`}</span>
+                  <span className="text-xs text-muted">
+                    <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(r.termIri)}`}>
+                      {r.termName}
+                    </Link>{' '}
+                    · {r.version === 'draft' ? 'working draft' : `version ${r.version}`} · {relativeTime(r.createdAt, now())}
+                  </span>
+                </div>
+                <p className="mt-1.5 whitespace-pre-wrap break-words text-sm">{r.description}</p>
+                <div className="mt-2.5 flex gap-2">
+                  <Button size="sm" variant="primary" icon={Bug} loading={accept.pending} onClick={() => void accept.run(r.id)}>
+                    Open as bug report
+                  </Button>
+                  <Button size="sm" variant="ghost" loading={dismiss.pending} onClick={() => void dismiss.run(r.id)}>
+                    Dismiss
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-5 py-3.5 text-sm text-muted" data-public-reports-empty>
+            No reports left to review.
+          </p>
+        )}
+        {reports.error ? (
+          <div className="px-5 pb-3">
+            <InlineError error={reports.error} />
+          </div>
+        ) : null}
         <div className="px-5 pb-3">
           <InlineError error={accept.error ?? dismiss.error} />
         </div>

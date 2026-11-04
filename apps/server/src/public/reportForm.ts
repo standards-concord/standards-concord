@@ -31,7 +31,7 @@ export function reportChoices(o: { action: string; iri: string; version: string;
   </section>
   <section class="choice" aria-labelledby="${id('report-public-h')}">
     <h3 id="${id('report-public-h')}">As a member of the public</h3>
-    <p>No account needed. Someone from the working group reviews your report. It isn’t published, and you won’t get a reply.</p>
+    <p>No account needed, and you won’t get a reply. Your report isn’t shown on this page: someone from the working group reviews it first. If they take it up, it becomes a change request that people signed in to Concord can read, and AI tools may help analyse it.</p>
     <form class="report-form" method="post" action="${esc(o.action)}">
       ${s.error ? `<p class="notice warn" role="alert" id="${id('report-error')}">${esc(s.error)}</p>` : `<p class="notice warn" role="alert" id="${id('report-error')}" hidden></p>`}
       <input type="hidden" name="term" value="${esc(o.iri)}">

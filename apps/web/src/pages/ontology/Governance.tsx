@@ -368,15 +368,17 @@ function WithheldReview() {
   const canReview = hasRole('owner', 'steward');
   const items = useAsync(() => (canReview ? api.withheld(id) : Promise.resolve([])), [id, canReview]);
   const heading = useRef<HTMLSpanElement>(null);
-  const act = useAction(async (fn: () => Promise<unknown>) => {
+  const [status, setStatus] = useState('');
+  const act = useAction(async (fn: () => Promise<unknown>, done: string) => {
     await fn();
     await items.reload();
+    setStatus(done);
     // The row (and the button that had focus) is gone: keep keyboard users in the list.
-    heading.current?.focus();
+    requestAnimationFrame(() => heading.current?.focus());
   });
   if (!canReview) return null;
-  if (items.error && !items.data) return <ErrorCard error={items.error} onRetry={items.reload} />;
-  if (!items.data?.length) return null;
+  if (items.error && !items.data) return <ErrorCard title="Couldn’t load what was withheld from the public page" error={items.error} onRetry={() => void items.reload()} />;
+  if (!items.data || (!items.data.length && !status)) return null;
   const reason = { credit: 'a credit an old merge wrote', 'use case title': 'names a use case', name: 'names a person' } as const;
   return (
     <section aria-labelledby="withheld-h">
@@ -392,6 +394,10 @@ function WithheldReview() {
         <p className="px-5 pt-3 pb-2 text-sm text-muted">
           Older versions of Concord could publish use case titles and people’s names. These statements were taken out of the public ontology for that reason. Put back any that are fine to publish.
         </p>
+        <p role="status" className="sr-only">
+          {status}
+        </p>
+        {!items.data.length && <p className="px-5 pb-3 text-sm text-muted">Nothing left to review.</p>}
         <ul className="divide-y divide-line">
           {items.data.map((w) => (
             <li key={w.id} className="px-5 py-3" data-withheld>
@@ -400,10 +406,10 @@ function WithheldReview() {
               </div>
               <p className="mt-1 whitespace-pre-wrap break-words text-sm">{w.object.value}</p>
               <div className="mt-2 flex gap-2">
-                <Button size="sm" loading={act.pending} onClick={() => void act.run(() => api.restoreWithheld(id, w.id))}>
+                <Button size="sm" loading={act.pending} onClick={() => void act.run(() => api.restoreWithheld(id, w.id), 'Put back on the public page.')}>
                   Put back
                 </Button>
-                <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run(() => api.dismissWithheld(id, w.id))}>
+                <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run(() => api.dismissWithheld(id, w.id), 'Kept off the public page.')}>
                   Keep it out
                 </Button>
               </div>

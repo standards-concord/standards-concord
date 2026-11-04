@@ -373,7 +373,7 @@ export type ChangeRequestOrigin =
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] }
   /** Reported anonymously from the public ontology page. */
-  | { type: 'public-report'; termIri: string; version: string };
+  | { type: 'public-report'; termIri: string; version: string; /** The queued report it was opened from: approving twice finds this request. */ reportId?: string };
 
 /**
  * A problem reported from the public ontology page by someone without an
@@ -391,6 +391,8 @@ export interface PublicReport {
   title: string;
   description: string;
   createdAt: string;
+  /** Set while a moderator is opening it as a change request (ms since the epoch). */
+  claimedAt?: number;
 }
 
 /**

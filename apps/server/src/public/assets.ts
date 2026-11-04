@@ -325,7 +325,9 @@ export const PAGE_SCRIPT = `
   if(dialog&&dialog.showModal){
     var form=dialog.querySelector('.report-form');var alertBox=form.querySelector('[role="alert"]');
     var body=dialog.querySelector('[data-report-body]');var done=dialog.querySelector('[data-report-done]');
-    var sending=false;
+    // Each opening of the dialog is a round: replies from an earlier round (a report sent, then the dialog
+    // closed and opened for another term) are ignored rather than shown against the new one.
+    var sending=false;var round=0;var button=form.querySelector('button[type="submit"]');
     var close=function(){dialog.close();};
     dialog.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener('click',close);});
     dialog.addEventListener('click',function(e){if(e.target===dialog)close();});
@@ -336,10 +338,11 @@ export const PAGE_SCRIPT = `
     };
     var clearError=function(){alertBox.hidden=true;desc.removeAttribute('aria-invalid');desc.removeAttribute('aria-describedby');};
     var fresh=function(){
+      var mine=round;
       form.elements.token.value='';
       var q='?term='+encodeURIComponent(form.elements.term.value)+'&version='+encodeURIComponent(form.elements.version.value);
       return fetch(form.action+'/token'+q,{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
-        .then(function(res){if(res.ok&&res.j.token)form.elements.token.value=res.j.token;else if(res.j.error)fail(res.j.error);}).catch(function(){});
+        .then(function(res){if(mine!==round)return;if(res.ok&&res.j.token)form.elements.token.value=res.j.token;else if(res.j.error)fail(res.j.error);}).catch(function(){});
     };
     document.querySelectorAll('[data-report]').forEach(function(a){a.addEventListener('click',function(e){
       var action;try{action=new URL(form.action,location.href);}catch(err){return;}
@@ -350,16 +353,18 @@ export const PAGE_SCRIPT = `
       var member=dialog.querySelector('[data-member-report]');if(member)member.href=a.getAttribute('data-member-href');
       form.elements.title.value='';form.elements.description.value='';
       clearError();body.hidden=false;done.hidden=true;
+      round++;sending=false;button.disabled=false;
       fresh();
       dialog.showModal();
     });});
     form.addEventListener('submit',function(e){
       e.preventDefault();if(sending)return;
       var data={};['term','version','token','website','title','description'].forEach(function(k){data[k]=form.elements[k]?form.elements[k].value:'';});
-      sending=true;var button=form.querySelector('button[type="submit"]');button.disabled=true;
+      sending=true;button.disabled=true;var mine=round;
       fetch(form.action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify(data)})
         .then(function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,j:j};});})
         .then(function(res){
+          if(mine!==round)return;
           if(res.ok){
             dialog.querySelector('[data-report-ref]').textContent=res.j.reference||'';
             body.hidden=true;done.hidden=false;
@@ -371,8 +376,8 @@ export const PAGE_SCRIPT = `
             if(res.j.token)form.elements.token.value=res.j.token;else fresh();
           }
         })
-        .catch(function(){fail('Could not send the report. Check your connection and try again.');})
-        .then(function(){sending=false;button.disabled=false;});
+        .catch(function(){if(mine===round)fail('Could not send the report. Check your connection and try again.');})
+        .then(function(){if(mine===round){sending=false;button.disabled=false;}});
     });
   }
 
