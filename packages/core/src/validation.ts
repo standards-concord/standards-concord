@@ -89,7 +89,8 @@ export async function parseData(text: string, format: DataFormat, opts: ParseDat
     if (out.addQuad(q.subject, q.predicate, q.object) && ++distinct > max) throw new DataError(413, tooMany(max));
   };
   try {
-    await streamQuads(text, format, opts.baseIRI, keep, opts.maxJsonLdBytes ?? MAX_JSONLD_BYTES);
+    // JSON-LD may have at most 4 values per allowed triple before it is converted (see checkJsonLdBudget).
+    await streamQuads(text, format, opts.baseIRI, keep, opts.maxJsonLdBytes ?? MAX_JSONLD_BYTES, Number.isFinite(max) ? max * 4 : Infinity);
   } catch (err) {
     if (err instanceof DataError) throw err;
     throw new DataError(400, `Could not parse the data as ${DATA_FORMATS[format].label}: ${(err as Error).message}`);
@@ -206,7 +207,166 @@ function jsonDepth(doc: unknown, limit: number): number {
   return deepest;
 }
 
-async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void, maxJsonLdBytes: number): Promise<void> {
+/** The longest term, IRI or context string JSON-LD may use. */
+export const MAX_JSONLD_STRING = 4096;
+/** How much IRI text expanding JSON-LD may make, in characters: uses of terms times the longest a term can expand to. */
+export const MAX_JSONLD_EXPANSION = 32 * 1024 * 1024;
+
+/**
+ * Bounds what converting JSON-LD can build, from the parsed JSON alone,
+ * before anything is converted. Expansion turns each use of a term (a key,
+ * an @type, a value coerced to an IRI) into a full IRI, which can be far
+ * longer than the term: a short document can name a huge IRI and use it
+ * thousands of times. So:
+ *  - keys, @id/@type/@vocab/@base values and every string in a context are
+ *    limited to MAX_JSONLD_STRING characters;
+ *  - the longest IRI any term can expand to is worked out from the contexts
+ *    (following prefixes through other terms), and that times the number of
+ *    uses must stay within MAX_JSONLD_EXPANSION;
+ *  - there may be at most `maxValues` property values and types (each makes
+ *    at most a triple or two), which bounds the triples built before they
+ *    are counted.
+ * Walks without recursion. Throws DataError 413.
+ */
+export function checkJsonLdBudget(doc: unknown, maxValues: number): void {
+  const fail = (why: string) => {
+    throw new DataError(413, `This JSON-LD is too large or complex to convert: ${why}. Send it as Turtle or N-Triples instead.`);
+  };
+  const long = (x: string, what: string) => x.length > MAX_JSONLD_STRING && fail(`${what} is longer than ${MAX_JSONLD_STRING.toLocaleString('en')} characters`);
+  // Term name → the IRIs (or compact IRIs) it is defined as, across every context.
+  const terms = new Map<string, string[]>();
+  let vocab = 0;
+  let base = 0;
+  let uses = 0;
+  let values = 0;
+  // Terms whose values are JSON literals (@type: @json): one literal each, never looked inside.
+  const jsonTerms = new Set<string>();
+  const define = (name: string, iri: string) => {
+    if (!terms.has(name)) terms.set(name, []);
+    terms.get(name)!.push(iri);
+  };
+  // First the contexts, wherever they are, so the terms are known before the data is counted.
+  const contexts: unknown[] = [];
+  const data: unknown[] = [doc];
+  const all: unknown[] = [doc];
+  while (all.length) {
+    const node = all.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const x of node) all.push(x);
+      continue;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      long(key, 'a key');
+      if (key === '@context') contexts.push(value);
+      else if (key !== '@value') all.push(value);
+    }
+  }
+  while (contexts.length) {
+    const node = contexts.pop();
+    if (typeof node === 'string') {
+      long(node, 'a context string');
+      continue;
+    }
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      for (const x of node) contexts.push(x);
+      continue;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '@vocab' && typeof value === 'string') vocab = Math.max(vocab, value.length);
+      else if (key === '@base' && typeof value === 'string') base = Math.max(base, value.length);
+      else if (!key.startsWith('@')) {
+        if (typeof value === 'string') define(key, value);
+        else if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const def = value as Record<string, unknown>;
+          for (const k of ['@id', '@reverse']) if (typeof def[k] === 'string') define(key, def[k] as string);
+          if (def['@id'] === undefined && def['@reverse'] === undefined) define(key, key);
+          if (def['@type'] === '@json') jsonTerms.add(key);
+        }
+      }
+      // Nested definitions and scoped contexts are contexts too.
+      contexts.push(value);
+    }
+  }
+  // Then the data: uses of terms (keys, and strings that may be IRIs) and values.
+  while (data.length) {
+    const node = data.pop();
+    if (typeof node === 'string') {
+      uses++;
+      continue;
+    }
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      // Every item of an array (of values, of a list, of types, of a graph) can make a triple or two.
+      values += node.length;
+      if (values > maxValues) fail(`it has more than ${maxValues.toLocaleString('en')} values`);
+      for (const x of node) data.push(x);
+      continue;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '@context' || key === '@value') continue;
+      if (key === '@id' || key === '@type' || key === '@vocab' || key === '@base') {
+        for (const v of Array.isArray(value) ? value : [value]) if (typeof v === 'string') long(v, `an ${key} value`);
+      }
+      const term = !key.startsWith('@');
+      if (term) uses++;
+      if ((term || key === '@type') && !Array.isArray(value)) values++;
+      if (values > maxValues) fail(`it has more than ${maxValues.toLocaleString('en')} values`);
+      if (term && jsonTerms.has(key)) continue;
+      data.push(value);
+    }
+  }
+  // The longest IRI each term can expand to: its definition, plus whatever its prefix (a term itself) expands to.
+  const memo = new Map<string, number>();
+  const visiting = new Set<string>();
+  const expandsTo = (name: string): number => {
+    const known = memo.get(name);
+    if (known !== undefined) return known;
+    if (visiting.has(name)) return 0; // A cycle: JSON-LD refuses it anyway.
+    visiting.add(name);
+    let longest = 0;
+    for (const iri of terms.get(name) ?? []) {
+      const colon = iri.indexOf(':');
+      const prefix = colon > 0 ? iri.slice(0, colon) : undefined;
+      const extra = prefix !== undefined && prefix !== name && terms.has(prefix) ? expandsTo(prefix) : colon < 0 ? Math.max(vocab, base) : 0;
+      longest = Math.max(longest, iri.length + extra);
+    }
+    visiting.delete(name);
+    memo.set(name, longest);
+    return longest;
+  };
+  let longest = Math.max(vocab, base);
+  for (const name of terms.keys()) longest = Math.max(longest, expandsTo(name));
+  if (longest > MAX_JSONLD_STRING) fail(`a term in its context expands to an IRI longer than ${MAX_JSONLD_STRING.toLocaleString('en')} characters`);
+  // Terms are expanded while their contexts are processed too, so count each definition as a use.
+  if ((uses + terms.size) * Math.max(longest, 1) > MAX_JSONLD_EXPANSION) fail('its contexts would expand it to too much text');
+}
+
+/** A quad as jsonld.toRDF returns it (plain objects, not RDF/JS terms). */
+interface JsonLdTerm {
+  termType: 'NamedNode' | 'BlankNode' | 'Literal' | 'DefaultGraph';
+  value: string;
+  datatype?: { value: string };
+  language?: string;
+}
+interface JsonLdQuad {
+  subject: JsonLdTerm;
+  predicate: JsonLdTerm;
+  object: JsonLdTerm;
+}
+
+const { namedNode, blankNode, literal, quad: makeQuad } = DataFactory;
+const fromTerm = (t: JsonLdTerm) =>
+  t.termType === 'BlankNode'
+    ? blankNode(t.value.replace(/^_:/, ''))
+    : t.termType === 'Literal'
+      ? literal(t.value, t.language || (t.datatype ? namedNode(t.datatype.value) : undefined))
+      : namedNode(t.value);
+/** Named graphs are merged into the default graph, as for the other formats. */
+const fromJsonLd = (q: JsonLdQuad) => makeQuad(fromTerm(q.subject) as never, fromTerm(q.predicate) as never, fromTerm(q.object) as never) as unknown as Quad;
+
+async function streamQuads(text: string, format: DataFormat, baseIRI: string | undefined, emit: (q: Quad) => void, maxJsonLdBytes: number, maxValues: number): Promise<void> {
   switch (format) {
     case 'turtle':
       return streamN3(text, 'Turtle', baseIRI, emit);
@@ -232,28 +392,31 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
         throw new DataError(400, `The data is not valid JSON: ${(err as Error).message}`);
       }
       if (jsonDepth(doc, MAX_JSON_DEPTH) > MAX_JSON_DEPTH) throw new DataError(400, `The JSON is nested more than ${MAX_JSON_DEPTH} levels deep, the limit.`);
+      checkJsonLdBudget(doc, maxValues);
       const jsonld = (await import('jsonld')).default;
       let remote: string | undefined;
-      let nquads: string;
+      let dataset: JsonLdQuad[];
       try {
-        // One pass to RDF. It can't be stopped part-way, so the byte limit above and the
-        // validator's time limit bound it; the triples it makes are then counted (distinct,
-        // as RDF) as they are read back, and refused past the limit.
-        nquads = (await jsonld.toRDF(doc as object, {
+        // One pass to RDF, as quad objects that share the term strings expansion made
+        // (not one N-Quads string that copies every IRI into every line). It can't be
+        // stopped part-way, so the limits above, the byte limit and the validator's time
+        // limit bound it; the triples are then counted (distinct, as RDF) and refused
+        // past the limit.
+        dataset = (await jsonld.toRDF(doc as object, {
           base: baseIRI,
-          format: 'application/n-quads',
           // Never fetch: a remote @context would let anyone make this server request any URL.
           documentLoader: async (url: string) => {
             remote = url;
             throw new Error('remote documents are not loaded');
           },
-        } as never)) as unknown as string;
+        } as never)) as unknown as JsonLdQuad[];
       } catch (err) {
         if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
         throw err;
       }
       doc = undefined;
-      return streamN3(nquads, 'N-Quads', undefined, emit);
+      for (const q of dataset) emit(fromJsonLd(q));
+      return;
     }
     default:
       throw new DataError(400, `Unsupported data format: ${format as string}`);

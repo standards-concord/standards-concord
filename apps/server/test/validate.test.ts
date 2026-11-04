@@ -345,6 +345,28 @@ describe('POST to the ontology IRI validates data', () => {
       expect((await local().post('/def/volunteering').set('Content-Type', 'text/turtle').send(VALID)).status).toBe(200);
     });
 
+    it('converts one JSON-LD document at a time, while other formats carry on', async () => {
+      const before = POOL_LIMITS.perClient;
+      POOL_LIMITS.perClient = 10;
+      const jsonld = JSON.stringify({
+        '@context': { vol: 'https://w3id.org/odi/volunteering#' },
+        '@graph': Array.from({ length: 3000 }, (_, i) => ({ '@id': `https://example.org/r${i}`, '@type': 'vol:Role', 'vol:title': 'r' })),
+      });
+      const samples: number[] = [];
+      const watch = setInterval(() => samples.push(poolState().jsonld), 0);
+      try {
+        const answers = await Promise.all([
+          ...Array.from({ length: 3 }, () => post('/def/volunteering', jsonld, 'application/ld+json')),
+          post('/def/volunteering', VALID),
+        ]);
+        expect(answers.map((a) => a.status)).toEqual([200, 200, 200, 200]);
+        expect(Math.max(...samples)).toBe(1);
+      } finally {
+        clearInterval(watch);
+        POOL_LIMITS.perClient = before;
+      }
+    });
+
     it('drops a compressed upload as soon as its client goes away', async () => {
       const gz = gzipSync(bigData(2000));
       const { req } = send(gz.subarray(0, gz.length >> 1), { 'Content-Encoding': 'gzip', 'Content-Length': String(gz.length) });

@@ -79,7 +79,9 @@ describe('reading data', () => {
     for (const [text, format] of cases) {
       const err = await parseData(text, format, { maxTriples: 2 }).catch((e) => e);
       expect(err, format).toBeInstanceOf(DataError);
-      expect([format, err.status, err.message]).toEqual([format, 413, 'The data has more than 2 triples, the limit.']);
+      expect([format, err.status]).toEqual([format, 413]);
+      // JSON-LD is refused before conversion, for having too many values to convert.
+      expect(err.message).toBe(format === 'jsonld' ? 'This JSON-LD is too large or complex to convert: it has more than 8 values. Send it as Turtle or N-Triples instead.' : 'The data has more than 2 triples, the limit.');
     }
   });
 
@@ -98,10 +100,12 @@ describe('reading data', () => {
     expect(await parseData(lists, 'jsonld')).toHaveLength(1 + 2 * 2 + 2 * 3 + 2 * 2 + 2 * 2);
     expect((await parseData(lists, 'jsonld', { maxTriples: 18 }).catch((e) => e)).status).toBe(413);
     const deepList = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', items: [[Array.from({ length: 5000 }, (_, i) => i)]] });
-    expect((await parseData(deepList, 'jsonld', { maxTriples: 25 }).catch((e) => e)).message).toMatch(/more than 25 triples/);
+    expect((await parseData(deepList, 'jsonld', { maxTriples: 25 }).catch((e) => e)).status).toBe(413);
+    expect(await parseData(deepList, 'jsonld', { maxTriples: 10_005 })).toHaveLength(10_005);
     // The same description repeated is one set of triples.
+    // (Repeats still count towards the values JSON-LD may have before conversion: four per allowed triple.)
     const repeated = JSON.stringify({ '@context': ctx, '@graph': Array.from({ length: 50 }, () => ({ '@id': 'https://e/a', '@type': 'https://e/T', p: 1 })) });
-    expect(await parseData(repeated, 'jsonld', { maxTriples: 2 })).toHaveLength(2);
+    expect(await parseData(repeated, 'jsonld', { maxTriples: 40 })).toHaveLength(2);
     // Duplicates are judged as RDF: a plain string is an xsd:string, and @type is rdf:type.
     const same = JSON.stringify({
       '@context': ctx,
@@ -115,6 +119,29 @@ describe('reading data', () => {
     const nested = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', p: [[1, [2, [3]]]] });
     expect(await parseData(nested, 'jsonld', { maxTriples: 3 })).toHaveLength(3);
     expect((await parseData(nested, 'jsonld', { maxTriples: 2 }).catch((e) => e)).status).toBe(413);
+  });
+
+  it('refuses JSON-LD whose terms would expand into huge IRIs, before converting it', async () => {
+    const refused = async (doc: unknown, why: RegExp) => {
+      const t = performance.now();
+      const err = await parseData(JSON.stringify(doc), 'jsonld', { maxTriples: 25_000 }).catch((e) => e);
+      expect(err).toBeInstanceOf(DataError);
+      expect([err.status, err.message]).toEqual([413, expect.stringMatching(why)]);
+      expect(performance.now() - t).toBeLessThan(500);
+    };
+    const nodes = (n: number) => Array.from({ length: n }, (_, i) => ({ '@id': `https://e/s${i}`, p: 1 }));
+    // A 100,000-character property IRI used on 5,000 nodes: about 140 KB that would expand to 500 MB.
+    await refused({ '@context': { p: `https://e/${'x'.repeat(100_000)}` }, '@graph': nodes(5000) }, /context string is longer than 4,096 characters/);
+    // Under the per-string limit, but used so often that it would still expand to too much.
+    await refused({ '@context': { p: `https://e/${'x'.repeat(4000)}` }, '@graph': nodes(5000) }, /would expand it to too much text/);
+    // Prefixes chained through other terms add up.
+    const chain: Record<string, string> = { t0: `https://e/${'x'.repeat(4000)}` };
+    for (let i = 1; i < 10; i++) chain[`t${i}`] = `t${i - 1}:${'y'.repeat(3000)}`;
+    await refused({ '@context': { ...chain, p: 't9:z' }, '@id': 'https://e/a', p: 1 }, /expands to an IRI longer than 4,096 characters/);
+    // And a long IRI written out in full is refused too.
+    await refused({ '@id': `https://e/${'x'.repeat(5000)}`, 'https://e/p': 1 }, /an @id value is longer than 4,096 characters/);
+    // Ordinary data with a context passes.
+    expect(await parseData(JSON.stringify({ '@context': { p: 'https://e/p' }, '@graph': nodes(5000) }), 'jsonld', { maxTriples: 25_000 })).toHaveLength(5000);
   });
 
   it('limits JSON-LD by size, as it is converted whole', async () => {

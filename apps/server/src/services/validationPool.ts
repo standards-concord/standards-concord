@@ -64,16 +64,15 @@ interface Slot {
   current?: Pending & { timer: NodeJS.Timeout };
 }
 
-const WORKER_URL = new URL('./validationWorker.ts', import.meta.url);
-// The worker is TypeScript: load it through tsx unless this process already does (node --import tsx, or the tsx CLI).
-const execArgv = process.execArgv.some((a) => a === 'tsx' || /[\\/]tsx[\\/]dist[\\/]/.test(a)) ? process.execArgv : [...process.execArgv, '--import', 'tsx'];
+// A plain-JavaScript entry that registers tsx itself, then loads validationWorker.ts.
+const WORKER_URL = new URL('./validationWorker.boot.mjs', import.meta.url);
 
 const slots: Slot[] = [];
 const queue: Pending[] = [];
 let nextId = 1;
 
 function spawn(): Slot {
-  const worker = new Worker(WORKER_URL, { execArgv, resourceLimits: { maxOldGenerationSizeMb: POOL_LIMITS.heapMb, maxYoungGenerationSizeMb: 32 } });
+  const worker = new Worker(WORKER_URL, { execArgv: [], resourceLimits: { maxOldGenerationSizeMb: POOL_LIMITS.heapMb, maxYoungGenerationSizeMb: 32 } });
   worker.unref();
   const slot: Slot = { worker };
   worker.on('message', (reply: WorkerReply) => {
@@ -94,8 +93,9 @@ function spawn(): Slot {
   return slot;
 }
 
-/** Workers being stopped. They still count against the limit until they have exited. */
+/** Workers being stopped. They still count against the limit until they have exited, as JSON-LD ones do against JSONLD_AT_ONCE. */
 let stopping = 0;
+let stoppingJsonld = 0;
 
 /**
  * Stops a worker, then fails its job and lets the queue go on. Its job's
@@ -109,21 +109,31 @@ function retire(slot: Slot, err: unknown) {
   const cur = slot.current;
   slot.current = undefined;
   if (cur) clearTimeout(cur.timer);
+  const jsonld = cur?.job.format === 'jsonld';
   stopping++;
+  if (jsonld) stoppingJsonld++;
   const done = () => {
     stopping--;
+    if (jsonld) stoppingJsonld--;
     cur?.reject(err);
     pump();
   };
   slot.worker.terminate().then(done, done);
 }
 
+/** JSON-LD jobs that may run at once: converting JSON-LD needs the most memory, so one at a time. */
+const JSONLD_AT_ONCE = 1;
+
 function pump() {
   while (queue.length) {
+    // The first waiting job that may start: any job, unless it is JSON-LD and JSON-LD is already running.
+    const jsonldRunning = slots.filter((s) => s.current?.job.format === 'jsonld').length + stoppingJsonld;
+    const i = queue.findIndex((p) => p.job.format !== 'jsonld' || jsonldRunning < JSONLD_AT_ONCE);
+    if (i < 0) return;
     let slot = slots.find((s) => !s.current);
     if (!slot && slots.length + stopping < POOL_LIMITS.workers) slot = spawn();
     if (!slot) return;
-    const next = queue.shift()!;
+    const next = queue.splice(i, 1)[0];
     clearTimeout(next.wait);
     const timer = setTimeout(() => {
       const seconds = POOL_LIMITS.timeoutMs / 1000;
@@ -179,4 +189,4 @@ export function runValidation(job: Omit<ValidationJob, 'id'>, signal?: AbortSign
 }
 
 /** Places taken and jobs waiting or running, for tests and health checks. */
-export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length, stopping, threads: slots.length + stopping });
+export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length, stopping, threads: slots.length + stopping, jsonld: slots.filter((s) => s.current?.job.format === 'jsonld').length + stoppingJsonld });
