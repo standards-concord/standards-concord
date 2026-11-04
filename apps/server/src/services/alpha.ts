@@ -46,6 +46,37 @@ export function rememberTester(req: Request, res: Response, before: User | undef
   res.cookie(TESTER_COOKIE, createSession(before.id), cookieOpts());
 }
 
+/**
+ * Sign-in could not move a demo tester's record into the account they signed in
+ * to: keep remembering the demo account as this browser's tester, so the record
+ * stays reachable, until `resumeTransfer` moves it.
+ */
+export function keepTesterForTransfer(req: Request, res: Response, demo: User) {
+  if (sessionUser(req.cookies?.[TESTER_COOKIE])?.id === demo.id) return;
+  clearTesterCookie(req, res);
+  res.cookie(TESTER_COOKIE, createSession(demo.id), cookieOpts());
+}
+
+/**
+ * A browser signed in with Google or GitHub that still remembers a demo tester
+ * account has a record waiting to move (see `keepTesterForTransfer`). Try again;
+ * once it has moved, the account they signed in to is the tester.
+ */
+export async function resumeTransfer(req: Request, res: Response) {
+  const remembered = sessionUser(req.cookies?.[TESTER_COOKIE]);
+  const user = req.user;
+  if (!remembered || !user || user.simulated || !isLasting(user) || remembered.id === user.id) return;
+  if (remembered.simulated || !remembered.providers.every((p) => p.provider === 'demo')) return;
+  try {
+    await mergeTesterRecords(remembered, user);
+  } catch (err) {
+    console.warn(`[alpha] testing record still could not move: ${(err as Error).message}`);
+    return;
+  }
+  clearTesterCookie(req, res);
+  delete req.cookies[TESTER_COOKIE];
+}
+
 export function testerInfo(u: User): AlphaTesterInfo {
   return { id: u.id, name: u.name, avatarUrl: u.avatarUrl, lasting: isLasting(u), providers: [...new Set(u.providers.map((p) => p.provider))], podUrl: u.podUrl };
 }
@@ -127,12 +158,24 @@ function mergeEntry(a: TestedVersion, b: TestedVersion): TestedVersion {
   };
 }
 
+/**
+ * The tester's record. No record yet is an empty history; a pod that could not
+ * be read throws (`readExisting`), so nothing is written over a record that is
+ * only out of reach for now. A record that is not JSON at all is kept aside
+ * (testing.unreadable-<time>.jsonld) before a fresh one replaces it.
+ */
 async function readVersions(userId: string): Promise<TestedVersion[]> {
-  const raw = await solid.read(userId, RECORD).catch(() => undefined);
+  let raw: string | undefined;
+  try {
+    raw = await solid.readExisting(userId, RECORD);
+  } catch (err) {
+    throw new HttpError(503, `Your testing record could not be read just now, so nothing was changed. Please try again. (${(err as Error).message})`);
+  }
   if (!raw) return [];
   try {
     return normaliseVersions((JSON.parse(raw) as Partial<RecordDoc> | null)?.versions);
   } catch {
+    await solid.write(userId, RECORD.replace('.jsonld', `.unreadable-${Date.now()}.jsonld`), raw, 'text/plain');
     return [];
   }
 }
@@ -170,7 +213,11 @@ const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.pod
 export async function alphaMe(req: Request): Promise<AlphaMe> {
   const t = testerFor(req);
   if (!t) return { versions: [] };
-  return { tester: testerInfo(t), versions: await readVersions(t.id), storedIn: podKind(t) };
+  try {
+    return { tester: testerInfo(t), versions: await readVersions(t.id), storedIn: podKind(t) };
+  } catch {
+    return { tester: testerInfo(t), versions: [], storedIn: podKind(t), unreadable: true };
+  }
 }
 
 /**
@@ -216,7 +263,9 @@ export async function recordVersion(tester: User, input: { version: unknown; com
 /**
  * Move a demo tester's record into the account they have just signed in to
  * (they proved control of both: the demo account's cookie and the provider
- * identity). Copies their feedback documents too; the demo account keeps its own copy.
+ * identity). Copies their feedback documents too; the demo account keeps its own
+ * copy. Throws if anything could not be read or written; it is safe to run
+ * again, since versions and feedback are merged rather than replaced.
  */
 export async function mergeTesterRecords(from: User, into: User) {
   const theirs = await updateRecord(from.id, async (v) => v);
@@ -227,7 +276,7 @@ export async function mergeTesterRecords(from: User, into: User) {
     return merged;
   });
   for (const id of new Set(theirs.flatMap((v) => v.feedbackIds))) {
-    const doc = await solid.read(from.id, `feedback/${id}.json`).catch(() => undefined);
-    if (doc && !(await solid.read(into.id, `feedback/${id}.json`).catch(() => undefined))) await solid.write(into.id, `feedback/${id}.json`, doc, 'application/json').catch(() => undefined);
+    const doc = await solid.readExisting(from.id, `feedback/${id}.json`);
+    if (doc && !(await solid.readExisting(into.id, `feedback/${id}.json`))) await solid.write(into.id, `feedback/${id}.json`, doc, 'application/json');
   }
 }

@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.12.0',
+    version: '0.13.0',
     date: '2026-11-04',
     title: 'Returning testers see what changed',
     changes: [
@@ -65,6 +65,70 @@ export const APP_RELEASES: AppRelease[] = [
           'The alpha pages show which version you’re testing. Sign in and Concord saves the version and your feedback to your own pod; next time it shows what changed, points your role at the new parts and asks about those rather than everything.',
         roles: [],
         ask: 'How useful is seeing what’s changed since your last visit, rather than starting over?',
+      },
+    ],
+  },
+  {
+    version: '0.12.0',
+    date: '2026-11-04',
+    title: 'SHACL compact syntax and classes for apps',
+    pr: 18,
+    changes: [
+      {
+        id: 'shaclc-classes',
+        type: 'feat',
+        title: 'Shapes in SHACL compact syntax, and generated classes',
+        detail:
+          'Source & export adds the SHACL shapes in compact syntax, which is much easier to read, and a JavaScript/TypeScript class for every shape so apps can work with the data as objects. Both are also served at the ontology’s URI.',
+        roles: ['agent', 'contributor'],
+        to: '{o}/source',
+        ask: 'How useful are the compact SHACL view and the generated classes for building against the standard?',
+      },
+      {
+        id: 'value-checks',
+        type: 'fix',
+        title: 'Data checks handle decimals, string types and patterns exactly',
+        detail: 'Validating data now checks exact decimal bounds, string subtypes and XSD patterns, and several datatypes on one property.',
+        roles: ['agent'],
+      },
+    ],
+  },
+  {
+    version: '0.11.3',
+    date: '2026-11-04',
+    title: 'Room under the ontology header',
+    pr: 41,
+    changes: [
+      {
+        id: 'header-gap',
+        type: 'fix',
+        title: 'A clear gap between the ontology header and the page',
+        detail: 'Each ontology page has breathing room between its header and the content below.',
+        roles: [],
+      },
+    ],
+  },
+  {
+    version: '0.11.2',
+    date: '2026-11-04',
+    title: 'Safer sign-in, and feedback for administrators only',
+    pr: 40,
+    changes: [
+      {
+        id: 'signin-hardening',
+        type: 'fix',
+        title: 'Signing in with Google or GitHub is safer',
+        detail:
+          'Each Google or GitHub identity has its own account: signing in never joins an account just because the email address matches, and a sign-in that didn’t start in your browser is refused.',
+        roles: [],
+      },
+      {
+        id: 'feedback-admins',
+        type: 'fix',
+        title: 'Only administrators can read testers’ feedback',
+        detail:
+          'Everyone’s feedback is readable only by this deployment’s administrators, signed in with Google or GitHub. Ontology roles and demo personas no longer count, and Feedback admin is gone from everyone else’s menu.',
+        roles: ['odi'],
       },
     ],
   },
@@ -487,6 +551,8 @@ export interface AlphaMe {
   /** Where the record lives: their Solid pod, or this server's private store when no Solid server is configured. */
   storedIn?: 'solid' | 'local';
   recordUrl?: string;
+  /** The record exists but could not be read just now; `versions` is empty and nothing will be written over it. */
+  unreadable?: boolean;
 }
 
 /** The newest version a tester used before `current`, if any. */

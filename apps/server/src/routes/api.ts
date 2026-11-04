@@ -12,7 +12,7 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
-import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor } from '../services/alpha.js';
+import { alphaMe, clearTesterCookie, recordVersion, rememberTester, resumeTransfer, testerFor } from '../services/alpha.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -134,7 +134,7 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
-    setSessionCookie(res, user.id);
+    setSessionCookie(res, user.id, 'demo');
     rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
@@ -543,7 +543,10 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ alpha testing ------------------------ */
-  r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
+  r.get('/alpha/me', async (req, res) => {
+    await resumeTransfer(req, res);
+    res.json(await alphaMe(req));
+  });
   r.post('/alpha/visit', async (req, res) => {
     const tester = testerFor(req);
     if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
@@ -551,7 +554,7 @@ export function apiRouter(): Router {
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
   });
   const feedbackAdmin = (req: Request) => {
-    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google or GitHub). Ontology roles
     // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');

@@ -127,16 +127,29 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
   const where = t.me?.storedIn === 'solid' ? 'your Solid pod' : 'your private storage on this server';
 
   if (!session || (t.meLoading && !t.me)) return <p className="text-sm text-muted">Checking who’s testing…</p>;
+  const unreadable = t.me?.unreadable && (
+    <p role="status" className="text-warn">
+      Your testing record couldn’t be read just now. Nothing has been changed, and it will show again once your pod answers.
+    </p>
+  );
+  const moving = tester && !tester.lasting && session.user?.providers?.some((p) => p.provider === 'google' || p.provider === 'github') && (
+    <p role="status" className="text-muted">
+      We couldn’t move your testing record into the account you signed in to yet. It stays here, and we’ll try again next time.
+    </p>
+  );
 
   if (tester?.lasting)
     return (
-      <div role="group" aria-label="Your testing record" className="flex items-start gap-3 text-sm">
-        <KeyRound className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
-        <p>
-          Signed in as <strong>{tester.name}</strong>. The versions you test and your feedback are saved to {where}
-          {t.me?.versions.length ? ` (${t.me.versions.length} version${t.me.versions.length === 1 ? '' : 's'} so far)` : ''}.
-          {session.user?.id !== tester.id && <span className="text-muted"> That stays true while you play someone else in the demo.</span>}
-        </p>
+      <div role="group" aria-label="Your testing record" className="space-y-2 text-sm">
+        <div className="flex items-start gap-3">
+          <KeyRound className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />
+          <p>
+            Signed in as <strong>{tester.name}</strong>. The versions you test and your feedback are saved to {where}
+            {t.me?.versions.length ? ` (${t.me.versions.length} version${t.me.versions.length === 1 ? '' : 's'} so far)` : ''}.
+            {session.user?.id !== tester.id && <span className="text-muted"> That stays true while you play someone else in the demo.</span>}
+          </p>
+        </div>
+        {unreadable}
       </div>
     );
 
@@ -154,7 +167,8 @@ function SavePrompt({ returnTo }: { returnTo: string }) {
             )}
           </p>
         </div>
-        <OAuthButtons returnTo={returnTo} />
+        {unreadable}
+        {moving || <OAuthButtons returnTo={returnTo} />}
       </div>
     );
 

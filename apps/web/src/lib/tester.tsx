@@ -75,7 +75,8 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
   // versions this browser has been used with.
   const [picks, setPicks] = useLocalStorage<Record<string, string>>('concord.alpha.picks', {});
   const [seen, setSeen] = useLocalStorage<string[]>('concord.alpha.seen', []);
-  const [compare, setCompare] = useState<string>();
+  // A comparison belongs to the tester who picked it: another tester in this browser starts from their own baseline.
+  const [compareFor, setCompareFor] = useState<{ tester: string; version: string }>();
 
   useEffect(() => {
     if (!seen.includes(APP_VERSION)) setSeen((s) => [...new Set([...s, APP_VERSION])]);
@@ -90,6 +91,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     if (!tester) return;
     const key = `${tester.id}:${APP_VERSION}:${roleKey ?? ''}`;
     if (recorded.current === key) return;
+    if (me_.unreadable) return; // Nothing is written over a record that couldn't be read.
     const entry = me_.versions.find((v) => v?.version === APP_VERSION);
     if (entry && (!roleKey || (Array.isArray(entry.roles) && entry.roles.includes(roleKey)))) {
       recorded.current = key;
@@ -105,6 +107,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
   }, [me_, roleKey, setMe]);
 
   const testerKey = me_?.tester?.id ?? 'anon';
+  const compare = compareFor?.tester === testerKey ? compareFor.version : undefined;
   const value = useMemo<TesterCtx>(() => {
     const valid = (v: string | undefined) => (v && findRelease(v) && compareVersions(v, APP_VERSION) < 0 ? findRelease(v)!.version : undefined);
     const versions = Array.isArray(me_?.versions) ? me_.versions.filter((v) => typeof v?.version === 'string') : [];
@@ -135,7 +138,7 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
       baselineSource,
       hasHistory,
       pickSince: (v) => {
-        if (hasHistory) return setCompare(v && v !== baseline ? v : undefined);
+        if (hasHistory) return setCompareFor(v && v !== baseline ? { tester: testerKey, version: v } : undefined);
         setPicks((p) => {
           const next = { ...(p ?? {}) };
           if (v === undefined) delete next[testerKey];

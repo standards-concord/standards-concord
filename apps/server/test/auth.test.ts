@@ -64,9 +64,9 @@ describe('reading feedback', () => {
       // A demo account with the same address is not an administrator.
       const demo = await createUser({ name: 'Pretend admin', email: 'admin@example.org', provider: 'demo', subject: 'demo-admin' });
       const { createSession } = await import('../src/services/users.js');
-      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`);
+      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`);
       expect(asAdmin.status).toBe(200);
-      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id)}`);
+      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id, 'demo')}`);
       expect(asDemo.status).toBe(403);
     } finally {
       config.adminEmails.splice(0, config.adminEmails.length, ...saved);
@@ -81,9 +81,9 @@ describe('reading feedback', () => {
     const saved = config.adminWebIds.slice();
     config.adminWebIds.push(admin.webId!, demo.webId!, persona.webId);
     try {
-      const get = (id: string) => request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(id)}`);
+      const get = (id: string) => request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(id, 'github')}`);
       expect((await get(admin.id)).status).toBe(200);
-      const session = await request(app).get('/api/session').set('Cookie', `concord_session=${createSession(admin.id)}`);
+      const session = await request(app).get('/api/session').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`);
       expect(session.body.user.isPlatformAdmin).toBe(true);
       // Listing a demo account's or a persona's WebID does not make them administrators.
       expect((await get(demo.id)).status).toBe(403);
@@ -92,6 +92,6 @@ describe('reading feedback', () => {
       config.adminWebIds.splice(0, config.adminWebIds.length, ...saved);
     }
     // Without the setting, the same account is an ordinary user.
-    expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`)).status).toBe(403);
+    expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`)).status).toBe(403);
   });
 });

@@ -3,8 +3,9 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
-import { createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
-import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
+import type { AuthProvider } from '@concord/shared';
+import { createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
+import { clearTesterCookie, keepTesterForTransfer, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -17,21 +18,23 @@ declare global {
   }
 }
 
+const FEDERATED: AuthProvider[] = ['google', 'github'];
+
 /**
  * Deployment administrators: an account whose WebID is in ADMIN_WEBIDS (or, the
- * older way, whose verified email is in ADMIN_EMAILS). It must be signed in with
- * Google or GitHub: demo accounts and simulated personas never count.
+ * older way, whose verified email is in ADMIN_EMAILS). This session must itself
+ * have been signed in with Google or GitHub: demo accounts, simulated personas,
+ * and sessions a demo account had before it was linked to a provider never count.
  */
-export function isAdmin(user: User): boolean {
-  const federated = user.providers.some((p) => p.provider === 'google' || p.provider === 'github');
-  if (!federated || user.simulated) return false;
+export function isAdmin(user: User, method: AuthProvider | undefined): boolean {
+  if (!method || !FEDERATED.includes(method) || !user.providers.some((p) => p.provider === method) || user.simulated) return false;
   if (user.webId && config.adminWebIds.includes(user.webId)) return true;
   return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
 }
 
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
-  req.user = user && isAdmin(user) ? { ...user, isPlatformAdmin: true } : user;
+  const s = sessionOf(req.cookies?.[SESSION_COOKIE]);
+  req.user = s && isAdmin(s.user, s.method) ? { ...s.user, isPlatformAdmin: true } : s?.user;
   next();
 }
 
@@ -40,8 +43,8 @@ export function requireUser(req: Request): User {
   return req.user;
 }
 
-export function setSessionCookie(res: Response, userId: string) {
-  res.cookie(SESSION_COOKIE, createSession(userId), {
+export function setSessionCookie(res: Response, userId: string, method: AuthProvider) {
+  res.cookie(SESSION_COOKIE, createSession(userId, method), {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.publicUrl.startsWith('https://'),
@@ -77,9 +80,9 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string) {
+function signInAs(req: Request, res: Response, userId: string, method: AuthProvider) {
   destroySession(req.cookies?.[SESSION_COOKIE]);
-  setSessionCookie(res, userId);
+  setSessionCookie(res, userId, method);
 }
 
 /**
@@ -91,9 +94,18 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
   const tester = testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
   const user = await upsertFederatedUser(identity, demoTester);
-  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user).catch((err) => console.warn(`[alpha] could not move testing record: ${(err as Error).message}`));
-  clearTesterCookie(req, res);
-  signInAs(req, res, user.id);
+  let moved = true;
+  if (demoTester && demoTester.id !== user.id) {
+    moved = await mergeTesterRecords(demoTester, user).then(
+      () => true,
+      (err) => (console.warn(`[alpha] could not move testing record yet: ${(err as Error).message}`), false),
+    );
+  }
+  // Until the record has moved, this browser keeps the demo account as the tester
+  // (so nothing is lost) and the move is tried again on the next visit.
+  if (moved) clearTesterCookie(req, res);
+  else keepTesterForTransfer(req, res, demoTester!);
+  signInAs(req, res, user.id, identity.provider);
   return user;
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/');

@@ -157,3 +157,31 @@ test('a tester with history can compare with another version and come back, by k
   await expect(page.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toBeVisible();
   await expectNoCrash(page);
 });
+
+test('a comparison one tester picked doesn’t carry over to the next tester in the same browser', async ({ page }) => {
+  await page.goto('/alpha');
+  const record = page.getByRole('group', { name: 'Your testing record' });
+  await record.getByRole('button', { name: /Keep a tester account in this browser/ }).click();
+  await expect(record).toContainText('tester account kept in this browser');
+  expect((await page.request.post('/api/alpha/visit', { data: { version: '0.7.0' } })).ok()).toBeTruthy();
+  await page.reload();
+  const changed = page.getByRole('region', { name: 'What’s changed' });
+  await changed.getByRole('button', { name: 'Compare with another version' }).click();
+  await changed.getByLabel('Compare with').selectOption('0.5.0');
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toBeVisible();
+
+  // Sign out and start again as someone else, without reloading the page.
+  await page.locator('.app-user-button').click();
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(page).toHaveURL(/\/login/);
+  await page.evaluate(() => {
+    history.pushState({}, '', '/alpha');
+    dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
+  await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
+  // The new tester has no history of their own, so they're asked, not shown the last tester's comparison.
+  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toHaveCount(0);
+  await expectNoCrash(page);
+});

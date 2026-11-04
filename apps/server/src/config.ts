@@ -27,7 +27,7 @@ export const config = {
   demoMode: bool(process.env.DEMO_MODE, true),
   /**
    * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
-   * An account's WebID is shown under Settings; it stays the same whichever provider they sign in with.
+   * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
    */
   adminWebIds: (process.env.ADMIN_WEBIDS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
   /** Older alternative to ADMIN_WEBIDS: the verified email of a Google or GitHub account. */

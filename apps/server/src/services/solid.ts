@@ -148,6 +148,27 @@ export const solid = {
     return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
   },
 
+  /**
+   * Like `read`, but only "not there" (404, or no local copy) comes back as
+   * undefined: a pod that answers with an error or cannot be reached throws, so
+   * callers never mistake a record that is out of reach for one that is empty.
+   */
+  async readExisting(userId: string, relPath: string): Promise<string | undefined> {
+    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const file = path.join(config.dataDir, 'private', userId, relPath);
+    const local = () => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined);
+    if (this.enabled && rec) {
+      const s = await sessionFor({ ...rec, id: userId });
+      const url = `${rec.podUrl}concord/${relPath}`;
+      const res = await s.fetch(url);
+      if (res.ok) return await res.text();
+      // Not in the pod: it may have been kept locally while the pod was unreachable.
+      if (res.status === 404 || res.status === 410) return local();
+      throw new Error(`GET ${url} → ${res.status}`);
+    }
+    return local();
+  },
+
   /** A minimal WebID profile document for locally-hosted WebIDs. */
   profileDocument(user: User): string {
     const me = this.localWebId(user.id);

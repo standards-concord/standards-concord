@@ -64,6 +64,8 @@ export async function upsertFederatedUser(p: { provider: AuthProvider; subject: 
       linked.name = p.name;
       linked.email ??= p.email;
       linked.avatarUrl ??= p.avatarUrl;
+      // Sessions issued while it was a demo account (in any browser) end here.
+      destroyUserSessions(linked.id);
       return put('users', linked);
     }
   }
@@ -88,18 +90,32 @@ export const publicUser = (u?: User) => (u ? { id: u.id, name: u.name, avatarUrl
 interface SessionDoc {
   id: string;
   userId: string;
+  /**
+   * How this session was signed in. Administrator access needs a session that
+   * was itself signed in with Google or GitHub: an account that later gains a
+   * provider does not upgrade the sessions it already had.
+   */
+  method?: AuthProvider;
   createdAt: string;
 }
 
-export function createSession(userId: string): string {
+export function createSession(userId: string, method?: AuthProvider): string {
   const id = newToken();
-  put<SessionDoc>('sessions', { id: hash(id), userId, createdAt: new Date().toISOString() });
+  put<SessionDoc>('sessions', { id: hash(id), userId, method, createdAt: new Date().toISOString() });
   return id;
 }
-export function sessionUser(token: string | undefined): User | undefined {
+export function sessionOf(token: string | undefined): { user: User; method?: AuthProvider } | undefined {
   if (!token) return;
   const s = get<SessionDoc>('sessions', hash(token));
-  return s ? getUser(s.userId) : undefined;
+  const user = s && getUser(s.userId);
+  return user ? { user, method: s.method } : undefined;
+}
+export function sessionUser(token: string | undefined): User | undefined {
+  return sessionOf(token)?.user;
+}
+/** End every session an account has (for example when a demo account gains a Google or GitHub identity). */
+export function destroyUserSessions(userId: string) {
+  for (const s of list<SessionDoc>('sessions')) if (s.userId === userId) remove('sessions', s.id);
 }
 export function destroySession(token: string | undefined) {
   if (token) remove('sessions', hash(token));
