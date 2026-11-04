@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { ChangeOp, ChangeRequestDetail } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, GitMerge, MessageSquare, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Undo2, Wand2, X, Minus, History, Scale } from 'lucide-react';
+import { ArrowLeft, Check, CircleSlash, GitMerge, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -104,7 +104,7 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
       {cr.status === 'approved' && !hasRole('editor', 'steward', 'owner') && <p className="text-xs text-muted">An editor or steward will merge this.</p>}
       <div className="flex flex-wrap gap-2 border-t border-line pt-3">
         {['draft', 'review', 'needs-work', 'triage'].includes(cr.status) && (
-          <Button size="sm" icon={Wand2} onClick={() => setReviseOpen(true)}>
+          <Button size="sm" icon={PenLine} onClick={() => setReviseOpen(true)}>
             Ask AI to revise
           </Button>
         )}
@@ -124,7 +124,7 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             <Button variant="ghost" onClick={() => setReviseOpen(false)}>
               Cancel
             </Button>
-            <Button variant="primary" icon={Sparkles} loading={revise.pending} disabled={!instruction.trim()} onClick={() => void revise.run()}>
+            <Button variant="primary" icon={PenLine} loading={revise.pending} disabled={!instruction.trim()} onClick={() => void revise.run()}>
               Revise
             </Button>
           </>
@@ -273,7 +273,7 @@ export function ChangeRequestPage() {
 
           {cr.analysis && (
             <Card>
-              <CardHeader icon={Sparkles} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
+              <CardHeader icon={ScanSearch} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
               <div className="space-y-3 p-5 text-sm">
                 <Markdown text={cr.analysis.summary} />
                 <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>

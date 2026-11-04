@@ -7,6 +7,8 @@ import type {
   ActivityItem,
   AgentReport,
   AgentToken,
+  OAuthConnection,
+  OAuthRequestInfo,
   ChangeOp,
   ChangeRequest,
   ChangeRequestDetail,
@@ -254,6 +256,12 @@ export const api = {
   agentTokens: () => get<AgentToken[]>('/api/agent-tokens'),
   createAgentToken: (name: string) => post<AgentToken>('/api/agent-tokens', { name }),
   deleteAgentToken: (id: string) => del<unknown>(`/api/agent-tokens/${e(id)}`),
+  // MCP clients connected with OAuth
+  oauthRequest: (id: string) => get<OAuthRequestInfo>(`/api/oauth/requests/${e(id)}`),
+  approveOAuth: (id: string) => post<{ redirect: string }>(`/api/oauth/requests/${e(id)}/approve`),
+  denyOAuth: (id: string) => post<{ redirect: string }>(`/api/oauth/requests/${e(id)}/deny`),
+  oauthConnections: () => get<OAuthConnection[]>('/api/oauth/connections'),
+  disconnectOAuth: (id: string) => del<unknown>(`/api/oauth/connections/${e(id)}`),
   agentReports: (id: string) => get<AgentReport[]>(`/api/ontologies/${e(id)}/agent-reports`),
   createAgentReport: (id: string, body: Partial<AgentReport>) => post<AgentReport>(`/api/ontologies/${e(id)}/agent-reports`, body as Json),
 

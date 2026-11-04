@@ -1,0 +1,74 @@
+name: Walkthrough video
+
+# Records the narrated walkthrough (walkthrough/README.md) for every published release,
+# or on demand, and attaches it to the release. Set the ELEVENLABS_API_KEY repository
+# secret for the narrated version; without it the video is a captioned draft.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      voice:
+        description: Voice provider (elevenlabs, openai, google or silent). Empty picks from the secrets that are set.
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: walkthrough-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # HermiT, so the reasoner shows as passing in the video.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: ./toolkit/setup.sh
+      - name: Install Chromium, ffmpeg and fonts
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-inter fonts-jetbrains-mono
+      # Voices are cached by their exact words, so unchanged paragraphs are never re-voiced.
+      - uses: actions/cache@v4
+        with:
+          path: walkthrough/.cache/voice
+          key: walkthrough-voice-${{ hashFiles('walkthrough/narration.md', 'walkthrough/lexicon.json') }}
+          restore-keys: walkthrough-voice-
+      - name: Record
+        run: pnpm walkthrough ${{ inputs.voice && format('--voice {0}', inputs.voice) || '' }}
+        env:
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: concord-walkthrough
+          path: |
+            walkthrough/out/concord-walkthrough.mp4
+            walkthrough/out/concord-walkthrough.vtt
+            walkthrough/out/chapters.txt
+            walkthrough/out/report.json
+          retention-days: 90
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" walkthrough/out/concord-walkthrough.mp4 walkthrough/out/concord-walkthrough.vtt walkthrough/out/chapters.txt --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

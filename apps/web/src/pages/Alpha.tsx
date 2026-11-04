@@ -1,7 +1,7 @@
+import { useEffect, useState } from 'react';
 import { ArrowLeft, ArrowRight, RotateCcw } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { api } from '../api';
-import { useDemoOntology } from '../lib/ontologies';
+import { useDemoOntology, useOntologies } from '../lib/ontologies';
 import { Page } from '../components/Shell';
 import { Stepper, StepBody } from '../components/Walkthrough';
 import { Button, Card } from '../components/ui';
@@ -11,6 +11,14 @@ export function AlphaPage() {
   const w = useWalkthrough();
   const nav = useNavigate();
   const demo = useDemoOntology();
+  const { loading } = useOntologies();
+  // Wait for the ontology list before leaving, or a quick click lands on the home page instead of the demo.
+  const [exploring, setExploring] = useState(false);
+  useEffect(() => {
+    if (!exploring || loading) return;
+    setExploring(false);
+    nav(demo ? `/o/${demo.id}` : '/');
+  }, [exploring, loading, demo, nav]);
   return (
     <Page>
       <div className="mb-6">
@@ -39,12 +47,10 @@ export function AlphaPage() {
           {w.step >= 2 && (
             <Button
               variant="secondary"
-              onClick={async () => {
+              loading={exploring}
+              onClick={() => {
                 w.setOpen(true);
-                // Picking a role signs in, which reloads the ontology list: if it hasn't arrived yet, fetch it rather than landing on the hub.
-                const list = demo ? undefined : await api.ontologies().catch(() => []);
-                const target = demo ?? list?.find((o) => o.demo) ?? list?.[0];
-                nav(target ? `/o/${target.id}` : '/');
+                setExploring(true);
               }}
             >
               Keep the guide open while I explore

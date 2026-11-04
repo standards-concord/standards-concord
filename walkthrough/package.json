@@ -1,0 +1,21 @@
+{
+  "name": "@concord/walkthrough",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Records the narrated Concord walkthrough video from narration.md",
+  "scripts": {
+    "record": "tsx record.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@rdfjs/wrapper": "0.34.0",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "n3": "^2.13.12",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  }
+}

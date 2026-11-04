@@ -7,11 +7,13 @@ import { openDb } from '../src/db.js';
 import { renderOntologyPage } from '../src/public/render.js';
 import { pageInput } from '../src/public/routes.js';
 import { toPublishedRequirements } from '../src/public/requirements.js';
+import { termAnchors } from '../src/public/anchors.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { createUseCase } from '../src/services/useCases.js';
-import { createUser } from '../src/services/users.js';
+import { createUseCase, listUseCases, updateUseCase } from '../src/services/useCases.js';
+import { createUser, getUser } from '../src/services/users.js';
+import type { OntologyView } from '@concord/core/types';
 
 const app = createApp();
 
@@ -235,5 +237,88 @@ describe('mapping the use case data onto the page', () => {
     expect(html).toContain('Working group call');
     expect(html).toMatch(/Met by <a class="ref" href="#Session"/);
     expect(html).toContain('2 working group use cases and 1 private use case also informed this version');
+  });
+});
+
+describe('review fixes', () => {
+  it('escapes dates that are not dates (stored XSS)', async () => {
+    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    input.view = { ...input.view, metadata: { ...input.view.metadata, modified: '<img src=x onerror=alert(1)>', issued: '"><script>alert(2)</script>' } };
+    input.release = undefined;
+    const html = renderOntologyPage(input);
+    expect(html).not.toContain('<img src=x');
+    expect(html).not.toContain('<script>alert(2)');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('never publishes a demo use case that someone edited, even as a simulated persona', async () => {
+    const project = findProject('volunteering')!;
+    const seeded = listUseCases(project.id).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
+    const author = getUser(seeded.authorId)!;
+    expect(author.simulated).toBe(true);
+    updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
+    for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
+      const res = await request(app).get(url);
+      expect(res.text, url).not.toContain('07700 900123');
+      expect(res.text, url).not.toContain('Renamed by a tester');
+      expect(res.text, url).toContain('Find weekly shifts that need volunteers');
+    }
+  });
+
+  it('negotiates only the types it produces, and refuses the rest', async () => {
+    const noHtml = await request(app).get('/def/volunteering').set('Accept', 'text/html;q=0, */*;q=1');
+    expect(noHtml.headers['content-type']).not.toMatch(/html/);
+    const app_ = await request(app).get('/def/volunteering').set('Accept', 'application/*');
+    expect(app_.headers['content-type']).toMatch(/^application\//);
+    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle']) {
+      const res = await request(app).get('/def/volunteering').set('Accept', accept);
+      expect(res.status, accept).toBe(406);
+      expect(res.headers.vary, accept).toMatch(/Accept/);
+      expect(res.headers['cache-control'], accept).toBe('no-store');
+    }
+    const html = await request(app).get('/def/volunteering/1.0.0').set('Accept', 'text/turtle');
+    expect(html.headers.link).toMatch(/1\.0\.0\.html>; rel="alternate"; type="text\/html"/);
+  });
+
+  it('keeps term anchors equal to IRI fragments and resolves clashes explicitly', () => {
+    const NS = 'https://example.org/v#';
+    const cls = (iri: string) => ({ kind: 'class' as const, iri, superClasses: [], equivalentClasses: [], disjointWith: [], restrictions: [] });
+    const view = {
+      metadata: { iri: 'https://example.org/v', creators: [], contributors: [], imports: [] },
+      classes: [cls('https://other.org/x#Thing'), cls(`${NS}Café`), cls(`${NS}sec-classes`), cls(`${NS}main`), cls(`${NS}Thing`)],
+      objectProperties: [], datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: {}, tripleCount: 0,
+    } as unknown as OntologyView;
+    const a = termAnchors(view, NS);
+    expect(a.get(`${NS}Café`)).toBe('Café');
+    expect(a.get(`${NS}sec-classes`)).toBe('term-sec-classes');
+    expect(a.get(`${NS}main`)).toBe('term-main');
+    // The ontology's own term wins the plain fragment over an external one.
+    expect(a.get(`${NS}Thing`)).toBe('Thing');
+    expect(a.get('https://other.org/x#Thing')).toBe('Thing-2');
+  });
+
+  it('links this and the latest version in the header', async () => {
+    const res = await request(app).get('/def/volunteering/1.0.0');
+    expect(res.text).toMatch(/<a href="[^"]*\/def\/volunteering\/1\.0\.0"><code>https:\/\/w3id\.org\/odi\/volunteering\/1\.0\.0<\/code><\/a>/);
+    expect(res.text).toMatch(/<a href="[^"]*\/def\/volunteering"><code>https:\/\/w3id\.org\/odi\/volunteering<\/code><\/a>/);
+    expect(res.text).toMatch(/role="tabpanel"[^>]*tabindex="0"/);
+  });
+
+  it('renders a release from the snapshot stored with it, not from today\'s data', async () => {
+    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
+    expect(fs.existsSync(file)).toBe(true);
+    const original = fs.readFileSync(file, 'utf8');
+    const snap = JSON.parse(original);
+    expect(snap.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+    try {
+      snap.useCases[0].title = 'As it was at release time';
+      fs.writeFileSync(file, JSON.stringify(snap));
+      const res = await request(app).get('/def/volunteering/1.0.0');
+      expect(res.text).toContain('As it was at release time');
+      const draft = await request(app).get('/def/volunteering/draft');
+      expect(draft.text).not.toContain('As it was at release time');
+    } finally {
+      fs.writeFileSync(file, original);
+    }
   });
 });

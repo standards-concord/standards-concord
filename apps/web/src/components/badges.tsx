@@ -1,5 +1,5 @@
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
-import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitFork, GitMerge, MessageSquareText, Pencil, Sparkles, Users, type LucideIcon } from 'lucide-react';
+import { Bot, Bug, CircleCheck, CircleAlert, FileText, GitFork, GitMerge, MessageSquareText, Pencil, Users, Combine, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
 
@@ -59,7 +59,7 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
     case 'bug-report':
       return { icon: Bug, label: 'Bug report' };
     case 'synthesis':
-      return { icon: Sparkles, label: 'Synthesised from use cases' };
+      return { icon: Combine, label: 'Synthesised from use cases' };
     case 'fork':
       return { icon: GitFork, label: `From the fork ${origin.forkSlug}` };
     default:
@@ -136,7 +136,7 @@ export function GitHubIcon({ className = 'size-4' }: { className?: string }) {
 export function Logo({ className }: { className?: string }) {
   return (
     <svg className={cx('size-7', className)} viewBox="0 0 32 32" aria-hidden>
-      <rect width="32" height="32" rx="8" fill="var(--accent)" />
+      <rect className="app-logo-bg" width="32" height="32" rx="8" fill="var(--accent)" />
       <circle cx="12" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" />
       <circle cx="20" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" strokeOpacity=".7" />
     </svg>
