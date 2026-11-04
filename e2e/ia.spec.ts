@@ -46,6 +46,22 @@ test.describe('progressive disclosure', () => {
     }
   });
 
+  test('every ontology page leaves a clear gap below the ontology header', async ({ page }) => {
+    for (const path of ['', '/browse', '/changes', '/governance', '/use-cases', '/query']) {
+      await page.goto(`/o/${demo.id}${path}`);
+      await settle(page);
+      const gap = await page.evaluate(() => {
+        const header = document.querySelector('.ontology-header')!.getBoundingClientRect();
+        const first = [...document.querySelectorAll('.ontology-content *')].find((el) => {
+          const r = el.getBoundingClientRect();
+          return r.height > 0 && r.width > 0;
+        })!;
+        return first.getBoundingClientRect().top - header.bottom;
+      });
+      expect(gap, `gap below the header on ${path || 'overview'}`).toBeGreaterThanOrEqual(32);
+    }
+  });
+
   test('the health chip summarises validation and links to the full lint report', async ({ page }) => {
     await page.goto(`/o/${demo.id}/browse`);
     const chip = page.getByRole('button', { name: /^Health: / });
