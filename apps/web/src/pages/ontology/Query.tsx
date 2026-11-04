@@ -243,7 +243,7 @@ function QueryWorkspace() {
         const p = c.slice(0, c.indexOf(':'));
         const apply: Completion['apply'] = (v, _completion, from, to) => {
           // Reuse a matching declaration, add one if the prefix is free, or use the full IRI if it's bound elsewhere.
-          const { declaration, text } = insertTerm(v.state.doc.toString(), lang, p, pfx[p], t.iri);
+          const { declaration, text } = insertTerm(v.state.doc.toString(), lang, p, pfx[p], t.iri, from);
           v.dispatch({
             changes: [...(declaration ? [{ from: 0, insert: declaration }] : []), { from, to, insert: text }],
             selection: { anchor: from + text.length + (declaration?.length ?? 0) },

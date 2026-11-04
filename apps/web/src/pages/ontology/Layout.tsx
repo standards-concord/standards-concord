@@ -112,7 +112,9 @@ export function OntologyLayout() {
     };
   }, [state.data, state.reload, view, id, session?.user?.id, session?.user?.isPlatformAdmin]);
 
-  if (state.error && !state.data)
+  // No context for this ontology and its request has failed (even if a previous ontology's data
+  // is still held): show the error with Retry rather than loading forever.
+  if (state.error && !state.loading && !ctx)
     return (
       <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
         <ErrorCard error={state.error} onRetry={state.reload} />

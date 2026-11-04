@@ -91,6 +91,10 @@ describe('buildSparql', () => {
     const active = { ...newStep(`${VOL}active`, 'boolean'), filter: { op: 'equals' as const, value: '1' } };
     expect(activeFilter(age)).toBeUndefined();
     expect(activeFilter(active)).toBeUndefined();
+    // Values a number field or true/false choice would show differently (or as empty) don't apply either.
+    for (const v of ['+5', '5.', ' 5', '5 ']) expect(activeFilter({ ...age, filter: { op: 'gt', value: v } }), v).toBeUndefined();
+    expect(activeFilter({ ...active, filter: { op: 'equals', value: ' false ' } })).toBeUndefined();
+    expect(activeFilter({ ...age, filter: { op: 'gt', value: '-0.5' } })).toEqual({ op: 'gt', value: '-0.5' });
     expect(isRequired(age)).toBe(false);
     const { query } = buildSparql(model({ steps: [age, active] }), { prefixes });
     expect(query).not.toContain('FILTER');

@@ -53,3 +53,18 @@ describe('declaredPrefixes: the awkward cases', () => {
     expect(declaredPrefixes(`SELECT * WHERE { ?s ex:PREFIX vol: <${NS}> }`).has('vol')).toBe(false);
   });
 });
+
+describe('declaredPrefixes: escapes and scope', () => {
+  it('a long string with an escaped quote still hides what is inside it', () => {
+    const sparql = 'SELECT ?s WHERE {\n  ?s a TOKEN .\n  BIND("""\\""" PREFIX ex: <https://example.org/>\nend""" AS ?x)\n}';
+    expect(declaredPrefixes(sparql).has('ex')).toBe(false);
+    const turtle = "ex:a ex:p '''\\''' @prefix ex: <https://example.org/>\nend''' .";
+    expect(declaredPrefixes(turtle).has('ex')).toBe(false);
+  });
+  it('only declarations before the insertion point are in scope', () => {
+    const doc = `ex:a a TOKEN .\n@prefix vol: <${NS}> .\n`;
+    const at = doc.indexOf('TOKEN');
+    expect(insertTerm(doc, 'turtle', 'vol', NS, IRI, at).declaration).toBe(`@prefix vol: <${NS}> .\n`);
+    expect(insertTerm(doc, 'turtle', 'vol', NS, IRI).declaration).toBeUndefined();
+  });
+});

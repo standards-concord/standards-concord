@@ -5,7 +5,10 @@
  * OWASP's CSV injection advice. Plain numbers such as -5 are left alone.
  */
 export function csvField(s: string): string {
-  const safe = /^[=+\-@\t\r]/.test(s) && !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s) ? `'${s}` : s;
+  // Importers may trim leading spaces before deciding what's a formula, so look past them too.
+  const trimmed = s.replace(/^[ \t\r\n]+/, '');
+  const risky = /^[=+\-@\t\r]/.test(s) || /^[=+\-@]/.test(trimmed);
+  const safe = risky && !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed) ? `'${s}` : s;
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 

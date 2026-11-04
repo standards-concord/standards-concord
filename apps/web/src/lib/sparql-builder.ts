@@ -141,11 +141,17 @@ export function usesBooleanChoice(type: ValueType, op: FilterOp): boolean {
   return type === 'boolean' && (op === 'equals' || op === 'notEquals');
 }
 
-/** Whether a filter value fits the control its operator shows, so what's on screen is what runs. */
+/** A number as an HTML number field holds it (no leading +, no trailing dot, no spaces); also valid SPARQL. */
+const HTML_NUMBER = /^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/;
+
+/**
+ * Whether a filter value is exactly something its operator's control can
+ * show (a number field, or a true/false choice), so what's on screen is what
+ * runs. No trimming: " 5" or "+5" would show as an empty number field.
+ */
 export function fitsControl(type: ValueType, op: FilterOp, value: string): boolean {
-  const v = value.trim();
-  if (usesNumberInput(type, op)) return isNumber(v);
-  if (usesBooleanChoice(type, op)) return v === 'true' || v === 'false';
+  if (usesNumberInput(type, op)) return HTML_NUMBER.test(value);
+  if (usesBooleanChoice(type, op)) return value === 'true' || value === 'false';
   return true;
 }
 
@@ -156,8 +162,9 @@ export function fitsControl(type: ValueType, op: FilterOp, value: string): boole
  */
 export function activeFilter(step: PathStep): { op: FilterOp; value: string } | undefined {
   const f = step.filter;
-  const value = f?.value.trim();
-  if (!f || !value || !fitsControl(step.valueType ?? 'text', f.op, value)) return undefined;
+  if (!f || !fitsControl(step.valueType ?? 'text', f.op, f.value)) return undefined;
+  const value = f.value.trim();
+  if (!value) return undefined;
   return { op: f.op, value };
 }
 

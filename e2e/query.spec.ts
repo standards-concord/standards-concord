@@ -183,6 +183,18 @@ test.describe('Query tab', () => {
     expect(stored[1]).toContain('draft B');
   });
 
+  test('switching to an ontology that fails to load shows the error, not endless loading', async ({ page, consoleGuard }) => {
+    // The ontology fails with a 500; its other requests (view, sources) 404.
+    consoleGuard.allow(/status of 500/, /status of 404/);
+    await page.route(/\/api\/ontologies\/broken-e2e(\?|$)/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) }));
+    await page.evaluate(() => {
+      history.pushState(null, '', '/o/broken-e2e/query');
+      dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page.getByRole('button', { name: /retry|try again/i })).toBeVisible();
+    await expect(page.getByTestId('sparq-ready')).toHaveCount(0);
+  });
+
   test('requiring a nested property requires the path to it', async ({ page }) => {
     await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
     await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
