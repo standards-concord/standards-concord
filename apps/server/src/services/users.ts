@@ -3,6 +3,7 @@ import type { ActivityItem, AgentToken, AuthProvider, User } from '@concord/shar
 import { clock } from '../clock.js';
 import { transaction, get, HttpError, list, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
+import { demoAvatarFor } from './avatars.js';
 import { solid } from './solid.js';
 
 export async function createUser(input: {
@@ -20,13 +21,15 @@ export async function createUser(input: {
   webId?: string;
 }): Promise<User> {
   const id = input.id ?? newId('usr');
+  const providers = [{ provider: input.provider, subject: input.subject }];
   const base: User = {
     id,
     name: input.name,
     email: input.email,
-    avatarUrl: input.avatarUrl,
+    // Demo accounts (simulated people and alpha testers) get a bundled picture.
+    avatarUrl: input.avatarUrl ?? demoAvatarFor({ id, providers }),
     webId: input.webId ?? solid.localWebId(id),
-    providers: [{ provider: input.provider, subject: input.subject }],
+    providers,
     simulated: input.simulated,
     persona: input.persona,
     organisation: input.organisation,
@@ -99,6 +102,25 @@ export async function linkFederatedIdentity(p: FederatedIdentity, linkTo?: User)
     }
     return undefined;
   });
+}
+
+/** Gives demo accounts made before profile pictures existed their picture. Returns how many changed. */
+export async function backfillDemoAvatars(): Promise<number> {
+  let changed = 0;
+  for (const u of await list<User>('users')) {
+    if (u.avatarUrl) continue;
+    if (!demoAvatarFor(u)) continue;
+    // Re-read in the write's own transaction, so a sign-in that changed the account meanwhile isn't undone.
+    const done = await transaction(async () => {
+      const fresh = await get<User>('users', u.id);
+      const avatarUrl = fresh && !fresh.avatarUrl ? demoAvatarFor(fresh) : undefined;
+      if (!fresh || !avatarUrl) return false;
+      await put('users', { ...fresh, avatarUrl });
+      return true;
+    });
+    if (done) changed++;
+  }
+  return changed;
 }
 
 export const getUser = async (id: string) => await get<User>('users', id);
@@ -192,7 +214,9 @@ export async function logActivity(a: Omit<ActivityItem, 'id' | 'at' | 'actorName
 
 export async function listActivity(ontologyId?: string, limit = 50): Promise<ActivityItem[]> {
   const items = ontologyId ? await list<ActivityItem>('activity', ontologyId) : await list<ActivityItem>('activity');
-  return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  // The picture is looked up when read, so older entries and changed pictures show too.
+  const latest = items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  return await Promise.all(latest.map(async (a) => ({ ...a, actorAvatarUrl: a.actorId ? (await getUser(a.actorId))?.avatarUrl : undefined })));
 }
 
 /** The author of reports sent from the public page by people without an account. */

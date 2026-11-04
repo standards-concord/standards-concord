@@ -11,7 +11,8 @@
     "test:e2e": "playwright test -c e2e --project=local",
     "test:e2e:live": "playwright test -c e2e --project=live",
     "test:e2e:solid": "playwright test -c e2e/solid.config.ts",
-    "walkthrough": "pnpm --filter @concord/walkthrough record"
+    "walkthrough": "pnpm --filter @concord/walkthrough record",
+    "avatars": "node scripts/generate-avatars.mjs"
   },
   "packageManager": "pnpm@10.0.0",
   "engines": {
@@ -19,6 +20,8 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
+    "@dicebear/core": "9.4.2",
+    "@dicebear/notionists": "9.4.2",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@playwright/test": "1.63.0",
     "@vercel/functions": "3.10.1",

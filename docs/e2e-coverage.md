@@ -102,6 +102,12 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Simulated participants and clock | ✅ | alpha, ia, account |
 | Reset the simulation | ❌ | Deliberately untested in the shared run: it wipes every other spec's data |
 
+## Across pages
+
+| Behaviour | Status | Specs |
+| --- | --- | --- |
+| Profile pictures: simulated members and demo testers show a bundled picture (members list, account menu, activity feed); initials when a picture fails to load | ✅ | avatars |
+
 ## Open pull requests that bring their own specs
 
 | PR | Adds | Spec |
