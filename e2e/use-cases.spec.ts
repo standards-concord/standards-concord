@@ -166,7 +166,7 @@ test.describe('use cases', () => {
 
   test('signed-out visitors and contributors see no meetings', async ({ page, request }) => {
     const demo = await demoOntology(request);
-    expect(await (await request.get(`/api/ontologies/${demo.id}/meetings`)).json()).toEqual([]);
+    expect((await request.get(`/api/ontologies/${demo.id}/meetings`)).status()).toBe(401);
     await signIn(page, { name: 'Contributor Cal', role: 'contributor' });
     await page.goto(`/o/${demo.id}/meetings`);
     await settle(page);

@@ -50,9 +50,10 @@ beforeAll(async () => {
 describe('meetings are for the working group', () => {
   it('signed-out visitors and contributors get no meetings, transcripts or streams (finding 2)', async () => {
     const id = await meetingId();
-    expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).body).toEqual([]);
-    expect((await request(app).get(`/api/meetings/${id}`)).status).toBe(404);
-    expect((await request(app).get(`/api/meetings/${id}/stream`)).status).toBe(404);
+    // Signed out: meetings are behind sign-in altogether.
+    expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).status).toBe(401);
+    expect((await request(app).get(`/api/meetings/${id}`)).status).toBe(401);
+    expect((await request(app).get(`/api/meetings/${id}/stream`)).status).toBe(401);
     const contributor = await login('contributor');
     expect((await contributor.get(`/api/meetings/${id}`)).status).toBe(404);
     expect((await contributor.get(`/api/ontologies/${demoId}/meetings`)).body).toEqual([]);
@@ -106,9 +107,11 @@ describe('change requests and validation are public, so they only use public use
     // Raw ids on a change request are filtered for the viewer.
     const someCr = list<ChangeRequest>(demoId)[0];
     put('changeRequests', { ...someCr, useCaseIds: [...(someCr.useCaseIds ?? []), id] }, demoId);
-    const anon = await request(app).get(`/api/change-requests/${someCr.id}`);
+    const outsider = await login('contributor');
+    const anon = await outsider.get(`/api/change-requests/${someCr.id}`);
+    expect(anon.status).toBe(200);
     expect(anon.body.useCaseIds ?? []).not.toContain(id);
-    const listed = (await request(app).get(`/api/ontologies/${demoId}/change-requests`)).body as ChangeRequest[];
+    const listed = (await outsider.get(`/api/ontologies/${demoId}/change-requests`)).body as ChangeRequest[];
     expect(listed.find((c) => c.id === someCr.id)?.useCaseIds ?? []).not.toContain(id);
     put('changeRequests', someCr, demoId);
   });
@@ -134,7 +137,7 @@ describe('the activity feed follows visibility (finding 5)', () => {
   it('hides items about use cases a viewer cannot see, and about meetings', async () => {
     const member = await login('member');
     await useCaseVia(member, 'Activity secret case', 'group');
-    const anon = (await request(app).get(`/api/activity?ontologyId=${demoId}`)).body as { message: string; link?: string }[];
+    const anon = (await (await login('contributor')).get(`/api/activity?ontologyId=${demoId}`)).body as { message: string; link?: string }[];
     expect(JSON.stringify(anon)).not.toMatch(/Activity secret case/);
     expect(anon.some((a) => a.link?.includes('/meetings/'))).toBe(false);
     const other = (await member.get(`/api/activity?ontologyId=${demoId}`)).body as { message: string }[];

@@ -215,11 +215,55 @@ test.describe('Public ontology page', () => {
     await page.goto(`/o/${id}`);
     const link = page.getByTestId('public-page-link');
     await expect(link).toHaveAttribute('href', '/def/volunteering');
-    const releases = await (await request.get(`/api/ontologies/${id}/releases`)).json();
+    const releases = await (await page.request.get(`/api/ontologies/${id}/releases`)).json();
     const published = releases.find((r: { status: string; version: string }) => r.status === 'published' && r.version === '1.0.0');
     await page.goto(`/o/${id}/releases/${published.id}`);
     await expect(page.getByTestId('release-public-page')).toHaveAttribute('href', '/def/volunteering/1.0.0');
     const [popup] = await Promise.all([page.waitForEvent('popup'), page.getByTestId('release-public-page').click()]);
     await expect(popup.getByText('Version 1.0.0', { exact: true })).toBeVisible();
   });
+
+  test('fragments resolve the way the browser does: as written first, then percent-decoded', async ({ page }) => {
+    await page.goto(PAGE);
+    // Stand-ins for terms whose IRIs end in #%41, #A and #Café, in different tabs.
+    await page.evaluate(() => {
+      const add = (panel: string, id: string) => {
+        const el = document.createElement('article');
+        el.id = id;
+        el.textContent = id;
+        document.getElementById(panel)!.appendChild(el);
+      };
+      add('tab-download', '%41');
+      add('tab-changes', 'A');
+      add('tab-changes', 'Café');
+    });
+    const selected = page.locator('[role="tab"][aria-selected="true"]');
+    await page.evaluate(() => (location.hash = '%41'));
+    await expect(selected).toHaveText('Download and cite');
+    await page.evaluate(() => (location.hash = 'A'));
+    await expect(selected).toHaveText('Changes');
+    await page.evaluate(() => (location.hash = 'tab-spec'));
+    await expect(selected).toHaveText('Specification');
+    await page.evaluate(() => (location.hash = 'Caf%C3%A9'));
+    await expect(selected).toHaveText('Changes');
+  });
+
+  test('a new ontology names its creator publicly only if they say so', async ({ page }) => {
+    const { user } = await signIn(page, { name: 'E2E Uncredited Owner', role: 'contributor' });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'New ontology' }).first().click();
+    const dialog = page.getByRole('dialog');
+    const credit = dialog.getByTestId('credit-creator');
+    await expect(credit).toBeChecked();
+    await expect(dialog).toContainText(`“${user.name}” is shown publicly`);
+    await credit.uncheck();
+    await expect(dialog).toContainText('No creator is listed');
+    await dialog.getByLabel('Title').fill(`Uncredited ${Date.now()}`);
+    await dialog.getByRole('button', { name: 'Create ontology' }).click();
+    await expect(page).toHaveURL(/\/o\/[^/]+/);
+    const [pub] = await Promise.all([page.waitForEvent('popup'), page.getByTestId('public-page-link').click()]);
+    await expect(pub.getByRole('heading', { level: 1 })).toContainText('Uncredited');
+    await expect(pub.locator('body')).not.toContainText(user.name);
+  });
 });
+

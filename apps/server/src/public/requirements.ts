@@ -69,6 +69,8 @@ export interface RequirementsDocumentView {
 export interface PublishedRequirements {
   document?: RequirementsDocumentView;
   useCases: PublicUseCaseView[];
+  /** A release whose snapshot is missing or unreadable: shown as such, never filled with current data. */
+  snapshotMissing?: boolean;
 }
 
 /**
@@ -145,34 +147,35 @@ export function publishedRequirements(project: OntologyProject, version?: string
 }
 
 /**
- * What a release's page shows. Each release stores a snapshot of its public
- * use cases and requirements (requirements.json, written at publish time), so
- * later edits never rewrite a published version. Releases from before
- * snapshots existed, and the working draft, use the current data.
+ * What a release's page shows: the snapshot of its public use cases and
+ * requirements (requirements.json) written when it was published, or
+ * backfilled at startup for releases from before snapshots existed (see
+ * refreshReleasePages). Later edits never rewrite a published version, and a
+ * release without a readable snapshot says so instead of showing today's data
+ * as its history.
  */
-export function requirementsFor(project: OntologyProject, version: string | undefined, snapshot: PublishedRequirements | undefined): PublishedRequirements {
-  if (!snapshot) return publishedRequirements(project, version);
+export function requirementsFor(project: OntologyProject, snapshot: PublishedRequirements | undefined): PublishedRequirements {
+  if (!snapshot || !Array.isArray(snapshot.useCases)) return { useCases: [], snapshotMissing: true };
   // A use case withdrawn after the release is no longer shown, and neither is anything written from it:
   // the requirements that came only from it, the sections citing it, and the introduction (the
   // copy on GitHub can't be recalled). Same rule as served() in services/requirements.ts.
   const cited = [...snapshot.useCases.map((u) => u.id), ...(snapshot.document?.requirements ?? []).flatMap((r) => r.useCaseIds)];
   const gone = withdrawnSince(project.id, [...new Set(cited)]);
-  if (!snapshot.document) return { document: publishedRequirements(project, version).document, useCases: snapshot.useCases.filter((u) => !gone.has(u.id)) };
+  const useCases = snapshot.useCases.filter((u) => !gone.has(u.id));
   const d = snapshot.document;
+  if (!d || !gone.size) return { document: d, useCases };
   const citesGone = (md: string) => [...gone].some((id) => md.includes(`#uc-${id}`));
   return {
-    document: !gone.size
-      ? d
-      : {
-          ...d,
-          intro: undefined,
-          markdown: d.markdown && !citesGone(d.markdown) ? d.markdown : undefined,
-          sections: d.sections?.filter((x) => !citesGone(x.markdown)),
-          requirements: d.requirements
-            ?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), original: r.useCaseIds.length }))
-            .filter((r) => r.useCaseIds.length > 0 || r.original === 0)
-            .map(({ original: _, ...r }) => r),
-        },
-    useCases: snapshot.useCases.filter((u) => !gone.has(u.id)),
+    document: {
+      ...d,
+      intro: undefined,
+      markdown: d.markdown && !citesGone(d.markdown) ? d.markdown : undefined,
+      sections: d.sections?.filter((x) => !citesGone(x.markdown)),
+      requirements: d.requirements
+        ?.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)), original: r.useCaseIds.length }))
+        .filter((r) => r.useCaseIds.length > 0 || r.original === 0)
+        .map(({ original: _, ...r }) => r),
+    },
+    useCases,
   };
 }

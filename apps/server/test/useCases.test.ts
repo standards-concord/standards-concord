@@ -96,7 +96,7 @@ describe('sharing modes', () => {
     const text = JSON.stringify(synthetic);
     expect(text).not.toMatch(/Mei|St Anne|stannes|Lottery Community Fund/);
     // The activity feed doesn't say who published it.
-    const act = await request(app).get(`/api/activity?ontologyId=${demoId}`);
+    const act = await (await login('contributor', 'Activity outsider')).get(`/api/activity?ontologyId=${demoId}`);
     const item = act.body.find((a: { type: string }) => a.type === 'usecase.anonymised');
     expect(item).toBeTruthy();
     expect(item.actorId).toBeUndefined();
@@ -208,8 +208,10 @@ describe('links', () => {
     const anon = await request(app).get(`/api/use-cases/${uc.body.trace.related[0].id}`);
     expect(anon.body.trace.related).toHaveLength(0);
     // Calls are working group business: to anyone else they don't exist.
-    expect((await request(app).get(`/api/meetings/${call.id}`)).status).toBe(404);
-    expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).body).toHaveLength(0);
+    expect((await request(app).get(`/api/meetings/${call.id}`)).status).toBe(401);
+    const outsider = await login('contributor', 'Meeting outsider');
+    expect((await outsider.get(`/api/meetings/${call.id}`)).status).toBe(404);
+    expect((await outsider.get(`/api/ontologies/${demoId}/meetings`)).body).toHaveLength(0);
   });
 
   it('turns a call into use cases once, linked back to the call', async () => {

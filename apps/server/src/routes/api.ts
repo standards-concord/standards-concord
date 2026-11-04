@@ -91,6 +91,21 @@ const project = (req: Request) => mustFindProject(String(req.params.id));
 const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...useCases.crForViewer(crs.detail(c), req.user), useCases: useCasesForCR(c, req.user) });
 /** Release detail plus the use cases it closes and its requirements document. */
 const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r), ...releaseTrace(r, req.user) });
+/** GET routes anyone may call without signing in. */
+const PUBLIC_READS = [
+  /^\/ontologies$/,
+  /^\/ontologies\/[^/]+$/,
+  /^\/ontologies\/[^/]+\/(view|search|source|validation)$/,
+  /^\/ontologies\/[^/]+\/terms\/.+$/,
+  // Use cases and published requirements documents: each read checks what the viewer may see
+  // (services/useCases.ts canSee, services/requirements.ts), so signed-out callers get only public ones.
+  /^\/ontologies\/[^/]+\/(use-cases|public-use-cases|requirements)$/,
+  /^\/ontologies\/[^/]+\/requirements\/[^/]+(\/markdown)?$/,
+  /^\/use-cases\/[^/]+$/,
+  /^\/governance\/templates$/,
+  /^\/feedback\/questions$/,
+  /^\/oauth\/requests\/[^/]+$/,
+];
 
 export function apiRouter(): Router {
   const r = Router();
@@ -135,6 +150,21 @@ export function apiRouter(): Router {
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
 
+  /*
+   * Reads below need a signed-in user, except the ontologies themselves (also
+   * public at /def/<slug>) and a few public lists. Use cases, interviews,
+   * meeting transcripts, change requests, releases, agent reports, activity
+   * and feedback can all hold material that isn't public, so an anonymous GET
+   * for them gets 401. Writes check the user themselves (a few, like feedback
+   * and webhooks, are meant to work without one).
+   */
+  r.use((req, _res, next) => {
+    if (req.user || (req.method !== 'GET' && req.method !== 'HEAD') || PUBLIC_READS.some((re) => re.test(req.path))) return next();
+    // Unknown paths still 404 (clients probe for optional features that way).
+    const known = (r.stack as unknown as { route?: { methods?: Record<string, boolean> }; match: (path: string) => boolean }[]).some((l) => l.route?.methods?.get && l.match(req.path));
+    next(known ? new HttpError(401, 'Sign in first') : undefined);
+  });
+
   /* --------------------------- ontologies --------------------------- */
   r.get('/ontologies', async (req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
@@ -145,7 +175,7 @@ export function apiRouter(): Router {
     const user = requireUser(req);
     const b = req.body ?? {};
     const p = await createProject(
-      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate },
+      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator !== false },
       user,
     );
     res.status(201).json(await summary(p, true, req.user));
@@ -153,7 +183,9 @@ export function apiRouter(): Router {
 
   r.get('/ontologies/:id', async (req, res) => {
     const p = project(req);
-    res.json({ ...(await summary(p, true, req.user)), members: membersWithUsers(p.id), versions: ontologyStore.versions(p), history: ontologyStore.log(p, 30) });
+    // Who is in the working group, and who made each commit, is for signed-in users.
+    const signedIn = !!req.user;
+    res.json({ ...(await summary(p, true, req.user)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {

@@ -4,7 +4,7 @@ import type { ChangeLevel } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_CSS, PAGE_SCRIPT } from './assets.js';
-import { termAnchors } from './anchors.js';
+import { fragment, pageIds, termAnchors } from './anchors.js';
 
 /**
  * The public page for one version of an ontology: what people see when they
@@ -104,6 +104,13 @@ const formatDate = (iso?: string) => {
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
 
+/**
+ * Names the renderer in each page. Bump it when a change must reach release
+ * pages already written to disk: refreshReleasePages regenerates any page
+ * that doesn't carry the current value.
+ */
+export const PAGE_GENERATOR = 'Concord public page 2';
+
 export function renderOntologyPage(input: OntologyPageInput): string {
   const { view, project } = input;
   const meta = view.metadata;
@@ -111,21 +118,23 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const compact = (iri: string) => compactIRI(iri, prefixes);
 
   /* --------------------------- term index --------------------------- */
+  const anchors = termAnchors(view, project.namespace);
+  // The page's own ids step aside for term anchors (an ontology may define #main).
+  const id = pageIds(anchors.values());
   const groups: { id: string; title: string; terms: TermView[] }[] = [
-    { id: 'sec-classes', title: 'Classes', terms: view.classes },
-    { id: 'sec-object-properties', title: 'Object properties', terms: view.objectProperties },
-    { id: 'sec-datatype-properties', title: 'Datatype properties', terms: view.datatypeProperties },
-    { id: 'sec-annotation-properties', title: 'Annotation properties', terms: view.annotationProperties },
-    { id: 'sec-individuals', title: 'Individuals', terms: view.individuals },
+    { id: id('sec-classes'), title: 'Classes', terms: view.classes },
+    { id: id('sec-object-properties'), title: 'Object properties', terms: view.objectProperties },
+    { id: id('sec-datatype-properties'), title: 'Datatype properties', terms: view.datatypeProperties },
+    { id: id('sec-annotation-properties'), title: 'Annotation properties', terms: view.annotationProperties },
+    { id: id('sec-individuals'), title: 'Individuals', terms: view.individuals },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
-  const anchors = termAnchors(view, project.namespace);
   const index = new Map<string, Indexed>();
   for (const g of groups) for (const t of g.terms) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
 
   const ref = (iri: string) => {
     const hit = index.get(iri);
-    if (hit) return `<a class="ref${hit.term.deprecated ? ' deprecated' : ''}" href="#${esc(hit.anchor)}" title="${esc(compact(iri))}">${esc(hit.name)}</a>`;
+    if (hit) return `<a class="ref${hit.term.deprecated ? ' deprecated' : ''}" href="#${esc(fragment(hit.anchor))}" title="${esc(compact(iri))}">${esc(hit.name)}</a>`;
     const c = compact(iri);
     return safeHref(iri) ? `<a class="ref ext" href="${esc(iri)}" rel="noreferrer"><code>${esc(c)}</code></a>` : `<code>${esc(c)}</code>`;
   };
@@ -199,7 +208,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
       t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : propertyRows(t as PropertyView);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
-    <h4><a class="permalink" href="#${esc(anchor)}" aria-label="Link to ${esc(name)}">#</a>${esc(name)}</h4>
+    <h4><a class="permalink" href="#${esc(fragment(anchor))}" aria-label="Link to ${esc(name)}">#</a>${esc(name)}</h4>
     <span class="kind kind-${t.kind}">${KIND_LABEL[t.kind]}</span>${t.deprecated ? '<span class="kind kind-deprecated">Deprecated</span>' : ''}
   </header>
   <p class="iri"><code>${esc(t.iri)}</code></p>
@@ -273,17 +282,17 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   /* ------------------------------ tabs ------------------------------ */
   const reqs = input.requirements;
   const tabs = [
-    { id: 'tab-spec', label: 'Specification' },
-    { id: 'tab-use-cases', label: 'Use cases and requirements', count: reqs.useCases.length },
-    { id: 'tab-changes', label: 'Changes' },
-    { id: 'tab-download', label: 'Download and cite' },
+    { key: 'spec' as const, id: id('tab-spec'), tabId: id('tab-spec-tab'), label: 'Specification' },
+    { key: 'useCasesPanel' as const, id: id('tab-use-cases'), tabId: id('tab-use-cases-tab'), label: 'Use cases and requirements', count: reqs.useCases.length },
+    { key: 'changes' as const, id: id('tab-changes'), tabId: id('tab-changes-tab'), label: 'Changes' },
+    { key: 'download' as const, id: id('tab-download'), tabId: id('tab-download-tab'), label: 'Download and cite' },
   ];
 
   const counts = [
-    { n: view.classes.length, label: 'classes', href: '#sec-classes' },
-    { n: view.objectProperties.length, label: 'object properties', href: '#sec-object-properties' },
-    { n: view.datatypeProperties.length, label: 'datatype properties', href: '#sec-datatype-properties' },
-    { n: view.individuals.length, label: 'individuals', href: '#sec-individuals' },
+    { n: view.classes.length, label: 'classes', href: `#${id('sec-classes')}` },
+    { n: view.objectProperties.length, label: 'object properties', href: `#${id('sec-object-properties')}` },
+    { n: view.datatypeProperties.length, label: 'datatype properties', href: `#${id('sec-datatype-properties')}` },
+    { n: view.individuals.length, label: 'individuals', href: `#${id('sec-individuals')}` },
   ];
 
   const nonEmpty = groups.filter((g) => g.terms.length);
@@ -292,32 +301,32 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   <nav class="toc" aria-label="Contents">
     <p class="toc-title">Contents</p>
     <ol>
-      <li><a href="#sec-abstract">Abstract</a></li>
-      <li><a href="#sec-overview">At a glance</a></li>
-      <li><a href="#sec-index">Term index</a></li>
+      <li><a href="#${id('sec-abstract')}">Abstract</a></li>
+      <li><a href="#${id('sec-overview')}">At a glance</a></li>
+      <li><a href="#${id('sec-index')}">Term index</a></li>
       ${nonEmpty.map((g) => `<li><a href="#${g.id}">${esc(g.title)}</a> <span class="count">${g.terms.length}</span></li>`).join('')}
-      <li><a href="#sec-namespaces">Namespaces</a></li>
+      <li><a href="#${id('sec-namespaces')}">Namespaces</a></li>
     </ol>
   </nav>
   <div class="spec-body">
-    <section id="sec-abstract" class="block">
+    <section id="${id('sec-abstract')}" class="block">
       <h2>Abstract</h2>
       ${renderMarkdown(meta.description || project.description) || '<p class="muted">No description yet.</p>'}
     </section>
-    <section id="sec-overview" class="block">
+    <section id="${id('sec-overview')}" class="block">
       <h2>At a glance</h2>
       <div class="stats">${counts.filter((c) => c.n > 0).map((c) => `<a class="stat" href="${c.href}"><strong>${c.n}</strong><span>${c.label}</span></a>`).join('')}</div>
       ${roots.length ? `<h3>Class hierarchy</h3><div class="tree">${tree(roots.map((r) => r.iri), new Set())}</div>` : ''}
     </section>
-    <section id="sec-index" class="block">
+    <section id="${id('sec-index')}" class="block">
       <h2>Term index</h2>
-      <label class="filter"><span class="sr-only">Filter terms</span><input id="term-filter" type="search" placeholder="Filter terms" autocomplete="off"></label>
+      <label class="filter"><span class="sr-only">Filter terms</span><input class="term-filter" type="search" placeholder="Filter terms" autocomplete="off"></label>
       ${nonEmpty
         .map(
           (g) => `<div class="index-group"><h3>${esc(g.title)}</h3><p class="chips">${g.terms
             .map((t) => {
               const { anchor, name } = index.get(t.iri)!;
-              return `<a class="chip${t.deprecated ? ' deprecated' : ''}" data-term="${esc(`${name} ${localName(t.iri)}`.toLowerCase())}" href="#${esc(anchor)}">${esc(name)}</a>`;
+              return `<a class="chip${t.deprecated ? ' deprecated' : ''}" data-term="${esc(`${name} ${localName(t.iri)}`.toLowerCase())}" href="#${esc(fragment(anchor))}">${esc(name)}</a>`;
             })
             .join('')}</p></div>`,
         )
@@ -325,7 +334,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
       <p class="muted filter-empty" hidden>No terms match.</p>
     </section>
     ${nonEmpty.map((g) => `<section id="${g.id}" class="block"><h2>${esc(g.title)}</h2>${g.terms.map(card).join('')}</section>`).join('')}
-    <section id="sec-namespaces" class="block">
+    <section id="${id('sec-namespaces')}" class="block">
       <h2>Namespaces</h2>
       <table class="table"><thead><tr><th>Prefix</th><th>Namespace</th></tr></thead><tbody>
       ${Object.entries(prefixes)
@@ -338,7 +347,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   </div>
 </div>`;
 
-  const useCasesPanel = renderUseCases(input, reqs, ref);
+  const useCasesPanel = renderUseCases(input, reqs, ref, id);
 
   const history = input.releases.length
     ? `<table class="table"><thead><tr><th>Version</th><th>Released</th><th>Level</th><th></th></tr></thead><tbody>${input.releases
@@ -421,7 +430,7 @@ ${project.github ? `<section class="block"><h2>Source</h2><p>Every release is a 
       '@id': term.iri,
       name,
       description: term.definition,
-      url: `${input.pageUrl}#${anchor}`,
+      url: `${input.pageUrl}#${fragment(anchor)}`,
     })),
   };
 
@@ -432,14 +441,14 @@ ${project.github ? `<section class="block"><h2>Source</h2><p>Every release is a 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}">
-<meta name="generator" content="Concord">
+<meta name="generator" content="${PAGE_GENERATOR}">
 <link rel="canonical" href="${esc(input.pageUrl)}">
 ${input.downloads.map((d) => `<link rel="alternate" type="${esc(d.mediaType)}" href="${esc(d.href)}" title="${esc(d.label)}">`).join('\n')}
 <script type="application/ld+json">${JSON.stringify(jsonLd).replace(/</g, '\\u003c')}</script>
 <style>${PAGE_CSS}</style>
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#${id('main')}">Skip to content</a>
 <header class="masthead">
   <div class="wrap">
     <p class="crumbs">${input.links.app ? `<a href="${esc(input.links.app)}">Concord</a>` : 'Concord'} <span aria-hidden="true">/</span> <span>${esc(project.slug)}</span></p>
@@ -452,14 +461,11 @@ ${input.downloads.map((d) => `<link rel="alternate" type="${esc(d.mediaType)}" h
 </header>
 <div class="tabbar">
   <nav class="tabs wrap" role="tablist" aria-label="Sections">
-    ${tabs.map((t, i) => `<a role="tab" id="${t.id}-tab" href="#${t.id}" aria-controls="${t.id}" aria-selected="${i === 0}">${esc(t.label)}${t.count !== undefined ? ` <span class="count">${t.count}</span>` : ''}</a>`).join('')}
+    ${tabs.map((t, i) => `<a role="tab" id="${t.tabId}" href="#${t.id}" aria-controls="${t.id}" aria-selected="${i === 0}">${esc(t.label)}${t.count !== undefined ? ` <span class="count">${t.count}</span>` : ''}</a>`).join('')}
   </nav>
 </div>
-<main id="main" class="wrap">
-  <section id="tab-spec" role="tabpanel" aria-labelledby="tab-spec-tab" class="panel" tabindex="0">${spec}</section>
-  <section id="tab-use-cases" role="tabpanel" aria-labelledby="tab-use-cases-tab" class="panel" tabindex="0">${useCasesPanel}</section>
-  <section id="tab-changes" role="tabpanel" aria-labelledby="tab-changes-tab" class="panel" tabindex="0">${changes}</section>
-  <section id="tab-download" role="tabpanel" aria-labelledby="tab-download-tab" class="panel" tabindex="0">${download}</section>
+<main id="${id('main')}" class="wrap">
+  ${tabs.map((t) => `<section id="${t.id}" role="tabpanel" aria-labelledby="${t.tabId}" class="panel" tabindex="0">${{ spec, useCasesPanel, changes, download }[t.key]}</section>`).join('\n  ')}
 </main>
 <footer class="foot wrap">
   <p>${esc(meta.title ?? project.title)} · ${esc(versionLabel)} · Published with Concord${input.links.app ? ` · <a href="${esc(input.links.app)}">Take part in developing this standard</a>` : ''}</p>
@@ -501,8 +507,9 @@ const ORIGIN_LABEL: Record<string, string> = {
   synthetic: 'Anonymised example',
 };
 
-function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, ref: (iri: string) => string): string {
+function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, ref: (iri: string) => string, id: (name: string) => string): string {
   const ucs = reqs.useCases;
+  const ucId = (u: { id: string }) => id(`uc-${anchorSafe(u.id)}`);
   const byId = new Map(ucs.map((u) => [u.id, u]));
   const releaseHref = (v?: string) => {
     const r = v && input.releases.find((x) => x.version === v);
@@ -510,7 +517,7 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
   };
   const ucLink = (id: string) => {
     const u = byId.get(id);
-    return u ? `<a class="uc-ref" href="#uc-${esc(anchorSafe(u.id))}">${esc(u.ref)}</a>` : '';
+    return u ? `<a class="uc-ref" href="#${esc(fragment(ucId(u)))}">${esc(u.ref)}</a>` : '';
   };
 
   const groupCount = (g: StatusGroup) => ucs.filter((u) => statusOf(u.status).group === g).length;
@@ -519,19 +526,19 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
   const doc = reqs.document;
   const reqTable = (rows: RequirementView[]) =>
     rows.length
-      ? `<h3 id="sec-requirements">Requirements</h3><table class="table reqs"><thead><tr><th>Id</th><th>Requirement</th><th>Use cases</th><th>Status</th></tr></thead><tbody>${rows
+      ? `<h3 id="${id('sec-requirements')}">Requirements</h3><table class="table reqs"><thead><tr><th>Id</th><th>Requirement</th><th>Use cases</th><th>Status</th></tr></thead><tbody>${rows
           .map(
             (r) =>
-              `<tr id="req-${esc(anchorSafe(r.id))}"><td><code>${esc(r.id)}</code></td><td>${esc(r.text)}${r.termIris?.length ? `<div class="req-terms muted small">Met by ${r.termIris.map(ref).join(', ')}</div>` : ''}</td><td>${r.useCaseIds.map(ucLink).filter(Boolean).join(', ') || '<span class="muted">None</span>'}</td><td><span class="req req-${esc(anchorSafe(r.status))}">${esc(REQ_STATUS[r.status] ?? r.status)}</span></td></tr>`,
+              `<tr id="${esc(id(`req-${anchorSafe(r.id)}`))}"><td><code>${esc(r.id)}</code></td><td>${esc(r.text)}${r.termIris?.length ? `<div class="req-terms muted small">Met by ${r.termIris.map(ref).join(', ')}</div>` : ''}</td><td>${r.useCaseIds.map(ucLink).filter(Boolean).join(', ') || '<span class="muted">None</span>'}</td><td><span class="req req-${esc(anchorSafe(r.status))}">${esc(REQ_STATUS[r.status] ?? r.status)}</span></td></tr>`,
           )
           .join('')}</tbody></table>`
       : '';
 
   const story = doc
-    ? `<article class="story block" aria-labelledby="sec-story">
+    ? `<article class="story block" aria-labelledby="${id('sec-story')}">
   <p class="eyebrow">Requirements document${doc.version && doc.version !== 'draft' ? ` for ${esc(doc.version)}` : ''}</p>
-  <h2 id="sec-story">${esc(doc.title)}</h2>
-  <div class="prose">${renderMarkdown(doc.intro)}${renderMarkdown(doc.markdown)}${(doc.sections ?? []).map((s) => `<h3 id="sec-story-${esc(anchorSafe(s.id))}">${esc(s.heading)}</h3>${renderMarkdown(s.markdown)}`).join('')}</div>
+  <h2 id="${id('sec-story')}">${esc(doc.title)}</h2>
+  <div class="prose">${renderMarkdown(doc.intro)}${renderMarkdown(doc.markdown)}${(doc.sections ?? []).map((s) => `<h3 id="${esc(id(`sec-story-${anchorSafe(s.id)}`))}">${esc(s.heading)}</h3>${renderMarkdown(s.markdown)}`).join('')}</div>
   ${reqTable(doc.requirements ?? [])}
   ${doc.generatedAt ? `<p class="muted small">Written from the use cases below on ${esc(formatDate(doc.generatedAt))}. Each reference links to the use case it draws on.</p>` : ''}
 </article>`
@@ -557,7 +564,7 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
       ? `${u.origin?.href && safeHref(u.origin.href) ? `<a href="${esc(u.origin.href)}">${esc(u.origin.label || origin)}</a>` : esc(u.origin?.label || origin)}${u.origin?.date ? `, ${esc(formatDate(u.origin.date))}` : ''}`
       : '';
     const by = u.attribution ? `Contributed by ${esc(u.attribution)}` : u.anonymised ? 'Anonymised and contributed with consent' : '';
-    return `<article class="uc" id="uc-${esc(anchorSafe(u.id))}" data-group="${st.group}">
+    return `<article class="uc" id="${esc(ucId(u))}" data-group="${st.group}">
   <header class="uc-head">
     <span class="uc-id">${esc(u.ref)}</span>
     <h4>${esc(u.title)}</h4>
@@ -598,15 +605,17 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
   }
 </section>
 ${story}
-<section class="block" aria-labelledby="sec-use-cases">
-  <h2 id="sec-use-cases">Use cases</h2>
+<section class="block" aria-labelledby="${id('sec-use-cases')}">
+  <h2 id="${id('sec-use-cases')}">Use cases</h2>
   ${
     ucs.length
       ? `<div class="uc-filters" role="group" aria-label="Filter use cases by status">${filters
           .filter((f) => f.key === 'all' || f.n)
           .map((f) => `<button type="button" data-filter="${f.key}" aria-pressed="${f.key === 'all'}">${esc(f.label)} <span class="count">${f.n}</span></button>`)
           .join('')}</div>${ucs.map(card).join('')}`
-      : '<p class="muted">No public use cases yet. Use cases shared privately or with the working group only are not shown here.</p>'
+      : reqs.snapshotMissing
+        ? '<p class="muted snapshot-missing">The use cases for this release were not recorded when it was published, so none are shown. The working draft has the current ones.</p>'
+        : '<p class="muted">No public use cases yet. Use cases shared privately or with the working group only are not shown here.</p>'
   }
 </section>`;
 }

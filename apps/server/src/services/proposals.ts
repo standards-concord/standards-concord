@@ -59,7 +59,7 @@ export class TermResolver {
 }
 
 /** Compile the model's flat proposal into engine ChangeOps. */
-export function proposalToOps(graph: OntologyGraph, terms: ProposedTerm[], source?: string): { ops: ChangeOp[]; warnings: string[] } {
+export function proposalToOps(graph: OntologyGraph, terms: ProposedTerm[], source?: string | string[]): { ops: ChangeOp[]; warnings: string[] } {
   const adds = terms
     .filter((t) => t.action === 'add')
     .map((t) => ({ ...t, localName: t.localName ? toLocalName(t.localName, t.kind) === t.localName ? t.localName : toLocalName(t.localName, t.kind) : toLocalName(t.label ?? 'Unnamed', t.kind) }));
@@ -73,7 +73,7 @@ export function proposalToOps(graph: OntologyGraph, terms: ProposedTerm[], sourc
       filler: x.filler ? r(x.filler) : undefined,
       cardinality: x.cardinality,
     }));
-  const src = source ? [source] : undefined;
+  const src = source === undefined ? undefined : Array.isArray(source) ? source : [source];
 
   // Adds first (classes, then properties, then individuals) so later references resolve.
   const order = { class: 0, objectProperty: 1, datatypeProperty: 2, individual: 3 } as const;

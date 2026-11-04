@@ -42,7 +42,7 @@ ${MODELLING_PRINCIPLES}
 
 Rules for your proposal:
 - Reuse existing terms in the ontology whenever they fit; refer to them by their CURIE (e.g. vol:Organisation). Refer to terms you are adding in the same proposal by their localName.
-- For each new or changed term, cite the use case and evidence it came from.
+- For each new or changed term, give the reason and evidence it came from. The ontology is published, but use cases can be private: never quote use case titles, people's names or organisations in definitions, comments or reasons; say "a use case" instead.
 - For each competency question, write a SPARQL 1.1 SELECT query (with PREFIX declarations) that answers it against the ontology plus a small amount of example instance data, and provide that example data in Turtle (with @prefix declarations, using the ontology namespace for terms and http://example.org/data/ for instances). The query must return at least one row on that example data once your changes are applied.
 - If two participants use the same word for different things, or different words for the same thing, say so in "conflicts" and model the distinction explicitly (with altLabels for synonyms).
 - Prefer a minor (additive) change. Only propose changes to existing terms when necessary, and explain why.`;
