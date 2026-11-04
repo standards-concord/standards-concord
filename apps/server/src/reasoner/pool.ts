@@ -5,7 +5,7 @@
  * validation fails closed instead of hanging.
  */
 import { Worker } from 'node:worker_threads';
-import { structuralReasoner, type OntologyGraph } from '@concord/core';
+import type { OntologyGraph } from '@concord/core';
 import type { ReasonerResult } from '@concord/core/types';
 
 const TIMEOUT_MS = Number(process.env.REASONER_TIMEOUT_MS ?? 60_000);
@@ -16,8 +16,14 @@ const pending = new Map<number, Pending>();
 let nextId = 1;
 let tail: Promise<unknown> = Promise.resolve();
 
-const noVerdict = (graph: OntologyGraph, started: number, error: string): ReasonerResult => ({
-  ...structuralReasoner(graph), available: false, checked: 'none', error, durationMs: Math.round(performance.now() - started),
+/**
+ * No verdict, returned at once. It deliberately doesn't fall back to the structural checks
+ * here: they run on this (the server's main) thread and can take seconds on a large ontology,
+ * which is the very case that timed out. Validation never passes on it (available: false).
+ */
+const noVerdict = (_graph: OntologyGraph, started: number, error: string): ReasonerResult => ({
+  engine: 'structural', available: false, checked: 'none', consistent: true, unsatisfiable: [], inferredSubClassOf: [],
+  explanation: 'No checks of consistency or satisfiability ran.', error, durationMs: Math.round(performance.now() - started),
 });
 
 /** Fails the jobs running on worker w (only that worker's: a replaced worker exits after its successor has started). */

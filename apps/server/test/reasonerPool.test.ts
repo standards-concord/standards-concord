@@ -24,4 +24,22 @@ describe('reasoner worker pool', () => {
     expect(next.error).toBeUndefined();
     expect(next.checked).toBe('complete');
   });
+
+  // Used to go wrong: the no-verdict result ran the structural checks on the server's main thread,
+  // which took about 17 s for a 1,000-class chain and stalled every other request meanwhile.
+  it('answers at once after a timeout, without running the structural checks on the main thread', async () => {
+    const owl = 'http://www.w3.org/2002/07/owl#', rdfs = 'http://www.w3.org/2000/01/rdf-schema#', ex = 'https://example.org/chain#';
+    const lines = [`<https://example.org/chain> a <${owl}Ontology> .`];
+    for (let i = 0; i < 1000; i++) lines.push(`<${ex}C${i}> a <${owl}Class>${i ? ` ; <${rdfs}subClassOf> <${ex}C${i - 1}>` : ''} .`);
+    const g = await OntologyGraph.fromTurtle(lines.join('\n'));
+    let ticks = 0;
+    const heartbeat = setInterval(() => ticks++, 10);
+    const t0 = performance.now();
+    const r = await reasonInWorker(g, { timeoutMs: 20 });
+    const elapsed = performance.now() - t0;
+    clearInterval(heartbeat);
+    expect(r).toMatchObject({ available: false, checked: 'none' });
+    expect(elapsed).toBeLessThan(1000);
+    expect(ticks).toBeGreaterThan(0);
+  });
 });

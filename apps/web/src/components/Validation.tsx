@@ -171,7 +171,7 @@ export function ReasonerResult({ report, label, checkInBrowser }: { report: Vali
       <strong className="text-warn">Consistent, but not every class could be checked.</strong> Validation doesn't pass until the reasoner can check them all.
     </span>
   ) : !r.available ? (
-    <span className="text-warn">The OWL reasoner gave no verdict; only structural checks ran.</span>
+    <span className="text-warn">The OWL reasoner gave no verdict, so validation can't pass.</span>
   ) : r.consistent ? (
     <span>
       <strong className="text-ok">Consistent.</strong> {r.unsatisfiable.length ? `${plural(r.unsatisfiable.length, 'unsatisfiable class', 'unsatisfiable classes')}.` : 'All classes are satisfiable.'}
