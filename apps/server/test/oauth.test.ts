@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { claim, get, openDb, put } from '../src/db.js';
 import { newId } from '../src/ids.js';
-import { setClientMetadataFetcher } from '../src/oauth.js';
+import { migrateClientSecrets, setClientMetadataFetcher } from '../src/oauth.js';
 import { FetchError, isPublicAddress, readCapped, safeFetchText } from '../src/safeFetch.js';
 import { Readable } from 'node:stream';
 import { seedDemo } from '../src/services/simulation.js';
@@ -637,6 +637,74 @@ describe('client metadata documents and redirect safety', () => {
     // None of that used up the code or the refresh token.
     expect((await token(exchange)).status).toBe(200);
     expect((await token(refresh)).status).toBe(200);
+  });
+
+  /** A confidential registered client with a live refresh token and a fresh code, for the checks below. */
+  async function confidentialClient() {
+    // Stored the way registration stores it (registering over HTTP here would hit its hourly limit).
+    const client_id = newId('client');
+    const client_secret = randomBytes(32).toString('hex');
+    put('oauthClients', {
+      id: client_id,
+      info: { client_id, client_name: 'Confidential', redirect_uris: [REDIRECT], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'client_secret_post', client_secret_expires_at: 0 },
+      secretHash: createHash('sha256').update(client_secret).digest('hex'),
+    });
+    const newCode = async () => {
+      const { verifier, challenge } = pkce();
+      const { code } = await authorize(await signedIn(), client_id, origin, { challenge, resource: `${origin}/mcp` });
+      return { grant_type: 'authorization_code', code, code_verifier: verifier, client_id, redirect_uri: REDIRECT, resource: `${origin}/mcp` };
+    };
+    const first = await token({ ...(await newCode()), client_secret });
+    expect(first.status).toBe(200);
+    return { client_id, client_secret, newCode, refresh: { grant_type: 'refresh_token', refresh_token: first.body.refresh_token as string, client_id, resource: `${origin}/mcp` } };
+  }
+
+  it('checks the secret on every path the token and revocation endpoints answer', async () => {
+    const c = await confidentialClient();
+    const exchange = await c.newCode();
+    for (const path of ['/token', '/token/', '/token//', '/TOKEN', '/token///x']) {
+      for (const body of [exchange, c.refresh]) {
+        const res = await request(base).post(path).type('form').send(body);
+        expect([401, 404], `${path} ${body.grant_type}`).toContain(res.status);
+      }
+    }
+    for (const path of ['/revoke', '/revoke/', '/revoke//']) {
+      expect([401, 404], path).toContain((await request(base).post(path).type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id })).status);
+    }
+    // Off the canonical paths, the endpoints aren't there at all.
+    expect((await request(base).post('/token//').type('form').send({ ...c.refresh, client_secret: c.client_secret })).status).toBe(404);
+    // And nothing above used up the code or the refresh token.
+    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
+    expect((await token({ ...c.refresh, client_secret: c.client_secret })).status).toBe(200);
+  });
+
+  it('refuses an expired secret, and a malformed stored hash, without a server error', async () => {
+    const c = await confidentialClient();
+    const doc = get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id)!;
+    put('oauthClients', { ...doc, info: { ...doc.info, client_secret_expires_at: Math.floor(Date.now() / 1000) - 60 } });
+    const exchange = await c.newCode();
+    for (const body of [exchange, c.refresh]) {
+      const res = await token({ ...body, client_secret: c.client_secret });
+      expect(res.status, body.grant_type).toBe(401);
+      expect(res.body.error_description).toContain('expired');
+    }
+    expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id, client_secret: c.client_secret })).status).toBe(401);
+    put('oauthClients', { ...doc, secretHash: 'ab' });
+    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(401);
+    put('oauthClients', doc);
+    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
+  });
+
+  it('hashes every plain-text secret at startup, including clients nobody has used since', () => {
+    const ids = [newId('client'), newId('client')];
+    for (const id of ids) put('oauthClients', { id, info: { client_id: id, client_name: 'Untouched', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: `plain-${id}` } });
+    expect(migrateClientSecrets()).toBeGreaterThanOrEqual(2);
+    for (const id of ids) {
+      const d = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id)!;
+      expect(d.info.client_secret).toBeUndefined();
+      expect(d.secretHash).toBe(createHash('sha256').update(`plain-${id}`).digest('hex'));
+    }
+    expect(migrateClientSecrets()).toBe(0);
   });
 
   it('moves a secret stored in plain text by older code into a hash, and still accepts it', async () => {

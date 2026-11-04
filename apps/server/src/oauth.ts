@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { claim, get, HttpError, list, put, remove, take, transaction } from './db.js';
+import { checkpoint, claim, get, HttpError, list, put, remove, take, transaction } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -276,14 +276,29 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
  */
 function registeredClient(clientId: string): ClientDoc | undefined {
   const doc = get<ClientDoc>('oauthClients', clientId);
-  if (!doc?.info.client_secret) return doc;
+  return doc?.info.client_secret ? hashSecret(doc) : doc;
+}
+function hashSecret(doc: ClientDoc): ClientDoc {
   const { client_secret, ...info } = doc.info;
-  const migrated = { ...doc, info: info as OAuthClientInformationFull, secretHash: sha(client_secret) };
+  const migrated = { ...doc, info: info as OAuthClientInformationFull, secretHash: sha(client_secret!) };
   put<ClientDoc>('oauthClients', migrated);
   return migrated;
 }
 
-const sameSecret = (given: string, hash: string) => timingSafeEqual(Buffer.from(sha(given), 'hex'), Buffer.from(hash, 'hex'));
+/** Run at startup: hash every client secret older code stored in plain text, and leave no copy in the WAL. */
+export function migrateClientSecrets(): number {
+  const n = transaction(() => {
+    const plain = list<ClientDoc>('oauthClients').filter((d) => d.info.client_secret);
+    for (const d of plain) hashSecret(d);
+    return plain.length;
+  });
+  if (n) checkpoint();
+  return n;
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** Constant-time check of a presented secret against its stored hash. A malformed stored hash never matches. */
+const sameSecret = (given: string, hash: string) => SHA256_HEX.test(hash) && timingSafeEqual(Buffer.from(sha(given), 'hex'), Buffer.from(hash, 'hex'));
 
 const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
@@ -629,13 +644,18 @@ function routerFor(origin: string): Router {
     const given = body.client_secret;
     if (doc?.secretHash) {
       if (typeof given !== 'string' || !sameSecret(given, doc.secretHash)) return refuse('The client secret is missing or wrong.');
+      const expires = doc.info.client_secret_expires_at;
+      if (expires && expires < now()) return refuse('The client secret has expired. Register the client again.');
     } else if (given !== undefined) {
       return refuse('This is a public client (none): send no client_secret.');
     }
     delete body.client_secret;
     next();
   };
-  for (const path of ['/token', '/revoke']) r.post(path, cors, express.urlencoded({ extended: false }), clientAuth);
+  // Mounted with use() so it covers every path the SDK's /token and /revoke routers answer (they match
+  // prefixes, so /token/ and /token// reach them too), not just the exact paths.
+  const postOnly = (h: RequestHandler): RequestHandler => (req, res, next) => (req.method === 'POST' ? h(req, res, next) : next());
+  for (const path of ['/token', '/revoke']) r.use(path, postOnly(cors), postOnly(express.urlencoded({ extended: false })), postOnly(clientAuth));
   r.use(
     mcpAuthRouter({
       provider,
@@ -657,8 +677,12 @@ function routerFor(origin: string): Router {
 const OAUTH_PATHS = /^\/(\.well-known\/(oauth-authorization-server|oauth-protected-resource)|authorize|token|register|revoke)(\/|$)/;
 
 /** Mount at the app root. Builds one router per public origin, so every domain gets matching metadata. */
+/** The only paths the OAuth endpoints answer on; anything else that looks like one (/token/, /token//) is not found. */
+const CANONICAL_OAUTH_PATHS = new Set(['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/authorize', '/token', '/register', '/revoke']);
+
 export function oauthRoutes(req: Request, res: Response, next: NextFunction) {
   if (!OAUTH_PATHS.test(req.path)) return next();
+  if (!CANONICAL_OAUTH_PATHS.has(req.path)) return void res.status(404).json({ error: 'not_found' });
   const origin = publicOrigin(req);
   if (!origin) return refuseUnknownOrigin(res);
   const limit = limits.find(([re]) => re.test(req.path))?.[1];

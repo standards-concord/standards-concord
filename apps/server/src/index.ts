@@ -1,10 +1,13 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
+import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
+const migrated = migrateClientSecrets();
+if (migrated) console.log(`[oauth] hashed ${migrated} stored client secret(s)`);
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }

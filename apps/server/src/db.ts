@@ -40,6 +40,7 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
+    PRAGMA secure_delete = ON;
     CREATE TABLE IF NOT EXISTS docs (
       collection TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -51,6 +52,14 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
     CREATE INDEX IF NOT EXISTS docs_parent ON docs (collection, parent);
   `);
   return db;
+}
+
+/**
+ * Copy the write-ahead log into the database and empty it. With secure_delete on, overwritten rows are
+ * zeroed in the database file, so after this no old copy of a rewritten row is left in either file.
+ */
+export function checkpoint() {
+  conn().exec('PRAGMA wal_checkpoint(TRUNCATE)');
 }
 
 export function closeDb() {
