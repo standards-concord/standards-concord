@@ -213,24 +213,29 @@ describe('SHACL compact syntax', () => {
     }
   });
 
-  it('keeps every type several restrictions give a property, in Turtle and SHACLC', async () => {
+  it('checks several datatypes on one property by value, in Turtle and SHACLC', async () => {
     const shapes = await turtleShapes(await edge());
-    // Each in a property shape of its own, as SHACLC allows one datatype per property shape.
-    const wq = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#wq'), null);
-    expect(wq.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value).sort()).toEqual([NS.xsd + 'integer', NS.xsd + 'string']);
-    const wp = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#wp'), null)[0];
-    expect(shapes.getObjects(wp, DataFactory.namedNode(SH + 'datatype'), null).map((o) => o.value)).toEqual([NS.xsd + 'byte']);
+    const on = (p: string) => shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode(`https://example.org/e#${p}`), null);
+    const objs = (p: string, pred: string) => on(p).flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + pred), null)).map((o) => o.value);
+    // A narrower datatype makes the other redundant: one exact check.
+    expect(objs('wp', 'datatype')).toEqual([NS.xsd + 'byte']);
     // Three types that reduce to one (SZ) give one shape.
-    const xs = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xs'), null);
-    expect(xs.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value)).toEqual(['https://example.org/e#SZ']);
-    // Datatypes neither of which is narrower are both checked, never neither, and a note says SHACL's exact
-    // datatype check rejects the overlap of their value spaces (0 is both non-negative and non-positive).
-    const xn = shapes.getSubjects(DataFactory.namedNode(SH + 'path'), DataFactory.namedNode('https://example.org/e#xn'), null);
-    expect(xn.flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + 'datatype'), null)).map((o) => o.value).sort()).toEqual([NS.xsd + 'nonNegativeInteger', NS.xsd + 'nonPositiveInteger']);
+    expect(objs('xs', 'datatype')).toEqual(['https://example.org/e#SZ']);
+    // xsd:nonNegativeInteger and xsd:nonPositiveInteger overlap only in 0: checked by value, not by two exact
+    // datatype checks that no literal can pass.
+    expect(objs('xn', 'datatype')).toEqual([]);
+    expect(objs('xn', 'minInclusive')).toEqual(['0']);
+    expect(objs('xn', 'maxInclusive')).toEqual(['0']);
+    expect(objs('xn', 'or')).toHaveLength(1);
+    // xsd:string and xsd:integer have no values in common: the property can have none.
+    expect(objs('wq', 'datatype')).toEqual([]);
+    expect(objs('wq', 'maxCount')).toEqual(['0']);
     const ttl = await toShacl(await edge());
-    expect(ttl).toMatch(/^# Note: <https:\/\/example\.org\/e#XN> <https:\/\/example\.org\/e#xn>: values must be all of <[^>]+>, <[^>]+>\. SHACL checks a literal's datatype exactly/m);
+    expect(ttl).toMatch(/^# Note: <https:\/\/example\.org\/e#WD> <https:\/\/example\.org\/e#wq>: values must be all of <[^>]+>, <[^>]+>, which have no values in common, so it can have none\./m);
+    expect(ttl).not.toMatch(/^# Note: <https:\/\/example\.org\/e#XN>/m);
     const shaclc = await toShaclc(await edge()); // and SHACLC says the same
-    expect(shaclc).toMatch(/^# Note: <https:\/\/example\.org\/e#XN>/m);
+    expect(shaclc).toMatch(/^# Note: <https:\/\/example\.org\/e#WD>/m);
+    expect(shaclc).toMatch(/e:xn xsd:decimal\|xsd:integer\|[^\n]*datatype=xsd:unsignedInt[^\n]*minInclusive=0 maxInclusive=0/);
   });
 
   it('combines many restrictions on one property quickly', async () => {
@@ -246,7 +251,9 @@ describe('SHACL compact syntax', () => {
     const started = Date.now();
     const ttl = await toShacl(g);
     expect(Date.now() - started).toBeLessThan(5000);
-    expect(ttl.match(/sh:datatype m:S/g)).toHaveLength(400);
+    // Strings of at most 1 to at most 400 characters: at most 1, checked by value.
+    expect(ttl).not.toMatch(/sh:datatype m:S/);
+    expect(ttl).toMatch(/sh:maxLength 1 ;/);
   }, 30_000);
 
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
@@ -388,11 +395,12 @@ describe('Generated JavaScript classes', () => {
     // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
     expect(mod.notes).toEqual(expect.arrayContaining([
       expect.stringMatching(/^UC <https:\/\/example\.org\/e#up>: values must be both <http:\/\/www\.w3\.org\/2001\/XMLSchema#string> and <http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>/),
-      // Two restrictions on the same class: the same.
-      expect.stringMatching(/^WD <https:\/\/example\.org\/e#wq>: values must be all of <http:\/\/www\.w3\.org\/2001\/XMLSchema#(string|integer)>, <http:\/\/www\.w3\.org\/2001\/XMLSchema#(string|integer)>/),
-      expect.stringMatching(/^XN <https:\/\/example\.org\/e#xn>: values must be all of/),
+      // Two restrictions on the same class whose datatypes share no values: what the shapes say.
+      expect.stringMatching(/^<https:\/\/example\.org\/e#WD> <https:\/\/example\.org\/e#wq>: values must be all of .*, which have no values in common/),
     ]));
-    expect(mod.notes).toHaveLength(3);
+    expect(mod.notes).toHaveLength(2);
+    // Values both non-negative and non-positive: whole numbers, checked by value.
+    expect(mod.ts).toMatch(/export class XN extends TermWrapper \{\s+get xn\(\): Set<number> \{[^}]*LiteralFrom\.integer\)/);
     // Three restrictions, one narrower than both others (SZ derives from SA1 and SB3), reduce to it, with no note.
     expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#SZ"\)/);
     // Two restrictions on the same class narrow too: xsd:byte within xsd:integer.

@@ -111,7 +111,7 @@ const typeKey = (p: Omit<CodeProperty, 'name' | 'path'>) =>
   `${p.maxCount === 1 ? ((p.minCount ?? 0) >= 1 ? 'one' : 'opt') : 'set'}|${p.node ?? ''}|${p.datatype ?? ''}`;
 
 /** XML Schema's built-in datatype derivations: each datatype and the one it is derived from. */
-const XSD_BASE: Record<string, string> = {
+export const XSD_BASE: Record<string, string> = {
   integer: 'decimal', nonPositiveInteger: 'integer', negativeInteger: 'nonPositiveInteger', long: 'integer', int: 'long', short: 'int', byte: 'short',
   nonNegativeInteger: 'integer', unsignedLong: 'nonNegativeInteger', unsignedInt: 'unsignedLong', unsignedShort: 'unsignedInt', unsignedByte: 'unsignedShort',
   positiveInteger: 'nonNegativeInteger', normalizedString: 'string', token: 'normalizedString', language: 'token', Name: 'token', NCName: 'Name',
@@ -151,8 +151,9 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
 
   /** The value type a property shape states itself (sh:datatype, or a class from a restriction). */
   const statedType = (ps: PropShape): ValueType | undefined => {
-    if (ps.datatype) return { datatype: ps.datatype };
-    if (ps.cls) return { node: byClass.get(ps.cls)?.iri ?? THING };
+    const t = ps.datatype || ps.cls ? ps : ps.codeType;
+    if (t?.datatype) return { datatype: t.datatype };
+    if (t?.cls) return { node: byClass.get(t.cls)?.iri ?? THING };
     return undefined;
   };
   /** The value type from the property's global range, for a property shape that states none. */
@@ -189,7 +190,8 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     if (!preferred.node && !preferred.datatype) return other;
     return preferred;
   };
-  const notes = new Set<string>();
+  // What the shapes can't check applies to the classes too.
+  const notes = new Set<string>(derived.notes);
   const typeName = (t: ValueType) => (t.datatype ? `<${t.datatype}>` : t.node === THING ? 'any resource' : `<${byIri.get(t.node!)?.targetClass}>`);
   /**
    * Both constraints apply: the larger minimum, the smaller maximum, the

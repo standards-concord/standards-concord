@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@rdfjs/types": "^2",
+    "@sparq-org/sparq": "0.1.5",
     "@types/jsonld": "^1.5.15",
     "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",

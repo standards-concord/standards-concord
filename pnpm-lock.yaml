@@ -212,6 +212,9 @@ importers:
       '@rdfjs/types':
         specifier: ^2
         version: 2.0.1
+      '@sparq-org/sparq':
+        specifier: 0.1.5
+        version: 0.1.5
       '@types/jsonld':
         specifier: ^1.5.15
         version: 1.5.15

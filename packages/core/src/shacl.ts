@@ -10,11 +10,12 @@ import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { Restriction } from './types.js';
 import { NS, RDF_TYPE, localName } from './ns.js';
-import { blankNode, canonical, literal, nn, objects, readList, typedLit } from './rdf.js';
+import { blankNode, canonical, literal, nn, objects, readList, typedLit, writeList } from './rdf.js';
 import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
 import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
+import { boundDatatype, datatypeDefinitions, family, intersect, WHOLE_NUMBER_PATTERN } from './valuespace.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -34,6 +35,22 @@ export interface PropShape {
    * property shape of its own.
    */
   alsoTypes?: { cls?: string; datatype?: string }[];
+  /**
+   * Values checked by value rather than by datatype IRI, when several
+   * datatypes apply at once (see valuespace.ts): any of `datatypes`, within
+   * the bounds and lengths, matching every pattern.
+   */
+  values?: {
+    datatypes: string[];
+    min?: { value: string; inclusive: boolean };
+    max?: { value: string; inclusive: boolean };
+    minLength?: number;
+    maxLength?: number;
+    /** SHACL (XPath) patterns, already anchored. */
+    patterns: string[];
+  };
+  /** The value type for generated code, when the shape checks values without one sh:datatype or sh:class. */
+  codeType?: { cls?: string; datatype?: string };
   qualified: { shape: { cls?: string; datatype?: string }; min?: number; max?: number }[];
 }
 
@@ -79,6 +96,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
   const notes: string[] = [];
   // Whether type `a` is narrower than or equal to `b`: a subclass, or a derived datatype.
   const bases = datatypeBases(graph);
+  const defs = datatypeDefinitions(graph.store);
   const supers = new Map(v.classes.map((k) => [k.iri, k.superClasses]));
   const isSubClass = (a: string, b: string) => {
     const seen = new Set([a]);
@@ -110,14 +128,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
     for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? [], narrowerOrEqual);
-    // Two datatypes neither of which is narrower each get a shape, so SHACL checks both. sh:datatype checks a
-    // literal's datatype IRI exactly, so values that OWL allows in the overlap of their value spaces (0 for
-    // xsd:nonNegativeInteger and xsd:nonPositiveInteger) are rejected: stricter, never laxer. A note says so.
-    for (const ps of byPath.values()) {
-      const dts = [ps.datatype, ...(ps.alsoTypes ?? []).map((t) => t.datatype)].filter((d): d is string => Boolean(d));
-      if (dts.length > 1)
-        notes.push(`<${k.iri}> <${ps.path}>: values must be all of ${dts.map((d) => `<${d}>`).join(', ')}. SHACL checks a literal's datatype exactly, so any value typed with only one of them is rejected, even one in both value spaces.`);
-    }
+    for (const ps of byPath.values()) combineDatatypes(k.iri, ps, defs, notes);
     shapes.push({
       iri: `${shapesNs}${localName(k.iri)}Shape`,
       targetClass: k.iri,
@@ -176,6 +187,27 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
       if (accessor) add(b, SH + 'codeIdentifier', literal(accessor));
       if (ps.datatype) add(b, SH + 'datatype', nn(ps.datatype));
       if (ps.cls) add(b, SH + 'class', nn(ps.cls));
+      if (ps.values) {
+        const vc = ps.values;
+        if (vc.datatypes.length === 1) add(b, SH + 'datatype', nn(vc.datatypes[0]));
+        else if (vc.datatypes.length)
+          add(b, SH + 'or', writeList(out, vc.datatypes.map((d) => {
+            const alt = blankNode();
+            add(alt, SH + 'datatype', nn(d));
+            return alt;
+          })));
+        const bound = (x: { value: string }) => typedLit(x.value, boundDatatype(x.value));
+        if (vc.min) add(b, SH + (vc.min.inclusive ? 'minInclusive' : 'minExclusive'), bound(vc.min));
+        if (vc.max) add(b, SH + (vc.max.inclusive ? 'maxInclusive' : 'maxExclusive'), bound(vc.max));
+        if (vc.minLength !== undefined) add(b, SH + 'minLength', int(vc.minLength));
+        if (vc.maxLength !== undefined) add(b, SH + 'maxLength', int(vc.maxLength));
+        // sh:pattern takes one pattern per property shape here, so SHACLC can write it.
+        vc.patterns.forEach((pattern, i) => {
+          const pb = i === 0 ? b : blankNode();
+          if (i > 0) add(shape, SH + 'property', pb), add(pb, SH + 'path', nn(ps.path));
+          add(pb, SH + 'pattern', literal(pattern));
+        });
+      }
       // Each further type gets a property shape of its own (SHACLC allows one datatype or class per property shape).
       for (const t of ps.alsoTypes ?? []) {
         const tb = blankNode();
@@ -480,15 +512,16 @@ function rewriteTokens(line: string, tokens: Set<string>): string {
       first = false;
       continue;
     }
-    if (/\s/.test(c)) {
+    // '|' separates the alternatives of an sh:or (it can't occur in an IRI reference).
+    if (/[\s|]/.test(c)) {
       out += c;
       i++;
       continue;
     }
     let j = i;
-    // An IRI reference runs to its closing '>' (it may contain quotes); otherwise a token ends at whitespace or a quote.
+    // An IRI reference runs to its closing '>' (it may contain quotes); otherwise a token ends at whitespace, '|' or a quote.
     if (c === '<') j = line.indexOf('>', i) < 0 ? line.length : line.indexOf('>', i) + 1;
-    else while (j < line.length && !/[\s"']/.test(line[j])) j++;
+    else while (j < line.length && !/[\s"'|]/.test(line[j])) j++;
     const tok = line.slice(i, j);
     out += !first && tokens.has(tok) ? `datatype=${tok}` : tok;
     first = false;
@@ -527,6 +560,47 @@ function nameQualifiedShapes(store: Store, shapesNs: string): void {
 }
 
 type ValueType = { cls?: string; datatype?: string };
+
+/**
+ * Several datatypes apply to one property (from several `only` restrictions,
+ * or one and the range), none of them narrower than another. No literal has
+ * two datatype IRIs, so one sh:datatype each would reject every value,
+ * including those OWL allows in the overlap of their value spaces (0 for
+ * xsd:nonNegativeInteger and xsd:nonPositiveInteger). The overlap is checked
+ * by value instead; if there is none, the property can have no values. What
+ * can't be expressed is left unchecked, never rejected, and a note says so.
+ */
+function combineDatatypes(cls: string, ps: PropShape, defs: ReturnType<typeof datatypeDefinitions>, notes: string[]): void {
+  const types = [...(ps.datatype ? [{ datatype: ps.datatype }] : ps.cls ? [{ cls: ps.cls }] : []), ...(ps.alsoTypes ?? [])];
+  const datatypes = types.flatMap((t) => (t.datatype ? [t.datatype] : []));
+  const classes = types.filter((t) => t.cls);
+  if (!datatypes.length || (datatypes.length === 1 && !classes.length)) return;
+  const where = `<${cls}> <${ps.path}>`;
+  const all = types.map((t) => `<${t.datatype ?? t.cls}>`).join(', ');
+  delete ps.datatype;
+  delete ps.cls;
+  delete ps.alsoTypes;
+  ps.codeType = types[0];
+  // A literal is never an instance of a class, so a datatype and a class together allow nothing.
+  const v = classes.length ? undefined : intersect(datatypes, defs);
+  if (!v || v.empty) {
+    ps.maxCount = 0;
+    notes.push(`${where}: values must be all of ${all}, which have no values in common, so it can have none.`);
+    return;
+  }
+  const decimal = v.root === NS.xsd + 'decimal';
+  ps.values = {
+    datatypes: v.root ? family(v.root) : [],
+    min: v.min,
+    max: v.max,
+    minLength: v.minLength,
+    maxLength: v.maxLength,
+    patterns: [...(v.whole ? [WHOLE_NUMBER_PATTERN] : []), ...v.patterns.map((p) => `^(?:${p})$`)],
+  };
+  if (v.root) ps.codeType = { datatype: decimal ? NS.xsd + (v.whole ? 'integer' : 'decimal') : v.root };
+  const unchecked = [...v.partial, ...(v.root ? [] : ['their datatype'])];
+  if (unchecked.length) notes.push(`${where}: values must be all of ${all}. The shapes check what they can by value, but not ${unchecked.join(' or ')}, so they accept some values the ontology doesn't.`);
+}
 
 /**
  * Adds an `only` type to a property shape. Every such type applies, as does
