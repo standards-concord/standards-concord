@@ -150,7 +150,8 @@ const HTML_NUMBER = /^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/;
  * runs. No trimming: " 5" or "+5" would show as an empty number field.
  */
 export function fitsControl(type: ValueType, op: FilterOp, value: string): boolean {
-  if (usesNumberInput(type, op)) return HTML_NUMBER.test(value);
+  // The browser's number field also drops numbers too big to represent (1e999), so require finite.
+  if (usesNumberInput(type, op)) return HTML_NUMBER.test(value) && Number.isFinite(Number(value));
   if (usesBooleanChoice(type, op)) return value === 'true' || value === 'false';
   return true;
 }

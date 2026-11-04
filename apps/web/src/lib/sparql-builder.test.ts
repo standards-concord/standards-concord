@@ -92,7 +92,7 @@ describe('buildSparql', () => {
     expect(activeFilter(age)).toBeUndefined();
     expect(activeFilter(active)).toBeUndefined();
     // Values a number field or true/false choice would show differently (or as empty) don't apply either.
-    for (const v of ['+5', '5.', ' 5', '5 ']) expect(activeFilter({ ...age, filter: { op: 'gt', value: v } }), v).toBeUndefined();
+    for (const v of ['+5', '5.', ' 5', '5 ', '1e309', '1e999', '9'.repeat(400)]) expect(activeFilter({ ...age, filter: { op: 'gt', value: v } }), v).toBeUndefined();
     expect(activeFilter({ ...active, filter: { op: 'equals', value: ' false ' } })).toBeUndefined();
     expect(activeFilter({ ...age, filter: { op: 'gt', value: '-0.5' } })).toEqual({ op: 'gt', value: '-0.5' });
     expect(isRequired(age)).toBe(false);
