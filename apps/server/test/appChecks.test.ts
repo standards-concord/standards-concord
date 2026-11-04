@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -798,11 +798,17 @@ describe('autopilot', () => {
       const expired = await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed' });
       expect(expired.status).toBe(401);
       expect(expired.body.error).toMatch(/expired/);
+      // A run that outlasts its keys sends its working-draft result again, with a new token from
+      // GitHub, and gets new ones; the old ones stop working.
+      const renewed = await report(a.token!, { target: 'baseline', revision: real.baseline.revision, attempt: real.attempt, outcome: 'passed', commit: 'xia-v1' });
+      expect(renewed.body.verified).toBe(true);
+      expect(renewed.body.runKeys[crId2]).not.toBe(answer.body.runKeys[crId2]);
+      expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed', runKey: answer.body.runKeys[crId2] })).status).toBe(401);
+      // The verified run's own result replaces the forged one.
+      expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed' })).body.autopilot.action).toBe('approved');
     } finally {
       clock.advance(-7 * 3600_000);
     }
-    // The verified run's own result replaces the forged one.
-    expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed' })).body.autopilot.action).toBe('approved');
   });
 
   it('counts results the app’s owner reports signed in, without the token', async () => {
@@ -895,21 +901,36 @@ describe('autopilot', () => {
       const jan = await login('reviewer', 'Reviewer Jan');
       const a = await connect(jan, 'Jan’s app', undefined, 'example/jan-app');
       const p = await pending(a.token!, true, 'jan-v1');
-      const body = { target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed', commit: 'jan-v1', oidc: oidcFor(a.id, 'example/jan-app', 'jan-v1') };
-      // Another process holds the database's write lock, so the report can't save.
+      const oidc = oidcFor(a.id, 'example/jan-app', 'jan-v1');
+      const { jti } = JSON.parse(Buffer.from(oidc.split('.')[1], 'base64url').toString('utf8')) as { jti: string };
+      const used = `${process.env.GITHUB_OIDC_ISSUER!.replace(/\/$/, '')}#${jti}`;
+      const body = { target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed', commit: 'jan-v1', oidc };
+      // Saving the report fails, but only once GitHub's proof has been checked and recorded as
+      // used: another process's trigger refuses the app's write while that record exists.
       const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
-      other.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
+      other
+        .prepare(
+          `CREATE TRIGGER fail_after_proof BEFORE INSERT ON docs
+           WHEN NEW.collection = 'apps' AND NEW.id = '${a.id}'
+             AND EXISTS (SELECT 1 FROM docs WHERE collection = 'oidcTokens' AND id = '${used}')
+           BEGIN SELECT RAISE(ABORT, 'injected failure after the proof was recorded'); END`,
+        )
+        .run();
       let failed;
       try {
         failed = await report(a.token!, body);
       } finally {
-        other.exec('ROLLBACK');
+        other.exec('DROP TRIGGER fail_after_proof');
         other.close();
       }
       expect(failed.status).toBe(500);
+      // Both the proof's record and the report were rolled back.
+      expect(getDoc('oidcTokens', used)).toBeUndefined();
+      expect((getDoc('apps', a.id) as { runs: { attempt: number; reported?: unknown }[] }).runs.find((r) => r.attempt === p.attempt)!.reported).toBeUndefined();
       const retried = await report(a.token!, body);
       expect(retried.status, retried.text).toBe(200);
       expect(retried.body.verified).toBe(true);
+      expect(getDoc('oidcTokens', used)).toBeTruthy();
     }, 180_000);
   });
 
@@ -1112,6 +1133,89 @@ describe('autopilot', () => {
         expect(text).not.toContain(op.localName);
         expect(merged.status).toBe('review');
       }
+    });
+
+    describe('across processes', () => {
+      const approvedCR = async (title: string) => {
+        const id = await freshCR(title);
+        await (await login('steward', 'Steward Clock')).post('/api/simulation/clock').send({ advanceDays: 8 });
+        await (await login('reviewer', `Reviewer for ${title}`)).post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+        expect((await ci(token, { [id]: 'passed' })).autopilot!.action).toBe('approved');
+        expect((await detail(id)).status).toBe('approved');
+        return id;
+      };
+      // Stand in for the moment of the commit, then put the real one back.
+      const duringCommit = async <T>(during: (commit: () => string) => string, fn: () => Promise<T>) => {
+        const real = ontologyStore.commitWorkingText;
+        ontologyStore.commitWorkingText = function (...args) {
+          return during(() => real.apply(this, args));
+        };
+        try {
+          return await fn();
+        } finally {
+          ontologyStore.commitWorkingText = real;
+        }
+      };
+
+      it('no other process can write between the final check and the recorded merge', async () => {
+        const id = await approvedCR('Autopilot and a merge in another process');
+        const project = getProject(demoId);
+        const head = ontologyStore.head(project);
+        // At the moment of the commit, after the approval was checked, another process (a second
+        // server on the same database) tries to send the request back to review, as a failing
+        // result from an app's CI would.
+        let other = '';
+        const merged = await duringCommit(
+          (commit) => {
+            const child = spawnSync(
+              process.execPath,
+              [
+                '-e',
+                `const { DatabaseSync } = require('node:sqlite');
+                 const db = new DatabaseSync(process.argv[1]);
+                 db.exec('PRAGMA busy_timeout = 0');
+                 try {
+                   db.exec('BEGIN IMMEDIATE');
+                   db.prepare("UPDATE docs SET data = json_set(data, '$.status', 'review') WHERE collection = 'changeRequests' AND id = ?").run(process.argv[2]);
+                   db.exec('COMMIT');
+                   console.log('wrote');
+                 } catch (e) { console.log('refused: ' + e.message); }`,
+                path.join(config.dataDir, 'concord.sqlite'),
+                id,
+              ],
+              { encoding: 'utf8' },
+            );
+            other = child.stdout.trim() || child.stderr;
+            return commit();
+          },
+          () => merge(getCR(id), undefined),
+        );
+        // It had to wait: it couldn't slip in between, so the merge didn't overwrite it.
+        expect(other).toMatch(/^refused: .*locked/);
+        expect(merged.status).toBe('merged');
+        expect(ontologyStore.head(project)).not.toBe(head);
+        expect((await detail(id)).status).toBe('merged');
+      });
+
+      it('a commit whose merge can’t be recorded is taken back', async () => {
+        const id = await approvedCR('Autopilot and a merge that fails to save');
+        const project = getProject(demoId);
+        const head = ontologyStore.head(project);
+        await expect(
+          duringCommit(
+            (commit) => {
+              commit();
+              throw new Error('disk full');
+            },
+            () => merge(getCR(id), undefined),
+          ),
+        ).rejects.toThrow('disk full');
+        expect(ontologyStore.head(project)).toBe(head);
+        expect((await detail(id)).status).toBe('approved');
+        // Retried, it merges.
+        expect((await merge(getCR(id), undefined)).status).toBe('merged');
+        expect(ontologyStore.head(project)).not.toBe(head);
+      });
     });
   });
 

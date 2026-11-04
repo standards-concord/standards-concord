@@ -58,6 +58,11 @@ export const ontologyStore = {
     return git(repoDir(project), ['rev-parse', 'HEAD']);
   },
 
+  /** Puts the working draft back to an earlier commit: undoes a commit whose database write didn't land. */
+  resetWorkingTo(project: Pick<OntologyProject, 'slug'>, commit: string) {
+    git(repoDir(project), ['reset', '-q', '--hard', commit]);
+  },
+
   readWorkingText(project: Pick<OntologyProject, 'slug'>): string {
     return fs.readFileSync(path.join(repoDir(project), FILE), 'utf8');
   },

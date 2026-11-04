@@ -25,7 +25,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { HttpError, list, mustGet, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -495,45 +495,82 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
       const after = applyChangeOps(working, prepared.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${prepared.number}` }).graph;
       turtle = await after.toTurtle();
     } catch (err) {
-      const now = getCR(id);
-      if (revisionOf(now, project) !== revision) continue;
-      setStatus(now, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-      return save(now);
+      const failed = transaction(() => {
+        const now = getCR(id);
+        if (now.status !== 'approved') return now;
+        if (revisionOf(now, project) !== revision) return undefined;
+        setStatus(now, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
+        return save(now);
+      });
+      if (!failed) continue;
+      return failed;
     }
-    // From here to the commit nothing else can run. Things may have changed while the merge was
-    // being prepared: the edits, the working draft (another merge), an app's result, a review.
-    const fresh = getCR(id);
-    if (fresh.status !== 'approved') return fresh;
-    if (revisionOf(fresh, project) !== revision) continue;
-    const held = approvalHolds(fresh);
-    if (!held.ok) {
-      revokeApproval(fresh, held.reason);
-      save(fresh);
-      if (actor) throw new HttpError(409, `The approval no longer holds${held.reason ? `: ${held.reason}` : ''}`);
-      return fresh;
+    // The final check and the commit are one step, in this process and across every process
+    // sharing the database (see finishMerge).
+    const done = finishMerge(id, project, revision, turtle, actor);
+    if (done === 'retry') continue;
+    if (done.kind === 'revoked') {
+      if (actor) throw new HttpError(409, `The approval no longer holds${done.reason ? `: ${done.reason}` : ''}`);
+      return done.cr;
     }
-    return finishMerge(fresh, project, turtle, actor);
+    if (done.kind === 'merged') await afterMerge(done.cr);
+    return done.cr;
   }
   throw new HttpError(409, 'The change or the working draft kept changing while it was being merged; try again');
 }
 
-async function finishMerge(cr: ChangeRequest, project: OntologyProject, turtle: string, actor: User | undefined): Promise<ChangeRequest> {
-  const author = getUser(cr.authorId);
-  cr.mergedCommit = ontologyStore.commitWorkingText(project, turtle, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
-    name: author?.name ?? 'Concord',
-  });
-  setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
-  if (project.stage === 'discovery') {
-    project.stage = 'drafting';
-    updateProject(project);
+type MergeStep = 'retry' | { kind: 'merged' | 'unchanged'; cr: ChangeRequest } | { kind: 'revoked'; cr: ChangeRequest; reason?: string };
+
+/**
+ * Re-read the request, check its approval still holds, commit and record the merge: all inside one
+ * database transaction. BEGIN IMMEDIATE holds the database's write lock throughout, so no other
+ * request or process (an app's CI reporting a failure, a review, another merge) can write in
+ * between: anything that would withdraw the approval either landed first, and is seen here, or
+ * waits until the merge is recorded, and is then applied to the merged request. It is the
+ * compare-and-swap of #28's merge: the request is committed only if it is still at the revision
+ * the merge was prepared from. Git isn't part of the transaction, so if recording the merge fails
+ * after the commit, the commit is taken back. Follow-up work (re-triaging other requests) runs
+ * after, outside it.
+ */
+function finishMerge(id: string, project: OntologyProject, revision: string, turtle: string, actor: User | undefined): MergeStep {
+  let before: string | undefined;
+  try {
+    return transaction((): MergeStep => {
+      const cr = getCR(id);
+      if (cr.status !== 'approved') return { kind: 'unchanged', cr };
+      if (revisionOf(cr, project) !== revision) return 'retry';
+      const held = approvalHolds(cr);
+      if (!held.ok) {
+        revokeApproval(cr, held.reason);
+        save(cr);
+        return { kind: 'revoked', cr, reason: held.reason };
+      }
+      const author = getUser(cr.authorId);
+      before = ontologyStore.head(project);
+      cr.mergedCommit = ontologyStore.commitWorkingText(project, turtle, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
+        name: author?.name ?? 'Concord',
+      });
+      setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
+      const current = getProject(cr.ontologyId);
+      if (current.stage === 'discovery') {
+        current.stage = 'drafting';
+        updateProject(current);
+      }
+      save(cr);
+      logActivity({ ontologyId: cr.ontologyId, actorId: actor?.id, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+      return { kind: 'merged', cr };
+    });
+  } catch (err) {
+    if (before && ontologyStore.head(project) !== before) ontologyStore.resetWorkingTo(project, before);
+    throw err;
   }
-  save(cr);
-  logActivity({ ontologyId: cr.ontologyId, actorId: actor?.id, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+}
+
+async function afterMerge(cr: ChangeRequest) {
   // Re-triage other open requests against the new head so their diffs stay accurate.
   for (const other of listCRs(cr.ontologyId).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
     await triage(other);
   }
-  return cr;
 }
 
 export async function withdraw(cr: ChangeRequest, actor: User) {

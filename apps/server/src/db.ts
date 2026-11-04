@@ -156,11 +156,15 @@ export function clearAll() {
  * Run fn in one transaction. BEGIN IMMEDIATE takes the write lock before fn
  * reads anything, so read-then-write steps can't interleave with another
  * writer (another process on the same database waits, up to busy_timeout).
- * fn must be synchronous and must not nest transactions.
+ * fn must be synchronous; a nested call joins the outer transaction.
  */
+let inTransaction = false;
 export function transaction<T>(fn: () => T): T {
+  // A nested call joins the transaction already open.
+  if (inTransaction) return fn();
   const c = conn();
   c.exec('BEGIN IMMEDIATE');
+  inTransaction = true;
   try {
     const out = fn();
     c.exec('COMMIT');
@@ -168,6 +172,8 @@ export function transaction<T>(fn: () => T): T {
   } catch (e) {
     c.exec('ROLLBACK');
     throw e;
+  } finally {
+    inTransaction = false;
   }
 }
 

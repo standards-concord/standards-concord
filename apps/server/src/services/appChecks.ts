@@ -72,7 +72,11 @@ interface AppDoc extends ConnectedApp {
 }
 
 const RUNS_KEPT = 20;
-/** How long a verified run's change keys work: as long as GitHub lets a job run. */
+/**
+ * How long a verified run's change keys work. Concord's own limit, chosen to cover a long test run
+ * (it matches GitHub-hosted runners' six-hour job limit; self-hosted runners can run longer, and a
+ * run that outlasts its keys reports its working-draft result again for new ones).
+ */
 const RUN_KEY_HOURS = 6;
 
 /**
@@ -540,7 +544,7 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
       jti = proof.jti;
       // Each change in this run gets its own key, which only the caller holding GitHub's proof
       // gets back: a change's result counts as verified only with that change's key, until the
-      // keys expire (GitHub stops a job after six hours anyway).
+      // keys expire after Concord's key lifetime (RUN_KEY_HOURS).
       runKeys = Object.fromEntries(Object.keys(run.targets).map((id) => [id, `crk_${randomBytes(24).toString('base64url')}`]));
       keys = Object.fromEntries(Object.entries(runKeys).map(([id, k]) => [id, hash(k)]));
       keysUntil = new Date(clock.now().getTime() + RUN_KEY_HOURS * 3600_000).toISOString();
