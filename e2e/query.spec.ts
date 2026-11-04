@@ -135,9 +135,69 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('sparql-editor')).toContainText('SELECT ?x WHERE { ?x a ?y } LIMIT 1');
     await toggle(page, 'Visual builder').click();
     await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(1);
-    await page.getByText('The SPARQL this builds').click();
-    await page.getByRole('button', { name: 'Start over' }).click();
+    // Start over sits with the builder's controls, not inside the generated code.
+    await page.getByTestId('query-builder').getByRole('button', { name: 'Start over' }).click();
     await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(0);
+  });
+
+  test('a restored SPARQL draft keeps its dataset', async ({ page }) => {
+    await page.getByText('The SPARQL this builds').click();
+    await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
+    const url = page.url();
+    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
+    await page.goto(url);
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
+    await run(page);
+    await expect(results(page)).toContainText('Park clean-up');
+  });
+
+  test('each ontology keeps its own drafts, even when the page is reused', async ({ page }) => {
+    const draftA = 'SELECT ?a WHERE { ?a ?b ?c } # draft A';
+    await toggle(page, 'SPARQL').click();
+    await setEditor(page, 'sparql-editor', draftA);
+    const a = new URL(page.url()).pathname;
+    const created = await page.request.post('/api/ontologies', { data: { title: `E2E second ${Date.now()}`, prefix: 'sec', description: 'Second ontology for draft isolation' } });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const b = (await created.json()) as { id: string };
+    // Client-side navigation to the other ontology's Query page, so React may reuse the component.
+    await page.evaluate((to) => {
+      history.pushState(null, '', to);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, `/o/${b.id}/query?mode=sparql`);
+    await expect(page).toHaveURL(new RegExp(`/o/${b.id}/query`));
+    const editor = page.getByTestId('sparql-editor');
+    await expect(editor).not.toContainText('draft A');
+    await setEditor(page, 'sparql-editor', 'SELECT ?b WHERE { ?b ?p ?o } # draft B');
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${a}`));
+    await expect(editor).toContainText('draft A');
+    const stored = await page.evaluate(([idA, idB]) => [localStorage.getItem(`concord.query.${idA}.sparql`), localStorage.getItem(`concord.query.${idB}.sparql`)], [a.split('/')[2], b.id]);
+    expect(stored[0]).toContain('draft A');
+    expect(stored[1]).toContain('draft B');
+  });
+
+  test('requiring a nested property requires the path to it', async ({ page }) => {
+    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
+    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
+    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
+    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
+    await name.getByRole('switch', { name: 'Keep records without it' }).click();
+    // The label's own control stays editable; the relationship above it is now required.
+    await expect(name.getByRole('switch', { name: 'Keep records without it' })).toBeEnabled();
+    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
+    await page.getByText('The SPARQL this builds').click();
+    await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).not.toContainText('OPTIONAL {\n    ?volunteeringOpportunity vol:offeredBy');
+    // Sorting names each column by its path.
+    await moreOptions(page);
+    await expect(page.getByLabel('Sort by').locator('option', { hasText: 'offered by › label' })).toHaveCount(1);
+  });
+
+  test('the query shows which data it runs over, with a shortcut to edit it', async ({ page }) => {
+    await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
+    await page.getByTestId('dataset-summary').getByRole('button', { name: 'Edit sample data' }).click();
+    await expect(toggle(page, 'Check data')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('data-editor')).toBeVisible();
   });
 
   test('the builder hands its query to the SPARQL editor', async ({ page }) => {
@@ -180,6 +240,18 @@ test.describe('Query tab', () => {
     await byLabel.click();
     await expect(editor).toContainText('PREFIX vol: <https://w3id.org/odi/volunteering#>');
     await expect(editor).toContainText('?x a vol:VolunteeringOpportunity');
+
+    // A commented-out or differently cased declaration doesn't count; a conflicting one gets the full IRI.
+    for (const [doc, expected] of [
+      ['# PREFIX vol: <https://w3id.org/odi/volunteering#>\nSELECT * WHERE { ?x a volunteering', 'PREFIX vol: <https://w3id.org/odi/volunteering#>\n#'],
+      ['PREFIX VOL: <https://other.example/>\nSELECT * WHERE { ?x a volunteering', 'PREFIX vol: <https://w3id.org/odi/volunteering#>\nPREFIX VOL:'],
+      ['PREFIX vol: <https://other.example/>\nSELECT * WHERE { ?x a volunteering', '?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity>'],
+    ]) {
+      await setEditor(page, 'sparql-editor', doc);
+      await page.keyboard.press('Control+Space');
+      await byLabel.click();
+      expect(await editor.evaluate((el) => (el as HTMLElement).innerText.replace(/\u00a0/g, ' '))).toContain(expected);
+    }
   });
 
   test('every query form: ASK, CONSTRUCT, examples and errors', async ({ page }) => {

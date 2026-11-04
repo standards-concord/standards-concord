@@ -14,7 +14,7 @@ export const FILTER_LABELS: Record<FilterOp, string> = {
   contains: 'contains',
   startsWith: 'starts with',
   equals: 'is',
-  notEquals: 'is not',
+  notEquals: 'has a value other than',
   gt: 'is more than',
   lt: 'is less than',
   regex: 'matches regex',
@@ -131,9 +131,26 @@ function filterExpr(v: string, f: { op: FilterOp; value: string }, type: ValueTy
   return `STR(${v}) ${cmp} ${literal(value)}`;
 }
 
-/** True when this step, or any step below it, filters: then the whole path to it must match. */
+/**
+ * True when this step must match because of something on it or below it: a
+ * filter here or further down, or a step further down that records must have
+ * ("Keep records without it" turned off). Then the whole path to it is
+ * required, not optional. The step's own optional flag isn't counted, so its
+ * control stays editable.
+ */
 export function isRequired(step: PathStep): boolean {
-  return !!step.filter?.value.trim() || step.children.some(isRequired);
+  return !!step.filter?.value.trim() || step.children.some((c) => !c.optional || isRequired(c));
+}
+
+/** Readable names for every step's column: "offered by › label". */
+export function pathLabels(steps: PathStep[], name: (iri: IRI) => string, path: string[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of steps) {
+    const here = [...path, name(s.property)];
+    out[s.id] = here.join(' › ');
+    Object.assign(out, pathLabels(s.children, name, here));
+  }
+  return out;
 }
 
 export interface BuiltQuery {

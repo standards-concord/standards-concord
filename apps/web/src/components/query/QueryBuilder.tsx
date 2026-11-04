@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
-import { ArrowRight, CornerDownRight, Plus, Trash2 } from 'lucide-react';
+import { ArrowRight, CornerDownRight, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { FILTER_LABELS, isRequired, newStep, updateStep, allSteps, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
+import { FILTER_LABELS, isRequired, newStep, pathLabels, updateStep, allSteps, type BuilderModel, type FilterOp, type PathStep } from '../../lib/sparql-builder';
 import { Button, Input, Select, Toggle } from '../ui';
 import { GROUP_LABELS, propertyOptions, type PropertyOption } from './schema';
 
@@ -81,19 +81,35 @@ function StepRow({
             </option>
           ))}
         </Select>
-        {step.filter && (
-          <Input
-            value={step.filter.value}
-            onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
-            placeholder={type === 'resource' ? 'prefix:name or https://…' : type === 'number' ? 'a number' : 'some text'}
-            inputMode={type === 'number' ? 'decimal' : undefined}
-            aria-label="Filter value"
-            className="h-8 w-40! text-xs"
-          />
-        )}
+        {step.filter &&
+          (type === 'boolean' && (step.filter.op === 'equals' || step.filter.op === 'notEquals') ? (
+            // Yes/no values get a yes/no choice, so "1" or "yes" can't silently compare as text.
+            <Select
+              value={step.filter.value}
+              onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
+              aria-label="Filter value"
+              className="h-8 w-auto! text-xs"
+            >
+              <option value="" disabled>
+                choose…
+              </option>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </Select>
+          ) : (
+            <Input
+              value={step.filter.value}
+              onChange={(e) => onChange(step.id, (s) => ({ ...s, filter: { op: s.filter!.op, value: e.target.value } }))}
+              placeholder={type === 'resource' ? 'prefix:name or https://…' : type === 'number' ? 'a number' : 'some text'}
+              type={type === 'number' && ['equals', 'notEquals', 'gt', 'lt'].includes(step.filter.op) ? 'number' : 'text'}
+              step="any"
+              aria-label="Filter value"
+              className="h-8 w-40! text-xs"
+            />
+          ))}
         <div className="ml-auto flex items-center gap-3">
           <Toggle checked={step.show} onChange={(v) => onChange(step.id, (s) => ({ ...s, show: v }))} label={<span className="text-xs">Show in results</span>} />
-          <span title={required ? 'Only records that meet the condition are kept, so they must have this' : 'Also keep records that have no value here'}>
+          <span title={required ? 'A condition here or below means records must have this' : 'Also keep records that have no value here'}>
             <Toggle
               checked={step.optional && !required}
               disabled={required}
@@ -133,6 +149,7 @@ export function QueryBuilder({
   onChange,
   variables,
   optionFor,
+  onReset,
 }: {
   view: OntologyView;
   label: Labeler;
@@ -140,12 +157,15 @@ export function QueryBuilder({
   onChange: (m: BuilderModel) => void;
   variables: Record<string, string>;
   optionFor: (iri: string) => PropertyOption | undefined;
+  /** Clear the builder back to its starting query. */
+  onReset: () => void;
 }) {
   const rootOptions = useMemo(() => propertyOptions(view, model.rootClass, label), [view, model.rootClass, label]);
   const classes = useMemo(() => [...view.classes].filter((c) => !c.deprecated).sort((a, b) => label(a.iri).localeCompare(label(b.iri))), [view, label]);
   const set = (patch: Partial<BuilderModel>) => onChange({ ...model, ...patch });
   const updateAt = (id: string, fn: (s: PathStep) => PathStep | null) => set({ steps: updateStep(model.steps, id, fn) });
   const orderable = allSteps(model.steps).filter((s) => s.show);
+  const paths = pathLabels(model.steps, (iri) => optionFor(iri)?.label ?? label(iri));
 
   return (
     <div className="space-y-3" data-testid="query-builder">
@@ -161,6 +181,9 @@ export function QueryBuilder({
         <span title="Also finds things whose type is a more specific class, following the ontology’s declared subclass links. This is not full OWL reasoning.">
           <Toggle checked={model.includeSubclasses} onChange={(v) => set({ includeSubclasses: v })} label={<span className="text-sm">include more specific types</span>} />
         </span>
+        <Button size="sm" variant="ghost" icon={RotateCcw} onClick={onReset} className="ml-auto">
+          Start over
+        </Button>
       </div>
 
       <ul className="space-y-2">
@@ -190,7 +213,7 @@ export function QueryBuilder({
               <option value="root">{label(model.rootClass)}</option>
               {orderable.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {optionFor(s.property)?.label ?? variables[s.id]}
+                  {paths[s.id] ?? variables[s.id]}
                 </option>
               ))}
             </Select>

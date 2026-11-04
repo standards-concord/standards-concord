@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { BookOpen, ChevronLeft, ChevronRight, Code2, Cpu, Download, Pencil, Play, Search, ShieldCheck, Workflow } from 'lucide-react';
+import { BookOpen, ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Pencil, Play, Search, ShieldCheck, Workflow } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
 import { api } from '../../api';
 import { useAsync, useLocalStorage } from '../../lib/hooks';
 import { allTerms, makeLabeler } from '../../lib/ontology';
-import { buildSparql, newStep, type BuilderModel } from '../../lib/sparql-builder';
+import { buildSparql, newStep, pathLabels, type BuilderModel } from '../../lib/sparql-builder';
+import { insertTerm } from '../../lib/prefixes';
+import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
 import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
 import { CodeEditor } from '../../components/code/CodeEditor';
@@ -67,10 +69,6 @@ function short(v: string, prefixes: Record<string, string>) {
   return v;
 }
 
-function csv(result: ResultRows) {
-  const esc = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-  return [result.vars.map((v) => result.labels?.[v] ?? v).join(','), ...result.rows.map((r) => result.vars.map((v) => esc(r[v] ?? '')).join(','))].join('\n');
-}
 
 function Segmented<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: { id: T; label: string; icon: typeof Code2 }[]; label: string }) {
   return (
@@ -114,7 +112,31 @@ function Pager({ page, pageSize, total, onPage, label }: { page: number; pageSiz
 
 type Workspace = 'query' | 'check';
 
+/** One workspace per ontology: switching ontology starts fresh rather than carrying state across. */
 export function QueryTab() {
+  const { id } = useOntology();
+  return <QueryWorkspace key={id} />;
+}
+
+/** Records in the sample data, by class: typed subjects, read by parsing the Turtle. */
+async function countRecords(data: string): Promise<Map<string, number>> {
+  const { SparqStore } = await sparqModule();
+  const counts = new Map<string, number>();
+  try {
+    const s = await SparqStore.fromString(data, 'turtle');
+    try {
+      const json = JSON.parse(s.queryJson('SELECT ?c (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s a ?c } GROUP BY ?c')) as { results: { bindings: { c: { value: string }; n: { value: string } }[] } };
+      for (const b of json.results.bindings) counts.set(b.c.value, Number(b.n.value));
+    } finally {
+      s.free();
+    }
+  } catch {
+    /* Unparseable data counts as no records; Check data reports the error. */
+  }
+  return counts;
+}
+
+function QueryWorkspace() {
   const { id, ontology } = useOntology();
   const [params, setParams] = useSearchParams();
   const mode: Mode = params.get('mode') === 'sparql' ? 'sparql' : 'builder';
@@ -145,7 +167,8 @@ export function QueryTab() {
   const examples = useMemo(() => sparqlExamples(ontology.prefix, ontology.namespace), [ontology.prefix, ontology.namespace]);
   // Drafts survive leaving the page, per ontology and per browser.
   const [query, setQuery] = useLocalStorage(`concord.query.${id}.sparql`, examples[0].query);
-  const [target, setTarget] = useState<Target>('ontology');
+  // The dataset is part of the draft: a restored instance query must still run against the data.
+  const [target, setTarget] = useLocalStorage<Target>(`concord.query.${id}.target`, 'ontology');
   const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
@@ -164,16 +187,27 @@ export function QueryTab() {
   const label = useMemo(() => makeLabeler(view.data), [view.data]);
   const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
 
+  // How many records of each class the sample data has, for the dataset summary and the starting class.
+  const [recordCounts, setRecordCounts] = useState<Map<string, number>>();
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(() => void countRecords(data).then((c) => !cancelled && setRecordCounts(c)), recordCounts ? 400 : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- recount when the data changes
+  }, [data]);
+  const recordTotal = recordCounts ? [...recordCounts.values()].reduce((a, b) => a + b, 0) : undefined;
+
   // Builder state: start from the first class that has instances in the sample data.
   const [model, setModel] = useLocalStorage<BuilderModel | null>(`concord.query.${id}.builder`, null);
   useEffect(() => {
-    if (!view.data) return;
+    if (!view.data || !recordCounts) return;
     if (model && view.data.classes.some((c) => c.iri === model.rootClass)) return;
     // Prefer a class the sample data has records of, so the first run finds something.
-    const counts = new Map<string, number>();
-    for (const m of data.matchAll(/\ba\s+([\w-]*:[\w-]+)/g)) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
     const live = view.data.classes.filter((c) => !c.deprecated);
-    const records = (iri: string) => counts.get(short(iri, view.data!.prefixes)) ?? 0;
+    const records = (iri: string) => recordCounts.get(iri) ?? 0;
     const preferred = [...live].sort((a, b) => records(b.iri) - records(a.iri))[0];
     if (!preferred) return;
     // Start with the class's first attribute (e.g. its title) as a column, so the first run shows something readable.
@@ -182,7 +216,7 @@ export function QueryTab() {
     const steps = first ? [newStep(first.iri, first.valueType)] : [];
     setModel({ rootClass: preferred.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the ontology or a reset changes it
-  }, [view.data, model]);
+  }, [view.data, model, recordCounts]);
   const allOptions = useMemo(() => (view.data ? propertyOptions(view.data, undefined, label) : []), [view.data, label]);
   const optionFor = useCallback((iri: string): PropertyOption | undefined => allOptions.find((o) => o.iri === iri), [allOptions]);
   const built = useMemo(
@@ -201,12 +235,11 @@ export function QueryTab() {
         if (c === t.iri) return [];
         const p = c.slice(0, c.indexOf(':'));
         const apply: Completion['apply'] = (v, _completion, from, to) => {
-          const doc = v.state.doc.toString();
-          const declared = lang === 'sparql' ? new RegExp(`PREFIX\\s+${p}:`, 'i').test(doc) : new RegExp(`@prefix\\s+${p}:`).test(doc);
-          const decl = lang === 'sparql' ? `PREFIX ${p}: <${pfx[p]}>\n` : `@prefix ${p}: <${pfx[p]}> .\n`;
+          // Reuse a matching declaration, add one if the prefix is free, or use the full IRI if it's bound elsewhere.
+          const { declaration, text } = insertTerm(v.state.doc.toString(), lang, p, pfx[p], t.iri);
           v.dispatch({
-            changes: [...(declared ? [] : [{ from: 0, insert: decl }]), { from, to, insert: c }],
-            selection: { anchor: from + c.length + (declared ? 0 : decl.length) },
+            changes: [...(declaration ? [{ from: 0, insert: declaration }] : []), { from, to, insert: text }],
+            selection: { anchor: from + text.length + (declaration?.length ?? 0) },
           });
         };
         const type = t.kind === 'class' ? 'class' : t.kind === 'individual' ? 'constant' : 'property';
@@ -287,14 +320,7 @@ export function QueryTab() {
         let labels: Record<string, string> | undefined;
         if (mode === 'builder' && built && model) {
           labels = { [built.variables.root]: label(model.rootClass), count: `Number of ${label(model.rootClass)} records` };
-          const walk = (steps: typeof model.steps, path: string[]) => {
-            for (const st of steps) {
-              const name = [...path, optionFor(st.property)?.label ?? label(st.property)];
-              labels![built.variables[st.id]] = name.join(' › ');
-              walk(st.children, name);
-            }
-          };
-          walk(model.steps, []);
+          for (const [stepId, path] of Object.entries(pathLabels(model.steps, (iri) => optionFor(iri)?.label ?? label(iri)))) labels[built.variables[stepId]] = path;
         }
         setResult({ kind: 'rows', vars: json.head.vars, rows, labels, limit: mode === 'builder' && !model?.countOnly ? model?.limit : undefined });
       }
@@ -360,7 +386,7 @@ export function QueryTab() {
             title="Query the ontology"
             subtitle={
               mode === 'builder'
-                ? 'Build a query by picking classes and properties. It runs over the ontology plus the sample data from Check data.'
+                ? 'Build a query by picking classes and properties.'
                 : 'SPARQL 1.1, with autocomplete for this ontology’s terms (Ctrl/⌘-Space) and Ctrl/⌘-Enter to run'
             }
             icon={Play}
@@ -382,6 +408,21 @@ export function QueryTab() {
             }
           />
           <div className="space-y-3 p-4">
+            {(mode === 'builder' || target === 'data') && recordTotal !== undefined && (
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted" data-testid="dataset-summary">
+                <Database className="size-3.5" />
+                {recordTotal > 0 ? (
+                  <span>
+                    Runs over the ontology plus {recordTotal.toLocaleString()} sample {recordTotal === 1 ? 'record' : 'records'}.
+                  </span>
+                ) : (
+                  <span>There is no sample data yet, so questions about records will find nothing.</span>
+                )}
+                <button type="button" className="text-accent underline-offset-2 hover:underline" onClick={() => setWorkspace('check')}>
+                  {recordTotal > 0 ? 'Edit sample data' : 'Add sample data'}
+                </button>
+              </p>
+            )}
             {mode === 'sparql' ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
@@ -437,7 +478,7 @@ export function QueryTab() {
               )
             ) : (
               <div className="space-y-4">
-                <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} />
+                <QueryBuilder view={view.data} label={label} model={model} onChange={setModel} variables={built.variables} optionFor={optionFor} onReset={() => setModel(null)} />
                 <QueryDiagram model={model} variables={built.variables} label={label} optionFor={optionFor} />
                 <details className="group">
                   <summary className="flex cursor-pointer items-center gap-2 text-sm text-muted">
@@ -455,9 +496,6 @@ export function QueryTab() {
                       }}
                     >
                       Edit as SPARQL
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setModel(null)}>
-                      Start over
                     </Button>
                   </div>
                 </details>
@@ -496,7 +534,7 @@ export function QueryTab() {
                       {result.rows.length} row{result.rows.length === 1 ? '' : 's'}
                       {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                     </span>
-                    <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(csv(result))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
+                    <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
                       <Download className="size-3" /> CSV
                     </a>
                   </div>

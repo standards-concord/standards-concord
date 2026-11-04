@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { SparqStore } from '@sparq-org/sparq';
-import { buildSparql, isRequired, newStep, updateStep, type BuilderModel } from './sparql-builder';
+import { buildSparql, isRequired, newStep, pathLabels, updateStep, type BuilderModel } from './sparql-builder';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -76,6 +76,25 @@ describe('buildSparql', () => {
     expect(query).toContain('OPTIONAL {\n    ?volunteeringOpportunity vol:title ?title .');
   });
 
+  it('a nested property records must have makes its whole path required', () => {
+    const name = { ...newStep(`${RDFS}label`), optional: false };
+    const org = { ...newStep(`${VOL}offeredBy`, 'resource'), children: [name] };
+    expect(isRequired(org)).toBe(true);
+    // The step's own flag is not counted, so its control stays editable.
+    expect(isRequired(name)).toBe(false);
+    const { query } = buildSparql(model({ steps: [org] }), { prefixes });
+    expect(query).not.toContain('OPTIONAL');
+  });
+
+  it('labels each column by its path', () => {
+    const name = newStep(`${RDFS}label`);
+    const org = { ...newStep(`${VOL}offeredBy`), children: [name] };
+    const site = { ...newStep(`${VOL}location`), children: [{ ...name, id: 'x' }] };
+    const labels = pathLabels([org, site], (iri) => iri.replace(/.*[#/]/, ''));
+    expect(labels[name.id]).toBe('offeredBy › label');
+    expect(labels.x).toBe('location › label');
+  });
+
   it('counts instead of listing', () => {
     const { query } = buildSparql(model({ countOnly: true, limit: 5, steps: [newStep(`${VOL}title`)] }), { prefixes });
     expect(query).toContain('SELECT (COUNT(DISTINCT ?volunteeringOpportunity) AS ?count)');
@@ -131,5 +150,49 @@ describe('generated queries run on sparq', () => {
     const orgs = buildSparql({ ...model(), rootClass: `${VOL}Organisation`, steps: [charity] }, { prefixes });
     expect(JSON.parse(store.queryJson(orgs.query)).results.bindings).toHaveLength(1);
     store.free();
+  });
+
+  // Deeper and sibling cases from the second review, run on a small graph:
+  // r1 has the full path, r2's organisation has no address, r3 has no organisation.
+  const graph = `@prefix ex: <https://example.org/> .
+ex:r1 a ex:Record ; ex:title "One" ; ex:org ex:o1 ; ex:topic ex:t1 .
+ex:o1 ex:label "Green Trust" ; ex:address ex:a1 .
+ex:a1 ex:city "Leeds" .
+ex:t1 ex:label "Parks" .
+ex:r2 a ex:Record ; ex:title "Two" ; ex:org ex:o2 ; ex:topic ex:t2 .
+ex:o2 ex:label "Blue Trust" .
+ex:t2 ex:label "Food" .
+ex:r3 a ex:Record ; ex:title "Three" .
+`;
+  const EX = 'https://example.org/';
+  const titles = async (steps: BuilderModel['steps']) => {
+    const store = await SparqStore.fromString(graph, 'turtle');
+    const built = buildSparql({ rootClass: `${EX}Record`, includeSubclasses: false, steps, distinct: true, countOnly: false, descending: false }, { prefixes: { ex: EX } });
+    const rows = (JSON.parse(store.queryJson(built.query)) as { results: { bindings: Record<string, { value: string }>[] } }).results.bindings;
+    store.free();
+    return { titles: rows.map((r) => r[built.variables[steps[0].id]]?.value).sort(), query: built.query };
+  };
+  const title = () => newStep(`${EX}title`);
+
+  it('a filter three relationships deep excludes non-matching and missing paths', async () => {
+    const city = { ...newStep(`${EX}city`), filter: { op: 'equals' as const, value: 'Leeds' } };
+    const steps = [title(), { ...newStep(`${EX}org`, 'resource'), children: [{ ...newStep(`${EX}address`, 'resource'), children: [city] }] }];
+    expect((await titles(steps)).titles).toEqual(['One']);
+  });
+
+  it('filters on sibling branches must both match; an unfiltered sibling stays optional', async () => {
+    const org = { ...newStep(`${EX}org`, 'resource'), children: [{ ...newStep(`${EX}label`), filter: { op: 'contains' as const, value: 'trust' } }] };
+    const topic = { ...newStep(`${EX}topic`, 'resource'), children: [{ ...newStep(`${EX}label`), filter: { op: 'equals' as const, value: 'Food' } }] };
+    expect((await titles([title(), org, topic])).titles).toEqual(['Two']);
+    const loose = { ...newStep(`${EX}topic`, 'resource'), children: [newStep(`${EX}label`)] };
+    const r = await titles([title(), loose]);
+    expect(r.titles).toEqual(['One', 'Three', 'Two']);
+    expect(r.query).toMatch(/OPTIONAL \{\n\s+\?record ex:topic \?topic \.\n\s+OPTIONAL \{/);
+  });
+
+  it('turning off "Keep records without it" on a nested property excludes records without it', async () => {
+    const address = { ...newStep(`${EX}address`, 'resource'), optional: false };
+    const steps = [title(), { ...newStep(`${EX}org`, 'resource'), children: [address] }];
+    expect((await titles(steps)).titles).toEqual(['One']);
   });
 });
