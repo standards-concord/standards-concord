@@ -90,7 +90,11 @@ jobs:
         run: |
           pnpm exec playwright install --with-deps chromium
           sudo apt-get install -y --no-install-recommends ffmpeg
+      # Includes the browser tests of the network allowlist, which the general test job
+      # (no browser installed) skips.
       - name: Walkthrough unit tests
+        env:
+          WALKTHROUGH_BROWSER_TESTS: '1'
         run: pnpm --filter @concord/walkthrough test
       - name: Run every walkthrough step
         run: pnpm walkthrough --check --strict

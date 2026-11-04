@@ -18,9 +18,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { chromium, type Route } from '@playwright/test';
+import type { Route } from '@playwright/test';
 import { Capture } from './lib/capture.ts';
 import { Director, sleep } from './lib/director.ts';
+import { guardContext, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
 import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
@@ -82,7 +83,6 @@ if (argv.publish) {
  * then block the dev server's own websocket. Everything here is local (and the proxy
  * enforces that), so turn those checks off.
  */
-const LOCAL_NETWORK_ARGS = ['--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights'];
 
 /** "Now", as far as the recorded hub and browser are concerned, so dates on screen never drift. */
 const EPOCH = '2026-11-23T10:00:00Z';
@@ -117,15 +117,12 @@ async function main() {
     // Every connection the browser makes goes through the allowlisting proxy, loopback included.
     const outside = new Set<string>();
     egress = await startEgressProxy([hub, concord?.api].filter(Boolean) as string[], outside);
-    const browser = await chromium.launch({
-      headless: !argv.headed,
-      proxy: { server: egress.url, bypass: '<-loopback>' },
-      args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars', ...LOCAL_NETWORK_ARGS],
-    });
+    const browser = await launchBrowser({ proxy: egress.url, headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars'] });
     const chromiumVersion = browser.version();
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
     // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
     await context.addInitScript('globalThis.__name ??= (f) => f;');
+    await guardContext(context);
     await context.addInitScript({ path: path.join(HERE, 'stage', 'overlay.js') });
     // The browser's clock agrees with the server's, and runs normally from there.
     if (!argv.hub) await context.clock.setSystemTime(new Date(EPOCH));
@@ -240,7 +237,8 @@ async function main() {
       await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
       if (fonts.fetched.size) log(`\n⚠ ${fonts.fetched.size} web font file(s) weren't in walkthrough/fonts/ and were fetched live. Commit them so recordings stay offline.`);
       log(`\nChecked ${kept.length} scenes: ${d.warnings.length ? `${d.warnings.length} warning(s)` : 'all steps worked'}.`);
-      if (d.warnings.length) process.exitCode = 1;
+      if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
+      if (d.warnings.length || (argv.strict && outside.size)) process.exitCode = 1;
       return;
     }
     await cap.start();
@@ -306,7 +304,7 @@ async function main() {
       throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s), ${fonts.missing.size} missing font file(s). See report.json.`);
     }
     // Some warnings arrive between steps (page errors, failed requests), so strict mode checks again at the end.
-    if (argv.strict && d.warnings.length) throw new Error(`--strict: ${d.warnings.length} warning(s) during the recording. See report.json.`);
+    if (argv.strict && (d.warnings.length || outside.size)) throw new Error(`--strict: ${d.warnings.length} warning(s) and ${outside.size} blocked outside request(s) during the recording. See report.json.`);
     log(`\nDone: ${out} (${fmt(seconds)})`);
     if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
     if (shims.size) log(`\n⚠ Stand-ins were used for platform features this hub doesn't serve yet:\n  ${[...shims].join('\n  ')}\n  Re-record once they're deployed, or pass --no-shims to refuse.`);

@@ -21,7 +21,7 @@ export function fontFile(dir: string, url: string) {
   return path.join(dir, `${createHash('sha256').update(url).digest('hex').slice(0, 20)}.${ext}`);
 }
 
-export async function serveFonts(context: BrowserContext, o: { dir: string; offline: boolean; fetched: Set<string>; missing: Set<string> }) {
+export async function serveFonts(context: BrowserContext, o: { dir: string; offline: boolean; fetched: Set<string>; missing: Set<string>; fetch?: typeof fetch }) {
   await mkdir(o.dir, { recursive: true });
   await context.route(FONT_HOSTS, async (route) => {
     const url = route.request().url();
@@ -33,12 +33,15 @@ export async function serveFonts(context: BrowserContext, o: { dir: string; offl
       o.missing.add(url);
       return route.abort('blockedbyclient');
     }
-    const res = await route.fetch();
-    const body = await res.body();
-    if (res.ok()) {
+    // Fetched here, not through the browser: the browser may only reach the recording's
+    // own origins. This is the one download a draft may make, and only from Google Fonts.
+    const res = await (o.fetch ?? fetch)(url, { headers: { 'user-agent': route.request().headers()['user-agent'] ?? '' }, redirect: 'error', signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+    if (!res) return route.abort('internetdisconnected');
+    const body = Buffer.from(await res.arrayBuffer());
+    if (res.ok) {
       await writeFile(file, body);
       o.fetched.add(url);
     }
-    return route.fulfill({ status: res.status(), contentType: res.headers()['content-type'], body, headers });
+    return route.fulfill({ status: res.status, contentType: res.headers.get('content-type') ?? TYPES[ext], body, headers });
   });
 }
