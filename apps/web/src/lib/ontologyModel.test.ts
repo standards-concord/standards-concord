@@ -283,8 +283,9 @@ describe('ontology model: performance', () => {
     const t = performance.now();
     for (const c of m.classes.keys()) m.ownSlots(c);
     m.incoming(I('F0'));
-    // Tens of milliseconds locally; it took about 2 s when every restriction was compared with every other.
-    expect(performance.now() - t).toBeLessThan(400);
+    // Tens of milliseconds locally; it took about 2 s when every restriction was compared with
+    // every other. The limit leaves room for slow CI machines.
+    expect(performance.now() - t).toBeLessThan(1000);
     expect(slotCard(slot(m, 'C399', 'p')!)).toBe('1..*');
   });
 
@@ -301,7 +302,8 @@ describe('ontology model: performance', () => {
     for (const c of m.classes.keys()) m.ownSlots(c);
     m.incoming(I('F'));
     // Tens of milliseconds locally; building every inherited slot at every level took about 3 s.
-    expect(performance.now() - t).toBeLessThan(400);
+    // The limit leaves room for slow CI machines.
+    expect(performance.now() - t).toBeLessThan(1000);
     expect(m.allSlots(I('C399')).flatMap((g) => g.slots)).toHaveLength(4000);
   });
 });

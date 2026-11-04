@@ -464,10 +464,31 @@ export function buildModel(view: OntologyView): OntologyModel {
    * that mention the property are visited, and a restriction repeated further up the hierarchy
    * is kept once (at its nearest statement).
    */
+  const keyOf = (x: Contribution) => (x.r ? restrictionKey(x.r) : `domain|${x.on}`);
+  const hasCycle = [...classes.keys()].some((c) => (parents.get(c) ?? []).some((p) => p === c || ancestorSet(p).has(c)));
+  // For a property most of the hierarchy mentions, build each class's list from its parents'
+  // (deduplicated) lists, so the work doesn't grow with depth times restrictions.
+  const fromParents = new Map<string, Contribution[]>();
+  const incremental = (iri: string, prop: string): Contribution[] => {
+    const k = `${iri}\n${prop}`;
+    const hit = fromParents.get(k);
+    if (hit) return hit;
+    const keys = new Set<string>();
+    const out: Contribution[] = [];
+    const push = (x: Contribution) => {
+      const key = keyOf(x);
+      if (!keys.has(key)) (keys.add(key), out.push(x));
+    };
+    stated(iri).get(prop)?.forEach(push);
+    for (const parent of parents.get(iri) ?? []) incremental(parent, prop).forEach(push);
+    fromParents.set(k, out);
+    return out;
+  };
   const contributionsFor = (iri: string, prop: string) => {
     const all = statedOn.get(prop) ?? [];
     const chain = [iri, ...ancestors(iri)];
     let holders: string[];
+    if (all.length >= chain.length && !hasCycle) return incremental(iri, prop);
     if (all.length >= chain.length) holders = chain.filter((c) => stated(c).has(prop));
     else {
       const pos = position(iri);
@@ -477,7 +498,7 @@ export function buildModel(view: OntologyView): OntologyModel {
     const out: Contribution[] = [];
     for (const c of holders)
       for (const x of stated(c).get(prop)!) {
-        const key = x.r ? restrictionKey(x.r) : `domain|${x.on}`;
+        const key = keyOf(x);
         if (keys.has(key)) continue;
         keys.add(key);
         out.push(x);
