@@ -212,6 +212,19 @@ function DemoBanner() {
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col">
+      {/* Skips the repeated header. It focuses <main> without touching the URL hash, which some pages use for their own sections. */}
+      <a
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault();
+          const main = document.getElementById('main');
+          main?.focus();
+          main?.scrollIntoView({ block: 'start' });
+        }}
+        className="sr-only z-50 rounded-lg bg-surface px-3 py-2 text-sm font-medium text-accent shadow-lg focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:outline-2 focus:outline-accent"
+      >
+        Skip to main content
+      </a>
       <header className="app-header sticky top-0 z-30 border-b border-line backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex min-w-0 items-center gap-2.5">
@@ -233,7 +246,9 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <DemoBanner />
-      <main className="flex-1">{children}</main>
+      <main id="main" tabIndex={-1} className="flex-1 scroll-mt-16 outline-none">
+        {children}
+      </main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
         Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used.
       </footer>

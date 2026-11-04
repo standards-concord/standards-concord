@@ -505,9 +505,19 @@ test.describe('progressive disclosure', () => {
     await latest.getByRole('link').first().click();
     await settle(page);
     await expectNoCrash(page);
-    const how = page.getByRole('button', { name: /How this was approved/ });
+    const releaseId = new URL(page.url()).pathname.split('/').pop()!;
+    const { approvalSource } = (await (await page.request.get(`/api/releases/${releaseId}`)).json()) as { approvalSource: string };
+    const how = page.getByRole('button', { name: approvalSource === 'current-policy' ? /Approval, checked against today’s policy/ : /How this was approved/ });
     await expect(how).toHaveAttribute('aria-expanded', 'false');
     await how.click();
+    if (approvalSource === 'bootstrap') {
+      // The set-up release had no approval rules, so there's no evaluation to show, only that explanation.
+      await expect(page.getByTestId('approval-source')).toContainText('No approval rules applied to it');
+      await expect(page.getByRole('heading', { name: 'Approval details' })).toHaveCount(0);
+      await page.getByRole('button', { name: /Technical details/ }).click();
+      await expect(page.getByText('Version IRI:')).toBeVisible();
+      return;
+    }
     await expect(page.getByText('Next:', { exact: true })).toBeVisible();
     // One click reveals the approval history, with no second "Approval details" toggle inside it.
     await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);

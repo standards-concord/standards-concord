@@ -103,12 +103,7 @@ export function ReleaseDetailPage() {
                 {/* Today's rules, not a record of the rules at the time: kept outside the approval history on purpose. */}
                 <PolicyGlance policy={ontology.governance} ontologyId={id} kind="release" title="Current release policy" className="mt-4 border-t border-line pt-3" />
               </Card>
-              {/* One click reveals the whole approval history: the panel's own details start open. */}
-              <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release" keepMounted>
-                <div className="space-y-4 p-5">
-                  <GovernancePanel g={g} userById={userById} subject="release" detailsOpen />
-                </div>
-              </CollapsibleCard>
+              <ApprovalHistory r={r} userById={userById} />
             </>
           ) : (
             <Card>
@@ -157,5 +152,40 @@ export function ReleaseDetailPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * How a published release was approved. It shows the evaluation recorded when it was published, so
+ * changing the policy or members later doesn't rewrite its history. Releases from before that record
+ * existed say plainly that they're checked against today's rules.
+ */
+function ApprovalHistory({ r, userById }: { r: ReleaseDetail; userById: ReturnType<typeof useOntology>['userById'] }) {
+  if (r.approvalSource === 'bootstrap')
+    return (
+      <CollapsibleCard icon={Scale} title="How this was approved" summary="The first release, published when the ontology was set up" keepMounted>
+        <p className="p-5 text-sm text-muted" data-testid="approval-source">
+          This was the ontology’s first release, published when it was set up in Concord. No approval rules applied to it; every release since follows the policy.
+        </p>
+      </CollapsibleCard>
+    );
+  const recorded = r.approvalSource === 'recorded';
+  return (
+    // One click reveals the whole approval history: the panel's own details start open.
+    <CollapsibleCard
+      icon={Scale}
+      title={recorded ? 'How this was approved' : 'Approval, checked against today’s policy'}
+      summary={recorded ? `Recorded when it was published on ${formatDate(r.publishedAt)}` : 'No record was kept when this was published'}
+      keepMounted
+    >
+      <div className="space-y-4 p-5">
+        <p className="text-xs text-muted" data-testid="approval-source">
+          {recorded
+            ? `The approvals, review period and vote as they stood when this release was published on ${formatDate(r.publishedAt, true)}. Later changes to the policy or members don’t change this record.`
+            : 'Concord didn’t keep a record of this release’s approval when it was published, so this applies today’s policy and members. It may not match what was required at the time.'}
+        </p>
+        <GovernancePanel g={r.governance} userById={userById} subject="release" detailsOpen />
+      </div>
+    </CollapsibleCard>
   );
 }

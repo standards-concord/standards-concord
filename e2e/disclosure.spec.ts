@@ -35,6 +35,24 @@ test.describe('summaries, popups and disclosures', () => {
     }
   });
 
+  test('following a link to #health focuses the section straight away, even while the report is still loading', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/validation/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.goto(`/o/${demo.id}#health`);
+    const health = page.locator('#health');
+    await expect(health.getByText('Validating…')).toBeVisible();
+    await expect(health).toBeFocused();
+    // Move on before the report arrives: when it lands, focus stays where the reader put it.
+    await page.getByRole('button', { name: /Ontology details/ }).focus();
+    release();
+    await expect(health.getByRole('button', { name: /Lint findings/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Ontology details/ })).toBeFocused();
+  });
+
   test('detailed validation never says a plain “Passed” when the reasoner did not run', async ({ page }) => {
     const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { errors: number; incomplete?: string[] } };
     test.skip(!o.health?.incomplete?.length, 'the reasoner ran here, so a plain pass is honest');

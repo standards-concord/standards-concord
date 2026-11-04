@@ -112,6 +112,26 @@ describe('change request lifecycle', () => {
     const v = await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=1.1.0`);
     expect(v.text).toMatch(/owl:versionInfo "1\.1\.0"/);
     expect(v.text).toMatch(/owl:backwardCompatibleWith/);
+
+    // The approval is recorded at publish time: changing the policy afterwards doesn't rewrite the history.
+    expect(published.body.approvalSource).toBe('recorded');
+    const recorded = published.body.governance;
+    const project = await steward.get(`/api/ontologies/${demoId}`);
+    const policy = structuredClone(project.body.governance);
+    const original = structuredClone(policy);
+    policy.releases.minor.minApprovals = recorded.requiredApprovals + 3;
+    policy.releases.minor.reviewPeriodDays = 99;
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy })).status).toBe(200);
+    const later = await steward.get(`/api/releases/${draft.id}`);
+    expect(later.body.approvalSource).toBe('recorded');
+    expect(later.body.governance.requiredApprovals).toBe(recorded.requiredApprovals);
+    expect(later.body.governance.rule.reviewPeriodDays).toBe(recorded.rule.reviewPeriodDays);
+    expect(later.body.governance.reviewPeriodEndsAt).toBe(recorded.reviewPeriodEndsAt);
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy: original })).status).toBe(200);
+
+    // The set-up release had no approval rules, and says so rather than borrowing today's.
+    const first = (await steward.get(`/api/ontologies/${demoId}/releases`)).body.find((r: { version: string }) => r.version === '1.0.0');
+    expect((await steward.get(`/api/releases/${first.id}`)).body.approvalSource).toBe('bootstrap');
   });
 
   it('rejects edits that make the ontology inconsistent from being approved', async () => {

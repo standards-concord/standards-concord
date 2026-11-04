@@ -18,6 +18,19 @@ test('signed-out visitors are sent to the login page', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Concord: design open standards together' })).toBeVisible();
 });
 
+test('the first Tab reaches a skip link that moves focus past the header', async ({ page }) => {
+  await page.goto('/appearance');
+  await settle(page);
+  await page.keyboard.press('Tab');
+  const skip = page.getByRole('link', { name: 'Skip to main content' });
+  await expect(skip).toBeFocused();
+  await expect(skip).toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('main#main')).toBeFocused();
+  // It doesn't change the URL, which some pages use for their own sections.
+  await expect(page).toHaveURL(/\/appearance$/);
+});
+
 test.describe('signed in', () => {
   test.beforeEach(async ({ page }) => {
     await signIn(page, { name: 'E2E tester', role: 'steward' });

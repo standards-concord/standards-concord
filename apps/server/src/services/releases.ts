@@ -7,7 +7,7 @@ import {
   stampRelease,
 } from '@concord/core';
 import type { ChangeLevel, OutputFormat } from '@concord/core/types';
-import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
+import type { ChangeRequest, GovernanceEvaluation, OntologyProject, Release, ReleaseApprovalSource, ReleaseDetail, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
@@ -52,12 +52,22 @@ export function releaseGovernance(r: Release) {
   });
 }
 
+/** A decided release shows the evaluation recorded at the time; only open releases are evaluated live. */
+export function releaseApproval(r: Release): { governance: GovernanceEvaluation; approvalSource: ReleaseApprovalSource } {
+  const decided = r.status === 'published' || r.status === 'rejected';
+  if (!decided) return { governance: releaseGovernance(r), approvalSource: 'live' };
+  if (r.approval) return { governance: r.approval, approvalSource: 'recorded' };
+  // Releases are only drafted from merged changes, so a published release with none is the set-up release.
+  if (r.status === 'published' && !r.changeRequestIds.length) return { governance: releaseGovernance(r), approvalSource: 'bootstrap' };
+  return { governance: releaseGovernance(r), approvalSource: 'current-policy' };
+}
+
 export function releaseDetail(r: Release): ReleaseDetail {
   const crs = r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id));
   return {
     ...r,
     votes: list<Vote>('votes', r.id),
-    governance: releaseGovernance(r),
+    ...releaseApproval(r),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
   };
 }
@@ -141,6 +151,7 @@ export async function advanceRelease(r: Release): Promise<Release> {
   if (r.status !== 'voting') return r;
   const g = releaseGovernance(r);
   if (g.outcome === 'rejected') {
+    r.approval = g;
     r.status = 'rejected';
     r.statusSince = clock.iso();
     save(r);
@@ -203,7 +214,10 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
+  // Record what the rules required at the moment of publishing, before the status changes.
+  const approval = releaseGovernance(r);
   r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
+  r.approval = approval;
   r.status = 'published';
   r.publishedAt = clock.iso();
   r.statusSince = r.publishedAt;

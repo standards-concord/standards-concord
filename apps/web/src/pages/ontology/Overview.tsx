@@ -20,13 +20,21 @@ export function OverviewTab() {
   const [moreActivity, setMoreActivity] = useState(false);
   // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
   const healthKey = wantsHealth ? loc.key : undefined;
-  useEffect(() => {
-    // Once the report has loaded or failed to load: either way, the health section is where focus belongs.
-    if (!healthKey || (!validation.data && !validation.error)) return;
-    // Move focus as well as the view, so keyboard and screen-reader users land on the report too.
+  const scrollToHealth = () =>
     healthRef.current?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  useEffect(() => {
+    // The section is there straight away (it shows "Validating…" while loading), so focus moves on arrival,
+    // not later when the report settles. Focus as well as the view, so keyboard and screen-reader users land there too.
+    if (!healthKey) return;
+    scrollToHealth();
     healthRef.current?.focus({ preventScroll: true });
-  }, [healthKey, validation.data, validation.error]);
+  }, [healthKey]);
+  const settled = Boolean(validation.data || validation.error);
+  useEffect(() => {
+    // When the report arrives the page above may have changed height: keep the section in view, but only if
+    // focus is still on it. Never pull focus back from somewhere the reader has since moved to.
+    if (healthKey && settled && document.activeElement === healthRef.current) scrollToHealth();
+  }, [healthKey, settled]);
   const members = o.members ?? [];
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
@@ -149,6 +157,14 @@ export function OverviewTab() {
             ) : (
               <p className="text-sm text-muted">No members yet.</p>
             )}
+            {/* Always visible, so roles without Governance in their nav can still find the rules. */}
+            <p className="mt-4 border-t border-line pt-3 text-xs text-muted" data-testid="policy-link">
+              Changes and releases are decided under{' '}
+              <Link to={`/o/${id}/governance`} className="font-medium text-accent hover:underline">
+                {o.governance.name}
+              </Link>
+              .
+            </p>
           </div>
         </Card>
         <Card>

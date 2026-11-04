@@ -129,7 +129,8 @@ test.describe('role-based views', () => {
     const glance = page.getByRole('button', { name: (await approved.count()) ? /Current release policy/ : /How releases are decided/ });
     await glance.click();
     await expect(page.getByRole('list', { name: 'What each kind of release needs' }).getByRole('listitem')).toHaveCount(3);
-    if (await approved.count()) {
+    const { approvalSource } = (await (await page.request.get(`/api/releases/${releases[0].id}`)).json()) as { approvalSource: string };
+    if ((await approved.count()) && approvalSource !== 'bootstrap') {
       await approved.click();
       // Inside, the approval details show straight away, with no second toggle.
       await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
@@ -148,5 +149,59 @@ test.describe('role-based views', () => {
     await page.goto(`/o/${demo.id}/governance`);
     await settle(page);
     await expect(page.getByRole('button', { name: 'Edit policy' })).toBeVisible();
+  });
+
+  test('a steward who isn’t an owner sees Governance but can’t edit the policy, and the server agrees', async ({ page, request }) => {
+    // Start as an editor, then have an owner make this person a steward only.
+    const { user } = await signIn(page, { name: 'Pure steward', role: 'editor' });
+    const owner = await request.post('/api/auth/demo', { data: { name: 'Owner tester', role: 'steward' } });
+    expect(owner.ok()).toBeTruthy();
+    const set = await request.put(`/api/ontologies/${demo.id}/members/${user.id}`, { data: { roles: ['steward', 'member'] } });
+    expect(set.ok(), await set.text()).toBeTruthy();
+
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    expect(await sectionNames(page)).toContain('Governance');
+    await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Governance' }).click();
+    await expect(page.getByRole('heading', { name: 'Governance', exact: true, level: 2 })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Edit policy' })).toHaveCount(0);
+    await expect(page.getByText('You can read the policy; only the ontology’s owners can change it.')).toBeVisible();
+    // Stewards still manage members, so the Overview offers "Manage".
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    await expect(page.getByRole('link', { name: 'Manage', exact: true })).toBeVisible();
+
+    // The server refuses a policy change from them too.
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { governance: unknown };
+    const put = await page.request.put(`/api/ontologies/${demo.id}/governance`, { data: { policy: o.governance } });
+    expect(put.status()).toBe(403);
+  });
+
+  test('the Overview always shows a link to the governance policy', async ({ page }) => {
+    await signIn(page, { name: 'Policy finder', role: 'contributor' });
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const line = page.getByTestId('policy-link');
+    await expect(line).toBeVisible();
+    await line.getByRole('link').click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
+  });
+
+  test('a published release says where its approval record comes from', async ({ page }) => {
+    await signIn(page, { name: 'History reader', role: 'member' });
+    const releases = (await (await page.request.get(`/api/ontologies/${demo.id}/releases`)).json()) as { id: string; version: string; status: string }[];
+    const published = releases.filter((r) => r.status === 'published');
+    test.skip(!published.length, 'the demo has no published releases');
+    for (const r of published) {
+      const detail = (await (await page.request.get(`/api/releases/${r.id}`)).json()) as { approvalSource: string };
+      await page.goto(`/o/${demo.id}/releases/${r.id}`);
+      await settle(page);
+      const title = detail.approvalSource === 'current-policy' ? /Approval, checked against today’s policy/ : /How this was approved/;
+      await page.getByRole('button', { name: title }).click();
+      const note = page.getByTestId('approval-source');
+      if (detail.approvalSource === 'bootstrap') await expect(note).toContainText('No approval rules applied to it');
+      if (detail.approvalSource === 'recorded') await expect(note).toContainText('Later changes to the policy or members don’t change this record');
+      if (detail.approvalSource === 'current-policy') await expect(note).toContainText('this applies today’s policy and members');
+    }
   });
 });
