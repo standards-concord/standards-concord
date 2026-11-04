@@ -26,7 +26,12 @@ export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: strin
   javascript: { label: 'JavaScript classes', mediaType: 'text/javascript', extension: 'js' },
 };
 
-export async function serialize(graph: OntologyGraph, format: OutputFormat): Promise<string> {
+/**
+ * `name` names the generated classes' dataset wrapper (the project slug, so
+ * the app and the public module export the same names); without it the name
+ * comes from the ontology IRI.
+ */
+export async function serialize(graph: OntologyGraph, format: OutputFormat, opts: { name?: string } = {}): Promise<string> {
   switch (format) {
     case 'turtle': return graph.toTurtle();
     case 'ntriples': return writeNTriples(graph.store);
@@ -36,9 +41,9 @@ export async function serialize(graph: OntologyGraph, format: OutputFormat): Pro
     case 'linkml': return toLinkML(graph);
     case 'shacl': return toShacl(graph);
     case 'shaclc': return toShaclc(graph);
-    case 'typescript': return (await toWrapperClasses(graph)).ts;
+    case 'typescript': return (await toWrapperClasses(graph, { name: opts.name })).ts;
     // Ready for a browser: @rdfjs/wrapper comes from a CDN (the npm package uses the bare import).
-    case 'javascript': return withWrapperImport((await toWrapperClasses(graph)).js);
+    case 'javascript': return withWrapperImport((await toWrapperClasses(graph, { name: opts.name })).js);
     default: throw new Error(`unsupported format ${format as string}`);
   }
 }

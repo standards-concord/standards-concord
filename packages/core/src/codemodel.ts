@@ -119,12 +119,14 @@ const XSD_BASE: Record<string, string> = {
 };
 
 /** Whether datatype `a` is `b` or derived from it, through the ontology's own datatypes (`bases`) and XML Schema's. */
-export function derivesFrom(a: string, b: string, bases: Map<string, string> = new Map()): boolean {
-  const seen = new Set<string>();
-  for (let x: string | undefined = a; x && !seen.has(x); ) {
+export function derivesFrom(a: string, b: string, bases: Map<string, string[]> = new Map()): boolean {
+  const seen = new Set<string>([a]);
+  const todo = [a];
+  while (todo.length) {
+    const x = todo.pop()!;
     if (x === b) return true;
-    seen.add(x);
-    x = bases.get(x) ?? (x.startsWith(NS.xsd) && XSD_BASE[x.slice(NS.xsd.length)] ? NS.xsd + XSD_BASE[x.slice(NS.xsd.length)] : undefined);
+    const xsd = x.startsWith(NS.xsd) ? XSD_BASE[x.slice(NS.xsd.length)] : undefined;
+    for (const y of [...(bases.get(x) ?? []), ...(xsd ? [NS.xsd + xsd] : [])]) if (!seen.has(y)) seen.add(y), todo.push(y);
   }
   return false;
 }
@@ -162,14 +164,17 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     return {};
   };
   /** Whether shape `a`'s class is (transitively) a subclass of shape `b`'s. */
-  const isSub = (a: string, b: string, seen = new Set<string>()): boolean => {
-    if (a === b) return true;
-    if (seen.has(a)) return false;
-    seen.add(a);
-    return (byIri.get(a)?.superClasses ?? []).some((c) => {
-      const ss = byClass.get(c);
-      return ss !== undefined && isSub(ss.iri, b, seen);
-    });
+  const isSub = (a: string, b: string): boolean => {
+    const seen = new Set([a]);
+    for (const todo = [a]; todo.length; ) {
+      const x = todo.pop()!;
+      if (x === b) return true;
+      for (const c of byIri.get(x)?.superClasses ?? []) {
+        const y = byClass.get(c)?.iri;
+        if (y && !seen.has(y)) seen.add(y), todo.push(y);
+      }
+    }
+    return false;
   };
   /**
    * Both constraints apply, so the value type is the narrower of the two when
@@ -208,57 +213,100 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     };
   };
 
-  // Effective properties: constraints from every superclass and the class's own all apply together.
-  // Results are cached unless a superclass cycle cut them short, so shared ancestors are worked out once.
-  const effectiveRaw = new Map<string, Map<string, Raw>>();
-  const effectiveOf = (iri: string, stack: Set<string>): { props: Map<string, Raw>; cut: boolean } => {
-    const done = effectiveRaw.get(iri);
-    if (done) return { props: done, cut: false };
-    const s = byIri.get(iri)!;
-    const where = names.get(iri)!;
-    const out = new Map<string, Raw>();
-    const next = new Set(stack).add(iri);
-    let cut = false;
-    for (const sup of s.superClasses) {
-      const ss = byClass.get(sup);
-      if (!ss) continue;
-      if (next.has(ss.iri)) {
-        cut = true;
-        continue;
-      }
-      const inherited = effectiveOf(ss.iri, next);
-      cut ||= inherited.cut;
-      for (const [path, p] of inherited.props) {
-        const prev = out.get(path);
-        out.set(path, prev ? merge(prev, p, where) : { ...p });
-      }
-    }
-    for (const ps of s.properties) {
-      if (!safeIri(ps.path)) continue;
-      const prev = out.get(ps.path);
-      const type = statedType(ps) ?? (prev ? {} : rangeType(ps.path));
-      const own: Raw = { path: ps.path, ...type, minCount: ps.minCount, maxCount: ps.maxCount };
-      // A type that only comes from the global range never widens an inherited one: the inherited type is
-      // preferred unless the range is narrower. A restriction on this class is preferred over what it inherits.
-      out.set(ps.path, !prev ? own : ps.fromRange || !statedType(ps) ? merge(prev, own, where) : merge(own, prev, where));
-    }
-    if (!cut) effectiveRaw.set(iri, out);
-    return { props: out, cut };
-  };
+  // Superclass edges between the generated classes.
+  const supersOf = (iri: string) =>
+    byIri.get(iri)!.superClasses.map((c) => byClass.get(c)?.iri).filter((x): x is string => x !== undefined && x !== iri);
 
+  // Superclass cycles (strongly connected components), each after all its ancestors: Tarjan's
+  // algorithm, iteratively, so a deep hierarchy can't overflow the stack. A component is
+  // listed in the order its members leave the stack.
+  const components: string[][] = [];
+  {
+    const index = new Map<string, number>();
+    const low = new Map<string, number>();
+    const onStack = new Set<string>();
+    const stack: string[] = [];
+    let counter = 0;
+    for (const root of shapes.map((x) => x.iri)) {
+      if (index.has(root)) continue;
+      const work: { v: string; edges: string[]; i: number }[] = [];
+      const visit = (v: string) => {
+        index.set(v, counter);
+        low.set(v, counter++);
+        stack.push(v);
+        onStack.add(v);
+        work.push({ v, edges: supersOf(v), i: 0 });
+      };
+      visit(root);
+      while (work.length) {
+        const top = work[work.length - 1];
+        if (top.i < top.edges.length) {
+          const w = top.edges[top.i++];
+          if (!index.has(w)) visit(w);
+          else if (onStack.has(w)) low.set(top.v, Math.min(low.get(top.v)!, index.get(w)!));
+          continue;
+        }
+        work.pop();
+        if (work.length) {
+          const parent = work[work.length - 1].v;
+          low.set(parent, Math.min(low.get(parent)!, low.get(top.v)!));
+        }
+        if (low.get(top.v) === index.get(top.v)) {
+          const comp: string[] = [];
+          let w: string;
+          do {
+            w = stack.pop()!;
+            onStack.delete(w);
+            comp.push(w);
+          } while (w !== top.v);
+          components.push(comp);
+        }
+      }
+    }
+  }
+
+  // Effective properties: constraints from every superclass and the class's own all apply together.
+  // Each component is worked out once, from its ancestors' results; the classes in a cycle are
+  // equivalent, so they share theirs.
+  const effectiveRaw = new Map<string, Map<string, Raw>>();
+  for (const comp of components) {
+    const members = new Set(comp);
+    const out = new Map<string, Raw>();
+    for (const iri of comp)
+      for (const sup of supersOf(iri)) {
+        if (members.has(sup)) continue;
+        for (const [path, p] of effectiveRaw.get(sup)!) {
+          const prev = out.get(path);
+          out.set(path, prev ? merge(prev, p, names.get(iri)!) : { ...p });
+        }
+      }
+    for (const iri of comp) {
+      const where = names.get(iri)!;
+      for (const ps of byIri.get(iri)!.properties) {
+        if (!safeIri(ps.path)) continue;
+        const prev = out.get(ps.path);
+        const type = statedType(ps) ?? (prev ? {} : rangeType(ps.path));
+        const own: Raw = { path: ps.path, ...type, minCount: ps.minCount, maxCount: ps.maxCount };
+        // A type that only comes from the global range never widens an inherited one: the inherited type is
+        // preferred unless the range is narrower. A restriction on this class is preferred over what it inherits.
+        out.set(ps.path, !prev ? own : ps.fromRange || !statedType(ps) ? merge(prev, own, where) : merge(own, prev, where));
+        if (ps.alsoTypes?.length) {
+          const all = [ps.datatype ?? ps.cls, ...ps.alsoTypes.map((t) => t.datatype ?? t.cls)].map((x) => `<${x}>`);
+          notes.add(`${where} <${ps.path}>: values must be all of ${all.join(', ')}, which one accessor can't express; it uses ${all[0]}.`);
+        }
+      }
+    }
+    for (const iri of comp) effectiveRaw.set(iri, out);
+  }
+
+  // Classes, each after the classes it can extend.
   const classes: CodeClass[] = [];
   const byShape = new Map<string, CodeClass>();
-  const visiting = new Set<string>();
-  const build = (iri: string): CodeClass | undefined => {
-    const existing = byShape.get(iri);
-    if (existing) return existing;
-    if (visiting.has(iri)) return undefined; // a superclass cycle
-    visiting.add(iri);
+  for (const iri of components.flat()) {
     const s = byIri.get(iri)!;
-    const eff = effectiveOf(iri, new Set()).props;
-    // Candidate base: the first named superclass that isn't part of a cycle through this class.
-    const supers = s.superClasses.map((c) => byClass.get(c)).filter((x) => x !== undefined).map((ss) => build(ss.iri));
-    let base = supers.find((b) => b && !chainIncludes(b, iri));
+    const eff = effectiveRaw.get(iri)!;
+    // Candidate base: the first superclass already built (in a cycle, an earlier member).
+    let base = supersOf(iri).map((x) => byShape.get(x)).find((x) => x !== undefined);
     // Keep the base only if every inherited accessor keeps its type.
     if (base) for (const [path, bp] of base.effective) if (eff.has(path) && typeKey(eff.get(path)!) !== typeKey(bp)) base = undefined;
     if (base && [...base.effective.keys()].some((p) => !eff.has(p))) base = undefined;
@@ -273,7 +321,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
         continue;
       }
       // Reuse the name a superclass gives this path, when it's free.
-      const fromSuper = s.superClasses.map((c) => byClass.get(c)).map((ss) => ss && byShape.get(ss.iri)?.effective.get(path)?.name).find(Boolean);
+      const fromSuper = supersOf(iri).map((x) => byShape.get(x)?.effective.get(path)?.name).find(Boolean);
       const name = fromSuper && !memberTaken.has(fromSuper) && !RESERVED_MEMBERS.has(fromSuper)
         ? (memberTaken.add(fromSuper), fromSuper)
         : allocate(identifierFrom(localName(path), 'camel'), memberTaken, RESERVED_MEMBERS);
@@ -282,16 +330,9 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
       declared.push(cp);
     }
     const c: CodeClass = { shapeIRI: iri, targetClass: s.targetClass, name: names.get(iri)!, base: base?.shapeIRI, declared, effective };
-    visiting.delete(iri);
     byShape.set(iri, c);
     classes.push(c);
-    return c;
-  };
-  const chainIncludes = (c: CodeClass, iri: string): boolean => {
-    for (let x: CodeClass | undefined = c; x; x = x.base ? byShape.get(x.base) : undefined) if (x.shapeIRI === iri) return true;
-    return false;
-  };
-  for (const s of shapes) build(s.iri);
+  }
 
   const needThing = classes.some((c) => [...c.effective.values()].some((p) => p.node === THING));
   const thingName = needThing ? allocate('Thing', taken, RESERVED_CLASSES) : undefined;

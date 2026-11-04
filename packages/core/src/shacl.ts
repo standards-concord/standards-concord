@@ -14,7 +14,7 @@ import { blankNode, canonical, literal, nn, objects, readList, typedLit } from '
 import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
-import { codeModel, type PropertyInfo } from './codemodel.js';
+import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -28,6 +28,8 @@ export interface PropShape {
   hasValue?: Term;
   /** The value type is only the property's global range (from its domain), not a restriction on this class. */
   fromRange?: boolean;
+  /** Further value types the values must also have, none narrower than another (from several `only` restrictions or a range). */
+  alsoTypes?: { cls?: string; datatype?: string }[];
   qualified: { shape: { cls?: string; datatype?: string }; min?: number; max?: number }[];
 }
 
@@ -44,8 +46,8 @@ export interface DerivedNodeShape {
 export interface DerivedShapes {
   /** Object or datatype property, and its declared range, for every property in the ontology. */
   propertyInfo: Map<string, PropertyInfo>;
-  /** Datatypes the ontology defines, and the datatype each is based on. */
-  datatypeBases: Map<string, string>;
+  /** Datatypes the ontology defines, and the datatypes each is based on. */
+  datatypeBases: Map<string, string[]>;
   /** IRI of the shapes graph (`<ontology>/shapes`), when the ontology has an IRI. */
   shapesIRI?: string;
   shapesNs: string;
@@ -68,6 +70,20 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
   const own = v.classes.filter((k) => !k.deprecated && k.iri.startsWith(graph.namespace));
   const ownIris = new Set(own.map((k) => k.iri));
   const shapes: DerivedNodeShape[] = [];
+  // Whether type `a` is narrower than or equal to `b`: a subclass, or a derived datatype.
+  const bases = datatypeBases(graph);
+  const supers = new Map(v.classes.map((k) => [k.iri, k.superClasses]));
+  const isSubClass = (a: string, b: string) => {
+    const seen = new Set([a]);
+    for (const todo = [a]; todo.length; ) {
+      const x = todo.pop()!;
+      if (x === b) return true;
+      for (const y of supers.get(x) ?? []) if (!seen.has(y)) seen.add(y), todo.push(y);
+    }
+    return false;
+  };
+  const narrowerOrEqual = (a: ValueType, b: ValueType) =>
+    a.datatype && b.datatype ? derivesFrom(a.datatype, b.datatype, bases) : a.cls && b.cls ? isSubClass(a.cls, b.cls) : false;
   for (const k of own) {
     const byPath = new Map<string, PropShape>();
     const get = (p: string) => {
@@ -86,7 +102,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       }
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
-    for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? []);
+    for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? [], narrowerOrEqual);
     shapes.push({
       iri: `${shapesNs}${localName(k.iri)}Shape`,
       targetClass: k.iri,
@@ -100,7 +116,7 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       ...v.objectProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: true, range: p.range }]),
       ...v.datatypeProperties.map((p): [string, PropertyInfo] => [p.iri, { objectProperty: false, range: p.range }]),
     ]),
-    datatypeBases: datatypeBases(graph),
+    datatypeBases: bases,
     shapesIRI: graph.ontologyIRI ? `${ont}/shapes` : undefined,
     shapesNs,
     prefixes: { ...graph.prefixes, sh: SH, [`${pref}sh`]: shapesNs },
@@ -144,6 +160,13 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
       if (accessor) add(b, SH + 'codeIdentifier', literal(accessor));
       if (ps.datatype) add(b, SH + 'datatype', nn(ps.datatype));
       if (ps.cls) add(b, SH + 'class', nn(ps.cls));
+      // Each further type gets a property shape of its own (SHACLC allows one datatype or class per property shape).
+      for (const t of ps.alsoTypes ?? []) {
+        const tb = blankNode();
+        add(shape, SH + 'property', tb);
+        add(tb, SH + 'path', nn(ps.path));
+        add(tb, SH + (t.datatype ? 'datatype' : 'class'), nn((t.datatype ?? t.cls)!));
+      }
       if (ps.minCount !== undefined) add(b, SH + 'minCount', int(ps.minCount));
       if (ps.maxCount !== undefined) add(b, SH + 'maxCount', int(ps.maxCount));
       if (ps.hasValue) add(b, SH + 'hasValue', ps.hasValue);
@@ -167,21 +190,20 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
 }
 
 /**
- * Datatypes defined in the ontology and the datatype each restricts or equals:
- * `e:Code owl:equivalentClass [ owl:onDatatype xsd:string ; ... ]` gives
- * e:Code → xsd:string.
+ * Datatypes defined in the ontology and every datatype each restricts or
+ * equals: `e:Code owl:equivalentClass [ owl:onDatatype xsd:string ; ... ]`
+ * gives e:Code → xsd:string. All definitions count, in any order.
  */
-function datatypeBases(graph: OntologyGraph): Map<string, string> {
-  const out = new Map<string, string>();
+function datatypeBases(graph: OntologyGraph): Map<string, string[]> {
+  const out = new Map<string, string[]>();
   for (const d of graph.store.getSubjects(nn(RDF_TYPE), nn(NS.rdfs + 'Datatype'), null)) {
     if (d.termType !== 'NamedNode') continue;
+    const bases = new Set<string>();
     for (const eq of objects(graph.store, d, NS.owl + 'equivalentClass')) {
       const base = eq.termType === 'NamedNode' ? eq : objects(graph.store, eq, NS.owl + 'onDatatype')[0];
-      if (base?.termType === 'NamedNode' && base.value !== d.value) {
-        out.set(d.value, base.value);
-        break;
-      }
+      if (base?.termType === 'NamedNode' && base.value !== d.value) bases.add(base.value);
     }
+    if (bases.size) out.set(d.value, [...bases].sort());
   }
   return out;
 }
@@ -484,7 +506,34 @@ function nameQualifiedShapes(store: Store, shapesNs: string): void {
   }
 }
 
-function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, range: string[]): void {
+type ValueType = { cls?: string; datatype?: string };
+
+/**
+ * Adds an `only` type to a property shape. Every such type applies, as does
+ * the range: the narrowest is kept, and types none of which is narrower are
+ * all kept (the first restriction's as the main one, and a restriction's over
+ * the range's).
+ */
+function addOnlyType(ps: PropShape, t: ValueType, narrowerOrEqual: (a: ValueType, b: ValueType) => boolean): void {
+  const cur: ValueType | undefined = ps.datatype ? { datatype: ps.datatype } : ps.cls ? { cls: ps.cls } : undefined;
+  const fromRange = ps.fromRange;
+  delete ps.fromRange;
+  const set = (x: ValueType) => {
+    delete ps.cls;
+    delete ps.datatype;
+    Object.assign(ps, x);
+  };
+  if (!cur || narrowerOrEqual(t, cur)) return set(t);
+  if (narrowerOrEqual(cur, t)) return;
+  if (ps.alsoTypes?.some((x) => narrowerOrEqual(x, t))) return;
+  ps.alsoTypes = (ps.alsoTypes ?? []).filter((x) => !narrowerOrEqual(t, x));
+  if (fromRange) {
+    set(t);
+    ps.alsoTypes.push(cur);
+  } else ps.alsoTypes.push(t);
+}
+
+function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, range: string[], narrowerOrEqual: (a: ValueType, b: ValueType) => boolean): void {
   const filler = r.filler && r.filler !== NS.owl + 'Thing' && r.filler !== NS.rdfs + 'Literal' ? r.filler : undefined;
   // A filler equal to the property's range adds no type constraint beyond the range.
   const sameAsRange = !filler || (range.length === 1 && range[0] === filler);
@@ -496,10 +545,7 @@ function applyRestriction(graph: OntologyGraph, ps: PropShape, r: Restriction, r
       else ps.qualified.push({ shape: typed, min: 1 });
       break;
     case 'only':
-      if (filler) {
-        Object.assign(ps, typed);
-        delete ps.fromRange;
-      }
+      if (filler) addOnlyType(ps, typed, narrowerOrEqual);
       break;
     case 'value':
       ps.hasValue = r.literal !== undefined ? literal(r.literal) : nn(r.filler!);

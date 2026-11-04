@@ -170,7 +170,7 @@ export function apiRouter(): Router {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format);
+    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);

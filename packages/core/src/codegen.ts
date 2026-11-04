@@ -174,6 +174,31 @@ function quietly<T>(fn: () => T): T {
  * Generates the classes for an ontology. The shapes are the same ones served
  * as SHACL and SHACLC (see shacl.ts), so the code and the shapes agree.
  */
+/**
+ * An RDF/JS DatasetCore over an N3 store whose match() uses the store's
+ * indexes and returns only the matches. The converter calls match(...).size
+ * for every class, and an N3 match result counts against the whole store, so
+ * a deep hierarchy would take quadratic time.
+ */
+function indexedDataset(store: Store) {
+  return {
+    get size() {
+      return store.size;
+    },
+    match: (s?: any, p?: any, o?: any, g?: any) => new Store(store.getQuads(s ?? null, p ?? null, o ?? null, g ?? null)),
+    add(q: any) {
+      store.addQuad(q);
+      return this;
+    },
+    delete(q: any) {
+      store.removeQuad(q);
+      return this;
+    },
+    has: (q: any) => store.has(q),
+    [Symbol.iterator]: () => store.getQuads(null, null, null, null)[Symbol.iterator](),
+  };
+}
+
 export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOptions = {}): Promise<GeneratedModule> {
   const derived = deriveShapes(graph);
   const { store, model, classes, thing, datatypes } = converterShapes(derived);
@@ -184,7 +209,7 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     import('@theodi/shacl-converter/dist/generator/class-generator.js' as string),
     import('@theodi/shacl-converter/dist/model/shacl-model.js' as string),
   ]);
-  const ds = new ShaclDataset(store, DataFactory);
+  const ds = new ShaclDataset(indexedDataset(store), DataFactory);
   const models = new Map<string, any>([...ds.nodeShapes].map((m: any) => [m.value, m]));
   const registry = new Map<string, unknown>();
   for (const [iri, m] of models) registry.set(iri, { shape: m, fileName: m.codeIdentifier, codeIdentifier: m.codeIdentifier, prefix: '' });

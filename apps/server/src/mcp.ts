@@ -75,7 +75,7 @@ function buildServer(user: User, agentName: string) {
       inputSchema: { ontology: ontologyArg, format: z.enum(Object.keys(FORMAT_INFO) as [OutputFormat, ...OutputFormat[]]).default('turtle'), version: z.string().optional().describe('Released version such as 1.2.0; default is the working draft') },
       annotations: { readOnlyHint: true },
     },
-    ({ ontology, format, version }) => withProject(ontology, async (p) => text(await serialize(await ontologyStore.at(p, version), format))),
+    ({ ontology, format, version }) => withProject(ontology, async (p) => text(await serialize(await ontologyStore.at(p, version), format, { name: p.slug }))),
   );
 
   server.registerTool(

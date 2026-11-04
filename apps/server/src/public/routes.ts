@@ -305,7 +305,7 @@ export async function sendFormat(req: Request, res: Response, o: SendFormatOptio
   }
   const info = FORMAT_INFO[o.format];
   // ?syntax=extended keeps shape names and labels, in shaclc-write's extended SHACLC.
-  const text = o.format === 'shaclc' && req.query.syntax === 'extended' ? await toShaclc(o.graph, { extended: true }) : await serialize(o.graph, o.format);
+  const text = o.format === 'shaclc' && req.query.syntax === 'extended' ? await toShaclc(o.graph, { extended: true }) : await serialize(o.graph, o.format, { name: o.project.slug });
   res.type(`${info.mediaType}; charset=utf-8`);
   res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
   res.send(text);
