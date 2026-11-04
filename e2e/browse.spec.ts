@@ -464,23 +464,39 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await page.goto(`${base}?view=diagram&hops=0`);
     const d = page.getByTestId('class-diagram');
     await expect(d.locator('[data-node]')).toHaveCount(2);
-    const result = await d.locator('svg[data-width]').evaluate((svg) => {
-      const out: string[] = [];
-      for (const node of svg.querySelectorAll('[data-node]')) {
-        const box = node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect();
-        for (const t of node.querySelectorAll('text')) {
+    const overflow = () =>
+      d.locator('svg[data-width]').evaluate((svg) => {
+        const out: string[] = [];
+        const inside = (t: Element, box: DOMRect) => {
           const b = t.getBoundingClientRect();
           if (b.left < box.left - 1 || b.right > box.right + 1 || b.top < box.top - 1 || b.bottom > box.bottom + 1) out.push(`${t.textContent} overflows its box`);
+        };
+        for (const node of svg.querySelectorAll('[data-node]')) {
+          const box = node.querySelector('rect:not([data-focus-ring])')!.getBoundingClientRect();
+          for (const t of node.querySelectorAll('text')) inside(t, box);
         }
-      }
-      // The export uses data-width/height (plus a 20px margin) as its bounds.
-      const content = (svg.querySelector('[data-viewport]') as SVGGElement).getBBox();
-      const w = Number((svg as SVGSVGElement).dataset.width);
-      const h = Number((svg as SVGSVGElement).dataset.height);
-      if (content.x < -20 || content.y < -20 || content.x + content.width > w + 20 || content.y + content.height > h + 20) out.push(`content ${JSON.stringify(content)} exceeds ${w}x${h}`);
-      return out;
-    });
-    expect(result).toEqual([]);
+        // Relationship labels, which turn bold when highlighted, keep some padding in their box.
+        for (const edge of svg.querySelectorAll('[data-edge]')) {
+          const rect = edge.querySelector('rect');
+          const t = edge.querySelector('text');
+          if (!rect || !t) continue;
+          const r = rect.getBBox();
+          const b = t.getBBox();
+          if (b.x < r.x + 3 || b.x + b.width > r.x + r.width - 3) out.push(`${t.textContent} (${b.width}) is too wide for its label box (${r.width})`);
+        }
+        // The export's bounds are data-width by data-height (it adds a margin around them).
+        const content = (svg.querySelector('[data-viewport]') as SVGGElement).getBBox();
+        const w = Number((svg as SVGSVGElement).dataset.width);
+        const h = Number((svg as SVGSVGElement).dataset.height);
+        if (content.x < -6 || content.y < -6 || content.x + content.width > w + 1 || content.y + content.height > h + 1) out.push(`content ${JSON.stringify(content)} exceeds ${w}x${h}`);
+        return out;
+      });
+    expect(await overflow()).toEqual([]);
+    // Selecting the class highlights its relationships, in bold.
+    await d.locator(`[data-node="${NS}Long"]`).click();
+    await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-pressed', 'true');
+    await expect(d.locator('[data-edge] text[font-weight="600"]').first()).toBeVisible();
+    expect(await overflow()).toEqual([]);
     // The full names are still there for assistive technology.
     await expect(d.locator(`[data-node="${NS}Long"]`)).toHaveAttribute('aria-label', new RegExp(`^${long}`));
     await expect(d.locator(`[data-node="${NS}Word"]`)).toHaveAttribute('aria-label', new RegExp(`^${word}`));

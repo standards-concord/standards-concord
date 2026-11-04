@@ -3,6 +3,7 @@ import dagre from '@dagrejs/dagre';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
+import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
 import { curve, downloadSvg, textWidth, themeColours, usePanZoom, ZoomControls } from './PanZoom';
 
@@ -61,7 +62,8 @@ interface DEdge {
 const FONT = 'Inter, ui-sans-serif, system-ui, sans-serif';
 const TITLE_FONT = `600 13px ${FONT}`;
 const ATTR_FONT = `12px ${FONT}`;
-const LABEL_FONT = `11px ${FONT}`;
+// Relationship labels turn bold when highlighted, so they are sized for the bold weight.
+const LABEL_FONT = `600 11px ${FONT}`;
 const HEAD = 30;
 const TITLE_ROW = 16;
 const ROW = 18;
@@ -72,42 +74,8 @@ const MAX_WIDTH = 340;
 const SLACK = 4;
 const UP = '↑ ';
 
-/**
- * Greedy word wrap to `max` pixels, breaking words too long for a line, and ending with an
- * ellipsis if more than `maxRows` rows would be needed (the full text stays in the title and
- * accessible name).
- */
-export function wrapText(text: string, font: string, max: number, maxRows: number): string[] {
-  const fits = (t: string) => textWidth(t, font) <= max;
-  const rows: string[] = [];
-  let cur = '';
-  for (const word of text.split(/\s+/).filter(Boolean)) {
-    const next = cur ? `${cur} ${word}` : word;
-    if (fits(next)) {
-      cur = next;
-      continue;
-    }
-    if (cur) rows.push(cur);
-    cur = word;
-    while (cur.length > 1 && !fits(cur)) {
-      let lo = 1;
-      let hi = cur.length - 1;
-      while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2);
-        if (fits(cur.slice(0, mid))) lo = mid;
-        else hi = mid - 1;
-      }
-      rows.push(cur.slice(0, lo));
-      cur = cur.slice(lo);
-    }
-  }
-  if (cur) rows.push(cur);
-  if (rows.length <= maxRows) return rows;
-  const kept = rows.slice(0, maxRows);
-  let last = kept[maxRows - 1];
-  while (last.length > 0 && !fits(`${last}…`)) last = last.slice(0, -1);
-  kept[maxRows - 1] = `${last.trimEnd()}…`;
-  return kept;
+function wrapText(text: string, font: string, max: number, maxRows: number) {
+  return wrapRows(text, (t) => textWidth(t, font), max, maxRows);
 }
 
 function typeName(iris: string[], exprs: string[], label: Labeler) {
@@ -207,7 +175,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
             continue;
           }
           edges.push(e);
-          g.setEdge(iri, r, { weight: 1, minlen: 1, width: textWidth(text, LABEL_FONT) + 10, height: 16, labelpos: 'c' }, id);
+          g.setEdge(iri, r, { weight: 1, minlen: 1, width: textWidth(text, LABEL_FONT) + 10 + SLACK, height: 16, labelpos: 'c' }, id);
         }
       }
 
@@ -238,9 +206,9 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       { x: x + 34, y: y + 22 },
       { x, y: y + 8 },
     ];
-    e.lx = x + 40 + textWidth(e.label!, LABEL_FONT) / 2;
+    e.lx = x + 40 + (textWidth(e.label!, LABEL_FONT) + SLACK) / 2;
     e.ly = y;
-    e.lw = textWidth(e.label!, LABEL_FONT) + 10;
+    e.lw = textWidth(e.label!, LABEL_FONT) + 10 + SLACK;
   }
   // The drawing's bounds (used to fit and export it) cover every box, edge and label.
   const gl = g.graph();

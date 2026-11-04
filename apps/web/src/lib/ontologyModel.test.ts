@@ -344,17 +344,19 @@ describe('ontology model: performance', () => {
 
 describe('ontology model: construction', () => {
   it('builds a deep chain and a wide hub in linear time', () => {
+    // A deep chain, and a hub whose subclasses, domain properties and restrictions all pile
+    // into single index entries.
     const chain = Array.from({ length: 5000 }, (_, i) => cls(`C${i}`, { sup: i ? [`C${i - 1}`] : [] }));
-    const hub = [cls('Hub'), ...Array.from({ length: 5000 }, (_, i) => cls(`K${i}`, { sup: ['Hub'] }))];
-    const domains = Array.from({ length: 2000 }, (_, i) => prop(`d${i}`, { domain: [I('Hub')] }));
+    const hub = [cls('Hub'), ...Array.from({ length: 20000 }, (_, i) => cls(`K${i}`, { sup: ['Hub'], r: [r('p', 'some', 'Hub')] }))];
+    const domains = [prop('p'), ...Array.from({ length: 20000 }, (_, i) => prop(`d${i}`, { domain: [I('Hub')] }))];
     const t = performance.now();
     const a = model(chain, []);
     const b = model(hub, domains);
-    // A few milliseconds each locally; materialising ancestor sets to look for cycles, or
-    // growing lists by copying them, made this take seconds.
-    expect(performance.now() - t).toBeLessThan(300);
+    // About 150 ms locally. Materialising ancestor sets to look for cycles took over
+    // 2 s, and growing the index lists by copying them took several seconds.
+    expect(performance.now() - t).toBeLessThan(1000);
     expect(a.roots).toEqual([I('C0')]);
-    expect(b.children.get(I('Hub'))).toHaveLength(5000);
+    expect(b.children.get(I('Hub'))).toHaveLength(20000);
   });
 });
 
