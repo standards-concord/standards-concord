@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ChangeRequest, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
+import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
@@ -10,18 +10,24 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject } from './ontologies.js';
+import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
 export const listMeetings = (ontologyId: string) => list<Meeting>('meetings', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-const save = (m: Meeting) => put('meetings', m, m.ontologyId);
+export const saveMeeting = (m: Meeting) => put('meetings', m, m.ontologyId);
+const save = saveMeeting;
 
 /** Live updates for the meeting page (SSE). */
 export const meetingEvents = new EventEmitter();
 meetingEvents.setMaxListeners(200);
-type MeetingEvent = { type: 'line'; line: TranscriptLine } | { type: 'prompt'; text: string; t?: number } | { type: 'status'; status: Meeting['status']; bot?: Meeting['bot'] };
-const emit = (m: Meeting, e: MeetingEvent) => meetingEvents.emit(m.id, e);
+type MeetingEvent =
+  | { type: 'line'; line: TranscriptLine }
+  | { type: 'prompt'; prompt: FacilitatorPrompt }
+  | { type: 'status'; status: Meeting['status']; bot?: Meeting['bot'] }
+  | { type: 'meeting'; meeting: Meeting };
+export const emit = (m: Meeting, e: MeetingEvent) => meetingEvents.emit(m.id, e);
 
 /* ------------------------------------------------------------------------ */
 /* Transcript parsing                                                        */
@@ -196,7 +202,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
 /* Creating meetings                                                         */
 /* ------------------------------------------------------------------------ */
 
-function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
+export function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
   return save({
     id: newId('mtg'),
     ontologyId: project.id,
@@ -224,11 +230,16 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* ------------------------------------------------------------------------ */
 
 const lastPromptAt = new Map<string, number>();
+const lastLineAt = new Map<string, number>();
+
+/** When the last transcript line of a live call arrived (this process only). */
+export const lastLineTime = (meetingId: string) => lastLineAt.get(meetingId);
 
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
 export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGapLines?: number } = {}) {
   m.transcript.push(line);
   save(m);
+  lastLineAt.set(m.id, Date.now());
   emit(m, { type: 'line', line });
   const n = m.transcript.length;
   const gap = opts.minGapLines ?? 4;
@@ -237,13 +248,65 @@ export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGa
   if (!prompt) return;
   lastPromptAt.set(m.id, n);
   const fresh = getMeeting(m.id);
-  const entry = { at: clock.iso(), t: line.t, text: prompt, posted: false };
-  if (fresh.bot?.provider === 'recall' && fresh.bot.botId) entry.posted = await recall.sendChat(fresh.bot.botId, prompt);
+  const entry: FacilitatorPrompt = { at: clock.iso(), t: line.t, text: prompt, posted: false };
+  if (fresh.postPromptsToChat) await postToChat(fresh, entry);
   fresh.facilitatorPrompts.push(entry);
   // keep the in-memory object in sync for the caller
   m.facilitatorPrompts = fresh.facilitatorPrompts;
   save(fresh);
-  emit(fresh, { type: 'prompt', text: prompt, t: line.t });
+  emit(fresh, { type: 'prompt', prompt: entry });
+}
+
+/** Posts one prompt into the meeting's chat through the bot. Simulated calls pretend to. */
+async function postToChat(m: Meeting, p: FacilitatorPrompt) {
+  if (m.bot?.provider === 'recall') {
+    if (!m.bot.botId || !['joining', 'in-call'].includes(m.bot.status)) {
+      p.postError = 'The bot is not in the call, so it can’t post in the chat.';
+      return;
+    }
+    const r = await recall.sendChat(m.bot.botId, p.text);
+    if (!r.ok) {
+      p.postError = r.error;
+      return;
+    }
+  } else if (m.source !== 'simulation') {
+    p.postError = 'No meeting bot is connected to this call, so there is no chat to post in.';
+    return;
+  }
+  p.posted = true;
+  p.postedAt = clock.iso();
+  delete p.postError;
+}
+
+/** "Post in the Meet chat" on one prompt the bot only suggested to the facilitator. */
+export async function postPrompt(m: Meeting, index: number) {
+  const p = m.facilitatorPrompts[index];
+  if (!p) throw new HttpError(404, 'No such prompt');
+  if (!p.posted) {
+    await postToChat(m, p);
+    save(m);
+    emit(m, { type: 'meeting', meeting: m });
+  }
+  if (p.postError) throw new HttpError(409, p.postError);
+  return m;
+}
+
+/** Meeting options people can change before or during a call. */
+export async function updateMeeting(m: Meeting, patch: { postPromptsToChat?: boolean; skip?: boolean }) {
+  if (patch.postPromptsToChat !== undefined) m.postPromptsToChat = patch.postPromptsToChat;
+  if (patch.skip !== undefined) {
+    if (!m.calendar) throw new HttpError(400, 'Only calls from a calendar invite can be skipped');
+    if (m.status !== 'scheduled') throw new HttpError(409, 'The bot has already joined this call. End it instead.');
+    m.calendar.skip = patch.skip;
+    // A bot already booked with Recall.ai for this call is cancelled; it is booked again if un-skipped.
+    if (patch.skip && m.bot?.botId) {
+      await recall.deleteBot(m.bot.botId);
+      m.bot = { provider: m.bot.provider, status: 'scheduled' };
+    }
+  }
+  save(m);
+  emit(m, { type: 'meeting', meeting: m });
+  return m;
 }
 
 async function facilitate(m: Meeting): Promise<string | undefined> {
@@ -288,69 +351,40 @@ function heuristicFacilitation(m: Meeting): { speak: boolean; prompt?: string } 
 /* Meeting bot adapters                                                      */
 /* ------------------------------------------------------------------------ */
 
-/**
- * The Google Meet Media API is in a closed developer preview, so a real bot
- * joins through Recall.ai (or a self-hosted Attendee, which has a near-identical
- * API). Without a key, invitations are recorded but the bot is simulated.
- */
-const recall = {
-  enabled: () => !!config.meetBot.recallApiKey,
-  base: () => `https://${config.meetBot.recallRegion}.recall.ai/api/v1`,
-  headers: () => ({ Authorization: `Token ${config.meetBot.recallApiKey}`, 'Content-Type': 'application/json' }),
+export const NO_BOT_PROVIDER =
+  'No meeting-bot provider is configured on this server (set RECALL_API_KEY). Use “Simulate a call” to see how the co-facilitator works, or upload the transcript afterwards.';
 
-  async createBot(meeting: Meeting, meetingUrl: string, secret: string) {
-    const res = await fetch(`${recall.base()}/bot/`, {
-      method: 'POST',
-      headers: recall.headers(),
-      body: JSON.stringify({
-        meeting_url: meetingUrl,
-        bot_name: config.meetBot.botName,
-        chat: { on_bot_join: { send_to: 'everyone', message: `Hi, I'm ${config.meetBot.botName}. I'm listening to capture use cases and terms for the ontology, and I may ask the odd clarifying question in chat.` } },
-        recording_config: {
-          transcript: { provider: { meeting_captions: {} } },
-          realtime_endpoints: [
-            {
-              type: 'webhook',
-              url: `${config.publicUrl}/api/webhooks/recall?meeting=${meeting.id}&secret=${secret}`,
-              events: ['transcript.data'],
-            },
-          ],
-        },
-      }),
-    });
-    if (!res.ok) throw new Error(`Recall.ai returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
-    return (await res.json()) as { id: string };
-  },
+export const isMeetUrl = (url: string) => /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(url);
 
-  async sendChat(botId: string, message: string): Promise<boolean> {
-    try {
-      const res = await fetch(`${recall.base()}/bot/${botId}/send_chat_message/`, { method: 'POST', headers: recall.headers(), body: JSON.stringify({ to: 'everyone', message }) });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  },
-
-  async leave(botId: string) {
-    await fetch(`${recall.base()}/bot/${botId}/leave_call/`, { method: 'POST', headers: recall.headers() }).catch(() => undefined);
-  },
-};
-
-export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string) {
-  if (!/^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
-  const secret = newToken();
-  const m = newMeeting(project, user, title, 'google-meet-bot', { meetingUrl, bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' } });
-  put('kv', { id: `meeting-secret:${m.id}`, secret });
-  if (recall.enabled()) {
-    try {
-      const bot = await recall.createBot(m, meetingUrl, secret);
-      m.bot = { provider: 'recall', botId: bot.id, status: 'joining' };
-    } catch (err) {
-      m.bot = { provider: 'recall', status: 'error', error: (err as Error).message };
-    }
-  } else {
-    m.bot = { provider: 'simulated', status: 'error', error: 'No meeting-bot provider is configured on this server (set RECALL_API_KEY). Use “Simulate a call” to see how the co-facilitator works, or upload the transcript afterwards.' };
+/** Books a Recall.ai bot for a meeting (now, or at joinAt). Returns the bot state to store. */
+export async function dispatchBot(m: Meeting, joinAt?: string): Promise<NonNullable<Meeting['bot']>> {
+  if (!recall.enabled()) return { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
+  let secret = get<{ id: string; secret: string }>('kv', `meeting-secret:${m.id}`)?.secret;
+  if (!secret) {
+    secret = newToken();
+    put('kv', { id: `meeting-secret:${m.id}`, secret });
   }
+  try {
+    const bot = await recall.createBot({
+      meetingUrl: m.meetingUrl!,
+      joinAt,
+      postPromptsToChat: !!m.postPromptsToChat,
+      webhookUrl: `${config.publicUrl}/api/webhooks/recall?meeting=${m.id}&secret=${secret}`,
+    });
+    return { provider: 'recall', botId: bot.id, status: 'joining' };
+  } catch (err) {
+    return { provider: 'recall', status: 'error', error: (err as Error).message };
+  }
+}
+
+export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string, opts: { postPromptsToChat?: boolean } = {}) {
+  if (!isMeetUrl(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
+  const m = newMeeting(project, user, title, 'google-meet-bot', {
+    meetingUrl,
+    postPromptsToChat: !!opts.postPromptsToChat,
+    bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' },
+  });
+  m.bot = await dispatchBot(m);
   save(m);
   logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return m;
@@ -364,6 +398,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   const evt = body as { event?: string; data?: { data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } } };
   if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
     if (m.bot) m.bot.status = 'in-call';
+    if (m.status === 'scheduled') m.status = 'live';
     const words = evt.data.data.words;
     await onLiveLine(m, { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative });
   }
@@ -401,9 +436,10 @@ export const SIMULATED_CALL: TranscriptLine[] = [
 const runningSimulations = new Set<string>();
 
 /** Replays the scripted call line by line so testers can watch the co-facilitator work. */
-export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number } = {}) {
+export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number; postPromptsToChat?: boolean } = {}) {
   const m = newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
+    postPromptsToChat: !!opts.postPromptsToChat,
     bot: { provider: 'simulated', status: 'in-call' },
   });
   const delay = opts.delayMs ?? 1800;

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { Meeting, UseCase } from '@concord/shared';
-import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquareWarning, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, Sparkles, Wand2 } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
-import { formatDate, titleCase } from '../../lib/format';
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Spinner } from '../../components/ui';
+import { formatDate, relativeTime, titleCase } from '../../lib/format';
+import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Spinner, Toggle } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
 import { MeetingStatus } from './Meetings';
@@ -27,7 +27,8 @@ export function MeetingDetailPage() {
   const [proposed, setProposed] = useState<{ useCases: UseCase[]; changeRequestId?: string }>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const live = m.data?.status === 'live';
-  const waitingBot = !!m.data?.bot && ['scheduled', 'joining', 'in-call'].includes(m.data.bot.status) && !live;
+  const scheduled = m.data?.status === 'scheduled';
+  const waitingBot = !!m.data?.bot && ['scheduled', 'joining', 'in-call'].includes(m.data.bot.status) && !live && !scheduled;
   const processing = m.data?.status === 'processing';
 
   // Live updates over SSE while the meeting is live.
@@ -58,6 +59,14 @@ export function MeetingDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [waitingBot, processing]);
 
+  // A call from a calendar invite: check now and then for the bot being booked or joining.
+  useEffect(() => {
+    if (!scheduled) return;
+    const t = setInterval(() => void m.reload(), 30_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scheduled]);
+
   useEffect(() => {
     if (!live) return;
     const el = scrollRef.current;
@@ -70,6 +79,19 @@ export function MeetingDetailPage() {
   }, [m.data?.transcript]);
 
   const analyse = useAction(async () => m.setData(await api.analyseMeeting(meetingId)));
+  const update = useAction(async (changes: { postPromptsToChat?: boolean; skip?: boolean }) => m.setData(await api.updateMeeting(meetingId, changes)));
+  const end = useAction(async () => m.setData(await api.endMeeting(meetingId)));
+  const [posting, setPosting] = useState<number>();
+  const postPrompt = useAction(async (i: number) => {
+    setPosting(i);
+    try {
+      m.setData(await api.postPrompt(meetingId, i));
+    } finally {
+      setPosting(undefined);
+      // The prompt records why posting failed; show it even when the request failed.
+      void m.reload();
+    }
+  });
   const propose = useAction(async () => {
     const r = await api.proposeFromMeeting(meetingId);
     setProposed({ useCases: r.useCases, changeRequestId: r.changeRequest?.id });
@@ -80,6 +102,9 @@ export function MeetingDetailPage() {
   if (!m.data) return <Loading />;
   const mt = m.data;
   const a = mt.analysis;
+  // Posting into the meeting chat needs a bot in the call (or a simulated one).
+  const hasChat = mt.source === 'simulation' || mt.source === 'google-meet-bot' || mt.source === 'calendar-invite';
+  const canPostNow = live && (mt.source === 'simulation' || (mt.bot?.provider === 'recall' && ['joining', 'in-call'].includes(mt.bot.status)));
 
   return (
     <div>
@@ -105,9 +130,29 @@ export function MeetingDetailPage() {
             )}
             {mt.bot && <> · bot via {mt.bot.provider}</>}
           </p>
+          {mt.calendar && (
+            <p className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-muted" data-testid="meeting-calendar">
+              From a calendar invite: {formatDate(mt.calendar.start, true)}
+              {mt.calendar.recurring && (
+                <>
+                  {' '}
+                  · <Repeat className="size-3" /> part of a series
+                </>
+              )}
+              {mt.calendar.organizer && <> · organised by {mt.calendar.organizer}</>}
+            </p>
+          )}
           {mt.bot?.error && <p className="mt-1 text-sm text-danger">Bot error: {mt.bot.error}</p>}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {scheduled && mt.calendar && (
+            <Toggle checked={!mt.calendar.skip} onChange={(v) => void update.run({ skip: !v })} disabled={update.pending} label={mt.calendar.skip ? 'The bot will skip this call' : 'The bot will join this call'} />
+          )}
+          {live && (
+            <Button icon={PhoneOff} loading={end.pending} onClick={() => void end.run()}>
+              End call and analyse
+            </Button>
+          )}
           {!a && mt.status !== 'live' && (
             <Button icon={Wand2} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
               Analyse transcript
@@ -120,7 +165,7 @@ export function MeetingDetailPage() {
           )}
         </div>
       </div>
-      <InlineError error={analyse.error || propose.error} />
+      <InlineError error={analyse.error || propose.error || update.error || end.error} />
       {proposed && !proposed.changeRequestId && (
         <Card className="mb-4 p-4 text-sm">
           Created {proposed.useCases.length} use case{proposed.useCases.length === 1 ? '' : 's'}.{' '}
@@ -140,7 +185,12 @@ export function MeetingDetailPage() {
                 <Spinner /> The bot is {mt.bot?.status === 'in-call' ? 'in the call — transcript will appear shortly' : `${mt.bot?.status}…`}
               </div>
             )}
-            {!mt.transcript.length && !waitingBot && <p className="text-sm text-muted">No transcript yet.</p>}
+            {scheduled && mt.calendar && (
+              <p className="text-sm text-muted">
+                {mt.calendar.skip ? 'The bot is skipping this call.' : `The bot joins when the call starts, ${relativeTime(mt.calendar.start)}. The transcript streams in here live.`}
+              </p>
+            )}
+            {!mt.transcript.length && !waitingBot && !scheduled && <p className="text-sm text-muted">No transcript yet.</p>}
             {mt.transcript.map((l, i) => (
               <div key={i} className="flex gap-3">
                 <span className="w-10 shrink-0 pt-0.5 text-right font-mono text-[0.7rem] text-subtle">{fmtT(l.t)}</span>
@@ -158,15 +208,27 @@ export function MeetingDetailPage() {
         <div className="space-y-4">
           <Card>
             <CardHeader icon={Bot} title="Co-lead bot prompts" subtitle="Gaps and follow-up questions the bot raised" />
+            {hasChat && (live || scheduled) && (
+              <div className="border-b border-line px-5 py-3">
+                <Toggle checked={!!mt.postPromptsToChat} onChange={(v) => void update.run({ postPromptsToChat: v })} disabled={update.pending} label="Post prompts in the Meet chat" />
+                <p className="mt-1 pl-11 text-xs text-muted">{mt.postPromptsToChat ? 'Everyone in the call sees each new prompt in the chat.' : 'New prompts only show here. Post any of them with its button.'}</p>
+              </div>
+            )}
             <ul className="divide-y divide-line">
               {mt.facilitatorPrompts.map((p, i) => (
-                <li key={i} className="flex gap-2 px-5 py-3 text-sm">
-                  <Lightbulb className="mt-0.5 size-4 shrink-0 text-warn" />
-                  <div>
+                <li key={i} className="flex gap-2 px-5 py-3 text-sm" data-testid="facilitator-prompt">
+                  {p.posted ? <MessageSquare className="mt-0.5 size-4 shrink-0 text-accent" /> : <Lightbulb className="mt-0.5 size-4 shrink-0 text-warn" />}
+                  <div className="min-w-0 flex-1">
                     <p>{p.text}</p>
                     <p className="mt-0.5 text-xs text-subtle">
-                      {fmtT(p.t)} {p.posted ? '· posted in the meeting chat' : '· suggested to the facilitator'}
+                      {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
                     </p>
+                    {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
+                    {!p.posted && canPostNow && (
+                      <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
+                        Post in the Meet chat
+                      </Button>
+                    )}
                   </div>
                 </li>
               ))}

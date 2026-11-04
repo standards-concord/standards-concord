@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
+import { meetBotTick } from './services/meetBot.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
@@ -18,3 +19,9 @@ setInterval(() => {
   runTick().catch((err) => console.warn('[tick]', (err as Error).message));
 }, 60_000).unref();
 void runTick();
+
+// The co-lead bot's calendar: pick up invites to its address, book bots before calls start.
+setInterval(() => {
+  meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+}, 60_000).unref();
+void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));

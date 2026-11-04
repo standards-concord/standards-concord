@@ -330,21 +330,64 @@ export interface MeetingAnalysis {
   decisions: string[];
 }
 
+export interface FacilitatorPrompt {
+  at: string;
+  /** seconds from the start of the call */
+  t?: number;
+  text: string;
+  /** True once the prompt has been posted in the meeting's own chat. */
+  posted: boolean;
+  postedAt?: string;
+  /** Why posting to the meeting chat failed, if it did. */
+  postError?: string;
+}
+
+/** Where a calendar-invited call came from: the bot's calendar feed or an uploaded .ics invite. */
+export interface MeetingCalendarInfo {
+  /** Stable key of this occurrence (event UID plus its start), used to avoid joining twice. */
+  key: string;
+  feed: 'calendar' | 'upload';
+  start: string;
+  end: string;
+  organizer?: string;
+  /** True for one occurrence of a recurring series. */
+  recurring: boolean;
+  /** Set when someone told the bot to stay out of this occurrence. */
+  skip?: boolean;
+}
+
 export interface Meeting {
   id: string;
   ontologyId: string;
   title: string;
-  source: 'upload' | 'google-meet-bot' | 'simulation' | 'google-drive';
+  source: 'upload' | 'google-meet-bot' | 'calendar-invite' | 'simulation' | 'google-drive';
   /** Google Meet URL when a bot was invited. */
   meetingUrl?: string;
   bot?: { provider: 'recall' | 'simulated'; botId?: string; status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error'; error?: string };
+  /** Set for calls the bot was invited to through its calendar address. */
+  calendar?: MeetingCalendarInfo;
+  /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */
+  postPromptsToChat?: boolean;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
-  facilitatorPrompts: { at: string; t?: number; text: string; posted: boolean }[];
+  facilitatorPrompts: FacilitatorPrompt[];
   analysis?: MeetingAnalysis;
-  status: 'live' | 'processing' | 'analysed' | 'error';
+  /** 'scheduled': a calendar invite the bot will join when the call starts. */
+  status: 'scheduled' | 'live' | 'processing' | 'analysed' | 'error';
   createdAt: string;
   createdBy: string;
+}
+
+/** What the co-lead bot can do on this server, for the Meetings page. */
+export interface MeetBotInfo {
+  provider: 'recall' | 'simulated';
+  /** The address people add to a calendar invite to bring the bot into a call. */
+  inviteEmail?: string;
+  /** True when the server reads the bot's calendar, so invites to inviteEmail are picked up. */
+  calendarConnected: boolean;
+  /** Default for "post prompts into the Meet chat" on calls that arrive by invite. */
+  postToChatDefault: boolean;
+  lastSync?: { at: string; ok: boolean; events: number; error?: string };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -613,7 +656,7 @@ export interface SessionInfo {
   providers: { google: boolean; github: boolean; demo: boolean };
   llm: { provider: 'anthropic' | 'simulated'; model: string };
   solid: { enabled: boolean; serverUrl?: string };
-  meetBot: { provider: 'recall' | 'simulated' };
+  meetBot: MeetBotInfo;
   /** Simulated clock offset in ms (demo mode lets testers fast-forward time). */
   clockOffsetMs: number;
   now: string;
@@ -660,7 +703,12 @@ export interface SessionInfo {
  * Meetings
  *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
- *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl, postPromptsToChat?} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> Meeting[]   (schedules the bot from a calendar invite)
+ *  GET  /api/meet-bot                                -> MeetBotInfo
+ *  POST /api/meet-bot/sync                           -> MeetBotInfo   (re-read the bot's calendar now)
+ *  PATCH /api/meetings/:id {postPromptsToChat?, skip?} -> Meeting
+ *  POST /api/meetings/:id/prompts/:index/post        -> Meeting   (post one prompt into the meeting chat)
  *  POST /api/ontologies/:id/meetings/simulate {title} -> Meeting           (replays a scripted call live)
  *  GET  /api/meetings/:id                            -> Meeting
  *  POST /api/meetings/:id/analyse                    -> Meeting

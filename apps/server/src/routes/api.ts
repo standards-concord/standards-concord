@@ -13,6 +13,7 @@ import { getAgentReport, listAgentReports, reportGap, sparql } from '../services
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
 import { listTemplates } from '../services/governance.js';
+import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
   competencyTests,
@@ -51,7 +52,7 @@ function sessionInfo(user?: User): SessionInfo {
     providers: providers(),
     llm: { provider: llm.provider, model: llm.model },
     solid: { enabled: !!config.solid.serverUrl, serverUrl: config.solid.serverUrl },
-    meetBot: { provider: config.meetBot.recallApiKey ? 'recall' : 'simulated' },
+    meetBot: meetBot.meetBotInfo(),
     clockOffsetMs: clock.offsetMs,
     now: clock.iso(),
   };
@@ -274,13 +275,44 @@ export function apiRouter(): Router {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
   r.post('/ontologies/:id/meetings/bot', async (req, res) => {
-    res.status(201).json(await meetings.inviteBot(project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300)));
+    res
+      .status(201)
+      .json(
+        await meetings.inviteBot(project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300), {
+          postPromptsToChat: req.body?.postPromptsToChat === true,
+        }),
+      );
+  });
+  r.post('/ontologies/:id/meetings/calendar', async (req, res) => {
+    res.status(201).json(await meetBot.scheduleFromInvite(project(req), requireUser(req), str(req.body?.ics, 'ics', 2_000_000), { postPromptsToChat: req.body?.postPromptsToChat === true }));
+  });
+  r.get('/meet-bot', (_req, res) => res.json(meetBot.meetBotInfo()));
+  r.post('/meet-bot/sync', async (req, res) => {
+    requireUser(req);
+    await meetBot.syncCalendar();
+    await meetBot.dispatchDue();
+    res.json(meetBot.meetBotInfo());
   });
   r.post('/ontologies/:id/meetings/simulate', async (req, res) => {
     const delay = Number(req.query.delayMs ?? req.body?.delayMs);
-    res.status(201).json(await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', Number.isFinite(delay) ? { delayMs: delay } : {}));
+    res.status(201).json(
+      await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', {
+        ...(Number.isFinite(delay) ? { delayMs: delay } : {}),
+        postPromptsToChat: req.body?.postPromptsToChat === true,
+      }),
+    );
   });
   r.get('/meetings/:id', (req, res) => res.json(meetings.getMeeting(String(req.params.id))));
+  r.patch('/meetings/:id', async (req, res) => {
+    requireUser(req);
+    const b = req.body ?? {};
+    const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+    res.json(await meetings.updateMeeting(meetings.getMeeting(String(req.params.id)), { postPromptsToChat: bool(b.postPromptsToChat), skip: bool(b.skip) }));
+  });
+  r.post('/meetings/:id/prompts/:index/post', async (req, res) => {
+    requireUser(req);
+    res.json(await meetings.postPrompt(meetings.getMeeting(String(req.params.id)), Number(req.params.index)));
+  });
   r.post('/meetings/:id/analyse', async (req, res) => {
     requireUser(req);
     res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
@@ -301,8 +333,7 @@ export function apiRouter(): Router {
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
     const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'prompt') send('prompt', { type: 'prompt', prompt: { at: clock.iso(), t: e.t, text: e.text, posted: false } });
-      else if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: meetings.getMeeting(m.id) as Meeting });
+      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: meetings.getMeeting(m.id) as Meeting });
       else send(e.type, e);
     };
     meetings.meetingEvents.on(m.id, onEvent);

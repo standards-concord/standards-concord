@@ -2,7 +2,7 @@
 
 A prototype platform for designing data standards together, built for the Open Data Institute. Every standard is a strict OWL 2 ontology that is kept logically consistent and FAIR, and the whole lifecycle from a first conversation to a published release runs asynchronously, with AI help at each step.
 
-- **Gather requirements three ways.** An AI interviewer follows Elisa Kendall's use case template and asks for competency questions with example answers. Google Meet transcripts can be uploaded, or a co-facilitator bot can join a live call and ask clarifying questions in chat. Coding agents such as Claude Code and Codex connect over MCP, read the ontology and report missing or ill-fitting concepts.
+- **Gather requirements three ways.** An AI interviewer follows Elisa Kendall's use case template and asks for competency questions with example answers. Google Meet transcripts can be uploaded, or a co-facilitator bot can join a live call, invited by email like any other guest, and raise clarifying questions (in the Meet chat, if you want). Coding agents such as Claude Code and Codex connect over MCP, read the ontology and report missing or ill-fitting concepts.
 - **Turn requirements into changes.** Use cases are synthesised into a change request with structured edits and SPARQL tests for each competency question. The model never writes RDF directly: it proposes terms, and the server compiles them into validated edit operations.
 - **Govern without meetings.** Every change is classified as patch, minor or major by explicit rules (based on OWL versioning practice and gist's semver approach), validated (strict lint, HermiT reasoner, FAIR checks, competency questions) and then reviewed under the ontology's governance policy. Policies come from a drop-down of five templates (steward-led, lazy consensus, W3C working group, membership vote, ODI-stewarded) and can be tuned: sign-off counts and roles, review periods, votes with quorum and threshold, vetoes, ODI privilege, ownership and transfer, and what is automated.
 - **Release properly.** Releases take the highest level of their changes, bump the semantic version, stamp `owl:versionIRI`, `owl:priorVersion` and `owl:backwardCompatibleWith` or `owl:incompatibleWith`, and include every format plus a SPARQL migration script for major versions. Each ontology is a git repository (tag per release) that is pushed to GitHub on release when configured.
@@ -61,7 +61,7 @@ Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search
 | --- | --- |
 | Sign in with Google / GitHub | `GOOGLE_CLIENT_ID/SECRET`, `GITHUB_CLIENT_ID/SECRET` |
 | Solid pods for private data | `SOLID_SERVER_URL` (Community Solid Server v7+) |
-| Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. |
+| Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. Add `MEET_BOT_EMAIL` and `MEET_BOT_ICS_URL` so inviting the bot's address to a call (or a recurring series) brings it in: [docs/meet-bot.md](docs/meet-bot.md). |
 | Publish releases to GitHub | `GITHUB_PUBLISH_TOKEN`, and set the repository on the ontology |
 | Voice input on Firefox | `STT_PROVIDER=openai`, `OPENAI_API_KEY` |
 
