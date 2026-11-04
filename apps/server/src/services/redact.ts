@@ -10,24 +10,27 @@ import { getUser } from './users.js';
  * revisions), and again at merge, release and startup clean-up, so nothing
  * stored before these checks existed can slip through.
  *
- * Two kinds of check:
- *   - free text: whole-word matches are replaced with "a use case" or "a
- *     participant", never inside a replacement already made, so running it
- *     again changes nothing;
- *   - names (labels, alternative labels, local names, edit lists): split into
- *     words however they're written (SecretPilotRecord, secret_pilot-record,
- *     "Secret  Pilot record"), and caught if a title's or name's words appear
- *     in order.
- * Titles made only of common words ("a", "use", "record", "the plan") are
- * not treated as secret: they reveal nothing and would mangle ordinary text.
+ * Secrets are matched by their words, however either side is written
+ * (SecretPilot, secret_pilot-record, "Secret  Pilot record", MacDonald), and
+ * wherever they appear: in free text the whole word or identifier holding one
+ * is replaced with "a use case" or "a participant" (never inside a
+ * replacement already made, so running it again changes nothing); names
+ * (labels, alternative labels, local names, edit lists) holding one are left
+ * out. Titles made only of common words ("a", "use", "record", "the plan")
+ * are not treated as secret: they reveal nothing and would mangle ordinary
+ * text. People's names always are, but a one-letter or common-word name
+ * ("An", "Will") only as written.
  */
-export interface Secrets {
-  /** Each secret as its words, lower case. */
-  titles: string[][];
-  people: string[][];
+export interface Secret {
+  /** The words, as first written. */
+  words: string[];
+  /** Matched only as written: a one-letter secret, or a name made only of common words ("An", "Will"). */
+  strict: boolean;
 }
-
-const PLACEHOLDERS = ['a use case', 'a participant'];
+export interface Secrets {
+  titles: Secret[];
+  people: Secret[];
+}
 
 /** Words too common to identify a use case on their own. */
 const COMMON = new Set(
@@ -38,45 +41,72 @@ const COMMON = new Set(
   one two three first second other more most all any some each`.split(/\s+/),
 );
 
-/** Words of a name or text, however it is written: camelCase, snake_case, kebab-case, spaces. */
-export function words(text: string): string[] {
-  return text
-    .normalize('NFKC')
-    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
-    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean)
-    .map((w) => w.toLowerCase());
+interface Token {
+  text: string;
+  start: number;
+  end: number;
+  /** The run of letters and digits the token is part of (SecretPilotRecord is one run of three tokens). */
+  runStart: number;
+  runEnd: number;
 }
+
+const CAMEL = /(?<=[\p{Ll}\p{N}])(?=\p{Lu})|(?<=\p{Lu})(?=\p{Lu}\p{Ll})/gu;
+
+/** Words of a name or text with their positions, however it is written: camelCase, snake_case, kebab-case, spaces. */
+function tokens(text: string): Token[] {
+  const out: Token[] = [];
+  for (const m of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const run = m[0];
+    const runStart = m.index;
+    const runEnd = runStart + run.length;
+    const cuts = [0, ...[...run.matchAll(CAMEL)].map((c) => c.index), run.length];
+    for (let i = 0; i + 1 < cuts.length; i++)
+      if (cuts[i + 1] > cuts[i]) out.push({ text: run.slice(cuts[i], cuts[i + 1]), start: runStart + cuts[i], end: runStart + cuts[i + 1], runStart, runEnd });
+  }
+  return out;
+}
+
+/** Words of a name or text, lower case, however it is written. */
+export function words(text: string): string[] {
+  return tokens(text.normalize('NFKC')).map((t) => t.text.toLowerCase());
+}
+
+const oneLetter = (ws: string[]) => ws.length === 1 && [...ws[0]].length === 1;
 
 /** A title worth keeping secret: at least one word that isn't common; a single letter only if it's a capital or digit. */
 function distinctive(value: string): boolean {
   const ws = words(value);
   if (!ws.length) return false;
-  if (ws.length === 1 && [...ws[0]].length === 1) return /\p{Lu}|\p{N}/u.test(value.trim());
+  if (oneLetter(ws)) return /\p{Lu}|\p{N}/u.test(value.trim());
   return ws.some((w) => !COMMON.has(w));
 }
 
-function secretWords(values: (string | undefined)[]): string[][] {
+function toSecrets(values: (string | undefined)[], keep: (v: string) => boolean): Secret[] {
   const seen = new Set<string>();
-  const out: string[][] = [];
+  const out: Secret[] = [];
   for (const v of values) {
-    if (!v || !distinctive(v)) continue;
-    const ws = words(v);
-    const key = ws.join(' ');
+    if (!v || !keep(v)) continue;
+    const ws = tokens(v.normalize('NFKC')).map((t) => t.text);
+    if (!ws.length) continue;
+    const strict = oneLetter(ws) || ws.every((w) => COMMON.has(w.toLowerCase()));
+    const key = `${strict}:${strict ? ws.join(' ') : ws.join(' ').toLowerCase()}`;
     if (!seen.has(key)) {
       seen.add(key);
-      out.push(ws);
+      out.push({ words: ws, strict });
     }
   }
-  return out.sort((a, b) => b.join(' ').length - a.join(' ').length);
+  return out;
 }
 
-/** Every title the use cases have had, and the names of the people who wrote them. */
+/**
+ * Every title the use cases have had, and the names of the people who wrote
+ * them. Titles made only of common words are left out (they reveal nothing);
+ * names never are, however ordinary: they're matched as written instead.
+ */
 export function secretsFor(useCases: UseCase[], extra: { titles?: string[]; people?: string[] } = {}): Secrets {
   return {
-    titles: secretWords([...useCases.flatMap((u) => [u.sections.name, ...(u.formerTitles ?? [])]), ...(extra.titles ?? [])]),
-    people: secretWords([...useCases.map((u) => getUser(u.authorId)?.name), ...(extra.people ?? [])]),
+    titles: toSecrets([...useCases.flatMap((u) => [u.sections.name, ...(u.formerTitles ?? [])]), ...(extra.titles ?? [])], distinctive),
+    people: toSecrets([...useCases.map((u) => getUser(u.authorId)?.name), ...(extra.people ?? [])], () => true),
   };
 }
 
@@ -96,8 +126,57 @@ export function secretsOf(cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>): Sec
 /** Several sets of secrets as one. */
 export const allSecrets = (xs: (Secrets | undefined)[]): Secrets => ({ titles: xs.flatMap((x) => x?.titles ?? []), people: xs.flatMap((x) => x?.people ?? []) });
 
-const ESCAPE = /[.*+?^${}()|[\]\\]/g;
-const KEEP = PLACEHOLDERS.map((p) => p.split(' ').join('\\s+'));
+const PLACEHOLDERS = [
+  ['a', 'use', 'case'],
+  ['a', 'participant'],
+];
+
+interface Match {
+  from: number;
+  to: number;
+  replacement: string;
+  /** Part of a longer identifier (SecretPilotRecord): replacing it would leave a name that means nothing. */
+  partial: boolean;
+}
+
+/**
+ * Where secrets appear in a text: runs of words spelling a secret (any case,
+ * any separators, inside identifiers too; strict secrets only as written),
+ * widened to the whole identifier they sit in. Never inside a
+ * placeholder an earlier redaction left.
+ */
+function matches(text: string, s: Secrets): Match[] {
+  const toks = tokens(text);
+  const kept = new Set<number>();
+  for (const ph of PLACEHOLDERS)
+    for (let i = 0; i + ph.length <= toks.length; i++) if (ph.every((w, j) => toks[i + j].text.toLowerCase() === w)) ph.forEach((_, j) => kept.add(i + j));
+  const found: Match[] = [];
+  const kinds: [Secret[], string][] = [
+    [s.titles, 'a use case'],
+    [s.people, 'a participant'],
+  ];
+  for (const [secrets, replacement] of kinds)
+    for (const secret of secrets) {
+      // Word boundaries inside a secret don't matter (MacDonald, Macdonald, Mac Donald); its ends do.
+      const key = secret.strict ? secret.words.join('') : secret.words.join('').toLowerCase();
+      for (let i = 0; i < toks.length; i++) {
+        let acc = '';
+        for (let j = i; j < toks.length && !kept.has(j); j++) {
+          acc += secret.strict ? toks[j].text : toks[j].text.toLowerCase();
+          if (acc === key) {
+            found.push({ from: toks[i].runStart, to: toks[j].runEnd, replacement, partial: toks[i].runStart !== toks[i].start || toks[j].runEnd !== toks[j].end });
+            break;
+          }
+          if (!key.startsWith(acc)) break;
+        }
+      }
+    }
+  // Longest first, then leftmost; overlapping matches are one.
+  found.sort((a, b) => b.to - b.from - (a.to - a.from) || a.from - b.from);
+  const chosen: Match[] = [];
+  for (const m of found) if (!chosen.some((c) => m.from < c.to && c.from < m.to)) chosen.push(m);
+  return chosen.sort((a, b) => a.from - b.from);
+}
 
 /** Text with titles replaced by "a use case" and names by "a participant". Running it again changes nothing. */
 export function redactText(text: string, s: Secrets): string;
@@ -105,39 +184,21 @@ export function redactText(text: string | undefined, s: Secrets): string | undef
 export function redactText(text: string | undefined, s: Secrets): string | undefined {
   if (text === undefined || (!s.titles.length && !s.people.length)) return text;
   const normalized = text.normalize('NFKC');
-  const kinds: [string[][], string][] = [
-    [s.titles, 'a use case'],
-    [s.people, 'a participant'],
-  ];
-  let out = normalized;
-  for (const [secrets, replacement] of kinds) {
-    for (const ws of secrets) {
-      // A one-letter secret ("X") only as written; anything else regardless of case.
-      const oneLetter = ws.length === 1 && [...ws[0]].length === 1;
-      const body = oneLetter ? ws[0].toUpperCase().replace(ESCAPE, '\\$&') : ws.map((w) => w.replace(ESCAPE, '\\$&')).join('[^\\p{L}\\p{N}]+');
-      // Placeholders are matched first and kept, so a replacement is never rewritten.
-      const re = new RegExp(`(?<![\\p{L}\\p{N}])(?:(${KEEP.join('|')})|${body})(?![\\p{L}\\p{N}])`, oneLetter ? 'gu' : 'giu');
-      out = out.replace(re, (m: string, kept: string | undefined) => (kept ? m : replacement));
-    }
+  const found = matches(normalized, s);
+  if (!found.length) return text;
+  let out = '';
+  let at = 0;
+  for (const m of found) {
+    out += normalized.slice(at, m.from) + m.replacement;
+    at = m.to;
   }
-  return out === normalized ? text : out;
+  return out + normalized.slice(at);
 }
-
-const contains = (hay: string[], needle: string[]) => {
-  for (let i = 0; i + needle.length <= hay.length; i++) if (needle.every((w, j) => hay[i + j] === w)) return true;
-  return false;
-};
 
 /** Would this name, label or line publish a title or a person, anywhere inside it? */
 export function revealing(name: string | undefined, s: Secrets): boolean {
-  if (!name) return false;
-  const ws = words(name);
-  return [...s.titles, ...s.people].some((secret) =>
-    secret.length === 1 && [...secret[0]].length === 1
-      ? // A one-letter title counts only as its own capitalised word.
-        name.normalize('NFKC').split(/[^\p{L}\p{N}]+/u).includes(secret[0].toUpperCase())
-      : contains(ws, secret),
-  );
+  if (!name || (!s.titles.length && !s.people.length)) return false;
+  return matches(name.normalize('NFKC'), s).length > 0;
 }
 
 const TEXT_FIELDS = ['definition', 'comment', 'editorialNote', 'reason', 'title', 'description'] as const;
@@ -176,7 +237,11 @@ export function redactOps(ops: ChangeOp[], s: Secrets): { ops: ChangeOp[]; dropp
 
 /** Lines of an edit list (KGCL) or notes, safe to publish: redacted, and any line still naming a secret (in an identifier, say) left out. */
 export function publishableLines(lines: string[], s: Secrets): string[] {
-  return lines.map((l) => redactText(l, s)).filter((l) => !revealing(l, s));
+  if (!s.titles.length && !s.people.length) return lines;
+  return lines
+    .filter((l) => !matches(l.normalize('NFKC'), s).some((m) => m.partial))
+    .map((l) => redactText(l, s))
+    .filter((l) => !revealing(l, s));
 }
 
 /** Release notes, safe to publish. */

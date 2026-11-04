@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { expandIRI, FORMAT_INFO, generatedProvenanceTitles, rewriteLiterals, scrubGeneratedProvenance, serialize, type OntologyGraph } from '@concord/core';
-import type { ChangeOp, OutputFormat } from '@concord/core/types';
-import type { ChangeRequest, OntologyProject, Release } from '@concord/shared';
+import type { OutputFormat } from '@concord/core/types';
+import type { ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, list, put } from '../db.js';
@@ -251,37 +251,71 @@ export async function refreshReleasePages(): Promise<void> {
 }
 
 /** Bump when the clean-up below changes, so it runs once more on every ontology. */
-const CLEANUP_VERSION = 'privacy clean-up 3';
+const CLEANUP_VERSION = 'privacy clean-up 4';
 
-/** Follows renames forward: a term a request added and a later request renamed is cleaned under both names. */
-function renameMap(crs: ChangeRequest[], g: OntologyGraph): (iris: string[]) => string[] {
-  const next = new Map<string, string>();
-  for (const cr of [...crs].sort((a, b) => a.number - b.number))
-    for (const op of cr.ops) if (op.op === 'renameTerm') next.set(expandIRI(op.iri, g.prefixes), g.namespace + op.newLocalName);
-  return (iris) => {
-    const out = new Set<string>();
-    for (let iri of iris) {
-      for (let hops = 0; hops < 50 && !out.has(iri); hops++) {
-        out.add(iri);
-        const n = next.get(iri);
-        if (!n) break;
-        iri = n;
-      }
+/** When a request was merged: what order its renames happened in. */
+const mergedAt = (cr: ChangeRequest) => cr.timeline.find((e) => e.type === 'status' && /^merged/.test(e.message ?? ''))?.at ?? cr.statusSince ?? '';
+
+/**
+ * Every name each request's terms have had. Terms are followed through later
+ * renames, and a new term is a new term even when it reuses a name an earlier
+ * one gave up (OldRecord renamed to NewRecord, then a new OldRecord renamed to
+ * OtherRecord: the first request's term is OldRecord and NewRecord).
+ */
+function termHistory(crs: ChangeRequest[], g: OntologyGraph) {
+  const current = new Map<string, Set<string>>();
+  const identity = (iri: string) => {
+    let id = current.get(iri);
+    if (!id) current.set(iri, (id = new Set([iri])));
+    return id;
+  };
+  const touched = new Map<string, Set<string>[]>();
+  const created = new Map<string, Set<string>[]>();
+  const ordered = [...crs].sort((a, b) => mergedAt(a).localeCompare(mergedAt(b)) || a.number - b.number);
+  for (const cr of ordered) {
+    const t: Set<string>[] = [];
+    const c: Set<string>[] = [];
+    for (const op of cr.ops) {
+      const r = op as Record<string, unknown>;
+      if (op.op === 'renameTerm') {
+        const from = expandIRI(op.iri, g.prefixes);
+        const to = g.namespace + op.newLocalName;
+        const id = identity(from);
+        current.delete(from);
+        id.add(to);
+        current.set(to, id);
+        t.push(id);
+      } else if (typeof r.localName === 'string') {
+        const iri = g.namespace + r.localName;
+        const id = new Set([iri]);
+        current.set(iri, id);
+        t.push(id);
+        c.push(id);
+      } else if (typeof r.iri === 'string') t.push(identity(expandIRI(r.iri, g.prefixes)));
+      else if (typeof r.classIri === 'string') t.push(identity(expandIRI(r.classIri, g.prefixes)));
     }
-    return [...out];
+    touched.set(cr.id, t);
+    created.set(cr.id, c);
+  }
+  const names = (ids: Set<string>[] | undefined) => [...new Set((ids ?? []).flatMap((id) => [...id]))];
+  return {
+    /** Every name of the terms a request added or changed. */
+    touched: (cr: ChangeRequest) => names(touched.get(cr.id)),
+    /** Every name of the terms a request added (the only ones merges credited their author on). */
+    created: (cr: ChangeRequest) => names(created.get(cr.id)),
   };
 }
 
-/** The terms an edit adds or changes. */
-function touched(g: OntologyGraph, ops: ChangeOp[]): string[] {
-  return ops.flatMap((o) => {
-    const r = o as Record<string, unknown>;
-    if (typeof r.localName === 'string') return [g.namespace + r.localName];
-    if (typeof r.iri === 'string') return [expandIRI(r.iri, g.prefixes)];
-    if (typeof r.classIri === 'string') return [expandIRI(r.classIri, g.prefixes)];
-    return [];
-  });
+/**
+ * What the clean-up learned from generated provenance it has since removed:
+ * the use case titles each term recorded. Kept (privately) so a run that
+ * stopped half way can still finish cleaning everything else.
+ */
+interface CleanupInputs {
+  id: string;
+  terms: Record<string, string[]>;
 }
+const cleanupInputsKey = (project: OntologyProject) => `privacy-cleanup:${project.id}`;
 
 /** Whether a stored snapshot holds only what may be published: nothing for a real ontology yet, the fixed fictional use cases for the demo. */
 export function publishableSnapshot(project: OntologyProject, version: string, data: PublishedRequirements): PublishedRequirements | undefined {
@@ -315,23 +349,42 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
   });
   const dir = ontologyStore.dir(project);
   let complete = true;
-  const harvested: string[] = [];
+  const inputs: CleanupInputs = get<CleanupInputs>('kv', cleanupInputsKey(project)) ?? { id: cleanupInputsKey(project), terms: {} };
+  const harvestedTitles = () => [...new Set(Object.values(inputs.terms).flat())];
+  // Terms generated from use cases whose requests are gone don't say who asked: any member's name there is provenance.
+  const userNames = list<User>('users').map((u) => u.name).filter(Boolean);
+  const legacyPeople = () => secretsFor([], { people: Object.keys(inputs.terms).length ? userNames : [] });
+  const norm = (name: string) => name.normalize('NFKC').trim().toLowerCase();
+  const memberNames = new Set(userNames.map(norm));
 
   const scrub = (g: OntologyGraph) => {
-    const forward = renameMap(crs, g);
-    const byTerm = generatedProvenanceTitles(g);
-    for (const titles of byTerm.values()) harvested.push(...titles);
-    // Merges credited their author on the terms they touched.
+    const history = termHistory(crs, g);
+    // Remember what generated provenance recorded before removing it, so a retry still knows.
+    let learned = false;
+    for (const [subject, titles] of generatedProvenanceTitles(g)) {
+      const before = inputs.terms[subject] ?? [];
+      const after = [...new Set([...before, ...titles])];
+      if (after.length !== before.length) {
+        inputs.terms[subject] = after;
+        learned = true;
+      }
+    }
+    if (learned) put('kv', inputs);
+    // Merges credited their author on the terms they added.
     const credited = new Map<string, Set<string>>();
     for (const cr of crs) {
-      const name = getUser(cr.authorId)?.name?.normalize('NFKC').trim().toLowerCase();
-      if (name) for (const iri of forward(touched(g, cr.ops))) credited.set(iri, new Set([...(credited.get(iri) ?? []), name]));
+      const name = getUser(cr.authorId)?.name;
+      if (name) for (const iri of history.created(cr)) credited.set(iri, new Set([...(credited.get(iri) ?? []), norm(name)]));
     }
-    let n = scrubGeneratedProvenance(g, { generatedContributor: (subject, name) => !!credited.get(subject)?.has(name.normalize('NFKC').trim().toLowerCase()) });
-    for (const { cr, secrets } of plans) n += rewriteLiterals(g, forward(touched(g, cr.ops)), (v) => redactText(v, secrets));
-    for (const [subject, titles] of byTerm) {
-      const secrets = secretsFor([], { titles });
-      n += rewriteLiterals(g, forward([subject]), (v) => redactText(v, secrets));
+    const legacy = new Set(Object.keys(inputs.terms));
+    let n = scrubGeneratedProvenance(g, {
+      generatedContributor: (subject, name) => !!credited.get(subject)?.has(norm(name)) || (legacy.has(subject) && memberNames.has(norm(name))),
+    });
+    for (const { cr, secrets } of plans) n += rewriteLiterals(g, history.touched(cr), (v) => redactText(v, secrets));
+    const people = legacyPeople();
+    for (const [subject, titles] of Object.entries(inputs.terms)) {
+      const secrets = allSecrets([secretsFor([], { titles }), people]);
+      n += rewriteLiterals(g, [subject], (v) => redactText(v, secrets));
     }
     return n;
   };
@@ -347,7 +400,7 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
     console.warn(`[public] could not clean ${project.slug} working draft: ${(err as Error).message}`);
   }
 
-  const changed: Record<string, Record<string, string>> = {};
+  const changed: Record<string, Record<string, string | null>> = {};
   const read = (version: string, name: string) => {
     const file = path.join(dir, 'releases', version, name);
     return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
@@ -355,7 +408,7 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
   const versions = ontologyStore.versions(project);
   for (const version of versions) {
     try {
-      const files: Record<string, string> = {};
+      const files: Record<string, string | null> = {};
       ontologyStore.forgetReleases(project);
       const graph = (await ontologyStore.at(project, version)).clone();
       if (scrub(graph)) files[ONTOLOGY_FILE] = await graph.toTurtle();
@@ -368,7 +421,10 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
           const fresh = await serialize(graph, format);
           if (fresh !== current) files[name] = fresh;
         } catch (err) {
-          console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}: ${(err as Error).message}`);
+          // The old file can't be checked or replaced: take it down rather than keep publishing what it may hold.
+          files[name] = null;
+          complete = false;
+          console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}, so removed it: ${(err as Error).message}`);
         }
       }
       const snapshot = readSnapshot(project, version);
@@ -383,8 +439,8 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
     }
   }
 
-  // Notes, once every graph has given up the titles its provenance recorded.
-  const harvestedSecrets = secretsFor([], { titles: harvested });
+  // Notes, once every graph has given up the titles its provenance recorded (this run or an earlier one).
+  const harvestedSecrets = allSecrets([secretsFor([], { titles: harvestedTitles() }), legacyPeople()]);
   for (const release of list<Release>('releases', project.id)) {
     try {
       const secrets = allSecrets([releaseSecrets(release), harvestedSecrets]);

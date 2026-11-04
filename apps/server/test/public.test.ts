@@ -553,7 +553,7 @@ describe('re-review fixes', () => {
 
   it('removes contributor names and use case titles that older versions wrote into the RDF', async () => {
     const project = findProject('volunteering')!;
-    // Merges credited their author on the terms they touched; other credits stay, even of registered users.
+    // Merges credited their author on the terms they added. On a term generated from use cases, any member's name is provenance; other credits stay.
     const leaky = await createUser({ name: 'Leaky Name', provider: 'github', subject: 'leaky-name' });
     await createUser({ name: 'Credited Member', provider: 'github', subject: 'credited-member' });
     const template = (await import('../src/db.js')).list<ChangeRequest>('changeRequests', project.id)[0];
@@ -584,7 +584,7 @@ describe('re-review fixes', () => {
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Needed by a use case (see source).');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('NCVO definition of formal volunteering');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Explicitly credited editor');
-    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Credited Member');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).not.toContain('Credited Member');
   });
 });
 
@@ -782,5 +782,159 @@ describe('fourth review fixes', () => {
     const agent = request.agent(app);
     await agent.post('/api/auth/demo').send({ name: 'WebID reader', role: 'contributor' });
     expect((await agent.get(`/people/${tester.id}`)).text).toContain('Rename Person');
+  });
+});
+
+describe('fifth review fixes', () => {
+  const NS = 'https://w3id.org/odi/volunteering#';
+  const base = () => listUseCases(findProject('volunteering')!.id)[0];
+  const releaseDir = () => path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0');
+  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 4"');
+  const rerun = async () => {
+    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    await refreshReleasePages();
+  };
+
+  it('catches titles and names written exactly as camelCase, or run together', async () => {
+    const mac = await createUser({ name: 'MacDonald', provider: 'github', subject: 'camel-mac' });
+    const s = secretsFor([{ ...base(), authorId: mac.id, sections: { name: 'SecretPilot' } }]);
+    expect(redactText('Requested by MacDonald for SecretPilot.', s)).toBe('Requested by a participant for a use case.');
+    expect(redactText('Requested by Macdonald for the secretpilot and Secret Pilot.', s)).toBe('Requested by a participant for the a use case and a use case.');
+    expect(revealing('MacDonaldRecord', s)).toBe(true);
+    // Through synthesis, merge and the commit that publishes it.
+    const project = findProject('volunteering')!;
+    const uc = createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilot' } });
+    const cr = await synthesise(project, mac, [uc.id]);
+    put(
+      'changeRequests',
+      { ...getCR(cr.id), title: 'Changes for SecretPilot by MacDonald', status: 'approved', ops: [{ op: 'addClass', localName: 'CamelSafeRecord', label: 'camel safe record', definition: 'Requested by MacDonald for SecretPilot.' }] },
+      cr.ontologyId,
+    );
+    expect((await merge(getCR(cr.id), undefined)).status).toBe('merged');
+    const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
+    expect(ttl).toContain('CamelSafeRecord');
+    expect(ttl).not.toMatch(/SecretPilot|MacDonald/);
+    const { execFileSync } = await import('node:child_process');
+    const message = execFileSync('git', ['log', '-1', '--format=%B'], { cwd: ontologyStore.dir(project), encoding: 'utf8' });
+    expect(message).toContain('CamelSafeRecord');
+    expect(message).not.toMatch(/SecretPilot|MacDonald/);
+  });
+
+  it('redacts people with short or common names, as written', async () => {
+    const an = await createUser({ name: 'An', provider: 'github', subject: 'short-an' });
+    const s = secretsFor([{ ...base(), authorId: an.id, sections: { name: 'Secret Pilot' } }]);
+    expect(s.people.length).toBe(1);
+    expect(redactText('Requested by An for Secret Pilot, an ordinary word.', s)).toBe('Requested by a participant for a use case, an ordinary word.');
+  });
+
+  it('catches one-letter titles inside identifiers and alternative labels', async () => {
+    const ann = await createUser({ name: 'Ann One', provider: 'github', subject: 'one-letter' });
+    const s = secretsFor([{ ...base(), authorId: ann.id, sections: { name: 'X' } }]);
+    expect(revealing('XRecord', s)).toBe(true);
+    expect(revealing('x_record', s)).toBe(false);
+    expect(revealing('Xylophone', s)).toBe(false);
+    expect(revealing('TaxRecord', s)).toBe(false);
+    const { ops, dropped } = redactOps(
+      [
+        { op: 'addClass', localName: 'XRecord', label: 'record', definition: 'x' },
+        { op: 'addClass', localName: 'Safe', label: 'safe', definition: 'x', altLabels: ['XRecord', 'Xylophone'] },
+      ],
+      s,
+    );
+    expect(dropped).toEqual(['XRecord']);
+    expect(ops).toEqual([{ op: 'addClass', localName: 'Safe', label: 'safe', definition: 'x', altLabels: ['Xylophone'] }]);
+  });
+
+  it('keeps a term’s history when its old name is reused, and keeps credits a merge never wrote', async () => {
+    const project = findProject('volunteering')!;
+    const tester = await createUser({ name: 'Reuse Person', provider: 'github', subject: 'reuse-person' });
+    const credit = await createUser({ name: 'Ann Credit', provider: 'github', subject: 'ann-credit' });
+    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'REUSE_SECRET' } });
+    const synth = await synthesise(project, tester, [uc.id]);
+    const template = getCR(synth.id);
+    const direct = { ...template, origin: { type: 'direct' as const }, status: 'merged' as const };
+    put('changeRequests', { ...template, number: 9300, status: 'merged', ops: [{ op: 'addClass', localName: 'ReuseOld', label: 'reuse old', definition: 'x' }] }, project.id);
+    put('changeRequests', { ...direct, id: 'cr_reuse_2', number: 9301, ops: [{ op: 'renameTerm', iri: `${NS}ReuseOld`, newLocalName: 'ReuseNew' }] }, project.id);
+    put('changeRequests', { ...direct, id: 'cr_reuse_3', number: 9302, ops: [{ op: 'addClass', localName: 'ReuseOld', label: 'reuse old again', definition: 'y' }] }, project.id);
+    put('changeRequests', { ...direct, id: 'cr_reuse_4', number: 9303, ops: [{ op: 'renameTerm', iri: `${NS}ReuseOld`, newLocalName: 'ReuseOther' }] }, project.id);
+    // Ann only edited a comment on a term that credits her by hand.
+    put('changeRequests', { ...direct, id: 'cr_credit', number: 9304, authorId: credit.id, ops: [{ op: 'updateAnnotations', iri: `${NS}CreditedTerm`, set: { comment: 'Edited.' } }] }, project.id);
+    const working = await ontologyStore.working(project);
+    const owl = 'http://www.w3.org/2002/07/owl#Class';
+    const dirty = await OntologyGraph.fromTurtle(
+      `${await working.toTurtle()}
+<${NS}ReuseNew> a <${owl}> ; <http://www.w3.org/2000/01/rdf-schema#comment> "Raised in REUSE_SECRET." .
+<${NS}ReuseOther> a <${owl}> ; <http://www.w3.org/2000/01/rdf-schema#comment> "Unrelated." .
+<${NS}CreditedTerm> a <${owl}> ; <http://purl.org/dc/terms/contributor> "Ann Credit" .
+`,
+    );
+    await ontologyStore.commitWorking(project, dirty, 'simulate reuse', { name: 'Test' });
+    await rerun();
+    const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
+    expect(ttl).toContain('ReuseNew');
+    expect(ttl).not.toContain('REUSE_SECRET');
+    expect(ttl).toContain('Ann Credit');
+  });
+
+  it('finishes an interrupted clean-up from what it learned, including authors of terms whose requests are gone', async () => {
+    const project = findProject('volunteering')!;
+    await createUser({ name: 'Legacy Ann', provider: 'github', subject: 'legacy-ann' });
+    const dir = releaseDir();
+    const ttlFile = path.join(dir, 'ontology.ttl');
+    const notesFile = path.join(dir, 'RELEASE_NOTES.md');
+    const ttl = fs.readFileSync(ttlFile, 'utf8');
+    const notes = fs.existsSync(notesFile) ? fs.readFileSync(notesFile, 'utf8') : '# Volunteering 1.0.0\n';
+    fs.writeFileSync(
+      ttlFile,
+      `${ttl}\n<${NS}OrphanTerm> a <http://www.w3.org/2002/07/owl#Class> ; <http://purl.org/dc/terms/source> "use cases: ORPHAN_PRIVATE_TITLE" ; <http://purl.org/dc/terms/contributor> "Legacy Ann" ; <http://www.w3.org/2004/02/skos/core#definition> "A record, requested by Legacy Ann for ORPHAN_PRIVATE_TITLE." .\n`,
+    );
+    fs.writeFileSync(notesFile, `${notes}\n- Changes for ORPHAN_PRIVATE_TITLE\n`);
+    ontologyStore.forgetReleases(project);
+    // The first run writes the cleaned Turtle, then fails before anything else.
+    const original = ontologyStore.updateReleaseFiles.bind(ontologyStore);
+    ontologyStore.updateReleaseFiles = (p, files, message) => {
+      original(p, Object.fromEntries(Object.entries(files).map(([v, f]) => [v, Object.fromEntries(Object.entries(f).filter(([n]) => n === 'ontology.ttl'))])), message);
+      throw new Error('disk full');
+    };
+    try {
+      await rerun();
+    } finally {
+      ontologyStore.updateReleaseFiles = original;
+    }
+    expect(fs.readFileSync(ttlFile, 'utf8')).not.toContain('ORPHAN_PRIVATE_TITLE');
+    expect(fs.readFileSync(notesFile, 'utf8')).toContain('ORPHAN_PRIVATE_TITLE');
+    expect(cleanupDone()).toBe(false);
+    // The next run no longer finds the title in the RDF, but still knows it.
+    await rerun();
+    expect(cleanupDone()).toBe(true);
+    expect(fs.readFileSync(notesFile, 'utf8')).not.toContain('ORPHAN_PRIVATE_TITLE');
+    const published = fs.readFileSync(ttlFile, 'utf8');
+    expect(published).toContain('OrphanTerm');
+    expect(published).not.toContain('Legacy Ann');
+    expect((await request(app).get('/def/volunteering/1.0.0')).text).not.toMatch(/ORPHAN_PRIVATE_TITLE|Legacy Ann/);
+  });
+
+  it('takes down a format it can’t regenerate, and tries again until it can', async () => {
+    const project = findProject('volunteering')!;
+    const dir = releaseDir();
+    const ttlFile = path.join(dir, 'ontology.ttl');
+    const owlFile = path.join(dir, 'ontology.owl');
+    const ttl = fs.readFileSync(ttlFile, 'utf8');
+    // A release whose RDF/XML file still holds a name, and whose graph RDF/XML can't write (a predicate ending in a digit).
+    fs.writeFileSync(ttlFile, `${ttl}\n<${NS}Volunteer> <https://example.org/123> "x" .\n`);
+    fs.writeFileSync(owlFile, '<?xml version="1.0"?>\n<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><!-- OLD_PRIVATE_NAME --></rdf:RDF>\n');
+    ontologyStore.forgetReleases(project);
+    try {
+      await rerun();
+      expect(fs.existsSync(owlFile)).toBe(false);
+      expect(cleanupDone()).toBe(false);
+      expect((await request(app).get('/def/volunteering/1.0.0.owl')).text ?? '').not.toContain('OLD_PRIVATE_NAME');
+    } finally {
+      fs.writeFileSync(ttlFile, ttl);
+      ontologyStore.forgetReleases(project);
+    }
+    await rerun();
+    expect(cleanupDone()).toBe(true);
+    expect((await request(app).get('/def/volunteering/1.0.0.owl')).text).toContain('rdf:RDF');
   });
 });

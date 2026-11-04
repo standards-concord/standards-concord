@@ -1,4 +1,4 @@
-import { allSecrets, publishableLines, publishableNotes, redactText, secretsOf } from './redact.js';
+import { allSecrets, publishableLines, publishableNotes, redactText, revealing, secretsOf } from './redact.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -66,7 +66,9 @@ export function releaseDetail(r: Release): ReleaseDetail {
 /** Release notes are published: a request synthesised from use cases never names them or their authors. */
 const published = (c: ChangeRequest, text: string) => {
   const secrets = secretsOf(c);
-  return secrets ? redactText(text, secrets) : text;
+  if (!secrets) return text;
+  const redacted = redactText(text, secrets);
+  return revealing(redacted, secrets) ? 'Changes from use cases' : redacted;
 };
 const publishedEdits = (c: ChangeRequest) => {
   const secrets = secretsOf(c);

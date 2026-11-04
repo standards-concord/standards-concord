@@ -37,7 +37,7 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
-import { publishableLines, redactOps, redactText, secretsOf } from './redact.js';
+import { publishableLines, redactOps, redactText, revealing, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -429,7 +429,8 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
     cr.kgcl = publishableLines(toKGCL(redacted.ops, after.prefixes), secrets);
   }
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
-  const title = secrets ? redactText(cr.title, secrets) : cr.title;
+  const redactedTitle = secrets ? redactText(cr.title, secrets) : cr.title;
+  const title = secrets && revealing(redactedTitle, secrets) ? 'Changes from use cases' : redactedTitle;
   cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: 'Concord' });
   setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
   if (project.stage === 'discovery') {
