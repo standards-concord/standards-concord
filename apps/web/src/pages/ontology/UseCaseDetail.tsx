@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from 'react-router';
-import { ArrowLeft, Archive, CircleCheck, Lock, MessageSquareText, Sparkles } from 'lucide-react';
+import { ArrowLeft, Archive, CircleCheck, Lock, MessageSquareText, GitPullRequestDraft } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, titleCase } from '../../lib/format';
@@ -60,7 +60,7 @@ export function UseCaseDetailPage() {
                   Mark as ready
                 </Button>
               )}
-              <Button variant={canContinue || canMarkReady ? 'secondary' : 'primary'} icon={Sparkles} loading={synth.pending} onClick={() => void synth.run()}>
+              <Button variant={canContinue || canMarkReady ? 'secondary' : 'primary'} icon={GitPullRequestDraft} loading={synth.pending} onClick={() => void synth.run()}>
                 Draft changes
               </Button>
               {u.status !== 'archived' && (

@@ -8,6 +8,7 @@ import { useSession } from '../lib/session';
 import { formatDate, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
+import { LookPicker } from '../components/LookPicker';
 import { Avatar, Badge, Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Loading, PageHeader } from '../components/ui';
 
 function TokenCreator({ onCreated }: { onCreated?: (t: AgentToken) => void }) {
@@ -55,7 +56,7 @@ export function SettingsPage() {
   });
   useEffect(() => {
     const target = location.hash.slice(1);
-    if (target === 'tokens' || target === 'agents') setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth' }), 100);
+    if (['tokens', 'agents', 'appearance'].includes(target)) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }), 100);
   }, []);
   const u = session?.user;
   if (!u) return null;
@@ -78,6 +79,8 @@ export function SettingsPage() {
           </div>
           {u.persona && <p className="border-t border-line px-5 py-4 text-sm text-muted">{u.persona}</p>}
         </Card>
+
+        <LookPicker />
 
         <Card>
           <CardHeader icon={Lock} title="Your WebID and Solid pod" />
