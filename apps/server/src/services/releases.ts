@@ -13,7 +13,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
-import { holdReleaseIfDraftHeld } from '../public/holds.js';
+import { anyHeld, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -177,6 +177,9 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   const can = publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
   const project = getProject(r.ontologyId);
+  // What this release captures: if the working draft changes before it's written, nothing is published.
+  const capturedHead = ontologyStore.head(project);
+  const capturedText = ontologyStore.readWorkingText(project);
   const working = await ontologyStore.working(project);
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
   const stamped = stampRelease(working, {
@@ -219,9 +222,16 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
-  // Made from a working draft still waiting for approval: it waits too.
-  holdReleaseIfDraftHeld(project, r.version);
-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }); // Published commits carry no names.
+  // Published commits carry no names.
+  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, () => {
+    // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
+    // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
+    if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
+      throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
+    // Made from a working draft still waiting for approval: it waits too. The draft is the one captured, so
+    // whether it's held now is whether what this release carries is held.
+    holdReleaseIfDraftHeld(project, r.version);
+  });
   r.status = 'published';
   r.publishedAt = clock.iso();
   r.statusSince = r.publishedAt;
@@ -241,7 +251,10 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   updateProject(project);
 
   // Public ontologies are persisted to GitHub on release, when configured.
-  if (project.github && config.github.publishToken) {
+  // Nothing leaves Concord while any version is waiting for approval: main and every tag would carry it.
+  if (project.github && config.github.publishToken && anyHeld(project)) {
+    console.log(`[release] not pushing ${project.slug} to GitHub: a version is waiting for a steward’s approval`);
+  } else if (project.github && config.github.publishToken) {
     try {
       const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
       ontologyStore.push(project, remote);

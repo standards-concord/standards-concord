@@ -116,7 +116,7 @@ function buildServer(user: User, agentName: string) {
   server.registerTool(
     'sparql_query',
     { title: 'SPARQL query', description: 'Run a read-only SPARQL query over the ontology itself (not instance data).', inputSchema: { ontology: ontologyArg, query: z.string(), version: z.string().optional() }, annotations: { readOnlyHint: true } },
-    ({ ontology, query, version }) => withProject(ontology, async (p) => json(await sparql(p, query, version))),
+    ({ ontology, query, version }) => withProject(ontology, async (p) => json(await sparql(p, query, version, user))),
   );
 
   server.registerTool(

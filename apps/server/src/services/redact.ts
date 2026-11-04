@@ -7,8 +7,8 @@ import { getUser } from './users.js';
  * the person approving what goes public (a change drafted from use cases, or
  * a version published before approvals existed). A hint, never a verdict:
  * nothing is published, held or rewritten because of what this finds, since
- * no matcher catches every way a name can be written. redactText is used
- * only on what a model is shown, never on anything published.
+ * no matcher catches every way a name can be written. Nothing rewrites text
+ * with it: redactText exists only so tests can check exactly what it spans.
  *
  * Secrets are matched by their words, however either side is written
  * (SecretPilot, secret_pilot-record, "Secret  Pilot record", MacDonald).
@@ -211,7 +211,7 @@ function matches(text: string, s: Secrets): Match[] {
   return chosen.sort((a, b) => a.from - b.from);
 }
 
-/** Text with titles replaced by "a use case" and names by "a participant". Running it again changes nothing. */
+/** For tests only: text with titles replaced by "a use case" and names by "a participant". Running it again changes nothing. */
 export function redactText(text: string, s: Secrets): string;
 export function redactText(text: string | undefined, s: Secrets): string | undefined;
 export function redactText(text: string | undefined, s: Secrets): string | undefined {

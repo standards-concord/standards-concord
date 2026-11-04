@@ -33,6 +33,9 @@ test.describe('privacy review', () => {
     // The use case's name is in what it would publish: highlighted for the editor, not rewritten.
     await expect(panel.locator('[data-statement][data-hint]').first()).toContainText(/Zephyr ?Pilot/i);
     await expect(panel.getByRole('note')).toContainText('may name a use case or a person');
+    // Each statement is also shown exactly as published, with full IRIs: a private name can sit inside one.
+    const exact = panel.locator('[data-statement] [data-nt]').first();
+    await expect(exact).toHaveText(/^(<https?:\/\/[^>]+>|_:\S+) <https?:\/\/[^>]+> .+ \.$/);
     await panel.getByRole('button', { name: 'Approve exactly this for publishing' }).click();
     await expect(page.getByTestId('publication-approved')).toContainText('Approved by E2E Publication Editor');
     await expect(panel.getByRole('button', { name: 'Approve exactly this for publishing' })).toHaveCount(0);
@@ -77,9 +80,18 @@ test.describe('privacy review', () => {
   test('stewards review versions published before approvals existed, and approve exactly what each publishes', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 409/);
     await signIn(page, { name: 'E2E Hold Steward', role: 'steward' });
-    let holds = [
-      { version: 'draft', fingerprint: 'fp-draft-1', statements: 120, hints: [{ subject: 'PilotRecord', predicate: 'definition', object: 'Raised by Legacy Person.', kind: 'name' }] },
-      { version: '1.0.0', fingerprint: 'fp-release', statements: 100, hints: [] },
+    let holds: Record<string, unknown>[] = [
+      {
+        version: 'draft',
+        fingerprint: 'fp-draft-1',
+        statements: 120,
+        hints: [{ subject: 'https://w3id.org/odi/volunteering#PilotRecord', predicate: 'http://www.w3.org/2004/02/skos/core#definition', object: 'Raised by Legacy Person.', kind: 'name' }],
+        turtle: '@prefix : <https://w3id.org/odi/volunteering#> .\n:PilotRecord :definition "Raised by Legacy Person." .',
+        notes: '',
+        snapshot: '',
+      },
+      { version: '1.0.0', fingerprint: 'fp-release', statements: 100, hints: [], turtle: '@prefix : <x#> .', notes: 'Thanks to NOTES_ONLY_NAME.', snapshot: '{ "note": "SNAPSHOT_ONLY_NAME" }' },
+      { version: '0.9.0', fingerprint: 'fp-broken', statements: 0, hints: [], turtle: '@prefix broken <nope', notes: '', snapshot: '', error: 'Its Turtle couldn’t be read (bad prefix), so nothing is highlighted. Read it all below.' },
     ];
     const calls: string[] = [];
     await page.route(`**/api/ontologies/${demo.id}/public-holds`, (route) => route.fulfill({ json: holds }));
@@ -98,20 +110,32 @@ test.describe('privacy review', () => {
     await page.goto(`/o/${demo.id}/governance`);
     await settle(page);
     const section = page.locator('section[aria-labelledby="held-h"]');
-    await expect(section).toContainText('Waiting for approval before they are public (2)');
+    await expect(section).toContainText('Waiting for approval before they are public (3)');
     const draft = section.locator('[data-held="draft"]');
     await expect(draft.locator('[data-hint="name"]')).toContainText('Raised by Legacy Person.');
-    await expect(draft.getByRole('link', { name: 'Read all of it (Turtle)' })).toHaveAttribute('href', `/api/ontologies/${demo.id}/public-holds/draft/turtle`);
+    // Everything approving publishes is on the screen: the Turtle, the release notes and the snapshot.
+    await draft.locator('[data-part="turtle"] summary').click();
+    await expect(draft.locator('[data-part="turtle"] pre')).toContainText(':PilotRecord :definition "Raised by Legacy Person."');
+    await expect(draft.locator('[data-part="notes"] summary')).toContainText('(none)');
+    const release = section.locator('[data-held="1.0.0"]');
+    await release.locator('[data-part="notes"] summary').click();
+    await expect(release.locator('[data-part="notes"] pre')).toHaveText('Thanks to NOTES_ONLY_NAME.');
+    await release.locator('[data-part="snapshot"] summary').click();
+    await expect(release.locator('[data-part="snapshot"] pre')).toContainText('SNAPSHOT_ONLY_NAME');
+    // A version that can't be read says so, and the others are still there to review.
+    await expect(section.locator('[data-held="0.9.0"]').getByRole('note')).toContainText('couldn’t be read');
     await draft.getByRole('button', { name: 'Approve exactly this for publishing' }).click();
     await expect(section.getByRole('alert')).toContainText('changed after you reviewed it');
     await expect(draft).toContainText('Nothing looks private');
     await draft.getByRole('button', { name: 'Approve exactly this for publishing' }).click();
-    await expect(section).toContainText('Waiting for approval before they are public (1)');
+    await expect(section).toContainText('Waiting for approval before they are public (2)');
     await expect(page.locator('#held-h')).toBeFocused();
     await expect(section.getByRole('status')).toHaveText('The working draft is published again.');
     await section.locator('[data-held="1.0.0"]').getByRole('button', { name: 'Approve exactly this for publishing' }).click();
+    await expect(section).toContainText('Waiting for approval before they are public (1)');
+    await section.locator('[data-held="0.9.0"]').getByRole('button', { name: 'Approve exactly this for publishing' }).click();
     await expect(section).toContainText('Nothing is waiting for approval.');
-    expect(calls).toEqual(['draft fp-draft-1', 'draft fp-draft-2', '1.0.0 fp-release']);
+    expect(calls).toEqual(['draft fp-draft-1', 'draft fp-draft-2', '1.0.0 fp-release', '0.9.0 fp-broken']);
   });
 
   test('members without the steward role are not shown the versions waiting for approval', async ({ page }) => {

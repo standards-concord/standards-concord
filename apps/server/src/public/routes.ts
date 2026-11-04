@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
-import { holdLegacy, isHeld } from './holds.js';
+import { holdLegacy, isHeld, readOntology } from './holds.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
@@ -331,7 +331,9 @@ async function serve(req: Request, res: Response) {
   else {
     // Slash namespaces put terms under the ontology IRI (…/volunteering/Volunteer):
     // send those to the term's anchor on the latest page.
-    const graph = await ontologyStore.at(project, latest ?? 'working');
+    // Not from a version waiting for approval: even a redirect would say which names it has.
+    if (isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
+    const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
     const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
     if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
@@ -341,14 +343,14 @@ async function serve(req: Request, res: Response) {
   const format = last.format ?? negotiate(req, res);
   if (!format) return;
   // Published before anyone approved what goes public: nothing of it is served until a steward does.
-  if (isHeld(project.id, version)) return held(res, project, version, format);
+  if (isHeld(project, version)) return held(res, project, version, format);
+  const graph = await readOntology(project, version, undefined);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');
-    const input = await pageInput(project, version, base);
+    const input = await pageInput(project, version, base, { graph });
     res.type('html').send(renderOntologyPage(input));
     return;
   }
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
   await sendFormat(req, res, {
     project,
     graph,

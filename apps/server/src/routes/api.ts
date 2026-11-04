@@ -37,7 +37,7 @@ import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
-import { approveHold, heldTurtle, listHolds } from '../public/holds.js';
+import { approveHold, listHolds, readOntology } from '../public/holds.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -188,12 +188,12 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
-    res.json((await ontologyStore.at(project(req), optStr(req.query.ref))).view());
+    res.json((await readOntology(project(req), optStr(req.query.ref), req.user)).view());
   });
 
   r.get('/ontologies/:id/terms/:iri', async (req, res) => {
     const p = project(req);
-    const g = await ontologyStore.at(p, optStr(req.query.ref));
+    const g = await readOntology(p, optStr(req.query.ref), req.user);
     const iri = expandIRI(String(req.params.iri), g.prefixes);
     const t = g.term(iri);
     if (!t) throw new HttpError(404, `No term ${req.params.iri}`);
@@ -203,14 +203,14 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id/search', async (req, res) => {
-    res.json((await ontologyStore.working(project(req))).search(String(req.query.q ?? ''), 30));
+    res.json((await readOntology(project(req), 'working', req.user)).search(String(req.query.q ?? ''), 30));
   });
 
   r.get('/ontologies/:id/source', async (req, res) => {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
+    const text = await serialize(await readOntology(p, ref, req.user), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -226,7 +226,7 @@ export function apiRouter(): Router {
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
-    const out = await sparql(project(req), str(req.body?.query, 'query'), optStr(req.body?.ref));
+    const out = await sparql(project(req), str(req.body?.query, 'query'), optStr(req.body?.ref), req.user);
     if (out.error) throw new HttpError(400, out.error);
     res.json(out);
   });
@@ -416,9 +416,7 @@ export function apiRouter(): Router {
   r.get('/ontologies/:id/public-holds', async (req, res) => {
     res.set('Cache-Control', 'no-store').json(await listHolds(steward(req).p));
   });
-  r.get('/ontologies/:id/public-holds/:version/turtle', (req, res) => {
-    res.set('Cache-Control', 'no-store').type('text/turtle').send(heldTurtle(steward(req).p, String(req.params.version)));
-  });
+
   r.post('/ontologies/:id/public-holds/:version/approve', (req, res) => {
     const { p, user } = steward(req);
     approveHold(p, user, String(req.params.version), req.body?.fingerprint);

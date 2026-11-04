@@ -10,7 +10,7 @@ import { newId } from '../ids.js';
 import { clientIp } from '../oauth.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
-import { isHeld } from './holds.js';
+import { isHeld, readOntology } from './holds.js';
 import { escapeHtml as esc } from './markdown.js';
 import { PAGE_CSS } from './assets.js';
 import { PUBLIC_BASE } from './w3id.js';
@@ -269,10 +269,10 @@ function siteOrigin(req: Request) {
 async function findTerm(project: OntologyProject, version: string | undefined, iri: string): Promise<{ term: TermView; version: string } | undefined> {
   const v = version && version !== 'draft' && ontologyStore.versions(project).includes(version) ? version : 'draft';
   for (const ref of [v, 'draft']) {
-    // A version waiting for a steward's approval publishes nothing, its terms included.
-    if (isHeld(project.id, ref)) continue;
+    // Read as the public reads it: a version waiting for a steward's approval publishes nothing, its terms included.
+    if (isHeld(project, ref)) continue;
     try {
-      const term = (await ontologyStore.at(project, ref === 'draft' ? 'working' : ref)).term(iri);
+      const term = (await readOntology(project, ref, undefined)).term(iri);
       if (term) return { term, version: ref };
     } catch {
       /* try the draft */

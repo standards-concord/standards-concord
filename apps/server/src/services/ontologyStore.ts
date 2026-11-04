@@ -103,11 +103,15 @@ export const ontologyStore = {
     files: Record<string, string>,
     notes: string,
     author: CommitAuthor,
+    /** Runs after the last await, just before anything is written: throwing writes nothing. */
+    beforeWrite?: () => void,
   ): Promise<string> {
     const dir = repoDir(project);
     const relDir = path.join(dir, 'releases', version);
-    fs.mkdirSync(relDir, { recursive: true });
     const turtle = await graph.toTurtle();
+    // From here to the commit nothing awaits, so nothing else runs in between.
+    beforeWrite?.();
+    fs.mkdirSync(relDir, { recursive: true });
     // The released file and the working draft are identical at release time.
     fs.writeFileSync(path.join(dir, FILE), turtle);
     fs.writeFileSync(path.join(relDir, FILE), turtle);

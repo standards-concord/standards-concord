@@ -67,9 +67,8 @@ const UNTRUSTED_TAG = 'untrusted_public_report';
  * from the public page is wrapped and marked as data from an anonymous
  * stranger, so it can't pass itself off as instructions (or close its own tag).
  */
-export function requestText(cr: Pick<ChangeRequest, 'number' | 'title' | 'description' | 'origin'>, hide: (s: string) => string = (s) => s): string {
-  const title = hide(cr.title);
-  const description = hide(cr.description);
+export function requestText(cr: Pick<ChangeRequest, 'number' | 'title' | 'description' | 'origin'>): string {
+  const { title, description } = cr;
   if (cr.origin.type !== 'public-report') return `Change request #${cr.number}: ${title}\n${description}`;
   // Escaped, not stripped: with no < or > left, nothing they write can close the block (or open another).
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
