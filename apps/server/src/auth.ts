@@ -17,11 +17,21 @@ declare global {
   }
 }
 
+/**
+ * Deployment administrators: an account whose WebID is in ADMIN_WEBIDS (or, the
+ * older way, whose verified email is in ADMIN_EMAILS). It must be signed in with
+ * Google or GitHub: demo accounts and simulated personas never count.
+ */
+export function isAdmin(user: User): boolean {
+  const federated = user.providers.some((p) => p.provider === 'google' || p.provider === 'github');
+  if (!federated || user.simulated) return false;
+  if (user.webId && config.adminWebIds.includes(user.webId)) return true;
+  return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
+}
+
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
   const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
-  // ADMIN_EMAILS makes people who sign in with Google or GitHub administrators of the deployment.
-  const federated = user?.providers.some((p) => p.provider === 'google' || p.provider === 'github');
-  req.user = user && federated && !user.simulated && user.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
+  req.user = user && isAdmin(user) ? { ...user, isPlatformAdmin: true } : user;
   next();
 }
 

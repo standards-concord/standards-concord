@@ -46,7 +46,8 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `PUBLIC_ORIGINS` | Comma-separated extra origins, such as a domain pointed straight at the backend, that may appear in OAuth metadata and MCP URLs when reached directly. Vercel domains don't need listing when `CONCORD_PROXY_SECRET` is set. |
 | `TRUST_PROXY` | Which proxies' `X-Forwarded-*` headers to believe, in [Express's syntax](https://expressjs.com/en/guide/behind-proxies.html). The default, `loopback, linklocal, uniquelocal`, covers Caddy on the same Docker network. OAuth URLs never come from these headers. |
 | `OPENAI_APPS_CHALLENGE` | The domain verification token from OpenAI's plugin submission, served at `/.well-known/openai-apps-challenge`. |
-| `ADMIN_EMAILS` | Comma-separated emails that can reset the demo and read every tester's feedback once signed in with Google or GitHub. |
+| `ADMIN_WEBIDS` | WebIDs of the deployment's administrators, who can reset the demo and read every tester's feedback. Sign in with Google or GitHub, copy your WebID from Settings, then `./deploy/azure/set-key.sh ADMIN_WEBIDS`. Demo accounts and personas never count. |
+| `ADMIN_EMAILS` | The older alternative: verified emails of Google or GitHub accounts. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google. Create an OAuth client (Web application) in Google Cloud with redirect URI `<vercel-url>/auth/google/callback`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Sign in with GitHub. Create an OAuth app with callback URL `<vercel-url>/auth/github/callback`. |
 | `GITHUB_PUBLISH_TOKEN`, `GITHUB_PUBLISH_OWNER` | Push each ontology's git history and release tags to a GitHub repository on release. |

@@ -72,4 +72,26 @@ describe('reading feedback', () => {
       config.adminEmails.splice(0, config.adminEmails.length, ...saved);
     }
   });
+
+  it('is possible for the account whose WebID is in ADMIN_WEBIDS, signed in with GitHub, and nobody else', async () => {
+    const { createSession } = await import('../src/services/users.js');
+    const admin = await upsertFederatedUser({ provider: 'github', subject: 'gh-webid-admin', name: 'Jesse' });
+    const demo = await createUser({ name: 'Demo with a WebID', provider: 'demo', subject: 'demo-webid' });
+    const persona = ((await request(app).get('/api/personas')).body as { id: string; webId: string }[])[0];
+    const saved = config.adminWebIds.slice();
+    config.adminWebIds.push(admin.webId!, demo.webId!, persona.webId);
+    try {
+      const get = (id: string) => request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(id)}`);
+      expect((await get(admin.id)).status).toBe(200);
+      const session = await request(app).get('/api/session').set('Cookie', `concord_session=${createSession(admin.id)}`);
+      expect(session.body.user.isPlatformAdmin).toBe(true);
+      // Listing a demo account's or a persona's WebID does not make them administrators.
+      expect((await get(demo.id)).status).toBe(403);
+      expect((await get(persona.id)).status).toBe(403);
+    } finally {
+      config.adminWebIds.splice(0, config.adminWebIds.length, ...saved);
+    }
+    // Without the setting, the same account is an ordinary user.
+    expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`)).status).toBe(403);
+  });
 });
