@@ -15,6 +15,8 @@ import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
+import { syncUseCasesForCR } from './traceability.js';
 import { getUser, logActivity } from './users.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
@@ -110,6 +112,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   if (!existing) {
     logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
+  // Keep the release's use cases and requirements document in step (in the background).
+  draftForRelease(r);
   return openVoteIfNeeded(r);
 }
 
@@ -191,6 +195,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     }
   }
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
+  const requirements = await prepareForRelease(project, r);
+  if (requirements) files['USE_CASES.md'] = renderMarkdown(requirements);
 
   const author = actor ?? getUser(r.createdBy);
   r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
@@ -206,7 +212,10 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     cr.statusSince = r.publishedAt;
     cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
     put('changeRequests', cr, cr.ontologyId);
+    // Use cases this change addressed are now closed by this version.
+    syncUseCasesForCR(cr);
   }
+  if (requirements) markPublished(requirements, r);
 
   project.currentVersion = r.version;
   project.stage = 'released';

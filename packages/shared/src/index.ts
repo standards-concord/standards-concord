@@ -264,23 +264,129 @@ export interface ElicitedTerm {
   existingIri?: string;
 }
 
+/**
+ * Who can see a use case.
+ * - private: only its author. The body is mirrored to the author's Solid pod. It never
+ *   feeds public outputs directly; instead the author can approve an anonymised,
+ *   synthetic version that is published with no name attached.
+ * - group: members of the working group (anyone with a role other than contributor or agent).
+ * - public: anyone, including the published spec's "Use cases and requirements" page.
+ */
+export type UseCaseVisibility = 'private' | 'group' | 'public';
+
+export const VISIBILITY_INFO: Record<UseCaseVisibility, { label: string; description: string }> = {
+  private: { label: 'Private', description: 'Only you can see it. You can publish an anonymised version with no name attached.' },
+  group: { label: 'Working group', description: 'Members of the working group can see it. It is not published.' },
+  public: { label: 'Public', description: 'Anyone can see it, and it can appear in the published use cases and requirements.' },
+};
+
+/**
+ * Use case lifecycle. Moves forward automatically where it can:
+ * draft -> triage (author submits) -> accepted / deferred / out-of-scope (triaged by an editor or steward)
+ * -> in-progress (a change request was drafted from it) -> addressed (that change was merged into the working draft)
+ * -> closed (a release containing the change was published; `resolution.version` says which).
+ */
+export type UseCaseStatus = 'draft' | 'triage' | 'accepted' | 'in-progress' | 'addressed' | 'closed' | 'deferred' | 'out-of-scope' | 'archived';
+
+export const USE_CASE_STATUS_INFO: Record<UseCaseStatus, { label: string; description: string; open: boolean }> = {
+  draft: { label: 'Draft', description: 'Still being written by its author.', open: true },
+  triage: { label: 'Needs triage', description: 'Submitted. An editor or steward decides whether the ontology should support it.', open: true },
+  accepted: { label: 'Accepted', description: 'In scope. Waiting for a change to the ontology.', open: true },
+  'in-progress': { label: 'In progress', description: 'A change request proposes the terms it needs.', open: true },
+  addressed: { label: 'Addressed', description: 'The change is merged into the working draft and waits for the next release.', open: true },
+  closed: { label: 'Closed', description: 'Covered by a published version of the ontology.', open: false },
+  deferred: { label: 'Deferred', description: 'In scope, but not for now.', open: false },
+  'out-of-scope': { label: 'Out of scope', description: 'The ontology will not cover this.', open: false },
+  archived: { label: 'Archived', description: 'Withdrawn or superseded.', open: false },
+};
+
+/** A manually added link from a use case to something related. */
+export interface UseCaseLink {
+  type: 'use-case' | 'meeting' | 'change-request' | 'url';
+  /** Target id (for use-case, meeting and change-request links). */
+  id?: string;
+  url?: string;
+  label?: string;
+  relation: 'related' | 'duplicate-of' | 'depends-on' | 'refines';
+  addedBy?: string;
+  at: string;
+}
+
+/** An anonymised, synthetic rewrite of a private use case, proposed to its author for approval. */
+export interface AnonymisedDraft {
+  sections: UseCaseSections;
+  competencyQuestions: { question: string; exampleAnswer?: string }[];
+  terms: ElicitedTerm[];
+  /** What was changed to anonymise it, in plain words (shown to the author). */
+  changes: string[];
+}
+
 export interface UseCase {
   id: string;
+  /** Per-ontology sequence number, shown as UC-3. */
+  number: number;
   ontologyId: string;
+  /** Hidden from everyone but the author when `anonymous` is true. */
   authorId: string;
   source: UseCaseSource;
   /** Meeting/session/agent report this came from. */
   sourceRef?: string;
-  status: 'eliciting' | 'ready' | 'synthesised' | 'archived';
+  /** For meeting use cases: indexes of the transcript lines it came from. */
+  sourceLines?: number[];
+  status: UseCaseStatus;
+  visibility: UseCaseVisibility;
+  /** Published with no name attached (an anonymised synthetic version of a private use case). */
+  anonymous?: boolean;
+  /** Only on private use cases, only visible to the author: the anonymised version proposed or published. */
+  anonymisation?: { status: 'proposed' | 'published' | 'declined'; draft?: AnonymisedDraft; proposedAt: string; decidedAt?: string; publishedId?: string };
   sections: UseCaseSections;
   competencyQuestions: CompetencyQuestion[];
   terms: ElicitedTerm[];
+  links?: UseCaseLink[];
+  /** Change requests drafted to address this use case. */
+  changeRequestIds?: string[];
+  /** Triage decision or closure. */
+  resolution?: { status: UseCaseStatus; note?: string; by?: string; at: string; releaseId?: string; version?: string };
   /** 0..1 completeness against the template, computed by the server. */
   completeness: number;
   /** Where the private interview transcript lives (Solid pod resource URL). */
   transcriptUrl?: string;
+  /** For private use cases: where the author's copy lives in their Solid pod. */
+  podUrl?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A short reference to a use case, used in links from other things. */
+export interface UseCaseRef {
+  id: string;
+  number: number;
+  title: string;
+  status: UseCaseStatus;
+  visibility: UseCaseVisibility;
+  anonymous?: boolean;
+}
+
+/** Everything a use case is linked to, in both directions. Computed by the server. */
+export interface UseCaseTrace {
+  /** Where it came from. */
+  source?: { kind: 'meeting' | 'interview' | 'agent-report' | 'form' | 'anonymised'; id?: string; title: string; date?: string; href?: string; lines?: TranscriptLine[] };
+  /** Change requests addressing it. */
+  changeRequests: { id: string; number: number; title: string; status: ChangeRequestStatus; releaseId?: string }[];
+  /** Releases that shipped those changes. */
+  releases: { id: string; version: string; status: Release['status'] }[];
+  /** Use cases it links to, and use cases linking to it. */
+  related: (UseCaseRef & { relation: UseCaseLink['relation']; direction: 'out' | 'in' })[];
+  /** Other links (meetings, URLs) added by hand. */
+  other: UseCaseLink[];
+  /** Requirements documents that cite it. */
+  documents: { version: string; releaseId?: string; status: RequirementsDocument['status'] }[];
+}
+
+export interface UseCaseDetail extends UseCase {
+  trace: UseCaseTrace;
+  /** What the viewer may do. */
+  can: { edit: boolean; triage: boolean; changeVisibility: boolean };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -345,6 +451,8 @@ export interface Meeting {
   status: 'live' | 'processing' | 'analysed' | 'error';
   createdAt: string;
   createdBy: string;
+  /** Use cases that came from this call (computed by the server, filtered to what the viewer can see). */
+  useCases?: (UseCaseRef & { sourceLines?: number[]; analysisTitle?: string })[];
 }
 
 /* ------------------------------------------------------------------------ */
@@ -489,9 +597,13 @@ export interface ChangeRequest {
   warnings?: string[];
   /** KGCL-style change lines, for people used to ontology change languages. */
   kgcl?: string[];
+  /** Use cases this change addresses (traceability). */
+  useCaseIds?: string[];
 }
 
 export interface ChangeRequestDetail extends ChangeRequest {
+  /** The use cases it addresses that the viewer can see. */
+  useCases?: UseCaseRef[];
   reviews: Review[];
   votes: Vote[];
   governance: GovernanceEvaluation;
@@ -516,9 +628,79 @@ export interface Release {
 }
 
 export interface ReleaseDetail extends Release {
+  /** Use cases this release closes (visible to the viewer). */
+  useCases?: UseCaseRef[];
+  /** The release's use cases and requirements document, if one was generated. */
+  requirements?: Pick<RequirementsDocument, 'id' | 'version' | 'status' | 'generatedAt' | 'title'>;
   votes: Vote[];
   governance: GovernanceEvaluation;
   changeRequests: Pick<ChangeRequest, 'id' | 'number' | 'title' | 'classification'>[];
+}
+
+/* ------------------------------------------------------------------------ */
+/* Use cases and requirements documents (published with each release)       */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * The public face of a use case. Only public use cases, and the anonymised
+ * synthetic versions of private ones, ever become a PublicUseCase.
+ */
+export interface PublicUseCase {
+  id: string;
+  /** e.g. "UC-3" */
+  ref: string;
+  title: string;
+  goal?: string;
+  description?: string;
+  actors?: string;
+  scenarios: string[];
+  competencyQuestions: { question: string; exampleAnswer?: string }[];
+  status: Exclude<UseCaseStatus, 'draft' | 'archived'>;
+  /** The version that covers it, once closed. */
+  coveredIn?: string;
+  sourceKind: UseCaseSource | 'synthetic';
+  /** An anonymised synthetic version of a private use case. */
+  anonymised: boolean;
+  /** Who described it; omitted when anonymous. */
+  attribution?: string;
+  origin?: { kind: 'meeting' | 'interview' | 'agent' | 'form' | 'synthetic'; label: string; date?: string; href?: string };
+}
+
+export interface RequirementItem {
+  /** Stable id within the document, e.g. "R1". Anchor: #req-R1 */
+  id: string;
+  text: string;
+  useCaseIds: string[];
+  /** Ontology terms that meet it. */
+  termIris: string[];
+  status: 'met' | 'partial' | 'open';
+}
+
+/**
+ * A release's "Use cases and requirements" document: the use cases told as one running
+ * story (in the style of the W3C Verifiable Credentials use cases), with every point
+ * linked to the use cases behind it, then the requirements and how far this version meets them.
+ *
+ * Citation links inside markdown: [UC-3](#uc-<useCaseId>) and [R1](#req-R1).
+ */
+export interface RequirementsDocument {
+  id: string;
+  ontologyId: string;
+  releaseId?: string;
+  version: string;
+  title: string;
+  status: 'draft' | 'published';
+  generatedAt: string;
+  /** True when written by the offline stand-in rather than the model. */
+  simulated?: boolean;
+  intro: string;
+  sections: { id: string; heading: string; markdown: string; useCaseIds: string[] }[];
+  requirements: RequirementItem[];
+  useCases: PublicUseCase[];
+  /** Use cases that informed the work but are not public (counts only). */
+  unpublished: { group: number; private: number };
+  /** Coverage of the public use cases at this version. */
+  coverage: { total: number; closed: number; addressed: number; open: number };
 }
 
 /* ------------------------------------------------------------------------ */

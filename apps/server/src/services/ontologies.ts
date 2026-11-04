@@ -134,7 +134,8 @@ const validationCache = new Map<string, Promise<ValidationReport>>();
 /** Competency questions from use cases that have SPARQL tests attached. */
 export function competencyTests(ontologyId: string) {
   return list<UseCase>('useCases', ontologyId)
-    .filter((u) => u.status !== 'archived')
+    // Private use cases stay private: their questions would surface in shared validation reports.
+    .filter((u) => u.status !== 'archived' && u.visibility !== 'private')
     .flatMap((u) => u.competencyQuestions)
     .filter((q) => q.sparql)
     .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));

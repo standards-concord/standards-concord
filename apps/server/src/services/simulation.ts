@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
-import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
+import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
 import { clearAll, list, put } from '../db.js';
@@ -18,7 +18,9 @@ import { ontologyStore } from './ontologyStore.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseTick, voteOnRelease } from './releases.js';
-import { createUseCase } from './useCases.js';
+import { sourceLinesFor } from './meetings.js';
+import { generateRequirements, markPublished } from './requirements.js';
+import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
 
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
@@ -75,7 +77,7 @@ async function seedHistory() {
   for (const p of PERSONAS) setRoles(project.id, people.get(p.key)!.id, p.roles);
 
   // Version 1.0.0 is already out: that makes the semver story concrete.
-  await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.');
+  const first = await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.');
 
   const aisha = people.get('aisha')!;
   const mei = people.get('mei')!;
@@ -90,7 +92,9 @@ async function seedHistory() {
     const cqs = JSON.parse(fs.readFileSync(cqFile, 'utf8')) as { question: string; sparql: string }[];
     createUseCase(project, tom, {
       source: 'form',
-      status: 'synthesised',
+      status: 'closed',
+      visibility: 'public',
+      resolution: { status: 'closed', at: clock.iso(), by: priya.id, releaseId: first.id, version: '1.0.0', note: 'The first release was designed around this use case.' },
       sections: {
         name: 'Aggregate volunteering opportunities across platforms',
         goal: 'Let volunteering platforms, councils and charities publish opportunities once, so that aggregators can show them all in one search.',
@@ -105,9 +109,17 @@ async function seedHistory() {
     });
   }
 
-  createUseCase(project, aisha, {
+  // 1.0.0's use cases and requirements document, frozen with the release.
+  try {
+    markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
+  } catch (err) {
+    console.warn(`[seed] requirements document: ${(err as Error).message}`);
+  }
+
+  const shifts = createUseCase(project, aisha, {
     source: 'chat',
-    status: 'ready',
+    status: 'accepted',
+    visibility: 'public',
     sections: {
       name: 'Find weekly shifts that need volunteers',
       goal: 'Help council volunteer coordinators fill recurring shifts, and help residents find regular volunteering that fits around work.',
@@ -161,7 +173,7 @@ async function seedHistory() {
     title: 'Say whether an opportunity reimburses expenses',
     description: 'Many volunteers can only take part if travel and other out-of-pocket costs are reimbursed. People want to filter on this before applying.',
     kind: 'feature',
-    origin: { type: 'chat' },
+    origin: { type: 'chat', useCaseId: shifts.id },
     ops: [
       {
         op: 'addDatatypeProperty',
@@ -200,6 +212,8 @@ async function seedHistory() {
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
   });
 
+  await seedTraceability(project, { priya, aisha, mei, gareth }, shifts.id);
+
   updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
   return list<OntologyProject>('ontologies').find((o) => o.slug === DEMO_SLUG);
 }
@@ -236,6 +250,88 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
   put('releases', r, project.id);
   project.currentVersion = version;
   updateProject(project);
+  return r;
+}
+
+/**
+ * Shows the sharing modes and links: a working group call with the use case it produced
+ * (linked both ways, with the transcript lines it came from), and a private use case
+ * whose author published an anonymised synthetic version with no name attached.
+ */
+async function seedTraceability(project: OntologyProject, p: Record<'priya' | 'aisha' | 'mei' | 'gareth', User>, shiftsId: string) {
+  const transcript: TranscriptLine[] = [
+    { speaker: p.priya.name, text: 'Thanks for joining. Today I would like to hear how people publish recurring shifts.', t: 4 },
+    { speaker: p.gareth.name, text: 'Our charity runs the same Saturday shift every week. Today our export lists every single occurrence, so a year of shifts is fifty-two separate sessions.', t: 15 },
+    { speaker: p.gareth.name, text: 'We store the rota as a weekly recurrence rule. It would be far simpler to publish the recurrence once and let aggregators expand it.', t: 31 },
+    { speaker: p.aisha.name, text: 'Same for the council. Volunteers want to see “every Saturday morning”, not a list of dates.', t: 48 },
+    { speaker: p.mei.name, text: 'For impact reporting we still need to count the sessions that actually happened, so cancellations matter.', t: 63 },
+    { speaker: p.gareth.name, text: 'Which recurring shifts run every week, and which dates are cancelled? That is the question our volunteers ask.', t: 80 },
+    { speaker: p.priya.name, text: 'Let us capture that as a use case and look at how other vocabularies model recurrence.', t: 96 },
+  ];
+  const now = clock.iso();
+  const meeting: Meeting = {
+    id: newId('mtg'),
+    ontologyId: project.id,
+    title: 'Working group call: recurring shifts',
+    source: 'upload',
+    transcript,
+    facilitatorPrompts: [{ at: now, t: 70, text: 'Mei mentioned cancellations. Should a cancelled occurrence be recorded on the session, or as an exception to the recurrence?', posted: false }],
+    analysis: {
+      summary: 'Publishers want to describe a recurring shift once, with cancellations as exceptions, instead of listing every occurrence. Impact reporting still needs to count sessions that took place.',
+      useCases: [
+        {
+          title: 'Publish recurring shifts once',
+          speaker: p.gareth.name,
+          sections: {
+            name: 'Publish recurring shifts once',
+            goal: 'Publish a weekly shift as a single recurring session rather than one record per date.',
+            actors: 'Charity publishing a rota; aggregators; volunteers.',
+            usageScenarios: ['A charity runs the same Saturday 9am–1pm shift every week and publishes it once with a weekly recurrence, plus the dates it is cancelled.'],
+          },
+        },
+      ],
+      terms: [{ label: 'recurrence rule', kind: 'datatypeProperty', definition: 'How often a session repeats, e.g. weekly on Saturdays.', evidence: ['We store the rota as a weekly recurrence rule.'] }],
+      competencyQuestions: [{ question: 'Which recurring shifts run every week, and which dates are cancelled?', askedBy: p.gareth.name }],
+      disagreements: [],
+      openQuestions: ['Should cancellations be exceptions to the recurrence or properties of a session?'],
+      decisions: ['Capture recurring shifts as a use case.'],
+    },
+    status: 'analysed',
+    createdAt: now,
+    createdBy: p.priya.id,
+  };
+  put('meetings', meeting, project.id);
+  const g = meeting.analysis!.useCases[0];
+  const recurring = createUseCase(project, p.priya, {
+    source: 'meeting',
+    sourceRef: meeting.id,
+    sourceLines: sourceLinesFor(meeting, g),
+    visibility: 'group',
+    status: 'triage',
+    sections: { ...g.sections, notes: `From the call “${meeting.title}”, described by ${g.speaker}.` },
+    competencyQuestions: [{ id: newId('cq'), question: meeting.analysis!.competencyQuestions[0].question, status: 'untested' }],
+    terms: meeting.analysis!.terms,
+  });
+  addLink(recurring, p.priya, { type: 'use-case', id: shiftsId, relation: 'related' });
+
+  // Mei described this privately; only the anonymised version is public.
+  const impact = createUseCase(project, p.mei, {
+    source: 'chat',
+    visibility: 'private',
+    status: 'draft',
+    sections: {
+      name: 'Report volunteering hours to our funders',
+      goal: 'Tell the Lottery Community Fund how many hours our volunteers gave at St Anne’s Hospice each quarter, broken down by cause.',
+      actors: 'Impact officer at St Anne’s Hospice; funders; volunteering platforms.',
+      usageScenarios: ['Every quarter Mei Chen exports hours from Better Impact and emails mei.chen@stannes.example to the Lottery Community Fund.'],
+    },
+    competencyQuestions: [
+      { id: newId('cq'), question: 'How many volunteer hours were given last quarter, by cause?', exampleAnswer: 'Environment 320 hours; health 210 hours', status: 'untested' },
+      { id: newId('cq'), question: 'Which opportunities count towards a funder’s outcome?', status: 'untested' },
+    ],
+  });
+  await proposeAnonymised(impact, p.mei);
+  publishAnonymised(getUseCase(impact.id), p.mei);
 }
 
 /* ------------------------------------------------------------------------ */

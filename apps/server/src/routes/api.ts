@@ -31,6 +31,8 @@ import {
 import { ontologyStore } from '../services/ontologyStore.js';
 import { PERSONAS } from '../services/personas.js';
 import * as releases from '../services/releases.js';
+import * as requirements from '../services/requirements.js';
+import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseDetail.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
@@ -82,6 +84,11 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
 }
 
 const project = (req: Request) => mustFindProject(String(req.params.id));
+
+/** Change request detail plus the use cases it addresses that the viewer may see. */
+const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...crs.detail(c), useCases: useCasesForCR(c, req.user) });
+/** Release detail plus the use cases it closes and its requirements document. */
+const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r), ...releaseTrace(r, req.user) });
 
 export function apiRouter(): Router {
   const r = Router();
@@ -239,11 +246,69 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------- use cases & interviews ------------------ */
-  r.get('/ontologies/:id/use-cases', (req, res) => res.json(useCases.listUseCases(project(req).id)));
-  r.get('/use-cases/:id', (req, res) => res.json(useCases.getUseCase(String(req.params.id))));
+  r.get('/ontologies/:id/use-cases', (req, res) => res.json(useCases.listUseCases(project(req).id, req.user)));
+  r.get('/ontologies/:id/public-use-cases', (req, res) => res.json(requirements.publicUseCases(project(req).id)));
+  r.get('/use-cases/:id', (req, res) => res.json(useCaseDetail(String(req.params.id), req.user)));
   r.patch('/use-cases/:id', (req, res) => {
-    const u = useCases.getUseCase(String(req.params.id));
-    res.json(useCases.updateUseCase(u, requireUser(req), req.body ?? {}));
+    const user = requireUser(req);
+    const u = useCases.getUseCaseFor(String(req.params.id), user);
+    useCases.updateUseCase(u, user, req.body ?? {});
+    res.json(useCaseDetail(u.id, user));
+  });
+  r.post('/use-cases/:id/visibility', (req, res) => {
+    const user = requireUser(req);
+    const u = useCases.getUseCaseFor(String(req.params.id), user);
+    useCases.setVisibility(u, user, req.body?.visibility);
+    res.json(useCaseDetail(u.id, user));
+  });
+  r.post('/use-cases/:id/submit', (req, res) => {
+    const user = requireUser(req);
+    useCases.submitUseCase(useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/triage', (req, res) => {
+    const user = requireUser(req);
+    useCases.triageUseCase(useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.status, optStr(req.body?.note));
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/links', (req, res) => {
+    const user = requireUser(req);
+    const b = req.body ?? {};
+    useCases.addLink(useCases.getUseCaseFor(String(req.params.id), user), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+  r.delete('/use-cases/:id/links/:target', (req, res) => {
+    const user = requireUser(req);
+    useCases.removeLink(useCases.getUseCaseFor(String(req.params.id), user), user, String(req.params.target));
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/anonymise', async (req, res) => {
+    const user = requireUser(req);
+    await useCases.proposeAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/anonymise/publish', (req, res) => {
+    const user = requireUser(req);
+    const out = useCases.publishAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.draft);
+    res.json({ original: useCaseDetail(out.original.id, user), published: useCaseDetail(out.published.id, user) });
+  });
+  r.post('/use-cases/:id/anonymise/decline', (req, res) => {
+    const user = requireUser(req);
+    useCases.declineAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(useCaseDetail(String(req.params.id), user));
+  });
+
+  /* ------------------------ requirements documents ------------------- */
+  r.get('/ontologies/:id/requirements', (req, res) => res.json(requirements.listDocuments(project(req).id, req.user)));
+  r.get('/ontologies/:id/requirements/:version', (req, res) => res.json(requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user)));
+  r.get('/ontologies/:id/requirements/:version/markdown', (req, res) => {
+    const doc = requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user);
+    res.type('text/markdown; charset=utf-8').send(requirements.renderMarkdown(doc));
+  });
+  r.post('/releases/:id/requirements', async (req, res) => {
+    const user = requireUser(req);
+    const rel = releases.getRelease(String(req.params.id));
+    res.status(201).json(await requirements.generateRequirements(mustFindProject(rel.ontologyId), { version: rel.version, release: rel, actor: user }));
   });
 
   r.post('/ontologies/:id/interviews', async (req, res) => {
@@ -252,7 +317,7 @@ export function apiRouter(): Router {
   r.get('/interviews/:id', (req, res) => {
     const s = useCases.getInterview(String(req.params.id));
     if (s.userId !== req.user?.id) throw new HttpError(403, 'Interviews are private to the person interviewed');
-    res.json({ ...s, useCase: useCases.getUseCase(s.useCaseId) });
+    res.json({ ...s, useCase: useCaseDetail(s.useCaseId, req.user) });
   });
   r.post('/interviews/:id/messages', async (req, res) => {
     const s = useCases.getInterview(String(req.params.id));
@@ -265,11 +330,11 @@ export function apiRouter(): Router {
     const p = project(req);
     const user = requireUser(req);
     const cr = await useCases.synthesise(p, user, Array.isArray(req.body?.useCaseIds) ? req.body.useCaseIds : undefined);
-    res.status(201).json(crs.detail(cr));
+    res.status(201).json(crOut(cr, req));
   });
 
   /* ------------------------------ meetings --------------------------- */
-  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id)));
+  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id).map((m) => meetings.meetingFor(m, req.user))));
   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
@@ -280,7 +345,7 @@ export function apiRouter(): Router {
     const delay = Number(req.query.delayMs ?? req.body?.delayMs);
     res.status(201).json(await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', Number.isFinite(delay) ? { delayMs: delay } : {}));
   });
-  r.get('/meetings/:id', (req, res) => res.json(meetings.getMeeting(String(req.params.id))));
+  r.get('/meetings/:id', (req, res) => res.json(meetings.meetingFor(meetings.getMeeting(String(req.params.id)), req.user)));
   r.post('/meetings/:id/analyse', async (req, res) => {
     requireUser(req);
     res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
@@ -292,8 +357,9 @@ export function apiRouter(): Router {
     res.json(await meetings.endLiveMeeting(m));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
-    const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), requireUser(req));
-    res.json({ useCases: out.useCases, changeRequest: out.changeRequest ? crs.detail(out.changeRequest) : undefined });
+    const user = requireUser(req);
+    const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), user);
+    res.json({ useCases: out.useCases.map((u) => useCases.present(u, user)), changeRequest: out.changeRequest ? crOut(out.changeRequest, req) : undefined });
   });
   r.get('/meetings/:id/stream', (req, res) => {
     const m = meetings.getMeeting(String(req.params.id));
@@ -329,6 +395,11 @@ export function apiRouter(): Router {
     const b = req.body ?? {};
     const kind: ChangeRequestKind = ['feature', 'bug', 'gap', 'editorial', 'deprecation'].includes(b.kind) ? b.kind : 'feature';
     if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
+    // Check cited use cases before creating anything.
+    for (const ucId of Array.isArray(b.useCaseIds) ? b.useCaseIds : []) {
+      const u = useCases.getUseCaseFor(String(ucId), user);
+      if (u.visibility === 'private') throw new HttpError(409, 'A change request cannot cite a private use case. Publish an anonymised version and cite that.');
+    }
     const cr = await crs.createChangeRequest(p, user, {
       title: optStr(b.title) ?? '',
       description: optStr(b.description) ?? '',
@@ -338,7 +409,8 @@ export function apiRouter(): Router {
       naturalLanguage: Array.isArray(b.ops) ? undefined : (optStr(b.naturalLanguage) ?? [optStr(b.title), optStr(b.description)].filter(Boolean).join('\n\n')),
       submit: !!b.submit,
     });
-    res.status(201).json(crs.detail(cr));
+    if (Array.isArray(b.useCaseIds) && b.useCaseIds.length) useCases.linkChangeRequest(cr, b.useCaseIds.map(String), user);
+    res.status(201).json(crOut(crs.getCR(cr.id), req));
   });
 
   r.post('/ontologies/:id/bug-reports', async (req, res) => {
@@ -355,44 +427,44 @@ export function apiRouter(): Router {
       origin: { type: 'bug-report' },
       naturalLanguage: `Bug report${termIri ? ` about <${termIri}>` : ''}: ${title}\n\n${description}`,
     });
-    res.status(201).json(crs.detail(cr));
+    res.status(201).json(crOut(cr, req));
   });
 
   const cr = (req: Request) => crs.getCR(String(req.params.id));
-  r.get('/change-requests/:id', (req, res) => res.json(crs.detail(cr(req))));
-  r.patch('/change-requests/:id', async (req, res) => res.json(crs.detail(await crs.updateOps(cr(req), requireUser(req), req.body ?? {}))));
-  r.post('/change-requests/:id/submit', async (req, res) => res.json(crs.detail(await crs.submit(cr(req), requireUser(req)))));
+  r.get('/change-requests/:id', (req, res) => res.json(crOut(cr(req), req)));
+  r.patch('/change-requests/:id', async (req, res) => res.json(crOut(await crs.updateOps(cr(req), requireUser(req), req.body ?? {}), req)));
+  r.post('/change-requests/:id/submit', async (req, res) => res.json(crOut(await crs.submit(cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {
     const decision = req.body?.decision;
     if (!['approve', 'request-changes', 'object', 'comment'].includes(decision)) throw new HttpError(400, 'decision must be approve, request-changes, object or comment');
-    res.json(crs.detail(await crs.addReview(cr(req), requireUser(req), decision, optStr(req.body?.comment))));
+    res.json(crOut(await crs.addReview(cr(req), requireUser(req), decision, optStr(req.body?.comment)), req));
   });
   r.post('/change-requests/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(crs.detail(await crs.addVote(cr(req), requireUser(req), choice, optStr(req.body?.comment))));
+    res.json(crOut(await crs.addVote(cr(req), requireUser(req), choice, optStr(req.body?.comment)), req));
   });
-  r.post('/change-requests/:id/merge', async (req, res) => res.json(crs.detail(await crs.merge(cr(req), requireUser(req)))));
-  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(crs.detail(await crs.withdraw(cr(req), requireUser(req)))));
-  r.post('/change-requests/:id/revise', async (req, res) => res.json(crs.detail(await crs.revise(cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)))));
+  r.post('/change-requests/:id/merge', async (req, res) => res.json(crOut(await crs.merge(cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(crOut(await crs.withdraw(cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/revise', async (req, res) => res.json(crOut(await crs.revise(cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)), req)));
   r.post('/change-requests/:id/retriage', async (req, res) => {
     requireUser(req);
-    res.json(crs.detail(await crs.advance(await crs.triage(cr(req)))));
+    res.json(crOut(await crs.advance(await crs.triage(cr(req))), req));
   });
 
   /* ------------------------------ releases --------------------------- */
   r.get('/ontologies/:id/releases', (req, res) => res.json(releases.listReleases(project(req).id)));
   r.post('/ontologies/:id/releases', async (req, res) => {
-    res.status(201).json(releases.releaseDetail(await releases.draftRelease(project(req), requireUser(req), optStr(req.body?.notes))));
+    res.status(201).json(relOut(req, await releases.draftRelease(project(req), requireUser(req), optStr(req.body?.notes))));
   });
-  r.get('/releases/:id', (req, res) => res.json(releases.releaseDetail(releases.getRelease(String(req.params.id)))));
+  r.get('/releases/:id', (req, res) => res.json(relOut(req, releases.getRelease(String(req.params.id)))));
   r.post('/releases/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(releases.releaseDetail(await releases.voteOnRelease(releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
+    res.json(relOut(req, await releases.voteOnRelease(releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
   });
   r.post('/releases/:id/publish', async (req, res) => {
-    res.json(releases.releaseDetail(await releases.publishRelease(releases.getRelease(String(req.params.id)), requireUser(req))));
+    res.json(relOut(req, await releases.publishRelease(releases.getRelease(String(req.params.id)), requireUser(req))));
   });
 
   /* ------------------------------- agents ---------------------------- */

@@ -23,6 +23,7 @@ export type Collection =
   | 'agentTokens'
   | 'agentReports'
   | 'feedback'
+  | 'requirementsDocs'
   | 'activity'
   | 'kv';
 

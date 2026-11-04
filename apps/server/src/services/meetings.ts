@@ -10,7 +10,7 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject } from './ontologies.js';
-import { createUseCase, synthesise } from './useCases.js';
+import { allUseCases, canSee, createUseCase, getUseCase, refOf, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
@@ -161,35 +161,68 @@ export function heuristicAnalysis(transcript: TranscriptLine[], existingLabels: 
 }
 
 /** Turn an analysed meeting into draft use cases (one per participant use case) and a proposed change request. */
+/** Transcript lines a use case from the analysis most likely came from: its speaker's turns that share words with it. */
+export function sourceLinesFor(m: Meeting, g: { speaker?: string; title: string; sections: UseCase['sections'] }): number[] {
+  const words = (t: string) => new Set(t.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+  const topic = words([g.title, g.sections.goal, g.sections.description, ...(g.sections.usageScenarios ?? [])].filter(Boolean).join(' '));
+  const scored = m.transcript
+    .map((l, i) => ({ i, l, overlap: [...words(l.text)].filter((w) => topic.has(w)).length }))
+    .filter((x) => (!g.speaker || x.l.speaker === g.speaker) && (x.overlap >= 2 || (g.speaker && x.overlap >= 1)));
+  const lines = (scored.length ? scored : g.speaker ? m.transcript.map((l, i) => ({ i, l, overlap: 0 })).filter((x) => x.l.speaker === g.speaker) : []).map((x) => x.i);
+  return lines.slice(0, 12);
+}
+
+/** Use cases created from a meeting, for a viewer. */
+export function useCasesFromMeeting(m: Meeting, viewer?: User): NonNullable<Meeting['useCases']> {
+  return allUseCases(m.ontologyId)
+    .filter((u) => u.source === 'meeting' && u.sourceRef === m.id && canSee(u, viewer))
+    .sort((a, b) => a.number - b.number)
+    .map((u) => ({ ...refOf(u), sourceLines: u.sourceLines }));
+}
+
+/** A meeting with its linked use cases, for a viewer. */
+export const meetingFor = (m: Meeting, viewer?: User): Meeting => ({ ...m, useCases: useCasesFromMeeting(m, viewer) });
+
 export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[]; changeRequest?: ChangeRequest }> {
   if (!m.analysis) m = await analyseMeeting(m);
   const a = m.analysis!;
   const project = getProject(m.ontologyId);
-  const ucs: UseCase[] = [];
+  // Calling this twice must not duplicate the use cases.
+  const existing = allUseCases(m.ontologyId).filter((u) => u.source === 'meeting' && u.sourceRef === m.id);
+  const ucs: UseCase[] = [...existing];
   const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
-  groups.forEach((g, i) => {
-    ucs.push(
-      createUseCase(project, actor, {
-        source: 'meeting',
-        sourceRef: m.id,
-        status: 'ready',
-        sections: { ...g.sections, name: g.sections.name ?? g.title, notes: `From the call “${m.title}”${'speaker' in g && g.speaker ? `, described by ${g.speaker}` : ''}.` },
-        // Attach the call's questions and terms to the first use case so they are not duplicated.
-        competencyQuestions:
-          i === 0 ? a.competencyQuestions.map((q) => ({ id: newId('cq'), question: q.question, status: 'untested' as const, exampleAnswer: undefined })) : [],
-        terms: i === 0 ? a.terms : [],
-      }),
-    );
-  });
+  if (!existing.length)
+    groups.forEach((g, i) => {
+      ucs.push(
+        createUseCase(project, actor, {
+          source: 'meeting',
+          sourceRef: m.id,
+          sourceLines: sourceLinesFor(m, g),
+          // Calls are working group business: their use cases are shared with the group, not published.
+          visibility: 'group',
+          status: 'triage',
+          sections: { ...g.sections, name: g.sections.name ?? g.title, notes: `From the call “${m.title}”${'speaker' in g && g.speaker ? `, described by ${g.speaker}` : ''}.` },
+          // Attach the call's questions and terms to the first use case so they are not duplicated.
+          competencyQuestions:
+            i === 0 ? a.competencyQuestions.map((q) => ({ id: newId('cq'), question: q.question, status: 'untested' as const, exampleAnswer: undefined })) : [],
+          terms: i === 0 ? a.terms : [],
+        }),
+      );
+    });
   let changeRequest: ChangeRequest | undefined;
-  try {
-    changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
-    changeRequest.origin = { type: 'meeting', meetingId: m.id };
-    put('changeRequests', changeRequest, changeRequest.ontologyId);
-  } catch (err) {
-    console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
+  const alreadyProposed = ucs.some((u) => u.changeRequestIds?.length);
+  if (!alreadyProposed) {
+    try {
+      changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
+      changeRequest.origin = { type: 'meeting', meetingId: m.id };
+      put('changeRequests', changeRequest, changeRequest.ontologyId);
+    } catch (err) {
+      console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
+    }
   }
-  return { useCases: ucs, changeRequest };
+  if (!existing.length)
+    logActivity({ ontologyId: m.ontologyId, actorId: actor.id, type: 'meeting.usecases', message: `turned the call “${m.title}” into ${ucs.length} use case${ucs.length === 1 ? '' : 's'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
+  return { useCases: ucs.map((u) => getUseCase(u.id)), changeRequest };
 }
 
 /* ------------------------------------------------------------------------ */

@@ -97,3 +97,17 @@ Never argue with feedback or defend the product. Keep each message to a few sent
 export const FEEDBACK_SUMMARY = `Summarise alpha-tester feedback on Concord (an ODI prototype for AI-assisted collaborative ontology design and governance) for the product team. Group it into themes with counts, note the governance options people preferred, call out the strongest positive and negative signals, and list concrete suggested changes. Quote short phrases where they are telling. Be neutral and precise; don't overstate small samples.`;
 
 export const PERSONA_ACTOR = `You are role-playing a participant in a simulated standards working group, so that an alpha tester can see how collaboration on the Concord platform feels. Stay in character (given below), be realistic and concise (one to three sentences), and engage with the actual content of the change request in front of you. You may agree, disagree, ask a pointed modelling question or raise a practical concern from your organisation's point of view.`;
+
+export const ANONYMISER = `You turn a participant's private use case into an anonymised, synthetic version that can be published, with no name attached, to justify changes to a shared data standard (an OWL ontology).
+
+Keep everything that matters for the ontology: the goal, the kinds of actors, the shape of the scenarios and flows, the data needed, every competency question (reworded only as far as needed) and the candidate terms.
+Remove or replace anything that could identify the participant, their organisation, colleagues, clients or location: names of people, organisations, places, products and internal systems; contact details; links; exact figures or dates that are distinctive; anything confidential. Replace specifics with plausible fictional or generic ones (e.g. "a food bank in a mid-sized town", "Riverton"), keeping the example concrete enough to be useful.
+Do not invent new requirements. Write in neutral third person. Keep notes and references out.
+In "changes", list in plain words what you changed (e.g. "Replaced the charity's name with 'a local food bank'"), so the participant can check nothing identifying is left. Never repeat the removed details in "changes": describe them generically.`;
+
+export const REQUIREMENTS_WRITER = `You write the "Use cases and requirements" document for a release of a shared data standard (an OWL ontology) developed by a working group on Concord, the Open Data Institute platform.
+
+Write it the way the W3C Verifiable Credentials Use Cases note does: not a list or a data dump, but one running story with a small cast of fictional, named characters whose day-to-day needs walk the reader through every use case in turn. Keep it concrete, warm and short (a paragraph or two per section). Introduce the cast in the intro.
+Every claim that comes from a use case must cite it inline as [UC-n] using the refs given (e.g. "… so she filters for step-free sessions [UC-4]."). Cite every use case at least once. Do not cite anything that is not in the list. Don't mention who described a use case.
+Then derive the requirements: short, testable statements of what the standard must let people say or ask ("It must be possible to record whether expenses are reimbursed."), each with the use cases it comes from and the ontology terms (labels or CURIEs from the term list) that meet it, if any. Where a requirement is a competency question, keep its intent. Requirements can be cited in the story as [R1] etc. in the order you list them.
+Use British English.`;

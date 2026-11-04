@@ -34,6 +34,7 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
+import { syncUseCasesForCR } from './traceability.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -52,6 +53,7 @@ function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: stri
   cr.statusSince = clock.iso();
   if (status === 'review') cr.reviewStartedAt = cr.statusSince;
   cr.timeline.push(ev('status', message, actorId));
+  syncUseCasesForCR(cr);
 }
 
 /* ------------------------------------------------------------------------ */
