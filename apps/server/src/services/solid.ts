@@ -83,6 +83,13 @@ async function sessionFor(rec: PodRecord): Promise<Session> {
   return s;
 }
 
+/** A precondition for `writeExisting`: replace only this version (ETag), or only create (`*`). */
+export interface WriteCondition {
+  ifMatch?: string;
+  ifNoneMatch?: '*';
+}
+export class PreconditionFailed extends Error {}
+
 export const solid = {
   get enabled() {
     return !!config.solid.serverUrl;
@@ -114,13 +121,13 @@ export const solid = {
   },
 
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
-  async write(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+  async write(userId: string, relPath: string, body: string | Buffer, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const s = await sessionFor({ ...rec, id: userId });
         const url = `${rec.podUrl}concord/${relPath}`;
-        const res = await s.fetch(url, { method: 'PUT', headers: { 'content-type': contentType }, body });
+        const res = await s.fetch(url, { method: 'PUT', headers: { 'content-type': contentType }, body: typeof body === 'string' ? body : new Uint8Array(body) });
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
       } catch (err) {
@@ -150,38 +157,66 @@ export const solid = {
 
   /**
    * If something is already at `relPath` (in the pod, or this server's private
-   * files when there is no pod), keep a verbatim copy beside it
-   * (`<name>.previous-<time><ext>`) before it is written over. Throws if the pod
-   * can't say, so the caller writes nothing.
+   * files when there is no pod), keep a byte-for-byte copy beside it under a new
+   * name (`<name>.previous-<time>-<n><ext>`, never replacing another file).
+   * Returns the precondition the caller's write must carry so it only replaces
+   * exactly what was kept (or, if nothing was there, only creates). Throws if the
+   * pod can't say, so the caller writes nothing.
    */
-  async keepExisting(userId: string, relPath: string): Promise<void> {
+  async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
-    const aside = relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}${ext}`);
+    const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
     if (this.enabled && rec) {
       const s = await sessionFor({ ...rec, id: userId });
       const url = `${rec.podUrl}concord/${relPath}`;
       const res = await s.fetch(url);
-      if (res.status === 404 || res.status === 410) return;
+      if (res.status === 404 || res.status === 410) return { ifNoneMatch: '*' };
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+      const etag = res.headers.get('etag');
+      if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
       const type = res.headers.get('content-type') ?? 'application/octet-stream';
-      await this.writeExisting(userId, aside, await res.text(), type);
-      return;
+      const bytes = await res.arrayBuffer();
+      for (let n = 0; ; n++) {
+        if (n >= 5) throw new Error(`could not find a free name to keep ${url}`);
+        try {
+          await this.writeExisting(userId, asideName(n), bytes, type, { ifNoneMatch: '*' });
+          break;
+        } catch (err) {
+          if (!(err instanceof PreconditionFailed)) throw err;
+        }
+      }
+      return { ifMatch: etag };
     }
-    const file = path.join(config.dataDir, 'private', userId, relPath);
-    if (fs.existsSync(file)) fs.copyFileSync(file, path.join(config.dataDir, 'private', userId, aside));
+    const dir = path.join(config.dataDir, 'private', userId);
+    const file = path.join(dir, relPath);
+    if (!fs.existsSync(file)) return {};
+    for (let n = 0; ; n++) {
+      if (n >= 5) throw new Error(`could not find a free name to keep ${file}`);
+      try {
+        fs.copyFileSync(file, path.join(dir, asideName(n)), fs.constants.COPYFILE_EXCL);
+        return {};
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
   },
 
   /**
    * Like `write`, but when the user has a pod the write must reach it: no quiet
    * fallback to this server, which later reads of the pod wouldn't see. Throws
-   * if the pod refuses or can't be reached.
+   * if the pod refuses or can't be reached (`PreconditionFailed` when `when`
+   * doesn't hold: the resource changed, or already exists).
    */
-  async writeExisting(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+  async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
-    if (!(this.enabled && rec)) return this.write(userId, relPath, body, contentType);
+    if (!(this.enabled && rec)) return this.write(userId, relPath, typeof body === 'string' ? body : Buffer.from(body), contentType);
     const s = await sessionFor({ ...rec, id: userId });
     const url = `${rec.podUrl}concord/${relPath}`;
-    const res = await s.fetch(url, { method: 'PUT', headers: { 'content-type': contentType }, body });
+    const headers: Record<string, string> = { 'content-type': contentType };
+    if (when.ifMatch) headers['if-match'] = when.ifMatch;
+    if (when.ifNoneMatch) headers['if-none-match'] = when.ifNoneMatch;
+    const res = await s.fetch(url, { method: 'PUT', headers, body });
+    if (res.status === 412) throw new PreconditionFailed(`PUT ${url} → 412`);
     if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
     return { kind: 'solid', url };
   },

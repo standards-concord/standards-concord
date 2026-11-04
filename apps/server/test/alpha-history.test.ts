@@ -34,13 +34,24 @@ describe('the first copy in a tester’s pod', () => {
     await solid.write(u.id, 'alpha/testing.jsonld', theirs, 'text/turtle');
     await recordVersion(u, { version: '0.8.0' });
     const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
-    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+\.jsonld$/.test(f));
+    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+-\d+\.jsonld$/.test(f));
     expect(aside).toHaveLength(1);
     expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe(theirs);
     expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0']);
     // Only the first time: later copies are this server's own.
     await recordVersion(u, { version: '0.8.1' });
     expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-'))).toHaveLength(1);
+  });
+
+  it('never replaces a file already using the name it would keep a copy under', async () => {
+    const u = await tester('name-taken');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'theirs', 'text/plain');
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    fs.writeFileSync(path.join(dir, 'testing.previous-1234-0.jsonld'), 'already here');
+    vi.spyOn(Date, 'now').mockReturnValue(1234);
+    await recordVersion(u, { version: '0.8.0' });
+    expect(fs.readFileSync(path.join(dir, 'testing.previous-1234-0.jsonld'), 'utf8')).toBe('already here');
+    expect(fs.readFileSync(path.join(dir, 'testing.previous-1234-1.jsonld'), 'utf8')).toBe('theirs');
   });
 
   it('writes nothing while the pod can’t say whether something is there, and catches up later', async () => {
