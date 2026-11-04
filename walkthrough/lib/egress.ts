@@ -20,7 +20,8 @@
  * - Any other tunnel is plain HTTP, so it may only go to an allowed http: origin, and the
  *   proxy parses it itself: each request on it must be for that origin, with a matching
  *   Host, exactly as above.
- * - A request must carry exactly one Host header; a CONNECT inside a tunnel is refused.
+ * - Every request, CONNECT included, must carry exactly one Host header naming its
+ *   target; a CONNECT inside a tunnel, or anything malformed or unexpected, is refused.
  * - A WebSocket handshake (over a tunnel, or sent straight to the proxy as a ws: URL) is
  *   held to the same rules. Nothing after it is passed on until the server answers
  *   101 Switching Protocols; after that the connection carries WebSocket frames.
@@ -78,25 +79,38 @@ export function readClientHello(b: Buffer): 'more' | 'bad' | { serverName: strin
   };
   try {
     need(2 + 32);
+    // legacy_version: TLS 1.0 to 1.2 (1.3 clients send 1.2 here).
+    if (r[i] !== 3 || r[i + 1] < 1 || r[i + 1] > 3) return 'bad';
     i += 2 + 32; // version, random
     need(1);
-    i += 1 + r[i]; // session id
+    if (r[i] > 32) return 'bad';
+    i += 1 + r[i]; // session id, at most 32 bytes
     need(2);
-    i += 2 + r.readUInt16BE(i); // cipher suites
+    const suites = r.readUInt16BE(i);
+    if (suites < 2 || suites % 2) return 'bad';
+    i += 2;
+    need(suites);
+    i += suites; // cipher suites: at least one, two bytes each
     need(1);
-    i += 1 + r[i]; // compression methods
-    if (i === r.length) return { serverName: null };
+    const methods = r[i];
+    need(1 + methods);
+    if (methods < 1 || !r.subarray(i + 1, i + 1 + methods).includes(0)) return 'bad';
+    i += 1 + methods; // compression methods, including "none"
+    // Browsers always send extensions; a hello without them isn't one we expect.
     need(2);
     const end = i + 2 + r.readUInt16BE(i);
     i += 2;
     if (end !== r.length) return 'bad';
     let serverName: string | null = null;
+    const seen = new Set<number>();
     while (i < end) {
       need(4);
       const type = r.readUInt16BE(i);
       const len = r.readUInt16BE(i + 2);
       i += 4;
       need(len);
+      if (seen.has(type)) return 'bad';
+      seen.add(type);
       if (type === 0) {
         // server_name: a list holding one host_name.
         if (serverName !== null || len < 5) return 'bad';
@@ -105,6 +119,7 @@ export function readClientHello(b: Buffer): 'more' | 'bad' | { serverName: strin
         const nameLength = r.readUInt16BE(i + 3);
         if (list !== len - 2 || nameType !== 0 || nameLength !== len - 5) return 'bad';
         serverName = r.subarray(i + 5, i + 5 + nameLength).toString('latin1');
+        if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(serverName)) return 'bad';
       }
       i += len;
     }
@@ -244,10 +259,18 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
     else socket.destroy();
   };
 
+  // An Expect header other than 100-continue: Node would answer 417 itself, unrecorded.
+  const expectation = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const to = (req.socket as TunnelSocket)[TUNNEL];
+    blocked(`${to ? `http://${to}` : String(req.url).slice(0, 200)} (Expect: ${String(req.headers.expect).slice(0, 60)})`);
+    res.writeHead(417).end();
+  };
+
   // Plain-text tunnels are parsed here, request by request, rather than passed through.
   const tunnels = http.createServer({ requireHostHeader: false }, forward);
   tunnels.on('upgrade', upgrade);
   tunnels.on('clientError', clientError);
+  tunnels.on('checkExpectation', expectation);
   // A CONNECT inside a tunnel would open a tunnel the outer check never saw.
   tunnels.on('connect', (req, client: net.Socket) => {
     blocked(`http://${(client as TunnelSocket)[TUNNEL]} (CONNECT ${String(req.url).slice(0, 100)} inside a tunnel)`);
@@ -326,12 +349,20 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
       client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
+    // Its Host must be exactly the target too, as for any other request.
+    const hosts = req.rawHeaders.filter((_, k) => k % 2 === 0 && /^host$/i.test(req.rawHeaders[k])).length;
+    if (hosts !== 1 || authority(req.headers.host, 'https:') !== hostPort) {
+      blocked(`CONNECT ${hostPort} (${hosts === 1 ? `Host: ${req.headers.host}` : `${hosts} Host headers`})`);
+      client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      return;
+    }
     client.on('error', () => client.destroy());
     client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     inspect(client, hostPort, head);
   });
   server.on('upgrade', upgrade);
   server.on('clientError', clientError);
+  server.on('checkExpectation', expectation);
   server.on('connection', track);
 
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));

@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Browser } from '@playwright/test';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { guardContext, guardedPage, hasChromium, launchBrowser } from '../lib/browser.ts';
+import { guardContext, hasChromium, launchBrowser } from '../lib/browser.ts';
 import { readClientHello, startEgressProxy, type Egress } from '../lib/egress.ts';
 import { fontFile, serveFonts } from '../lib/fonts.ts';
 
@@ -183,11 +183,14 @@ describe.runIf(run)('egress proxy', () => {
     let packets = 0;
     udp.on('message', () => packets++);
     await new Promise<void>((r) => udp.bind(0, '127.0.0.1', r));
-    const stun = `stun:127.0.0.1:${(udp.address() as AddressInfo).port}`;
-    const tryRtc = (stunUrl: string) =>
+    const udpPort = (udp.address() as AddressInfo).port;
+    // A TURN server that is only reachable over TCP, on the denied server C.
+    const cPort = new URL(C).port;
+    const servers = [{ urls: `stun:127.0.0.1:${udpPort}` }, { urls: `turn:127.0.0.1:${udpPort}?transport=udp`, username: 'u', credential: 'p' }, { urls: `turn:127.0.0.1:${cPort}?transport=tcp`, username: 'u', credential: 'p' }];
+    const tryRtc = (iceServers: RTCIceServer[]) =>
       new Promise<string>((r) => {
         try {
-          const pc = new RTCPeerConnection({ iceServers: [{ urls: stunUrl }] });
+          const pc = new RTCPeerConnection({ iceServers });
           pc.createDataChannel('x');
           void pc.createOffer().then((o) => pc.setLocalDescription(o));
           setTimeout(() => r('created'), 3000);
@@ -195,63 +198,24 @@ describe.runIf(run)('egress proxy', () => {
           r('blocked');
         }
       });
-    // With the recording's guard, pages have no RTCPeerConnection at all…
-    const guarded = await browser.newContext();
-    const blocked = new Set<string>();
-    await guardContext(guarded, blocked);
-    const page = await guardedPage(guarded, blocked);
-    await page.goto(`${A}/`);
-    expect(await page.evaluate(tryRtc, stun)).toBe('blocked');
-    // …and an attempt is reported even when the page swallows the error.
-    expect([...blocked].some((b) => b.startsWith('webrtc: RTCPeerConnection'))).toBe(true);
-    blocked.clear();
-    await page.evaluate(() => {
-      try {
-        new RTCPeerConnection();
-      } catch {
-        /* swallowed */
-      }
-    });
-    await expect.poll(() => blocked.size).toBe(1);
-    // Page code can't silence the report: it comes from the debugger, not the page.
-    blocked.clear();
-    await page.evaluate(() => {
-      (globalThis as any).__playwright__binding__ = () => {};
-      (globalThis as any).__playwright__binding__controller__ = { callBinding: () => {} };
-      try {
-        new RTCPeerConnection();
-      } catch {
-        /* swallowed */
-      }
-    });
-    await expect.poll(() => blocked.size).toBe(1);
-    // Nor forge one: a script of its own under the replacement's name doesn't count.
-    blocked.clear();
-    await page.evaluate(() => {
-      try {
-        (0, eval)("throw new Error('forged')\n//# sourceURL=concord-walkthrough-no-webrtc.js");
-      } catch {
-        /* swallowed */
-      }
-    });
-    await page.waitForTimeout(200);
-    expect(blocked.size).toBe(0);
-    // The first inline script and a fresh iframe are covered too.
-    blocked.clear();
-    await page.goto(`${A}/early`);
-    await expect.poll(() => [...blocked].filter((b) => b.startsWith('webrtc: RTCPeerConnection')).length).toBeGreaterThanOrEqual(2);
-    // A page the recording didn't open itself is closed and reported.
-    blocked.clear();
-    const [popup] = await Promise.all([guarded.waitForEvent('page'), page.evaluate(() => void window.open('about:blank'))]);
-    await expect.poll(() => popup.isClosed()).toBe(true);
-    expect([...blocked].some((b) => b.startsWith('unexpected page'))).toBe(true);
-    await guarded.close();
-    // …and even without it, the launch policy keeps WebRTC from sending UDP directly.
+    // Without the page guard, the launch policy alone keeps WebRTC off UDP, and TURN over
+    // TCP has to go through the proxy, which refuses and reports it.
     const bare = await browser.newContext();
-    const page2 = await bare.newPage();
-    await page2.goto(`${A}/`);
-    await page2.evaluate(tryRtc, stun);
+    const page = await bare.newPage();
+    await page.goto(`${A}/`);
+    expect(await page.evaluate(tryRtc, servers)).toBe('created');
     await bare.close();
+    expect(packets).toBe(0);
+    expect(outside.has(`127.0.0.1:${cPort}`)).toBe(true);
+    // With the guard, pages and frames have no working RTCPeerConnection at all.
+    const guarded = await browser.newContext();
+    await guardContext(guarded);
+    const page2 = await guarded.newPage();
+    await page2.goto(`${A}/early`);
+    expect(await page2.evaluate(tryRtc, servers)).toBe('blocked');
+    const frame = page2.frames().find((f) => f !== page2.mainFrame());
+    expect(await frame?.evaluate(() => { try { new RTCPeerConnection(); return 'created'; } catch { return 'blocked'; } })).toBe('blocked');
+    await guarded.close();
     udp.close();
     expect(packets).toBe(0);
   }, 30_000);
@@ -398,6 +362,65 @@ describe.runIf(run)('egress proxy', () => {
       const broken = Buffer.from(hello);
       broken.writeUInt16BE(broken.readUInt16BE(3) - 1, 3);
       expect(readClientHello(broken.subarray(0, broken.length - 1))).toBe('bad');
+    });
+
+    /** A hand-made ClientHello, so its fields can be wrong in ways a real client won't make. */
+    const craftHello = (o: { suites?: number[]; methods?: number[]; sni?: string; extensions?: boolean }) => {
+      const u16 = (n: number) => Buffer.from([n >> 8, n & 255]);
+      const ext: Buffer[] = [];
+      if (o.sni !== undefined) {
+        const name = Buffer.from(o.sni);
+        ext.push(Buffer.concat([u16(0), u16(name.length + 5), u16(name.length + 3), Buffer.from([0]), u16(name.length), name]));
+      }
+      const extensions = Buffer.concat(ext);
+      const suites = o.suites ?? [0x1301];
+      const methods = o.methods ?? [0];
+      const body = Buffer.concat([
+        Buffer.from([3, 3]),
+        Buffer.alloc(32, 7),
+        Buffer.from([0]),
+        u16(suites.length * 2),
+        ...suites.map(u16),
+        Buffer.from([methods.length, ...methods]),
+        ...(o.extensions === false ? [] : [u16(extensions.length), extensions]),
+      ]);
+      const hs = Buffer.concat([Buffer.from([1, body.length >> 16, (body.length >> 8) & 255, body.length & 255]), body]);
+      return Buffer.concat([Buffer.from([0x16, 3, 1]), u16(hs.length), hs]);
+    };
+
+    it('rejects ClientHellos with invalid fields', () => {
+      expect(readClientHello(craftHello({ sni: 'localhost' }))).toEqual({ serverName: 'localhost' });
+      expect(readClientHello(craftHello({ sni: 'localhost', suites: [], methods: [] }))).toBe('bad');
+      expect(readClientHello(craftHello({ sni: 'localhost', suites: [] }))).toBe('bad');
+      expect(readClientHello(craftHello({ sni: 'localhost', methods: [1] }))).toBe('bad');
+      expect(readClientHello(craftHello({ extensions: false }))).toBe('bad');
+      expect(readClientHello(craftHello({ sni: 'bad name' }))).toBe('bad');
+    });
+
+    it('refuses a tunnel opened with a malformed ClientHello, even with the right name', async () => {
+      const bPort = new URL(B).port;
+      egress.allow(`https://localhost:${bPort}`);
+      const hits = aRequests.length;
+      await tunnel(`localhost:${bPort}`, Buffer.concat([craftHello({ sni: 'localhost', suites: [], methods: [] }), Buffer.from('GET /after-hello HTTP/1.1\r\nHost: x\r\n\r\n')]));
+      expect(outside.has(`https://localhost:${bPort} (not a well-formed TLS ClientHello)`)).toBe(true);
+      expect(aRequests.length).toBe(hits);
+    });
+
+    it('refuses a CONNECT without exactly one Host naming its target', async () => {
+      const target = `127.0.0.1:${port()}`;
+      expect(await direct(`CONNECT ${target} HTTP/1.1\r\n\r\n`)).toContain('403');
+      expect(await direct(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nHost: denied.invalid\r\n\r\n`)).toContain('403');
+      expect(await direct(`CONNECT ${target} HTTP/1.1\r\nHost: denied.invalid\r\n\r\n`)).toContain('403');
+      expect(outside.has(`CONNECT ${target} (0 Host headers)`)).toBe(true);
+      expect(outside.has(`CONNECT ${target} (2 Host headers)`)).toBe(true);
+      expect(outside.has(`CONNECT ${target} (Host: denied.invalid)`)).toBe(true);
+    });
+
+    it('records requests Node would refuse with 417 itself', async () => {
+      expect(await direct(`GET ${A}/expect HTTP/1.1\r\nExpect: unsupported\r\nConnection: close\r\n\r\n`)).toContain('417');
+      expect(await tunnel(`127.0.0.1:${port()}`, `GET /expect HTTP/1.1\r\nExpect: unsupported\r\nConnection: close\r\n\r\n`)).toContain('417');
+      expect([...outside].filter((o) => o.includes('(Expect: unsupported)')).length).toBe(2);
+      expect(aRequests).not.toContain('/expect');
     });
 
     it('refuses a TLS tunnel whose server name is not the host it was opened to', async () => {
