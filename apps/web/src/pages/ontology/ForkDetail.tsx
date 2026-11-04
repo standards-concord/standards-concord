@@ -110,7 +110,8 @@ function AddTerms({ onDone }: { onDone: () => void }) {
   const [result, setResult] = useState<string>();
   const add = useAction(async () => {
     const r = await api.editFork(id, forkSlug, { description: text.trim() });
-    setResult(`Added ${r.terms.map((t) => t.curie).join(', ') || 'the edits'}. ${r.validation.consistent ? 'The ontology is still logically consistent.' : ''}`);
+    const check = r.validation.reasoner === 'owl' ? 'The OWL reasoner confirms the ontology is still logically consistent.' : 'Checked with the structural reasoner only (the full OWL reasoner is not installed on this server).';
+    setResult(`Added ${r.terms.map((t) => t.curie).join(', ') || 'the edits'}. ${r.validation.consistent ? check : ''}`);
     setText('');
     onDone();
   });
@@ -153,7 +154,19 @@ export function ForkPage() {
   const discard = (c: ForkConflict) => {
     if (!c.iri) return;
     if (window.confirm(`Discard this fork's change to ${c.curie ?? c.iri}? The fork goes back to upstream's version of it; you can redo the change after syncing.`))
-      void act.run(async () => (await api.discardForkChanges(id, forkSlug, [c.iri!]), `Discarded the change to ${c.curie ?? c.iri}.${f.behindBy ? ' Now sync with upstream.' : ''}`));
+      void act.run(async () => {
+        const after = f.behindBy ? ' Now sync with upstream.' : '';
+        try {
+          await api.discardForkChanges(id, forkSlug, [c.iri!]);
+        } catch (err) {
+          // The same edit also changed other terms: say which, and only go ahead if confirmed.
+          const message = (err as Error).message ?? '';
+          if (!/^The same edit also changed/.test(message) || !window.confirm(`${message.replace(/ Discard them as well.*$/, '')} Discard all of them?`)) throw err;
+          await api.discardForkChanges(id, forkSlug, [c.iri!], true);
+          return `Discarded the edit to ${c.curie ?? c.iri} and the other changes made with it.${after}`;
+        }
+        return `Discarded the change to ${c.curie ?? c.iri}.${after}`;
+      });
   };
   const sync = () =>
     void act.run(async () => {

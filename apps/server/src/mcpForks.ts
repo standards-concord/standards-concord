@@ -44,7 +44,7 @@ function brief(f: ForkSummary) {
 }
 
 const howToImport = (f: ForkSummary) =>
-  `Import the fork instead of the released ontology while you develop: use ${f.urls.iri} (content negotiated) or a file URL such as ${f.urls.formats.turtle}. Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
+  `Import the fork instead of the released ontology while you develop: use a file URL such as ${f.urls.formats.turtle} (or ${f.urls.iri} with an Accept header for the RDF format you want; like the release IRIs, it gives HTML to browsers and */*). Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
 
 export function registerForkTools(server: McpServer, user: User, resolveOntology: (ref: string) => OntologyProject | undefined) {
   const forkArg = z.string().describe('Fork id (frk_…) or "<ontology-slug>/<fork-slug>", as returned by create_fork or list_forks');
@@ -211,12 +211,13 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
         fork: forkArg,
         terms: z.array(z.string()).optional().describe('Terms whose changes to drop, as CURIEs (vol:Shift) or IRIs, or keys from a conflict; omit with all: true to drop everything'),
         all: z.boolean().optional().describe('Drop every change in the fork'),
+        includeRelated: z.boolean().optional().describe('Also drop changes to other terms made in the same edit (the error lists them when this is needed)'),
       },
     },
-    ({ fork, terms, all }) =>
+    ({ fork, terms, all, includeRelated }) =>
       withFork(fork, async (f) => {
         if (!all && !terms?.length) return fail('Name the terms whose changes to discard, or pass all: true.');
-        const r = await discardForkChanges(f, user, all ? 'all' : terms!);
+        const r = await discardForkChanges(f, user, all ? 'all' : terms!, { includeRelated });
         return json({ fork: brief(r), next: r.behindBy ? 'Now call sync_fork to pick up upstream\'s changes.' : 'Done.' });
       }),
   );

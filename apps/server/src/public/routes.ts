@@ -141,6 +141,9 @@ function notFound(res: Response, message: string, home?: string) {
 }
 
 async function serve(req: Request, res: Response) {
+  // Public data: any web application may import it, as it can a fork (routes/forkResolver.ts).
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Type');
   const slugSeg = String(req.params.slug);
   const versionSeg = req.params.version === undefined ? undefined : String(req.params.version);
   // An extension can be on the last segment: /def/x.ttl or /def/x/1.0.0.ttl

@@ -437,7 +437,7 @@ export function apiRouter(): Router {
   r.post('/ontologies/:id/forks/:fork/discard', async (req, res) => {
     const terms = req.body?.all === true ? 'all' : Array.isArray(req.body?.terms) ? req.body.terms.filter((t: unknown): t is string => typeof t === 'string' && !!t.trim()) : [];
     if (terms !== 'all' && !terms.length) throw new HttpError(400, 'Name the terms whose changes to discard, or send all: true');
-    res.json(await forks.discardForkChanges(fork(req), req.user, terms));
+    res.json(await forks.discardForkChanges(fork(req), req.user, terms, { includeRelated: req.body?.includeRelated === true }));
   });
   r.post('/ontologies/:id/forks/:fork/close', async (req, res) => res.json(await forks.closeFork(fork(req), req.user)));
 

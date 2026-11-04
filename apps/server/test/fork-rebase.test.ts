@@ -1,9 +1,12 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
+import type { OntologyFork } from '@concord/shared';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { config } from '../src/config.js';
+import { get, openDb, put } from '../src/db.js';
+import { forkDetail, forkSummary } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -213,5 +216,138 @@ describe('migration', () => {
     expect((await request(app).get('/def/volunteering/latest').set('Accept', 'text/turtle')).status).toBe(200);
     expect((await request(app).get('/def/volunteering/9.9.9.ttl')).status).toBe(404);
     expect((await request(app).get('/def/volunteering/draft').set('Accept', 'text/html')).status).toBe(200);
+  });
+});
+
+describe('second review', () => {
+  const fork = async (path: string) => (await request(app).get(path)).body;
+
+  it('a slow read never writes back an old version of the fork', async () => {
+    const path = await newFork('Stale reads');
+    const stale = structuredClone(get<OntologyFork>('forks', (await fork(path)).id)!);
+    await dev.post(`${path}/edits`).send({ ops: [addClass('AfterTheRead', 'after the read')] });
+    await forkSummary(stale);
+    await forkDetail(stale);
+    const now = get<OntologyFork>('forks', stale.id)!;
+    expect(now.revision).toBe(1);
+    expect(now.ops).toHaveLength(1);
+    expect(now.head).toBe(ontologyStore.forkHead(findProject('volunteering')!, now.slug));
+  });
+
+  it('an edit prepared before the fork changed elsewhere is refused, in git and in the database', async () => {
+    const path = await newFork('Other process');
+    const p = findProject('volunteering')!;
+    const before = await fork(path);
+    // Another server process moves the branch: this process's next edit must not build on the old head.
+    const g = await ontologyStore.forkGraph(p, before.slug);
+    await ontologyStore.commitFork(p, before.slug, g, 'Edit from another process', { name: 'Other', email: 'o@example.org' }, { expectedParent: before.head });
+    const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('LostEdit', 'lost edit')] });
+    expect(edit.status).toBe(409);
+    // And a database record changed elsewhere (closed, here) is not overwritten.
+    const path2 = await newFork('Closed elsewhere');
+    const rec = get<OntologyFork>('forks', (await fork(path2)).id)!;
+    const closedElsewhere = { ...rec, status: 'closed' as const, head: 'f'.repeat(40) };
+    put('forks', closedElsewhere, rec.ontologyId);
+    expect((await dev.post(`${path2}/edits`).send({ ops: [addClass('NotAfterClose', 'not after close')] })).status).toBe(409);
+  });
+
+  it('closing moves the branch, so an edit prepared before the close fails, and closing twice is refused', async () => {
+    const path = await newFork('Close race');
+    const p = findProject('volunteering')!;
+    const before = await fork(path);
+    expect((await dev.post(`${path}/close`)).status).toBe(200);
+    const g = await ontologyStore.forkGraph(p, before.slug);
+    await expect(ontologyStore.commitFork(p, before.slug, g, 'Late edit', { name: 'Late', email: 'l@example.org' }, { expectedParent: before.head })).rejects.toThrow(/changed/);
+    expect((await dev.post(`${path}/close`)).status).toBe(409);
+    expect((await fork(path)).status).toBe('closed');
+  });
+
+  it('a removal that would drop an axiom upstream added is a conflict, not a silent loss', async () => {
+    await upstream([addClass('DeleteAnchor', 'delete anchor')]);
+    const path = await newFork('Removes the anchor');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'removeTerm', iri: `${VOL}DeleteAnchor` }] });
+    await upstream([addClass('NewUpstreamChild', 'new upstream child', { subClassOf: [`${VOL}DeleteAnchor`] })]);
+    const before = await fork(path);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.synced).toBe(false);
+    expect(sync.conflicts).toEqual(expect.arrayContaining([expect.objectContaining({ curie: expect.stringMatching(/NewUpstreamChild|DeleteAnchor/) })]));
+    expect((await fork(path)).head).toBe(before.head);
+  });
+
+  it('upstream adding a subclass of a term the fork rewords is not a conflict', async () => {
+    const path = await newFork('Rewords cause');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}Cause`, set: { definition: 'A cause, as the fork words it.' } }] });
+    await upstream([addClass('ClimateCause', 'climate cause', { subClassOf: [`${VOL}Cause`] })]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.conflicts).toEqual([]);
+    expect(sync.synced).toBe(true);
+    const ttl = (await request(app).get(`/def/volunteering/forks/${sync.fork.slug}.ttl`)).text;
+    expect(ttl).toContain('vol:ClimateCause');
+    expect(ttl).toContain('as the fork words it');
+  });
+
+  it('an import given as a CURIE, or an explicit source, is compared exactly', async () => {
+    const path = await newFork('Import and source');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'addImport', iri: 'owl:' }] });
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}Location`, set: { source: ['https://example.org/places-register'] } }] });
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).not.toMatch(/^switch-/);
+    expect(check.fork.terms).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ iri: 'import:http://www.w3.org/2002/07/owl#', upstream: 'not-proposed' }),
+        expect.objectContaining({ curie: 'vol:Location', upstream: 'not-proposed' }),
+      ]),
+    );
+  });
+
+  it('an edit that was undone drops out, so it can not conflict later', async () => {
+    const p = findProject('volunteering')!;
+    const path = await newFork('Undone');
+    const original = (await ontologyStore.forkGraph(p, (await fork(path)).slug)).term(`${VOL}AccessibilityFeature`)!.definition!;
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: 'Temporarily reworded.' } }] });
+    const undone = await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: original } }] });
+    expect(undone.body.fork.ops).toEqual([]);
+    expect(undone.body.fork.terms).toEqual([]);
+    await upstream([{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: 'Reworded upstream.' } }]);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.synced).toBe(true);
+  });
+
+  it('refuses fork changes when the full OWL reasoner is required but cannot run', async () => {
+    const path = await newFork('No reasoner');
+    const prev = { require: config.requireFullReasoner, python: process.env.CONCORD_PYTHON };
+    config.requireFullReasoner = true;
+    process.env.CONCORD_PYTHON = '/nonexistent/python';
+    try {
+      const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('Unchecked', 'unchecked')] });
+      expect(edit.status).toBe(503);
+      expect(edit.body.error).toMatch(/reasoner/);
+      expect((await fork(path)).revision).toBe(0);
+    } finally {
+      config.requireFullReasoner = prev.require;
+      if (prev.python === undefined) delete process.env.CONCORD_PYTHON;
+      else process.env.CONCORD_PYTHON = prev.python;
+    }
+    // Where the reasoner is optional, the edit goes through and says how it was checked.
+    const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('Checked', 'checked')] });
+    expect(edit.status).toBe(200);
+    expect(['owl', 'structural']).toContain(edit.body.validation.reasoner);
+  });
+
+  it('discards only the named header field, and asks before discarding other terms changed in the same edit', async () => {
+    const path = await newFork('Discard scope');
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { title: 'Fork title', description: 'Fork description' } }] });
+    const r = await dev.post(`${path}/discard`).send({ terms: ['meta:title'] });
+    expect(r.status).toBe(200);
+    expect(r.body.ops).toEqual([{ op: 'setMetadata', set: { description: 'Fork description' } }]);
+    const ttl = (await request(app).get(`/def/volunteering/forks/${r.body.slug}.ttl`)).text;
+    expect(ttl).toContain('Fork description');
+    expect(ttl).not.toContain('Fork title');
+
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LeftOne', 'left one'), addClass('RightOne', 'right one')] });
+    await dev.post(`${path}/edits`).send({ ops: [{ op: 'addDisjointness', classes: [`${VOL}LeftOne`, `${VOL}RightOne`] }] });
+    const asks = await dev.post(`${path}/discard`).send({ terms: ['vol:LeftOne'] });
+    expect(asks.status).toBe(409);
+    expect(asks.body.error).toMatch(/vol:RightOne/);
   });
 });

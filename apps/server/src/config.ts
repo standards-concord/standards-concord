@@ -25,6 +25,12 @@ export const config = {
   webDist: path.join(repoRoot, 'apps/web/dist'),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',
   demoMode: bool(process.env.DEMO_MODE, true),
+  /**
+   * Refuse to publish fork edits when the full OWL reasoner (HermiT via toolkit/) can't run,
+   * instead of falling back to the structural check. On in production (the Docker image ships
+   * the toolkit); off by default elsewhere so the app runs with no setup.
+   */
+  requireFullReasoner: bool(process.env.CONCORD_REQUIRE_REASONER, process.env.NODE_ENV === 'production'),
   /** Comma-separated emails of deployment administrators (reset the demo, read all feedback). */
   adminEmails: (process.env.ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
 

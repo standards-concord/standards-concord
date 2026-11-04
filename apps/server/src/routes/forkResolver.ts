@@ -9,7 +9,7 @@ import { ontologyStore } from '../services/ontologyStore.js';
 /**
  * Dereferenceable development forks:
  *
- *   /def/<ontology>/forks/<fork>          content negotiated (Turtle by default)
+ *   /def/<ontology>/forks/<fork>          content negotiated like the version pages (HTML for browsers and wildcard Accept)
  *   /def/<ontology>/forks/<fork>.ttl      one format by extension (.jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl)
  *
  * Always the fork's latest revision, so an application that imports it picks
@@ -17,9 +17,6 @@ import { ontologyStore } from '../services/ontologyStore.js';
  * to the fork's page in Concord. Responses allow any origin, so a
  * web application can load the fork straight from the browser.
  */
-
-/** Content negotiation as for the public pages, but Turtle first, so clients that send *\/* (curl, fetch) get RDF rather than a redirect. */
-const NEGOTIABLE_TYPES = Object.keys(NEGOTIABLE).sort((a, b) => Number(NEGOTIABLE[a] === 'html') - Number(NEGOTIABLE[b] === 'html'));
 
 function plain(res: Response, status: number, message: string) {
   res.status(status).type('text/plain').send(message);
@@ -37,8 +34,11 @@ async function serve(req: Request, res: Response) {
 
   let format: OutputFormat | 'html' | undefined = seg.format;
   if (!format) {
-    const best = req.accepts(NEGOTIABLE_TYPES);
-    if (!best) return plain(res, 406, `Not acceptable. Available: ${NEGOTIABLE_TYPES.join(', ')}, or add an extension such as .ttl`);
+    // Exactly as the public version pages negotiate, so moving an import from the fork to a
+    // version (the migration plan) never changes what a client gets back.
+    const types = Object.keys(NEGOTIABLE);
+    const best = req.accepts(types);
+    if (!best) return plain(res, 406, `Not acceptable. Available: ${types.join(', ')}, or add an extension such as .ttl`);
     format = NEGOTIABLE[best];
     res.vary('Accept');
   }
