@@ -319,15 +319,35 @@ async function main() {
  * Runs in every page: shows the public hub address wherever the local one appears in the
  * page's text (the hub prints its own URL in places), and hides the alpha testers'
  * floating "Walkthrough" button, which would sit in the corner of every shot.
+ *
+ * CodeMirror owns its DOM and redraws any text changed under it, which would set this
+ * observer off again forever, so code views are changed through the editor instead.
  */
 function presentation({ local, shown }: { local: string[]; shown: string }) {
+  const swap = (t: string) => local.reduce((acc, l) => acc.split(l).join(shown), t);
+  const editor = (content: Element) => {
+    // EditorView.findFromDOM, without importing the app's CodeMirror.
+    const tile = (content as any).cmTile ?? (content as any).cmView;
+    const view = tile?.root?.view ?? tile?.rootView?.view;
+    if (!view) return;
+    const doc: string = view.state.doc.toString();
+    if (!local.some((l) => doc.includes(l))) return;
+    view.dispatch({ changes: { from: 0, to: doc.length, insert: swap(doc) } });
+  };
   const fix = (root: Node) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const el = root instanceof Element ? root : root.parentElement;
+    const inEditor = el?.closest('.cm-content');
+    if (inEditor) return editor(inEditor);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest('.cm-editor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       const t = n.nodeValue ?? '';
-      if (local.some((l) => t.includes(l))) n.nodeValue = local.reduce((acc, l) => acc.split(l).join(shown), t);
+      if (local.some((l) => t.includes(l))) n.nodeValue = swap(t);
     }
-    for (const b of (root instanceof Element || root instanceof Document ? root : document).querySelectorAll?.('button.fixed') ?? []) {
+    const scope = root instanceof Element || root instanceof Document ? root : document;
+    for (const c of scope.querySelectorAll?.('.cm-content') ?? []) editor(c);
+    for (const b of scope.querySelectorAll?.('button.fixed') ?? []) {
       if (/^\s*Walkthrough/.test(b.textContent ?? '')) (b as HTMLElement).style.display = 'none';
     }
   };

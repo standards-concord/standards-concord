@@ -68,7 +68,7 @@ const CHAPTERS: Record<string, { eyebrow: string; title: string; sub?: string; a
 const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
 
 /** What each format view must contain for the narration about it to be true. */
-const FORMAT_MARKERS: Record<string, RegExp> = { turtle: /@prefix|owl:Class/, linkml: /classes:/, shacl: /sh:NodeShape/, shaclc: /^\s*shape\s/m, typescript: /\bclass\s+\w+/ };
+const FORMAT_MARKERS: Record<string, RegExp> = { turtle: /@prefix|owl:Class/, linkml: /classes:/, shacl: /sh:NodeShape/, shaclc: /\bshape\s+\S+\s*->/, typescript: /\bclass\s+\w+/ };
 
 async function apiJson(c: Ctx, p: string): Promise<any> {
   const res = await c.api.get(`${c.hub}${p}`);

@@ -29,6 +29,7 @@ let browser: Browser;
 const outside = new Set<string>();
 
 let aConnections = 0;
+let bBytes = 0;
 const aUpgrades: string[] = [];
 const aRequests: string[] = [];
 const listen = (h: http.RequestListener) =>
@@ -48,6 +49,8 @@ beforeAll(async () => {
     if (req.url === '/hop') res.writeHead(302, { location: `${C}/leak` }).end();
     else res.end('ok');
   });
+  // Every byte that reaches B, parsed or not.
+  b.on('connection', (sock) => sock.on('data', (d) => (bBytes += d.length)));
   [a, A] = await listen((req, res) => {
     aRequests.push(req.url ?? '');
     if (req.url === '/chain') res.writeHead(302, { location: `${B}/hop` }).end();
@@ -365,9 +368,10 @@ describe.runIf(run)('egress proxy', () => {
     });
 
     /** A hand-made ClientHello, so its fields can be wrong in ways a real client won't make. */
-    const craftHello = (o: { suites?: number[]; methods?: number[]; sni?: string; extensions?: boolean }) => {
+    const craftHello = (o: { suites?: number[]; methods?: number[]; sni?: string; extensions?: boolean; extra?: [number, Buffer][] }) => {
       const u16 = (n: number) => Buffer.from([n >> 8, n & 255]);
       const ext: Buffer[] = [];
+      for (const [type, data] of o.extra ?? []) ext.push(Buffer.concat([u16(type), u16(data.length), data]));
       if (o.sni !== undefined) {
         const name = Buffer.from(o.sni);
         ext.push(Buffer.concat([u16(0), u16(name.length + 5), u16(name.length + 3), Buffer.from([0]), u16(name.length), name]));
@@ -388,6 +392,23 @@ describe.runIf(run)('egress proxy', () => {
       return Buffer.concat([Buffer.from([0x16, 3, 1]), u16(hs.length), hs]);
     };
 
+    it('lets Chromium’s own ClientHello through to an allowed https: origin', async () => {
+      // A raw TCP server standing in for a TLS server: it records what arrives and hangs up.
+      let first: Buffer | undefined;
+      const d = net.createServer((sock) => sock.once('data', (x) => ((first ??= x as Buffer), sock.destroy())));
+      await new Promise<void>((r) => d.listen(0, '127.0.0.1', r));
+      const dPort = (d.address() as AddressInfo).port;
+      egress.allow(`https://localhost:${dPort}`);
+      const page = await browser.newPage();
+      await page.goto(`${A}/`);
+      await page.evaluate((u) => fetch(u).catch(() => undefined), `https://localhost:${dPort}/`);
+      await expect.poll(() => first?.[0]).toBe(0x16);
+      expect(readClientHello(first!)).toEqual({ serverName: 'localhost' });
+      expect([...outside].some((o) => o.includes(`localhost:${dPort}`))).toBe(false);
+      await page.close();
+      d.close();
+    });
+
     it('rejects ClientHellos with invalid fields', () => {
       expect(readClientHello(craftHello({ sni: 'localhost' }))).toEqual({ serverName: 'localhost' });
       expect(readClientHello(craftHello({ sni: 'localhost', suites: [], methods: [] }))).toBe('bad');
@@ -400,10 +421,23 @@ describe.runIf(run)('egress proxy', () => {
     it('refuses a tunnel opened with a malformed ClientHello, even with the right name', async () => {
       const bPort = new URL(B).port;
       egress.allow(`https://localhost:${bPort}`);
-      const hits = aRequests.length;
-      await tunnel(`localhost:${bPort}`, Buffer.concat([craftHello({ sni: 'localhost', suites: [], methods: [] }), Buffer.from('GET /after-hello HTTP/1.1\r\nHost: x\r\n\r\n')]));
-      expect(outside.has(`https://localhost:${bPort} (not a well-formed TLS ClientHello)`)).toBe(true);
-      expect(aRequests.length).toBe(hits);
+      const after = Buffer.from('GET /after-hello HTTP/1.1\r\nHost: x\r\n\r\n');
+      const before = bBytes;
+      for (const bad of [
+        craftHello({ sni: 'localhost', suites: [], methods: [] }),
+        craftHello({ sni: 'localhost', extra: [[43, Buffer.from([0])]] }), // empty supported_versions
+        craftHello({ sni: 'localhost', extra: [[13, Buffer.from([0, 0])]] }), // empty signature_algorithms
+        craftHello({ sni: 'localhost', extra: [[16, Buffer.from([0, 4, 2, 0x68])]] }), // truncated ALPN
+      ]) {
+        outside.delete(`https://localhost:${bPort} (not a well-formed TLS ClientHello)`);
+        await tunnel(`localhost:${bPort}`, Buffer.concat([bad, after]));
+        expect(outside.has(`https://localhost:${bPort} (not a well-formed TLS ClientHello)`)).toBe(true);
+      }
+      // Not a byte reached B.
+      expect(bBytes).toBe(before);
+      // A hello with well-formed list extensions still goes through.
+      await tunnel(`localhost:${bPort}`, craftHello({ sni: 'localhost', extra: [[43, Buffer.from([2, 3, 4])], [13, Buffer.from([0, 2, 4, 3])], [16, Buffer.from([0, 3, 2, 0x68, 0x32])]] }));
+      expect(bBytes).toBeGreaterThan(before);
     });
 
     it('refuses a CONNECT without exactly one Host naming its target', async () => {

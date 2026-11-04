@@ -12,8 +12,10 @@
  *   exactly that origin's host[:port]. Node's HTTP parser reads them, so every request
  *   on a kept-alive connection is checked.
  * - A CONNECT tunnel names only host:port, so its first bytes decide its scheme. A TLS
- *   tunnel may only go to an allowed https: origin, and must open with a complete,
- *   well-formed ClientHello naming that host (SNI; none for an IP address). What follows
+ *   tunnel may only go to an allowed https: origin, and must open with a complete
+ *   ClientHello naming that host (SNI; none for an IP address). The proxy checks the
+ *   hello's framing, its fixed fields and the framing of the list-valued extensions; the
+ *   meaning of the rest is left to the TLS server, which is always an allowed origin. What follows
  *   is encrypted, so the proxy can't see further: the browser checks the server's
  *   certificate against that name, but a server holding certificates for several names
  *   could still be asked for another one inside TLS.
@@ -54,6 +56,47 @@ function authority(host: string | undefined, protocol: string): string | undefin
     return `${u.hostname}:${u.port || defaultPort(protocol)}`;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Checks the framing of the extensions a browser's ClientHello carries whose contents are
+ * lists: each must be a non-empty list whose length matches. Other extensions are checked
+ * only for fitting in the hello; their meaning is for the TLS server (which is always an
+ * allowed origin) to judge.
+ */
+function extensionOk(type: number, d: Buffer): boolean {
+  const list16 = (unit: number) => d.length >= 2 + unit && d.readUInt16BE(0) === d.length - 2 && (d.length - 2) % unit === 0;
+  switch (type) {
+    case 10: // supported_groups: two-byte entries
+    case 13: // signature_algorithms
+    case 50: // signature_algorithms_cert
+      return list16(2);
+    case 43: // supported_versions: a one-byte length, then two-byte versions
+      return d.length >= 3 && d[0] === d.length - 1 && d[0] % 2 === 0;
+    case 45: // psk_key_exchange_modes: a one-byte length, then one-byte modes
+    case 11: // ec_point_formats
+      return d.length >= 2 && d[0] === d.length - 1;
+    case 16: {
+      // application_layer_protocol_negotiation: a list of non-empty one-byte-length names
+      if (d.length < 3 || d.readUInt16BE(0) !== d.length - 2) return false;
+      for (let k = 2; k < d.length; k += 1 + d[k]) if (d[k] === 0 || k + 1 + d[k] > d.length) return false;
+      return true;
+    }
+    case 51: {
+      // key_share: a list of (group, length, key) entries
+      if (d.length < 2 || d.readUInt16BE(0) !== d.length - 2) return false;
+      let k = 2;
+      while (k < d.length) {
+        if (k + 4 > d.length) return false;
+        const n = d.readUInt16BE(k + 2);
+        if (n === 0 || k + 4 + n > d.length) return false;
+        k += 4 + n;
+      }
+      return true;
+    }
+    default:
+      return true;
   }
 }
 
@@ -120,7 +163,7 @@ export function readClientHello(b: Buffer): 'more' | 'bad' | { serverName: strin
         if (list !== len - 2 || nameType !== 0 || nameLength !== len - 5) return 'bad';
         serverName = r.subarray(i + 5, i + 5 + nameLength).toString('latin1');
         if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(serverName)) return 'bad';
-      }
+      } else if (!extensionOk(type, r.subarray(i, i + len))) return 'bad';
       i += len;
     }
     return i === end ? { serverName } : 'bad';
