@@ -16,6 +16,7 @@
     "node": ">=22.13"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
     "@playwright/test": "1.63.0",
     "@vercel/functions": "3.10.1"
   }

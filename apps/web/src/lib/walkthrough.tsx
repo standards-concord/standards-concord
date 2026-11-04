@@ -109,7 +109,7 @@ export function tasksFor(roles: Role[], ontologyId?: string): TourTask[] {
   if (!ontologyId) return [];
   const o = `/o/${ontologyId}`;
   const all: Record<string, TourTask> = {
-    browse: { id: 'browse', label: 'Browse the ontology', detail: 'Look at the class tree, a term’s definition and the graph view.', to: `${o}/browse` },
+    browse: { id: 'browse', label: 'Browse the ontology', detail: 'Look at the class tree, the class diagram and graph, and a class’s properties.', to: `${o}/browse` },
     interview: { id: 'interview', label: 'Describe a use case to the interviewer', detail: 'Chat (or talk) about how you use this data; watch the use case document fill in.', to: `${o}/use-cases?start=1` },
     meeting: { id: 'meeting', label: 'Upload or simulate a meeting', detail: 'Run a simulated live call and see the co-lead bot raise follow-up questions.', to: `${o}/meetings` },
     review: { id: 'review', label: 'Open a change request and review it', detail: 'Read the AI analysis and validation, then approve, request changes or object.', to: `${o}/changes` },

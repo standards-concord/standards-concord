@@ -1,57 +1,19 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import type { ClassView } from '@concord/core/types';
-import { Bug, ChevronDown, ChevronRight, Circle, Network, ListTree, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, LayoutTemplate, Network, ListTree, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
 import { compactIri } from '../../lib/format';
 import { OntologyGraph } from '../../components/OntologyGraph';
+import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
+import { ClassTree } from '../../components/ontology-viz/ClassTree';
+import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood, type DiagramOptions } from '../../components/ontology-viz/ClassDiagram';
+import { HierarchyPath, IncomingList, Neighbourhood, PropertyTable, SubclassList } from '../../components/ontology-viz/ClassPanels';
 import { BugReportDialog } from '../../components/BugReport';
-import { Badge, Button, Card, CopyButton, EmptyState, ErrorCard, Input, Loading, cx } from '../../components/ui';
+import { Badge, Button, Card, Chip, CopyButton, EmptyState, ErrorCard, Input, Loading, Select, cx } from '../../components/ui';
 import { useOntology } from './Layout';
-
-function buildTree(view: OntologyView) {
-  const iris = new Set(view.classes.map((c) => c.iri));
-  const children = new Map<string, ClassView[]>();
-  const roots: ClassView[] = [];
-  for (const c of view.classes) {
-    const parents = c.superClasses.filter((s) => iris.has(s) && s !== c.iri);
-    if (!parents.length) roots.push(c);
-    for (const p of parents) children.set(p, [...(children.get(p) ?? []), c]);
-  }
-  const byLabel = (a: ClassView, b: ClassView) => (a.label ?? a.iri).localeCompare(b.label ?? b.iri);
-  roots.sort(byLabel);
-  for (const v of children.values()) v.sort(byLabel);
-  return { roots, children };
-}
-
-function TreeNode({ c, children, depth, selected, onSelect, label, seen }: { c: ClassView; children: Map<string, ClassView[]>; depth: number; selected?: string; onSelect: (iri: string) => void; label: Labeler; seen: Set<string> }) {
-  const kids = seen.has(c.iri) ? [] : (children.get(c.iri) ?? []);
-  const [open, setOpen] = useState(depth < 2);
-  const nextSeen = useMemo(() => new Set([...seen, c.iri]), [seen, c.iri]);
-  return (
-    <li>
-      <div className={cx('flex items-center rounded-md pr-2 text-sm', selected === c.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2')} style={{ paddingLeft: depth * 14 }}>
-        <button className="flex size-6 shrink-0 items-center justify-center text-muted" onClick={() => setOpen((o) => !o)} aria-label={open ? 'Collapse' : 'Expand'} disabled={!kids.length}>
-          {kids.length ? open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : <Circle className="size-1.5 fill-current opacity-40" />}
-        </button>
-        <button className={cx('min-w-0 flex-1 truncate py-1 text-left', c.deprecated && 'text-muted line-through')} onClick={() => onSelect(c.iri)}>
-          {c.label ?? label(c.iri)}
-        </button>
-        {kids.length > 0 && <span className="text-[0.65rem] text-subtle">{kids.length}</span>}
-      </div>
-      {open && kids.length > 0 && (
-        <ul>
-          {kids.map((k) => (
-            <TreeNode key={k.iri} c={k} children={children} depth={depth + 1} selected={selected} onSelect={onSelect} label={label} seen={nextSeen} />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
 
 function TermLink({ iri, label, onSelect }: { iri: string; label: Labeler; onSelect: (iri: string) => void }) {
   return (
@@ -84,7 +46,19 @@ function IriList({ iris, label, onSelect, empty = '—' }: { iris: string[]; lab
   );
 }
 
-function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string) => void }) {
+function Section({ title, children, defaultOpen = true }: { title: string; children: ReactNode; defaultOpen?: boolean }) {
+  return (
+    <details open={defaultOpen} className="group mt-5 border-t border-line pt-4">
+      <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-4 text-muted transition-transform group-open:rotate-90" aria-hidden />
+        {title}
+      </summary>
+      <div className="mt-3">{children}</div>
+    </details>
+  );
+}
+
+function TermDetailPanel({ iri, onSelect, model, showNeighbourhood }: { iri: string; onSelect: (i: string) => void; model: OntologyModel; showNeighbourhood: boolean }) {
   const { id, label, view } = useOntology();
   const term = useAsync(() => api.term(id, iri), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
@@ -101,6 +75,11 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
             <Badge tone="outline">{KIND_LABEL[t.kind]}</Badge>
             {t.deprecated && <Badge tone="warn">Deprecated</Badge>}
           </div>
+          {t.kind === 'class' && model.classes.has(t.iri) && (
+            <div className="mt-1">
+              <HierarchyPath iri={t.iri} model={model} label={label} onSelect={onSelect} />
+            </div>
+          )}
           <div className="mt-1 flex items-center gap-1.5">
             <code className="truncate font-mono text-xs text-muted" title={t.iri}>
               {compactIri(t.iri, prefixes)}
@@ -132,6 +111,9 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
           <>
             <Row k="Subclass of">
               <IriList iris={t.superClasses} label={label} onSelect={onSelect} empty="owl:Thing (top level)" />
+            </Row>
+            <Row k="Subclasses">
+              <SubclassList iri={t.iri} model={model} label={label} onSelect={onSelect} />
             </Row>
             {t.restrictions.length > 0 && (
               <Row k="Restrictions">
@@ -224,6 +206,21 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
           )}
         </Row>
       </dl>
+      {t.kind === 'class' && model.classes.has(t.iri) && view.data && (
+        <>
+          <Section title="Properties">
+            <PropertyTable iri={t.iri} model={model} label={label} onSelect={onSelect} />
+          </Section>
+          <Section title="Relationships pointing here">
+            <IncomingList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+          </Section>
+          {showNeighbourhood && (
+            <Section title="Neighbourhood diagram">
+              <Neighbourhood iri={t.iri} view={view.data} model={model} label={label} onSelect={onSelect} />
+            </Section>
+          )}
+        </>
+      )}
       <BugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} ontologyId={id} termIri={t.iri} termLabel={t.label ?? label(t.iri)} />
     </Card>
   );
@@ -257,11 +254,60 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
   );
 }
 
+type Mode = 'tree' | 'diagram' | 'graph';
+const MODES: { key: Mode; label: string; icon: typeof ListTree; hint: string }[] = [
+  { key: 'tree', label: 'Classes', icon: ListTree, hint: 'Hierarchy and term pages' },
+  { key: 'diagram', label: 'Diagram', icon: LayoutTemplate, hint: 'UML-style class diagram' },
+  { key: 'graph', label: 'Graph', icon: Network, hint: 'Network overview' },
+];
+
+function DiagramView({ model, selected, onSelect }: { model: OntologyModel; selected?: string; onSelect: (iri: string) => void }) {
+  const { view, label } = useOntology();
+  const [params, setParams] = useSearchParams();
+  const [opts, setOpts] = useState<DiagramOptions>(DEFAULT_DIAGRAM_OPTIONS);
+  const focusable = !!selected && model.classes.has(selected);
+  const hops = Number(params.get('hops') ?? '0');
+  const focus = focusable && hops > 0 ? selected : undefined;
+  const scope = useMemo(() => (focus ? neighbourhood(model, focus, hops, opts) : new Set(model.classes.keys())), [model, focus, hops, opts]);
+  const setHops = (h: number) => {
+    const next = new URLSearchParams(params);
+    if (h) next.set('hops', String(h));
+    else next.delete('hops');
+    setParams(next, { replace: true });
+  };
+  const toggle = (k: keyof DiagramOptions) => setOpts((o) => ({ ...o, [k]: !o[k] }));
+  if (!view.data) return null;
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
+        <label className="flex items-center gap-2 text-xs text-muted">
+          Show
+          <Select value={focus ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Diagram scope">
+            <option value="0">Whole ontology</option>
+            <option value="1" disabled={!focusable}>
+              {focusable ? `${label(selected!)} and direct links` : 'Around a class (pick one first)'}
+            </option>
+            <option value="2" disabled={!focusable}>
+              {focusable ? `${label(selected!)}, two links out` : 'Two links out (pick a class)'}
+            </option>
+          </Select>
+        </label>
+        <Chip active={opts.attributes} onClick={() => toggle('attributes')}>Attributes</Chip>
+        <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>Inherited attributes</Chip>
+        <Chip active={opts.associations} onClick={() => toggle('associations')}>Relationships</Chip>
+        <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>Subclasses</Chip>
+      </div>
+      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={selected ? 520 : 680} />
+    </div>
+  );
+}
+
 export function BrowseTab() {
   const { id, view, label } = useOntology();
   const [params, setParams] = useSearchParams();
   const selected = params.get('term') ?? undefined;
-  const mode = params.get('view') === 'graph' ? 'graph' : 'tree';
+  const raw = params.get('view');
+  const mode: Mode = raw === 'graph' || raw === 'diagram' ? raw : 'tree';
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
   useEffect(() => {
@@ -269,22 +315,22 @@ export function BrowseTab() {
     return () => clearTimeout(t);
   }, [q]);
   const results = useAsync(async () => (debounced ? api.search(id, debounced) : undefined), [id, debounced]);
-  const tree = useMemo(() => (view.data ? buildTree(view.data) : undefined), [view.data]);
+  const model = useMemo(() => (view.data ? buildModel(view.data) : undefined), [view.data]);
 
   const select = (iri: string) => {
     const next = new URLSearchParams(params);
     next.set('term', iri);
     setParams(next, { replace: false });
   };
-  const setMode = (m: 'tree' | 'graph') => {
+  const setMode = (m: Mode) => {
     const next = new URLSearchParams(params);
-    if (m === 'graph') next.set('view', 'graph');
-    else next.delete('view');
+    if (m === 'tree') next.delete('view');
+    else next.set('view', m);
     setParams(next, { replace: true });
   };
 
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
-  if (!view.data || !tree) return <Loading label="Loading ontology…" />;
+  if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
   const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length;
 
@@ -293,20 +339,26 @@ export function BrowseTab() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="relative w-full max-w-sm">
           <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search terms, definitions…" className="pl-9" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search terms, definitions…" className="pl-9" aria-label="Search terms" />
           {q && (
             <button className="absolute top-2.5 right-3 text-muted" onClick={() => setQ('')} aria-label="Clear search">
               <X className="size-4" />
             </button>
           )}
         </div>
-        <div className="inline-flex rounded-lg border border-line-strong p-0.5">
-          <button onClick={() => setMode('tree')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === 'tree' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-            <ListTree className="size-4" /> Tree
-          </button>
-          <button onClick={() => setMode('graph')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === 'graph' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-            <Network className="size-4" /> Graph
-          </button>
+        <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View">
+          {MODES.map((m) => (
+            <button
+              key={m.key}
+              role="radio"
+              aria-checked={mode === m.key}
+              title={m.hint}
+              onClick={() => setMode(m.key)}
+              className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === m.key ? 'bg-surface-2 font-medium' : 'text-muted hover:text-fg')}
+            >
+              <m.icon className="size-4" aria-hidden /> {m.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -344,12 +396,7 @@ export function BrowseTab() {
               </div>
             ) : (
               <>
-                <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Classes ({v.classes.length})</div>
-                <ul>
-                  {tree.roots.map((c) => (
-                    <TreeNode key={c.iri} c={c} children={tree.children} depth={0} selected={selected} onSelect={select} label={label} seen={new Set()} />
-                  ))}
-                </ul>
+                <ClassTree model={model} label={label} selected={selected} onSelect={select} />
                 <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
                 <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
                 <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
@@ -357,13 +404,14 @@ export function BrowseTab() {
             )}
           </Card>
           <div className="min-w-0 space-y-4">
-            {mode === 'graph' && <OntologyGraph view={v} selected={selected} onSelect={select} height={selected ? 420 : 600} />}
+            {mode === 'graph' && <OntologyGraph view={v} selected={selected} onSelect={select} height={selected ? 440 : 620} />}
+            {mode === 'diagram' && <DiagramView model={model} selected={selected} onSelect={select} />}
             {selected ? (
-              <TermDetailPanel iri={selected} onSelect={select} />
+              <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={mode === 'tree'} />
             ) : (
               mode === 'tree' && (
                 <EmptyState icon={ListTree} title="Pick a term">
-                  Choose a class or property on the left to see its definition, axioms and where it’s used.
+                  Choose a class or property on the left to see its definition, properties, axioms and a diagram of what it connects to. Or switch to the Diagram or Graph view above to see the whole ontology.
                 </EmptyState>
               )
             )}

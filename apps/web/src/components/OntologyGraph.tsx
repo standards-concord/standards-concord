@@ -1,81 +1,165 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OntologyView } from '@concord/shared';
-import type { Core } from 'cytoscape';
+import type { Core, ElementDefinition } from 'cytoscape';
+import dagre from '@dagrejs/dagre';
 import { makeLabeler } from '../lib/ontology';
-import { Loading } from './ui';
+import { buildModel, isDatatype } from '../lib/ontologyModel';
+import { Chip, Loading, Select } from './ui';
+import { textWidth, themeColours, ZoomControls } from './ontology-viz/PanZoom';
 
-function cssVar(name: string, fallback: string) {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return v || fallback;
+function nodeWidth(text: string, size = 11) {
+  return Math.ceil(textWidth(text, `${size}px Inter, system-ui, sans-serif`) + 22);
 }
 
-/** Cytoscape graph of classes: subClassOf edges and object property domain→range edges. */
+export type GraphLayout = 'hierarchy' | 'force' | 'radial';
+export interface GraphFilters {
+  subclass: boolean;
+  relations: boolean;
+  datatypes: boolean;
+  disjoint: boolean;
+}
+const DEFAULT_FILTERS: GraphFilters = { subclass: true, relations: true, datatypes: false, disjoint: false };
+
+/**
+ * Network overview of the whole ontology, in the spirit of WebVOWL and OntoGraf but with
+ * a cleaner notation: classes are nodes (bigger when they have more subclasses), solid
+ * arrows point from a subclass to its parent, dashed arrows are object properties from
+ * domain to range. Datatype attributes and disjointness can be switched on. Selecting a
+ * class highlights its neighbourhood and fades the rest.
+ */
 export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view: OntologyView; selected?: string; onSelect?: (iri: string) => void; height?: number }) {
   const ref = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const [ready, setReady] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [layout, setLayout] = useState<GraphLayout>('hierarchy');
+  const [filters, setFilters] = useState<GraphFilters>(DEFAULT_FILTERS);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const model = useMemo(() => buildModel(view), [view]);
+
+  const elements = useMemo(() => {
+    const label = makeLabeler(view);
+    const els: ElementDefinition[] = [];
+    const nodeIds = new Set<string>();
+    for (const c of view.classes) {
+      const kids = model.descendants(c.iri).length;
+      els.push({ data: { id: c.iri, label: label(c.iri), kind: 'class', deprecated: c.deprecated ? 1 : 0, size: Math.min(28 + kids * 6, 64), w: nodeWidth(label(c.iri)) } });
+      nodeIds.add(c.iri);
+    }
+    const external = (iri: string) => {
+      if (nodeIds.has(iri)) return;
+      nodeIds.add(iri);
+      els.push({ data: { id: iri, label: label(iri), kind: 'external', size: 28, w: nodeWidth(label(iri)) } });
+    };
+    if (filters.subclass)
+      for (const [c, ps] of model.parents) for (const p of ps) els.push({ data: { id: `sub:${c}:${p}`, source: c, target: p, kind: 'sub' } });
+    if (filters.relations)
+      for (const p of view.objectProperties)
+        for (const d of p.domain)
+          for (const r of p.range) {
+            if (!model.classes.has(d)) continue;
+            if (!model.classes.has(r)) external(r);
+            els.push({ data: { id: `p:${p.iri}:${d}:${r}`, source: d, target: r, label: label(p.iri), kind: 'prop', property: p.iri } });
+          }
+    if (filters.datatypes)
+      for (const p of view.datatypeProperties)
+        for (const d of p.domain) {
+          if (!model.classes.has(d)) continue;
+          const id = `lit:${p.iri}:${d}`;
+          const r = p.range.find(isDatatype);
+          const text = r ? r.replace(/^.*[#/]/, '') : 'Literal';
+          els.push({ data: { id, label: text, kind: 'literal', size: 20, w: nodeWidth(text, 10) } });
+          els.push({ data: { id: `dp:${id}`, source: d, target: id, label: label(p.iri), kind: 'dprop', property: p.iri } });
+        }
+    if (filters.disjoint) {
+      const done = new Set<string>();
+      for (const c of view.classes)
+        for (const d of c.disjointWith) {
+          const key = [c.iri, d].sort().join('|');
+          if (done.has(key) || !model.classes.has(d)) continue;
+          done.add(key);
+          els.push({ data: { id: `dis:${key}`, source: c.iri, target: d, kind: 'disjoint' } });
+        }
+    }
+    return els;
+  }, [view, model, filters]);
+
+  // Hierarchy positions from dagre, parents above children.
+  const positions = useMemo(() => {
+    const g = new dagre.graphlib.Graph({ multigraph: true });
+    g.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 70 });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const e of elements) if (!e.data.source) g.setNode(e.data.id!, { width: e.data.w + 10, height: e.data.size + 6 });
+    for (const e of elements) {
+      const d = e.data;
+      if (!d.source) continue;
+      if (d.kind === 'sub') g.setEdge(d.target, d.source, { weight: 5 }, d.id);
+      else if (d.kind === 'prop' || d.kind === 'dprop') g.setEdge(d.source, d.target, { weight: 1 }, d.id);
+    }
+    dagre.layout(g);
+    return Object.fromEntries(g.nodes().map((n) => [n, { x: g.node(n).x, y: g.node(n).y }]));
+  }, [elements]);
 
   useEffect(() => {
     let disposed = false;
+    setReady(false);
     void import('cytoscape').then(({ default: cytoscape }) => {
       if (disposed || !ref.current) return;
-      const label = makeLabeler(view);
-      const classIris = new Set(view.classes.map((c) => c.iri));
-      const nodes = view.classes.map((c) => ({ data: { id: c.iri, label: label(c.iri), deprecated: c.deprecated ? 1 : 0 } }));
-      const edges: { data: { id: string; source: string; target: string; label: string; kind: string } }[] = [];
-      for (const c of view.classes)
-        for (const s of c.superClasses) if (classIris.has(s)) edges.push({ data: { id: `sub:${c.iri}:${s}`, source: c.iri, target: s, label: 'subClassOf', kind: 'sub' } });
-      for (const p of view.objectProperties)
-        for (const d of p.domain) for (const r of p.range) if (classIris.has(d) && classIris.has(r)) edges.push({ data: { id: `p:${p.iri}:${d}:${r}`, source: d, target: r, label: label(p.iri), kind: 'prop' } });
-
-      const fg = cssVar('--fg', '#141414');
-      const muted = cssVar('--muted', '#5f6368');
-      const accent = cssVar('--accent', '#1f4fe0');
-      const surface = cssVar('--surface', '#fff');
-      const line = cssVar('--line-strong', '#ccc');
-
-      cyRef.current = cytoscape({
+      const c = themeColours();
+      const literalFill = '#fdf3c4';
+      const cy = cytoscape({
         container: ref.current,
-        elements: { nodes, edges },
-        wheelSensitivity: 0.3,
-        minZoom: 0.2,
-        maxZoom: 1.4,
+        elements,
+        minZoom: 0.15,
+        maxZoom: 2.5,
+        boxSelectionEnabled: false,
         style: [
           {
             selector: 'node',
             style: {
               label: 'data(label)',
-              'background-color': surface,
-              'border-color': accent,
+              'background-color': c.accentSoft,
+              'border-color': c.accent,
               'border-width': 1.5,
-              color: fg,
+              color: c.fg,
               'font-size': 11,
               'font-family': 'Inter, system-ui, sans-serif',
               'text-valign': 'center',
               'text-halign': 'center',
               shape: 'round-rectangle',
-              width: 'label',
-              height: 26,
-              padding: '8px',
+              width: 'data(w)',
+              height: 'data(size)',
             },
           },
-          { selector: 'node[deprecated = 1]', style: { 'border-style': 'dashed', color: muted, 'border-color': muted } },
-          { selector: 'node:selected', style: { 'background-color': accent, color: surface } },
+          { selector: 'node[kind = "external"]', style: { 'background-color': c.surface2, 'border-color': c.muted, 'border-style': 'dotted', color: c.muted } },
+          { selector: 'node[kind = "literal"]', style: { shape: 'rectangle', 'background-color': literalFill, 'border-color': '#b8920f', color: '#3d3000', 'font-size': 10, height: 20 } },
+          { selector: 'node[deprecated = 1]', style: { 'border-style': 'dashed', color: c.muted, 'border-color': c.muted, 'background-color': c.surface2 } },
+          { selector: 'node:selected', style: { 'background-color': c.accent, color: c.accentFg, 'border-width': 2.5 } },
+          { selector: '.faded', style: { opacity: 0.18 } },
+          { selector: 'edge', style: { width: 1.3, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle', 'line-color': c.lineStrong, 'target-arrow-color': c.lineStrong, 'arrow-scale': 0.9 } },
+          { selector: 'edge[kind = "sub"]', style: { 'line-color': c.muted, 'target-arrow-color': c.muted, 'target-arrow-shape': 'triangle', 'target-arrow-fill': 'hollow', 'arrow-scale': 1.3 } },
           {
-            selector: 'edge',
-            style: { width: 1.2, 'curve-style': 'bezier', 'target-arrow-shape': 'triangle', 'line-color': line, 'target-arrow-color': line, 'arrow-scale': 0.8 },
+            selector: 'edge[kind = "prop"], edge[kind = "dprop"]',
+            style: { 'line-style': 'dashed', 'line-color': c.accent, 'target-arrow-color': c.accent, label: 'data(label)', 'font-size': 9.5, color: c.muted, 'text-rotation': 'autorotate', 'text-background-color': c.surface, 'text-background-opacity': 1, 'text-background-padding': '2px' },
           },
-          { selector: 'edge[kind = "sub"]', style: { 'target-arrow-shape': 'triangle-backcurve', 'target-arrow-fill': 'hollow' } },
-          {
-            selector: 'edge[kind = "prop"]',
-            style: { 'line-style': 'dashed', 'line-color': accent, 'target-arrow-color': accent, label: 'data(label)', 'font-size': 9, color: muted, 'text-rotation': 'autorotate', 'text-background-color': surface, 'text-background-opacity': 1, 'text-background-padding': '2px' },
-          },
+          { selector: 'edge[kind = "dprop"]', style: { 'line-color': '#b8920f', 'target-arrow-color': '#b8920f' } },
+          { selector: 'edge[kind = "disjoint"]', style: { 'line-color': c.warn, 'line-style': 'dotted', 'target-arrow-shape': 'none', 'source-arrow-shape': 'none', opacity: 0.6 } },
+          { selector: 'edge.hl', style: { width: 2.4, 'z-index': 10 } },
         ],
-        layout: { name: 'breadthfirst', directed: true, spacingFactor: 1.15, padding: 20 } as never,
+        layout: { name: 'preset', positions: (n: { id: () => string }) => positions[n.id()] ?? { x: 0, y: 0 }, padding: 30, fit: true } as never,
       });
-      cyRef.current.on('tap', 'node', (e) => onSelectRef.current?.(e.target.id()));
+      cy.on('tap', 'node', (e) => {
+        const id = e.target.id() as string;
+        if (e.target.data('kind') === 'class' || e.target.data('kind') === 'external') onSelectRef.current?.(id);
+      });
+      cy.on('tap', 'edge', (e) => {
+        const p = e.target.data('property');
+        if (p) onSelectRef.current?.(p);
+      });
+      cy.on('zoom', () => setZoom(cy.zoom()));
+      cyRef.current = cy;
+      setZoom(cy.zoom());
       setReady(true);
     });
     return () => {
@@ -83,22 +167,93 @@ export function OntologyGraph({ view, selected, onSelect, height = 560 }: { view
       cyRef.current?.destroy();
       cyRef.current = null;
     };
-  }, [view]);
+  }, [elements, positions]);
 
+  // Re-run the chosen layout.
   useEffect(() => {
     const cy = cyRef.current;
-    if (!cy || !selected) return;
-    cy.$(':selected').unselect();
-    const n = cy.getElementById(selected);
-    if (n.nonempty()) n.select();
+    if (!cy || !ready) return;
+    const opts =
+      layout === 'hierarchy'
+        ? { name: 'preset', positions: (n: { id: () => string }) => positions[n.id()] ?? { x: 0, y: 0 }, padding: 30, animate: true, animationDuration: 300 }
+        : layout === 'force'
+          ? { name: 'cose', padding: 30, animate: true, animationDuration: 400, nodeRepulsion: () => 9000, idealEdgeLength: () => 110, randomize: false }
+          : { name: 'concentric', padding: 30, animate: true, animationDuration: 300, concentric: (n: { id: () => string }) => 10 - model.depth(n.id()), levelWidth: () => 1, minNodeSpacing: 30 };
+    cy.layout(opts as never).run();
+  }, [layout, ready, positions, model]);
+
+  // Selection: highlight the neighbourhood and bring it into view.
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy || !ready) return;
+    cy.batch(() => {
+      cy.elements().removeClass('faded hl');
+      cy.$(':selected').unselect();
+      if (!selected) return;
+      const n = cy.getElementById(selected);
+      if (n.empty() || !n.isNode()) return;
+      n.select();
+      const hood = n.closedNeighborhood();
+      cy.elements().not(hood).addClass('faded');
+      hood.edges().addClass('hl');
+    });
+    const n = cy.getElementById(selected ?? '');
+    if (n.nonempty() && n.isNode()) cy.animate({ center: { eles: n }, duration: 300 });
   }, [selected, ready]);
 
+  const exportPng = () => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    const a = document.createElement('a');
+    a.href = cy.png({ full: true, scale: 2, bg: themeColours().surface });
+    a.download = 'ontology-graph.png';
+    a.click();
+  };
+  const zoomBy = (f: number) => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.zoom({ level: cy.zoom() * f, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+  };
+
+  const toggle = (k: keyof GraphFilters) => setFilters((f) => ({ ...f, [k]: !f[k] }));
+  const classCount = view.classes.length;
+  const edgeCount = elements.filter((e) => e.data.source).length;
+
   return (
-    <div className="relative overflow-hidden rounded-lg border border-line bg-surface" style={{ height }}>
-      {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
-      <div ref={ref} className="size-full" />
-      <div className="absolute bottom-2 left-2 rounded-md bg-surface/90 px-2 py-1 text-[0.7rem] text-muted">
-        Solid arrow: subclass of · Dashed: object property (domain → range)
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Graph options">
+        <label className="flex items-center gap-2 text-xs text-muted">
+          Layout
+          <Select value={layout} onChange={(e) => setLayout(e.target.value as GraphLayout)} className="h-8 w-36 text-sm" aria-label="Graph layout">
+            <option value="hierarchy">Hierarchy</option>
+            <option value="force">Force-directed</option>
+            <option value="radial">Radial by depth</option>
+          </Select>
+        </label>
+        <span className="text-xs text-muted">Show</span>
+        <Chip active={filters.subclass} onClick={() => toggle('subclass')}>Subclasses</Chip>
+        <Chip active={filters.relations} onClick={() => toggle('relations')}>Relationships</Chip>
+        <Chip active={filters.datatypes} onClick={() => toggle('datatypes')}>Attributes</Chip>
+        <Chip active={filters.disjoint} onClick={() => toggle('disjoint')}>Disjointness</Chip>
+      </div>
+      <div
+        className="relative overflow-hidden rounded-lg border border-line bg-surface"
+        style={{ height }}
+        role="img"
+        aria-label={`Graph of ${classCount} classes and ${edgeCount} links. The Diagram view and each class's page give the same information as text.`}
+        data-testid="ontology-graph"
+        data-ready={ready ? 'true' : 'false'}
+      >
+        {!ready && <Loading className="absolute inset-0" label="Laying out graph…" />}
+        <div ref={ref} className="size-full" />
+        {ready && <ZoomControls k={zoom} onIn={() => zoomBy(1.2)} onOut={() => zoomBy(1 / 1.2)} onFit={() => cyRef.current?.fit(undefined, 30)} onExport={exportPng} exportLabel="Download as PNG" />}
+        <div className="pointer-events-none absolute bottom-2 left-2 flex flex-wrap gap-x-4 gap-y-1 rounded-md bg-surface/90 px-2.5 py-1.5 text-[0.7rem] text-muted">
+          <span>Solid ▷ subclass of</span>
+          <span className="text-accent">Dashed → relationship (domain → range)</span>
+          {filters.datatypes && <span style={{ color: '#8a6d00' }}>Yellow: attribute value type</span>}
+          {filters.disjoint && <span className="text-warn">Dotted: disjoint</span>}
+          <span>Bigger nodes have more subclasses</span>
+        </div>
       </div>
     </div>
   );

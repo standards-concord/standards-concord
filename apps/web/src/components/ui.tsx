@@ -327,6 +327,7 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       type="button"
       disabled={disabled}
       onClick={onClick}
+      aria-pressed={onClick ? !!active : undefined}
       className={cx(
         'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50',
         active ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',

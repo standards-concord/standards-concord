@@ -12,6 +12,7 @@
   "dependencies": {
     "@concord/core": "workspace:*",
     "@concord/shared": "workspace:*",
+    "@dagrejs/dagre": "1.1.5",
     "@sparq-org/sparq": "0.1.5",
     "cytoscape": "^3.34.3",
     "lucide-react": "^1.57.0",

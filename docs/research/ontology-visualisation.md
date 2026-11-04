@@ -1,0 +1,37 @@
+# Visual views of an ontology
+
+What existing ontology tools show, what holds up and what doesn't, and what Concord's Browse tab does instead.
+
+## What the established tools do
+
+| Tool | Main views | Worth keeping | Dated or hard to use |
+| --- | --- | --- | --- |
+| **Protégé** (desktop) | Asserted and inferred class hierarchy, a "Description" frame per class (equivalent to, subclass of, disjoint with, instances) in Manchester syntax, usage and annotation panels | The hierarchy plus a frame per class is the right core. Showing where a term is used. | Swing UI and dense tabs. Axioms read as logic rather than as "what data can an X have". Graph plugins are add-ons. |
+| **WebProtégé** | Hierarchy and form-based entity editing in the browser, per-entity discussion and change history | Collaboration on each term. Forms over raw axioms. | Graph view is limited. Visually old-fashioned. |
+| **OntoGraf / OWLViz** (Protégé plugins) | Node-link graph you expand node by node, filtered by arc type | Incremental exploration from one class. Filtering by relationship type. | Static layouts that tangle quickly. Mouse only. No sense of cardinality. |
+| **WebVOWL** (VOWL notation) | Force-directed graph: classes as circles sized by instances, properties as labelled boxes on edges, datatypes in yellow, colour codes for external and deprecated terms | Colour and size carry meaning. Datatypes and properties are visible. Filters and a "degree of collapsing" control. | Force layouts jiggle and lose the hierarchy. Circles waste space. Not keyboard or screen reader accessible. |
+| **TopBraid EDG / Composer** | Form views, SHACL-driven class views, UML-like diagrams | Shape-centric "what properties does this class have". | Enterprise UI. Heavy to learn. |
+| **OWLGrEd, Chowlk, Gra.fo** | UML-style class diagrams: boxes with attributes, associations with cardinalities | The notation data modellers already know. LinkML's generated docs draw the same thing. | Mostly editors or static drawings, not live views of a changing ontology. |
+| **OLS (EBI Ontology Lookup Service), schema.org pages** | Term pages with a hierarchy and, on schema.org, a table of every property a type can have, including inherited ones | The schema.org property table is the most readable way to answer "what can an X have", especially for non-ontologists. | Graph views (OLS) are an afterthought. |
+
+## What Concord does
+
+The Browse tab has three views that share the class tree on the left and the term page below.
+
+- **Classes.** An accessible tree (WAI-ARIA tree pattern: one tab stop, arrow keys, Home and End, type-ahead, expand and collapse all). Ancestors of the selected class open automatically. A class with several parents appears under each. Each class page now has breadcrumbs for every inheritance path, its subclasses, a schema.org-style **property table** (own properties, then those inherited from each ancestor, with expected type and cardinality from domains, ranges, restrictions and functional characteristics), the relationships that can point at it, and a small **neighbourhood diagram**.
+- **Diagram.** A UML-style class diagram, because the ODI works in LinkML and data modellers read UML. Boxes list datatype attributes as `name : type [min..max]`. Object properties are labelled associations with cardinalities. Subclasses point to their parent with a hollow triangle. Layout is layered top-down (parents above children) with dagre, so the hierarchy stays readable. It can show the whole ontology, or a class and everything one or two links away. Attributes, inherited attributes, relationships and subclass links can each be turned off. It's drawn as SVG, so it's sharp at any zoom and can be downloaded.
+- **Graph.** A network overview in the spirit of WebVOWL and OntoGraf, with a hierarchical layout by default and force-directed and radial alternatives. Node size reflects the number of subclasses. Attributes (as yellow datatype nodes, VOWL style) and disjointness can be switched on. Selecting a class fades everything outside its neighbourhood. Clicking a relationship opens the property. It can be downloaded as a PNG.
+
+## Making them modern and accessible
+
+- Pan and zoom follow current canvas tools: drag or scroll to pan, pinch or ctrl/⌘ + scroll to zoom, and +, −, 0 and the arrow keys from the keyboard.
+- Every class in the diagram is a focusable button with a descriptive label. Arrow keys move to the nearest class in that direction, and Enter opens it. The graph canvas has a summary label and points to the diagram and class pages, which hold the same information as text.
+- The views follow the light and dark themes. The browser tests run axe on the class page and the diagram, and check that every view fits a phone screen without sideways scrolling. Running axe found the app's `--subtle` grey text failing contrast (3.2:1), so it was darkened to meet WCAG AA everywhere.
+- Everything is linked: classes, properties and types in the tables and diagrams all open their term page. The view, selection and diagram scope are in the URL, so a view can be shared.
+
+## Possible next steps
+
+- Inferred hierarchy (from HermiT) next to the asserted one, as Protégé offers.
+- Instance counts from example data, to size nodes as WebVOWL does.
+- Showing a change request's added and removed terms on the diagram, coloured as a diff.
+- Editing from the diagram (drag a new subclass, draw an association) that creates a change request.
