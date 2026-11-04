@@ -363,7 +363,8 @@ async function readFolder(get: PodGet, testerId: string, url: string): Promise<P
     }),
   );
   const items = read.filter((x): x is FeedbackSubmission => !!x).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const unread = read.length - items.length;
+  // Documents that failed, and any beyond the first MAX_POD_ITEMS (not read at all), are both counted.
+  const unread = members.length - items.length;
   return { ...base, status: unread ? 'partial' : 'ok', items, ...(unread ? { unread } : {}) };
 }
 

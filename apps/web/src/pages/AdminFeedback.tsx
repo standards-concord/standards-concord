@@ -134,7 +134,7 @@ function PodFeedback() {
                       <span className="font-medium">{f.testerName}</span>
                       <Badge tone={FOLDER_STATUS[f.status].tone}>{FOLDER_STATUS[f.status].label}</Badge>
                       {(f.status === 'ok' || f.status === 'partial') && <span className="text-xs text-muted">{f.items.length} submission{f.items.length === 1 ? '' : 's'}</span>}
-                      {!!f.unread && <span className="text-xs text-warn">{f.unread} couldn’t be read</span>}
+                      {!!f.unread && <span className="text-xs text-warn">{f.unread} not read</span>}
                       <a href={f.url} target="_blank" rel="noreferrer" className="ml-auto truncate font-mono text-xs text-accent hover:underline">
                         {f.url}
                       </a>

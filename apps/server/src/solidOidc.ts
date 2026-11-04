@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import * as oauth from 'oauth4webapi';
 import { Parser, type Quad } from 'n3';
 import { config } from './config.js';
-import { FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
+import { ConnectionPool, FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
 
 /**
  * Signing in with your own WebID (Solid-OIDC), as a relying party.
@@ -79,7 +79,7 @@ export const guardedRequests: { observe?: (method: string, url: string) => void 
 /** The pod server's own responses (feedback documents, listings, ACLs) may be larger than an OIDC document, but are still capped. */
 export const POD_MAX_BYTES = 1024 * 1024;
 
-function guarded(maxBytes: number, check?: (url: URL) => void) {
+function guarded(maxBytes: number, check?: (url: URL) => void, pool?: ConnectionPool | 'held') {
   return async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     check?.(url);
@@ -94,7 +94,7 @@ function guarded(maxBytes: number, check?: (url: URL) => void) {
     }
     const headers = headerRecord(init.headers);
     guardedRequests.observe?.(method, url.href);
-    const r = await safeRequest(url, { method, headers, body, accept: headers.accept ?? '*/*', maxBytes, timeoutMs: TIMEOUT_MS, allowPrivate: trusted, allowHttp: trusted });
+    const r = await safeRequest(url, { method, headers, body, accept: headers.accept ?? '*/*', maxBytes, timeoutMs: TIMEOUT_MS, allowPrivate: trusted, allowHttp: trusted, pool });
     // Response refuses bodies on these statuses; a redirect comes back as itself and is never followed.
     const nullBody = [101, 204, 205, 304].includes(r.status) || method === 'HEAD';
     if (r.status < 200 || r.status > 599) throw new FetchError('bad-response', `HTTP ${r.status}`);
@@ -115,12 +115,18 @@ export function podUrl(raw: string | URL): URL {
   return u;
 }
 
+/** The pod server's own connections, apart from the sign-in's (so a request holding one can still refresh its token). */
+const podConnections = new ConnectionPool();
+const podPool = () => podConnections;
+
 /**
  * The only fetch for the pod server (account API, owners' reads and writes,
  * sharing, admins' reads): the same guarded transport, its origin only, with a
  * larger byte cap.
  */
-export const podFetch = guarded(POD_MAX_BYTES, podUrl);
+export const podFetch = guarded(POD_MAX_BYTES, podUrl, podConnections);
+/** podFetch for a request that already holds one of the pod server's connections. */
+const podFetchHeld = guarded(POD_MAX_BYTES, podUrl, 'held');
 
 const oauthOptions = (url: URL) => ({
   [oauth.customFetch]: guardedFetch as typeof fetch,
@@ -446,8 +452,8 @@ export async function clientCredentialsLogin(webId: string, clientId: string, cl
 const refreshing = new WeakMap<SolidLogin, Promise<boolean>>();
 
 /** Refresh the access token if it is (nearly) expired. Returns false when the login can't continue. */
-function fresh(login: SolidLogin): Promise<boolean> {
-  if (Date.now() < login.expiresAt - 30_000) return Promise.resolve(true);
+function fresh(login: SolidLogin, force = false): Promise<boolean> {
+  if (!force && Date.now() < login.expiresAt - 30_000) return Promise.resolve(true);
   let p = refreshing.get(login);
   if (!p) {
     p = renew(login).finally(() => refreshing.delete(login));
@@ -481,23 +487,36 @@ export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { 
 
 /**
  * Requests that act as the login's WebID (a DPoP proof per request), on the
- * operator's own pod server only, through `podFetch`. Undefined if the login
- * can no longer be used. A 401 from the pod comes back as a response.
+ * operator's own pod server only, through the pod server's connections.
+ * Undefined if the login can no longer be used. Each request waits for its
+ * connection first, and only then checks the token is fresh (refreshing it if
+ * not) and signs its proof, so time spent queueing can't leave it stale. A 401
+ * gets one refresh and retry; any other answer comes back as the response.
  */
 export async function podRequester(login: SolidLogin): Promise<PodRequest | undefined> {
   if (!(await fresh(login))) return undefined;
   return async (method, url, init = {}) => {
     const u = podUrl(url);
-    if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
-    const DPoP = oauth.DPoP(login.client, login.keys);
-    const opts = { DPoP, [oauth.customFetch]: podFetch as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
-    try {
-      return await withNonceRetry(() => oauth.protectedResourceRequest(login.accessToken, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts));
-    } catch (err) {
-      // oauth4webapi raises a 401 challenge as an error; hand it back as the response it was.
-      if (err instanceof oauth.WWWAuthenticateChallengeError) return err.response;
-      throw err;
-    }
+    return podPool().run(async () => {
+      const send = async () => {
+        if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
+        const token = login.accessToken;
+        const DPoP = oauth.DPoP(login.client, login.keys);
+        const opts = { DPoP, [oauth.customFetch]: podFetchHeld as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
+        try {
+          return { token, res: await withNonceRetry(() => oauth.protectedResourceRequest(token, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts)) };
+        } catch (err) {
+          // oauth4webapi raises a 401 challenge as an error; hand it back as the response it was.
+          if (err instanceof oauth.WWWAuthenticateChallengeError) return { token, res: err.response };
+          throw err;
+        }
+      };
+      const first = await send();
+      if (first.res.status !== 401) return first.res;
+      // The token may have been revoked or expired early: refresh (unless another request just did) and try once more.
+      if (login.accessToken === first.token && !(await fresh(login, true))) return first.res;
+      return (await send()).res;
+    });
   };
 }
 

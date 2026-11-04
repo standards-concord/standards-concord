@@ -360,6 +360,14 @@ describe('the admin’s view of the pods', () => {
       expect(f.unread).toBe(1);
       expect(f.items.map((x) => x.id)).toEqual(['3', '1']);
       expect(f.sharingError).toMatch(/./);
+
+      // A listing longer than Concord reads (100) is partial too, and says how many weren't read.
+      const many = async (url: string) =>
+        url === folder ? new Response(Array.from({ length: 101 }, (_, i) => `<> <http://www.w3.org/ns/ldp#contains> <d${i}.json> .`).join('\n'), { status: 200 }) : new Response(JSON.stringify({ id: url.slice(-9, -5), createdAt: '2026-11-04T00:00:00Z', answers: {} }), { status: 200 });
+      const big = (await readPodFeedback({ webId: 'https://jesse.example/#me', get: many })).folders.find((x) => x.testerId === id)!;
+      expect(big.items).toHaveLength(100);
+      expect(big.status).toBe('partial');
+      expect(big.unread).toBe(1);
     } finally {
       config.solid.serverUrl = saved;
     }

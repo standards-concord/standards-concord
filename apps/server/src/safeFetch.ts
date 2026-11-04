@@ -114,28 +114,50 @@ export class FetchError extends Error {
   }
 }
 
-let active = 0;
-const MAX_CONCURRENT = 4;
-/** Requests waiting for one of the MAX_CONCURRENT connections, in order. Beyond MAX_QUEUED, new ones are refused as 'busy'. */
-const waiting: (() => void)[] = [];
-const MAX_QUEUED = 500;
+/**
+ * A few connections at a time; the rest wait their turn, first come first
+ * served. Beyond `maxQueued` waiting, new requests are refused as 'busy'.
+ */
+export class ConnectionPool {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(
+    private readonly size = 4,
+    private readonly maxQueued = 500,
+  ) {}
 
-/** Wait for a connection slot (first come, first served). */
-function acquire(): Promise<void> {
-  if (active < MAX_CONCURRENT) {
-    active++;
-    return Promise.resolve();
+  acquire(): Promise<void> {
+    if (this.active < this.size) {
+      this.active++;
+      return Promise.resolve();
+    }
+    if (this.waiting.length >= this.maxQueued) return Promise.reject(new FetchError('busy', 'Too many fetches waiting'));
+    // The slot is handed over by release() without decrementing, so it can't be taken by a newcomer in between.
+    return new Promise((resolve) => this.waiting.push(resolve));
   }
-  if (waiting.length >= MAX_QUEUED) return Promise.reject(new FetchError('busy', 'Too many fetches waiting'));
-  // The slot is handed over by release() without decrementing, so it can't be taken by a newcomer in between.
-  return new Promise((resolve) => waiting.push(resolve));
+
+  release() {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.active--;
+  }
+
+  /**
+   * Run `fn` holding one slot: for a caller that must prepare a request (fresh
+   * credentials, a signed proof) only once it is its turn. Requests `fn` makes
+   * through this pool pass `pool: 'held'` so they don't wait for a second slot.
+   */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
 }
 
-function release() {
-  const next = waiting.shift();
-  if (next) next();
-  else active--;
-}
+const shared = new ConnectionPool();
 
 export interface SafeFetchOptions {
   maxBytes?: number;
@@ -160,6 +182,8 @@ export interface SafeRequestOptions extends SafeFetchOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'HEAD';
   headers?: Record<string, string>;
   body?: string;
+  /** The connections this request waits for (default: one pool shared by every caller); 'held' when the caller already holds a slot (ConnectionPool.run). */
+  pool?: ConnectionPool | 'held';
   /** Refuse a status before its body is read (the connection is dropped at once). */
   refuseStatus?: (status: number) => FetchError | undefined;
 }
@@ -183,11 +207,13 @@ export function safeRequest(url: URL, opts: SafeRequestOptions = {}): Promise<Sa
   if (url.username || url.password) return Promise.reject(new FetchError('bad-response', 'URLs with credentials are not fetched'));
   const literal = ipLiteral(url);
   if (literal && !opts.allowPrivate && !isPublicAddress(literal)) return Promise.reject(new FetchError('bad-response', `Refusing to connect to ${literal}: not a public address`));
-  return acquire().then(() => connect(url, opts, maxBytes, timeoutMs));
+  if (opts.pool === 'held') return connect(url, opts, maxBytes, timeoutMs, () => undefined);
+  const pool = opts.pool ?? shared;
+  return pool.acquire().then(() => connect(url, opts, maxBytes, timeoutMs, () => pool.release()));
 }
 
 /** One request, holding a connection slot until it settles. */
-function connect(url: URL, opts: SafeRequestOptions, maxBytes: number, timeoutMs: number): Promise<SafeResponse> {
+function connect(url: URL, opts: SafeRequestOptions, maxBytes: number, timeoutMs: number, release: () => void): Promise<SafeResponse> {
   return new Promise<SafeResponse>((resolve, reject) => {
     let settled = false;
     const done = (err: Error | undefined, value?: SafeResponse) => {

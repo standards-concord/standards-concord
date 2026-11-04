@@ -2,6 +2,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
+import { openDb } from '../src/db.js';
+import { solid } from '../src/services/solid.js';
 import { clientCredentialsLogin, finishLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
 
 /**
@@ -107,6 +109,24 @@ beforeAll(async () => {
     if (url.pathname === '/pod/big.json') {
       podAuth.push(String(req.headers.authorization));
       return send('application/json', JSON.stringify({ id: 'x' }), behaviour.padPod, behaviour.stallPod);
+    }
+    // Refuses the first access token (as if it had been revoked early); /pod/locked.json refuses every token.
+    if (url.pathname === '/pod/revoked.json' || url.pathname === '/pod/locked.json') {
+      podAuth.push(String(req.headers.authorization));
+      if (url.pathname === '/pod/locked.json' || req.headers.authorization === 'DPoP at-1') return res.writeHead(401, { 'www-authenticate': 'DPoP error="invalid_token"' }).end();
+      return json(200, { id: 'y' });
+    }
+    // A Community Solid Server's account API, enough to provision a pod.
+    if (url.pathname.startsWith('/.account/')) {
+      const a = `${base}/.account/`;
+      const authed = req.headers.authorization === 'CSS-Account-Token acct-tok';
+      if (req.method === 'GET' && url.pathname === '/.account/')
+        return json(200, { controls: { account: { create: `${a}account/`, ...(authed ? { pod: `${a}pod/`, clientCredentials: `${a}cc/` } : {}) }, password: { login: `${a}login/`, ...(authed ? { create: `${a}password/` } : {}) } } });
+      if (url.pathname === '/.account/account/') return json(200, { authorization: 'acct-tok' });
+      if (!authed) return json(401, {});
+      if (url.pathname === '/.account/password/') return json(200, {});
+      if (url.pathname === '/.account/pod/') return json(200, { pod: `${base}/newpod/`, webId: `${base}/newpod/profile/card#me` });
+      if (url.pathname === '/.account/cc/') return json(200, { id: 'cc-id', secret: 'cc-secret' });
     }
     if (url.pathname === '/token') {
       sawDpop = typeof req.headers.dpop === 'string';
@@ -293,6 +313,41 @@ describe('reading a pod as the signed-in WebID', () => {
     expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200]);
     expect(refreshes).toBe(1);
     expect(new Set(podAuth)).toEqual(new Set(['DPoP at-r1']));
+  });
+
+  it('waits for a connection before checking the token, so a token that went stale in the queue is refreshed first', async () => {
+    const { login } = await signIn();
+    const get = (await podReader(login))!;
+    // Four slow reads take every connection to the pod server; the token has half a second of freshness left.
+    behaviour = { stallPod: 1500 };
+    login.expiresAt = Date.now() + 30_500;
+    const busy = [1, 2, 3, 4].map(() => get(`${base}/pod/big.json`, 'application/json'));
+    await new Promise((r) => setTimeout(r, 100));
+    const queued = get(`${base}/pod/big.json`, 'application/json');
+    expect((await Promise.all([...busy, queued])).map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    // The queued read went out after a refresh, with the new token; the first four used the old one.
+    expect(refreshes).toBe(1);
+    expect(podAuth).toEqual(['DPoP at-1', 'DPoP at-1', 'DPoP at-1', 'DPoP at-1', 'DPoP at-r1']);
+  }, 20_000);
+
+  it('refreshes once and retries when the pod answers 401, and gives the 401 back if it persists', async () => {
+    const { login } = await signIn();
+    const get = (await podReader(login))!;
+    expect((await get(`${base}/pod/revoked.json`, 'application/json')).status).toBe(200);
+    expect(refreshes).toBe(1);
+    expect(podAuth).toEqual(['DPoP at-1', 'DPoP at-r1']);
+    podAuth = [];
+    expect((await get(`${base}/pod/locked.json`, 'application/json')).status).toBe(401);
+    expect(podAuth).toHaveLength(2);
+    expect(refreshes).toBe(2);
+  });
+
+  it('provisions a pod through the guarded transport (the account API, then client credentials)', async () => {
+    openDb(':memory:');
+    const made = await solid.provision({ id: 'u-provision1', name: 'New Tester' });
+    expect(made).toEqual({ webId: `${base}/newpod/profile/card#me`, podUrl: `${base}/newpod/` });
+    expect(seen.filter((r) => r.includes('/.account/')).length).toBeGreaterThanOrEqual(5);
+    // Every request it made went through the guarded transport (checked after each test), and none used the plain fetch (stubbed to fail).
   });
 
   it('acts as a pod owner with client credentials, through the guarded transport', async () => {

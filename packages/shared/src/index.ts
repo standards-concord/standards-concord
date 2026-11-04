@@ -665,7 +665,7 @@ export interface PodFeedbackFolder {
   /** forbidden: the pod refused the admin's WebID; missing: no feedback saved there; partial: some documents couldn't be read. */
   status: 'ok' | 'partial' | 'forbidden' | 'missing' | 'error';
   items: FeedbackSubmission[];
-  /** Documents the folder lists that couldn't be read (status partial). */
+  /** Documents the folder lists that weren't read: they failed, or were beyond the first 100 (status partial). */
   unread?: number;
   /** Why Concord couldn't share this folder with the admins, the last time it tried. */
   sharingError?: string;
