@@ -73,20 +73,51 @@ export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, vie
 const noLongerPublic: ((u: UseCase) => void)[] = [];
 
 const consentLocks = new Map<string, Promise<unknown>>();
-const heldLocks = new AsyncLocalStorage<Set<string>>();
+/** One holding of the lock. Work it starts that asks for the lock again queues on `inner`, behind its siblings. */
+interface Holding {
+  active: boolean;
+  inner: Promise<unknown>;
+}
+const holdings = new AsyncLocalStorage<Map<string, Holding>>();
 /**
  * Runs `fn` exclusively for an ontology. Everything that commits material
  * derived from use cases (a release, a merge, a drafted change request) and
- * everything that changes consent (withdrawal, visibility, archiving) goes
- * through it, so a withdrawal can't land between the consent check and the
- * commit: it waits. Re-entrant: work already holding the lock (a drafted
- * request that merges straight away) runs at once.
+ * everything that changes consent (withdrawal, visibility, submission,
+ * archiving) goes through it, so a withdrawal can't land between the consent
+ * check and the commit: it waits.
+ *
+ * Work already holding the lock (a drafted request that merges straight away)
+ * doesn't wait for itself: its nested calls run one at a time, in order, and
+ * the holding ends only when they have all finished. Once a holding has ended,
+ * anything still carrying its context queues like everyone else.
  */
 export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T): Promise<T> {
-  const held = heldLocks.getStore();
-  if (held?.has(ontologyId)) return Promise.resolve().then(fn);
-  const inside = () => heldLocks.run(new Set([...(held ?? []), ontologyId]), fn);
-  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(inside);
+  const context = holdings.getStore();
+  const runHeld = (): Promise<T> => {
+    const mine: Holding = { active: true, inner: Promise.resolve() };
+    const next = new Map(context ?? []);
+    next.set(ontologyId, mine);
+    return holdings.run(next, async () => {
+      try {
+        return await fn();
+      } finally {
+        mine.active = false;
+        // Nested work this holding started (even work it didn't wait for) finishes inside it.
+        while (true) {
+          const pending = mine.inner;
+          await pending.catch(() => undefined);
+          if (pending === mine.inner) break;
+        }
+      }
+    });
+  };
+  const parent = context?.get(ontologyId);
+  if (parent?.active) {
+    const run = parent.inner.catch(() => undefined).then(runHeld);
+    parent.inner = run.catch(() => undefined);
+    return run;
+  }
+  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(runHeld);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);
   void tail.then(() => {
@@ -102,24 +133,46 @@ const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => 
 /* Consent at read time: records derived from use cases                      */
 /* ------------------------------------------------------------------------ */
 
-/** The use cases a change request was drafted from or cites. */
-export function crSources(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>): string[] {
+/**
+ * The use cases a change request was drafted from or cites. Requests made from a call before this
+ * version recorded only the call: its use cases are found through it.
+ */
+export function crSources(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>): string[] {
   const ids = [...(cr.useCaseIds ?? [])];
   if (cr.origin.type === 'synthesis') ids.push(...cr.origin.useCaseIds);
   if (cr.origin.type === 'chat' && cr.origin.useCaseId) ids.push(cr.origin.useCaseId);
+  if (cr.origin.type === 'meeting') ids.push(...meetingUseCases(cr.ontologyId, cr.origin.meetingId));
   return [...new Set(ids)];
 }
+
+const meetingUseCases = (ontologyId: string, meetingId: string) =>
+  list<UseCase>('useCases', ontologyId)
+    .filter((u) => u.source === 'meeting' && u.sourceRef === meetingId)
+    .map((u) => u.id);
+
+/** A request made from a call whose use cases can't be found: where its content came from is unknown. */
+const provenanceUnknown = (cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>) => cr.origin.type === 'meeting' && !meetingUseCases(cr.ontologyId, cr.origin.meetingId).length;
 
 const visibleTo = (id: string, viewer?: User) => {
   const u = get<UseCase>('useCases', id);
   return !!u && canSee(u, viewer);
 };
 
-/** True when the viewer may not see one of the use cases the request came from or cites: then only its number and state are shown. */
-export const crWithheld = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>, viewer?: User) => crSources(cr).some((id) => !visibleTo(id, viewer));
+/**
+ * True when only the request's number and state may be shown to this viewer: they may not see one
+ * of the use cases it came from or cites, or it was made from a call they may not see.
+ */
+export function crWithheld(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>, viewer?: User) {
+  if (cr.origin.type === 'meeting') {
+    const m = get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId);
+    if (!m || !canSeeMeeting(m, viewer)) return true;
+  }
+  return crSources(cr).some((id) => !visibleTo(id, viewer));
+}
 
-/** Every use case it came from or cites is still public, so it may go into the ontology. */
-export const sourcesPublic = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds'>) =>
+/** Every use case it came from or cites is still public (and where it came from is known), so it may go into the ontology. */
+export const sourcesPublic = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>) =>
+  !provenanceUnknown(cr) &&
   crSources(cr).every((id) => {
     const u = get<UseCase>('useCases', id);
     return !!u && isPublic(u);
@@ -129,19 +182,22 @@ export const WITHHELD_TITLE = 'Withheld: based on a use case that is no longer s
 /** The reason a request can't go further once a use case it came from is no longer public. */
 export const SOURCE_GONE = 'A use case this request was drafted from or cites is no longer public, so it cannot go into the ontology. Open a new change request instead.';
 
+/** The source recorded on results of a change request's own tests (not drawn from any use case). */
+export const OWN_TEST = '@request';
+
 /**
- * Competency question results the viewer may see: those from a use case they can see, and the
- * request's own tests. A result with no recorded source that isn't one of the request's own tests
- * (saved before sources were recorded) is left out.
+ * Competency question results the viewer may see: the request's own tests, and those from a use
+ * case they can see. A result with no recorded source (saved before sources were recorded) can't
+ * be told apart from one drawn from a withdrawn use case, so it is never shown; the next triage
+ * records sources again.
  */
-export function visibleCQResults<R extends { question: string; source?: string }>(results: R[], viewer?: User, ownTests: { question: string }[] = []): R[] {
-  const own = new Set(ownTests.map((t) => t.question));
-  return results.filter((r) => (r.source ? visibleTo(r.source, viewer) : own.has(r.question)));
+export function visibleCQResults<R extends { question: string; source?: string }>(results: R[], viewer?: User): R[] {
+  return results.filter((r) => r.source === OWN_TEST || (!!r.source && visibleTo(r.source, viewer)));
 }
 
 /** A validation report as the viewer may see it. */
-export function validationForViewer<V extends { competencyQuestions: { question: string; source?: string }[] }>(v: V, viewer?: User, ownTests?: { question: string }[]): V {
-  return { ...v, competencyQuestions: visibleCQResults(v.competencyQuestions, viewer, ownTests) };
+export function validationForViewer<V extends { competencyQuestions: { question: string; source?: string }[] }>(v: V, viewer?: User): V {
+  return { ...v, competencyQuestions: visibleCQResults(v.competencyQuestions, viewer) };
 }
 
 /** Bring documents written before sharing modes existed up to date. */
@@ -316,6 +372,18 @@ function saveUseCase(u: UseCase) {
   if (u.visibility === 'private') void mirrorToPod(u);
   if (before && isPublic(before) && !isPublic(u)) for (const fn of noLongerPublic) fn(u);
   return u;
+}
+
+/**
+ * Write only these fields of `u` onto the use case as it is stored now. For work that read the use
+ * case before an await (an interview turn, an anonymised draft): anything else saved meanwhile,
+ * above all who may see it and whether it was submitted or withdrawn, is kept.
+ */
+function saveFields(u: UseCase, fields: (keyof UseCase)[]): UseCase {
+  const fresh = get<UseCase>('useCases', u.id);
+  if (!fresh) return u;
+  for (const f of fields) (fresh as unknown as Record<string, unknown>)[f] = u[f];
+  return saveUseCase(fresh);
 }
 
 /**
@@ -611,7 +679,7 @@ export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
     ...cr,
     origin,
     ...(cr.useCaseIds ? { useCaseIds: cr.useCaseIds.filter(ok) } : {}),
-    ...(cr.validation ? { validation: validationForViewer(cr.validation, viewer, cr.tests) } : {}),
+    ...(cr.validation ? { validation: validationForViewer(cr.validation, viewer) } : {}),
   } as T;
 }
 
@@ -810,7 +878,7 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
   const draft = restrictDraft(value);
   draft.warnings = identifyingWarnings(draft, known);
   u.anonymisation = { status: 'proposed', draft, proposedAt: clock.iso() };
-  return saveUseCase(u);
+  return saveFields(u, ['anonymisation']);
 }
 
 /**
@@ -1071,8 +1139,9 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
   });
   mergeTurn(u, turn);
   session.messages.push(msg('assistant', turn.reply, turn.targets as ChatMessage['targets']));
-  saveUseCase(u);
-  if (turn.done) await completeInterview(session, u, user);
+  // Only what the interview captured: a visibility or consent change made during the model call stands.
+  saveFields(u, ['sections', 'competencyQuestions', 'terms']);
+  if (turn.done) await completeInterview(session, getUseCase(u.id), user);
   saveInterview(session);
   await persistTranscript(session, u);
   return { session, useCase: getUseCase(u.id) };
@@ -1107,8 +1176,15 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
       ),
     );
   } else {
-    if (u.status === 'draft') u.status = 'triage';
-    saveUseCase(u);
+    // Finishing a shared interview submits it: a consent change, so under the lock, on the record as stored then.
+    await withConsentLock(u.ontologyId, () => {
+      const fresh = getUseCase(u.id);
+      if (fresh.status === 'draft' && fresh.visibility !== 'private' && !fresh.withdrawnAt) {
+        fresh.status = 'triage';
+        saveUseCase(fresh);
+      }
+      Object.assign(u, fresh);
+    });
     logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
 }

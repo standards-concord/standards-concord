@@ -1164,3 +1164,177 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     expect(res.text).not.toMatch(/Pilot boat roster/);
   });
 });
+
+describe('eighth review: requests made from calls, interview saves, untagged results, nested locks', () => {
+  const publicCase = async (who: string, name: string) => {
+    const agent = await login('contributor', who);
+    return { agent, id: await useCaseVia(agent, name, 'public') };
+  };
+  const addClass = (label: string) => ({ op: 'addClass', localName: 'Eighth' + Math.random().toString(36).slice(2, 8), label, definition: `A ${label} thing.` }) as unknown as ChangeRequest['ops'][number];
+  /** A call, stored directly, as the meeting workflow before this version left it. */
+  const legacyMeeting = () => {
+    const m = { ...structuredClone(listDocs<{ id: string; createdBy?: string }>('meetings', demoId)[0]), id: `mtg_legacy_${Math.random().toString(36).slice(2, 8)}` };
+    put('meetings', m, demoId);
+    return m;
+  };
+  /** A change request as the meeting workflow before this version stored it: origin the call, no use case links. */
+  const legacyMeetingCR = (meetingId: string, fields: Partial<ChangeRequest>) => {
+    const base = list<ChangeRequest>(demoId)[0];
+    const cr = { ...structuredClone(base), id: `cr_mtg_${Math.random().toString(36).slice(2, 8)}`, number: 5000 + Math.floor(Math.random() * 999), origin: { type: 'meeting' as const, meetingId }, useCaseIds: undefined, releaseId: undefined, mergedCommit: undefined, ...fields } as ChangeRequest;
+    put('changeRequests', cr, demoId);
+    return cr;
+  };
+
+  it('a request made from a call before this version is withheld and refused once a use case from that call is withdrawn (finding 1)', async () => {
+    const m = legacyMeeting();
+    const { id } = await publicCase('Call Case Author', 'Legacy call case');
+    put('useCases', { ...getUseCase(id), source: 'meeting', sourceRef: m.id }, demoId);
+    const cr = legacyMeetingCR(m.id, { title: 'From the call: Legacy call case', status: 'approved', ops: [addClass('Legacy call secret')] });
+    // Before the withdrawal, working group members see it (and outsiders don't: it came from a call).
+    const member = await login('member', 'Call Member');
+    expect((await member.get(`/api/change-requests/${cr.id}`)).text).toMatch(/Legacy call case/);
+    const outsider = await login('contributor');
+    expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
+    withdrawUseCase(getUseCase(id), userNamed('Call Case Author'));
+    for (const reader of [member, outsider]) {
+      const res = await reader.get(`/api/change-requests/${cr.id}`);
+      expect(res.body.withheld).toBe(true);
+      expect(res.text).not.toMatch(/Legacy call/);
+    }
+    const editor = await login('editor', 'Call Editor');
+    expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
+    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
+    expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Legacy call secret/);
+  });
+
+  it('a request made from a call whose use cases can no longer be found is never merged (finding 1)', async () => {
+    const m = legacyMeeting();
+    const cr = legacyMeetingCR(m.id, { title: 'Orphaned call request', status: 'approved', ops: [addClass('Orphaned call secret')] });
+    const editor = await login('editor', 'Orphan Editor');
+    expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
+    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
+    expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Orphaned call secret/);
+    // And someone who can't see the call can't read it.
+    expect((await (await login('contributor')).get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
+  });
+
+  it('an interview turn that finishes after the author changes who can see the use case keeps their choice (finding 2)', async () => {
+    const { llm } = await import('../src/llm/provider.js');
+    const { agent, id } = await publicCase('Turn Author', 'Turn race case');
+    const s = await agent.post(`/api/ontologies/${demoId}/interviews`).send({ useCaseId: id });
+    expect(s.status).toBe(201);
+    const real = llm.json.bind(llm);
+    let resume!: () => void;
+    const spy = vi.spyOn(llm, 'json').mockImplementation(async (opts: Parameters<typeof llm.json>[0]) => {
+      if (opts.task === 'interview' && !resume) await new Promise<void>((ok) => (resume = ok));
+      return real(opts as never);
+    });
+    try {
+      const turn = agent.post(`/api/interviews/${s.body.id}/messages`).send({ content: 'We also track ferry crews.' }).then((r) => r);
+      while (!resume) await new Promise((ok) => setTimeout(ok, 10));
+      // Made private while the model was answering...
+      expect((await agent.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'private' })).status).toBe(200);
+      const outsider = await login('contributor');
+      expect((await outsider.get(`/api/use-cases/${id}`)).status).toBe(404);
+      resume();
+      expect((await turn).status).toBe(200);
+      // ...and it stays private, with what the turn captured.
+      expect(getUseCase(id).visibility).toBe('private');
+      expect((await outsider.get(`/api/use-cases/${id}`)).status).toBe(404);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('an interview turn that finishes after the author shares the use case does not take it back (finding 2)', async () => {
+    const { llm } = await import('../src/llm/provider.js');
+    const agent = await login('contributor', 'Share Turn Author');
+    const s = await agent.post(`/api/ontologies/${demoId}/interviews`).send({});
+    const id = s.body.useCaseId as string;
+    await agent.patch(`/api/use-cases/${id}`).send({ sections: { name: 'Shared mid-turn case', goal: 'g' }, competencyQuestions: [{ question: 'Which shared ones?' }] });
+    const real = llm.json.bind(llm);
+    let resume!: () => void;
+    const spy = vi.spyOn(llm, 'json').mockImplementation(async (opts: Parameters<typeof llm.json>[0]) => {
+      if (opts.task === 'interview' && !resume) await new Promise<void>((ok) => (resume = ok));
+      return real(opts as never);
+    });
+    try {
+      const turn = agent.post(`/api/interviews/${s.body.id}/messages`).send({ content: 'More detail.' }).then((r) => r);
+      while (!resume) await new Promise((ok) => setTimeout(ok, 10));
+      expect((await agent.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'public' })).status).toBe(200);
+      expect((await agent.post(`/api/use-cases/${id}/submit`)).status).toBe(200);
+      resume();
+      expect((await turn).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    const u = getUseCase(id);
+    expect(u.visibility).toBe('public');
+    expect(u.status).not.toBe('draft');
+  });
+
+  it('competency results saved without a source are never shown, even when they share a question with the request\'s own test (finding 3)', async () => {
+    const { triage } = await import('../src/services/changeRequests.js');
+    const { id } = await publicCase('Untagged Author', 'Untagged results case');
+    const u = getUseCase(id);
+    put('useCases', { ...u, competencyQuestions: [{ id: 'cq_untagged', question: 'Which resources?', status: 'answerable', sparql: 'SELECT ?x WHERE { ?x a <urn:UntaggedKind> }', exampleData: '<urn:UNTAGGED-SECRET> a <urn:UntaggedKind> .' }] }, demoId);
+    const base = list<ChangeRequest>(demoId)[0];
+    const cr = { ...structuredClone(base), id: 'cr_untagged', number: 4999, origin: { type: 'direct' as const }, useCaseIds: [], tests: [{ question: 'Which resources?', sparql: 'SELECT ?x WHERE { ?x a <urn:OwnKind> }', exampleData: '<urn:own-harmless> a <urn:OwnKind> .' }] };
+    put('changeRequests', cr, demoId);
+    await triage(get<ChangeRequest>('changeRequests', cr.id)!);
+    const outsider = await login('contributor');
+    // Newly saved results say where they came from: the request's own test is shown.
+    const fresh = await outsider.get(`/api/change-requests/${cr.id}`);
+    expect(fresh.text).toContain('own-harmless');
+    // As saved before sources were recorded: no source on any result.
+    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
+    put('changeRequests', { ...saved, validation: { ...saved.validation!, competencyQuestions: saved.validation!.competencyQuestions.map(({ source: _s, ...r }) => r) } }, demoId);
+    withdrawUseCase(getUseCase(id), userNamed('Untagged Author'));
+    const res = await outsider.get(`/api/change-requests/${cr.id}`);
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('UNTAGGED-SECRET');
+  });
+
+  it('nested work inside a consent lock runs one at a time, and the holding ends only when it has finished (finding 4)', async () => {
+    let running = 0;
+    let most = 0;
+    const work = (ms: number) => async () => {
+      running++;
+      most = Math.max(most, running);
+      await new Promise((ok) => setTimeout(ok, ms));
+      running--;
+    };
+    let detached: Promise<void> | undefined;
+    const outer = withConsentLock('lock-test', async () => {
+      // Two in parallel, and one started without waiting for it.
+      await Promise.all([withConsentLock('lock-test', work(20)), withConsentLock('lock-test', work(20))]);
+      detached = withConsentLock('lock-test', work(40));
+    });
+    // Unrelated work queued behind the holding must not overlap the detached child.
+    const after = withConsentLock('lock-test', work(10));
+    await Promise.all([outer, after]);
+    await detached;
+    expect(most).toBe(1);
+  });
+
+  it('a context that outlives its holding queues like anyone else (finding 4)', async () => {
+    let running = 0;
+    let most = 0;
+    const work = (ms: number) => async () => {
+      running++;
+      most = Math.max(most, running);
+      await new Promise((ok) => setTimeout(ok, ms));
+      running--;
+    };
+    let late: Promise<void> | undefined;
+    await withConsentLock('lock-test-2', async () => {
+      // Starts after the holding has ended, still carrying its context.
+      late = new Promise<void>((ok) => setTimeout(ok, 30)).then(() => withConsentLock('lock-test-2', work(20)));
+    });
+    // Unrelated work takes the lock in the meantime and holds it past the late call.
+    const unrelated = new Promise<void>((ok) => setTimeout(ok, 10)).then(() => withConsentLock('lock-test-2', work(60)));
+    await Promise.all([late, unrelated]);
+    await late;
+    expect(most).toBe(1);
+  });
+});

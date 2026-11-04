@@ -32,7 +32,7 @@ import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
-import { SOURCE_GONE, sourcesPublic, withConsentLock } from './useCases.js';
+import { OWN_TEST, SOURCE_GONE, sourcesPublic, withConsentLock } from './useCases.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
@@ -205,7 +205,8 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const { graph: after, warnings } = applyChangeOps(before, ops, { author: author?.name, date: clock.iso().slice(0, 10) });
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
-  const cqs = [...competencyTests(project.id), ...(tests ?? [])];
+  // The request's own tests are marked as such, so readers can tell them from use cases' questions.
+  const cqs = [...competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
   const validation = await validate(after, { cqs, reasoner: 'owl', fair: await fairContext(after.ontologyIRI) });
   return { before, after, diff, classification, validation, warnings };
 }
