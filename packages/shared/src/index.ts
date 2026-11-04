@@ -516,6 +516,8 @@ export interface ChangeRequest {
    * back to review instead of merging.
    */
   approvedAs?: { level: ChangeLevel; confirmation: boolean };
+  /** Whose action approved it for an automatic merge that is waiting for their triage budget; the merge is charged to them. */
+  autoMergeBy?: string;
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;

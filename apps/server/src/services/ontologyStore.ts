@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
@@ -18,19 +19,23 @@ function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
 }
 
-function git(dir: string, args: string[], env: Record<string, string> = {}): string {
-  return execFileSync('git', args, {
+function git(dir: string, args: string[], env: Record<string, string> = {}, opts: { input?: string; extraEnv?: Record<string, string>; raw?: boolean } = {}): string {
+  const out = execFileSync('git', args, {
     cwd: dir,
     encoding: 'utf8',
+    input: opts.input,
+    maxBuffer: 256 * 1024 * 1024,
     env: {
       ...process.env,
       GIT_AUTHOR_NAME: env.name ?? 'Concord',
       GIT_AUTHOR_EMAIL: env.email ?? 'concord@localhost',
       GIT_COMMITTER_NAME: 'Concord',
       GIT_COMMITTER_EMAIL: 'concord@localhost',
+      ...opts.extraEnv,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+    stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+  });
+  return opts.raw ? out : out.trim();
 }
 
 const graphCache = new Map<string, OntologyGraph>();
@@ -58,18 +63,25 @@ export const ontologyStore = {
     return git(repoDir(project), ['rev-parse', 'HEAD']);
   },
 
-  readWorkingText(project: Pick<OntologyProject, 'slug'>): string {
-    return fs.readFileSync(path.join(repoDir(project), FILE), 'utf8');
+  /** The working draft as committed (git, not the checked-out file, which is only a mirror of it). */
+  readWorkingText(project: Pick<OntologyProject, 'slug'>, commit = 'HEAD'): string {
+    return git(repoDir(project), ['show', `${commit}:${FILE}`], {}, { raw: true });
   },
 
   async working(project: Pick<OntologyProject, 'slug'>): Promise<OntologyGraph> {
-    const key = `${project.slug}@${this.head(project)}`;
+    return (await this.workingAt(project)).graph;
+  },
+
+  /** The working draft and the commit it is from, read together. */
+  async workingAt(project: Pick<OntologyProject, 'slug'>): Promise<{ graph: OntologyGraph; head: string }> {
+    const head = this.head(project);
+    const key = `${project.slug}@${head}`;
     let g = graphCache.get(key);
     if (!g) {
-      g = await OntologyGraph.fromTurtle(this.readWorkingText(project));
+      g = await OntologyGraph.fromTurtle(this.readWorkingText(project, head));
       graphCache.set(key, g);
     }
-    return g;
+    return { graph: g, head };
   },
 
   /** `ref` is 'working' or a released version like '1.2.0'. */
@@ -86,13 +98,36 @@ export const ontologyStore = {
     return g;
   },
 
-  async commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor): Promise<string> {
+  /**
+   * Commits a new working draft on top of `base` (default: the current head).
+   * The branch only moves if it is still at `base` (an atomic compare-and-swap
+   * of the ref), so a writer that computed its change from an older draft can
+   * never overwrite a commit made since: it gets a 409 and nothing changes.
+   */
+  async commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor, base?: string): Promise<string> {
     const dir = repoDir(project);
-    fs.writeFileSync(path.join(dir, FILE), await graph.toTurtle());
-    git(dir, ['add', FILE]);
-    const status = git(dir, ['status', '--porcelain']);
-    if (status) git(dir, ['commit', '-q', '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
-    return this.head(project);
+    const parent = base ?? this.head(project);
+    const blob = git(dir, ['hash-object', '-w', '--stdin'], {}, { input: await graph.toTurtle() });
+    const index = path.join(dir, '.git', `concord-index-${randomUUID()}`);
+    let tree: string;
+    try {
+      const extraEnv = { GIT_INDEX_FILE: index };
+      git(dir, ['read-tree', parent], {}, { extraEnv });
+      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], {}, { extraEnv });
+      tree = git(dir, ['write-tree'], {}, { extraEnv });
+    } finally {
+      fs.rmSync(index, { force: true });
+    }
+    if (tree === git(dir, ['rev-parse', `${parent}^{tree}`])) return parent; // nothing changed
+    const commit = git(dir, ['commit-tree', tree, '-p', parent, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
+    try {
+      git(dir, ['update-ref', '-m', 'concord: commit working draft', 'HEAD', commit, parent]);
+    } catch {
+      throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
+    }
+    // Bring the checked-out file in line with whatever the branch now holds.
+    git(dir, ['checkout', '-q', 'HEAD', '--', FILE]);
+    return commit;
   },
 
   async writeRelease(

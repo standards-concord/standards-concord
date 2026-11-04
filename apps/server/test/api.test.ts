@@ -760,7 +760,7 @@ describe('inline term edits', () => {
       expect((await editor.post(`/api/change-requests/${one.body.id}/merge`)).status).toBe(429);
       expect(crsMod.getCR(one.body.id).status).toBe('approved');
 
-      // An approval that would trigger an automatic merge: recorded, and the governance clock does the merge.
+      // An approval that would trigger an automatic merge: recorded, and the merge waits for the approver's budget.
       const LOC = `${VOL}Location`;
       const two = await edit(b, { termIri: LOC, set: { examples: ['a village hall'] }, submit: true });
       await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
@@ -769,13 +769,92 @@ describe('inline term edits', () => {
       const approved = await editor.post(`/api/change-requests/${two.body.id}/reviews`).send({ decision: 'approve' });
       expect(approved.status).toBe(200);
       expect(approved.body.status).toBe('approved');
+      expect(approved.body.autoMergeBy).toBe((await userOf(editor)).id);
+      await editor.post('/api/simulation/clock').send({ advanceDays: 0.01 });
+      expect(crsMod.getCR(two.body.id).status).toBe('approved');
+      // Once they have budget again, the governance clock merges it, on their budget.
+      triageBudget.max = 2;
       await editor.post('/api/simulation/clock').send({ advanceDays: 0.01 });
       expect(crsMod.getCR(two.body.id).status).toBe('merged');
+      expect(crsMod.getCR(two.body.id).autoMergeBy).toBeUndefined();
+      // That merge used the editor's second allowance (the first was the re-triage).
+      expect((await editor.post(`/api/change-requests/${one.body.id}/retriage`)).status).toBe(429);
       // Re-checking the other open requests after each merge used no LLM triage.
       expect(spy.mock.calls.filter(([c]) => c.task === 'triage')).toHaveLength(0);
     } finally {
       spy.mockRestore();
       Object.assign(triageBudget, saved);
     }
+  });
+
+  it('re-validates the combined result at merge, and does not merge if it now fails', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const HELPER = `${VOL}Helper`;
+    const PERSON = `${VOL}Person`;
+    const editor = await login('editor', 'Editor Combined');
+    const steward = await userOf(await login('steward', 'Steward Combined'));
+    const create = (title: string, ops: object[]) => editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title, description: '', kind: 'change', ops });
+    const approve = (r: { body: { id: string; classification: { level: 'patch' | 'minor' | 'major' } } }) =>
+      put('changeRequests', { ...crsMod.getCR(r.body.id), status: 'approved', approvedAs: { level: r.body.classification.level, confirmation: false } }, demoId);
+    const helper = await create('Add helper', [{ op: 'addClass', localName: 'Helper', label: 'helper', definition: 'An agent that helps out with a volunteering opportunity.', subClassOf: [`${VOL}Agent`] }]);
+    approve(helper);
+    expect((await crsMod.merge(crsMod.getCR(helper.body.id), steward)).status).toBe('merged');
+    // Each passes on its own; together Helper would be unsatisfiable.
+    const sub = await create('Helpers are people', [{ op: 'setSuperClasses', iri: HELPER, superClasses: [PERSON] }]);
+    const disjoint = await create('Helpers are not people', [{ op: 'addDisjointness', classes: [HELPER, PERSON] }]);
+    expect(sub.body.validation.passed).toBe(true);
+    expect(disjoint.body.validation.passed).toBe(true);
+    approve(sub);
+    approve(disjoint);
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const head = async () => ontologyStore.head(getProject(demoId));
+    expect((await crsMod.merge(crsMod.getCR(sub.body.id), steward)).status).toBe('merged');
+    const before = await head();
+    const second = await crsMod.merge(crsMod.getCR(disjoint.body.id), steward);
+    expect(second.status).toBe('needs-work');
+    expect(second.validation!.passed).toBe(false);
+    expect(JSON.stringify(second.timeline)).toMatch(/fails validation/);
+    expect(await head()).toEqual(before);
+  });
+
+  it('lets a blocking review added after approval stop the merge', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const contributor = await login('contributor', 'Contributor Blocked');
+    const editor = await login('editor', 'Editor Blocker');
+    const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Blocked later.' }, submit: true });
+    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    const blocked = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ decision: 'request-changes', comment: 'Not yet.' });
+    expect(blocked.body.status).toBe('needs-work');
+    expect((await editor.post(`/api/change-requests/${created.body.id}/merge`)).status).toBe(409);
+    expect((await contributor.get(termPath(`${VOL}Cause`))).body.comment).not.toBe('Blocked later.');
+  });
+
+  it('re-checks a request approved before approval details were recorded', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const contributor = await login('contributor', 'Contributor Legacy');
+    const TC = `${VOL}TimeCommitment`;
+    const current = (await contributor.get(termPath(TC))).body.definition;
+    // A definition rewording with no reviews, stored as approved by an older version (no approvedAs).
+    const created = await edit(contributor, { termIri: TC, set: { definition: `${current} Legacy.` }, previous: { definition: current }, definitionIntent: 'same-meaning' });
+    const legacy = { ...crsMod.getCR(created.body.id), status: 'approved' as const };
+    delete legacy.approvedAs;
+    put('changeRequests', legacy, demoId);
+    const result = await crsMod.merge(crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Legacy')));
+    expect(result.status).not.toBe('merged');
+    expect((await contributor.get(termPath(TC))).body.definition).toBe(current);
+  });
+
+  it('never moves the working draft from a stale base', async () => {
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { getProject } = await import('../src/services/ontologies.js');
+    const project = getProject(demoId);
+    const { graph, head } = await ontologyStore.workingAt(project);
+    const stale = ontologyStore.log(project, 2)[1].sha;
+    await expect(ontologyStore.commitWorking(project, graph, 'stale writer', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
+    expect(ontologyStore.head(project)).toBe(head);
   });
 });
