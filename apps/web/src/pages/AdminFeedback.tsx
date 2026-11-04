@@ -32,59 +32,90 @@ function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication
 }
 
 /** One summary waiting for a decision: say which issue is ours, or that none is. */
+const KIND_LABEL: Record<PublicationNeedingAdmin['kind'], string> = {
+  'post-unknown': 'Post with unknown outcome',
+  withdrawal: 'Withdrawal',
+  'comment-unknown': 'Triage comment with unknown outcome',
+  'triage-parked': 'Out of the triage queue',
+};
+
+/** A number typed by an administrator: an issue number or a comment id. */
+function NumberField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="flex items-center gap-1 text-xs">
+      {label}
+      <input className="w-28 rounded border border-border bg-transparent px-1 py-0.5" inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value.replace(/\D/g, ''))} />
+    </label>
+  );
+}
+
+/** One summary waiting for a decision, with the choices that apply to it. */
 function PublicationDecision({ p, onDone }: { p: PublicationNeedingAdmin; onDone: () => void }) {
-  const [issue, setIssue] = useState('');
+  const [num, setNum] = useState('');
   const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[1]) => {
     await api.resolveFeedbackPublication(p.id, body);
     onDone();
   });
-  const withdrawing = p.state === 'withdrawing';
-  const n = Number(issue);
+  const n = Number(num);
+  const btn = (label: string, body: Parameters<typeof api.resolveFeedbackPublication>[1], disabled = false) => (
+    <Button size="sm" variant="ghost" disabled={disabled} loading={act.pending} onClick={() => void act.run(body)}>
+      {label}
+    </Button>
+  );
   return (
     <li className="space-y-2 border-t border-border p-4 first:border-t-0" aria-label={`Public summary: ${p.summary}`}>
       <p className="text-sm">
-        <Badge>{withdrawing ? 'Withdrawal' : 'Post with unknown outcome'}</Badge> {p.feedbackDeleted && <Badge>Feedback deleted</Badge>}
+        <Badge>{KIND_LABEL[p.kind]}</Badge> {p.feedbackDeleted && <Badge>Feedback deleted</Badge>}
       </p>
       <blockquote className="border-l-2 border-border pl-3 text-sm">{p.summary}</blockquote>
       {p.reason && <p className="text-xs text-muted">{p.reason}</p>}
       <p className="text-xs text-muted">
-        Its marker on GitHub is <code>{p.marker}</code> in {p.repo}.
+        {p.issue ? (
+          <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer">
+            Issue #{p.issue.number}
+          </a>
+        ) : (
+          <>
+            Its marker on GitHub is <code>{p.marker}</code> in {p.repo}.
+          </>
+        )}
       </p>
-      {!p.issue && (
+      {(p.kind === 'post-unknown' || p.kind === 'withdrawal') && !p.issue && (
         <div className="flex flex-wrap items-center gap-2">
           {p.candidates.map((c) => (
             <span key={c.number} className="flex items-center gap-1">
               <a className="text-sm text-accent underline" href={c.url} target="_blank" rel="noreferrer">
                 Issue #{c.number}
               </a>
-              <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'adopt', issue: c.number })}>
-                This is it (#{c.number})
-              </Button>
+              {btn(`This is it (#${c.number})`, { action: 'adopt', issue: c.number })}
             </span>
           ))}
           {!p.candidates.length && <span className="text-xs text-muted">No likely issues were found.</span>}
-          <label className="flex items-center gap-1 text-xs">
-            Issue number
-            <input className="w-20 rounded border border-border bg-transparent px-1 py-0.5" inputMode="numeric" value={issue} onChange={(e) => setIssue(e.target.value.replace(/\D/g, ''))} />
-          </label>
-          <Button size="sm" variant="ghost" disabled={!(n > 0)} loading={act.pending} onClick={() => void act.run({ action: 'adopt', issue: n })}>
-            Use this issue
-          </Button>
+          <NumberField label="Issue number" value={num} onChange={setNum} />
+          {btn('Use this issue', { action: 'adopt', issue: n }, !(n > 0))}
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'check' })}>
-          Check GitHub again
-        </Button>
-        {withdrawing ? (
-          <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'confirm' })}>
-            Confirm nothing is left on GitHub
-          </Button>
-        ) : (
-          <Button size="sm" variant="ghost" loading={act.pending} onClick={() => void act.run({ action: 'repost' })}>
-            None is ours: post again
-          </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        {p.kind === 'post-unknown' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('None is ours: post again', { action: 'repost' })}
+          </>
         )}
+        {p.kind === 'withdrawal' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('Confirm nothing is left on GitHub', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'comment-unknown' && (
+          <>
+            <NumberField label="Comment id" value={num} onChange={setNum} />
+            {btn('Record this comment', { action: 'comment', comment: n }, !(n > 0))}
+            {btn('Confirm there is no triage comment', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'triage-parked' && btn('Put back in the triage queue', { action: 'check' })}
       </div>
       <InlineError error={act.error} />
     </li>

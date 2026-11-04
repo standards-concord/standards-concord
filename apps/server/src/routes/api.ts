@@ -547,13 +547,16 @@ export function apiRouter(): Router {
   });
   r.post('/feedback/:id/publication/resolve', (req, res) => {
     feedbackAdmin(req);
-    const { action, issue } = req.body ?? {};
+    const { action, issue, comment } = req.body ?? {};
     let a: AdminAction;
     if (action === 'adopt') {
-      if (!Number.isInteger(issue) || issue <= 0) throw new HttpError(400, 'issue must be an issue number');
+      if (!Number.isSafeInteger(issue) || issue <= 0) throw new HttpError(400, 'issue must be an issue number');
       a = { action, issue };
+    } else if (action === 'comment') {
+      if (!Number.isSafeInteger(comment) || comment <= 0) throw new HttpError(400, 'comment must be a comment id');
+      a = { action, comment };
     } else if (action === 'check' || action === 'repost' || action === 'confirm') a = { action };
-    else throw new HttpError(400, 'action must be check, adopt, repost or confirm');
+    else throw new HttpError(400, 'action must be check, adopt, repost, confirm or comment');
     res.json(resolvePublication(String(req.params.id), a));
   });
   // Public summaries waiting for an administrator, listed apart from feedback (whose row may be deleted).

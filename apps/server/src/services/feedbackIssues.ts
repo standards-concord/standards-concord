@@ -70,6 +70,8 @@ export interface Publication {
   triage?: { claim: string; until: number; phase: 'commenting' | 'labelling' };
   /** The routine's decision, saved before anything is written, so a retry carries out the same one. */
   decision?: TriageDecision;
+  /** Taken out of the triage queue because GitHub said the issue isn't open or labelled for triage. */
+  triageParked?: { reason: string; at: string };
   triagedAt?: string;
   /** A withdrawal that needs an administrator (which issue, or a comment that may exist). */
   adminNeeded?: boolean;
@@ -109,7 +111,11 @@ const validId = (v: unknown): v is number => Number.isSafeInteger(v) && (v as nu
 /* ------------------------------ rendering ------------------------------- */
 
 /** Every ASCII punctuation character GitHub could read as Markdown, an HTML tag or a character reference. */
-const escapeMarkdown = (s: string) => s.replace(/([\\`*_{}[\]()#+!|<>~=&$:^-])/g, '\\$1');
+const escapeMarkdown = (s: string) =>
+  s
+    .replace(/([\\`*_{}[\]()#+!|<>~=&$:^-])/g, '\\$1')
+    // "1." at the start of a line would start a numbered list.
+    .replace(/^(\s*\d+)\./gm, '$1\\.');
 
 export function issueTitle(summary: string): string {
   const first = summary.split('\n')[0].trim();
@@ -548,7 +554,17 @@ export async function withdrawPublication(feedbackId: string, token: unknown): P
   return status(publicationFor(feedbackId)!);
 }
 
-export type AdminAction = { action: 'check' } | { action: 'adopt'; issue: number } | { action: 'repost' } | { action: 'confirm' };
+export type AdminAction = { action: 'check' } | { action: 'adopt'; issue: number } | { action: 'repost' } | { action: 'confirm' } | { action: 'comment'; comment: number };
+
+type AttentionKind = 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+/** Why a record is waiting for an administrator, if it is. */
+function attentionKind(p: Publication): AttentionKind | undefined {
+  if (p.state === 'needs-admin') return 'post-unknown';
+  if (p.state === 'withdrawing' && p.adminNeeded) return 'withdrawal';
+  if (p.state === 'filed' && p.commentUnknown) return 'comment-unknown';
+  if (p.state === 'filed' && p.triageParked) return 'triage-parked';
+  return undefined;
+}
 
 /**
  * Administrators: decide for a record waiting for them.
@@ -556,16 +572,26 @@ export type AdminAction = { action: 'check' } | { action: 'adopt'; issue: number
  * - "adopt": this issue is the summary's (one of the candidates, or one they found).
  * - "repost" (a post with an unknown outcome): none is; post it again.
  * - "confirm" (a withdrawal): nothing of it is left on GitHub; finish.
+ * - A triage comment whose outcome is unknown: "comment" records the id of the
+ *   one they found on the issue; "confirm" says there is none.
+ * - A summary taken out of the triage queue: "check" puts it back.
  */
 export function resolvePublication(id: string, a: AdminAction): FeedbackPublicationStatus {
   const p = transaction(() => {
     const p = get<Publication>('feedbackPublications', id);
     if (!p) return undefined;
-    const waiting = p.state === 'needs-admin' || (p.state === 'withdrawing' && p.adminNeeded);
-    if (!waiting) return undefined;
+    const k = attentionKind(p);
+    if (!k) return undefined;
     const reset = { ...release, adminNeeded: undefined, lastError: undefined, nextAttemptAt: now() };
     let next: Publication | undefined;
-    if (a.action === 'check')
+    if (k === 'comment-unknown') {
+      // The administrator looked at the issue's comments: one is the triage comment (record it), or none is.
+      if (a.action === 'comment') next = { ...p, commentUnknown: undefined, comments: [...new Set([...(p.comments ?? []), a.comment])] };
+      else if (a.action === 'confirm') next = { ...p, commentUnknown: undefined };
+    } else if (k === 'triage-parked') {
+      if (a.action === 'check') next = { ...p, triageParked: undefined };
+    } else if (a.action === 'comment') next = undefined;
+    else if (a.action === 'check')
       next =
         p.state === 'withdrawing' || p.issue
           ? { ...p, ...reset }
@@ -588,17 +614,23 @@ export function resolvePublication(id: string, a: AdminAction): FeedbackPublicat
 /** Public summaries waiting for an administrator, whether or not their feedback still exists. */
 export function publicationsNeedingAdmin() {
   return list<Publication>('feedbackPublications')
-    .filter((p) => p.state === 'needs-admin' || (p.state === 'withdrawing' && p.adminNeeded))
+    .filter((p) => attentionKind(p))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map((p) => ({
       id: p.id,
+      kind: attentionKind(p)!,
       state: p.state,
       summary: p.summary,
       repo: p.repo,
       marker: marker(p.pubId),
       issue: p.issue,
       candidates: p.candidates ?? [],
-      reason: p.lastError,
+      reason:
+        attentionKind(p) === 'comment-unknown'
+          ? `A triage comment may have been posted on issue #${p.issue?.number} without its id being recorded. Find it on the issue and record its id, or confirm there is none. It is never posted again on its own.`
+          : attentionKind(p) === 'triage-parked'
+            ? `Taken out of the triage queue: ${p.triageParked!.reason}. Put it back once that's fixed, or triage it by hand.`
+            : p.lastError,
       feedbackDeleted: !get('feedback', p.id),
       createdAt: p.createdAt,
     }));
@@ -642,7 +674,7 @@ export function triageQueue() {
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const row = (p: Publication) => ({ issue: p.issue!.number, url: p.issue!.url, summary: p.summary, createdAt: p.createdAt });
   return {
-    pending: filed.filter((p) => !p.triagedAt && !p.commentUnknown).slice(0, 10).map(row),
+    pending: filed.filter((p) => !p.triagedAt && !p.commentUnknown && !p.triageParked).slice(0, 10).map(row),
     triaged: filed.filter((p) => p.triagedAt).slice(-100).map(row),
   };
 }
@@ -696,21 +728,20 @@ export async function triagePublication(issueNumber: number, body: Record<string
     }
     if (p.commentUnknown) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
     if (p.triage && p.triage.until > now()) throw new HttpError(409, 'That issue is being triaged');
+    if (p.triageParked) throw new HttpError(409, 'That issue was taken out of the triage queue');
     if (p.decision && !sameDecision(p.decision, input)) throw new HttpError(409, 'A different decision is already recorded for that issue; send the same one again');
     if (!p.decision) {
       if (!triageQueue().pending.some((x) => x.issue === issueNumber)) throw new HttpError(409, 'Triage the oldest summaries first, as listed in the queue');
-      const t = now();
-      const recent = (get<Kv<number[]>>('kv', triageRateId(repo))?.value ?? []).filter((x) => x > t - HOUR_MS);
-      if (recent.length >= TRIAGE_PER_HOUR) throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
-      put('kv', { id: triageRateId(repo), value: [...recent, t] });
+      if (triageSlotsUsed(repo) >= TRIAGE_PER_HOUR) throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
     }
     if (pauseOf(repo).until > now()) throw new HttpError(503, 'GitHub asked us to wait; try again later');
-    const next: Publication = { ...p, decision: p.decision ?? input, triage: { claim, until: now() + TRIAGE_LEASE_MS, phase: p.comments?.length ? 'labelling' : 'commenting' } };
+    const next: Publication = { ...p, triage: { claim, until: now() + TRIAGE_LEASE_MS, phase: p.comments?.length ? 'labelling' : 'commenting' } };
     put('feedbackPublications', next);
     return next;
   });
   if (!pub) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
-  const decision = pub.decision!;
+  const resuming = !!pub.decision;
+  const decision = pub.decision ?? input;
   /** Before every request: still ours, still filed, feedback still there, not paused. */
   const check = async () => {
     const p = get<Publication>('feedbackPublications', pub.id);
@@ -725,10 +756,29 @@ export async function triagePublication(issueNumber: number, body: Record<string
     });
   let commenting = false;
   try {
-    await check();
-    const current = (await github('GET', `/repos/${repo}/issues/${issueNumber}`)) as { state?: string; labels?: ({ name?: string } | string)[] } | null;
-    const names = (current?.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
-    if (current?.state !== 'open' || !FEEDBACK_LABELS.every((l) => names.includes(l))) throw new HttpError(409, 'That issue is closed or no longer labelled for triage');
+    const names = await issueLabels(repo, issueNumber, check);
+    // A resumed decision may already have removed needs-triage; a new one needs both labels.
+    const why = !names ? 'the issue is closed' : !names.includes('feedback') ? 'the issue is no longer labelled feedback' : !resuming && !names.includes('needs-triage') ? 'the issue is no longer labelled needs-triage' : undefined;
+    if (why) {
+      // Out of the queue, so it can't hold a place among the oldest ten; an administrator can put it back.
+      release(() => ({ triageParked: { reason: why, at: new Date(now()).toISOString() } }));
+      throw new HttpError(409, `Not triaged: ${why}`);
+    }
+    if (!resuming) {
+      // The decision is saved, and counted, before anything is written.
+      const saved = transaction(() => {
+        const p = get<Publication>('feedbackPublications', pub.id);
+        if (!p || p.triage?.claim !== claim) return 'lease';
+        const t = now();
+        const recent = (get<Kv<number[]>>('kv', triageRateId(repo))?.value ?? []).filter((x) => x > t - HOUR_MS);
+        if (recent.length >= TRIAGE_PER_HOUR) return 'full';
+        put('kv', { id: triageRateId(repo), value: [...recent, t] });
+        put('feedbackPublications', { ...p, decision });
+        return 'ok';
+      });
+      if (saved === 'lease') throw new HttpError(409, 'The triage lease ran out');
+      if (saved === 'full') throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
+    }
     if (pub.triage!.phase === 'commenting') {
       await check();
       commenting = true;
@@ -747,13 +797,25 @@ export async function triagePublication(issueNumber: number, body: Record<string
       if (!ours) throw new HttpError(409, 'The triage lease ran out');
     }
     const wanted = [decision.kind, decision.size, ...(decision.needsJesse ? ['needs-jesse'] : []), ...(decision.possibleDuplicateOf ? ['possible-duplicate'] : []), 'triaged'];
-    const conflicting = names.filter((n) => ((TRIAGE_KINDS as readonly string[]).includes(n) || (TRIAGE_SIZES as readonly string[]).includes(n)) && !wanted.includes(n));
-    for (const name of conflicting) await removeLabel(repo, issueNumber, name, check);
+    const unwanted = (labels: string[]) => labels.filter((n) => n === 'needs-triage' || (CHOSEN_LABELS.includes(n) && !wanted.includes(n)));
+    for (const name of unwanted(names!).filter((n) => n !== 'needs-triage')) await removeLabel(repo, issueNumber, name, check);
     await check();
     await github('POST', `/repos/${repo}/issues/${issueNumber}/labels`, { labels: wanted });
-    const after = await removeLabel(repo, issueNumber, 'needs-triage', check);
-    if (after && (!wanted.every((l) => after.includes(l)) || after.includes('needs-triage') || after.some((l) => conflicting.includes(l))))
-      throw new HttpError(502, 'The issue’s labels didn’t come out as expected; try again');
+    await removeLabel(repo, issueNumber, 'needs-triage', check);
+    // Check the labels as they are now (someone may have changed them meanwhile), tidying once if needed.
+    for (let pass = 0; ; pass++) {
+      const final = await issueLabels(repo, issueNumber, check);
+      if (!final) throw new HttpError(409, 'The issue was closed during triage');
+      const extra = unwanted(final);
+      const missing = wanted.filter((l) => !final.includes(l));
+      if (!extra.length && !missing.length) break;
+      if (pass === 1) throw new HttpError(502, 'The issue’s labels didn’t come out as expected; try again');
+      for (const name of extra) await removeLabel(repo, issueNumber, name, check);
+      if (missing.length) {
+        await check();
+        await github('POST', `/repos/${repo}/issues/${issueNumber}/labels`, { labels: missing });
+      }
+    }
     rateOk(repo);
     release(() => ({ triagedAt: new Date(now()).toISOString() }));
     return { issue: issueNumber, labels: wanted, comments: publicationFor(pub.id)?.comments ?? [] };
@@ -771,6 +833,17 @@ export async function triagePublication(issueNumber: number, body: Record<string
 }
 
 const triageRateId = (repo: string) => `feedback-issues:triage-rate:${repo.toLowerCase()}`;
+const triageSlotsUsed = (repo: string) => (get<Kv<number[]>>('kv', triageRateId(repo))?.value ?? []).filter((x) => x > now() - HOUR_MS).length;
+/** One kind and one size: any other kind or size label is removed. Other labels are left alone. */
+const CHOSEN_LABELS: string[] = [...TRIAGE_KINDS, ...TRIAGE_SIZES];
+
+/** The issue's labels, or undefined if it isn't open. */
+async function issueLabels(repo: string, issue: number, check: () => Promise<void>): Promise<string[] | undefined> {
+  await check();
+  const current = (await github('GET', `/repos/${repo}/issues/${issue}`)) as { state?: string; labels?: ({ name?: string } | string)[] } | null;
+  if (current?.state !== 'open') return undefined;
+  return (current.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+}
 
 /** Remove one label (already gone is fine). Returns the labels left, when GitHub says. */
 async function removeLabel(repo: string, issue: number, name: string, check: () => Promise<void>): Promise<string[] | undefined> {
