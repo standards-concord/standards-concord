@@ -16,7 +16,7 @@ const FORMATS: { id: OutputFormat; label: string; ext: string; note: string }[] 
   { id: 'jsonld', label: 'JSON-LD', ext: 'jsonld', note: 'Linked data as JSON, convenient for web developers.' },
   { id: 'ntriples', label: 'N-Triples', ext: 'nt', note: 'One triple per line — ideal for diffs and bulk loading.' },
   { id: 'manchester', label: 'Manchester', ext: 'omn', note: 'OWL Manchester syntax: the most readable form of the logical axioms.' },
-  { id: 'linkml', label: 'LinkML', ext: 'yaml', note: 'LinkML is used internally at the ODI to generate schemas, validators and docs from one model.' },
+  { id: 'linkml', label: 'LinkML', ext: 'yaml', note: 'LinkML describes the model as YAML, from which schemas, validators and documentation can be generated.' },
   { id: 'shacl', label: 'SHACL', ext: 'shacl.ttl', note: 'Shapes generated from the ontology to validate instance data.' },
   { id: 'shaclc', label: 'SHACLC', ext: 'shaclc', note: 'The same shapes in SHACL compact syntax, which is much easier to read.' },
   {
