@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -10,11 +10,12 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeRequestDetail, ConnectedApp, PendingAppChecks } from '@concord/shared';
 import { createApp } from '../src/app.js';
-import { get as getDoc, insertOnce, openDb } from '../src/db.js';
+import { get as getDoc, insertOnce, openDb, put } from '../src/db.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { appForToken, byToken, pending as startRun, report as reportResult, touchSeen } from '../src/services/appChecks.js';
-import { getCR, merge, saveCR } from '../src/services/changeRequests.js';
+import { getCR, merge } from '../src/services/changeRequests.js';
+import { OntologyGraph } from '@concord/core';
 import { getProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -202,9 +203,10 @@ const autopilotSays = (d: ChangeRequestDetail, userId: string) => [...d.reviews,
 const standing = (d: ChangeRequestDetail, userId: string) => autopilotSays(d, userId).filter((x) => !x.withdrawnAt && x.autopilot!.revision === d.revision);
 
 /** Move the working draft on, as merging another change would. */
-function touchWorkingDraft() {
+async function touchWorkingDraft() {
   const project = getProject(demoId);
-  ontologyStore.commitWorkingText(project, `${ontologyStore.readWorkingText(project)}\n# touched by a test ${Date.now()}\n`, 'Touch', { name: 'Test' });
+  const text = `${ontologyStore.readWorkingText(project)}\n<urn:test:touched-${randomUUID()}> <http://www.w3.org/2000/01/rdf-schema#comment> "touched by a test" .\n`;
+  await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle(text), 'Touch', { name: 'Test' });
 }
 
 beforeAll(async () => {
@@ -403,7 +405,7 @@ describe('connected apps', () => {
   it('ignores a result for a version of the change that has since moved on', async () => {
     const run = await ciRun(created.token!);
     await run.post('baseline', 'passed');
-    touchWorkingDraft();
+    await touchWorkingDraft();
     const res = await run.post(minorId, 'failed');
     expect(res.stale).toBe(true);
     expect((await detail(minorId)).appChecks!.find((c) => c.appId === created.id)!.outcome).toBe('passed');
@@ -467,7 +469,7 @@ describe('autopilot', () => {
 
     const oldRun = await ciRun(a.token!);
     await oldRun.post('baseline', 'passed');
-    touchWorkingDraft();
+    await touchWorkingDraft();
     // A run that started before the draft moved can't bring the approval back.
     expect((await oldRun.post(crId, 'passed')).stale).toBe(true);
     const after = await detail(crId);
@@ -897,6 +899,24 @@ describe('autopilot', () => {
       expect(() => startRun(seen, true, undefined, byToken(seen))).toThrow(/replaced/);
     });
 
+    it('a database held by another writer for too long is reported as busy, to retry', async () => {
+      const kim = await login('reviewer', 'Reviewer Kim');
+      const a = await connect(kim, 'Kim’s app');
+      const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
+      other.exec('BEGIN IMMEDIATE');
+      let busy;
+      try {
+        busy = await kim.post(`/api/apps/${a.id}/token`);
+      } finally {
+        other.exec('ROLLBACK');
+        other.close();
+      }
+      expect(busy.status).toBe(503);
+      expect(busy.headers['retry-after']).toBe('2');
+      expect(busy.body.error).toMatch(/busy/);
+      expect((await kim.post(`/api/apps/${a.id}/token`)).status).toBe(200);
+    });
+
     it('a report that fails to save leaves GitHub’s proof unused, so the retry works', async () => {
       const jan = await login('reviewer', 'Reviewer Jan');
       const a = await connect(jan, 'Jan’s app', undefined, 'example/jan-app');
@@ -1122,8 +1142,13 @@ describe('autopilot', () => {
       const op = changed.ops[0] as { localName: string };
       changed.ops = [{ ...op, localName: 'swappedInMidMerge' } as never];
       changed.opsUpdatedAt = new Date(Date.parse(changed.opsUpdatedAt ?? changed.createdAt) + 1000).toISOString();
-      saveCR(changed);
-      const merged = await merging;
+      // Written as any other writer does: a new revision of the request.
+      changed.rev = (changed.rev ?? 0) + 1;
+      put('changeRequests', changed, changed.ontologyId);
+      const merged = await merging.catch((err: { status?: number }) => {
+        expect(err.status).toBe(409);
+        return getCR(crId);
+      });
       const text = ontologyStore.readWorkingText(project);
       // Either it merged exactly the new edits, or it stopped; never the old edits under the new ones.
       if (merged.status === 'merged') {
@@ -1144,77 +1169,203 @@ describe('autopilot', () => {
         expect((await detail(id)).status).toBe('approved');
         return id;
       };
-      // Stand in for the moment of the commit, then put the real one back.
-      const duringCommit = async <T>(during: (commit: () => string) => string, fn: () => Promise<T>) => {
-        const real = ontologyStore.commitWorkingText;
-        ontologyStore.commitWorkingText = function (...args) {
-          return during(() => real.apply(this, args));
-        };
+      const termOf = (id: string) => (getCR(id).ops[0] as { localName: string }).localName;
+      const dbFile = () => path.join(config.dataDir, 'concord.sqlite');
+      const repo = () => path.join(config.dataDir, 'ontologies', getProject(demoId).slug);
+      const branch = () => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo(), encoding: 'utf8' }).trim();
+      const src = new URL('../src/services/', import.meta.url).href;
+
+      /**
+       * Run a script in a second server process on the same database and repositories. Its lock
+       * lease is short, so if it dies holding it, this process gets it back within a second.
+       */
+      const inAnotherProcess = (body: string) => {
+        const file = path.join(os.tmpdir(), `concord-other-${randomUUID()}.mts`);
+        fs.writeFileSync(
+          file,
+          `const { lockTiming } = await import('${src}repoLock.ts');
+           lockTiming.leaseMs = 1000;
+           lockTiming.heartbeatMs = 200;
+           // The demo's governance clock lives in each process; run on the same one.
+           const { clock } = await import('${src}../clock.ts');
+           clock.offsetMs = ${clock.offsetMs};
+           const { ontologyStore } = await import('${src}ontologyStore.ts');
+           const { getCR, merge } = await import('${src}changeRequests.ts');
+           ${body}`,
+        );
         try {
-          return await fn();
+          return spawnSync(process.execPath, ['--import', 'tsx', file], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname, env: process.env });
         } finally {
-          ontologyStore.commitWorkingText = real;
+          fs.rmSync(file, { force: true });
         }
       };
 
-      it('no other process can write between the final check and the recorded merge', async () => {
-        const id = await approvedCR('Autopilot and a merge in another process');
+      it('an approval withdrawn by another process just before the merge lands stops it', async () => {
+        const id = await approvedCR('Autopilot and an approval withdrawn elsewhere');
         const project = getProject(demoId);
         const head = ontologyStore.head(project);
-        // At the moment of the commit, after the approval was checked, another process (a second
-        // server on the same database) tries to send the request back to review, as a failing
-        // result from an app's CI would.
-        let other = '';
-        const merged = await duringCommit(
-          (commit) => {
-            const child = spawnSync(
-              process.execPath,
-              [
-                '-e',
-                `const { DatabaseSync } = require('node:sqlite');
-                 const db = new DatabaseSync(process.argv[1]);
-                 db.exec('PRAGMA busy_timeout = 0');
-                 try {
-                   db.exec('BEGIN IMMEDIATE');
-                   db.prepare("UPDATE docs SET data = json_set(data, '$.status', 'review') WHERE collection = 'changeRequests' AND id = ?").run(process.argv[2]);
-                   db.exec('COMMIT');
-                   console.log('wrote');
-                 } catch (e) { console.log('refused: ' + e.message); }`,
-                path.join(config.dataDir, 'concord.sqlite'),
-                id,
-              ],
-              { encoding: 'utf8' },
-            );
-            other = child.stdout.trim() || child.stderr;
-            return commit();
-          },
-          () => merge(getCR(id), undefined),
-        );
-        // It had to wait: it couldn't slip in between, so the merge didn't overwrite it.
-        expect(other).toMatch(/^refused: .*locked/);
-        expect(merged.status).toBe('merged');
-        expect(ontologyStore.head(project)).not.toBe(head);
-        expect((await detail(id)).status).toBe('merged');
+        // After the merge has checked everything and built its commit, another process withdraws
+        // the approvals (as autopilot does when an app's CI fails).
+        const real = ontologyStore.advanceTo;
+        ontologyStore.advanceTo = function (...args: Parameters<typeof real>) {
+          const db = new DatabaseSync(dbFile());
+          db.prepare("UPDATE docs SET data = json_set(data, '$.withdrawnAt', ?) WHERE collection = 'reviews' AND parent = ? AND json_extract(data, '$.decision') = 'approve'").run(
+            new Date().toISOString(),
+            id,
+          );
+          db.close();
+          return real.apply(this, args);
+        };
+        let merged;
+        try {
+          merged = await merge(getCR(id), undefined);
+        } finally {
+          ontologyStore.advanceTo = real;
+        }
+        expect(merged.status).toBe('review');
+        expect(ontologyStore.head(project)).toBe(head);
+        expect(branch()).toBe(head);
+        expect(ontologyStore.readWorkingText(project)).not.toContain(termOf(id));
       });
 
-      it('a commit whose merge can’t be recorded is taken back', async () => {
-        const id = await approvedCR('Autopilot and a merge that fails to save');
+      it('a merge whose record fails changes nothing, and can’t undo another process’s merge', async () => {
+        const a = await approvedCR('Autopilot and a merge that fails to save');
+        const b = await approvedCR('Autopilot and a merge in another process');
         const project = getProject(demoId);
         const head = ontologyStore.head(project);
-        await expect(
-          duringCommit(
-            (commit) => {
-              commit();
-              throw new Error('disk full');
-            },
-            () => merge(getCR(id), undefined),
-          ),
-        ).rejects.toThrow('disk full');
-        expect(ontologyStore.head(project)).toBe(head);
+        // The database refuses to record A as merged.
+        const other = new DatabaseSync(dbFile());
+        other
+          .prepare(
+            `CREATE TRIGGER fail_merge BEFORE INSERT ON docs
+             WHEN NEW.collection = 'changeRequests' AND NEW.id = '${a}' AND json_extract(NEW.data, '$.status') = 'merged'
+             BEGIN SELECT RAISE(ABORT, 'injected failure recording the merge'); END`,
+          )
+          .run();
+        try {
+          await expect(merge(getCR(a), undefined)).rejects.toThrow(/injected failure/);
+          // Nothing moved: not the database's draft, not git.
+          expect(ontologyStore.head(project)).toBe(head);
+          expect(branch()).toBe(head);
+          expect((await detail(a)).status).toBe('approved');
+          // Another process merges B.
+          const child = inAnotherProcess(`console.log((await merge(getCR('${b}'), undefined)).status);`);
+          expect(child.stdout.trim(), child.stderr).toBe('merged');
+        } finally {
+          other.exec('DROP TRIGGER fail_merge');
+          other.close();
+        }
+        // B's merge stands, in the database and in git.
+        const afterB = ontologyStore.head(project);
+        expect(afterB).not.toBe(head);
+        expect((await detail(b)).mergedCommit).toBe(afterB);
+        expect(ontologyStore.readWorkingText(project)).toContain(termOf(b));
+        expect(branch()).toBe(afterB);
+        // Autopilot's yes on A was for the draft before B, so retried now A goes back to review;
+        // once the app passes it on the new draft it merges on top of B.
+        expect((await merge(getCR(a), undefined)).status).toBe('review');
+        expect((await ci(token, { [a]: 'passed' })).autopilot!.action).toBe('approved');
+        expect((await merge(getCR(a), undefined)).status).toBe('merged');
+        const text = ontologyStore.readWorkingText(project);
+        expect(text).toContain(termOf(a));
+        expect(text).toContain(termOf(b));
+      });
+
+      it('a merge killed after it was recorded is finished in git by the next read (or restart)', async () => {
+        const id = await approvedCR('Autopilot and a merge killed after recording');
+        const project = getProject(demoId);
+        const head = ontologyStore.head(project);
+        // The other process is killed once the merge is recorded, before git has caught up.
+        const child = inAnotherProcess(`
+          const advance = ontologyStore.advanceTo;
+          ontologyStore.advanceTo = function (...args) {
+            this.sync = () => process.kill(process.pid, 'SIGKILL');
+            return advance.apply(this, args);
+          };
+          await merge(getCR('${id}'), undefined);
+          console.log('not killed');`);
+        expect(child.signal, child.stdout + child.stderr).toBe('SIGKILL');
+        expect(branch()).toBe(head);
+        // The database says merged; the next read (as at start-up) brings git in line.
+        const d = await detail(id);
+        expect(d.status).toBe('merged');
+        expect(d.mergedCommit).not.toBe(head);
+        expect(ontologyStore.readWorkingText(project)).toContain(termOf(id));
+        expect(branch()).toBe(d.mergedCommit);
+        expect(fs.readFileSync(path.join(repo(), 'ontology.ttl'), 'utf8')).toContain(termOf(id));
+      });
+
+      it('a merge killed after its git commit but before it was recorded leaves nothing applied', async () => {
+        const id = await approvedCR('Autopilot and a merge killed before recording');
+        const project = getProject(demoId);
+        const head = ontologyStore.head(project);
+        // The other process builds the commit, then is killed before the database records it.
+        const child = inAnotherProcess(`
+          ontologyStore.advanceTo = () => process.kill(process.pid, 'SIGKILL');
+          await merge(getCR('${id}'), undefined);
+          console.log('not killed');`);
+        expect(child.signal, child.stdout + child.stderr).toBe('SIGKILL');
         expect((await detail(id)).status).toBe('approved');
-        // Retried, it merges.
-        expect((await merge(getCR(id), undefined)).status).toBe('merged');
-        expect(ontologyStore.head(project)).not.toBe(head);
+        expect(ontologyStore.head(project)).toBe(head);
+        expect(branch()).toBe(head);
+        expect(ontologyStore.readWorkingText(project)).not.toContain(termOf(id));
+        // So it merges cleanly when tried again (its edits aren't already in the draft).
+        const merged = await merge(getCR(id), undefined);
+        expect(merged.status).toBe('merged');
+        expect(ontologyStore.readWorkingText(project)).toContain(termOf(id));
+      });
+
+      it('a slow git doesn’t hold up other database writers', async () => {
+        const id = await approvedCR('Autopilot and a slow git');
+        // A git that takes 6 seconds to commit (a slow disk, say): longer than a writer waits for the database.
+        const shim = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-slow-git-'));
+        const started = path.join(shim, 'started');
+        const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+        fs.writeFileSync(
+          path.join(shim, 'git'),
+          `#!/bin/sh\ncase "$1" in commit|commit-tree) touch '${started}'; sleep 6;; esac\nexec '${realGit}' "$@"\n`,
+          { mode: 0o755 },
+        );
+        // Another process writes to the database while git is committing, waiting as long as any writer would.
+        const writer = spawn(
+          process.execPath,
+          [
+            '-e',
+            `const fs = require('node:fs');
+             const { DatabaseSync } = require('node:sqlite');
+             const until = Date.now() + 60_000;
+             while (!fs.existsSync(process.argv[2]) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+             const db = new DatabaseSync(process.argv[1]);
+             db.exec('PRAGMA busy_timeout = 5000');
+             const t = Date.now();
+             try {
+               db.exec('BEGIN IMMEDIATE');
+               db.prepare("INSERT INTO docs (collection, id, parent, data, created_at) VALUES ('kv', ?, NULL, '{}', ?)").run('writer-probe-' + t, new Date().toISOString());
+               db.exec('COMMIT');
+               console.log('wrote after ' + (Date.now() - t) + 'ms');
+             } catch (e) { console.log('failed: ' + e.message); }`,
+            dbFile(),
+            started,
+          ],
+          { stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        let out = '';
+        writer.stdout.on('data', (d) => (out += d));
+        const finished = new Promise((r) => writer.once('exit', r));
+        const path0 = process.env.PATH;
+        process.env.PATH = `${shim}:${path0}`;
+        let merged;
+        try {
+          merged = await merge(getCR(id), undefined);
+        } finally {
+          process.env.PATH = path0;
+        }
+        await finished;
+        fs.rmSync(shim, { recursive: true, force: true });
+        expect(fs.existsSync(started) || out, 'git committed through the slow shim').toBeTruthy();
+        expect(out.trim()).toMatch(/^wrote after \d+ms$/);
+        expect(Number(out.match(/(\d+)ms/)![1])).toBeLessThan(2000);
+        expect(merged.status).toBe('merged');
       });
     });
   });

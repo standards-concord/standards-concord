@@ -266,6 +266,11 @@ export function ChangeRequestPage() {
               view meeting
             </Link>
           )}
+          {cr.origin.type === 'term-edit' && (
+            <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.termIri)}`}>
+              view term
+            </Link>
+          )}
           {cr.origin.type === 'chat' && cr.origin.useCaseId && (
             <Link className="text-accent hover:underline" to={`/o/${id}/use-cases/${cr.origin.useCaseId}`}>
               view use case

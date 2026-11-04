@@ -13,13 +13,14 @@ import type {
   OntologyProject,
   PendingAppChecks,
   Review,
+  TimelineEvent,
   User,
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put, remove, setField, transaction } from '../db.js';
 import { newId } from '../ids.js';
-import { addReview, addVote, advance, getCR, governanceFor, listCRs, reviewsFor, saveCR, votesFor } from './changeRequests.js';
+import { addReview, addVote, advance, changeCR, getCR, governanceFor, listCRs, reviewsFor, votesFor } from './changeRequests.js';
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -488,6 +489,12 @@ export async function report(appIn: AppDoc, input: ReportInput, by: ReportedBy =
     const run = app?.runs?.find((r) => r.attempt === step.attempt);
     return { ...step.reply, targets: app && run ? retestsFor(app, run, getProject(app.ontologyId)) : [] };
   }
+  // The note on the change's timeline is written as the request's own change (under its lock),
+  // after the result is stored: the result is what counts, and it never waits on a merge.
+  if (step.note) {
+    const note = step.note;
+    await changeCR(step.crId, (c) => void c.timeline.push(note)).catch((err) => console.warn(`app check note on ${step.crId}:`, (err as Error).message));
+  }
   const autopilot = await applyAutopilot(step.crId, step.ownerId);
   return { ...step.reply, autopilot };
 }
@@ -495,7 +502,7 @@ export async function report(appIn: AppDoc, input: ReportInput, by: ReportedBy =
 type Step =
   | { kind: 'done'; reply: Record<string, unknown> }
   | { kind: 'baseline'; reply: Record<string, unknown>; ontologyId: string; ownerId: string; attempt: number }
-  | { kind: 'change'; reply: Record<string, unknown>; crId: string; ownerId: string };
+  | { kind: 'change'; reply: Record<string, unknown>; crId: string; ownerId: string; note?: TimelineEvent };
 
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -615,21 +622,21 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
   };
   put('appChecks', check, cr.id);
   const changed = !previous || previous.outcome !== outcome || previous.revision !== revision;
+  let note: TimelineEvent | undefined;
   if (changed && outcome !== 'error') {
     const owner = getUser(app.ownerId)?.name ?? 'Someone';
-    cr.timeline.push({
+    note = {
       at,
       type: 'app-check',
       message:
         outcome === 'passed'
           ? `${owner}’s app ${app.name} passed its checks against this change.`
           : `${owner}’s app ${app.name} failed its checks against this change${summary ? `: ${summary.split('\n')[0].slice(0, 200)}` : '.'}`,
-    });
-    saveCR(cr);
+    };
     if (outcome === 'failed')
       logActivity({ ontologyId: cr.ontologyId, actorId: app.ownerId, type: 'app.failed', message: `reports that their app ${app.name} breaks with #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
-  return { kind: 'change', reply: { check, stale: false }, crId: cr.id, ownerId: app.ownerId };
+  return { kind: 'change', reply: { check, stale: false }, crId: cr.id, ownerId: app.ownerId, note };
 }
 
 /** Report a result as an app, without its token (the demo's simulated CI, which is trusted). */
@@ -796,10 +803,11 @@ export async function applyAutopilot(crId: string, userId: string, depth = 0): P
   const wrong = inForce.filter((x) => !autopilotStands(x, cr, revision, spoke) && !replaced(x));
   if (wrong.length && depth < 3) {
     const at = clock.iso();
-    for (const x of wrong) put('decision' in x ? 'reviews' : 'votes', { ...x, withdrawnAt: at }, cr.id);
-    cr = getCR(cr.id);
-    cr.timeline.push({ at, type: 'app-check', message: `Autopilot withdrew ${user.name}’s ${wrong.some(isYes) ? 'yes' : 'no'}: ${d.why}.` });
-    saveCR(cr);
+    // The withdrawals and the note are saved together, as the request's own change.
+    await changeCR(cr.id, (c) => {
+      for (const x of wrong) put('decision' in x ? 'reviews' : 'votes', { ...x, withdrawnAt: at }, c.id);
+      c.timeline.push({ at, type: 'app-check', message: `Autopilot withdrew ${user.name}’s ${wrong.some(isYes) ? 'yes' : 'no'}: ${d.why}.` });
+    });
     // Withdrawing can move the change (an approval that no longer holds goes back a stage),
     // so decide again from where it ends up.
     await advance(getCR(cr.id));

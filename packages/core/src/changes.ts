@@ -67,6 +67,24 @@ const ANNOTATION_FIELDS: Record<keyof Omit<TermAnnotations, 'mappings'>, string>
   source: P.source,
 };
 
+/**
+ * Compares two values of an annotation field the way an editor sees them:
+ * whitespace-trimmed, with empty strings and missing values equal, and lists
+ * compared as sets (RDF gives them no order).
+ */
+export function sameAnnotationValue(a: string | string[] | undefined, b: string | string[] | undefined): boolean {
+  const norm = (v: string | string[] | undefined) =>
+    Array.isArray(v) ? [...new Set(v.map((x) => String(x).trim()).filter(Boolean))].sort() : v === undefined || v === null ? '' : String(v).trim();
+  const x = norm(a);
+  const y = norm(b);
+  if (Array.isArray(x) || Array.isArray(y)) {
+    const xs = Array.isArray(x) ? x : x ? [x] : [];
+    const ys = Array.isArray(y) ? y : y ? [y] : [];
+    return xs.length === ys.length && xs.every((v, i) => v === ys[i]);
+  }
+  return x === y;
+}
+
 function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: string[], touched: Set<string>): void {
   const s = g.store;
   const ex = (i: IRI) => expandIRI(i, g.prefixes);
@@ -187,6 +205,15 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     }
     case 'updateAnnotations': {
       const iri = requireTerm(ex(op.iri));
+      if (op.expect) {
+        const current = (g.term(iri) ?? {}) as TermAnnotations;
+        for (const field of Object.keys(op.expect) as (keyof typeof ANNOTATION_FIELDS)[]) {
+          if (!(field in ANNOTATION_FIELDS)) fail(`cannot check unknown field "${field}"`);
+          if (!sameAnnotationValue(op.expect[field], current[field])) {
+            fail(`the ${field} of <${iri}> has changed since this edit was proposed; revise the edit against the current value`);
+          }
+        }
+      }
       if (op.set.label !== undefined && !op.set.label.trim()) fail('label cannot be empty');
       if (op.set.label) {
         const clash = findLabel(g, op.set.label, iri);

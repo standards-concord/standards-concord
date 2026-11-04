@@ -10,6 +10,7 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject } from './ontologies.js';
+import { updateCR } from './changeRequests.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
@@ -184,8 +185,9 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
   let changeRequest: ChangeRequest | undefined;
   try {
     changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
-    changeRequest.origin = { type: 'meeting', meetingId: m.id };
-    put('changeRequests', changeRequest, changeRequest.ontologyId);
+    await updateCR(changeRequest, (c) => {
+      c.origin = { type: 'meeting', meetingId: m.id };
+    });
   } catch (err) {
     console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
   }

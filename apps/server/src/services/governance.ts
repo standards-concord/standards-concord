@@ -156,6 +156,8 @@ export interface EvalInput {
   /** When review started (for change requests: when it entered 'review'). */
   reviewStartedAt: string;
   authorId: string;
+  /** Others who wrote the current edits; their approvals don't count either. */
+  coAuthorIds?: string[];
   reviews: Review[];
   votes: Vote[];
   members: Membership[];
@@ -163,6 +165,12 @@ export interface EvalInput {
   now: Date;
   /** Treat an open vote as closed (re-checking an approval that came from a vote). */
   voteClosed?: boolean;
+  /**
+   * Set when the change needs someone other than the author to sign it off
+   * whatever the policy says (e.g. a reworded definition, whose meaning must
+   * be confirmed unchanged): lazy consensus or zero-approval rules then need one.
+   */
+  independentConfirmation?: string;
   /** Users who are simulated personas; not used for logic, just passed through. */
 }
 
@@ -196,7 +204,9 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
   const unmet: string[] = [];
 
   const latest = latestReviews(input.reviews);
-  const counts = (rev: Review) => rev.userId !== input.authorId && rolesOf(members, rev.userId).some((role) => r.approverRoles.includes(role));
+  const approverRoles: Role[] = r.approverRoles.length ? r.approverRoles : ['owner', 'steward', 'editor', 'reviewer'];
+  const writers = new Set([input.authorId, ...(input.coAuthorIds ?? [])]);
+  const counts = (rev: Review) => !writers.has(rev.userId) && rolesOf(members, rev.userId).some((role) => approverRoles.includes(role));
   const approvals = latest.filter((rev) => rev.decision === 'approve' && counts(rev)).length;
 
   const odiFinalSay = policy.odiPrivilege === 'final-say' && level === 'major';
@@ -211,7 +221,8 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
 
   const reviewPeriodEndsAt = addDays(input.reviewStartedAt, r.reviewPeriodDays);
   const reviewPeriodOver = now.getTime() >= new Date(reviewPeriodEndsAt).getTime();
-  const requiredApprovals = r.lazyConsensus && objections.length === 0 ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
+  const policyApprovals = r.lazyConsensus && objections.length === 0 ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
+  const requiredApprovals = input.independentConfirmation ? Math.max(policyApprovals, 1) : policyApprovals;
   const validationOk = !policy.requireValidation || input.validationOk;
 
   // Votes
@@ -288,7 +299,9 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     // review (or triage / needs-work being re-evaluated)
     if (!reviewPeriodOver) unmet.push(`Review period: open for comment until ${reviewPeriodEndsAt}.`);
     if (approvals < requiredApprovals)
-      unmet.push(`Approvals: ${approvals}/${requiredApprovals} from ${roleList(r.approverRoles)} (not the author).`);
+      unmet.push(
+        `Approvals: ${approvals}/${requiredApprovals} from ${roleList(approverRoles)} (not the author or anyone who rewrote the edits).${requiredApprovals > policyApprovals && input.independentConfirmation ? ` ${input.independentConfirmation}` : ''}`,
+      );
     if (odiFinalSay && !odiApproved) unmet.push('ODI oversight must approve major changes.');
     const reviewDone = reviewPeriodOver && approvals >= requiredApprovals && (!odiFinalSay || odiApproved || voteNeeded);
     if (reviewDone) {
@@ -302,7 +315,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     } else {
       outcome = 'review';
       if (objections.length && r.lazyConsensus) next = 'An objection was raised; it will go to a vote when the comment period ends.';
-      else if (approvals < requiredApprovals) next = `Needs ${requiredApprovals - approvals} more approval(s) from ${roleList(r.approverRoles)}.`;
+      else if (approvals < requiredApprovals) next = `Needs ${requiredApprovals - approvals} more approval(s) from ${roleList(approverRoles)}.`;
       else next = `Waiting for the review period to end (${reviewPeriodEndsAt}).`;
     }
   }

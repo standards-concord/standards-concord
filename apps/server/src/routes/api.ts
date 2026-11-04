@@ -13,6 +13,8 @@ import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import { reconcile as reconcileAutopilot } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
+import { proposeTermEdit } from '../services/termEdits.js';
+import { withTriageBudget } from '../services/budget.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
@@ -414,6 +416,11 @@ export function apiRouter(): Router {
     res.status(201).json(crs.detail(cr));
   });
 
+  r.post('/ontologies/:id/term-edits', async (req, res) => {
+    const cr = await proposeTermEdit(project(req), requireUser(req), req.body ?? {});
+    res.status(201).json(crs.detail(cr));
+  });
+
   const cr = (req: Request) => crs.getCR(String(req.params.id));
   r.get('/change-requests/:id', (req, res) => res.json(crs.detail(cr(req))));
   r.patch('/change-requests/:id', async (req, res) => res.json(crs.detail(await crs.updateOps(cr(req), requireUser(req), req.body ?? {}))));
@@ -432,8 +439,8 @@ export function apiRouter(): Router {
   r.post('/change-requests/:id/withdraw', async (req, res) => res.json(crs.detail(await crs.withdraw(cr(req), requireUser(req)))));
   r.post('/change-requests/:id/revise', async (req, res) => res.json(crs.detail(await crs.revise(cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)))));
   r.post('/change-requests/:id/retriage', async (req, res) => {
-    requireUser(req);
-    res.json(crs.detail(await crs.advance(await crs.triage(cr(req)))));
+    const user = requireUser(req);
+    res.json(crs.detail(await withTriageBudget(user, async () => crs.advance(await crs.triage(cr(req))))));
   });
 
   /* ------------------------------ releases --------------------------- */

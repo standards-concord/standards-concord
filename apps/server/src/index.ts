@@ -1,10 +1,14 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
-import { openDb } from './db.js';
+import { list, openDb } from './db.js';
 import { refreshReleasePages } from './public/routes.js';
+import { ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
+import type { OntologyProject } from '@concord/shared';
 
 openDb();
+// Git is a projection of the database: repair anything a crash left half-done.
+for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
