@@ -44,33 +44,62 @@ export const isSafePrefix = (p: string): boolean => /^[A-Za-z][A-Za-z0-9_-]*(?:\
 /** Unicode noncharacters: U+FDD0 to U+FDEF, and the last two code points of every plane. */
 const isNoncharacter = (cp: number): boolean => (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
 
+/** Characters an IRI can't hold unescaped (RFC 3987), which is also what Turtle's IRIREF refuses. */
+const IRI_EXCLUDED = new Set([...'<>"{}|\\^`']);
+
 /**
- * A namespace IRI safe to put in a context or a prefix declaration. Only
- * http(s) namespaces are accepted, and only in the canonical form a URL
- * parser gives back unchanged, so nothing malformed or ambiguous survives:
- * - no user name or password, a host, and at most one `#`;
- * - no square brackets outside an IPv6 host;
- * - ending in `#` or `/`, as a namespace does;
- * - once percent-decoded, valid UTF-8 with no control characters or
- *   Unicode noncharacters.
- * Non-ASCII characters must be percent-encoded (and hosts punycoded), which
- * is the form the parser gives back.
+ * A namespace IRI safe to write as a Turtle prefix and a JSON-LD context
+ * entry, and that our Turtle reader reads back: any scheme (URNs and raw
+ * Unicode included) followed by
+ * - no spaces (Unicode ones included, which JSON-LD refuses), controls,
+ *   `<>"{}|\^` or backticks, surrogates or
+ *   noncharacters, and every `%` followed by two hex digits (a percent-encoded
+ *   noncharacter is refused too);
+ * - at most one `#` (a fragment can't hold another);
+ * - square brackets only around an IP-literal host, and in an authority at
+ *   most one `@` and a numeric port.
+ * Starting with a scheme, it can never be a JSON-LD keyword such as `@import`.
  */
 export function isSafeNamespace(iri: string): boolean {
-  let url: URL;
-  try { url = new URL(iri); } catch { return false; }
-  if (url.href !== iri) return false;
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
-  if (url.username || url.password || !url.hostname) return false;
-  if (iri.split('#').length > 2) return false;
-  if (!iri.endsWith('#') && !iri.endsWith('/')) return false;
-  const afterHost = url.pathname + url.search + url.hash;
-  if (/[[\]]/.test(afterHost)) return false;
-  let decoded: string;
-  try { decoded = decodeURIComponent(iri); } catch { return false; }
-  for (const ch of decoded) {
-    const cp = ch.codePointAt(0)!;
-    if (cp <= 0x20 || (cp >= 0x7f && cp <= 0x9f) || (cp >= 0xd800 && cp <= 0xdfff) || isNoncharacter(cp)) return false;
+  const m = /^[A-Za-z][A-Za-z0-9+.-]*:(.+)$/s.exec(iri);
+  if (!m) return false;
+  const rest = m[1];
+  // JSON-LD refuses an IRI with any Unicode space (U+00A0, U+2003 and the like), though RFC 3987 allows some.
+  if (/\s/u.test(rest)) return false;
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    const cp = rest.codePointAt(i)!;
+    if (cp > 0xffff) i++;
+    else if (cp >= 0xd800 && cp <= 0xdfff) return false;
+    if (cp <= 0x20 || (cp >= 0x7f && cp <= 0x9f) || isNoncharacter(cp) || IRI_EXCLUDED.has(ch)) return false;
+    if (ch === '%' && !/^[0-9A-Fa-f]{2}$/.test(rest.slice(i + 1, i + 3))) return false;
+  }
+  if (rest.split('#').length > 2) return false;
+  let outside = rest;
+  if (rest.startsWith('//')) {
+    const end = rest.slice(2).search(/[/?#]/);
+    const authority = end < 0 ? rest.slice(2) : rest.slice(2, 2 + end);
+    outside = end < 0 ? '' : rest.slice(2 + end);
+    const at = authority.split('@');
+    if (at.length > 2) return false;
+    const hostPort = at[at.length - 1];
+    const lit = /^\[([0-9A-Fa-f:.]+|v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\](?::(\d*))?$/.exec(hostPort);
+    if (!lit) {
+      if (/[[\]]/.test(hostPort)) return false;
+      const colon = hostPort.lastIndexOf(':');
+      if (colon >= 0 && !/^\d*$/.test(hostPort.slice(colon + 1))) return false;
+    }
+    if (/[[\]]/.test(at.length > 1 ? at[0] : '')) return false;
+  }
+  if (/[[\]]/.test(outside)) return false;
+  // Percent-encoded text is checked once decoded; bytes that aren't UTF-8 text are left as they are.
+  if (rest.includes('%')) {
+    let decoded = '';
+    try { decoded = decodeURIComponent(rest); } catch { /* not UTF-8 text */ }
+    for (const c of decoded) {
+      const cp = c.codePointAt(0)!;
+      if (isNoncharacter(cp)) return false;
+    }
   }
   return true;
 }

@@ -64,25 +64,79 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
     expect(setMeta(g, { preferredPrefix: 'vol' })).toBeTruthy();
   });
 
-  it('accepts only canonical http(s) namespace IRIs', () => {
+  it('accepts IRIs of any scheme, and refuses malformed ones', () => {
     const bad = ['', 'not an iri', 'https://example.org/a b#', 'http://[bad', 'https://example.org/%zz#', 'https://example.org/%4#',
-      'https://example.org/[x]#', 'https://example.org/a#b#c', 'https://a@b@host/ns#', 'https://user:pw@example.org/ns#',
-      'ftp://host:not-a-port/ns#', 'ftp://[::1]/ns#', 'urn:example:vol:', 'https:no-authority#', 'https://example.org/<x>#',
-      // Not in the form a URL parser gives back: upper-case host, default port, raw non-ASCII.
-      'https://EXAMPLE.org/ns#', 'https://example.org:443/ns#', 'https://例え.jp/語彙#',
-      // Percent-decoded: invalid UTF-8, a control character, noncharacters U+FDD0 and U+1FFFE, a lone surrogate.
-      'https://example.org/%C3/', 'https://example.org/%01/', 'https://example.org/%EF%B7%90/', 'https://example.org/%F0%9F%BF%BE/', 'https://example.org/%ED%A0%80/',
-      // A namespace ends in # or /.
-      'https://example.org/ns', 'https://example.org/ns#x'];
+      // Characters an IRI (and Turtle) can't hold: these used to pass the URL round-trip check.
+      'https://example.org/a|b#', 'https://example.org/?x={}#', 'https://example.org/?x=`#', 'https://example.org/#x\\y/',
+      'https://example.org/<x>#', 'urn:x"y', 'urn:x\u0001y', 'urn:x\u0085y',
+      // Lone surrogates and noncharacters, raw or percent-encoded.
+      // Unicode spaces: RFC 3987 allows some, but JSON-LD refuses them.
+      'urn:x\u00a0y', 'https://example.org/a\u2003b#',
+      'urn:x\ud800y', 'urn:x\udc00y', 'urn:x﷐y', 'urn:x\u{1fffe}y', 'https://example.org/%EF%B7%90/',
+      // Component rules: one fragment, brackets only around an IP-literal host, one @, a numeric port.
+      'https://example.org/[x]#', 'urn:[x]', 'https://example.org/a#b#c', 'https://a@b@host/ns#', 'ftp://host:not-a-port/ns#', 'http://[::1/ns#'];
     for (const iri of bad) expect(isSafeNamespace(iri), JSON.stringify(iri)).toBe(false);
-    const ok = ['https://w3id.org/odi/vol#', 'http://example.org/ns/', 'http://[::1]/ns#', 'https://xn--r8jz45g.jp/%E8%AA%9E%E5%BD%99#',
-      'https://example.org/caf%C3%A9/', 'https://example.org/%F0%9F%98%80#', 'https://example.org:8443/a/b?c=d#'];
+    const ok = ['https://w3id.org/odi/vol#', 'http://example.org/ns/', 'urn:example:vol:', 'https://例え.jp/語彙#', 'https://example.org/\u{1F600}#',
+      'http://[::1]/ns#', 'ftp://[::1]/ns#', 'https://user@example.org:8443/a/b?c=d#', 'https://example.org/caf%C3%A9/', 'tag:example.org,2026:vol#', 'https://example.org/ns'];
     for (const iri of ok) expect(isSafeNamespace(iri), iri).toBe(true);
+  });
+
+  it('writes every namespace it accepts as Turtle that reads back', async () => {
+    // Property check: random namespaces built from safe and unsafe characters. Whatever the predicate accepts
+    // must survive being written as a Turtle prefix and a class IRI, and read back unchanged.
+    let seed = 7;
+    const rand = (n: number) => {
+      // mulberry32: a small seeded generator, so the cases are the same on every run.
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return (((t ^ (t >>> 14)) >>> 0) / 4294967296) * n | 0;
+    };
+    const alphabet = [...'aZ09-._~:/?#[]@!$&\'()*+,;=%41|{}<>"\\^` ', 'é', '語', '\u{1F600}', '\u0001', '\u00a0', '\ufdd0', '%EF%B7%90', '%zz'];
+    const heads = ['https://example.org/', 'urn:example:', 'http://[::1]/', 'tag:x,2026:', 'https://例え.jp/'];
+    // Astra's malformed examples first, then random ones.
+    const candidates = ['https://example.org/a|b#', 'https://example.org/?x={}#', 'https://example.org/?x=`#', 'https://example.org/#x\\y/', 'urn:example:vol:'];
+    for (let i = 0; i < 1500; i++) {
+      let ns = heads[rand(heads.length)];
+      for (let j = rand(6); j > 0; j--) ns += alphabet[rand(alphabet.length)];
+      candidates.push(ns + (rand(2) ? '#' : '/'));
+    }
+    let accepted = 0;
+    for (const ns of candidates) {
+      if (!isSafeNamespace(ns)) continue;
+      accepted++;
+      const g = await OntologyGraph.fromTurtle(ONT('e', EX));
+      const r = applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix: 'zz', preferredNamespace: ns } }] as any);
+      const withClass = await OntologyGraph.fromTurtle(`${await r.graph.toTurtle()}\n<${ns}Thing> a <http://www.w3.org/2002/07/owl#Class> .`);
+      const back = await OntologyGraph.fromTurtle(await serialize(withClass, 'turtle'));
+      expect(back.metadata().preferredNamespace, ns).toBe(ns);
+      expect(back.store.getQuads(ns + 'Thing', null, null, null).length, ns).toBe(1);
+      expect(Object.keys(JSON.parse(await serialize(back, 'jsonld'))['@context']), ns).toContain('zz');
+    }
+    expect(accepted).toBeGreaterThan(40);
+  });
+
+  it('keeps a stored URN or Unicode namespace usable, as on main', async () => {
+    for (const ns of ['urn:example:vol:', 'https://例え.jp/語彙#']) {
+      // Stored as N-Triples, so the prefix can only come from the preferred-prefix metadata.
+      const nt = `<https://example.org/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Ontology> .
+<https://example.org/e> <http://purl.org/vocab/vann/preferredNamespacePrefix> "zz" .
+<https://example.org/e> <http://purl.org/vocab/vann/preferredNamespaceUri> "${ns}" .
+<${ns}Thing> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
+`;
+      const g = await OntologyGraph.parse(nt, 'ntriples');
+      expect(g.prefixes.zz, ns).toBe(ns);
+      const r = applyChangeOps(g, [{ op: 'addClass', localName: 'Part', label: 'part', definition: 'A part of a thing, for this test.', subClassOf: ['zz:Thing'] }] as any);
+      expect(r.graph.store.getQuads(null, 'http://www.w3.org/2000/01/rdf-schema#subClassOf', ns + 'Thing', null).length, ns).toBe(1);
+      // Resubmitting the unchanged namespace is fine.
+      expect(() => applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix: 'zz', preferredNamespace: ns } }] as any), ns).not.toThrow();
+      expect(JSON.parse(await serialize(g, 'jsonld'))['@context'].zz, ns).toBe(ns);
+    }
   });
 
   it('refuses a malformed namespace when metadata is edited, changing nothing', async () => {
     const g = await OntologyGraph.fromTurtle(ONT('e', EX));
-    for (const preferredNamespace of ['https://example.org/[x]#', 'https://example.org/a#b#c', 'urn:x:', '']) {
+    for (const preferredNamespace of ['https://example.org/[x]#', 'https://example.org/a#b#c', 'https://example.org/a|b#', '']) {
       expect(() => setMeta(g, { preferredPrefix: 'zz', preferredNamespace }), JSON.stringify(preferredNamespace)).toThrow(/preferredNamespace must be an absolute IRI/);
     }
     // Called directly, without the copy applyChangeOps makes: a valid field in the same edit is not applied either,
