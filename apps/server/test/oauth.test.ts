@@ -444,6 +444,58 @@ describe('client metadata documents and redirect safety', () => {
   const authorizeUrl = (clientId: string, redirect: string) =>
     `/authorize?${new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, code_challenge: pkce().challenge, code_challenge_method: 'S256', state: 's' })}`;
 
+  /** Runs a whole sign-in the way ChatGPT's connector does: resource and scopes on both legs, a client assertion it may send, and refresh. */
+  async function chatgptFlow(clientId: string, redirect: string, tokenAuth: Record<string, string> = {}) {
+    const { verifier, challenge } = pkce();
+    const resource = `${origin}/mcp`;
+    const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state: 'cgpt', resource, scope: 'openid email profile' });
+    const start = await request(base).get(`/authorize?${q}`);
+    expect(start.status, JSON.stringify(start.body)).toBe(302);
+    const id = new URL(start.headers.location).searchParams.get('request')!;
+    const agent = await signedIn('ChatGPT user');
+    expect((await agent.get(`/api/oauth/requests/${id}`)).body).toMatchObject({ clientName: 'ChatGPT', redirectHost: 'chatgpt.com' });
+    const back = new URL((await agent.post(`/api/oauth/requests/${id}/approve`).send({})).body.redirect);
+    expect(back.origin + back.pathname).toBe(redirect);
+    expect(back.searchParams.get('iss')).toBe(`${origin}/`);
+    expect(back.searchParams.get('state')).toBe('cgpt');
+    const t = await token({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, client_id: clientId, redirect_uri: redirect, resource, ...tokenAuth });
+    expect(t.status, JSON.stringify(t.body)).toBe(200);
+    expect((await tools(t.body.access_token)).status).toBe(200);
+    const r = await token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: clientId, resource, ...tokenAuth });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect((await tools(r.body.access_token)).status).toBe(200);
+  }
+
+  it('works with ChatGPT signing in through its client metadata document, on either callback', async () => {
+    const id = 'https://chatgpt.com/oauth/client.json';
+    docs.set(id, {
+      client_id: id,
+      client_name: 'ChatGPT',
+      client_uri: 'https://chatgpt.com',
+      logo_uri: 'https://chatgpt.com/favicon.ico',
+      redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect', 'https://chatgpt.com/connector/oauth/cb_123abc'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'private_key_jwt',
+      token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+      jwks_uri: 'https://chatgpt.com/oauth/jwks.json',
+      scope: 'openid email profile',
+    });
+    // Concord treats it as a public client; an assertion ChatGPT sends anyway is ignored rather than refused.
+    await chatgptFlow(id, 'https://chatgpt.com/connector/oauth/cb_123abc', { client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: 'eyJhbGciOiJSUzI1NiJ9.e30.sig' });
+    await chatgptFlow(id, 'https://chatgpt.com/connector_platform_oauth_redirect');
+  });
+
+  it('works with ChatGPT registering itself (dynamic client registration), public or with a secret', async () => {
+    for (const method of ['none', 'client_secret_post']) {
+      const reg = await request(base)
+        .post('/register')
+        .send({ client_name: 'ChatGPT', redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: method, scope: 'openid email profile' });
+      expect(reg.status, method).toBe(201);
+      await chatgptFlow(reg.body.client_id, 'https://chatgpt.com/connector_platform_oauth_redirect', reg.body.client_secret ? { client_secret: reg.body.client_secret } : {});
+    }
+  });
+
   it('accepts a valid metadata document and shows its name on the consent page', async () => {
     docs.set(CID, meta({ logo_uri: 'https://client.example/logo.png' }));
     const res = await request(base).get(authorizeUrl(CID, 'https://client.example/callback'));

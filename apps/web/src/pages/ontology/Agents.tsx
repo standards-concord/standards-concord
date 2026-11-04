@@ -26,7 +26,7 @@ export function ConnectAgentTab() {
         <div>
           <h2 className="text-lg font-semibold">Connect an agent</h2>
           <p className="max-w-2xl text-sm text-muted">
-            Let Claude, Claude Code, Codex or your editor read {ontology.title}, query it, check your data against it and report what’s missing, through Concord’s MCP connector.
+            Let Claude, ChatGPT, Claude Code, Codex or your editor read {ontology.title}, query it, check your data against it and report what’s missing, through Concord’s MCP connector.
           </p>
         </div>
         <Link to={`/o/${id}/agents`} className="inline-flex items-center gap-1.5 text-sm text-accent hover:underline">

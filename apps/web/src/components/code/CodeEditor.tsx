@@ -13,7 +13,7 @@ import {
   placeholder as placeholderExt,
   rectangularSelection,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { bracketMatching, foldGutter, foldKeymap, foldService, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type Completion, type CompletionSource } from '@codemirror/autocomplete';
@@ -33,7 +33,7 @@ const theme = EditorView.theme({
   '&.cm-focused': { outline: '2px solid var(--accent)', outlineOffset: '-2px' },
   '.cm-scroller': { fontFamily: 'var(--font-mono)', lineHeight: '1.6' },
   '.cm-content': { caretColor: 'var(--fg)', padding: '8px 0' },
-  '.cm-gutters': { backgroundColor: 'var(--surface-2)', color: 'var(--subtle)', border: 'none', borderRight: '1px solid var(--line)' },
+  '.cm-gutters': { backgroundColor: 'var(--surface-2)', color: 'var(--muted)', border: 'none', borderRight: '1px solid var(--line)' },
   '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--accent-soft) 55%, transparent)' },
   '.cm-activeLineGutter': { backgroundColor: 'var(--accent-soft)', color: 'var(--fg)' },
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': { backgroundColor: 'var(--syn-selection) !important' },
@@ -173,7 +173,6 @@ export function CodeEditor({
           ...closeBracketsKeymap,
           ...historyKeymap,
           ...completionKeymap,
-          indentWithTab,
         ]),
         EditorView.updateListener.of((u) => {
           if (u.docChanged) latest.current.onChange?.(u.state.doc.toString());

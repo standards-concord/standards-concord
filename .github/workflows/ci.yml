@@ -9,9 +9,13 @@ on:
 permissions:
   contents: read
 
+# Branches cancel superseded runs. main never does: a run that is building the
+# backend image finishes, and newer main pushes queue behind it (GitHub keeps the
+# newest pending one), so the latest main commit always reaches the server and
+# an older image never overwrites a newer one.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:

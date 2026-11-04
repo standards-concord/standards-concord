@@ -50,7 +50,7 @@ describe('demo seed', () => {
   });
 
   it('validates the working draft as consistent and FAIR', async () => {
-    const res = await request(app).get(`/api/ontologies/${demoId}/validation`);
+    const res = await (await login('contributor')).get(`/api/ontologies/${demoId}/validation`);
     expect(res.status).toBe(200);
     expect(res.body.reasoner.consistent).toBe(true);
     expect(res.body.fair.score).toBeGreaterThan(0.7);
@@ -291,6 +291,28 @@ describe('anonymous access', () => {
     expect(detail.status).toBe(200);
     expect(detail.body.members).toEqual([]);
     expect(detail.body.history).toEqual([]);
+    // Owner ids lead to names via /people, and the counts reveal private work.
+    for (const s of [detail.body, ...(await request(app).get('/api/ontologies')).body]) {
+      expect(s.ownerIds).toEqual([]);
+      expect(s.stats.useCases).toBeUndefined();
+      expect(s.stats.openChangeRequests).toBeUndefined();
+      expect(s.stats.members).toBeUndefined();
+      expect(s.stats.classes).toBeGreaterThanOrEqual(0);
+    }
+    const owner = await login('contributor', 'Owner check');
+    expect((await owner.get('/api/ontologies/volunteering')).body.ownerIds.length).toBeGreaterThan(0);
+  });
+
+  it('keeps validation (private competency questions) and the simulation behind sign-in', async () => {
+    expect((await request(app).get(`/api/ontologies/${demoId}/validation`)).status).toBe(401);
+    expect((await request(app).get(`/api/ontologies/${demoId}/validation?ref=1.0.0`)).status).toBe(401);
+    const step = await request(app).post('/api/simulation/step').send({ ontologyId: demoId });
+    expect(step.status).toBe(401);
+    expect(JSON.stringify(step.body)).not.toContain('events');
+    expect((await request(app).post('/api/simulation/clock').send({ advanceDays: 1 })).status).toBe(401);
+    const agent = await login('contributor', 'Validator');
+    expect((await agent.get(`/api/ontologies/${demoId}/validation`)).status).toBe(200);
+    expect((await agent.post('/api/simulation/step').send({ ontologyId: demoId })).status).toBe(200);
   });
 });
 
