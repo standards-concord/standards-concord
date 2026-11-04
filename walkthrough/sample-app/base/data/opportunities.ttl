@@ -1,0 +1,31 @@
+# Opportunities published by local organisations. All data is fictional.
+@prefix vol: <https://w3id.org/odi/volunteering#> .
+@prefix ex: <https://helping-hands.example/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:parkCleanUp a vol:VolunteeringOpportunity ;
+    vol:title "Saturday park clean-up" ;
+    vol:summary "Help keep Victoria Park clean and safe for wildlife. Gloves and pickers provided." ;
+    vol:minimumAge "16"^^xsd:nonNegativeInteger ;
+    vol:placesAvailable "12"^^xsd:nonNegativeInteger .
+
+ex:telephoneBefriending a vol:VolunteeringOpportunity ;
+    vol:title "Telephone befriending" ;
+    vol:summary "A weekly phone call with an older person who lives alone." ;
+    vol:minimumAge "18"^^xsd:nonNegativeInteger ;
+    vol:requiresBackgroundCheck true ;
+    vol:placesAvailable "4"^^xsd:nonNegativeInteger .
+
+ex:foodBank a vol:VolunteeringOpportunity ;
+    vol:title "Food bank warehouse shifts" ;
+    vol:summary "Sort donations and pack parcels with a friendly team on weekday mornings." ;
+    vol:minimumAge "14"^^xsd:nonNegativeInteger ;
+    vol:placesAvailable "8"^^xsd:nonNegativeInteger .
+
+ex:readingBuddies a vol:VolunteeringOpportunity ;
+    vol:title "Library reading buddies" ;
+    vol:summary "Listen to children read and help them build confidence, after school." ;
+    vol:minimumAge "18"^^xsd:nonNegativeInteger ;
+    vol:requiresBackgroundCheck true ;
+    vol:placesAvailable "6"^^xsd:nonNegativeInteger .
