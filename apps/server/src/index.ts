@@ -1,12 +1,16 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { list, openDb } from './db.js';
+import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
 import { ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 
 openDb();
+const secrets = migrateClientSecrets();
+if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
+if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 // Git is a projection of the database: repair anything a crash left half-done.
 for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 if (config.demoMode) {

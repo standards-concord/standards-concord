@@ -9,7 +9,8 @@ A prototype platform for designing data standards together, built for the Open D
 - **Release properly.** Releases take the highest level of their changes, bump the semantic version, stamp `owl:versionIRI`, `owl:priorVersion` and `owl:backwardCompatibleWith` or `owl:incompatibleWith`, and include every format plus a SPARQL migration script for major versions. Each ontology is a git repository (tag per release) that is pushed to GitHub on release when configured.
 - **Readable at its own address.** The ontology IRI and every version IRI resolve to a public page in the style of W3C and Widoco vocabulary docs: metadata, a reference entry for every term (anchored by its IRI fragment), the use cases and requirements behind the version, release notes and every serialisation. RDF clients get Turtle, JSON-LD, RDF/XML or N-Triples from the same address by content negotiation, or by extension (`/def/<slug>/<version>.ttl`). The page is also written into each release as `index.html`, and w3id.org redirect rules are generated for persistent IRIs.
 - **Query it in the browser.** The Query tab loads the ontology into [sparq](https://github.com/sparq-org/sparq), a SPARQL engine compiled to WebAssembly, to run SPARQL and check instance data against the ontology's SHACL shapes without a round trip to the server.
-- **View it your way.** Turtle, LinkML, JSON-LD, RDF/XML, N-Triples, Manchester syntax and SHACL shapes.
+- **View it your way.** Turtle, LinkML, JSON-LD, RDF/XML, N-Triples, Manchester syntax and SHACL shapes, also in the much more readable SHACL compact syntax (SHACLC).
+- **Use it in code straight away.** Every SHACL shape is also a JavaScript class, generated with the [ODI SHACL converter](https://github.com/theodi/shacl-shape-converter-typescript) over [@rdfjs/wrapper](https://github.com/rdfjs/wrapper). Apps import them from the ontology's own address (`import { VolunteeringDataset } from "https://…/def/volunteering/1.0.0.js"`, or `Accept: text/javascript`), get types from `.d.ts`, or `npm install https://…/def/volunteering/1.0.0.tgz`. The package name is the same for every version and fork, so moving an app from a fork to a release only changes that URL.
 - **Identity and private data.** Sign in with Google or GitHub. A WebID and a Solid pod are created automatically; private material such as interview transcripts is stored in the pod, and only the structured, public parts are shared.
 - **Alpha testing built in.** `/alpha` walks testers through the platform in a role of their choice with a simulated working group around them, and `/feedback` is a voice-enabled feedback chat with guided and open pathways.
 
@@ -83,6 +84,8 @@ pnpm test:e2e:live   # read-only smoke tests against the deployed site (LIVE_URL
 ```
 
 The browser tests start their own API server (on port 8797, with a throwaway data directory) and web app (port 5183), so they don't disturb a running `pnpm dev`. Set `E2E_MODE=preview` to test the production build instead of the dev server; run `pnpm --filter @concord/web build` first. CI runs both modes on every push, and the live tests after every Vercel production deploy. Add new specs as `e2e/<feature>.spec.ts`, using the `test` from `e2e/fixtures.ts`: it fails any test whose page logs a console error or crashes.
+
+Every feature comes with Playwright tests, and **every bug fix comes with a Playwright test that reproduces the bug**, so it can't come back. [docs/e2e-coverage.md](docs/e2e-coverage.md) maps each page, role and flow to the spec that covers it. More in [CLAUDE.md](CLAUDE.md).
 
 ## Docs
 
