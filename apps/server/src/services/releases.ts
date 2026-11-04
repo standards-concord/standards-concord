@@ -165,7 +165,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   const can = publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
   const project = getProject(r.ontologyId);
-  const working = await ontologyStore.working(project);
+  const head = ontologyStore.head(project);
+  const working = await ontologyStore.graphAt(project, head);
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
   const stamped = stampRelease(working, {
     version: r.version,
@@ -204,7 +205,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? getUser(r.createdBy);
-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' });
+  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, head);
   r.status = 'published';
   r.publishedAt = clock.iso();
   r.statusSince = r.publishedAt;

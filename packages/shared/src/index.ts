@@ -471,8 +471,15 @@ export interface ChangeRequest {
   number: number; // per-ontology sequence, shown as #12
   /** Record version: every save advances it, and a save only goes through if it hasn't moved since the request was read. */
   rev?: number;
-  /** Set while a merge holds the request (until: epoch ms): no other save goes through until it finishes or runs out. */
-  merging?: { until: number };
+  /**
+   * Set while a merge holds the request. Until it records `commit`, the hold
+   * runs out at `until` (epoch ms) and a later edit makes the merge give up.
+   * Once `commit` (the exact commit the merge will make on top of `base`) is
+   * recorded, the merge is decided: whoever touches the request next finishes
+   * it (moves the draft to `commit` if it is still at `base`) or, if the draft
+   * moved first, gives the claim back.
+   */
+  merging?: { until: number; by?: string; commit?: string; base?: string };
   ontologyId: string;
   title: string;
   description: string;
@@ -606,7 +613,7 @@ export interface ForkConflict {
 /** What an agent should do about a fork at the start of a development session. */
 export interface ForkCheck {
   fork: ForkSummary;
-  outcome: 'keep-using-fork' | 'sync-fork' | 'resolve-conflicts' | 'switch-to-draft' | 'switch-to-release' | 'fork-closed';
+  outcome: 'keep-using-fork' | 'sync-fork' | 'resolve-conflicts' | 'switch-to-draft' | 'switch-to-release' | 'fork-closed' | 'recreate-fork';
   message: string;
   /** Import URLs to replace in the application (every one of them resolves). */
   replace: { from: string; to: string }[];

@@ -48,11 +48,29 @@ export const listCRs = (ontologyId: string) => list<ChangeRequest>('changeReques
  * a slow writer (a long triage, a stalled proposal) can't put back an older
  * version over an edit someone else made. Also fenced: a fork proposal that
  * has lost its hold on the fork writes nothing. Every writer goes through here.
+ *
+ * A merge holds the request from its claim to its final save, and only the
+ * merger (claimMerge) can save it meanwhile. Once the merge has recorded the
+ * commit it is making, nobody can change the request until that merge is
+ * finished, so a save that finds one finishes it first and then refuses this
+ * (now out-of-date) copy.
  */
 export function saveChangeRequest(cr: ChangeRequest, opts: { claimMerge?: boolean } = {}): ChangeRequest {
-  // A merge holds the request from its claim to its final save: a copy read meanwhile carries the
-  // claim and can't be saved over it (the merger clears the claim on its own copy first).
-  if (cr.merging && cr.merging.until > Date.now() && !opts.claimMerge) throw new HttpError(409, `Change request #${cr.number} is being merged right now. Try again in a moment.`);
+  if (!opts.claimMerge) {
+    const stored = get<ChangeRequest>('changeRequests', cr.id);
+    if (stored?.merging?.commit) {
+      const outcome = settleMerge(stored);
+      throw new HttpError(
+        409,
+        outcome === 'merged'
+          ? `Change request #${cr.number} has just been merged, so it can't be changed any more.`
+          : `Change request #${cr.number} was changed by someone else at the same time. Reload it and try again.`,
+      );
+    }
+    if (stored?.merging && stored.merging.until > Date.now()) throw new HttpError(409, `Change request #${cr.number} is being merged right now. Try again in a moment.`);
+    // A hold that ran out before its merge decided anything is void: don't carry it forward.
+    if (cr.merging && !cr.merging.commit && cr.merging.until <= Date.now()) delete cr.merging;
+  }
   const expected = cr.rev;
   const updatedAt = cr.updatedAt;
   cr.rev = (expected ?? 0) + 1;
@@ -420,63 +438,127 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
   return cr;
 }
 
-/** Merge into the working draft. Re-applies the edits on the current head (a rebase). */
-/** How long a merge may hold a request; a merge whose process stopped stops blocking it after this. */
+/** How long a merge may hold a request before deciding its commit; a merge whose process stopped stops blocking it after this. */
 const MERGE_LEASE_MS = 2 * 60_000;
 
 /**
- * Merge an approved request into the working draft, in three steps so that a
- * merge working from an out-of-date copy has no effect at all: claim the
- * request (a conditional save on its version, which refuses a stale copy and
- * holds off every other save), commit its edits on top of the draft it read
- * (a compare-and-swap on the branch), then record the merge.
+ * Merge an approved request into the working draft. It's done so that a merge
+ * either happens exactly once with the edits that were approved, or not at
+ * all, even with several server processes and crashes in between:
+ *
+ * 1. Claim the request (a conditional save on its version: a stale copy is
+ *    refused, and every other save is held off while the claim lasts).
+ * 2. Apply the edits to the draft as it is at one exact commit, and write the
+ *    resulting commit without moving the draft.
+ * 3. Record that commit on the request, again conditionally: if anyone saved
+ *    the request since the claim (say, after the claim ran out), this fails
+ *    and the draft is never touched.
+ * 4. Move the draft to the commit if it is still where the merge read it
+ *    (settleMerge). From step 3 on anyone can do this, so a merge whose
+ *    process stopped is finished by the next one to touch the request.
  */
 export async function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
+  const current = get<ChangeRequest>('changeRequests', cr.id);
+  if (current?.merging?.commit) {
+    // An earlier merge decided its commit and stopped: finish it rather than apply the edits twice.
+    const outcome = settleMerge(current);
+    adopt(cr, current);
+    if (outcome === 'merged') {
+      await retriageOthers(cr);
+      return cr;
+    }
+  }
   if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   if (cr.merging && cr.merging.until > Date.now()) throw new HttpError(409, `Change request #${cr.number} is already being merged.`);
-  cr.merging = { until: Date.now() + MERGE_LEASE_MS };
+  cr.merging = { until: Date.now() + MERGE_LEASE_MS, by: actor?.id };
   save(cr, { claimMerge: true });
-  const release = () => {
+  const giveBack = () => {
     delete cr.merging;
     try {
-      save(cr);
+      save(cr, { claimMerge: true });
     } catch {
       // Changed after the claim ran out: it's no longer this merge's to give back.
     }
   };
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
-  let after: OntologyGraph;
-  let head: string;
   try {
-    head = ontologyStore.head(project);
-    const working = await ontologyStore.working(project);
+    const base = ontologyStore.head(project);
+    const working = await ontologyStore.graphAt(project, base);
+    let after: OntologyGraph;
     try {
       after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), provenance: `${project.slug}#${cr.number}` }).graph;
     } catch (err) {
       delete cr.merging;
       setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-      return save(cr);
+      return save(cr, { claimMerge: true });
     }
-    cr.mergedCommit = await ontologyStore.commitWorkingIf(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: author?.name ?? 'Concord' }, head);
+    const commit = await ontologyStore.prepareWorkingCommit(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: author?.name ?? 'Concord' }, base);
+    cr.merging = { ...cr.merging, commit, base };
+    save(cr, { claimMerge: true });
   } catch (err) {
-    release();
+    if (!cr.merging?.commit || !get<ChangeRequest>('changeRequests', cr.id)?.merging?.commit) giveBack();
     throw err;
   }
-  delete cr.merging;
-  setStatus(cr, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
-  if (project.stage === 'discovery') {
-    project.stage = 'drafting';
-    updateProject(project);
-  }
-  save(cr);
-  logActivity({ ontologyId: cr.ontologyId, actorId: actor?.id, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
-  // Re-triage other open requests against the new head so their diffs stay accurate.
-  for (const other of listCRs(cr.ontologyId).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
-    await triage(other);
-  }
+  if (settleMerge(cr) !== 'merged') throw new HttpError(409, 'The working draft changed while this was being merged. Nothing was merged; try again.');
+  await retriageOthers(cr);
   return cr;
+}
+
+/**
+ * Finish a merge that has recorded its commit (any process can, any number of
+ * times): if the commit is already in the draft, or the draft is still where
+ * the merge read it and can be moved to it, record the merge; otherwise the
+ * draft moved first, so give the claim back (the request stays approved).
+ * Updates `cr` in place to what was stored.
+ */
+function settleMerge(cr: ChangeRequest): 'merged' | 'released' {
+  const m = cr.merging;
+  if (!m?.commit || !m.base) return cr.status === 'merged' ? 'merged' : 'released';
+  const project = getProject(cr.ontologyId);
+  if (!ontologyStore.inWorking(project, m.commit) && ontologyStore.head(project) === m.base) ontologyStore.advanceWorking(project, m.commit, m.base);
+  const merged = ontologyStore.inWorking(project, m.commit);
+  const actorId = m.by;
+  delete cr.merging;
+  if (merged) {
+    cr.mergedCommit = m.commit;
+    setStatus(cr, 'merged', `merged into the working draft${actorId ? '' : ' automatically'}`, actorId);
+  }
+  try {
+    save(cr, { claimMerge: true });
+  } catch (err) {
+    // Someone else settled it first: take what they stored.
+    const stored = get<ChangeRequest>('changeRequests', cr.id);
+    if (!stored || stored.merging?.commit) throw err;
+    adopt(cr, stored);
+    return stored.status === 'merged' ? 'merged' : 'released';
+  }
+  if (merged) {
+    if (project.stage === 'discovery') {
+      project.stage = 'drafting';
+      updateProject(project);
+    }
+    logActivity({ ontologyId: cr.ontologyId, actorId, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+  }
+  return merged ? 'merged' : 'released';
+}
+
+/** Make `cr` exactly what was stored (dropping fields the stored copy no longer has, such as a finished merge's hold). */
+function adopt(cr: ChangeRequest, stored: ChangeRequest) {
+  for (const k of Object.keys(cr)) if (!(k in stored)) delete (cr as unknown as Record<string, unknown>)[k];
+  Object.assign(cr, stored);
+}
+
+/** Re-triage other open requests against the new head so their diffs stay accurate. */
+async function retriageOthers(cr: ChangeRequest) {
+  for (const other of listCRs(cr.ontologyId).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
+    try {
+      await triage(other);
+    } catch (err) {
+      if (!(err instanceof HttpError && err.status === 409)) throw err;
+    }
+  }
 }
 
 export async function withdraw(cr: ChangeRequest, actor: User) {
@@ -520,10 +602,22 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
 /** Periodic sweep: time-based transitions (review periods ending, votes closing). */
 export async function tick(): Promise<number> {
   let changed = 0;
+  // Finish merges whose process stopped after deciding their commit.
+  for (const cr of list<ChangeRequest>('changeRequests').filter((c) => c.merging?.commit)) {
+    if (settleMerge(cr) === 'merged') {
+      changed++;
+      await retriageOthers(cr);
+    }
+  }
   for (const cr of list<ChangeRequest>('changeRequests').filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {
     const before = cr.status;
-    const after = await advance(cr);
-    if (after.status !== before) changed++;
+    try {
+      const after = await advance(cr);
+      if (after.status !== before) changed++;
+    } catch (err) {
+      // Being merged or changed by someone else right now: the next sweep picks it up.
+      if (!(err instanceof HttpError && err.status === 409)) throw err;
+    }
   }
   return changed;
 }

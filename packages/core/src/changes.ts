@@ -51,6 +51,9 @@ export function applyChangeOps(graph: OntologyGraph, ops: ChangeOp[], ctx: Chang
   ops.forEach((op, i) => {
     try {
       applyOne(g, op, ctx, warnings, touched);
+      // Whatever an edit names or builds (a new term, a rename's destination, every class in a
+      // disjointness), it may not end up changing the recorded provenance properties.
+      for (const t of touched) notRecorded(t);
     } catch (e) {
       if (e instanceof ChangeOpError) throw e;
       throw new ChangeOpError((e as Error).message, i);
@@ -145,7 +148,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       fail(`invalid local name "${localName}": ${kind === 'class' ? 'classes use UpperCamelCase' : kind === 'property' ? 'properties use lowerCamelCase' : 'individuals use letters, digits and hyphens'} with no spaces or underscores`);
     }
     if (!g.namespace) fail('ontology has no namespace (no owl:Ontology header)');
-    const iri = g.namespace + localName;
+    const iri = notRecorded(g.namespace + localName);
     if (s.countQuads(nn(iri), null, null, null) > 0) fail(`term <${iri}> already exists`);
     if (!fields.label?.trim()) fail('label is required');
     if (kind !== 'individual' && !fields.definition?.trim()) fail('definition is required');
@@ -274,7 +277,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       break;
     }
     case 'addDisjointness': {
-      const classes = [...new Set(op.classes.map(ex))].map(requireClass);
+      const classes = [...new Set(op.classes.map(ex).map(notRecorded))].map(requireClass);
       if (classes.length < 2) fail('disjointness needs at least two distinct classes');
       if (classes.length === 2) add(classes[0], P.disjointWith, nn(classes[1]));
       else {
@@ -286,7 +289,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       break;
     }
     case 'removeDisjointness': {
-      const classes = [...new Set(op.classes.map(ex))];
+      const classes = [...new Set(op.classes.map(ex).map(notRecorded))];
       if (classes.length < 2) fail('need at least two classes');
       let removed = 0;
       const inSet = new Set(classes);
@@ -359,7 +362,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       const kinds = g.kindsOf(iri);
       const kind = kinds.has('class') ? 'class' : kinds.has('individual') && kinds.size === 1 ? 'individual' : 'property';
       if (!isValidLocalName(op.newLocalName, kind)) fail(`invalid local name "${op.newLocalName}" for a ${kind}`);
-      const newIri = g.namespace + op.newLocalName;
+      const newIri = notRecorded(g.namespace + op.newLocalName);
       if (newIri === iri) fail('new name is the same as the old one');
       if (s.countQuads(nn(newIri), null, null, null) > 0) fail(`term <${newIri}> already exists`);
       renameTerm(g, iri, newIri, date);

@@ -47,6 +47,7 @@ const OUTCOME_TONE: Record<ForkCheck['outcome'], string> = {
   'switch-to-draft': 'border-ok/40 bg-ok-soft',
   'switch-to-release': 'border-ok/40 bg-ok-soft',
   'fork-closed': 'border-line bg-surface-2',
+  'recreate-fork': 'border-warn/40 bg-warn-soft',
 };
 
 /** Fork changes that can't be carried onto upstream as they are, each with a way out. */
@@ -182,6 +183,8 @@ export function ForkPage() {
   if (!state.data) return <Loading />;
   const f: ForkDetail = state.data;
   const isOwner = !!session?.user && (session.user.id === f.ownerId || !!session.user.isPlatformAdmin);
+  // Forks made before generated provenance had its own property can only be read, downloaded and closed.
+  const editable = f.status !== 'closed' && f.provenanceFormat === 2;
   const cr = f.changeRequest;
   const crOpen = cr && ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
   // Terms whose fork version isn't upstream or in the open change request (including edits made since proposing).
@@ -215,7 +218,7 @@ export function ForkPage() {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-6">
-          {check.data && <NextSteps check={check.data} onDiscard={isOwner && f.status !== 'closed' ? discard : undefined} pending={act.pending} />}
+          {check.data && <NextSteps check={check.data} onDiscard={isOwner && editable ? discard : undefined} pending={act.pending} />}
 
           <Card>
             <CardHeader title={`Terms in this fork (${f.terms.length})`} subtitle="New terms use the standard's own namespace, so your data stays valid when they land upstream." />
@@ -239,7 +242,7 @@ export function ForkPage() {
             )}
           </Card>
 
-          {isOwner && f.status !== 'closed' && <AddTerms onDone={() => void state.reload()} />}
+          {isOwner && editable && <AddTerms onDone={() => void state.reload()} />}
 
           <Card>
             <CardHeader title="History" />
@@ -308,7 +311,7 @@ export function ForkPage() {
             )}
             {isOwner && f.status !== 'closed' && (
               <div className="mt-3 flex flex-wrap gap-2">
-                {toPropose && !conflicted && (
+                {editable && toPropose && !conflicted && (
                   <Button
                     variant="primary"
                     icon={GitPullRequest}
@@ -323,7 +326,7 @@ export function ForkPage() {
                     {crOpen ? `Update #${cr!.number}` : 'Propose upstream'}
                   </Button>
                 )}
-                {f.behindBy > 0 && (
+                {editable && f.behindBy > 0 && (
                   <Button icon={RefreshCw} loading={act.pending} onClick={sync}>
                     Sync with upstream
                   </Button>
@@ -344,7 +347,7 @@ export function ForkPage() {
                 {notice}
               </p>
             )}
-            {syncConflicts.length > 0 && !act.pending && <Conflicts conflicts={syncConflicts} onDiscard={isOwner ? discard : undefined} pending={act.pending} />}
+            {syncConflicts.length > 0 && !act.pending && <Conflicts conflicts={syncConflicts} onDiscard={isOwner && editable ? discard : undefined} pending={act.pending} />}
             <InlineError error={act.error} />
           </Card>
         </aside>

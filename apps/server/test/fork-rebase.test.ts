@@ -1,6 +1,8 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
 import type { OntologyFork } from '@concord/shared';
+import fs from 'node:fs';
+import nodePath from 'node:path';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
@@ -726,11 +728,12 @@ describe('seventh review', () => {
     expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
     return next;
   };
-  /** Runs `during` once, the first time a read of the working draft happens while `when` holds. */
+  /** Runs `during` once, the first time a read of the draft happens while `when` holds. */
   async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
-    const original = ontologyStore.working;
+    // Every read of the draft (working, and a merge's read at its exact base) goes through graphAt.
+    const original = ontologyStore.graphAt;
     let done = false;
-    ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
       if (!done && when()) {
         done = true;
         await during();
@@ -740,7 +743,7 @@ describe('seventh review', () => {
     try {
       return await fn();
     } finally {
-      ontologyStore.working = original;
+      ontologyStore.graphAt = original;
     }
   }
   const proposeFrom = async (name: string, localName: string) => {
@@ -851,5 +854,155 @@ describe('seventh review', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/earlier version of Concord/);
     expect((await request(app).get(`/def/volunteering/forks/${path.split('/').at(-1)}.ttl`)).status).toBe(200);
+  });
+});
+
+describe('eighth review', () => {
+  const p = () => findProject('volunteering')!;
+  const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
+  /** Runs `during` once, the first time the draft is read (by any route) while `when` holds. */
+  async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
+    const originals = { working: ontologyStore.working, graphAt: ontologyStore.graphAt };
+    let done = false;
+    const hook = async () => {
+      if (!done && when()) {
+        done = true;
+        await during();
+      }
+    };
+    ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.working>) {
+      await hook();
+      return originals.working.apply(this, args);
+    };
+    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.graphAt>) {
+      await hook();
+      return originals.graphAt.apply(this, args);
+    };
+    try {
+      return await fn();
+    } finally {
+      Object.assign(ontologyStore, originals);
+    }
+  }
+  /** Replace a store method for the length of `fn`. */
+  async function stubbed<K extends 'advanceWorking'>(key: K, impl: (original: (typeof ontologyStore)[K]) => (typeof ontologyStore)[K], fn: () => Promise<unknown>) {
+    const original = ontologyStore[key];
+    ontologyStore[key] = impl(original.bind(ontologyStore) as (typeof ontologyStore)[K]);
+    try {
+      return await fn();
+    } finally {
+      ontologyStore[key] = original;
+    }
+  }
+  const proposeFrom = async (name: string, localName: string) => {
+    const path = await newFork(name);
+    await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
+    return (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
+  };
+  const approve = (id: string) => {
+    const c = getCR(id);
+    c.status = 'approved';
+    saveChangeRequest(c);
+  };
+  const stop = () => {
+    throw new Error('the merging process stopped');
+  };
+
+  it('a merge whose hold ran out commits nothing once the request has been edited', async () => {
+    // Used to: the stalled merge resumed after someone replaced the edits, committed the old ones
+    // (the draft hadn't moved, so the branch update went through), and only then failed.
+    const crId = await proposeFrom('Expired merge', 'ExpiredMerge');
+    approve(crId);
+    const head = ontologyStore.head(p());
+    await expect(
+      interleave(
+        () => !!getCR(crId).merging,
+        () => {
+          const held = getCR(crId);
+          expect(putIf('changeRequests', { ...held, merging: { ...held.merging!, until: Date.now() - 1 }, rev: held.rev! + 1 }, 'rev', held.rev)).toBe(true);
+          const edited = getCR(crId);
+          edited.ops = [addClass('ReplacedWhileStalled', 'replaced while stalled')];
+          saveChangeRequest(edited);
+        },
+        () => merge(getCR(crId), undefined),
+      ),
+    ).rejects.toThrow(/changed by someone else/);
+    expect(ontologyStore.head(p())).toBe(head);
+    expect(await has('ExpiredMerge')).toBe(false);
+    expect(JSON.stringify(getCR(crId).ops)).toMatch(/ReplacedWhileStalled/);
+    expect(getCR(crId).merging).toBeUndefined();
+  });
+
+  it('reads the draft from its commit, so a checkout that lags behind loses nothing', async () => {
+    // Used to: a merge read ontology.ttl from the checkout, which another process had not rewritten
+    // yet after moving the branch, and committed a draft without that process's term.
+    const before = ontologyStore.readWorkingText(p());
+    await upstream([addClass('CommittedFirst', 'committed first')]);
+    const checkout = nodePath.join(ontologyStore.dir(p()), 'ontology.ttl');
+    fs.writeFileSync(checkout, before);
+    const crId = await proposeFrom('Lagging checkout', 'MergedOnTop');
+    approve(crId);
+    expect((await merge(getCR(crId), undefined)).status).toBe('merged');
+    expect(await has('CommittedFirst')).toBe(true);
+    expect(await has('MergedOnTop')).toBe(true);
+    // The merge brought the checkout up to the commit it made.
+    expect(fs.readFileSync(checkout, 'utf8').trim()).toBe(ontologyStore.readAt(p(), 'HEAD'));
+  });
+
+  it('a merge that stopped right after committing is recognised by the retry, not redone', async () => {
+    // Used to: the request stayed approved with no mergedCommit, and the retry failed because the
+    // term already existed, moving the request to needs-work.
+    const crId = await proposeFrom('Stopped after commit', 'StoppedAfterCommit');
+    approve(crId);
+    await expect(stubbed('advanceWorking', (original) => (...args) => (original(...args), stop()), () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    const stuck = getCR(crId);
+    expect(stuck.status).toBe('approved');
+    expect(stuck.merging?.commit).toBeTruthy();
+    expect(await has('StoppedAfterCommit')).toBe(true);
+    const head = ontologyStore.head(p());
+    const done = await merge(getCR(crId), undefined);
+    expect(done.status).toBe('merged');
+    expect(done.mergedCommit).toBe(stuck.merging!.commit);
+    expect(done.merging).toBeUndefined();
+    expect(ontologyStore.head(p())).toBe(head);
+  });
+
+  it('a merge that stopped after deciding its commit is finished by the next save, which is then refused', async () => {
+    const crId = await proposeFrom('Stopped before commit', 'StoppedBeforeCommit');
+    approve(crId);
+    await expect(stubbed('advanceWorking', () => stop, () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    expect(await has('StoppedBeforeCommit')).toBe(false);
+    const late = getCR(crId);
+    late.title = 'An edit after the merge decided';
+    expect(() => saveChangeRequest(late)).toThrow(/has just been merged/);
+    expect(getCR(crId).status).toBe('merged');
+    expect(getCR(crId).title).not.toBe('An edit after the merge decided');
+    expect(await has('StoppedBeforeCommit')).toBe(true);
+  });
+
+  it('a decided merge whose draft moved first is given back, and the retry applies it to the new draft once', async () => {
+    const crId = await proposeFrom('Decided then moved', 'DecidedThenMoved');
+    approve(crId);
+    await expect(stubbed('advanceWorking', () => stop, () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    await upstream([addClass('MovedFirst', 'moved first')]);
+    const done = await merge(getCR(crId), undefined);
+    expect(done.status).toBe('merged');
+    expect(await has('MovedFirst')).toBe(true);
+    expect(await has('DecidedThenMoved')).toBe(true);
+    expect(ontologyStore.inWorking(p(), done.mergedCommit!)).toBe(true);
+  });
+
+  it('tells the owner of a fork from an earlier version to recreate it, and offers no edits', async () => {
+    // Used to: check_forks said keep using the fork and propose it, but proposing always failed.
+    const path = await newFork('Legacy guidance');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LegacyGuided', 'legacy guided')] });
+    const id = (await reader.get(path)).body.id as string;
+    const f = get<OntologyFork>('forks', id)!;
+    expect(putIf('forks', { ...f, provenanceFormat: undefined, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
+    const check = (await dev.get(`${path}/check`)).body;
+    expect(check.outcome).toBe('recreate-fork');
+    expect(check.steps.join(' ')).toMatch(/create_fork/);
+    expect(check.steps.join(' ')).not.toMatch(/propose_fork|sync_fork/);
+    expect((await dev.post(`${path}/close`).send({})).status).toBe(200);
   });
 });

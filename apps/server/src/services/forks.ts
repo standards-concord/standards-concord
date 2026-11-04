@@ -965,6 +965,25 @@ export async function checkFork(f: OntologyFork): Promise<ForkCheck> {
   // Everything the fork changed has landed; the target must also have everything else the
   // application gets from the fork, such as unreleased draft terms the fork was created with.
   const lacking = fork.status === 'released' || fork.status === 'merged' ? await notIn(p, f) : undefined;
+  // A fork from before generated provenance had its own property can't be changed (requireOpen),
+  // so the only advice that works for it is moving to a target, or recreating it.
+  const switchable = (fork.status === 'released' && !lacking?.release.length) || (fork.status === 'merged' && !lacking?.draft.length);
+  if (f.provenanceFormat !== 2 && !switchable) {
+    const own = fork.terms.length ? ` Its changes: ${names(fork.terms)}.` : '';
+    return {
+      fork,
+      outcome: 'recreate-fork',
+      message: `“${f.title}” was made by an earlier version of Concord and can no longer be changed, synced or proposed. It still resolves, so your application keeps working. To carry on developing, recreate it.${own}`,
+      replace: [],
+      conflicts: [],
+      steps: [
+        `Create a new fork of ${p.title} (create_fork, or New fork on the Forks page).`,
+        `Redo this fork's changes in the new fork with edit_fork${fork.terms.length ? ` (${names(fork.terms)})` : ''}; get_fork on this fork lists them.`,
+        `Replace ${fork.urls.iri} with the new fork's IRI in your imports (and the same for each file extension).`,
+        `Close this fork once nothing uses it (close_fork, or Close fork on ${fork.urls.app}).`,
+      ],
+    };
+  }
   if (fork.status === 'released' && lacking?.release.length) {
     const draft = versionUrl(p, 'draft');
     const what = lacking.release.map((k) => keyLabel(k, lacking.prefixes)).join(', ');

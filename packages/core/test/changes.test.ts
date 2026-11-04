@@ -309,3 +309,26 @@ describe('generated provenance', () => {
     expect(termDescription(c, X('Volunteer'))).not.toBe(termDescription(a, X('Volunteer')));
   });
 });
+
+describe('recorded provenance cannot be reached indirectly', () => {
+  // Eighth review: the guard only looked at an op's own `iri`, so a rename whose destination was
+  // built from a temporarily changed namespace turned every dcterms:source into a forged
+  // dcterms:provenance, and the `classes` of a disjointness were never checked.
+  const DCT = 'http://purl.org/dc/terms/';
+  const intoDcterms = { op: 'setMetadata', set: { preferredNamespace: DCT } } satisfies ChangeOp;
+  const property = { op: 'addDatatypeProperty', localName: 'sourceNote', label: 'source note', definition: 'Where a statement came from.', range: [NS.xsd + 'string'] } satisfies ChangeOp;
+
+  it('refuses a rename into a recorded property', () => {
+    expect(() => applyChangeOps(baseOntology(), [property, intoDcterms, { op: 'renameTerm', iri: X('sourceNote'), newLocalName: 'provenance' }])).toThrow(/recorded by Concord/);
+  });
+
+  it('refuses a new term built at a recorded property', () => {
+    expect(() =>
+      applyChangeOps(baseOntology(), [intoDcterms, { op: 'addDatatypeProperty', localName: 'modified', label: 'modified', definition: 'When it changed.', range: [NS.xsd + 'date'] }]),
+    ).toThrow(/recorded by Concord/);
+  });
+
+  it.each(['addDisjointness', 'removeDisjointness'] as const)('refuses %s that names a recorded property', (op) => {
+    expect(() => applyChangeOps(baseOntology(), [{ op, classes: [X('Person'), DCT + 'created'] }])).toThrow(/recorded by Concord/);
+  });
+});
