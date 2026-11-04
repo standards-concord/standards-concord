@@ -1,0 +1,24 @@
+:root { --ink: #1f2937; --muted: #6b7280; --brand: #0f766e; --brand-soft: #ccfbf1; --line: #e5e7eb; --bg: #f8faf9; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+header { background: var(--brand); color: white; padding: 22px 48px 26px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 24px; }
+.brand { font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
+.logo { margin-right: 6px; }
+.tag { margin: 0; opacity: .85; grid-column: 1; }
+.impact { grid-column: 2; grid-row: 1 / span 2; background: rgba(255,255,255,.14); border-radius: 12px; padding: 10px 16px; text-align: right; }
+.impact strong { display: block; font-size: 26px; }
+main { padding: 26px 48px; max-width: 1180px; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+.cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+.card { background: white; border: 1px solid var(--line); border-radius: 14px; padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 8px; }
+.card h2 { font-size: 18px; margin: 0; }
+.card p { margin: 0; color: var(--muted); line-height: 1.45; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.pill { font-size: 12.5px; background: #f3f4f6; border-radius: 999px; padding: 3px 10px; color: #374151; }
+.pill.hours { background: var(--brand-soft); color: #115e59; font-weight: 600; }
+.actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+button { font: inherit; font-size: 14px; border-radius: 9px; border: 1px solid var(--brand); background: var(--brand); color: white; padding: 7px 14px; cursor: pointer; }
+button.secondary { background: white; color: var(--brand); }
+.log { display: flex; gap: 8px; align-items: center; }
+.log input { font: inherit; width: 84px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
+footer { padding: 18px 48px 36px; color: var(--muted); font-size: 13px; }

@@ -90,5 +90,6 @@ The browser tests start their own API server (on port 8797, with a throwaway dat
 ## Docs
 
 - [Alpha walkthrough](docs/alpha-walkthrough.md)
+- [Narrated walkthrough video](walkthrough/README.md): `pnpm walkthrough` records it from an editable script
 - [Questions for ODI colleagues](docs/odi-questions.md)
 - Research: [ontology practice, requirements, versioning and governance](docs/research/ontology-practice.md), [technical options](docs/research/tech.md), [ODI playbooks](docs/research/playbooks.md)
