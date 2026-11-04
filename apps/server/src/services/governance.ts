@@ -33,7 +33,7 @@ const vote = (threshold: number, quorum: number, durationDays: number, voterRole
   durationDays,
 });
 
-const automation = { autoTriage: true, autoDraftRelease: true, reminders: true };
+const automation = { autoTriage: true, autoDraftRelease: true, reminders: true, appAutopilot: true };
 
 export const GOVERNANCE_TEMPLATES: Record<GovernanceTemplateId, GovernancePolicy> = {
   'steward-led': {

@@ -349,7 +349,7 @@ export function GovernanceTab() {
       <CollapsibleCard
         title="Ownership, ODI and automation"
         subtitle="Who owns the ontology, what the ODI can do, and which steps run automatically."
-        summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${[policy.automation.autoTriage, policy.automation.autoDraftRelease, policy.automation.reminders, policy.requireValidation].filter(Boolean).length} of 4 automations on`}
+        summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${[policy.automation.autoTriage, policy.automation.autoDraftRelease, policy.automation.reminders, policy.automation.appAutopilot !== false, policy.requireValidation].filter(Boolean).length} of 5 automations on`}
       >
         <div className="grid md:grid-cols-2 md:divide-x divide-line">
           <div>
@@ -386,6 +386,12 @@ export function GovernanceTab() {
               <Toggle checked={policy.automation.autoTriage} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoTriage: v } })} label="AI triage: classify and validate every request on arrival" />
               <Toggle checked={policy.automation.autoDraftRelease} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, autoDraftRelease: v } })} label="Draft a release automatically when approved changes accumulate" />
               <Toggle checked={policy.automation.reminders} disabled={!canEdit} onChange={(v) => edit({ automation: { ...policy.automation, reminders: v } })} label="Nudge reviewers and voters when actions are pending" />
+              <Toggle
+                checked={policy.automation.appAutopilot !== false}
+                disabled={!canEdit}
+                onChange={(v) => edit({ automation: { ...policy.automation, appAutopilot: v } })}
+                label="Autopilot: members can have Concord approve or vote yes for them when their apps pass a change"
+              />
               <Toggle checked={policy.requireValidation} disabled={!canEdit} onChange={(v) => edit({ requireValidation: v })} label="Changes that fail validation can never be approved" />
             </div>
           </div>

@@ -11,6 +11,7 @@ import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
 import { ValidationDetails } from '../../components/Validation';
+import { AppChecksCard, AutopilotBadge } from '../../components/AppChecks';
 import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
@@ -310,6 +311,8 @@ export function ChangeRequestPage() {
             </div>
           </Card>
 
+          <AppChecksCard cr={cr} ontologyId={id} />
+
           <Card>
             <CardHeader icon={History} title="Reviews and timeline" />
             <ol className="relative space-y-4 p-5">
@@ -332,6 +335,7 @@ export function ChangeRequestPage() {
                           <div className="flex flex-wrap items-center gap-1.5">
                             <strong className="font-medium">{nameOf(item.r.userId)}</strong>
                             <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
+                            <AutopilotBadge mark={item.r.autopilot} />
                             <RoleChips roles={item.r.roles} />
                             <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                           </div>
@@ -342,6 +346,7 @@ export function ChangeRequestPage() {
                         <div className="flex flex-wrap items-center gap-1.5">
                           <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
                           <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
+                          <AutopilotBadge mark={item.v.autopilot} />
                           <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                           {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
                         </div>

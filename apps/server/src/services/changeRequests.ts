@@ -18,6 +18,7 @@ import type {
   ChangeRequestOrigin,
   ChangeRequestStatus,
   OntologyProject,
+  AutopilotMark,
   Review,
   TimelineEvent,
   User,
@@ -30,6 +31,7 @@ import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
+import { checksFor, onStatusChanged, revisionOf } from './appChecks.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -46,6 +48,7 @@ const save = (cr: ChangeRequest) => {
   cr.updatedAt = clock.iso();
   return put('changeRequests', cr, cr.ontologyId);
 };
+export const saveCR = save;
 
 function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
   if (cr.status === status) return;
@@ -309,7 +312,15 @@ export function governanceFor(cr: ChangeRequest) {
 }
 
 export function detail(cr: ChangeRequest): ChangeRequestDetail {
-  return { ...cr, reviews: reviewsFor(cr.id), votes: votesFor(cr.id), governance: governanceFor(cr), author: publicUser(getUser(cr.authorId)) };
+  return {
+    ...cr,
+    reviews: reviewsFor(cr.id),
+    votes: votesFor(cr.id),
+    governance: governanceFor(cr),
+    author: publicUser(getUser(cr.authorId)),
+    appChecks: checksFor(cr),
+    revision: revisionOf(cr),
+  };
 }
 
 export async function submit(cr: ChangeRequest, actor: User) {
@@ -318,7 +329,11 @@ export async function submit(cr: ChangeRequest, actor: User) {
   if (!['draft', 'needs-work'].includes(cr.status)) throw new HttpError(409, `Cannot submit a request that is ${cr.status}`);
   setStatus(cr, 'review', 'submitted for review', actor.id);
   save(cr);
-  return advance(cr);
+  const after = await advance(cr);
+  if (after.status !== 'review') return after;
+  // Connected apps may already have results for this version of the change.
+  await onStatusChanged(after);
+  return getCR(cr.id);
 }
 
 export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?: string; description?: string; ops?: ChangeOp[] }) {
@@ -337,35 +352,36 @@ export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?:
   return advance(cr);
 }
 
-export async function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string) {
+export async function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string, autopilot?: AutopilotMark) {
   if (!OPEN.includes(cr.status) && decision !== 'comment') throw new HttpError(409, `This request is ${cr.status}`);
   const roles = rolesFor(cr.ontologyId, actor.id);
   if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
-  const review: Review = { id: newId('rev'), changeRequestId: cr.id, userId: actor.id, roles, decision, comment, at: clock.iso() };
+  const review: Review = { id: newId('rev'), changeRequestId: cr.id, userId: actor.id, roles, decision, comment, at: clock.iso(), ...(autopilot && { autopilot }) };
   put('reviews', review, cr.id);
   const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
   cr.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
   save(cr);
-  logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+  logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb}${autopilot ? ' (autopilot)' : ''} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   return advance(cr);
 }
 
-export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string) {
+export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, autopilot?: AutopilotMark) {
   if (cr.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
   const g = governanceFor(cr);
   const roles = rolesFor(cr.ontologyId, actor.id);
   if (!g.rule.vote || !roles.some((r) => g.rule.vote!.voterRoles.includes(r)))
     throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
-  const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
+  const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso(), ...(autopilot && { autopilot }) };
   put('votes', vote, cr.id);
   cr.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
   save(cr);
-  logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+  logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice}${autopilot ? ' (autopilot)' : ''} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   return advance(cr);
 }
 
 /** Re-evaluate governance and apply any transition it allows. Safe to call any time. */
 export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
+  const startStatus = cr.status;
   for (let i = 0; i < 4; i++) {
     if (!OPEN.includes(cr.status)) break;
     if (cr.status === 'triage') {
@@ -392,6 +408,11 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
     logActivity({ ontologyId: cr.ontologyId, type: `cr.${g.outcome}`, message: `#${cr.number} ${cr.title} → ${g.outcome}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
   save(cr);
+  if (cr.status !== startStatus && (cr.status === 'review' || cr.status === 'voting')) {
+    // Autopilot may approve or vote now, which can move the request on; pick up where it got to.
+    await onStatusChanged(cr);
+    cr = getCR(cr.id);
+  }
   if (cr.status === 'approved') {
     const g = governanceFor(cr);
     if (g.rule.autoMerge) return merge(cr, undefined);

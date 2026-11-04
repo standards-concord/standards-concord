@@ -6,6 +6,7 @@ A prototype platform for designing data standards together, built for the Open D
 - **Turn requirements into changes.** Use cases are synthesised into a change request with structured edits and SPARQL tests for each competency question. The model never writes RDF directly: it proposes terms, and the server compiles them into validated edit operations.
 - **Govern without meetings.** Every change is classified as patch, minor or major by explicit rules (based on OWL versioning practice and gist's semver approach), validated (strict lint, HermiT reasoner, FAIR checks, competency questions) and then reviewed under the ontology's governance policy. Policies come from a drop-down of five templates (steward-led, lazy consensus, W3C working group, membership vote, ODI-stewarded) and can be tuned: sign-off counts and roles, review periods, votes with quorum and threshold, vetoes, ODI privilege, ownership and transfer, and what is automated.
 - **Release properly.** Releases take the highest level of their changes, bump the semantic version, stamp `owl:versionIRI`, `owl:priorVersion` and `owl:backwardCompatibleWith` or `owl:incompatibleWith`, and include every format plus a SPARQL migration script for major versions. Each ontology is a git repository (tag per release) that is pushed to GitHub on release when configured.
+- **Test real apps against proposed changes.** People building on an ontology connect their app; a [GitHub Action](actions/app-check) tests it against the ontology each open change request would produce and reports back, so every change shows what it would break. With autopilot on, Concord approves or votes yes for the app's owner whenever their apps pass, so changes don't wait on them.
 - **Query it in the browser.** The Query tab loads the ontology into [sparq](https://github.com/sparq-org/sparq), a SPARQL engine compiled to WebAssembly, to run SPARQL and check instance data against the ontology's SHACL shapes without a round trip to the server.
 - **View it your way.** Turtle, LinkML (used inside the ODI), JSON-LD, RDF/XML, N-Triples, Manchester syntax and SHACL shapes.
 - **Identity and private data.** Sign in with Google or GitHub. A WebID and a Solid pod are created automatically; private material such as interview transcripts is stored in the pod, and only the structured, public parts are shared.
@@ -54,6 +55,10 @@ bearer_token_env_var = "CONCORD_TOKEN"
 ```
 
 Tools: `list_ontologies`, `get_ontology` (any format, including LinkML), `search_terms`, `get_term`, `sparql_query`, `validate_data`, `report_gap`, `propose_change`, `get_change_request`.
+
+### Test an app against proposed changes
+
+Connect the app under *Changes → App checks* in any ontology, then add the [Concord app check action](actions/app-check) to its CI. Results appear on each change request, and autopilot can approve or vote for you when your apps pass.
 
 ### Optional services
 

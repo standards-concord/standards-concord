@@ -22,6 +22,8 @@ export type Collection =
   | 'releases'
   | 'agentTokens'
   | 'agentReports'
+  | 'apps'
+  | 'appChecks'
   | 'feedback'
   | 'activity'
   | 'kv';

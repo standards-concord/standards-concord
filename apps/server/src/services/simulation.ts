@@ -11,6 +11,7 @@ import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
+import { baselineRevision, createApp as createConnectedApp, reportAs, revisionOf } from './appChecks.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
@@ -200,8 +201,25 @@ async function seedHistory() {
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
   });
 
+  // Gareth's CRM export is a connected app with autopilot on. Its (simulated) CI passed the
+  // expenses change, so autopilot approved it for him, and failed the one-location change.
+  await seedConnectedApp(project, gareth, minor.id, major.id);
+
   updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
   return list<OntologyProject>('ontologies').find((o) => o.slug === DEMO_SLUG);
+}
+
+async function seedConnectedApp(project: OntologyProject, owner: User, passesId: string, failsId: string) {
+  const app = createConnectedApp(project, owner, { name: 'CharityBase volunteer export', repo: 'charitybase-demo/volunteer-export', autopilot: { enabled: true, levels: ['patch', 'minor'], onFailure: 'report' } });
+  const sim = 'Simulated CI run for the demo.';
+  await reportAs(app.id, { target: 'baseline', revision: baselineRevision(project), outcome: 'passed', summary: sim });
+  await reportAs(app.id, { target: passesId, revision: revisionOf(getCR(passesId)), outcome: 'passed', summary: `\`npm test\` passed. ${sim}` });
+  await reportAs(app.id, {
+    target: failsId,
+    revision: revisionOf(getCR(failsId)),
+    outcome: 'failed',
+    summary: `\`npm test\` exited with code 1: "exports a session at several sites" expected 3 locations, got 1. ${sim}`,
+  });
 }
 
 async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string) {

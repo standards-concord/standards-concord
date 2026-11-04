@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
+import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
@@ -413,6 +414,9 @@ export function apiRouter(): Router {
       await reportGap(project(req), requireUser(req), { agentName: optStr(b.agentName) ?? 'Web form', kind, summary: str(b.summary, 'summary', 300), details: optStr(b.details) ?? '', context: optStr(b.context) }),
     );
   });
+
+  /* ---------------------- connected apps and autopilot ---------------- */
+  mountAppChecks(r);
 
   /* ------------------------------ simulation ------------------------- */
   r.post('/simulation/step', async (req, res) => {

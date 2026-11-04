@@ -35,7 +35,7 @@ export const SECTIONS: { label: string; tabs: [path: string, label: string][]; a
   { label: 'Overview', tabs: [['', 'Overview']] },
   { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query']] },
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agents']], also: ['interview'] },
-  { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
+  { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases'], ['apps', 'App checks']] },
   { label: 'Governance', tabs: [['governance', 'Governance']] },
 ];
 

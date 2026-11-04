@@ -27,6 +27,7 @@ import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
 import { GovernanceTab } from './pages/ontology/Governance';
 import { AgentsTab } from './pages/ontology/Agents';
+import { AppsTab } from './pages/ontology/Apps';
 
 const AdminFeedbackPage = lazy(() => import('./pages/AdminFeedback').then((m) => ({ default: m.AdminFeedbackPage })));
 
@@ -96,6 +97,7 @@ function Routed() {
             <Route path="releases/:releaseId" element={<ReleaseDetailPage />} />
             <Route path="governance" element={<GovernanceTab />} />
             <Route path="agents" element={<AgentsTab />} />
+            <Route path="apps" element={<AppsTab />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>

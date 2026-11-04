@@ -7,6 +7,8 @@ import type {
   ActivityItem,
   AgentReport,
   AgentToken,
+  AutopilotSettings,
+  ConnectedApp,
   ChangeOp,
   ChangeRequest,
   ChangeRequestDetail,
@@ -229,6 +231,13 @@ export const api = {
   deleteAgentToken: (id: string) => del<unknown>(`/api/agent-tokens/${e(id)}`),
   agentReports: (id: string) => get<AgentReport[]>(`/api/ontologies/${e(id)}/agent-reports`),
   createAgentReport: (id: string, body: Partial<AgentReport>) => post<AgentReport>(`/api/ontologies/${e(id)}/agent-reports`, body as Json),
+
+  // Connected apps (CI checks against proposed changes, autopilot)
+  apps: (id: string) => get<ConnectedApp[]>(`/api/ontologies/${e(id)}/apps`),
+  createApp: (id: string, body: { name: string; repo?: string; autopilot?: Partial<AutopilotSettings> }) => post<ConnectedApp>(`/api/ontologies/${e(id)}/apps`, body),
+  updateApp: (appId: string, body: { name?: string; repo?: string; autopilot?: Partial<AutopilotSettings> }) => patch<ConnectedApp>(`/api/apps/${e(appId)}`, body),
+  rotateAppToken: (appId: string) => post<ConnectedApp>(`/api/apps/${e(appId)}/token`),
+  deleteApp: (appId: string) => del<unknown>(`/api/apps/${e(appId)}`),
 
   // Simulation
   simulationStep: (ontologyId: string) => post<{ events: ActivityItem[] }>('/api/simulation/step', { ontologyId }),
