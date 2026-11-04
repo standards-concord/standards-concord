@@ -125,6 +125,12 @@ export interface CodeEditorProps {
   testId?: string;
   /** Problems to underline, with hover popups and gutter markers. */
   diagnostics?: EditorDiagnostic[];
+  /**
+   * The text the diagnostics' positions refer to. They're applied only while
+   * the editor holds exactly that text; until then the underlines already
+   * shown move along with edits.
+   */
+  diagnosticsFor?: string;
   ref?: Ref<CodeEditorHandle>;
 }
 
@@ -166,6 +172,7 @@ export function CodeEditor({
   className,
   testId,
   diagnostics,
+  diagnosticsFor,
   ref,
 }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null);
@@ -174,8 +181,14 @@ export function CodeEditor({
   // Keep callbacks fresh without rebuilding the editor.
   const latest = useRef({ onChange, onRun, completions });
   latest.current = { onChange, onRun, completions };
-  const latestDiagnostics = useRef(diagnostics);
-  latestDiagnostics.current = diagnostics;
+  const latestDiagnostics = useRef({ diagnostics, diagnosticsFor });
+  latestDiagnostics.current = { diagnostics, diagnosticsFor };
+  const applyDiagnostics = (v: EditorView) => {
+    const { diagnostics: ds, diagnosticsFor: forText } = latestDiagnostics.current;
+    if (!ds) return;
+    if (forText !== undefined && (v.state.doc.length !== forText.length || v.state.doc.toString() !== forText)) return;
+    v.dispatch(setDiagnostics(v.state, toCm(v.state.doc.length, ds)));
+  };
 
   useImperativeHandle(
     ref,
@@ -242,7 +255,7 @@ export function CodeEditor({
     }
     const v = new EditorView({ state: EditorState.create({ doc: value, extensions }), parent: host.current });
     view.current = v;
-    if (latestDiagnostics.current) v.dispatch(setDiagnostics(v.state, toCm(v.state.doc.length, latestDiagnostics.current)));
+    applyDiagnostics(v);
     return () => {
       v.destroy();
       view.current = null;
@@ -262,9 +275,9 @@ export function CodeEditor({
 
   // Diagnostics are computed for the current text, so they replace whatever was shown.
   useEffect(() => {
-    const v = view.current;
-    if (v && diagnostics) v.dispatch(setDiagnostics(v.state, toCm(v.state.doc.length, diagnostics)));
-  }, [diagnostics]);
+    if (view.current) applyDiagnostics(view.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyDiagnostics reads the latest props
+  }, [diagnostics, diagnosticsFor, value]);
 
   return (
     <div

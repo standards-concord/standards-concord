@@ -129,4 +129,6 @@ Each fix has a test that fails without it.
 | Resubmit did nothing after "request changes" | Next PR: earlier requests for changes become stale on resubmit; reviewers can approve from Needs work | Next PR (change-requests) |
 | Buttons nested in links (Hub, Shell, Feedback, Walkthrough, OAuth consent, Overview) | Routed to the IA thread, after #37 | |
 | Check data problems showed full `<https://…>` IRIs: sparq wraps IRIs in angle brackets, which the prefix lookup never matched, and only the ontology's prefixes were tried | Problems are written with the data's own prefixes first | check-data: "problems use the prefixes the data declares" |
+| Check data: an out-of-range `\U` escape threw while rendering and crashed the page | Invalid escapes are positioned syntax errors | check-data: "an invalid character escape is a syntax error, not a crash" |
+| Check data: after an edit, an old report's underline moved onto the record's name | Out-of-date reports underline nothing and can't be jumped to until checked again | check-data: "problems read as sentences…" |
 | Browse tree leaves expose disabled, unnamed Collapse/Expand buttons | Routed to PR #9, which replaces the tree | |

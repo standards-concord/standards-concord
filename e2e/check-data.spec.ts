@@ -78,10 +78,13 @@ ex:helper a vol:Role .
     await list.getByRole('button', { name: /ex:foodbank requires/ }).click();
     await expect.poll(() => selection(page)).toBe('ex:foodbank');
 
-    // The underline follows the value, and goes once it's fixed (even before checking again).
-    await setData(page, (await editor.innerText()).replace('"sixteen"', '"16"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>'));
+    // Used to go wrong: after an edit, the old report's underline moved onto the record's name.
+    // Now an out-of-date report underlines nothing and its items can't be jumped to until you check again.
+    await setData(page, (await editor.innerText()).replace('"sixteen"', '16'));
     await expect(page.getByTestId('report-stale')).toBeVisible();
-    await expect(squiggle).toHaveCount(0);
+    await expect(editor.locator('.cm-lintRange-error')).toHaveCount(0);
+    await expect(list.getByRole('button')).toHaveCount(0);
+    await setData(page, (await editor.innerText()).replace(/vol:minimumAge 16/, 'vol:minimumAge "16"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>'));
     await check(page);
     await expect(list.getByRole('button', { name: /sixteen/ })).toHaveCount(0);
   });
@@ -115,6 +118,18 @@ ex:helper a vol:Role .
     await expect(page.getByTestId('data-editor').locator('.cm-lintRange-error', { hasText: 'ex:b' })).toHaveCount(1);
     // Format won't rearrange a document it can't read.
     await expect(page.getByRole('button', { name: 'Format', exact: true })).toBeDisabled();
+    // Screen readers hear a short summary once typing settles.
+    await expect(page.getByTestId('lint-announcement')).toHaveText('1 syntax error in the Turtle, listed below the editor.');
+  });
+
+  // Used to go wrong: an out-of-range escape threw while rendering and took the page down.
+  test('an invalid character escape is a syntax error, not a crash', async ({ page }) => {
+    await signIn(page, { name: 'E2E check escape', role: 'editor' });
+    await openCheck(page, id);
+    await setData(page, `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/data/> .\n\nex:a a vol:Role ; vol:title "\\UFFFFFFFF" .\n`);
+    const lint = page.getByRole('list', { name: 'Problems in the Turtle' });
+    await expect(lint.getByRole('button', { name: /Syntax error/ })).toContainText('Line 4');
+    await expect(page.getByTestId('data-editor')).toBeVisible();
   });
 
   test('Format tidies the layout and keeps prefixes and comments', async ({ page }) => {

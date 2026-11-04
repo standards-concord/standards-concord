@@ -6,7 +6,10 @@ import { Badge, Button, Card, CardHeader, InlineError, cx } from '../ui';
 import { CodeEditor, type CodeEditorHandle, type EditorDiagnostic } from '../code/CodeEditor';
 import { highlightSegments } from '../code/highlight';
 import { formatTurtle, parseTurtle } from '../../lib/turtleDoc';
-import { describeFindings, displayPrefixes, parseSyntaxError, unknownTerms, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
+import { ShapesIndex, describeFindings, displayPrefixes, parseSyntaxError, unknownTerms, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
+
+/** How long after typing stops the Turtle is read again for underlines. */
+const ANALYSE_DELAY = 250;
 
 const sparqModule = () => import('@sparq-org/sparq');
 
@@ -46,7 +49,7 @@ const SEVERITY: Record<Severity, { icon: typeof CircleX; className: string; labe
 };
 
 /** One problem. Clicking it (or Enter on it) selects the place in the data it's about. */
-function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at'>; onReveal: (from: number, to: number) => void }) {
+function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at'>; onReveal?: (from: number, to: number) => void }) {
   const sev = SEVERITY[finding.severity];
   // The record and property, unless the sentence already names them.
   const named = new Set(finding.parts.flatMap((p) => (typeof p !== 'string' && 'code' in p ? [p.code] : [])));
@@ -79,7 +82,7 @@ function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' 
     </>
   );
   const box = 'block w-full rounded-md border border-line px-3 py-2 text-left';
-  if (!finding.at) return <div className={box}>{body}</div>;
+  if (!finding.at || !onReveal) return <div className={box}>{body}</div>;
   const { from, to } = finding.at;
   return (
     <button type="button" className={cx(box, 'hover:border-accent hover:bg-accent-soft/40 focus-visible:border-accent')} onClick={() => onReveal(from, to)} title="Show this in the data">
@@ -128,46 +131,65 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const { report, checkedData, error: checkError } = result;
   const [showAll, setShowAll] = useState(false);
   const [formatNote, setFormatNote] = useState<string>();
+  const [formatting, setFormatting] = useState(false);
   const reportStale = !!report && checkedData !== data;
 
+  // Everything below reads a settled copy of the text, a moment after typing stops, so big files stay quick to type in.
+  const [settled, setSettled] = useState(data);
+  useEffect(() => {
+    if (settled === data) return;
+    const t = setTimeout(() => setSettled(data), ANALYSE_DELAY);
+    return () => clearTimeout(t);
+  }, [data, settled]);
+  const current = settled === data;
+
   // The data is read after the ontology, so the ontology's prefixes are in scope.
-  const doc = useMemo(() => parseTurtle(data, { prefixes: ontologyPrefixes }), [data, ontologyPrefixes]);
+  const doc = useMemo(() => parseTurtle(settled, { prefixes: ontologyPrefixes }), [settled, ontologyPrefixes]);
   const prefixes = useMemo(() => displayPrefixes(doc, ontologyPrefixes), [doc, ontologyPrefixes]);
 
-  // Syntax: sparq is the judge. Debounced, and read with the ontology's prefixes declared first.
+  // Syntax: sparq is the judge, reading the ontology's prefixes first.
+  const header = useMemo(
+    () =>
+      Object.entries(ontologyPrefixes)
+        .map(([p, ns]) => `@prefix ${p}: <${ns}> .\n`)
+        .join(''),
+    [ontologyPrefixes],
+  );
   const [syntax, setSyntax] = useState<{ data: string; error?: { message: string; from: number } }>();
   useEffect(() => {
     let cancelled = false;
-    const header = Object.entries(ontologyPrefixes)
-      .map(([p, ns]) => `@prefix ${p}: <${ns}> .\n`)
-      .join('');
     const headerBytes = new TextEncoder().encode(header).length;
-    const t = setTimeout(() => {
-      void sparqModule().then(async ({ SparqStore }) => {
-        let error: { message: string; from: number } | undefined;
-        try {
-          (await SparqStore.fromString(header + data, 'turtle')).free();
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          error = parseSyntaxError(message, data, headerBytes) ?? (doc.error ? { message: doc.error.message, from: doc.error.from } : { message, from: 0 });
-        }
-        if (!cancelled) setSyntax({ data, error });
-      });
-    }, 300);
+    void sparqModule().then(async ({ SparqStore }) => {
+      let error: { message: string; from: number } | undefined;
+      try {
+        (await SparqStore.fromString(header + settled, 'turtle')).free();
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        error = parseSyntaxError(message, settled, headerBytes) ?? (doc.error ? { message: doc.error.message, from: doc.error.from } : { message, from: 0 });
+      }
+      if (!cancelled) setSyntax({ data: settled, error });
+    });
     return () => {
       cancelled = true;
-      clearTimeout(t);
     };
-  }, [data, ontologyPrefixes, doc]);
-  const syntaxError = syntax?.data === data ? syntax.error : undefined;
+  }, [settled, header, doc]);
+  const syntaxChecked = syntax?.data === settled;
+  const syntaxError = syntaxChecked ? syntax.error : undefined;
 
-  const findings = useMemo(() => (report ? describeFindings(report.results, { doc, text: data, prefixes }) : []), [report, doc, data, prefixes]);
+  // Findings belong to the data that was checked. Once it changes they're shown faded and no longer underlined or jumped to.
+  const shapesIndex = useMemo(() => new ShapesIndex(shapes), [shapes]);
+  const findings = useMemo(() => {
+    if (!report || checkedData === undefined) return [];
+    const checkedDoc = checkedData === settled ? doc : parseTurtle(checkedData, { prefixes: ontologyPrefixes });
+    return describeFindings(report.results, { doc: checkedDoc, text: checkedData, prefixes: displayPrefixes(checkedDoc, ontologyPrefixes), shapes: shapesIndex });
+  }, [report, checkedData, settled, doc, ontologyPrefixes, shapesIndex]);
+
   // Every IRI the ontology mentions counts as defined (terms, datatypes, the ontology itself).
   // If the ontology can't be read here, don't guess: no typo warnings.
   const knownTerms = useMemo(() => {
     if (!ontologyTurtle) return undefined;
     const o = parseTurtle(ontologyTurtle);
-    return o.error ? undefined : o.iris.map((p) => p.term.value);
+    return o.error ? undefined : new Set(o.iris.map((p) => p.term.value));
   }, [ontologyTurtle]);
   const termWarnings = useMemo(() => (knownTerms ? unknownTerms(doc, namespace, knownTerms, prefixes) : []), [doc, namespace, knownTerms, prefixes]);
 
@@ -175,24 +197,42 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const live = useMemo(() => {
     const out: (Pick<Finding, 'severity' | 'parts' | 'at'> & { text: string; to: number })[] = [];
     if (syntaxError) {
-      const to = Math.min(data.length, syntaxError.from + Math.max(1, /^\S*/.exec(data.slice(syntaxError.from))![0].length));
-      out.push({ severity: 'error', parts: [`Syntax error: ${syntaxError.message}`], text: `Syntax error: ${syntaxError.message}`, at: { from: syntaxError.from, to, line: lineAt(data, syntaxError.from) }, to });
+      const to = Math.min(settled.length, syntaxError.from + Math.max(1, /^\S*/.exec(settled.slice(syntaxError.from, syntaxError.from + 200))![0].length));
+      out.push({ severity: 'error', parts: [`Syntax error: ${syntaxError.message}`], text: `Syntax error: ${syntaxError.message}`, at: { from: syntaxError.from, to, line: lineAt(settled, syntaxError.from) }, to });
     }
-    for (const w of termWarnings) out.push({ severity: 'warning', parts: [w.message], text: w.message, at: { from: w.from, to: w.to, line: lineAt(data, w.from) }, to: w.to });
+    for (const w of termWarnings) out.push({ severity: 'warning', parts: [w.message], text: w.message, at: { from: w.from, to: w.to, line: lineAt(settled, w.from) }, to: w.to });
     return out;
-  }, [syntaxError, termWarnings, data]);
+  }, [syntaxError, termWarnings, settled]);
 
   const diagnostics = useMemo<EditorDiagnostic[]>(() => {
     const out: EditorDiagnostic[] = [];
     for (const l of live) out.push({ from: l.at!.from, to: l.to, severity: l.severity, message: l.text, source: l.severity === 'error' ? 'Turtle syntax' : 'Ontology terms' });
-    for (const f of findings) for (const r of f.ranges) out.push({ from: r.from, to: r.to, severity: f.severity, message: f.text, source: 'Check against the ontology' });
+    if (checkedData === settled) for (const f of findings) for (const r of f.ranges) out.push({ from: r.from, to: r.to, severity: f.severity, message: f.text, source: 'Check against the ontology' });
     return out;
-  }, [live, findings]);
+  }, [live, findings, checkedData, settled]);
+
+  // For screen readers: a short, settled summary of what's underlined, announced when it changes.
+  const announcement = useMemo(() => {
+    if (!current || !syntaxChecked) return undefined;
+    if (!live.length) return 'No syntax or term problems in the Turtle.';
+    const errors = live.filter((l) => l.severity === 'error').length;
+    const warnings = live.length - errors;
+    const bits = [errors ? `${errors} syntax error${errors === 1 ? '' : 's'}` : '', warnings ? `${warnings} term warning${warnings === 1 ? '' : 's'}` : ''].filter(Boolean);
+    return `${bits.join(' and ')} in the Turtle, listed below the editor.`;
+  }, [current, syntaxChecked, live]);
+  const [announced, setAnnounced] = useState<string>();
+  useEffect(() => {
+    if (announcement === undefined) return;
+    const t = setTimeout(() => setAnnounced((prev) => (prev === undefined && announcement.startsWith('No ') ? prev : announcement)), 1000);
+    return () => clearTimeout(t);
+  }, [announcement]);
 
   const check = () => {
     const s = store();
     if (!s || !shapes) return;
     setShowAll(false);
+    // The analysis catches up at once, so the new underlines line up with what was checked.
+    setSettled(data);
     try {
       // The ontology goes in the data graph too, so sh:class sees subclass relationships.
       const r = s.validate(`${ontologyTurtle ?? ''}\n${data}`, shapes, 'turtle');
@@ -202,16 +242,46 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
     }
   };
 
-  const formatted = useMemo(() => (syntaxError ? undefined : formatTurtle(data, ontologyPrefixes)), [data, ontologyPrefixes, syntaxError]);
-  const format = () => {
-    if (formatted === undefined) return;
-    if (formatted === data) {
-      setFormatNote('Already tidy.');
-      return;
+  // Format only once sparq has read this exact text without a syntax error.
+  const canFormat = current && syntaxChecked && !syntaxError;
+  const format = async () => {
+    if (!canFormat || formatting) return;
+    const original = data;
+    setFormatting(true);
+    try {
+      const out = formatTurtle(original, ontologyPrefixes);
+      if (out === undefined) {
+        setFormatNote('Couldn’t tidy this safely, so it’s unchanged.');
+        return;
+      }
+      if (out === original) {
+        setFormatNote('Already tidy.');
+        return;
+      }
+      // Belt and braces: sparq must read the result as the same number of triples.
+      const { SparqStore } = await sparqModule();
+      const count = async (t: string) => {
+        const st = await SparqStore.fromString(header + t, 'turtle');
+        try {
+          return st.countQuads(null, null, null);
+        } finally {
+          st.free();
+        }
+      };
+      const [a, b] = await Promise.all([count(original), count(out)]).catch(() => [NaN, NaN]);
+      if (!(a === b)) {
+        setFormatNote('Couldn’t tidy this safely, so it’s unchanged.');
+        return;
+      }
+      if (latestData.current !== original) return; // edited meanwhile: leave the newer text alone
+      onDataChange(out);
+      setFormatNote('Tidied the layout. Ctrl/⌘-Z in the editor undoes it.');
+    } finally {
+      setFormatting(false);
     }
-    onDataChange(formatted);
-    setFormatNote('Tidied the layout. Ctrl/⌘-Z in the editor undoes it.');
   };
+  const latestData = useRef(data);
+  latestData.current = data;
   useEffect(() => {
     if (!formatNote) return;
     const t = setTimeout(() => setFormatNote(undefined), 4000);
@@ -230,7 +300,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
         icon={ShieldCheck}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <Button icon={WandSparkles} onClick={format} disabled={formatted === undefined} title={formatted === undefined ? 'Fix the syntax error first' : 'Lay the Turtle out tidily, keeping your prefixes and comments'}>
+            <Button icon={WandSparkles} onClick={() => void format()} loading={formatting} disabled={!canFormat} title={canFormat ? 'Lay the Turtle out tidily, keeping your prefixes and comments' : syntaxError ? 'Fix the syntax error first' : 'Reading the Turtle…'}>
               Format
             </Button>
             <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes}>
@@ -251,7 +321,11 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
           maxHeight={420}
           testId="data-editor"
           diagnostics={diagnostics}
+          diagnosticsFor={settled}
         />
+        <p role="status" aria-live="polite" className="sr-only" data-testid="lint-announcement">
+          {announced}
+        </p>
         <p className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
           <span>Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</span>
           {formatNote && (
@@ -298,7 +372,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
               <ol className="space-y-1" aria-label="Problems found">
                 {shown.map((f, i) => (
                   <li key={i}>
-                    <ProblemItem finding={f} onReveal={reveal} />
+                    <ProblemItem finding={f} onReveal={reportStale ? undefined : reveal} />
                   </li>
                 ))}
               </ol>

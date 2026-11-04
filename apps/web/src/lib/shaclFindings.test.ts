@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { formatTurtle, parseTurtle, termKey } from './turtleDoc';
-import { describeFindings, displayPrefixes, parseSyntaxError, shortIri, unknownTerms } from './shaclFindings';
+import { formatTurtle, parseTurtle, resolveIri, termKey, tokenize } from './turtleDoc';
+import { ShapesIndex, describeFindings, displayPrefixes, fitsDatatype, parseSyntaxError, shortIri, unknownTerms } from './shaclFindings';
 
 const VOL = 'https://w3id.org/odi/volunteering#';
 const DATA = `@prefix vol: <${VOL}> .
@@ -90,7 +90,7 @@ describe('describeFindings', () => {
 
   it('says what type a value is and what it must be, and suggests a fix', () => {
     const [, age] = describeFindings(REPORT, ctx(DATA));
-    expect(age.text).toBe('Value "sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger. Write it as "16"^^xsd:nonNegativeInteger.');
+    expect(age.text).toBe('Value "sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger. Write it as "16"^^xsd:nonNegativeInteger');
     expect(DATA.slice(age.at!.from, age.at!.to)).toBe('"sixteen"');
     expect(age.focus).toBe('ex:saturday-shift');
     expect(age.path).toBe('vol:minimumAge');
@@ -142,7 +142,7 @@ describe('unknownTerms', () => {
   it('flags ontology terms that don’t exist and suggests the closest', () => {
     const text = DATA.replace('vol:title', 'vol:titel');
     const doc = parseTurtle(text);
-    const [w] = unknownTerms(doc, VOL, [`${VOL}title`, `${VOL}minimumAge`, `${VOL}offeredBy`, `${VOL}VolunteeringOpportunity`, `${VOL}VolunteerInvolvingOrganisation`], displayPrefixes(doc));
+    const [w] = unknownTerms(doc, VOL, new Set([`${VOL}title`, `${VOL}minimumAge`, `${VOL}offeredBy`, `${VOL}VolunteeringOpportunity`, `${VOL}VolunteerInvolvingOrganisation`]), displayPrefixes(doc));
     expect(w.message).toBe('vol:titel isn’t defined in this ontology. Did you mean vol:title?');
     expect(text.slice(w.from, w.to)).toBe('vol:titel');
   });
@@ -186,5 +186,148 @@ ex:z ex:p [] .
 
   it('leaves a broken document alone', () => {
     expect(formatTurtle('ex:a ex:b')).toBeUndefined();
+  });
+});
+
+/*
+ * Regressions from the first review of the Check data rework (PR #50). Each
+ * test names what used to go wrong.
+ */
+const EX = 'http://e/';
+const SHAPES = `@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <${EX}> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:S a sh:NodeShape ; sh:targetClass ex:C ;
+  sh:property [ sh:path ex:p ; sh:minCount 2 ; sh:message "Please supply two contacts" ] ,
+    [ sh:path ex:d ; sh:datatype xsd:date ; sh:message "See <https://help.example/dates> for date formats" ] ,
+    [ sh:path ex:q ; sh:or ( [ sh:class ex:A ] [ sh:datatype xsd:integer ] ) ] .
+`;
+const sh = (c: string) => `http://www.w3.org/ns/shacl#${c}ConstraintComponent`;
+function exCtx(text: string, shapes = SHAPES) {
+  const doc = parseTurtle(text);
+  return { doc, text, prefixes: displayPrefixes(doc), shapes: new ShapesIndex(shapes) };
+}
+
+describe('review regressions', () => {
+  // Used to throw a RangeError while rendering, crashing the page.
+  it('an out-of-range \\U escape is a positioned syntax error, not a crash', () => {
+    for (const text of ['ex:a ex:b "\\UFFFFFFFF" .', '<\\UFFFFFFFF> <http://e/p> 1 .', 'ex:a ex:b "\\uD800" .']) {
+      const doc = parseTurtle(text, { prefixes: { ex: EX } });
+      expect(doc.error?.message).toMatch(/isn’t a valid character escape/);
+      expect(text.slice(doc.error!.from, doc.error!.to)).toContain('\\');
+    }
+  });
+
+  // The local reader accepted these, so Format could rewrite invalid input.
+  it('invalid escapes and a lone [] . are errors', () => {
+    expect(tokenize('"bad\\q"')[0].type).toBe('error');
+    expect(parseTurtle('[] .').error).toBeDefined();
+  });
+
+  // "ex:b." swallowed the full stop, so parsing stopped and later findings had no location.
+  it('a prefixed name followed straight by the full stop, and supplementary-plane names', () => {
+    const doc = parseTurtle('@prefix ex: <http://e/> .\nex:a ex:p ex:b.\nex:𐀀 ex:p ex:c.');
+    expect(doc.error).toBeUndefined();
+    expect(doc.triples.map((t) => t.o.term.value)).toEqual(['http://e/b', 'http://e/c']);
+    expect(doc.triples[1].s.term.value).toBe('http://e/𐀀');
+  });
+
+  // new URL() percent-encoded IRIs, so they never matched what sparq reports.
+  it('resolves relative IRIs the way sparq does, without percent-encoding', () => {
+    const doc = parseTurtle('@base <http://e/a/b> .\n<café> <../p> <#x> .');
+    expect(doc.triples[0].s.term.value).toBe('http://e/a/café');
+    expect(doc.triples[0].p.term.value).toBe('http://e/p');
+    expect(doc.triples[0].o.term.value).toBe('http://e/a/b#x');
+    expect(resolveIri('?q', 'http://e/a/b?z')).toBe('http://e/a/b?q');
+  });
+
+  // Format turned "PREFIX # note\nex: <…>" into invalid Turtle, and dropped comments inside [ ].
+  it('Format keeps comments in directives and blank nodes, and stays valid', () => {
+    const text = 'PREFIX # note\nex: <http://e/>\nex:a ex:p [ # inside\n] ; ex:q [ # first\n ex:r 1 # second\n ] .';
+    const out = formatTurtle(text)!;
+    expect(out).toBeDefined();
+    for (const c of ['# note', '# inside', '# first', '# second']) expect(out).toContain(c);
+    expect(parseTurtle(out).error).toBeUndefined();
+    expect(formatTurtle(out)).toBe(out);
+  });
+
+  // Typing in a big file did seconds of work on every keystroke.
+  it('reading, tidying and typo-checking a 5,000-record file is fast', () => {
+    let text = '@prefix ex: <http://e/> .\n';
+    for (let i = 0; i < 5000; i++) text += `ex:r${i} a ex:Thing ; ex:name "Record number ${i}" ; ex:size ${i} .\n`;
+    expect(text.length).toBeGreaterThan(140_000);
+    let t0 = performance.now();
+    const doc = parseTurtle(text);
+    expect(doc.triples).toHaveLength(15000);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    t0 = performance.now();
+    expect(formatTurtle(text)).toBeDefined();
+    expect(performance.now() - t0).toBeLessThan(2000);
+    const known = new Set(Array.from({ length: 300 }, (_, i) => `${EX}term${i}`));
+    t0 = performance.now();
+    expect(unknownTerms(doc, EX, known, displayPrefixes(doc)).length).toBe(15000);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
+  // A blank node's identity was guessed from its properties, pointing at the wrong record.
+  it('blank-node findings stay unlocated instead of guessing', () => {
+    const text = '@prefix ex: <http://e/> .\n[] a ex:C .\n[ ex:p "valid" ] .\n';
+    const [f] = describeFindings([{ focusNode: '_:__ttl_anon_3_1', path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Please supply two contacts' }], exCtx(text));
+    expect(f.at).toBeUndefined();
+    expect(f.ranges).toEqual([]);
+    expect(f.text).not.toMatch(/found/);
+    expect(f.text).toMatch(/^A blank node requires at least 2 ex:p/);
+  });
+
+  // Custom messages were mined for numbers and IRIs, inventing requirements.
+  it('takes limits and datatypes from the shapes, and shows custom messages as written', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:p "x" ; ex:d "2025-02-30" .\n';
+    const [count, date] = describeFindings(
+      [
+        { focusNode: `<${EX}a>`, path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Please supply two contacts' },
+        { focusNode: `<${EX}a>`, path: `<${EX}d>`, value: '"2025-02-30"', sourceConstraintComponent: sh('Datatype'), message: 'See <https://help.example/dates> for date formats' },
+      ],
+      exCtx(text),
+    );
+    expect(count.text).toBe('ex:a requires at least 2 ex:p, 1 found. “Please supply two contacts”');
+    expect(date.text).toMatch(/^Value "2025-02-30" is of type xsd:string but must be of type xsd:date\. “See <https:\/\/help\.example\/dates> for date formats”$/);
+    // 30 February isn't a date, so there's no "Write it as".
+    expect(date.text).not.toMatch(/Write it as/);
+  });
+
+  // Repeating a triple counted twice: "requires at least 2 ex:p, 2 found".
+  it('counts distinct values, as SHACL does', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a ex:p "x" .\nex:a ex:p "x" .\n';
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}p>`, sourceConstraintComponent: sh('MinCount'), message: 'Fewer than 2 values' }], exCtx(text, ''));
+    expect(f.text).toBe('ex:a requires at least 2 ex:p, 1 found');
+  });
+
+  // Suggested fixes could be invalid ("999"^^xsd:byte, "2025-99-99"^^xsd:date) or change text ("one"@en → "1").
+  it('only suggests fixes that are valid, and never turns words into numbers for text', () => {
+    expect(fitsDatatype('999', 'http://www.w3.org/2001/XMLSchema#byte')).toBe(false);
+    expect(fitsDatatype('127', 'http://www.w3.org/2001/XMLSchema#byte')).toBe(true);
+    expect(fitsDatatype('2025-99-99', 'http://www.w3.org/2001/XMLSchema#date')).toBe(false);
+    expect(fitsDatatype('2024-02-29', 'http://www.w3.org/2001/XMLSchema#date')).toBe(true);
+    const text = '@prefix ex: <http://e/> .\nex:a ex:t "one"@en .\n';
+    const [f] = describeFindings(
+      [{ focusNode: `<${EX}a>`, path: `<${EX}t>`, value: '"one"@en', sourceConstraintComponent: sh('Datatype'), message: 'Value does not have datatype <http://www.w3.org/2001/XMLSchema#string>' }],
+      exCtx(text, ''),
+    );
+    expect(f.text).toBe('Value "one"@en is of type rdf:langString but must be of type xsd:string. Write it as "one"');
+  });
+
+  // Instance names in the ontology's namespace got "did you mean" corrections.
+  it('only checks properties, types and datatypes for typos, never record names', () => {
+    const text = '@prefix ex: <http://e/> .\nex:role a ex:Role ; ex:titel "x" ; ex:link ex:other .\n';
+    const doc = parseTurtle(text);
+    const warnings = unknownTerms(doc, EX, new Set([`${EX}Role`, `${EX}title`, `${EX}link`]), displayPrefixes(doc));
+    expect(warnings.map((w) => text.slice(w.from, w.to))).toEqual(['ex:titel']);
+  });
+
+  // sh:or showed "Value does not conform to any member shape".
+  it('describes the alternatives of sh:or in plain words', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:q "x" .\n';
+    const [f] = describeFindings([{ focusNode: `<${EX}a>`, path: `<${EX}q>`, value: '"x"', sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' }], exCtx(text));
+    expect(f.text).toBe('Value "x" must be a ex:A or a xsd:integer value');
   });
 });
