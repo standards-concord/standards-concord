@@ -94,7 +94,7 @@ describe('buildSparql', () => {
     // Values a number field or true/false choice would show differently (or as empty) don't apply either.
     for (const v of ['+5', '5.', ' 5', '5 ', '1e309', '1e999', '9'.repeat(400)]) expect(activeFilter({ ...age, filter: { op: 'gt', value: v } }), v).toBeUndefined();
     expect(activeFilter({ ...active, filter: { op: 'equals', value: ' false ' } })).toBeUndefined();
-    expect(activeFilter({ ...age, filter: { op: 'gt', value: '-0.5' } })).toEqual({ op: 'gt', value: '-0.5' });
+    for (const v of ['-0.5', '1e3', '1E+3', '1e-3', '.5', '1.e2', '-2.E-1']) expect(activeFilter({ ...age, filter: { op: 'gt', value: v } }), v).toEqual({ op: 'gt', value: v });
     expect(isRequired(age)).toBe(false);
     const { query } = buildSparql(model({ steps: [age, active] }), { prefixes });
     expect(query).not.toContain('FILTER');
@@ -172,11 +172,11 @@ describe('generated queries run on sparq', () => {
   // Deeper and sibling cases from the second review, run on a small graph:
   // r1 has the full path, r2's organisation has no address, r3 has no organisation.
   const graph = `@prefix ex: <https://example.org/> .
-ex:r1 a ex:Record ; ex:title "One" ; ex:org ex:o1 ; ex:topic ex:t1 .
+ex:r1 a ex:Record ; ex:title "One" ; ex:org ex:o1 ; ex:topic ex:t1 ; ex:size 250 .
 ex:o1 ex:label "Green Trust" ; ex:address ex:a1 .
 ex:a1 ex:city "Leeds" .
 ex:t1 ex:label "Parks" .
-ex:r2 a ex:Record ; ex:title "Two" ; ex:org ex:o2 ; ex:topic ex:t2 .
+ex:r2 a ex:Record ; ex:title "Two" ; ex:org ex:o2 ; ex:topic ex:t2 ; ex:size 5 .
 ex:o2 ex:label "Blue Trust" .
 ex:t2 ex:label "Food" .
 ex:r3 a ex:Record ; ex:title "Three" .
@@ -190,6 +190,13 @@ ex:r3 a ex:Record ; ex:title "Three" .
     return { titles: rows.map((r) => r[built.variables[steps[0].id]]?.value).sort(), query: built.query };
   };
   const title = () => newStep(`${EX}title`);
+
+  it('every number form the field accepts runs as a filter on sparq', async () => {
+    for (const [v, expected] of [['1.e2', ['One']], ['.5e3', []], ['-1E1', ['One', 'Two']]] as const) {
+      const size = { ...newStep(`${EX}size`, 'number'), filter: { op: 'gt' as const, value: v }, optional: false };
+      expect((await titles([title(), size])).titles, v).toEqual(expected);
+    }
+  });
 
   it('a filter three relationships deep excludes non-matching and missing paths', async () => {
     const city = { ...newStep(`${EX}city`), filter: { op: 'equals' as const, value: 'Leeds' } };

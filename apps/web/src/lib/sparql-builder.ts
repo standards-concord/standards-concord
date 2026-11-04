@@ -141,8 +141,12 @@ export function usesBooleanChoice(type: ValueType, op: FilterOp): boolean {
   return type === 'boolean' && (op === 'equals' || op === 'notEquals');
 }
 
-/** A number as an HTML number field holds it (no leading +, no trailing dot, no spaces); also valid SPARQL. */
-const HTML_NUMBER = /^-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/;
+/**
+ * A number as a browser number field holds it: no leading +, no spaces, and a
+ * dot only with digits after it or straight before an exponent ("1.e2", which
+ * Chrome accepts). Every form is also a valid SPARQL numeric literal.
+ */
+const HTML_NUMBER = /^-?(\d+(\.\d+)?([eE][+-]?\d+)?|\.\d+([eE][+-]?\d+)?|\d+\.[eE][+-]?\d+)$/;
 
 /**
  * Whether a filter value is exactly something its operator's control can
