@@ -153,6 +153,9 @@ export async function advanceRelease(r: Release): Promise<Release> {
   return r;
 }
 
+/** What a published release is made from: if any of it changes while publishing, the files would no longer match. */
+const releaseSnapshot = (r: Release) => JSON.stringify([r.status, r.version, r.level, r.notes, r.versionIRI, r.changeRequestIds]);
+
 /** Can this release be published now? (approved vote, or no vote needed) */
 function publishable(r: Release) {
   if (r.status === 'draft') return { ok: true, why: '' };
@@ -173,6 +176,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   const r = mustGet<Release>('releases', stale.id);
   const can = publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
+  const snapshot = releaseSnapshot(r);
   const project = getProject(r.ontologyId);
   const { graph: working, head: base } = await ontologyStore.workingAt(project);
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
@@ -220,8 +224,12 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // draft is still the one released and the release is still unpublished
   // (see ontologyStore.advanceTo). The tag follows from the database.
   await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, base, (commit) => {
+    // Still exactly the release these files were made from, and still approved (a vote may have changed meanwhile).
     const latest = mustGet<Release>('releases', r.id);
     if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
+    if (releaseSnapshot(latest) !== snapshot) throw new HttpError(409, 'The release changed while it was being published, so it was not published. Try again.');
+    const now = publishable(latest);
+    if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
     Object.assign(r, latest, { commit, status: 'published', publishedAt, statusSince: publishedAt });
     save(r);
     for (const id of r.changeRequestIds) markReleased(id, r.id, r.version, publishedAt);

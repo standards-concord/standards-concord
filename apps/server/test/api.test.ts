@@ -981,19 +981,20 @@ describe('inline term edits', () => {
     expect((await contributor.get(termPath(`${VOL}Agent`))).body.comment).toBe('Merged while the release waited.');
   });
 
-  /* Git is a projection of the database: kill points between the two, and repair. */
+  /* Git is a projection of the database: kill points between the two, and repair through ordinary reads. */
   const repo = async () => {
     const { ontologyStore } = await import('../src/services/ontologyStore.js');
     const { getProject } = await import('../src/services/ontologies.js');
     const { execFileSync } = await import('node:child_process');
-    const project = getProject(demoId);
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: ontologyStore.dir(project), encoding: 'utf8' }).trim();
     const path = await import('node:path');
+    const fs = await import('node:fs');
     const { config } = await import('../src/config.js');
+    const project = getProject(demoId);
+    // The repository as it is on disk, without the repair that reads through ontologyStore do first.
     const raw = path.join(config.dataDir, 'ontologies', project.slug);
-    // Without the repair that ontologyStore.dir() does first.
     const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8' }).trim();
-    return { ontologyStore, project, git, rawGit };
+    const rawFile = (name: string) => fs.readFileSync(path.join(raw, name), 'utf8');
+    return { ontologyStore, project, rawGit, rawFile, raw };
   };
   const approvedEdit = async (who: string, iri: string, set: object) => {
     const crsMod = await import('../src/services/changeRequests.js');
@@ -1001,6 +1002,20 @@ describe('inline term edits', () => {
     const created = await edit(await login('contributor', who), { termIri: iri, set, submit: true });
     put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
     return created.body.id as string;
+  };
+  /** The process dies the moment the database transaction of the next advance commits: nothing after it runs, not even the git sync. */
+  const dieAfterNextCommit = async () => {
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const original = ontologyStore.advanceTo;
+    const sync = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => undefined);
+    const spy = vi.spyOn(ontologyStore, 'advanceTo').mockImplementationOnce(function (this: typeof ontologyStore, ...args) {
+      original.apply(ontologyStore, args);
+      throw new Error('killed');
+    });
+    return () => {
+      spy.mockRestore();
+      sync.mockRestore();
+    };
   };
 
   it('never lets a copy read before a merge be saved over it', async () => {
@@ -1020,37 +1035,64 @@ describe('inline term edits', () => {
     await expect(crsMod.updateCR(old, (c) => (c.title = 'Overwritten'))).rejects.toMatchObject({ status: 409 });
   });
 
-  it('keeps a committed merge if the process dies before git is updated, and repairs git from the database', async () => {
+  it('writes a review only together with the request it was given on', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
-    const { ontologyStore, project, rawGit } = await repo();
-    const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
-    const before = ontologyStore.head(project);
-    // Dies right after the database transaction: nothing in git is moved.
-    const spy = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => {
-      throw new Error('killed');
+    const { clock } = await import('../src/clock.js');
+    const { put, list } = await import('../src/db.js');
+    const contributor = await login('contributor', 'Contributor Atomic Review');
+    const editor = await login('editor', 'Editor Atomic Review');
+    const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Reviewed atomically.' }, submit: true });
+    const id = created.body.id;
+    // Someone else writes the request between the review being made and saved: both are refused, together.
+    const iso = clock.iso.bind(clock);
+    let calls = 0;
+    const spy = vi.spyOn(clock, 'iso').mockImplementation(() => {
+      if (++calls === 2) put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+      return iso();
     });
     try {
-      expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Crash')))).status).toBe('merged');
+      expect((await editor.post(`/api/change-requests/${id}/reviews`).send({ decision: 'request-changes', comment: 'Lost with its save.' })).status).toBe(409);
     } finally {
       spy.mockRestore();
     }
+    expect(list<{ comment?: string }>('reviews', id).some((r) => r.comment === 'Lost with its save.')).toBe(false);
+  });
+
+  it('keeps a committed merge if the process dies before git is updated, and repairs git on the next read', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { ontologyStore, project, rawGit, rawFile } = await repo();
+    const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
+    const before = ontologyStore.head(project);
+    const restore = await dieAfterNextCommit();
+    try {
+      await expect(crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Crash')))).rejects.toThrow('killed');
+    } finally {
+      restore();
+    }
+    // The merge and its bookkeeping landed together in the database...
     const merged = ontologyStore.head(project);
     expect(merged).not.toBe(before);
+    expect(crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: merged });
+    // ...while git was never touched.
     expect(rawGit('rev-parse', 'HEAD')).toBe(before);
     // The commit only the database names survives garbage collection.
     rawGit('reflog', 'expire', '--expire=now', '--all');
     rawGit('gc', '-q', '--prune=now');
     expect(rawGit('cat-file', '-t', merged)).toBe('commit');
-    // Anything that reads the checkout repairs it first.
-    const { git } = await repo();
-    expect(git('rev-parse', 'HEAD')).toBe(merged);
-    expect(git('status', '--porcelain', '--untracked-files=no')).toBe('');
-    await expect((await login('member', 'Reader Crash')).get(termPath(`${VOL}Cause`)).then((r) => r.body.comment)).resolves.toBe('Survives a crash.');
+    // An ordinary read puts git right: branch, index and files.
+    expect((await (await login('member', 'Reader Crash')).get(termPath(`${VOL}Cause`))).body.comment).toBe('Survives a crash.');
+    expect(rawGit('rev-parse', 'HEAD')).toBe(merged);
+    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
+    expect(rawFile('ontology.ttl')).toContain('Survives a crash.');
+    // Its pin is no longer needed once the branch includes it.
+    expect(rawGit('for-each-ref', 'refs/concord/commits/')).toBe('');
   });
 
-  it('repairs checked-out files that failed to update, not just the branch', async () => {
+  it('repairs checked-out files that failed to update, and files an older sync put back', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
-    const { ontologyStore, project, rawGit } = await repo();
+    const { ontologyStore, project, rawGit, rawFile, raw } = await repo();
+    const fs = await import('node:fs');
+    const path = await import('node:path');
     const id = await approvedEdit('Contributor Checkout', `${VOL}Cause`, { editorialNote: 'Checked out eventually.' });
     const spy = vi.spyOn(ontologyStore, 'checkout').mockImplementationOnce(() => {
       throw new Error('disk full');
@@ -1060,16 +1102,43 @@ describe('inline term edits', () => {
     } finally {
       spy.mockRestore();
     }
-    // The branch moved but the files did not: the next read puts them right.
-    expect(rawGit('rev-parse', 'HEAD')).toBe(ontologyStore.head(project));
-    const { git } = await repo();
-    expect(git('status', '--porcelain', '--untracked-files=no')).toBe('');
-    const fs = await import('node:fs');
-    const path = await import('node:path');
-    expect(fs.readFileSync(path.join(ontologyStore.dir(project), 'ontology.ttl'), 'utf8')).toBe(ontologyStore.readWorkingText(project));
+    await ontologyStore.working(project);
+    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
+    expect(rawFile('ontology.ttl')).toBe(ontologyStore.readWorkingText(project, ontologyStore.head(project)));
+
+    // An older sync (from another process) put the previous draft's files back and recorded that it had.
+    const head = ontologyStore.head(project);
+    const older = rawGit('rev-parse', `${head}~1`);
+    rawGit('read-tree', '--reset', '-u', older);
+    const stamp = path.join(raw, '.git', 'concord-synced');
+    fs.writeFileSync(stamp, fs.readFileSync(stamp, 'utf8').replace(head, older));
+    ontologyStore.versions(project);
+    expect(rawFile('ontology.ttl')).toContain('Checked out eventually.');
+    // A branch ahead of the database is put back too.
+    rawGit('update-ref', 'HEAD', rawGit('commit-tree', `${head}^{tree}`, '-p', head, '-m', 'stray'));
+    ontologyStore.log(project);
+    expect(rawGit('rev-parse', 'HEAD')).toBe(head);
   });
 
-  it('records a release atomically, survives a crash before its tag, and refuses a second publisher', async () => {
+  it('restores release tags from the published releases, including ones from before', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const { list } = await import('../src/db.js');
+    const published = list<{ version: string; status: string; commit?: string }>('releases', demoId).filter((r) => r.status === 'published' && r.commit);
+    expect(published.length).toBeGreaterThan(0);
+    for (const r of published) rawGit('tag', '-d', `v${r.version}`);
+    await ontologyStore.at(project, published[0].version);
+    for (const r of published) expect(rawGit('rev-parse', `v${r.version}^{commit}`)).toBe(r.commit);
+  });
+
+  it('drops the pin of an advance that was refused', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const graph = await ontologyStore.working(project);
+    const stale = rawGit('rev-parse', `${ontologyStore.head(project)}~1`);
+    await expect(ontologyStore.commitWorking(project, graph, 'refused', { name: 'Refused' }, stale)).rejects.toMatchObject({ status: 409 });
+    expect(rawGit('for-each-ref', 'refs/concord/commits/')).toBe('');
+  });
+
+  it('records a release atomically, survives dying before its tag, and refuses a second publisher', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const releases = await import('../src/services/releases.js');
     const { ontologyStore, project, rawGit } = await repo();
@@ -1084,33 +1153,65 @@ describe('inline term edits', () => {
     const draft = put('releases', { ...pending, status: 'draft' }, demoId);
     const tag = `v${draft.version}`;
 
-    // Two publishers queued on the same (soon stale) release object, and the first dies right after its database transaction.
-    const spy = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => {
-      throw new Error('killed');
-    });
+    // Two publishers queued on the same (soon stale) release object; the first dies the moment its transaction commits.
+    const restore = await dieAfterNextCommit();
     let first, second;
     try {
       [first, second] = await Promise.allSettled([releases.publishRelease({ ...draft } as never, stewardUser), releases.publishRelease({ ...draft } as never, stewardUser)]);
     } finally {
-      spy.mockRestore();
+      restore();
     }
-    expect(first.status).toBe('fulfilled');
+    expect(first).toMatchObject({ status: 'rejected', reason: { message: 'killed' } });
     expect(second).toMatchObject({ status: 'rejected', reason: { status: 409 } });
-    // Everything the release records landed together.
+    // Everything the release records landed with the commit.
     const stored = list<{ id: string; status: string; commit?: string }>('releases', demoId).find((r) => r.id === draft.id)!;
     expect(stored.status).toBe('published');
     expect(stored.commit).toBe(ontologyStore.head(project));
     expect(getProject(demoId).currentVersion).toBe(draft.version);
     for (const crId of draft.changeRequestIds) expect(crsMod.getCR(crId).status).toBe('released');
-    // The tag and files follow from the database once anything reads the repository.
+    // The tag follows from the database on the next ordinary read.
     expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
-    ontologyStore.dir(project);
+    expect((await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=${draft.version}`)).status).toBe(200);
     expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
-    expect((await ontologyStore.at(project, draft.version)).ontologyIRI).toBeTruthy();
     // Publishing again is refused rather than rewriting the version.
     const released = ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
     await expect(releases.publishRelease({ ...draft } as never, stewardUser)).rejects.toMatchObject({ status: 409 });
     expect(ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl')).toBe(released);
+  });
+
+  it('does not publish a release that was rejected or redrafted while it was being published', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const releases = await import('../src/services/releases.js');
+    const { ontologyStore, project, rawGit } = await repo();
+    const { put, list } = await import('../src/db.js');
+    const steward = await login('steward', 'Steward Rejected');
+    const stewardUser = await userOf(steward);
+    for (const [what, change] of [
+      ['rejected', (r: { id: string; notes: string }) => ({ ...r, status: 'rejected' })],
+      ['redrafted', (r: { id: string; notes: string }) => ({ ...r, notes: `${r.notes}\n\nRedrafted.` })],
+    ] as const) {
+      const id = await approvedEdit(`Contributor ${what}`, `${VOL}Cause`, { examples: [`release ${what}`] });
+      expect((await crsMod.merge(crsMod.getCR(id), stewardUser)).status).toBe('merged');
+      await steward.post(`/api/ontologies/${demoId}/releases`).send({});
+      const pending = list<{ id: string; status: string; version: string; notes: string }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
+      const draft = put('releases', { ...pending, status: 'draft' }, demoId);
+      const head = ontologyStore.head(project);
+      const original = ontologyStore.writeRelease;
+      const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async function (this: typeof ontologyStore, ...args) {
+        put('releases', change(list<typeof draft>('releases', demoId).find((r) => r.id === draft.id)! as never), demoId);
+        return original.apply(ontologyStore, args);
+      });
+      try {
+        await expect(releases.publishRelease({ ...draft } as never, stewardUser), what).rejects.toMatchObject({ status: 409 });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(ontologyStore.head(project), what).toBe(head);
+      expect(list<{ id: string; status: string }>('releases', demoId).find((r) => r.id === draft.id)!.status, what).not.toBe('published');
+      expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/v${draft.version}`), what).toThrow();
+      // Leave nothing pending for the next round.
+      put('releases', { ...list<typeof draft>('releases', demoId).find((r) => r.id === draft.id)!, status: 'rejected' }, demoId);
+    }
   });
 
   it('keeps a vote that passed for requests approved before votes were recorded on approval', async () => {

@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
-import type { OntologyProject } from '@concord/shared';
+import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
-import { get, HttpError, put, transaction } from '../db.js';
+import { get, HttpError, list, put, transaction } from '../db.js';
 
 /**
  * Each ontology is a git repository. The working draft is `ontology.ttl` on
@@ -21,11 +21,13 @@ import { get, HttpError, put, transaction } from '../db.js';
  * change request is still exactly as it checked it.
  *
  * The database is the only source of truth; git is a projection of it. Every
- * commit gets a durable ref (refs/concord/commits/<sha>) before the pointer can
- * name it, so git gc never removes it, and `sync` (idempotent; run at start-up,
- * after every advance, and before anything reads the checkout) brings the
- * branch, release tags and checked-out files in line with the database. Reads
- * of content go to git objects, never to the checked-out files.
+ * commit is pinned by a ref (refs/concord/commits/<time>-<sha>) before the
+ * pointer can name it, so git gc never removes it; pins are dropped once the
+ * branch includes them, or straight away if the advance is refused. `sync`
+ * (idempotent; run at start-up, after every advance, and by every read that
+ * finds git out of line) brings the branch, the release tags (from the
+ * published releases' records) and the checked-out files in line with the
+ * database. Reads of content go to git objects, never to the checked-out files.
  */
 const FILE = 'ontology.ttl';
 
@@ -54,9 +56,45 @@ function git(dir: string, args: string[], env: Record<string, string> = {}, opts
 
 const graphCache = new Map<string, OntologyGraph>();
 const headKey = (project: Pick<OntologyProject, 'slug'>) => `draft-head:${project.slug}`;
-const tagsKey = (project: Pick<OntologyProject, 'slug'>) => `draft-tags:${project.slug}`;
-/** The draft commit this process last fully synced the checkout to, per ontology. */
-const syncedTo = new Map<string, string>();
+const PIN = 'refs/concord/commits/';
+const PIN_GRACE_MS = 10 * 60 * 1000;
+
+/** The tags git should have: one per published release, on its recorded commit. */
+function releaseTags(project: Pick<OntologyProject, 'slug'>): [string, string, string][] {
+  const id = list<OntologyProject>('ontologies').find((p) => p.slug === project.slug)?.id;
+  if (!id) return [];
+  return list<Release>('releases', id)
+    .filter((r) => r.status === 'published' && r.commit)
+    .map((r): [string, string, string] => [`v${r.version}`, r.commit!, `Release ${r.version}`])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+/** What the repository should look like, as one string: the draft commit and the release tags. */
+const expectedState = (head: string, tags: [string, string, string][]) => `${head} ${createHash('sha1').update(JSON.stringify(tags)).digest('hex')}`;
+
+/** A ref's value, read from the files (no git process), or undefined if it has none. */
+function refValue(dir: string, ref: string): string | undefined {
+  try {
+    const loose = path.join(dir, '.git', ref);
+    if (fs.existsSync(loose)) return fs.readFileSync(loose, 'utf8').trim();
+    const packed = fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8');
+    return packed.split('\n').find((l) => l.endsWith(` ${ref}`))?.split(' ')[0];
+  } catch {
+    return undefined;
+  }
+}
+
+/** The branch's commit, read from the files, or undefined if it can't be. */
+function branchSha(dir: string): string | undefined {
+  try {
+    const head = fs.readFileSync(path.join(dir, '.git', 'HEAD'), 'utf8').trim();
+    return head.startsWith('ref: ') ? refValue(dir, head.slice(5)) : head;
+  } catch {
+    return undefined;
+  }
+}
+const stampFile = (dir: string) => path.join(dir, '.git', 'concord-synced');
+const syncLockFile = (dir: string) => path.join(dir, '.git', 'concord-sync.lock');
 
 /** A commit on `base` that writes `files` (repository path → content, or null to delete), or `base` itself if nothing changes. Moves nothing. */
 function buildCommit(dir: string, base: string, files: Record<string, string | null>, message: string, author: CommitAuthor): string {
@@ -124,21 +162,28 @@ export const ontologyStore = {
    * Makes `commit` the working draft if it is still `base`, together with
    * `record` (synchronous database writes, which can throw to refuse), in one
    * transaction. Throws 409 if the draft has moved. With commit === base it
-   * still checks and records. `tag` records a release tag to create on it.
+   * still checks and records.
    */
-  advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => void, tag?: { name: string; message: string }): void {
-    // Durable before the database can point at it.
-    git(repoDir(project), ['update-ref', `refs/concord/commits/${commit}`, commit]);
-    transaction(() => {
-      if (this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
-      record?.(commit);
-      put('kv', { id: headKey(project), sha: commit });
-      if (tag) {
-        const tags = get<{ tags: Record<string, { commit: string; message: string }> }>('kv', tagsKey(project))?.tags ?? {};
-        put('kv', { id: tagsKey(project), tags: { ...tags, [tag.name]: { commit, message: tag.message } } });
+  advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => void): void {
+    const dir = repoDir(project);
+    // Pinned before the database can point at it; unpinned again if it doesn't.
+    const pin = `${PIN}${Date.now()}-${commit}`;
+    git(dir, ['update-ref', pin, commit]);
+    try {
+      transaction(() => {
+        if (this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
+        record?.(commit);
+        put('kv', { id: headKey(project), sha: commit });
+      });
+    } catch (err) {
+      try {
+        git(dir, ['update-ref', '-d', pin]);
+      } catch {
+        /* pruned later */
       }
-    });
-    // Done: the rest only brings git in line, and is repaired later if it fails here.
+      throw err;
+    }
+    // Done: the rest only brings git in line, and any read repairs it if it fails here.
     try {
       this.sync(project);
     } catch (err) {
@@ -146,9 +191,23 @@ export const ontologyStore = {
     }
   },
 
-  /** Brings the checkout in line with the database, unless this process already has for the current draft. */
+  /**
+   * Brings git in line with the database if it isn't: checks the branch and
+   * the record of the last completed sync against the database (not anything
+   * cached in this process), so it notices another process's half-done or
+   * older sync. Every read calls it.
+   */
   ensureSynced(project: Pick<OntologyProject, 'slug'>): void {
-    if (syncedTo.get(project.slug) === this.head(project)) return;
+    const dir = repoDir(project);
+    const head = this.head(project);
+    let stamp = '';
+    try {
+      stamp = fs.readFileSync(stampFile(dir), 'utf8').trim();
+    } catch {
+      /* never synced */
+    }
+    const tags = releaseTags(project);
+    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`))) return;
     try {
       this.sync(project);
     } catch (err) {
@@ -158,38 +217,54 @@ export const ontologyStore = {
 
   /**
    * Idempotently brings the git branch, release tags and checked-out files in
-   * line with the database. Safe to run any time, from any process.
+   * line with the database. Safe to run any time, from any process: syncs run
+   * one at a time and each reads the database afresh, so an older one can't
+   * undo a newer one, and the record of the last completed sync says exactly
+   * what it synced.
    */
   sync(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
-    syncedTo.delete(project.slug);
-    // Branch: read it before the pointer (which only moves forwards), then compare-and-swap, so a slower syncer can't move it back.
-    let target = '';
-    for (let i = 0; i < 5; i++) {
-      const branch = git(dir, ['rev-parse', 'HEAD']);
-      target = this.head(project);
-      if (branch === target) break;
-      try {
-        git(dir, ['update-ref', '-m', 'concord: sync working draft', 'HEAD', target, branch]);
-        break;
-      } catch {
-        if (i === 4) throw new Error('could not move the branch');
-      }
+    const lock = syncLockFile(dir);
+    try {
+      fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      // Someone else is syncing (from a fresh read, so they will finish the job), unless they died doing it.
+      if (Date.now() - fs.statSync(lock).mtimeMs < 30_000) return;
+      fs.rmSync(lock, { force: true });
+      fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
     }
-    // Release tags.
-    const tags = get<{ tags: Record<string, { commit: string; message: string }> }>('kv', tagsKey(project))?.tags ?? {};
-    for (const [name, t] of Object.entries(tags)) {
-      let at = '';
-      try {
-        at = git(dir, ['rev-parse', '-q', '--verify', `refs/tags/${name}^{commit}`]);
-      } catch {
-        /* missing */
+    try {
+      fs.rmSync(stampFile(dir), { force: true });
+      const target = this.head(project);
+      const tags = releaseTags(project);
+      if (git(dir, ['rev-parse', 'HEAD']) !== target) git(dir, ['update-ref', '-m', 'concord: sync working draft', 'HEAD', target]);
+      for (const [name, commit, message] of tags) {
+        let at = '';
+        try {
+          at = git(dir, ['rev-parse', '-q', '--verify', `refs/tags/${name}^{commit}`]);
+        } catch {
+          /* missing */
+        }
+        if (at !== commit) git(dir, ['tag', '-f', '-a', name, '-m', message, commit]);
       }
-      if (at !== t.commit) git(dir, ['tag', '-f', '-a', name, '-m', t.message, t.commit]);
+      // Checked-out files: reset the index and files to the commit (not just compare refs).
+      this.checkout(project, target);
+      this.prunePins(project, target);
+      fs.writeFileSync(stampFile(dir), `${expectedState(target, tags)}\n`);
+    } finally {
+      fs.rmSync(lock, { force: true });
     }
-    // Checked-out files: reset the index and files to the commit (not just compare refs).
-    this.checkout(project, target);
-    syncedTo.set(project.slug, target);
+  },
+
+  /** Drops pins the branch now includes, and pins of advances that never happened (after a grace period for ones in flight). */
+  prunePins(project: Pick<OntologyProject, 'slug'>, branch: string): void {
+    const dir = repoDir(project);
+    const merged = new Set(git(dir, ['for-each-ref', `--merged=${branch}`, '--format=%(refname)', PIN]).split('\n').filter(Boolean));
+    for (const ref of git(dir, ['for-each-ref', '--format=%(refname)', PIN]).split('\n').filter(Boolean)) {
+      const at = Number(ref.slice(PIN.length).split('-')[0]);
+      if (merged.has(ref) || !(Date.now() - at < PIN_GRACE_MS)) git(dir, ['update-ref', '-d', ref]);
+    }
   },
 
   /** Rewrites the index and checked-out files to match `commit`. */
@@ -198,8 +273,9 @@ export const ontologyStore = {
   },
 
   /** The working draft as committed (git, not the checked-out file, which is only a mirror of it). */
-  readWorkingText(project: Pick<OntologyProject, 'slug'>, commit = 'HEAD'): string {
-    return git(repoDir(project), ['show', `${commit}:${FILE}`], {}, { raw: true });
+  readWorkingText(project: Pick<OntologyProject, 'slug'>, commit?: string): string {
+    if (!commit) this.ensureSynced(project);
+    return git(repoDir(project), ['show', `${commit ?? this.head(project)}:${FILE}`], {}, { raw: true });
   },
 
   async working(project: Pick<OntologyProject, 'slug'>): Promise<OntologyGraph> {
@@ -208,6 +284,7 @@ export const ontologyStore = {
 
   /** The working draft and the commit it is from, read together. */
   async workingAt(project: Pick<OntologyProject, 'slug'>): Promise<{ graph: OntologyGraph; head: string }> {
+    this.ensureSynced(project);
     const head = this.head(project);
     const key = `${project.slug}@${head}`;
     let g = graphCache.get(key);
@@ -221,6 +298,7 @@ export const ontologyStore = {
   /** `ref` is 'working' or a released version like '1.2.0'. */
   async at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph> {
     if (!ref || ref === 'working') return this.working(project);
+    this.ensureSynced(project);
     const key = `${project.slug}@v${ref}`;
     let g = graphCache.get(key);
     if (!g) {
@@ -235,6 +313,7 @@ export const ontologyStore = {
   /** A file stored beside a released version (releases/<version>/<name>) in the working draft, from git. */
   readReleaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): string | undefined {
     if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+$/.test(name)) return undefined;
+    this.ensureSynced(project);
     try {
       return git(repoDir(project), ['show', `${this.head(project)}:releases/${version}/${name}`], {}, { raw: true });
     } catch {
@@ -281,8 +360,8 @@ export const ontologyStore = {
     };
     for (const [name, content] of Object.entries(files)) all[`releases/${version}/${name}`] = content;
     const commit = buildCommit(dir, parent, all, `Release ${version}`, { name: author.name, email: author.email ?? 'steward@concord' });
-    // The release's own bookkeeping (record) and its tag are part of the same advance.
-    this.advanceTo(project, parent, commit, record, { name: `v${version}`, message: `Release ${version}` });
+    // The release's own bookkeeping (record, which marks it published on this commit, and so tags it) is part of the same advance.
+    this.advanceTo(project, parent, commit, record);
     return commit;
   },
 
@@ -297,11 +376,13 @@ export const ontologyStore = {
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
+    this.ensureSynced(project);
     const files = git(repoDir(project), ['ls-tree', '-r', '--name-only', this.head(project), '--', 'releases']).split('\n');
     return files.map((f) => f.match(/^releases\/([^/]+)\/ontology\.ttl$/)?.[1]).filter((v): v is string => !!v);
   },
 
   log(project: Pick<OntologyProject, 'slug'>, limit = 50) {
+    this.ensureSynced(project);
     const out = git(repoDir(project), ['log', `-${limit}`, '--format=%H%x1f%an%x1f%aI%x1f%s', this.head(project)]);
     return out
       .split('\n')
