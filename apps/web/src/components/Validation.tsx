@@ -5,6 +5,7 @@ import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleA
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
 import { Badge, ProgressBar, cx } from './ui';
+import { HighlightedCode } from './code/CodeView';
 
 const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string }> = {
   error: { icon: CircleX, cls: 'text-danger', label: 'Errors' },
@@ -156,7 +157,7 @@ export function CqResults({ report }: { report: ValidationReport }) {
           </button>
           {openIdx === i && (
             <div className="mt-2 space-y-2 pl-6">
-              <pre className="overflow-x-auto rounded-md bg-surface-2 p-2 font-mono text-xs">{q.sparql}</pre>
+              <HighlightedCode code={q.sparql} language="sparql" />
               {q.error && <p className="text-xs text-danger">{q.error}</p>}
               {q.rows.length > 0 && (
                 <div className="overflow-x-auto">

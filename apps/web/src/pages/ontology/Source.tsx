@@ -3,7 +3,9 @@ import type { OutputFormat } from '@concord/shared';
 import { Download, Info } from 'lucide-react';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { Button, Card, CodeBlock, ErrorCard, Loading, Select, cx } from '../../components/ui';
+import { Button, Card, ErrorCard, Loading, Select, cx } from '../../components/ui';
+import { CodeView } from '../../components/code/CodeView';
+import { FORMAT_LANGUAGE } from '../../components/code/languages';
 import { useOntology } from './Layout';
 
 const FORMATS: { id: OutputFormat; label: string; ext: string; note: string }[] = [
@@ -74,7 +76,7 @@ export function SourceTab() {
         ) : source.data === undefined || source.loading ? (
           <Loading label={`Serialising as ${meta.label}…`} />
         ) : (
-          <CodeBlock code={source.data} maxHeight={640} className="border-0" />
+          <CodeView code={source.data} language={FORMAT_LANGUAGE[format] ?? 'text'} ariaLabel={`${meta.label} source`} maxHeight={640} testId="source-code" />
         )}
       </Card>
     </div>
