@@ -1,17 +1,29 @@
 @import 'tailwindcss';
 
 /*
- * Design tokens. Colours are CSS variables so light/dark swap in one place;
- * the @theme inline block exposes them as Tailwind utilities (bg-surface,
- * text-muted, border-line, bg-accent, ...).
+ * Design tokens. Everything visual is a CSS variable so a whole "look" swaps in one
+ * place: colours, fonts, corner radii, shadows and a few type settings. The
+ * @theme inline block exposes them as Tailwind utilities (bg-surface, text-muted,
+ * border-line, bg-accent, rounded-xl, shadow-lg, font-display, rounded-pill, ...),
+ * so components pick up the active look without knowing which it is.
+ *
+ * Looks are chosen with <html data-look="..."> (see lib/look.ts):
+ *   spec       Specification: standards-document typography (default)
+ *   civic      Civic grid: Swiss/civic grotesque, black rules, square corners
+ *   workbench  Workbench: IBM Plex engineering tool with a dark masthead
+ *   classic    Original prototype style
+ * Each look sets a light palette and a dark one (prefers-color-scheme).
  */
-:root {
+
+/* ------------------------------------------------------------ Original (classic) */
+:root,
+[data-look='classic'] {
   --bg: #fafaf9;
   --surface: #ffffff;
   --surface-2: #f4f4f3;
   --fg: #141414;
   --muted: #5f6368;
-  --subtle: #8a8f98;
+  --subtle: #6b7078;
   --line: #e5e5e3;
   --line-strong: #d4d4d1;
   --accent: #1f4fe0;
@@ -25,6 +37,7 @@
   --danger: #c0262d;
   --danger-soft: #fdecec;
   --info-soft: #eef2ff;
+  --focus: var(--accent);
   /* Syntax highlighting (code views, SPARQL editor). */
   --syn-keyword: #8a2bb9;
   --syn-iri: #0b6b8f;
@@ -33,23 +46,52 @@
   --syn-string: #157f3c;
   --syn-number: #b45309;
   --syn-variable: #c0262d;
-  --syn-comment: #8a8f98;
+  --syn-comment: #6b7078;
   --syn-meta: #a35a00;
   --syn-func: #0f766e;
   --syn-tag: #1f4fe0;
   --syn-attr: #8a2bb9;
   --syn-selection: #d6e0ff;
+
+  /* Shape and type. */
+  --font-body: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-heading: var(--font-body);
+  --font-code: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --heading-weight: 600;
+  --heading-tracking: -0.025em;
+  --title-size: 1.5rem;
+  --r-xs: 0.125rem;
+  --r-sm: 0.25rem;
+  --r-md: 0.375rem;
+  --r-lg: 0.5rem;
+  --r-xl: 0.75rem;
+  --r-2xl: 1rem;
+  --r-pill: 9999px;
+  --r-avatar: 9999px;
+  --sh-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --sh-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --sh-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --sh-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --sh-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --sh-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  --avatar-s: 45%;
+  --avatar-l: 45%;
+  --header-bg: color-mix(in srgb, var(--surface) 90%, transparent);
+  --header-fg: var(--fg);
+  --header-muted: var(--muted);
+  --header-rule: 0px;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root,
+  [data-look='classic'] {
     --bg: #0f1012;
     --surface: #16181b;
     --surface-2: #1d2024;
     --fg: #ececec;
     --muted: #a3a8b0;
-    --subtle: #7d838c;
+    --subtle: #868c95;
     --line: #2a2d32;
     --line-strong: #3a3e45;
     --accent: #6f8fff;
@@ -70,19 +112,336 @@
     --syn-string: #74d68f;
     --syn-number: #f5b36b;
     --syn-variable: #ff8d8c;
-    --syn-comment: #7d838c;
+    --syn-comment: #868c95;
     --syn-meta: #f0c674;
     --syn-func: #5ed3c2;
     --syn-tag: #8fa8ff;
     --syn-attr: #d19bff;
     --syn-selection: #2b3a66;
+    --sh-xs: none;
+    --avatar-l: 40%;
+    color-scheme: dark;
+  }
+}
+
+/* ------------------------------------------------------------ Specification */
+[data-look='spec'] {
+  --bg: #f7f6f2;
+  --surface: #fffefb;
+  --surface-2: #f0eee8;
+  --fg: #1c1b19;
+  --muted: #57534c;
+  --subtle: #716c63;
+  --line: #e0ddd5;
+  --line-strong: #c9c4b8;
+  --accent: #005a9c;
+  --accent-hover: #00467a;
+  --accent-soft: #e6eef5;
+  --accent-fg: #ffffff;
+  --ok: #2a6b2f;
+  --ok-soft: #e9f1e6;
+  --warn: #8a4f00;
+  --warn-soft: #f8efdc;
+  --danger: #a3262a;
+  --danger-soft: #f7e7e5;
+  --info-soft: #e6eef5;
+  --syn-keyword: #7a2a8c;
+  --syn-iri: #005a9c;
+  --syn-prefix: #716c63;
+  --syn-name: #1d4f91;
+  --syn-string: #2a6b2f;
+  --syn-number: #8a4f00;
+  --syn-variable: #a3262a;
+  --syn-comment: #716c63;
+  --syn-meta: #8a4f00;
+  --syn-func: #0d6461;
+  --syn-tag: #1d4f91;
+  --syn-attr: #7a2a8c;
+  --syn-selection: #d3e2ee;
+
+  --font-body: 'Source Sans 3', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-heading: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-code: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --heading-weight: 600;
+  --heading-tracking: -0.005em;
+  --title-size: 2rem;
+  --r-xs: 1px;
+  --r-sm: 2px;
+  --r-md: 2px;
+  --r-lg: 3px;
+  --r-xl: 3px;
+  --r-2xl: 4px;
+  --r-pill: 2px;
+  --r-avatar: 2px;
+  --sh-xs: none;
+  --sh-sm: none;
+  --sh-md: 0 2px 6px rgb(28 27 25 / 0.08);
+  --sh-lg: 0 4px 14px rgb(28 27 25 / 0.1);
+  --sh-xl: 0 8px 24px rgb(28 27 25 / 0.12);
+  --sh-2xl: 0 12px 32px rgb(28 27 25 / 0.16);
+  --avatar-s: 22%;
+  --avatar-l: 38%;
+  --header-bg: var(--surface);
+  --header-rule: 4px;
+  color-scheme: light;
+}
+
+/* ------------------------------------------------------------ Civic grid */
+[data-look='civic'] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f3f3f1;
+  --fg: #0b0b0b;
+  --muted: #474747;
+  --subtle: #6b6b6b;
+  --line: #d6d6d3;
+  --line-strong: #0b0b0b;
+  --accent: #0b0b0b;
+  --accent-hover: #333333;
+  --accent-soft: #fff0b3;
+  --accent-fg: #ffffff;
+  --ok: #00703c;
+  --ok-soft: #e3f1e9;
+  --warn: #8f4a00;
+  --warn-soft: #fdecd6;
+  --danger: #c22a14;
+  --danger-soft: #fbe4df;
+  --info-soft: #f3f3f1;
+  --focus: #e0480f;
+  --syn-keyword: #b3361a;
+  --syn-iri: #0b5c8a;
+  --syn-prefix: #6b6b6b;
+  --syn-name: #0b0b0b;
+  --syn-string: #00703c;
+  --syn-number: #8f4a00;
+  --syn-variable: #b3361a;
+  --syn-comment: #6b6b6b;
+  --syn-meta: #8f4a00;
+  --syn-func: #0b5c8a;
+  --syn-tag: #0b0b0b;
+  --syn-attr: #b3361a;
+  --syn-selection: #ffe58a;
+
+  --font-body: 'Public Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-heading: 'Archivo', 'Public Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-code: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --heading-weight: 800;
+  --heading-tracking: -0.02em;
+  --title-size: 2.25rem;
+  --r-xs: 0;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-xl: 0;
+  --r-2xl: 0;
+  --r-pill: 0;
+  --r-avatar: 0;
+  --sh-xs: none;
+  --sh-sm: none;
+  --sh-md: 4px 4px 0 rgb(11 11 11 / 0.9);
+  --sh-lg: 4px 4px 0 rgb(11 11 11 / 0.9);
+  --sh-xl: 6px 6px 0 rgb(11 11 11 / 0.9);
+  --sh-2xl: 8px 8px 0 rgb(11 11 11 / 0.9);
+  --avatar-s: 0%;
+  --avatar-l: 22%;
+  --header-bg: var(--surface);
+  --header-rule: 6px;
+  color-scheme: light;
+}
+
+/* ------------------------------------------------------------ Workbench */
+[data-look='workbench'] {
+  --bg: #eef0ed;
+  --surface: #fbfcfa;
+  --surface-2: #e7ebe7;
+  --fg: #16201c;
+  --muted: #4b5751;
+  --subtle: #64706a;
+  --line: #d3d9d4;
+  --line-strong: #aeb8b2;
+  --accent: #0b6e4f;
+  --accent-hover: #085a40;
+  --accent-soft: #dfeee7;
+  --accent-fg: #ffffff;
+  --ok: #19703a;
+  --ok-soft: #e2f1e6;
+  --warn: #8c5200;
+  --warn-soft: #f8edd8;
+  --danger: #b0282c;
+  --danger-soft: #f8e4e3;
+  --info-soft: #e3ecef;
+  --syn-keyword: #8a2b8f;
+  --syn-iri: #0a5f86;
+  --syn-prefix: #64706a;
+  --syn-name: #0b6e4f;
+  --syn-string: #19703a;
+  --syn-number: #8c5200;
+  --syn-variable: #b0282c;
+  --syn-comment: #64706a;
+  --syn-meta: #8c5200;
+  --syn-func: #0a5f86;
+  --syn-tag: #0b6e4f;
+  --syn-attr: #8a2b8f;
+  --syn-selection: #cfe5da;
+
+  --font-body: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-heading: 'IBM Plex Sans Condensed', 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-code: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --heading-weight: 600;
+  --heading-tracking: 0;
+  --title-size: 1.625rem;
+  --r-xs: 1px;
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 3px;
+  --r-xl: 4px;
+  --r-2xl: 4px;
+  --r-pill: 3px;
+  --r-avatar: 3px;
+  --sh-xs: none;
+  --sh-sm: none;
+  --sh-md: 0 1px 2px rgb(22 32 28 / 0.12);
+  --sh-lg: 0 3px 10px rgb(22 32 28 / 0.14);
+  --sh-xl: 0 6px 18px rgb(22 32 28 / 0.16);
+  --sh-2xl: 0 10px 28px rgb(22 32 28 / 0.2);
+  --avatar-s: 25%;
+  --avatar-l: 36%;
+  --header-bg: #16201c;
+  --header-fg: #eef0ed;
+  --header-muted: #a9b5ae;
+  --header-rule: 0px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-look='spec'] {
+    --bg: #141311;
+    --surface: #1b1a17;
+    --surface-2: #24221e;
+    --fg: #ebe8e1;
+    --muted: #b1aca1;
+    --subtle: #918b80;
+    --line: #34312b;
+    --line-strong: #4a463e;
+    --accent: #7fb2e5;
+    --accent-hover: #9cc4ec;
+    --accent-soft: #1a2633;
+    --accent-fg: #0c1622;
+    --ok: #82c487;
+    --ok-soft: #182519;
+    --warn: #e5b161;
+    --warn-soft: #2c2213;
+    --danger: #f08a85;
+    --danger-soft: #331a18;
+    --info-soft: #1a2633;
+    --syn-keyword: #d6a3e0;
+    --syn-iri: #7fb2e5;
+    --syn-prefix: #918b80;
+    --syn-name: #a8c6ef;
+    --syn-string: #82c487;
+    --syn-number: #e5b161;
+    --syn-variable: #f08a85;
+    --syn-comment: #918b80;
+    --syn-meta: #e5b161;
+    --syn-func: #76cbc4;
+    --syn-tag: #a8c6ef;
+    --syn-attr: #d6a3e0;
+    --syn-selection: #29425e;
+    --sh-md: 0 2px 6px rgb(0 0 0 / 0.4);
+    --sh-lg: 0 4px 14px rgb(0 0 0 / 0.45);
+    --sh-xl: 0 8px 24px rgb(0 0 0 / 0.5);
+    --sh-2xl: 0 12px 32px rgb(0 0 0 / 0.55);
+    --avatar-l: 34%;
+    color-scheme: dark;
+  }
+  [data-look='civic'] {
+    --bg: #0b0b0b;
+    --surface: #0b0b0b;
+    --surface-2: #1a1a1a;
+    --fg: #f5f5f2;
+    --muted: #bdbdb8;
+    --subtle: #95958f;
+    --line: #333331;
+    --line-strong: #f5f5f2;
+    --accent: #f5f5f2;
+    --accent-hover: #d6d6d2;
+    --accent-soft: #3a3000;
+    --accent-fg: #0b0b0b;
+    --ok: #5cd08f;
+    --ok-soft: #0f2a1b;
+    --warn: #f2a54a;
+    --warn-soft: #2e1f0b;
+    --danger: #ff7a64;
+    --danger-soft: #35150f;
+    --info-soft: #1a1a1a;
+    --focus: #ff7a3d;
+    --syn-keyword: #ff8f6b;
+    --syn-iri: #7cc4f2;
+    --syn-prefix: #95958f;
+    --syn-name: #f5f5f2;
+    --syn-string: #5cd08f;
+    --syn-number: #f2a54a;
+    --syn-variable: #ff8f6b;
+    --syn-comment: #95958f;
+    --syn-meta: #f2a54a;
+    --syn-func: #7cc4f2;
+    --syn-tag: #f5f5f2;
+    --syn-attr: #ff8f6b;
+    --syn-selection: #4d3f00;
+    --sh-md: 4px 4px 0 rgb(245 245 242 / 0.85);
+    --sh-lg: 4px 4px 0 rgb(245 245 242 / 0.85);
+    --sh-xl: 6px 6px 0 rgb(245 245 242 / 0.85);
+    --sh-2xl: 8px 8px 0 rgb(245 245 242 / 0.85);
+    --avatar-l: 30%;
+    color-scheme: dark;
+  }
+  [data-look='workbench'] {
+    --bg: #0f1412;
+    --surface: #161c19;
+    --surface-2: #1e2622;
+    --fg: #e5ebe7;
+    --muted: #a6b2ab;
+    --subtle: #84918a;
+    --line: #2a332f;
+    --line-strong: #3d4842;
+    --accent: #4fc39a;
+    --accent-hover: #6fd1ae;
+    --accent-soft: #14302a;
+    --accent-fg: #06140f;
+    --ok: #63c785;
+    --ok-soft: #13291b;
+    --warn: #e9b05a;
+    --warn-soft: #2c2210;
+    --danger: #f2807b;
+    --danger-soft: #331817;
+    --info-soft: #172529;
+    --syn-keyword: #d79be0;
+    --syn-iri: #6cc3e8;
+    --syn-prefix: #84918a;
+    --syn-name: #4fc39a;
+    --syn-string: #63c785;
+    --syn-number: #e9b05a;
+    --syn-variable: #f2807b;
+    --syn-comment: #84918a;
+    --syn-meta: #e9b05a;
+    --syn-func: #6cc3e8;
+    --syn-tag: #4fc39a;
+    --syn-attr: #d79be0;
+    --syn-selection: #1f4a3b;
+    --header-bg: #0a0e0c;
+    --sh-md: 0 1px 2px rgb(0 0 0 / 0.5);
+    --sh-lg: 0 3px 10px rgb(0 0 0 / 0.5);
+    --sh-xl: 0 6px 18px rgb(0 0 0 / 0.55);
+    --sh-2xl: 0 10px 28px rgb(0 0 0 / 0.6);
+    --avatar-l: 32%;
     color-scheme: dark;
   }
 }
 
 @theme inline {
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
+  --font-display: var(--font-heading);
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
@@ -101,15 +460,145 @@
   --color-warn-soft: var(--warn-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --radius-2xl: var(--r-2xl);
+  --radius-pill: var(--r-pill);
+  --shadow-xs: var(--sh-xs);
+  --shadow-sm: var(--sh-sm);
+  --shadow-md: var(--sh-md);
+  --shadow-lg: var(--sh-lg);
+  --shadow-xl: var(--sh-xl);
+  --shadow-2xl: var(--sh-2xl);
+}
+
+@layer base {
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-heading);
+    letter-spacing: var(--heading-tracking);
+  }
+}
+
+/* ------------------------------------------------------------ Look details
+ * The few things a token can't express. Components carry neutral hook classes
+ * (app-header, ui-card, ui-badge, page-title, ...) and only this file styles them per look.
+ */
+.app-header {
+  background: var(--header-bg);
+  color: var(--header-fg);
+  border-top: var(--header-rule) solid var(--accent);
+}
+.app-header .app-brand-sub {
+  color: var(--header-muted);
+}
+.page-title {
+  font-size: var(--title-size);
+  line-height: 1.15;
+  font-weight: var(--heading-weight);
+}
+
+/* Specification: links and section headings read like a W3C document. */
+[data-look='spec'] .page-eyebrow {
+  font-family: var(--font-body);
+  letter-spacing: 0.08em;
+}
+[data-look='spec'] .ui-card-title {
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  font-weight: 600;
+}
+[data-look='spec'] .ui-badge {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.04em;
+  font-size: 0.8rem;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent);
+}
+[data-look='spec'] .prose-chat a,
+[data-look='spec'] main a.text-accent:not(nav *) {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+
+/* Civic grid: black rules over every card, heavy uppercase labels, a yellow highlight. */
+[data-look='civic'] .ui-card {
+  border-top: 3px solid var(--fg);
+}
+[data-look='civic'] .ui-card-title,
+[data-look='civic'] .page-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.75rem;
+  font-weight: 800;
+  font-family: var(--font-heading);
+}
+[data-look='civic'] .ui-badge {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.65rem;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+[data-look='civic'] .ui-stat-value {
+  font-family: var(--font-heading);
+  font-size: 1.75rem;
+  font-weight: 800;
+}
+[data-look='civic'] :focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* Workbench: monospace metadata, a dark masthead. */
+[data-look='workbench'] .ui-badge,
+[data-look='workbench'] .page-eyebrow,
+[data-look='workbench'] .ui-stat-label {
+  font-family: var(--font-code);
+  letter-spacing: 0;
+  text-transform: none;
+}
+[data-look='workbench'] .ui-badge {
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+[data-look='workbench'] .ui-stat-value {
+  font-family: var(--font-code);
+  font-weight: 500;
+}
+[data-look='workbench'] .app-header .ui-button-header {
+  background: transparent;
+  color: var(--header-fg);
+  border-color: color-mix(in srgb, var(--header-fg) 30%, transparent);
+}
+[data-look='workbench'] .app-header .ui-button-header:hover {
+  background: color-mix(in srgb, var(--header-fg) 12%, transparent);
+}
+[data-look='workbench'] .app-header select {
+  background: transparent;
+  color: var(--header-fg);
+  border-color: color-mix(in srgb, var(--header-fg) 30%, transparent);
+}
+[data-look='workbench'] .app-header select option {
+  color: var(--fg);
+  background: var(--surface);
+}
+[data-look='workbench'] .app-header .app-user-button:hover {
+  background: color-mix(in srgb, var(--header-fg) 12%, transparent);
 }
 
 html,
 body {
   background: var(--bg);
   color: var(--fg);
-  font-family: var(--font-sans);
+  font-family: var(--font-body);
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: 'cv11', 'ss01';
 }
 
 body {
@@ -122,9 +611,9 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--r-md);
 }
 
 /* Markdown inside chat bubbles and analysis text. */
@@ -153,12 +642,12 @@ body {
   font-size: 0.85em;
   background: var(--surface-2);
   padding: 0.1em 0.35em;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
 }
 .prose-chat pre {
   background: var(--surface-2);
   padding: 0.75em;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   overflow-x: auto;
   font-size: 0.85em;
 }
@@ -244,3 +733,8 @@ body {
 .tok-attr { color: var(--syn-attr); }
 .tok-punct { color: var(--muted); }
 [data-language="yaml"] .tok-content { color: var(--syn-string); }
+
+/* The logo tile follows the look's corner radius. */
+.app-logo-bg {
+  rx: calc(var(--r-xl) * 1.4);
+}

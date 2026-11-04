@@ -7,6 +7,7 @@ import { formatDate, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
 import { TokenCreator } from './ontology/Agents';
+import { LookPicker } from '../components/LookPicker';
 import { Avatar, Badge, Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading, PageHeader } from '../components/ui';
 
 export function SettingsPage() {
@@ -17,7 +18,8 @@ export function SettingsPage() {
     await tokens.reload();
   });
   useEffect(() => {
-    if (location.hash === '#tokens') setTimeout(() => document.getElementById('tokens')?.scrollIntoView({ behavior: 'smooth' }), 100);
+    const target = { '#tokens': 'tokens', '#appearance': 'appearance' }[location.hash];
+    if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: 'smooth' }), 100);
   }, []);
   const u = session?.user;
   if (!u) return null;
@@ -40,6 +42,8 @@ export function SettingsPage() {
           </div>
           {u.persona && <p className="border-t border-line px-5 py-4 text-sm text-muted">{u.persona}</p>}
         </Card>
+
+        <LookPicker />
 
         <Card>
           <CardHeader icon={Lock} title="Your WebID and Solid pod" />

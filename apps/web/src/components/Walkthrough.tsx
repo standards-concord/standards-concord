@@ -316,7 +316,7 @@ export function WalkthroughDock() {
       {!w.open && (
         <button
           onClick={() => w.setOpen(true)}
-          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-full border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
+          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-pill border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
         >
           <Compass className="size-4 text-accent" />
           Walkthrough

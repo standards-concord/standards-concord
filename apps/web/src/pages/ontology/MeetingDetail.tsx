@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { Meeting, UseCase } from '@concord/shared';
-import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquareWarning, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquareWarning, GitPullRequestDraft, ScanSearch } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, titleCase } from '../../lib/format';
@@ -109,12 +109,12 @@ export function MeetingDetailPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           {!a && mt.status !== 'live' && (
-            <Button icon={Wand2} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
+            <Button icon={ScanSearch} loading={analyse.pending || processing} onClick={() => void analyse.run()} disabled={!mt.transcript.length}>
               Analyse transcript
             </Button>
           )}
           {a && (
-            <Button variant="primary" icon={Sparkles} loading={propose.pending} onClick={() => void propose.run()}>
+            <Button variant="primary" icon={GitPullRequestDraft} loading={propose.pending} onClick={() => void propose.run()}>
               Turn into use cases and a change request
             </Button>
           )}
@@ -176,7 +176,7 @@ export function MeetingDetailPage() {
 
           {a ? (
             <Card>
-              <CardHeader icon={Sparkles} title="Analysis" />
+              <CardHeader icon={ScanSearch} title="Analysis" />
               <div className="space-y-5 p-5 text-sm">
                 <Markdown text={a.summary} />
                 {a.useCases.length > 0 && (
@@ -263,7 +263,7 @@ export function MeetingDetailPage() {
               </div>
             </Card>
           ) : (
-            <EmptyState icon={Sparkles} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
+            <EmptyState icon={ScanSearch} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
               {live ? 'Keep watching — the transcript and bot prompts update live.' : 'Run the analysis to extract use cases, terms and questions.'}
             </EmptyState>
           )}

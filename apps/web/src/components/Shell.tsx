@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
-import { ChevronDown, Clock, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass } from 'lucide-react';
+import { ChevronDown, Clock, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass, Palette } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
@@ -71,7 +71,7 @@ function UserMenu() {
   };
   return (
     <div className="relative" ref={ref}>
-      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 rounded-full p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
+      <button onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
         <Avatar name={user.name} src={user.avatarUrl} size={30} />
         <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
         <ChevronDown className="hidden size-3.5 text-muted lg:inline" />
@@ -88,6 +88,9 @@ function UserMenu() {
           </MenuLink>
           <MenuLink to="/settings#tokens" icon={<Settings className="size-4" />}>
             Agent tokens
+          </MenuLink>
+          <MenuLink to="/settings#appearance" icon={<Palette className="size-4" />}>
+            Appearance
           </MenuLink>
           <MenuLink to="/alpha" icon={<Compass className="size-4" />}>
             Alpha walkthrough
@@ -169,19 +172,19 @@ function DemoBanner() {
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-30 border-b border-line bg-surface/90 backdrop-blur">
+      <header className="app-header sticky top-0 z-30 border-b border-line backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex min-w-0 items-center gap-2.5">
             <Logo />
             <span className="truncate text-sm font-semibold tracking-tight">
-              Concord<span className="hidden text-muted sm:inline"></span>
+              Concord<span className="app-brand-sub hidden sm:inline"></span>
             </span>
             <span className="rounded bg-warn-soft px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide text-warn uppercase">alpha</span>
           </Link>
           <div className="flex-1" />
           <OntologySwitcher />
           <NavLink to="/feedback" className={({ isActive }) => cx(isActive && 'pointer-events-none opacity-60')}>
-            <Button size="sm" variant="subtle" icon={MessageSquareHeart}>
+            <Button size="sm" variant="subtle" icon={MessageSquareHeart} className="ui-button-header">
               <span className="hidden sm:inline">Give feedback</span>
               <span className="sm:hidden">Feedback</span>
             </Button>

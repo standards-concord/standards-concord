@@ -47,7 +47,7 @@ export function Popover({
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen((o) => !o)}
-        className={cx('inline-flex items-center gap-1 rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-accent', className)}
+        className={cx('inline-flex items-center gap-1 rounded-pill transition-colors focus-visible:outline-2 focus-visible:outline-accent', className)}
       >
         {trigger}
         <ChevronDown className={cx('size-3 transition-transform', open && 'rotate-180')} aria-hidden />
@@ -99,8 +99,8 @@ export function Disclosure({
         className={cx('flex w-full items-center gap-1.5 text-left text-sm', tone === 'muted' ? 'text-muted hover:text-fg' : 'font-medium hover:text-accent')}
       >
         {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
-        <span className="min-w-0 flex-1">{title}</span>
-        {summary !== undefined && <span className="shrink-0 text-xs font-normal text-muted">{summary}</span>}
+        <span className="min-w-[6rem] flex-1">{title}</span>
+        {summary !== undefined && <span className="min-w-0 text-right text-xs font-normal text-muted">{summary}</span>}
       </button>
       {open && (
         <div id={id} className="mt-3">
