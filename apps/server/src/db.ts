@@ -18,6 +18,7 @@ export type Collection =
   | 'meetings'
   | 'changeRequests'
   | 'publicReports'
+  | 'withheld'
   | 'reviews'
   | 'votes'
   | 'releases'
@@ -41,6 +42,7 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
+    PRAGMA secure_delete = ON;
     CREATE TABLE IF NOT EXISTS docs (
       collection TEXT NOT NULL,
       id TEXT NOT NULL,
@@ -52,6 +54,37 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
     CREATE INDEX IF NOT EXISTS docs_parent ON docs (collection, parent);
   `);
   return db;
+}
+
+/**
+ * Remove every old copy of rewritten or deleted rows: VACUUM rebuilds the database file without its free
+ * space (secure_delete only zeroes what is freed from now on, not what older versions left behind), then the
+ * write-ahead log is copied in and emptied. Returns false, leaving the job to be retried, if another
+ * connection blocked either step.
+ */
+export function scrubFreeSpace(): boolean {
+  const c = conn();
+  try {
+    c.exec('VACUUM');
+    const r = c.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number };
+    return r.busy === 0 && r.log === r.checkpointed;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run fn without waiting on other connections' locks (busy_timeout 0): anything blocked throws SQLITE_BUSY
+ * at once instead of stalling the request thread. For background work that can simply be retried later.
+ */
+export function withoutWaiting<T>(fn: () => T): T {
+  const c = conn();
+  c.exec('PRAGMA busy_timeout = 0');
+  try {
+    return fn();
+  } finally {
+    c.exec('PRAGMA busy_timeout = 5000');
+  }
 }
 
 export function closeDb() {

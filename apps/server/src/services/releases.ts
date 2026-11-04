@@ -64,20 +64,22 @@ export function releaseDetail(r: Release): ReleaseDetail {
 }
 
 /** Release notes are published: a request synthesised from use cases never names them or their authors. */
+// A request an editor confirmed publishes nothing private is published as it is.
+const notesSecrets = (c: ChangeRequest) => (c.privacyCleared ? undefined : secretsOf(c));
 const published = (c: ChangeRequest, text: string) => {
-  const secrets = secretsOf(c);
+  const secrets = notesSecrets(c);
   if (!secrets) return text;
   const redacted = redactText(text, secrets);
   return revealing(redacted, secrets) ? 'Changes from use cases' : redacted;
 };
 const publishedEdits = (c: ChangeRequest) => {
-  const secrets = secretsOf(c);
+  const secrets = notesSecrets(c);
   return secrets ? publishableLines(c.kgcl ?? [], secrets) : (c.kgcl ?? []);
 };
 
 /** What a release's notes must not publish: the secrets of every synthesised request it includes. */
 export function releaseSecrets(r: Pick<Release, 'changeRequestIds'>) {
-  return allSecrets(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)).map((c) => (c ? secretsOf(c) : undefined)));
+  return allSecrets(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)).map((c) => (c ? notesSecrets(c) : undefined)));
 }
 
 /** Release notes grouped by level, from the merged change requests. */
@@ -196,7 +198,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
     if (format === 'turtle') continue;
     try {
-      files[`ontology.${FORMAT_INFO[format].extension}`] = await serialize(stamped, format);
+      files[`ontology.${FORMAT_INFO[format].extension}`] = await serialize(stamped, format, { name: project.slug });
     } catch (err) {
       console.warn(`[release] could not serialise ${format}: ${(err as Error).message}`);
     }

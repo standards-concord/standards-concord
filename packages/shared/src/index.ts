@@ -393,6 +393,30 @@ export interface PublicReport {
   createdAt: string;
 }
 
+/**
+ * A statement the privacy clean-up took out of a published ontology (the
+ * working draft or a release) because it may reveal a private use case or a
+ * person: kept here, privately, so an owner or steward can put it back if it
+ * was a false alarm.
+ */
+export interface WithheldStatement {
+  id: string;
+  ontologyId: string;
+  /** "working" for the working draft, else a release version. */
+  version: string;
+  subject: string;
+  predicate: string;
+  object: { value: string; language?: string; datatype?: string };
+  reason: 'credit' | 'use case title' | 'name';
+  at: string;
+}
+
+export interface PrivacyFinding {
+  /** e.g. "definition of :PilotRecord", "title". */
+  where: string;
+  kind: 'use case title' | 'name';
+}
+
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
   | 'triage' // automated classification + validation running/needs triage
@@ -505,6 +529,14 @@ export interface ChangeRequest {
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
   mergedCommit?: string;
+  /**
+   * What a merge would publish from the private use cases this was
+   * synthesised from (where, and what kind: never the text itself). Set when
+   * a merge is held back for it.
+   */
+  privacyFindings?: PrivacyFinding[];
+  /** An editor confirmed nothing in this version of the request is private (it changes if the request does). */
+  privacyCleared?: { by: string; at: string; fingerprint: string };
   releaseId?: string;
   timeline: TimelineEvent[];
   createdAt: string;
@@ -561,10 +593,15 @@ export interface ReleaseDetail extends Release {
 export interface OAuthRequestInfo {
   id: string;
   clientName: string;
+  /** Name, website and logo come from the app itself and are not checked. */
   clientUri?: string;
   logoUri?: string;
-  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code. */
+  /** For apps identified by a metadata document URL: the host that published it, which Concord did check. */
+  publisher?: string;
+  /** Where the person is sent back to, e.g. localhost:33418 for Claude Code; for a native app, its link scheme (com.example.app:). */
   redirectHost: string;
+  /** web: an https site. local: an app on this computer listening on localhost. native: an installed app's link scheme. */
+  redirectKind: 'web' | 'local' | 'native';
   localRedirect: boolean;
   resource?: string;
 }

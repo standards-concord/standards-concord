@@ -1,5 +1,6 @@
 import type { ChangeOp } from '@concord/core/types';
 import type { ChangeRequest, UseCase } from '@concord/shared';
+import { createHash } from 'node:crypto';
 import { get, list } from '../db.js';
 import { getUser } from './users.js';
 
@@ -24,7 +25,7 @@ import { getUser } from './users.js';
 export interface Secret {
   /** The words, as first written. */
   words: string[];
-  /** Matched only as written: a one-letter secret, or a name made only of common words ("An", "Will"). */
+  /** Matched only as written (or in capitals): a one-letter secret, or a name made only of ordinary words ("An", "Will"). */
   strict: boolean;
 }
 export interface Secrets {
@@ -40,6 +41,23 @@ const COMMON = new Set(
   info information model models system systems service services report reports user users person people place places work my our your
   one two three first second other more most all any some each`.split(/\s+/),
 );
+
+/** Ordinary words that are also names: a person called Will or May is matched only as written (Will, WILL). */
+const NAME_WORDS = new Set(
+  `will mark may june rose grace hope joy faith art rob pat sue jack frank guy dean lane ray max sky summer april august victor earl rich chase
+  hunter cliff gene bill penny ivy holly dawn eve iris lily violet amber ruby pearl crystal destiny honor sterling an al ed bo jo di
+  sam tom tim kim lee ben dan don ken ron ted val viv win drew rex king major sunny storm river brook glen heath forest`.split(/\s+/),
+);
+const plain = (w: string) => COMMON.has(w.toLowerCase()) || NAME_WORDS.has(w.toLowerCase());
+
+/** Letters and digits only, lower case, accents removed: what a name is however it's written. */
+export const foldName = (text: string) => fold(text);
+const fold = (text: string) =>
+  text
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
 
 interface Token {
   text: string;
@@ -88,7 +106,7 @@ function toSecrets(values: (string | undefined)[], keep: (v: string) => boolean)
     if (!v || !keep(v)) continue;
     const ws = tokens(v.normalize('NFKC')).map((t) => t.text);
     if (!ws.length) continue;
-    const strict = oneLetter(ws) || ws.every((w) => COMMON.has(w.toLowerCase()));
+    const strict = oneLetter(ws) || ws.every(plain);
     const key = `${strict}:${strict ? ws.join(' ') : ws.join(' ').toLowerCase()}`;
     if (!seen.has(key)) {
       seen.add(key);
@@ -151,24 +169,50 @@ function matches(text: string, s: Secrets): Match[] {
   for (const ph of PLACEHOLDERS)
     for (let i = 0; i + ph.length <= toks.length; i++) if (ph.every((w, j) => toks[i + j].text.toLowerCase() === w)) ph.forEach((_, j) => kept.add(i + j));
   const found: Match[] = [];
+  // Runs of letters and digits, with the tokens in each.
+  const runs: { text: string; tokens: number[] }[] = [];
+  toks.forEach((t, i) => {
+    const last = runs[runs.length - 1];
+    if (last && toks[last.tokens[0]].runStart === t.runStart) last.tokens.push(i);
+    else runs.push({ text: text.slice(t.runStart, t.runEnd), tokens: [i] });
+  });
+  const push = (i: number, j: number, replacement: string) =>
+    found.push({ from: toks[i].runStart, to: toks[j].runEnd, replacement, partial: toks[i].runStart !== toks[i].start || toks[j].runEnd !== toks[j].end });
   const kinds: [Secret[], string][] = [
     [s.titles, 'a use case'],
     [s.people, 'a participant'],
   ];
   for (const [secrets, replacement] of kinds)
     for (const secret of secrets) {
-      // Word boundaries inside a secret don't matter (MacDonald, Macdonald, Mac Donald); its ends do.
-      const key = secret.strict ? secret.words.join('') : secret.words.join('').toLowerCase();
+      const key = fold(secret.words.join(''));
+      if (!key) continue;
+      const wordsLower = secret.words.map((w) => fold(w));
+      const caps = secret.words.join('').toUpperCase();
+      const plural = (t: string, w: string) => t === w || t === `${w}s` || t === `${w}es`;
+      /** One token against one word of the secret. */
+      const same = (t: Token, j: number, last: boolean) =>
+        secret.strict ? t.text === secret.words[j] || t.text === secret.words[j].toUpperCase() : last ? plural(fold(t.text), wordsLower[j]) : fold(t.text) === wordsLower[j];
+      // 1. Word by word, across any separators: Secret Pilot, secret_pilot-records, SECRET PILOTS, MacDonald.
       for (let i = 0; i < toks.length; i++) {
-        let acc = '';
-        for (let j = i; j < toks.length && !kept.has(j); j++) {
-          acc += secret.strict ? toks[j].text : toks[j].text.toLowerCase();
-          if (acc === key) {
-            found.push({ from: toks[i].runStart, to: toks[j].runEnd, replacement, partial: toks[i].runStart !== toks[i].start || toks[j].runEnd !== toks[j].end });
-            break;
-          }
-          if (!key.startsWith(acc)) break;
-        }
+        const n = wordsLower.length;
+        if (i + n > toks.length) break;
+        let ok = true;
+        for (let j = 0; ok && j < n; j++) ok = !kept.has(i + j) && same(toks[i + j], j, j === n - 1);
+        if (ok) push(i, i + n - 1, replacement);
+      }
+      // 2. Inside one run of letters and digits, however its words are joined (Macdonald, SECRETPILOTSRECORD, XRECORD).
+      for (const run of runs) {
+        if (run.tokens.some((t) => kept.has(t))) continue;
+        const text = run.text;
+        const upper = /\p{L}/u.test(text) && text === text.toUpperCase();
+        const lower = text === text.toLowerCase();
+        let hit = false;
+        if (secret.strict) hit = upper && text.length > caps.length && (text.startsWith(caps) || text.endsWith(caps));
+        else if (key.length >= 5) hit = fold(text).includes(key);
+        else if (upper) hit = text.length > caps.length && (text.startsWith(caps) || text.endsWith(caps));
+        else if (lower && key.length >= 4) hit = text.startsWith(key) && text.length > key.length;
+        else if (fold(text) === key) hit = true;
+        if (hit) push(run.tokens[0], run.tokens[run.tokens.length - 1], replacement);
       }
     }
   // Longest first, then leftmost; overlapping matches are one.
@@ -197,8 +241,30 @@ export function redactText(text: string | undefined, s: Secrets): string | undef
 
 /** Would this name, label or line publish a title or a person, anywhere inside it? */
 export function revealing(name: string | undefined, s: Secrets): boolean {
-  if (!name || (!s.titles.length && !s.people.length)) return false;
-  return matches(name.normalize('NFKC'), s).length > 0;
+  return findSecrets(name, s).length > 0;
+}
+
+/**
+ * Which kinds of secret a text would publish, if any. Deliberately eager
+ * (everything redaction catches, and any long title or name however its
+ * words are joined or spaced): where this is used, a false alarm costs a
+ * person a look, while a miss would publish something private.
+ */
+export function findSecrets(text: string | undefined, s: Secrets): ('use case title' | 'name')[] {
+  if (!text || (!s.titles.length && !s.people.length)) return [];
+  const normalized = text.normalize('NFKC');
+  const found = new Set<'use case title' | 'name'>();
+  for (const m of matches(normalized, s)) found.add(m.replacement === 'a use case' ? 'use case title' : 'name');
+  const folded = fold(normalized.replace(/\ba use case\b|\ba participant\b/gi, ' '));
+  for (const [kind, list] of [
+    ['use case title', s.titles],
+    ['name', s.people],
+  ] as const)
+    for (const secret of list) {
+      const key = fold(secret.words.join(''));
+      if (!secret.strict && key.length >= 5 && folded.includes(key)) found.add(kind);
+    }
+  return [...found];
 }
 
 const TEXT_FIELDS = ['definition', 'comment', 'editorialNote', 'reason', 'title', 'description'] as const;
@@ -249,4 +315,40 @@ export function publishableNotes(notes: string, s: Secrets): string {
   if (!s.titles.length && !s.people.length) return notes;
   const out = publishableLines(notes.split('\n'), s).join('\n');
   return out === notes ? notes : out;
+}
+
+/** Where a change request would publish a secret: its title, every text and name in its edits, and its edit list. */
+export function privacyFindings(cr: Pick<ChangeRequest, 'title' | 'ops' | 'kgcl'>, s: Secrets): { where: string; kind: 'use case title' | 'name' }[] {
+  const out = new Map<string, { where: string; kind: 'use case title' | 'name' }>();
+  const check = (where: string, text: unknown) => {
+    if (typeof text !== 'string') return;
+    for (const kind of findSecrets(text, s)) out.set(`${where}|${kind}`, { where, kind });
+  };
+  check('title', cr.title);
+  for (const op of cr.ops) {
+    const r = op as unknown as Record<string, unknown>;
+    const term = String(r.newLocalName ?? r.localName ?? r.iri ?? r.classIri ?? op.op);
+    const walk = (value: unknown, field: string) => {
+      if (typeof value === 'string') check(field === 'localName' || field === 'newLocalName' ? `name ${term}` : `${field} of ${term}`, value);
+      else if (Array.isArray(value)) value.forEach((v) => walk(v, field));
+      else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, k);
+    };
+    for (const [k, v] of Object.entries(r)) if (k !== 'op') walk(v, k);
+  }
+  (cr.kgcl ?? []).forEach((line) => check('edit list', line));
+  return [...out.values()];
+}
+
+/** Changes whenever what a request would publish does, so a confirmation covers exactly what was checked. */
+export const publicationFingerprint = (cr: Pick<ChangeRequest, 'title' | 'ops' | 'kgcl'>) =>
+  createHash('sha256').update(JSON.stringify([cr.title, cr.ops, cr.kgcl ?? []])).digest('base64url');
+
+/** Text with every line that names a secret left out (nothing is rewritten). */
+export function withholdLines(text: string, s: Secrets): string {
+  if (!s.titles.length && !s.people.length) return text;
+  const out = text
+    .split('\n')
+    .filter((l) => !findSecrets(l, s).length)
+    .join('\n');
+  return out === text ? text : out;
 }

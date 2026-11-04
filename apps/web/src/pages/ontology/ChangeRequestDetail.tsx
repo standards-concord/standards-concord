@@ -54,6 +54,24 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
       {(cr.status === 'review' || cr.status === 'voting' || cr.status === 'triage' || cr.status === 'needs-work' || cr.status === 'draft') && (
         <Textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Add a comment (optional for approvals, helpful for objections)…" />
       )}
+      {cr.status === 'needs-work' && !!cr.privacyFindings?.length && (
+        <div className="rounded-lg border border-warn/40 bg-warn-soft p-3 text-sm" data-testid="privacy-hold">
+          <p className="font-medium">Held back: this would publish something from a private use case</p>
+          <ul className="mt-1 list-disc pl-5 text-muted">
+            {cr.privacyFindings.map((f) => (
+              <li key={`${f.where}-${f.kind}`}>
+                {f.kind === 'name' ? 'A person’s name' : 'A use case title'} in {f.where}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1.5 text-muted">Edit the change to leave it out, or, if it isn’t private, an editor can confirm and merge it.</p>
+          {hasRole('editor', 'steward', 'owner') && (
+            <Button size="sm" className="mt-2" loading={act.pending} onClick={() => void act.run(() => api.confirmNothingPrivate(cr.id))}>
+              Nothing here is private: merge
+            </Button>
+          )}
+        </div>
+      )}
       {(cr.status === 'draft' || cr.status === 'needs-work') && canEdit && (
         <Button variant="primary" icon={Send} className="w-full" loading={act.pending} onClick={() => void act.run(() => api.submitChangeRequest(cr.id))}>
           {cr.status === 'draft' ? 'Submit for review' : 'Resubmit'}

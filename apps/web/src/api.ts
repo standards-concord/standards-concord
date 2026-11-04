@@ -27,6 +27,7 @@ import type {
   OntologyView,
   OutputFormat,
   PublicReport,
+  WithheldStatement,
   Release,
   ReleaseDetail,
   Role,
@@ -215,6 +216,10 @@ export const api = {
   publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
   acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
   dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
+  confirmNothingPrivate: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/confirm-nothing-private`),
+  withheld: (id: string) => get<WithheldStatement[]>(`/api/ontologies/${e(id)}/withheld`),
+  restoreWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/restore`),
+  dismissWithheld: (id: string, wid: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/withheld/${e(wid)}/dismiss`),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),

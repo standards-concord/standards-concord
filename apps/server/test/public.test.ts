@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
-import { pageInput, refreshReleasePages } from '../src/public/routes.js';
+import { listWithheld, pageInput, refreshReleasePages, restoreWithheld } from '../src/public/routes.js';
 import { toPublishedRequirements } from '../src/public/requirements.js';
 import { fragment, termAnchors } from '../src/public/anchors.js';
 import { createProject, findProject } from '../src/services/ontologies.js';
@@ -276,7 +276,7 @@ describe('review fixes', () => {
     expect(noHtml.headers['content-type']).not.toMatch(/html/);
     const app_ = await request(app).get('/def/volunteering').set('Accept', 'application/*');
     expect(app_.headers['content-type']).toMatch(/^application\//);
-    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle']) {
+    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle', 'application/javascript', 'text/typescript']) {
       const res = await request(app).get('/def/volunteering').set('Accept', accept);
       expect(res.status, accept).toBe(406);
       expect(res.headers.vary, accept).toMatch(/Accept/);
@@ -553,7 +553,7 @@ describe('re-review fixes', () => {
 
   it('removes contributor names and use case titles that older versions wrote into the RDF', async () => {
     const project = findProject('volunteering')!;
-    // Merges credited their author on the terms they added. On a term generated from use cases, any member's name is provenance; other credits stay.
+    // On a term generated from use cases, the credits merges wrote can't be told from others, so all are withheld for review.
     const leaky = await createUser({ name: 'Leaky Name', provider: 'github', subject: 'leaky-name' });
     await createUser({ name: 'Credited Member', provider: 'github', subject: 'credited-member' });
     const template = (await import('../src/db.js')).list<ChangeRequest>('changeRequests', project.id)[0];
@@ -583,8 +583,13 @@ describe('re-review fixes', () => {
     // Editorial notes keep their meaning, and hand-written sources stay.
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Needed by a use case (see source).');
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('NCVO definition of formal volunteering');
+    // Credits on a term generated from use cases are withheld, not deleted: an owner or steward can put one back.
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).not.toContain('Explicitly credited editor');
+    const held = listWithheld(project.id).find((w) => w.version === 'working' && w.object.value === 'Explicitly credited editor')!;
+    expect(held.reason).toBe('credit');
+    await restoreWithheld(project, held.id);
     expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('Explicitly credited editor');
-    expect((await request(app).get('/def/volunteering/draft.ttl')).text).not.toContain('Credited Member');
+    expect(listWithheld(project.id).some((w) => w.id === held.id)).toBe(false);
   });
 });
 
@@ -602,14 +607,27 @@ describe('third review fixes', () => {
       { op: 'addClass', localName: 'PendingSecretTitleRecord', label: 'PENDING_SECRET_TITLE record', definition: 'x' },
     ];
     put('changeRequests', { ...getCR(cr.id), ops, status: 'approved' }, cr.ontologyId);
+    // Held back, not rewritten: it says where, and publishes nothing.
+    const held = await merge(getCR(cr.id), undefined);
+    expect(held.status).toBe('needs-work');
+    expect(held.privacyFindings).toEqual(
+      expect.arrayContaining([
+        { where: 'definition of QueuedThing', kind: 'use case title' },
+        { where: 'definition of QueuedThing', kind: 'name' },
+        { where: 'name PendingSecretTitleRecord', kind: 'use case title' },
+      ]),
+    );
+    expect(JSON.stringify(held.privacyFindings)).not.toContain('PENDING_SECRET_TITLE');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).not.toContain('QueuedThing');
+    // Edited, it merges.
+    put('changeRequests', { ...getCR(cr.id), ops: [{ op: 'addClass', localName: 'QueuedThing', label: 'queued thing', definition: 'Something waiting in a queue.' }], status: 'approved' }, cr.ontologyId);
     const merged = await merge(getCR(cr.id), undefined);
     expect(merged.status).toBe('merged');
+    expect(merged.privacyFindings).toBeUndefined();
     const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
     expect(ttl).toContain('QueuedThing');
     expect(ttl).not.toContain('PENDING_SECRET_TITLE');
     expect(ttl).not.toContain('Pending Person');
-    expect(ttl).not.toContain('PendingSecretTitleRecord');
-    expect(merged.timeline.some((e) => /left out PendingSecretTitleRecord/.test(e.message))).toBe(true);
     // The commit is published with the ontology, so it names no one; signed-in history still does.
     const head = ontologyStore.log(project, 1)[0];
     expect(head.author).toBe('Concord');
@@ -719,24 +737,37 @@ describe('fourth review fixes', () => {
     expect(redactText(redactText(once, s), s)).toBe(once);
   });
 
-  it('describes a merged request by what was merged, in the commit and in release notes', async () => {
+  it('merges a held-back request once an editor confirms nothing in it is private, and only that version', async () => {
     const project = findProject('volunteering')!;
     const tester = await createUser({ name: 'Kgcl Person', provider: 'github', subject: 'kgcl-leak' });
     const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'Hidden Pilot' } });
     const cr = await synthesise(project, tester, [uc.id]);
     const ops = [
-      { op: 'addClass', localName: 'HiddenPilotRecord', label: 'pilot record', definition: 'Private' },
+      { op: 'addClass', localName: 'HiddenPilotRecord', label: 'pilot record', definition: 'A record.' },
       { op: 'addClass', localName: 'SafeRecordFour', label: 'safe record four', definition: 'Fine.' },
     ];
-    put('changeRequests', { ...getCR(cr.id), ops, kgcl: ["create class :HiddenPilotRecord 'pilot record'", "create class :SafeRecordFour 'safe record four'"], status: 'approved' }, cr.ontologyId);
-    const merged = await merge(getCR(cr.id), undefined);
-    expect(merged.status).toBe('merged');
-    expect(JSON.stringify(merged.kgcl)).not.toMatch(/HiddenPilot/);
-    expect(JSON.stringify(merged.kgcl)).toMatch(/SafeRecordFour/);
-    const { execFileSync } = await import('node:child_process');
-    const message = execFileSync('git', ['log', '-1', '--format=%B'], { cwd: ontologyStore.dir(project), encoding: 'utf8' });
-    expect(message).toContain('SafeRecordFour');
-    expect(message).not.toMatch(/Hidden ?Pilot/i);
+    put('changeRequests', { ...getCR(cr.id), ops, kgcl: ["create class :HiddenPilotRecord 'pilot record'"], status: 'approved' }, cr.ontologyId);
+    expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
+    // Only editors, stewards and owners can confirm.
+    const contributor = request.agent(app);
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor four', role: 'contributor' });
+    expect((await contributor.post(`/api/change-requests/${cr.id}/confirm-nothing-private`)).status).toBe(403);
+    const editor = request.agent(app);
+    await editor.post('/api/auth/demo').send({ name: 'Editor four', role: 'editor' });
+    const confirmed = await editor.post(`/api/change-requests/${cr.id}/confirm-nothing-private`);
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.status).toBe('merged');
+    expect((await request(app).get('/def/volunteering/draft.ttl')).text).toContain('HiddenPilotRecord');
+    // A confirmation covers what was checked: a later edit needs another.
+    const again = await synthesise(project, tester, [uc.id]);
+    put('changeRequests', { ...getCR(again.id), ops: [{ op: 'addClass', localName: 'HiddenPilotNote', label: 'note', definition: 'x' }], status: 'approved' }, project.id);
+    expect((await merge(getCR(again.id), undefined)).status).toBe('needs-work');
+    await editor.post(`/api/change-requests/${again.id}/confirm-nothing-private`);
+    // (merged now; editing a merged request isn't possible, so check the fingerprint directly)
+    const { publicationFingerprint } = await import('../src/services/redact.js');
+    const after = getCR(again.id);
+    expect(after.privacyCleared?.fingerprint).toBe(publicationFingerprint(after));
+    expect(publicationFingerprint({ ...after, ops: [...after.ops, { op: 'addClass', localName: 'HiddenPilotMore', label: 'more', definition: 'x' }] })).not.toBe(after.privacyCleared?.fingerprint);
   });
 
   it('cleans release drafts, renamed terms and half-written formats, and hides names from anonymous WebID lookups', async () => {
@@ -769,7 +800,8 @@ describe('fourth review fixes', () => {
       expect(ttl).not.toContain('RENAMED_SECRET');
       expect(ttl).not.toContain('Rename Person');
       const stored = (await import('../src/db.js')).get<{ notes: string }>('releases', 'rel_old_draft')!;
-      expect(stored.notes).toBe('Changes for a use case by a participant');
+      // Lines naming a use case or a person are left out, never reworded.
+      expect(stored.notes).toBe('');
       expect(fs.readFileSync(path.join(dir, 'ontology.jsonld'), 'utf8')).not.toContain('WRITE_FAILURE_SECRET');
     } finally {
       (await import('../src/db.js')).remove('releases', 'rel_old_draft');
@@ -789,7 +821,7 @@ describe('fifth review fixes', () => {
   const NS = 'https://w3id.org/odi/volunteering#';
   const base = () => listUseCases(findProject('volunteering')!.id)[0];
   const releaseDir = () => path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0');
-  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 4"');
+  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
   const rerun = async () => {
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     await refreshReleasePages();
@@ -810,13 +842,13 @@ describe('fifth review fixes', () => {
       { ...getCR(cr.id), title: 'Changes for SecretPilot by MacDonald', status: 'approved', ops: [{ op: 'addClass', localName: 'CamelSafeRecord', label: 'camel safe record', definition: 'Requested by MacDonald for SecretPilot.' }] },
       cr.ontologyId,
     );
-    expect((await merge(getCR(cr.id), undefined)).status).toBe('merged');
+    const held = await merge(getCR(cr.id), undefined);
+    expect(held.status).toBe('needs-work');
+    expect(held.privacyFindings).toEqual(expect.arrayContaining([{ where: 'title', kind: 'use case title' }, { where: 'title', kind: 'name' }, { where: 'definition of CamelSafeRecord', kind: 'name' }]));
     const ttl = (await request(app).get('/def/volunteering/draft.ttl')).text;
-    expect(ttl).toContain('CamelSafeRecord');
-    expect(ttl).not.toMatch(/SecretPilot|MacDonald/);
+    expect(ttl).not.toMatch(/SecretPilot|MacDonald|CamelSafeRecord/);
     const { execFileSync } = await import('node:child_process');
     const message = execFileSync('git', ['log', '-1', '--format=%B'], { cwd: ontologyStore.dir(project), encoding: 'utf8' });
-    expect(message).toContain('CamelSafeRecord');
     expect(message).not.toMatch(/SecretPilot|MacDonald/);
   });
 
@@ -936,5 +968,144 @@ describe('fifth review fixes', () => {
     await rerun();
     expect(cleanupDone()).toBe(true);
     expect((await request(app).get('/def/volunteering/1.0.0.owl')).text).toContain('rdf:RDF');
+  });
+});
+
+describe('sixth review fixes', () => {
+  const NS = 'https://w3id.org/odi/volunteering#';
+  const owlClass = 'http://www.w3.org/2002/07/owl#Class';
+  const DEF = 'http://www.w3.org/2004/02/skos/core#definition';
+  const CONTRIB = 'http://purl.org/dc/terms/contributor';
+  const SRC = 'http://purl.org/dc/terms/source';
+  const base = () => listUseCases(findProject('volunteering')!.id)[0];
+  const rerun = async () => {
+    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    await refreshReleasePages();
+  };
+  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
+  const everyFormat = async (version: string) =>
+    Promise.all(['', '.ttl', '.nt', '.owl', '.jsonld', '.omn', '.yaml'].map(async (ext) => (await request(app).get(`/def/volunteering/${version}${ext}`)).text)).then((xs) => xs.join('\n'));
+
+  it('catches cased, plural and run-together forms of titles and names, and holds back a merge that has them', async () => {
+    const { findSecrets } = await import('../src/services/redact.js');
+    const mac = await createUser({ name: 'MacDonald', provider: 'github', subject: 'six-mac' });
+    const s = secretsFor([{ ...base(), authorId: mac.id, sections: { name: 'SecretPilot' } }]);
+    for (const t of ['SecretPilotsRecord', 'SECRETPILOTRECORD', 'MACDONALDRECORD', 'Requested by MacDonalds for SecretPilots', 'secret-pilots', 'Secret  Pilots', 'macdonaldrecord'])
+      expect(findSecrets(t, s).length, t).toBeGreaterThan(0);
+    const an = await createUser({ name: 'An', provider: 'github', subject: 'six-an' });
+    const x = secretsFor([{ ...base(), authorId: an.id, sections: { name: 'X' } }]);
+    for (const t of ['Requested by AN', 'ANRECORD', 'XRECORD', 'XRecord', 'Requested by An']) expect(findSecrets(t, x).length, t).toBeGreaterThan(0);
+    for (const t of ['an apple', 'Xylophone', 'TaxRecord', 'A plan for an index']) expect(findSecrets(t, x), t).toEqual([]);
+    // Through synthesis and merge: nothing reaches the draft.
+    const project = findProject('volunteering')!;
+    const uc = createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilot' } });
+    const cr = await synthesise(project, mac, [uc.id]);
+    put(
+      'changeRequests',
+      {
+        ...getCR(cr.id),
+        title: 'Changes',
+        status: 'approved',
+        ops: [
+          { op: 'addClass', localName: 'SECRETPILOTRECORD', label: 'record', definition: 'Requested by MacDonalds for SecretPilots.' },
+          { op: 'addClass', localName: 'SixSafe', label: 'six safe', definition: 'Fine.', altLabels: ['MACDONALDRECORD'] },
+        ],
+      },
+      project.id,
+    );
+    expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
+    expect(await everyFormat('draft')).not.toMatch(/SECRETPILOT|MacDonald|MACDONALD|SixSafe/i);
+  });
+
+  it('never changes what unrelated text means', async () => {
+    const { findSecrets, redactText } = await import('../src/services/redact.js');
+    const anna = await createUser({ name: 'Anna', provider: 'github', subject: 'six-anna' });
+    const will = await createUser({ name: 'Will', provider: 'github', subject: 'six-will' });
+    const s = secretsFor([
+      { ...base(), authorId: anna.id, sections: { name: 'Secret Pilot' } },
+      { ...base(), authorId: will.id, sections: { name: 'Secret Pilot' } },
+    ]);
+    for (const t of ['An N/A value is allowed.', 'A record will remain valid.', 'A summary of the savannah.']) {
+      expect(findSecrets(t, s), t).toEqual([]);
+      expect(redactText(t, s)).toBe(t);
+    }
+    expect(findSecrets('Requested by Will and Anna.', s)).toEqual(['name']);
+  });
+
+  it('withholds what a deleted author’s merges left, learning from every graph before cleaning any', async () => {
+    const project = findProject('volunteering')!;
+    const ghost = await createUser({ name: 'Ghost Author', provider: 'github', subject: 'six-ghost' });
+    (await import('../src/db.js')).remove('users', ghost.id);
+    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
+    const ttlFile = path.join(dir, 'ontology.ttl');
+    const saved = fs.readFileSync(ttlFile, 'utf8');
+    // In the release: a term generated from a use case, credited to a person who no longer has an account.
+    fs.writeFileSync(
+      ttlFile,
+      `${saved}\n<${NS}GhostTerm> a <${owlClass}> ; <${SRC}> "use cases: LATE_HARVEST_PRIVATE_TITLE" ; <${CONTRIB}> "Ghost Author" ; <${DEF}> "A record, requested by Ghost Author." .\n`,
+    );
+    ontologyStore.forgetReleases(project);
+    // In the working draft, only text: its provenance survives only in the release, read later.
+    const working = await ontologyStore.working(project);
+    const dirty = await OntologyGraph.fromTurtle(`${await working.toTurtle()}\n<${NS}LateTerm> a <${owlClass}> ; <${DEF}> "Drafted for LATE_HARVEST_PRIVATE_TITLE." .\n`);
+    await ontologyStore.commitWorking(project, dirty, 'simulate', { name: 'Test' });
+    await rerun();
+    expect(cleanupDone()).toBe(true);
+    const published = `${await everyFormat('1.0.0')}\n${await everyFormat('draft')}\n${(await request(app).get('/def/volunteering/1.0.0')).text}\n${(await request(app).get('/def/volunteering/draft')).text}`;
+    expect(published).toContain('GhostTerm');
+    expect(published).toContain('LateTerm');
+    expect(published).not.toMatch(/Ghost Author|LATE_HARVEST_PRIVATE_TITLE/);
+    expect(listWithheld(project.id).filter((w) => /Ghost Author|LATE_HARVEST/.test(w.object.value)).map((w) => w.reason).sort()).toEqual(['credit', 'name', 'use case title']);
+  });
+
+  it('credits stay with the term a person meant, even when an old name is reused', async () => {
+    const project = findProject('volunteering')!;
+    const alice = await createUser({ name: 'Alias Alice', provider: 'github', subject: 'six-alice' });
+    const bob = await createUser({ name: 'Alias Bob', provider: 'github', subject: 'six-bob' });
+    const template = (await import('../src/db.js')).list<ChangeRequest>('changeRequests', project.id)[0];
+    const direct = { ...template, origin: { type: 'direct' as const }, status: 'merged' as const };
+    put('changeRequests', { ...direct, id: 'cr_alias_1', number: 9501, authorId: alice.id, ops: [{ op: 'addClass', localName: 'AliasOld', label: 'alias', definition: 'x' }] }, project.id);
+    put('changeRequests', { ...direct, id: 'cr_alias_2', number: 9502, authorId: alice.id, ops: [{ op: 'renameTerm', iri: `${NS}AliasOld`, newLocalName: 'AliasNew' }] }, project.id);
+    put('changeRequests', { ...direct, id: 'cr_alias_3', number: 9503, authorId: bob.id, ops: [{ op: 'addClass', localName: 'AliasOld', label: 'alias again', definition: 'y' }] }, project.id);
+    const working = await ontologyStore.working(project);
+    const dirty = await OntologyGraph.fromTurtle(
+      `${await working.toTurtle()}
+<${NS}AliasNew> a <${owlClass}> ; <${SRC}> "volunteering#9501" ; <${CONTRIB}> "Alias Alice" .
+<${NS}AliasOld> a <${owlClass}> ; <${SRC}> "volunteering#9503" ; <${CONTRIB}> "Alias Bob", "Alias Alice" .
+`,
+    );
+    await ontologyStore.commitWorking(project, dirty, 'simulate', { name: 'Test' });
+    await rerun();
+    const g = await ontologyStore.working(project);
+    const credits = (iri: string) => g.store.getQuads(iri, CONTRIB, null, null).map((q) => q.object.value).sort();
+    // What each merge wrote is withheld; Bob's deliberate credit to Alice stays on his term.
+    expect(credits(`${NS}AliasNew`)).toEqual([]);
+    expect(credits(`${NS}AliasOld`)).toEqual(['Alias Alice']);
+  });
+
+  it('keeps a format it had to take down on its list until it is back on disk', async () => {
+    const project = findProject('volunteering')!;
+    const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
+    const ttlFile = path.join(dir, 'ontology.ttl');
+    const owlFile = path.join(dir, 'ontology.owl');
+    const ttl = fs.readFileSync(ttlFile, 'utf8');
+    fs.writeFileSync(owlFile, '<?xml version="1.0"?>\n<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><!-- OLD_PRIVATE_NAME --></rdf:RDF>\n');
+    fs.writeFileSync(ttlFile, `${ttl}\n<${NS}Volunteer> <https://example.org/123> "x" .\n`);
+    ontologyStore.forgetReleases(project);
+    try {
+      await rerun();
+      expect(fs.existsSync(owlFile)).toBe(false);
+      expect(cleanupDone()).toBe(false);
+      // Still broken: still not done.
+      await rerun();
+      expect(cleanupDone()).toBe(false);
+    } finally {
+      fs.writeFileSync(ttlFile, ttl);
+      ontologyStore.forgetReleases(project);
+    }
+    await rerun();
+    expect(cleanupDone()).toBe(true);
+    expect(fs.readFileSync(owlFile, 'utf8')).toContain('rdf:RDF');
+    expect(fs.readFileSync(owlFile, 'utf8')).not.toContain('OLD_PRIVATE_NAME');
   });
 });

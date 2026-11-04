@@ -1,14 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { expandIRI, FORMAT_INFO, generatedProvenanceTitles, rewriteLiterals, scrubGeneratedProvenance, serialize, type OntologyGraph } from '@concord/core';
+import { DataFactory, type Literal, type Quad } from 'n3';
+import { bumpVersion, FORMAT_INFO, generatedProvenanceTitles, npmPackage, scrubGeneratedProvenance, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
-import type { ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
+import type { ChangeRequest, OntologyProject, Release, UseCase, WithheldStatement } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, list, put } from '../db.js';
-import { allSecrets, publishableNotes, redactText, secretsFor, secretsOf } from '../services/redact.js';
-import { releaseSecrets } from '../services/releases.js';
+import { get, HttpError, list, put, remove } from '../db.js';
+import { newId } from '../ids.js';
+import { findSecrets, foldName, secretsFor, withholdLines, words } from '../services/redact.js';
 import { getUser } from '../services/users.js';
 import { findProject } from '../services/ontologies.js';
 import { ONTOLOGY_FILE, ontologyStore } from '../services/ontologyStore.js';
@@ -26,33 +27,57 @@ export { PUBLIC_BASE };
  *   /def/<slug>                 the ontology IRI: the latest release
  *   /def/<slug>/<version>       a version IRI, e.g. /def/volunteering/1.0.0
  *   /def/<slug>/draft           the unreleased working draft
- *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .html)
+ *   /def/<slug>/<version>.ttl   a specific serialisation (also .jsonld, .owl, .nt, .omn, .linkml.yaml, .shacl.ttl, .shaclc, .html)
+ *   /def/<slug>/<version>.js    JavaScript classes for every SHACL node shape (@rdfjs/wrapper), to import from a browser
+ *                               (?deps=bare imports "@rdfjs/wrapper" by name instead of from a CDN); also .ts and .d.ts
+ *   /def/<slug>/<version>.tgz   the same classes as an npm package: npm install <this URL>
+ *   /def/<slug>/<version>.shaclc  standard SHACL compact syntax (?syntax=extended keeps shape names)
  *
- * Browsers get the HTML page; anything asking for RDF gets RDF (Vary: Accept).
+ * Browsers get the HTML page; anything asking for RDF (or JavaScript, or
+ * SHACLC) gets that (Vary: Accept). Responses allow any origin, so an app on
+ * another site can fetch the ontology or import its classes.
  * Persistent IRIs (w3id.org) redirect here, see w3id.ts.
  */
 
 /** Formats offered for download and by content negotiation, in display order. */
-const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl'];
+const DOWNLOAD_ORDER: OutputFormat[] = ['turtle', 'jsonld', 'rdfxml', 'ntriples', 'manchester', 'linkml', 'shacl', 'shaclc', 'javascript', 'typescript'];
+
+/** What a /def URL can return: a serialisation, the HTML page, type declarations or an npm package. */
+export type PublicFormat = OutputFormat | 'html' | 'dts' | 'npm';
+
+const EXTRA_INFO: Record<'dts' | 'npm', { label: string; mediaType: string; extension: string }> = {
+  dts: { label: 'TypeScript declarations', mediaType: 'application/typescript', extension: 'd.ts' },
+  npm: { label: 'npm package', mediaType: 'application/gzip', extension: 'tgz' },
+};
 
 /**
  * Media types answered by content negotiation: exactly the types we produce and
- * send back, with no aliases (SHACL and LinkML are by extension only). HTML is
- * first, so a bare Accept or *\/* gets the page.
+ * send back, with no aliases (SHACL, LinkML, the declarations and the npm
+ * package are by extension only). HTML is first, so a bare Accept or *\/* gets
+ * the page.
  */
-const NEGOTIABLE: Record<string, OutputFormat | 'html'> = {
+const NEGOTIABLE: Record<string, PublicFormat> = {
   'text/html': 'html',
   'text/turtle': 'turtle',
   'application/ld+json': 'jsonld',
   'application/rdf+xml': 'rdfxml',
   'application/n-triples': 'ntriples',
   'text/owl-manchester': 'manchester',
+  'text/shaclc': 'shaclc',
+  'text/javascript': 'javascript',
+  'application/typescript': 'typescript',
 };
 
 /** File extensions, longest first so ".shacl.ttl" wins over ".ttl". */
-const EXTENSIONS: [string, OutputFormat | 'html'][] = [
+const EXTENSIONS: [string, PublicFormat][] = [
   ['linkml.yaml', 'linkml'],
   ['shacl.ttl', 'shacl'],
+  ['shaclc', 'shaclc'],
+  ['d.ts', 'dts'],
+  ['ts', 'typescript'],
+  ['mjs', 'javascript'],
+  ['js', 'javascript'],
+  ['tgz', 'npm'],
   ['jsonld', 'jsonld'],
   ['html', 'html'],
   ['ttl', 'turtle'],
@@ -62,7 +87,7 @@ const EXTENSIONS: [string, OutputFormat | 'html'][] = [
   ['nt', 'ntriples'],
 ];
 
-function splitExtension(segment: string): { base: string; format?: OutputFormat | 'html' } {
+function splitExtension(segment: string): { base: string; format?: PublicFormat } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
   return { base: segment };
 }
@@ -107,8 +132,20 @@ export async function pageInput(
       href: opts.relativeDownloads ? `ontology.${info.extension}` : `${root}/${version}.${info.extension}`,
     };
   });
+  const mod = await toWrapperClasses(graph, { name: project.slug });
+  const withGetter = mod.classes.filter((c) => c.datasetGetter);
+  const example = withGetter.find((c) => c.properties.length > 1 && !c.extends) ?? withGetter[0];
   return {
     project,
+    code: {
+      moduleUrl: `${root}/${version}.js`,
+      packageUrl: `${root}/${version}.tgz`,
+      packageName: `${project.slug}-ontology`,
+      datasetClass: mod.datasetClass,
+      exampleClass: example?.name,
+      exampleGetter: example?.datasetGetter,
+      exampleProperty: example?.properties[0]?.name,
+    },
     view: graph.view(),
     kind: isDraft ? 'draft' : 'release',
     version,
@@ -251,71 +288,25 @@ export async function refreshReleasePages(): Promise<void> {
 }
 
 /** Bump when the clean-up below changes, so it runs once more on every ontology. */
-const CLEANUP_VERSION = 'privacy clean-up 4';
-
-/** When a request was merged: what order its renames happened in. */
-const mergedAt = (cr: ChangeRequest) => cr.timeline.find((e) => e.type === 'status' && /^merged/.test(e.message ?? ''))?.at ?? cr.statusSince ?? '';
+const CLEANUP_VERSION = 'privacy clean-up 5';
 
 /**
- * Every name each request's terms have had. Terms are followed through later
- * renames, and a new term is a new term even when it reuses a name an earlier
- * one gave up (OldRecord renamed to NewRecord, then a new OldRecord renamed to
- * OtherRecord: the first request's term is OldRecord and NewRecord).
+ * What the clean-up has learned, kept privately so a run that stops half way
+ * (or a later run) still knows it: the use case titles generated provenance
+ * recorded, the names in credits it withheld, and the formats it had to take
+ * down and must regenerate.
  */
-function termHistory(crs: ChangeRequest[], g: OntologyGraph) {
-  const current = new Map<string, Set<string>>();
-  const identity = (iri: string) => {
-    let id = current.get(iri);
-    if (!id) current.set(iri, (id = new Set([iri])));
-    return id;
-  };
-  const touched = new Map<string, Set<string>[]>();
-  const created = new Map<string, Set<string>[]>();
-  const ordered = [...crs].sort((a, b) => mergedAt(a).localeCompare(mergedAt(b)) || a.number - b.number);
-  for (const cr of ordered) {
-    const t: Set<string>[] = [];
-    const c: Set<string>[] = [];
-    for (const op of cr.ops) {
-      const r = op as Record<string, unknown>;
-      if (op.op === 'renameTerm') {
-        const from = expandIRI(op.iri, g.prefixes);
-        const to = g.namespace + op.newLocalName;
-        const id = identity(from);
-        current.delete(from);
-        id.add(to);
-        current.set(to, id);
-        t.push(id);
-      } else if (typeof r.localName === 'string') {
-        const iri = g.namespace + r.localName;
-        const id = new Set([iri]);
-        current.set(iri, id);
-        t.push(id);
-        c.push(id);
-      } else if (typeof r.iri === 'string') t.push(identity(expandIRI(r.iri, g.prefixes)));
-      else if (typeof r.classIri === 'string') t.push(identity(expandIRI(r.classIri, g.prefixes)));
-    }
-    touched.set(cr.id, t);
-    created.set(cr.id, c);
-  }
-  const names = (ids: Set<string>[] | undefined) => [...new Set((ids ?? []).flatMap((id) => [...id]))];
-  return {
-    /** Every name of the terms a request added or changed. */
-    touched: (cr: ChangeRequest) => names(touched.get(cr.id)),
-    /** Every name of the terms a request added (the only ones merges credited their author on). */
-    created: (cr: ChangeRequest) => names(created.get(cr.id)),
-  };
-}
-
-/**
- * What the clean-up learned from generated provenance it has since removed:
- * the use case titles each term recorded. Kept (privately) so a run that
- * stopped half way can still finish cleaning everything else.
- */
-interface CleanupInputs {
+interface CleanupState {
   id: string;
-  terms: Record<string, string[]>;
+  titles: string[];
+  names: string[];
+  pendingFormats: Record<string, string[]>;
 }
-const cleanupInputsKey = (project: OntologyProject) => `privacy-cleanup:${project.id}`;
+const cleanupStateKey = (project: OntologyProject) => `privacy-cleanup:${project.id}`;
+
+const SOURCE = 'http://purl.org/dc/terms/source';
+const P_CONTRIBUTOR = 'http://purl.org/dc/terms/contributor';
+const CREDIT_PREDICATES = new Set([P_CONTRIBUTOR, 'http://purl.org/dc/terms/creator', 'http://purl.org/dc/elements/1.1/creator', 'http://purl.org/dc/elements/1.1/contributor']);
 
 /** Whether a stored snapshot holds only what may be published: nothing for a real ontology yet, the fixed fictional use cases for the demo. */
 export function publishableSnapshot(project: OntologyProject, version: string, data: PublishedRequirements): PublishedRequirements | undefined {
@@ -325,147 +316,213 @@ export function publishableSnapshot(project: OntologyProject, version: string, d
 }
 
 /**
- * Removes what older versions of Concord could publish from private use
- * cases and the people behind changes, from the working draft, every release
- * on disk (RDF in every format, notes and use case snapshots) and every
- * release record, drafts included:
- *   - generated provenance (scrubGeneratedProvenance); a term's contributor
- *     only where a merged request by that person touched the term,
- *   - the titles and authors of the use cases each synthesised request came
- *     from, in the terms it added or changed (followed through later renames),
- *     and the titles generated provenance itself recorded, in those terms,
- *   - the same in release notes (record, RELEASE_NOTES.md, CHANGELOG.md),
- *   - release snapshots that hold anything but what may be published.
- * Every serialisation is regenerated from the cleaned graph and compared with
- * what's on disk, so a run interrupted half way is finished by the next.
- * Each release is handled on its own. Returns whether everything was checked
- * and written: only then is the clean-up recorded as done.
+ * Takes out of every published ontology (the working draft and each release
+ * on disk, every format, notes and snapshots) what older versions of Concord
+ * could publish from private use cases and the people behind changes. Nothing
+ * is rewritten: a statement that may reveal something is withheld whole (kept
+ * privately as a WithheldStatement, so an owner or steward can put it back).
+ *
+ *   1. Everything is read and learned before anything is changed: the titles
+ *      generated provenance recorded, and the credits merges wrote. Credits a
+ *      merge wrote are recognised by the term itself: a literal
+ *      dcterms:contributor on a term whose dcterms:source names the request
+ *      that created it ("<slug>#<n>") and that request's author (or a request
+ *      or author that no longer exists), or on a term generated from use
+ *      cases. The names in them are then treated as private too.
+ *   2. Generated provenance is removed (it's in fixed forms), those credits
+ *      are withheld, and so is any other text on any term that names a use
+ *      case title or one of those people, however it's written. Credits no
+ *      merge wrote were given on purpose, and stay.
+ *   3. Every format of every release is regenerated from the cleaned graph; one
+ *      that can't be is taken down and tried again on every run until it can.
+ *   4. Release notes and the changelog lose any line that names one.
+ * Returns whether everything was checked and written: only then is the
+ * clean-up recorded as done.
  */
 async function remediateProvenance(project: OntologyProject): Promise<{ complete: boolean }> {
-  const crs = list<ChangeRequest>('changeRequests', project.id).filter((c) => ['merged', 'released'].includes(c.status));
-  const plans = crs.flatMap((cr) => {
-    const secrets = secretsOf(cr);
-    return secrets ? [{ cr, secrets }] : [];
-  });
+  const crs = list<ChangeRequest>('changeRequests', project.id);
+  const byNumber = new Map(crs.map((c) => [c.number, c]));
   const dir = ontologyStore.dir(project);
   let complete = true;
-  const inputs: CleanupInputs = get<CleanupInputs>('kv', cleanupInputsKey(project)) ?? { id: cleanupInputsKey(project), terms: {} };
-  const harvestedTitles = () => [...new Set(Object.values(inputs.terms).flat())];
-  // Terms generated from use cases whose requests are gone don't say who asked: any member's name there is provenance.
-  const userNames = list<User>('users').filter((u) => u.id !== 'usr_public').map((u) => u.name).filter(Boolean);
-  const legacyPeople = () => secretsFor([], { people: Object.keys(inputs.terms).length ? userNames : [] });
-  const norm = (name: string) => name.normalize('NFKC').trim().toLowerCase();
-  const memberNames = new Set(userNames.map(norm));
+  const state: CleanupState = { titles: [], names: [], pendingFormats: {}, ...get<CleanupState>('kv', cleanupStateKey(project)), id: cleanupStateKey(project) };
+  const warn = (what: string, err: unknown) => {
+    complete = false;
+    console.warn(`[public] could not ${what} for ${project.slug}: ${(err as Error).message}`);
+  };
 
-  const scrub = (g: OntologyGraph) => {
-    const history = termHistory(crs, g);
-    // Remember what generated provenance recorded before removing it, so a retry still knows.
-    let learned = false;
-    for (const [subject, titles] of generatedProvenanceTitles(g)) {
-      const before = inputs.terms[subject] ?? [];
-      const after = [...new Set([...before, ...titles])];
-      if (after.length !== before.length) {
-        inputs.terms[subject] = after;
-        learned = true;
+  // 1. Read every graph, and learn from all of them before changing any.
+  const graphs: { version: string; graph: OntologyGraph }[] = [];
+  try {
+    graphs.push({ version: 'working', graph: (await ontologyStore.working(project)).clone() });
+  } catch (err) {
+    warn('read the working draft', err);
+  }
+  ontologyStore.forgetReleases(project);
+  const versions = ontologyStore.versions(project);
+  for (const version of versions) {
+    try {
+      graphs.push({ version, graph: (await ontologyStore.at(project, version)).clone() });
+    } catch (err) {
+      warn(`read release ${version}`, err);
+    }
+  }
+  const sourceRef = new RegExp(`^${project.slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#(\\d+)$`);
+  /** The literal credits on a term that a merge (not a person) wrote. */
+  const generatedCredits = (g: OntologyGraph, subject: string, generatedProvenance: boolean) => {
+    const credits = g.store.getQuads(DataFactory.namedNode(subject), DataFactory.namedNode(P_CONTRIBUTOR), null, null).filter((q) => q.object.termType === 'Literal');
+    if (!credits.length) return [];
+    if (generatedProvenance) return credits;
+    const refs = g.store
+      .getQuads(DataFactory.namedNode(subject), DataFactory.namedNode(SOURCE), null, null)
+      .map((q) => sourceRef.exec(q.object.value)?.[1])
+      .filter((n): n is string => !!n);
+    return credits.filter((q) =>
+      refs.some((n) => {
+        const cr = byNumber.get(Number(n));
+        const author = cr && getUser(cr.authorId);
+        return !author || author.name.normalize('NFKC').trim() === q.object.value.normalize('NFKC').trim();
+      }),
+    );
+  };
+  const tainted = new Map<OntologyGraph, Set<string>>();
+  const generated = new Map<OntologyGraph, Set<string>>();
+  for (const { graph } of graphs) {
+    const provenance = generatedProvenanceTitles(graph);
+    generated.set(graph, new Set(provenance.keys()));
+    const marked = new Set(provenance.keys());
+    for (const titles of provenance.values()) state.titles.push(...titles);
+    for (const subject of new Set(graph.store.getSubjects(null, null, null).filter((t) => t.termType === 'NamedNode').map((t) => t.value))) {
+      if (subject === graph.ontologyIRI) continue;
+      const credits = generatedCredits(graph, subject, marked.has(subject));
+      if (credits.length) marked.add(subject);
+      state.names.push(...credits.map((q) => q.object.value));
+    }
+    tainted.set(graph, marked);
+  }
+  state.titles = [...new Set(state.titles)];
+  state.names = [...new Set(state.names)];
+  put('kv', state);
+
+  // What may not be published: every title the ontology's use cases have had, those learned above, and
+  // the names of the people who wrote the use cases or were credited by a merge. A title that is also
+  // the ontology's own vocabulary (a term named "Volunteering" in a volunteering ontology) reveals nothing.
+  const vocabulary = new Set<string>();
+  const working = graphs.find((x) => x.version === 'working')?.graph;
+  if (working) {
+    const view = working.view();
+    for (const t of [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.individuals]) {
+      if (tainted.get(working)?.has(t.iri)) continue;
+      for (const name of [t.label ?? '', t.iri.replace(/^.*[#/]/, '')]) {
+        vocabulary.add(foldName(name));
+        for (const w of words(name)) vocabulary.add(foldName(w));
       }
     }
-    if (learned) put('kv', inputs);
-    // Merges credited their author on the terms they added.
-    const credited = new Map<string, Set<string>>();
-    for (const cr of crs) {
-      const name = getUser(cr.authorId)?.name;
-      if (name) for (const iri of history.created(cr)) credited.set(iri, new Set([...(credited.get(iri) ?? []), norm(name)]));
-    }
-    const legacy = new Set(Object.keys(inputs.terms));
-    let n = scrubGeneratedProvenance(g, {
-      generatedContributor: (subject, name) => !!credited.get(subject)?.has(norm(name)) || (legacy.has(subject) && memberNames.has(norm(name))),
+  }
+  const all = secretsFor(list<UseCase>('useCases', project.id), { titles: state.titles, people: state.names });
+  const secrets = { ...all, titles: all.titles.filter((t) => !vocabulary.has(foldName(t.words.join('')))) };
+
+  // 2. Clean each graph.
+  const withheld: WithheldStatement[] = [];
+  const withhold = (version: string, g: OntologyGraph, q: Quad, reason: WithheldStatement['reason']) => {
+    g.store.removeQuad(q);
+    const o = q.object as Literal;
+    withheld.push({
+      id: newId('whd'),
+      ontologyId: project.id,
+      version,
+      subject: q.subject.value,
+      predicate: q.predicate.value,
+      object: { value: o.value, language: o.language || undefined, datatype: o.language ? undefined : o.datatype?.value },
+      reason,
+      at: clock.iso(),
     });
-    for (const { cr, secrets } of plans) n += rewriteLiterals(g, history.touched(cr), (v) => redactText(v, secrets));
-    const people = legacyPeople();
-    for (const [subject, titles] of Object.entries(inputs.terms)) {
-      const secrets = allSecrets([secretsFor([], { titles }), people]);
-      n += rewriteLiterals(g, [subject], (v) => redactText(v, secrets));
+  };
+  const clean = (version: string, g: OntologyGraph) => {
+    let n = 0;
+    const credits = new Set<Quad>();
+    for (const subject of tainted.get(g) ?? []) for (const q of generatedCredits(g, subject, !!generated.get(g)?.has(subject))) credits.add(q);
+    for (const q of credits) {
+      withhold(version, g, q, 'credit');
+      n++;
+    }
+    n += scrubGeneratedProvenance(g);
+    for (const q of g.store.getQuads(null, null, null, null)) {
+      if (q.subject.termType !== 'NamedNode' || q.subject.value === g.ontologyIRI || q.object.termType !== 'Literal') continue;
+      // A credit no merge wrote was given on purpose, and stays.
+      if (CREDIT_PREDICATES.has(q.predicate.value)) continue;
+      const found = findSecrets(q.object.value, secrets);
+      if (!found.length) continue;
+      withhold(version, g, q, found[0]);
+      n++;
     }
     return n;
   };
 
-  try {
-    const draft = (await ontologyStore.working(project)).clone();
-    if (scrub(draft)) {
-      await ontologyStore.commitWorking(project, draft, 'Remove contributor names and use case titles from annotations', { name: 'Concord' });
-      console.log(`[public] cleaned ${project.slug} working draft`);
-    }
-  } catch (err) {
-    complete = false;
-    console.warn(`[public] could not clean ${project.slug} working draft: ${(err as Error).message}`);
-  }
-
-  const changed: Record<string, Record<string, string | null>> = {};
-  const read = (version: string, name: string) => {
-    const file = path.join(dir, 'releases', version, name);
-    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
-  };
-  const versions = ontologyStore.versions(project);
-  for (const version of versions) {
+  const files: Record<string, Record<string, string | null>> = {};
+  for (const { version, graph } of graphs) {
     try {
-      const files: Record<string, string | null> = {};
-      ontologyStore.forgetReleases(project);
-      const graph = (await ontologyStore.at(project, version)).clone();
-      if (scrub(graph)) files[ONTOLOGY_FILE] = await graph.toTurtle();
-      // Every other serialisation, from the cleaned graph, wherever it differs from the file.
+      const changed = clean(version, graph);
+      if (version === 'working') {
+        if (changed) await ontologyStore.commitWorking(project, graph, 'Withhold contributor names and use case titles from annotations', { name: 'Concord' });
+        continue;
+      }
+      const out: Record<string, string | null> = {};
+      if (changed) out[ONTOLOGY_FILE] = await graph.toTurtle();
+      // 3. Every other format, from the cleaned graph: those on disk, and any taken down before.
+      const pending = new Set(state.pendingFormats[version] ?? []);
       for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
+        if (format === 'turtle') continue;
         const name = `ontology.${FORMAT_INFO[format].extension}`;
-        const current = read(version, name);
-        if (format === 'turtle' || current === undefined) continue;
+        const file = path.join(dir, 'releases', version, name);
+        const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+        if (current === undefined && !pending.has(name)) continue;
         try {
-          const fresh = await serialize(graph, format);
-          if (fresh !== current) files[name] = fresh;
+          const fresh = await serialize(graph, format, { name: project.slug });
+          if (fresh !== current) out[name] = fresh;
+          pending.delete(name);
         } catch (err) {
-          // The old file can't be checked or replaced: take it down rather than keep publishing what it may hold.
-          files[name] = null;
-          complete = false;
-          console.warn(`[public] could not reserialise ${project.slug} ${version} as ${format}, so removed it: ${(err as Error).message}`);
+          // It can't be checked or replaced: take it down rather than keep publishing what it may hold, and try again next time.
+          if (current !== undefined) out[name] = null;
+          pending.add(name);
+          warn(`regenerate ${version} as ${format} (taken down until it can be)`, err);
         }
       }
+      if (pending.size) state.pendingFormats[version] = [...pending];
+      else delete state.pendingFormats[version];
       const snapshot = readSnapshot(project, version);
       if (snapshot.state === 'ok') {
         const replacement = publishableSnapshot(project, version, snapshot.data);
-        if (replacement) files[REQUIREMENTS_SNAPSHOT] = snapshotFile(replacement);
+        if (replacement) out[REQUIREMENTS_SNAPSHOT] = snapshotFile(replacement);
       }
-      if (Object.keys(files).length) changed[version] = files;
+      if (Object.keys(out).length) files[version] = out;
     } catch (err) {
-      complete = false;
-      console.warn(`[public] could not clean ${project.slug} ${version}: ${(err as Error).message}`);
+      warn(`clean ${version}`, err);
     }
   }
 
-  // Notes, once every graph has given up the titles its provenance recorded (this run or an earlier one).
-  const harvestedSecrets = allSecrets([secretsFor([], { titles: harvestedTitles() }), legacyPeople()]);
+  // 4. Notes: a line naming a title or a person is left out.
   for (const release of list<Release>('releases', project.id)) {
     try {
-      const secrets = allSecrets([releaseSecrets(release), harvestedSecrets]);
-      const notes = publishableNotes(release.notes, secrets);
+      const notes = withholdLines(release.notes, secrets);
       if (notes !== release.notes) {
         release.notes = notes;
         put('releases', release, release.ontologyId);
       }
-      const file = versions.includes(release.version) ? read(release.version, 'RELEASE_NOTES.md') : undefined;
-      if (file !== undefined) {
-        const clean = publishableNotes(file, secrets);
-        if (clean !== file) changed[release.version] = { ...changed[release.version], 'RELEASE_NOTES.md': clean };
+      const file = path.join(dir, 'releases', release.version, 'RELEASE_NOTES.md');
+      if (versions.includes(release.version) && fs.existsSync(file)) {
+        const before = fs.readFileSync(file, 'utf8');
+        const after = withholdLines(before, secrets);
+        if (after !== before) files[release.version] = { ...files[release.version], 'RELEASE_NOTES.md': after };
       }
     } catch (err) {
-      complete = false;
-      console.warn(`[public] could not clean ${project.slug} ${release.version} notes: ${(err as Error).message}`);
+      warn(`clean the notes of ${release.version}`, err);
     }
   }
-  if (Object.keys(changed).length) {
+  if (Object.keys(files).length) {
     try {
-      ontologyStore.updateReleaseFiles(project, changed, `Remove contributor names and use case titles from releases (${Object.keys(changed).join(', ')})`);
-      console.log(`[public] cleaned ${project.slug} releases: ${Object.keys(changed).join(', ')}`);
+      ontologyStore.updateReleaseFiles(project, files, `Withhold contributor names and use case titles from releases (${Object.keys(files).join(', ')})`);
     } catch (err) {
-      complete = false;
-      console.warn(`[public] could not write ${project.slug} releases: ${(err as Error).message}`);
+      warn('write releases', err);
     }
     ontologyStore.forgetReleases(project);
   }
@@ -473,14 +530,55 @@ async function remediateProvenance(project: OntologyProject): Promise<{ complete
     const changelog = path.join(dir, 'CHANGELOG.md');
     if (fs.existsSync(changelog)) {
       const before = fs.readFileSync(changelog, 'utf8');
-      const after = publishableNotes(before, allSecrets([...plans.map((p) => p.secrets), harvestedSecrets]));
-      if (after !== before) ontologyStore.updateRepoFile(project, 'CHANGELOG.md', after, 'Remove use case titles from the changelog');
+      const after = withholdLines(before, secrets);
+      if (after !== before) ontologyStore.updateRepoFile(project, 'CHANGELOG.md', after, 'Withhold use case titles from the changelog');
     }
   } catch (err) {
-    complete = false;
-    console.warn(`[public] could not clean ${project.slug} changelog: ${(err as Error).message}`);
+    warn('clean the changelog', err);
   }
+  for (const w of withheld) put('withheld', w, project.id);
+  put('kv', state);
+  if (Object.keys(state.pendingFormats).length) complete = false;
   return { complete };
+}
+
+/** Statements withheld from an ontology's public views, waiting for an owner or steward. */
+export const listWithheld = (ontologyId: string) => list<WithheldStatement>('withheld', ontologyId).sort((a, b) => a.version.localeCompare(b.version) || a.subject.localeCompare(b.subject));
+
+/** Puts a withheld statement back where it was taken from (an owner or steward decided it's fine to publish). */
+export async function restoreWithheld(project: OntologyProject, id: string): Promise<void> {
+  const w = get<WithheldStatement>('withheld', id);
+  if (!w || w.ontologyId !== project.id) throw new HttpError(404, 'Nothing withheld with that id');
+  const object = DataFactory.literal(w.object.value, w.object.language || (w.object.datatype ? DataFactory.namedNode(w.object.datatype) : undefined));
+  const quad = DataFactory.quad(DataFactory.namedNode(w.subject), DataFactory.namedNode(w.predicate), object);
+  if (w.version === 'working') {
+    const g = (await ontologyStore.working(project)).clone();
+    g.store.addQuad(quad);
+    await ontologyStore.commitWorking(project, g, 'Restore a statement the privacy clean-up withheld', { name: 'Concord' });
+  } else {
+    ontologyStore.forgetReleases(project);
+    const g = (await ontologyStore.at(project, w.version)).clone();
+    g.store.addQuad(quad);
+    const out: Record<string, string> = { [ONTOLOGY_FILE]: await g.toTurtle() };
+    for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
+      const name = `ontology.${FORMAT_INFO[format].extension}`;
+      if (format !== 'turtle' && fs.existsSync(path.join(ontologyStore.dir(project), 'releases', w.version, name))) out[name] = await serialize(g, format, { name: project.slug });
+    }
+    ontologyStore.updateReleaseFiles(project, { [w.version]: out }, `Restore a statement the privacy clean-up withheld from ${w.version}`);
+    ontologyStore.forgetReleases(project);
+    // Its page is rendered again at the next refresh.
+    const pages = readPageState();
+    delete pages[project.slug];
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(pageStateFile(), `${JSON.stringify(pages, null, 2)}\n`);
+  }
+  remove('withheld', id);
+}
+
+/** Keeps a statement withheld for good (it's forgotten here). */
+export function dismissWithheld(project: OntologyProject, id: string) {
+  const w = get<WithheldStatement>('withheld', id);
+  if (w && w.ontologyId === project.id) remove('withheld', id);
 }
 
 /**
@@ -530,24 +628,49 @@ async function serve(req: Request, res: Response) {
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 
-  let format = last.format;
-  if (!format) {
-    // The answer depends on Accept, including when it is a refusal.
-    res.vary('Accept');
-    const best = req.accepts(Object.keys(NEGOTIABLE));
-    if (!best) {
-      res
-        .status(406)
-        .set('Cache-Control', 'no-store')
-        .type('text/plain')
-        .send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl`);
-      return;
-    }
-    format = NEGOTIABLE[best];
+  const format = last.format ?? negotiate(req, res);
+  if (!format) return;
+  if (format === 'html') {
+    publicHeaders(res, `${root}/${version}`, version === 'draft');
+    const input = await pageInput(project, version, base);
+    res.type('html').send(renderOntologyPage(input));
+    return;
   }
+  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
+  await sendFormat(req, res, {
+    project,
+    graph,
+    format,
+    version,
+    self: `${root}/${version}`,
+    mutable: version === 'draft',
+    // The draft is ahead of the latest release: 1.0.0 → 1.1.0-draft.
+    packageVersion: version === 'draft' ? `${latest ? bumpVersion(latest, 'minor') : '0.1.0'}-draft` : version,
+  });
+}
 
-  res.set('Cache-Control', version === 'draft' ? 'no-cache' : 'public, max-age=300');
-  const self = `${root}/${version}`;
+/** The format an Accept header asks for, or undefined after answering 406. */
+export function negotiate(req: Request, res: Response): PublicFormat | undefined {
+  // The answer depends on Accept, including when it is a refusal.
+  res.vary('Accept');
+  const best = req.accepts(Object.keys(NEGOTIABLE));
+  if (!best) {
+    res
+      .status(406)
+      .set('Cache-Control', 'no-store')
+      .type('text/plain')
+      .send(`Not acceptable. Available: ${Object.keys(NEGOTIABLE).join(', ')}, or add an extension such as .ttl or .js`);
+    return undefined;
+  }
+  return NEGOTIABLE[best];
+}
+
+function publicHeaders(res: Response, self: string, mutable: boolean) {
+  res.vary('Accept');
+  // Public data: any site may fetch it, or import the generated classes from it.
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Disposition');
+  res.set('Cache-Control', mutable ? 'no-cache' : 'public, max-age=300');
   res.set(
     'Link',
     [
@@ -556,17 +679,66 @@ async function serve(req: Request, res: Response) {
       `<${self}>; rel="canonical"`,
     ].join(', '),
   );
+}
 
-  if (format === 'html') {
-    const input = await pageInput(project, version, base);
-    res.type('html').send(renderOntologyPage(input));
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+export interface SendFormatOptions {
+  project: OntologyProject;
+  graph: Awaited<ReturnType<typeof ontologyStore.at>>;
+  format: Exclude<PublicFormat, 'html'>;
+  /** '1.0.0', 'draft' or e.g. 'forks/activity-tracking': used in file names. */
+  version: string;
+  /** The canonical URL of this version, without an extension. */
+  self: string;
+  /** Drafts and forks change, so they aren't cached. */
+  mutable: boolean;
+  /** Semver version for the npm package (falls back to owl:versionInfo, then 0.0.0). */
+  packageVersion?: string;
+}
+
+/**
+ * Sends one version of an ontology in any non-HTML format: an RDF
+ * serialisation, SHACLC, the generated JavaScript or TypeScript classes, their
+ * declarations, or an npm package of them. Shared by every /def route (releases,
+ * the draft and forks) so each offers the same formats.
+ */
+export async function sendFormat(req: Request, res: Response, o: SendFormatOptions): Promise<void> {
+  publicHeaders(res, o.self, o.mutable);
+  const fileBase = `${o.project.slug}-${o.version.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
+  if (o.format === 'javascript' || o.format === 'typescript' || o.format === 'dts' || o.format === 'npm') {
+    const mod = await toWrapperClasses(o.graph, { name: o.project.slug, sourceUrl: o.self });
+    if (o.format === 'npm') {
+      const info = o.graph.view().metadata.versionInfo;
+      const version = [o.packageVersion, info].find((v) => v && SEMVER.test(v)) ?? '0.0.0';
+      const tgz = npmPackage(mod, {
+        name: `${o.project.slug}-ontology`,
+        version,
+        description: `Classes for ${o.project.title}, generated from its SHACL shapes`,
+        homepage: o.self,
+        shapes: await toShacl(o.graph),
+      });
+      res.type(EXTRA_INFO.npm.mediaType);
+      res.set('Content-Disposition', `attachment; filename="${fileBase}.tgz"`);
+      res.send(tgz);
+      return;
+    }
+    const text =
+      o.format === 'typescript' ? mod.ts : o.format === 'dts' ? mod.dts : req.query.deps === 'bare' ? mod.js : withWrapperImport(mod.js, WRAPPER_CDN);
+    const info = o.format === 'dts' ? EXTRA_INFO.dts : FORMAT_INFO[o.format];
+    res.type(`${info.mediaType}; charset=utf-8`);
+    // Deno and other URL importers find the declarations here.
+    if (o.format === 'javascript') res.set('X-TypeScript-Types', `${o.self}.d.ts`);
+    res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
+    res.send(text);
     return;
   }
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
-  const info = FORMAT_INFO[format];
+  const info = FORMAT_INFO[o.format];
+  // ?syntax=extended keeps shape names and labels, in shaclc-write's extended SHACLC.
+  const text = o.format === 'shaclc' && req.query.syntax === 'extended' ? await toShaclc(o.graph, { extended: true }) : await serialize(o.graph, o.format, { name: o.project.slug });
   res.type(`${info.mediaType}; charset=utf-8`);
-  res.set('Content-Disposition', `inline; filename="${project.slug}-${version}.${info.extension}"`);
-  res.send(await serialize(graph, format));
+  res.set('Content-Disposition', `inline; filename="${fileBase}.${info.extension}"`);
+  res.send(text);
 }
 
 export function publicRouter(): Router {

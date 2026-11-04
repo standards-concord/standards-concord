@@ -37,6 +37,7 @@ import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { getPublicReport, listPublicReports, removePublicReport } from '../public/report.js';
+import { dismissWithheld, listWithheld, restoreWithheld } from '../public/routes.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -209,7 +210,7 @@ export function apiRouter(): Router {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format);
+    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -389,10 +390,35 @@ export function apiRouter(): Router {
     res.json({ ok: true });
   });
 
+  /* ----------------- statements withheld by the clean-up -------------- */
+  // What the privacy clean-up took out of the published ontology: owners and stewards decide what goes back.
+  const steward = (req: Request) => {
+    const p = project(req);
+    requireRole(p.id, requireUser(req), ['owner', 'steward'], 'review what was withheld from the public page');
+    return p;
+  };
+  r.get('/ontologies/:id/withheld', (req, res) => {
+    res.json(listWithheld(steward(req).id));
+  });
+  r.post('/ontologies/:id/withheld/:wid/restore', async (req, res) => {
+    await restoreWithheld(steward(req), String(req.params.wid));
+    res.json({ ok: true });
+  });
+  r.post('/ontologies/:id/withheld/:wid/dismiss', (req, res) => {
+    dismissWithheld(steward(req), String(req.params.wid));
+    res.json({ ok: true });
+  });
+
   /* ---------------------------- change requests ---------------------- */
   r.get('/ontologies/:id/change-requests', (req, res) => {
     const status = optStr(req.query.status);
     res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status));
+  });
+
+  // A request held back because it would publish something from private use cases: an editor confirms it doesn't.
+  r.post('/change-requests/:id/confirm-nothing-private', async (req, res) => {
+    const cr = await crs.confirmNothingPrivate(crs.getCR(String(req.params.id)), requireUser(req));
+    res.json(crs.detail(cr));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {
@@ -550,9 +576,10 @@ export function apiRouter(): Router {
     );
   });
   const feedbackAdmin = (req: Request) => {
+    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
-    const odi = list<import('@concord/shared').Membership>('memberships').some((m) => m.userId === user.id && (m.roles.includes('odi') || m.roles.includes('owner')));
-    if (!user.isPlatformAdmin && !odi) throw new HttpError(403, 'Only ODI staff and ontology owners can read feedback');
+    if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');
   };
   r.get('/feedback', (req, res) => {
     feedbackAdmin(req);
