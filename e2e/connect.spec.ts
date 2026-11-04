@@ -1,5 +1,4 @@
-import { expect, test } from '@playwright/test';
-import { signInDemo } from './helpers.js';
+import { expect, signIn, test } from './fixtures';
 
 const TOOL_NAMES = ['list_ontologies', 'get_ontology', 'search_terms', 'sparql_query', 'validate_data', 'propose_change', 'get_change_request'];
 
@@ -54,7 +53,7 @@ test.describe('Connect page', () => {
   });
 
   test('the ontology Agents tab shows the same install options and no tool list', async ({ page, baseURL }) => {
-    await signInDemo(page);
+    await signIn(page);
     await page.goto('/o/volunteering/agents');
     await expect(page.getByTestId('connect-agent')).toBeVisible();
     await expect(page.getByTestId('mcp-url')).toHaveText(`${baseURL}/mcp`);
@@ -66,7 +65,7 @@ test.describe('Connect page', () => {
   });
 
   test('the account menu links to the connect page and connected agents', async ({ page }) => {
-    await signInDemo(page);
+    await signIn(page);
     await page.goto('/settings#agents');
     await expect(page.getByText('Connected agents')).toBeVisible();
     await expect(page.getByTestId('connections')).toContainText('No agents connected yet.');

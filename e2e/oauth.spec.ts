@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test';
-import { fakeAgent, signInDemo } from './helpers.js';
+import { expect, signIn, test } from './fixtures';
+import { fakeAgent } from './mcp-agent';
 
 test.describe('Connecting an agent with OAuth (no token)', () => {
   test('a signed-out person signs in, allows the agent, and the agent can use the tools', async ({ page, baseURL }) => {
@@ -62,7 +62,7 @@ test.describe('Connecting an agent with OAuth (no token)', () => {
   });
 
   test('a signed-in person can decline', async ({ page, baseURL }) => {
-    await signInDemo(page);
+    await signIn(page);
     const agent = await fakeAgent(baseURL!, 'Codex (playwright)');
     try {
       await page.goto((await agent.authorizationUrl).href);
@@ -76,7 +76,8 @@ test.describe('Connecting an agent with OAuth (no token)', () => {
     }
   });
 
-  test('an old or unknown sign-in link explains what to do', async ({ page }) => {
+  test('an old or unknown sign-in link explains what to do', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 404/);
     await page.goto('/oauth/authorize?request=authz_doesnotexist');
     await expect(page.getByText(/expired/)).toBeVisible();
     await expect(page.getByText(/try connecting again/i)).toBeVisible();

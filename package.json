@@ -8,13 +8,16 @@
     "test": "pnpm -r test",
     "dev": "pnpm --parallel -r dev",
     "start": "pnpm --filter @concord/server start",
-    "e2e": "pnpm --filter @concord/web build && pnpm --filter @concord/e2e e2e"
+    "test:e2e": "playwright test -c e2e --project=local",
+    "test:e2e:live": "playwright test -c e2e --project=live"
   },
   "packageManager": "pnpm@10.0.0",
   "engines": {
     "node": ">=22.13"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@playwright/test": "1.63.0",
     "@vercel/functions": "3.10.1"
   }
 }

@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.1
+        version: 1.32.1(zod@4.6.7)
+      '@playwright/test':
+        specifier: 1.63.0
+        version: 1.63.0
       '@vercel/functions':
         specifier: 3.10.1
         version: 3.10.1
@@ -124,21 +130,6 @@ importers:
       vite:
         specifier: ^6
         version: 6.4.4(@types/node@26.6.5)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.9.1)
-
-  e2e:
-    devDependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.32.1
-        version: 1.32.1(zod@4.6.7)
-      '@playwright/test':
-        specifier: 1.63.0
-        version: 1.63.0
-      '@types/node':
-        specifier: ^26.6.5
-        version: 26.6.5
-      typescript:
-        specifier: ^7.0.2
-        version: 7.0.2
 
   packages/core:
     dependencies:

@@ -1,17 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, type Page } from '@playwright/test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-
-/** Sign in as a fresh demo tester. */
-export async function signInDemo(page: Page) {
-  await page.goto('/login');
-  await page.getByRole('button', { name: 'Try the demo' }).click();
-  await expect(page).not.toHaveURL(/\/login/);
-}
 
 /**
  * A stand-in for Claude Code or Codex: the official MCP SDK client with a

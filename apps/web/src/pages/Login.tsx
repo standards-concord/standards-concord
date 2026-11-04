@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router';
 import { Compass, KeyRound, Sparkles } from 'lucide-react';
 import { api } from '../api';
@@ -10,14 +11,16 @@ export function LoginPage() {
   const { session, loading, error, refresh, setSession } = useSession();
   const [params] = useSearchParams();
   const nav = useNavigate();
+  const after = useRef<string>(undefined);
   const next = params.get('next') || '/';
   const demo = useAction(async () => {
     const s = await api.demoLogin({});
+    // Once the session is set, the redirect below takes over; demo testers start at the walkthrough.
+    after.current = next === '/' ? '/alpha' : next;
     setSession(s);
-    nav(next === '/' ? '/alpha' : next);
   });
 
-  if (session?.user) return <Navigate to={next} replace />;
+  if (session?.user) return <Navigate to={after.current ?? next} replace />;
 
   return (
     <div className="mx-auto flex max-w-md flex-col px-4 py-16">

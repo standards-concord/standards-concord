@@ -157,7 +157,7 @@ export const api = {
   session: () => get<SessionInfo>('/api/session'),
   demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
   logout: () => post<Record<string, never>>('/api/auth/logout'),
-  personas: () => get<User[]>('/api/personas'),
+  personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
 
   // Ontologies

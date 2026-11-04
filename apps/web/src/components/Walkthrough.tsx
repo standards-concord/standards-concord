@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
-import type { ActivityItem, User } from '@concord/shared';
+import type { ActivityItem, Role, User } from '@concord/shared';
 import { ArrowLeft, ArrowRight, Check, CircleCheck, Compass, FastForward, MessageSquareHeart, Play, RotateCcw, X } from 'lucide-react';
 import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
@@ -74,7 +74,8 @@ function RoleStep({ compact }: { compact?: boolean }) {
   if (personas.error) return <ErrorCard error={personas.error} onRetry={personas.reload} />;
   if (!personas.data) return <Loading label="Loading personas…" />;
 
-  const rolesOf = (u: User) => w.demo?.members?.find((m) => m.userId === u.id)?.roles;
+  // Before sign-in the demo's member list isn't readable, so fall back to the roles the persona list carries.
+  const rolesOf = (u: User & { roles?: Role[] }) => w.demo?.members?.find((m) => m.userId === u.id)?.roles ?? u.roles;
   const grouped = TESTER_ROLES.map((r) => ({ role: r, people: personas.data!.filter((p) => testerRoleFor(p, rolesOf(p)).key === r.key) }));
 
   return (
@@ -83,7 +84,7 @@ function RoleStep({ compact }: { compact?: boolean }) {
       <InlineError error={login.error} />
       <div className={cx('grid gap-3', !compact && 'sm:grid-cols-2')}>
         {grouped.map(({ role, people }) => (
-          <div key={role.key} className="rounded-xl border border-line bg-surface p-4">
+          <section key={role.key} aria-label={role.title} className="rounded-xl border border-line bg-surface p-4">
             <div className="text-sm font-semibold">{role.title}</div>
             <p className="mt-0.5 mb-3 text-xs text-muted">{role.blurb}</p>
             <div className="space-y-2">
@@ -115,7 +116,7 @@ function RoleStep({ compact }: { compact?: boolean }) {
                 </Button>
               )}
             </div>
-          </div>
+          </section>
         ))}
       </div>
     </div>
