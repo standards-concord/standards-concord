@@ -114,6 +114,15 @@ export function putFenced<T extends { id: string }>(collection: Collection, doc:
   });
 }
 
+/** putIf(), checked against the current fence (if any) in the same transaction. */
+export function putIfFenced<T extends { id: string }>(collection: Collection, doc: T, field: string, expected: string | number | undefined): boolean {
+  const guard = fences.getStore();
+  return transaction(() => {
+    guard?.();
+    return putIf(collection, doc, field, expected);
+  });
+}
+
 export function get<T>(collection: Collection, id: string): T | undefined {
   const row = conn().prepare('SELECT data FROM docs WHERE collection = ? AND id = ?').get(collection, id) as
     | { data: string }

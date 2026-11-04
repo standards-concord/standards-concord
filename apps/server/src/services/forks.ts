@@ -1,4 +1,4 @@
-import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, termDescription, validate, type OntologyGraph } from '@concord/core';
+import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, recordAsProvenance, termDescription, validate, type OntologyGraph } from '@concord/core';
 import type { ChangeOp, OutputFormat, ValidationReport } from '@concord/core/types';
 import type {
   ChangeRequest,
@@ -107,8 +107,16 @@ async function commitAndSave(p: OntologyProject, f: OntologyFork, from: Snapshot
   }
 }
 
+/** A proposal's writes hold only while the fork record is still at the version its lease was saved with. */
+function proposalFence(id: string, claimed: Snapshot) {
+  return () => {
+    if (get<OntologyFork>('forks', id)?.seq !== claimed.seq)
+      throw new HttpError(409, 'The fork changed while it was being proposed (this proposal took too long and lost its hold on the fork). Reload it and propose again if needed.');
+  };
+}
+
 /** Internals exercised by the concurrency tests. */
-export const forTests = { save, commitAndSave };
+export const forTests = { save, commitAndSave, proposalFence };
 
 export const listForks = (ontologyId: string) => list<OntologyFork>('forks', ontologyId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 export const forksOwnedBy = (userId: string) => list<OntologyFork>('forks').filter((f) => f.ownerId === userId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -487,6 +495,7 @@ export async function createFork(p: OntologyProject, owner: User, input: { name:
     head: '',
     status: 'active',
     changeRequestIds: [],
+    provenanceFormat: 2,
     createdAt: now,
     updatedAt: now,
   };
@@ -653,10 +662,7 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
     // Every write to the change request is fenced on that lease: if it runs out (this process
     // stalled) and anything else changes the fork, this proposal's writes are refused, so it can
     // never overwrite newer work. Nothing is ever rolled back.
-    const fence = () => {
-      if (get<OntologyFork>('forks', f.id)?.seq !== claimed.seq)
-        throw new HttpError(409, 'The fork changed while it was being proposed (this proposal took too long and lost its hold on the fork). Reload it and propose again if needed.');
-    };
+    const fence = proposalFence(f.id, claimed);
     const release = () => {
       // Give the lease back if nothing else has changed the fork since.
       const cur = get<OntologyFork>('forks', f.id);
@@ -772,9 +778,11 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     const label = (k: string) => keyLabel(k, base.prefixes);
     const keep: ChangeOp[] = [];
     const related = new Set<string>();
-    let touched = 0;
+    // Everything: every stored edit goes, including ones with nothing left to replay (such as a
+    // setter of a field the fork stamps itself, stored before those were refused).
+    let touched = drop ? 0 : f.ops.length;
     out.ops.forEach((op, i) => {
-      if (!drop) return void touched++; // everything: every edit goes, whatever it touches
+      if (!drop) return;
       const keys = out.perOp[i];
       const hit = keys.filter((k) => drop.has(k));
       if (!hit.length) return void keep.push(op);
@@ -818,6 +826,47 @@ function toKey(t: string, prefixes: Record<string, string>) {
   if (s.startsWith('meta:')) return s;
   return expand(s, prefixes);
 }
+
+/**
+ * Forks made before generated provenance had its own property carry it as
+ * dcterms:source "<ontology> fork <fork>" on the terms their edits created,
+ * which comparisons now treat as a requested annotation (so every sync would
+ * conflict). Move those to dcterms:provenance, keeping any value an edit asked
+ * for explicitly, and mark the fork migrated. Runs at startup, and again later
+ * for a fork that was busy (a proposal's lease); safe to repeat.
+ */
+export async function migrateForkProvenance(): Promise<{ migrated: number; deferred: number }> {
+  let migrated = 0;
+  let deferred = 0;
+  for (const fork of list<OntologyFork>('forks')) {
+    if (fork.provenanceFormat === 2) continue;
+    const p = get<OntologyProject>('ontologies', fork.ontologyId);
+    if (!p) continue;
+    try {
+      await locked(fork.id, async (f, from) => {
+        if (f.provenanceFormat === 2) return;
+        const tag = `${p.slug} fork ${f.slug}`;
+        const graph = await ontologyStore.forkGraph(p, f.slug);
+        const statements = f.ops
+          .filter((op) => CREATES.has(op.op) && !((op as { source?: string[] }).source ?? []).includes(tag))
+          .map((op) => ({ iri: graph.namespace + (op as { localName: string }).localName, value: tag }));
+        const { graph: next, moved } = recordAsProvenance(graph, statements);
+        f.provenanceFormat = 2;
+        const head = f.head;
+        if (moved) await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, next, 'Record generated provenance as dcterms:provenance', { name: 'Concord', email: 'concord@localhost' }, { expectedParent: head }));
+        else save(f, from);
+        migrated++;
+      });
+    } catch (err) {
+      deferred++;
+      console.warn(`[forks] provenance migration of ${fork.slug} deferred: ${(err as Error).message}`);
+    }
+  }
+  return { migrated, deferred };
+}
+
+/** Edits that create a term, which is where the engine records provenance. */
+const CREATES = new Set<ChangeOp['op']>(['addClass', 'addObjectProperty', 'addDatatypeProperty', 'addIndividual']);
 
 export async function closeFork(fork: OntologyFork, user: User | undefined) {
   requireOwner(fork, user, 'close it');

@@ -11,6 +11,7 @@ import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { HttpError, list, mustGet, put } from '../db.js';
+import { saveChangeRequest } from './changeRequests.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
@@ -215,7 +216,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     cr.releaseId = r.id;
     cr.statusSince = r.publishedAt;
     cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
-    put('changeRequests', cr, cr.ontologyId);
+    saveChangeRequest(cr);
   }
 
   project.currentVersion = r.version;

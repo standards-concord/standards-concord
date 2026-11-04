@@ -9,7 +9,7 @@ export type { EmptyOntologyOptions } from './graph.js';
 export { serialize, FORMAT_INFO } from './serialize.js';
 
 // Changes
-export { applyChangeOps, ChangeOpError } from './changes.js';
+export { applyChangeOps, ChangeOpError, recordAsProvenance } from './changes.js';
 export type { ChangeContext, ApplyResult } from './changes.js';
 export { canonicalTriples, diffOntologies, termDescription } from './diff.js';
 export { classifyChange, CLASSIFICATION_RULES } from './classify.js';

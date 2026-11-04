@@ -64,6 +64,18 @@ const fail = (msg: string): never => {
   throw new OpFail(msg);
 };
 
+/**
+ * Provenance the engine records itself when terms change (ChangeContext). It
+ * isn't part of what a term means, so comparisons ignore it; edits may not
+ * set or replace it, or a hand-written value would be ignored too, and a
+ * recorded one could be forged.
+ */
+const ENGINE_RECORDED = new Set([P.provenance, P.created, P.contributor, NS.dcterms + 'modified']);
+const notRecorded = (pred: string) => {
+  if (ENGINE_RECORDED.has(pred)) fail(`<${pred}> is recorded by Concord when a term changes and can't be set by an edit; use dcterms:source or a note for provenance you want to state`);
+  return pred;
+};
+
 const ANNOTATION_FIELDS: Record<keyof Omit<TermAnnotations, 'mappings'>, string> = {
   label: P.label,
   definition: P.definition,
@@ -116,7 +128,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     }
     if (set.mappings) {
       for (const [p, targets] of Object.entries(set.mappings)) {
-        const pred = ex(p);
+        const pred = notRecorded(ex(p));
         removeAll(iri, pred);
         for (const t of targets) add(iri, pred, nn(ex(t)));
         usedAnnotations.add(pred);
@@ -188,7 +200,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     case 'addIndividual': {
       const types = op.types.map(ex).map(requireClass);
       if (!types.length) fail('an individual needs at least one type');
-      const facts = Object.entries(op.facts ?? {}).map(([p, vals]) => [requireKnown(ex(p), 'property'), vals] as const);
+      const facts = Object.entries(op.facts ?? {}).map(([p, vals]) => [notRecorded(requireKnown(ex(p), 'property')), vals] as const);
       const iri = newTerm(op.localName, 'individual', T.NamedIndividual, op);
       for (const t of types) add(iri, RDF_TYPE, nn(t));
       for (const [p, vals] of facts) for (const v of vals) add(iri, p, factValue(g, p, v, ex, requireKnown));
@@ -379,6 +391,28 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
 
 function inImports(g: OntologyGraph, iri: string): boolean {
   return g.metadata().imports.some((imp) => iri.startsWith(imp));
+}
+
+/**
+ * Turn dcterms:source statements that recorded provenance (written before it
+ * had its own property) into dcterms:provenance: for each {iri, value}, a
+ * dcterms:source of exactly that value on that term moves. Returns a new
+ * graph, and how many statements moved.
+ */
+export function recordAsProvenance(graph: OntologyGraph, statements: { iri: string; value: string }[]): { graph: OntologyGraph; moved: number } {
+  const g = graph.clone();
+  const s = g.store;
+  let moved = 0;
+  for (const { iri, value } of statements) {
+    for (const o of objects(s, iri, P.source)) {
+      if (o.value !== value) continue;
+      s.removeQuad(nn(iri), nn(P.source), o as any, defaultGraph());
+      s.addQuad(nn(iri), nn(P.provenance), literal(value), defaultGraph());
+      moved++;
+    }
+  }
+  if (moved) declareAnnotationProperties(s, [P.provenance]);
+  return { graph: g, moved };
 }
 
 export function isDatatype(g: OntologyGraph, iri: string): boolean {

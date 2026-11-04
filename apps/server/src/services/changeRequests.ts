@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { HttpError, list, mustGet, put, putFenced } from '../db.js';
+import { get, HttpError, list, mustGet, put, putFenced, putIfFenced } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -42,11 +42,28 @@ const ev = (type: TimelineEvent['type'], message: string, actorId?: string): Tim
 
 export const getCR = (id: string) => mustGet<ChangeRequest>('changeRequests', id);
 export const listCRs = (ontologyId: string) => list<ChangeRequest>('changeRequests', ontologyId).sort((a, b) => b.number - a.number);
-const save = (cr: ChangeRequest) => {
+/**
+ * Store a change request, only if nobody else has saved it since this copy
+ * was read (a conditional write on `rev`, atomic across server processes), so
+ * a slow writer (a long triage, a stalled proposal) can't put back an older
+ * version over an edit someone else made. Also fenced: a fork proposal that
+ * has lost its hold on the fork writes nothing. Every writer goes through here.
+ */
+export function saveChangeRequest(cr: ChangeRequest): ChangeRequest {
+  const expected = cr.rev;
+  const updatedAt = cr.updatedAt;
+  cr.rev = (expected ?? 0) + 1;
   cr.updatedAt = clock.iso();
-  // Fenced: a proposal from a fork that has lost its hold on the fork can't overwrite newer work.
-  return putFenced('changeRequests', cr, cr.ontologyId);
-};
+  const isNew = expected === undefined && !get<ChangeRequest>('changeRequests', cr.id);
+  if (isNew) return putFenced('changeRequests', cr, cr.ontologyId);
+  if (!putIfFenced('changeRequests', cr, 'rev', expected)) {
+    cr.rev = expected;
+    cr.updatedAt = updatedAt;
+    throw new HttpError(409, `Change request #${cr.number} was changed by someone else at the same time. Reload it and try again.`);
+  }
+  return cr;
+}
+const save = saveChangeRequest;
 
 function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
   if (cr.status === status) return;

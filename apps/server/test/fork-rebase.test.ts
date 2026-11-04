@@ -8,7 +8,7 @@ import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
 import { createChangeRequest, getCR, updateOps } from '../src/services/changeRequests.js';
 import { getUser } from '../src/services/users.js';
-import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
+import { forkDetail, forkSummary, forTests, migrateForkProvenance } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -660,5 +660,91 @@ describe('fifth review', () => {
     // After syncing, the fork no longer has it either, and switching is safe.
     expect((await dev.post(`${path}/sync`)).body.synced).toBe(true);
     expect((await dev.get(`${path}/check`)).body.outcome).toBe('switch-to-draft');
+  });
+});
+
+describe('sixth review', () => {
+  const fork = async (path: string) => (await reader.get(path)).body;
+  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
+  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+    const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
+    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    return next;
+  };
+
+  it.each([
+    ['provenance', { op: 'updateAnnotations', iri: `${VOL}Role`, set: { mappings: { 'dcterms:provenance': ['urn:forged-record'] } } }],
+    ['contributor', { op: 'updateAnnotations', iri: `${VOL}Role`, set: { mappings: { 'http://purl.org/dc/terms/contributor': ['urn:someone'] } } }],
+  ])('edits cannot set recorded %s by hand', async (_, op) => {
+    const path = await newFork(`Forge ${_}`);
+    const res = await dev.post(`${path}/edits`).send({ ops: [op] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/recorded by Concord/);
+  });
+
+  it('discarding everything clears a fork whose only stored edit has nothing to replay', async () => {
+    const path = await newFork('Legacy only');
+    const f = await record(path);
+    elsewhere(f, { ops: [{ op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
+    const all = await dev.post(`${path}/discard`).send({ all: true });
+    expect(all.status).toBe(200);
+    expect(all.body.ops).toEqual([]);
+    expect(get<OntologyFork>('forks', f.id)!.ops).toEqual([]);
+  });
+
+  it('a change request saved from an old copy is refused, whoever saves it', async () => {
+    const path = await newFork('Request editor race');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('EditorRace', 'editor race')] });
+    const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id;
+    const stale = getCR(crId); // a slow writer (a proposal's triage, say) holds this copy
+    // Someone edits the request through the ordinary request editor.
+    const edited = await dev.patch(`/api/change-requests/${crId}`).send({ title: 'Edited in the request editor' });
+    expect(edited.status).toBe(200);
+    const owner = getUser(get<OntologyFork>('forks', (await fork(path)).id)!.ownerId)!;
+    await expect(updateOps(stale, owner, { title: 'Stale title' })).rejects.toThrow(/changed by someone else/);
+    expect(getCR(crId).title).toBe('Edited in the request editor');
+  });
+
+  it('the proposal fence refuses a proposal’s writes once the fork has moved on', async () => {
+    const path = await newFork('Production fence');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('ProductionFence', 'production fence')] });
+    const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id;
+    const f = await record(path);
+    const fence = forTests.proposalFence(f.id, { seq: f.seq });
+    const owner = getUser(f.ownerId)!;
+    elsewhere(f, {});
+    await expect(withFence(fence, () => updateOps(getCR(crId), owner, { title: 'From a stalled proposal' }))).rejects.toThrow(/lost its hold/);
+    expect(getCR(crId).title).not.toBe('From a stalled proposal');
+  });
+
+  it('forks from before dcterms:provenance are migrated, keeping requested sources', async () => {
+    const p = findProject('volunteering')!;
+    const path = await newFork('Legacy provenance');
+    const slug = path.split('/').at(-1)!;
+    const tag = `volunteering fork ${slug}`;
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LegacyStamped', 'legacy stamped'), addClass('LegacyAsked', 'legacy asked', { source: [tag] })] });
+    // Rewrite the fork as the earlier format wrote it: the generated record as a dcterms:source.
+    const f = await record(path);
+    const g = (await ontologyStore.forkGraph(p, slug)).clone();
+    const DCT = 'http://purl.org/dc/terms/';
+    for (const q of g.store.getQuads(null, DCT + 'provenance', null, null)) {
+      g.store.removeQuad(q);
+      if (q.subject.value === `${VOL}LegacyStamped`) g.store.addQuad(q.subject, { termType: 'NamedNode', value: DCT + 'source' } as never, q.object);
+    }
+    const head = await ontologyStore.commitFork(p, slug, g, 'Old format', { name: 'Old', email: 'old@example.org' }, { expectedParent: f.head });
+    const legacy = elsewhere(f, { head, provenanceFormat: undefined });
+    await upstream([addClass('UnrelatedToLegacy', 'unrelated to legacy')]);
+    expect((await dev.post(`${path}/sync`)).body.synced).toBe(false);
+
+    const { migrated } = await migrateForkProvenance();
+    expect(migrated).toBeGreaterThanOrEqual(1);
+    const after = await ontologyStore.forkGraph(p, slug);
+    expect(after.term(`${VOL}LegacyStamped`)!.source ?? []).toEqual([]);
+    expect(after.term(`${VOL}LegacyAsked`)!.source).toEqual([tag]);
+    expect(get<OntologyFork>('forks', legacy.id)!.provenanceFormat).toBe(2);
+    const sync = (await dev.post(`${path}/sync`)).body;
+    expect(sync.conflicts).toEqual([]);
+    expect(sync.synced).toBe(true);
+    expect((await migrateForkProvenance()).migrated).toBe(0);
   });
 });

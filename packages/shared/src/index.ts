@@ -469,6 +469,8 @@ export interface AiAnalysis {
 export interface ChangeRequest {
   id: string;
   number: number; // per-ontology sequence, shown as #12
+  /** Record version: every save advances it, and a save only goes through if it hasn't moved since the request was read. */
+  rev?: number;
   ontologyId: string;
   title: string;
   description: string;
@@ -541,6 +543,8 @@ export interface OntologyFork {
   seq?: number;
   /** The revision last proposed upstream; edits after it are not in the change request yet. */
   proposedRevision?: number;
+  /** 2 once generated provenance on the fork is recorded as dcterms:provenance (migrateForkProvenance). */
+  provenanceFormat?: 2;
   /** Set while a proposal is being made (until: epoch ms), so no other change starts until it has finished or the lease has run out. */
   proposing?: { until: number };
   createdAt: string;

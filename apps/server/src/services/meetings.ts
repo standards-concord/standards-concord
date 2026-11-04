@@ -3,6 +3,7 @@ import type { ChangeRequest, Meeting, MeetingAnalysis, OntologyProject, Transcri
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
+import { saveChangeRequest } from './changeRequests.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -185,7 +186,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
   try {
     changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
     changeRequest.origin = { type: 'meeting', meetingId: m.id };
-    put('changeRequests', changeRequest, changeRequest.ontologyId);
+    saveChangeRequest(changeRequest);
   } catch (err) {
     console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
   }

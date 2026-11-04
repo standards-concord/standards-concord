@@ -2,12 +2,21 @@ import { createApp } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
 import { refreshReleasePages } from './public/routes.js';
+import { migrateForkProvenance } from './services/forks.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
+// Forks written before generated provenance had its own property are brought up to date.
+const migrateForks = () =>
+  migrateForkProvenance()
+    .then(({ deferred }) => {
+      if (deferred) setTimeout(migrateForks, 5 * 60_000).unref();
+    })
+    .catch((err) => console.error('[forks] migration failed', err));
+await migrateForks();
 // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
 await refreshReleasePages().catch((err) => console.error('[public] refresh failed', err));
 
