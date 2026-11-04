@@ -20,6 +20,7 @@ title: Concord: designing data standards together
   - [if: jsClasses] above a paragraph keeps it only when the hub has that feature;
     [if: !jsClasses] only when it doesn't. Use it so the intro and outro promise only
     what the recorded scenes show.
+  - {minutes} is replaced with the estimated length of the scenes being recorded.
   - Pronunciations for the voice (OWL, SHACL, SPARQL…) are in lexicon.json.
 
   Writing for the ear
@@ -37,11 +38,11 @@ Hi, and welcome to Concord. It's a prototype from the Open Data Institute for de
 
 [do: open-hub]
 [if: jsClasses]
-In about nine minutes I'll show you what Concord is for, how a standard grows from a conversation into a published release, and then the part I enjoy most: building an app against one of these standards with a coding agent.
+In about {minutes} minutes I'll show you what Concord is for, how a standard grows from a conversation into a published release, and then the part I enjoy most: building an app against one of these standards with a coding agent.
 
 [do: open-hub]
 [if: !jsClasses]
-In about four minutes I'll show you what Concord is for, and how a standard grows from a conversation into a published release.
+In about {minutes} minutes I'll show you what Concord is for, and how a standard grows from a conversation into a published release.
 
 [do: point-hub-card]
 This is the hub. Each card is a standard that a community looks after. We'll follow the volunteering standard, which describes volunteering opportunities, the organisations that offer them, and the people who give their time.

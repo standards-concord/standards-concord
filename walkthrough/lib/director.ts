@@ -19,8 +19,20 @@ export class Director {
     readonly page: Page,
     private readonly strict: boolean,
   ) {
-    // A script error on screen is a broken shot, even if every click landed.
-    page.on('pageerror', (e) => this.note(`Page error on ${page.url()}: ${e.message.split('\n')[0]}`));
+    // A script error, a console error or a failed request is a broken shot, even if every
+    // click landed: the page may be showing an error state the narration doesn't mention.
+    page.context().on('weberror', (e) => this.note(`Page error on ${e.page()?.url() ?? '?'}: ${e.error().message.split('\n')[0]}`));
+    page.context().on('console', (m) => {
+      if (m.type() === 'error' && !/ERR_BLOCKED_BY_CLIENT/.test(m.text())) this.note(`Console error on ${m.page()?.url() ?? '?'}: ${m.text().split('\n')[0].slice(0, 200)}`);
+    });
+    page.context().on('requestfailed', (r) => {
+      const why = r.failure()?.errorText ?? '';
+      // Blocked requests are reported as outside requests; aborted ones are cancelled by navigating away.
+      if (!/ERR_BLOCKED_BY_CLIENT|ERR_ABORTED/.test(why)) this.note(`Request failed: ${r.method()} ${r.url()} (${why})`);
+    });
+    page.context().on('response', (r) => {
+      if (r.status() >= 400 && !/\/favicon\.ico$/.test(r.url())) this.note(`HTTP ${r.status()} from ${r.request().method()} ${r.url()}`);
+    });
   }
 
   /** Records a warning without throwing (for events that arrive outside a step). */

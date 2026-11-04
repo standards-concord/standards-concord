@@ -342,8 +342,10 @@ export const actions: Record<string, Action> = {
     const j = r.json ?? {};
     const added = Array.isArray(j.added) ? j.added.map((t: any) => `+ ${t.term ?? t.iri}  (${t.kind ?? t.change ?? ''})`).join('\n') : '';
     c.d.claim(Array.isArray(j.added) && j.added.length, 'edit_fork added the new terms');
-    c.d.claim(j.validation?.passed !== false, 'the fork still validates after the edit');
-    const valid = j.validation ? `\nValidation: ${j.validation.passed === false ? 'failed' : 'passed'}${j.validation.consistent === false ? ' (inconsistent)' : ''}` : '';
+    // Only an explicit pass counts: a missing or partial validation result is not a pass.
+    const passed = j.validation?.passed === true && j.validation?.consistent !== false;
+    c.d.claim(passed, `the fork validates after the edit (got ${JSON.stringify(j.validation ?? null)})`);
+    const valid = j.validation ? `\nValidation: ${passed ? 'passed' : 'failed'}${j.validation.consistent === false ? ' (inconsistent)' : ''}` : '';
     await c.term.result(c.shown((added ? added + valid : '') || r.text), { max: 8 });
   },
   async 'open-fork-page'(c) {
@@ -413,17 +415,20 @@ export const actions: Record<string, Action> = {
     await sleep(300);
     await c.d.type(card.getByRole('spinbutton', { name: 'Hours' }), '2', 'the hours field', 6);
     await sleep(300);
-    const impact = c.d.page.locator('#impact');
-    const hoursOf = async () => Number(((await impact.textContent().catch(() => '')) ?? '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? NaN);
-    const before = await hoursOf();
+    // "The totals update straight away": both the opportunity's total and mine.
+    const num = async (l: import('@playwright/test').Locator) => Number(((await l.first().textContent({ timeout: 500 }).catch(() => '')) ?? '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? 0);
+    const mine = () => num(c.d.page.locator('#impact'));
+    // The list re-renders on save, so find the card again each time.
+    const given = () => num(c.d.page.locator('.card').filter({ hasText: /Food bank/i }).locator('.pill.hours'));
+    const before = { mine: await mine(), given: await given() };
     await c.d.click(card.getByRole('button', { name: 'Save' }), 'the Save button', { settle: false });
-    // "The totals update straight away."
     let after = before;
-    for (let i = 0; i < 20 && after === before; i++) {
+    for (let i = 0; i < 20 && (after.mine === before.mine || after.given === before.given); i++) {
       await sleep(100);
-      after = await hoursOf();
+      after = { mine: await mine(), given: await given() };
     }
-    c.d.claim(after === before + 2, `the running total goes up by 2 hours (${before} → ${after})`);
+    c.d.claim(after.mine === before.mine + 2, `my running total goes up by 2 hours (${before.mine} → ${after.mine})`);
+    c.d.claim(after.given === before.given + 2, `the food bank's hours given go up by 2 (${before.given} → ${after.given})`);
     await sleep(500);
     await c.d.highlight(c.d.page.locator('#impact'), 'updated');
   },

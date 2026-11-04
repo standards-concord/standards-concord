@@ -1,13 +1,13 @@
 # Narrated walkthrough video
 
-Records a narrated tour of Concord as an MP4, from an editable script: about nine minutes with the developer story, about four without it. Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
+Records a narrated tour of Concord as an MP4, from an editable script: about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
 pnpm walkthrough                        # voice from the environment (see below)
 pnpm walkthrough --voice elevenlabs     # asks for ELEVENLABS_API_KEY without echoing it, if unset
 pnpm walkthrough --draft                # no voice: captions only, for checking pacing and visuals
 pnpm walkthrough --only intro,goals     # some scenes only
-pnpm walkthrough --strict               # fail on UI drift (a button that's gone, a failed step)
+pnpm walkthrough --strict               # fail on any warning: UI drift, a narrated outcome not shown, a page or request error
 pnpm walkthrough --publish              # a release video: strict, no stand-ins, no outside requests, a real voice
 ```
 
@@ -36,13 +36,13 @@ Let's look inside. The Browse page shows the classes and their relationships…
 
 - `## Title {#id}` starts a scene and a video chapter. `requires=forks,jsClasses` records the scene only when the hub has those features; `unless=forks` marks a fallback.
 - Each paragraph is one narration clip. `[do: action args]` above a paragraph runs as it starts, while it's spoken; `[then: action]` above a paragraph runs after it's spoken; `[pause: 1.5]` holds in silence.
-- `[if: jsClasses]` above a paragraph keeps it only when the hub has that feature, and `[if: !jsClasses]` only when it doesn't. The intro and outro use it so they promise only what the recorded scenes show.
+- `[if: jsClasses]` above a paragraph keeps it only when the hub has that feature, and `[if: !jsClasses]` only when it doesn't. The intro and outro use it so they promise only what the recorded scenes show. `{minutes}` becomes the estimated length of the recorded scenes, in words.
 - The next paragraph starts once both the narration and the actions have finished, so timing takes care of itself: rewrite a sentence and the video re-times around it.
 - Voices are cached in `walkthrough/.cache/voice/` by their exact words, so after an edit only the changed paragraphs are sent to the voice service.
 - Words the voice might say wrongly (SHACL, SPARQL, ODI…) go in [lexicon.json](lexicon.json). Captions keep the written spelling.
 - Captions are split into short phrases (at most 84 characters, broken at commas where possible). With ElevenLabs they are timed from the voice's own character timestamps; other voices fall back to an estimate from text length (`report.json` says which).
 - `pnpm walkthrough --list-actions` lists the actions. To add one, add a function to `actions` in scenes.ts. Use the `Director` helpers (`click`, `type`, `highlight`, `chapter`…): they move a visible pointer and fail softly, so a renamed button gives a warning, not a ruined recording.
-- When the narration claims an outcome ("the results come straight back", "validation has passed", "the totals update"), the action checks it with `d.claim(...)` or `d.claimVisible(...)`. An action that ran but didn't produce what the words say is a warning, so `--strict` and `--publish` fail on it. Pages that answer with an HTTP error, and script errors in the page, are warnings too.
+- When the narration claims an outcome ("the results come straight back", "validation has passed", "the totals update"), the action checks it with `d.claim(...)` or `d.claimVisible(...)`. An action that ran but didn't produce what the words say is a warning, so `--strict` and `--publish` fail on it. Uncaught script errors, console errors, failed requests and HTTP error responses in the browser are warnings too, wherever they happen.
 
 When the app changes, run `pnpm walkthrough --draft --strict`. It takes a few minutes and fails on the first step that no longer works; CI does the same on every pull request that touches the walkthrough.
 
@@ -74,7 +74,9 @@ Some scenes need platform features that may not be on every hub: development for
 
 The developer story is about generated JavaScript classes, so its scenes require `jsClasses`. In a draft against a hub that can't serve them yet, the sample app is given a stand-in module with the same shape ([sample-app/fallback/volunteering.js](sample-app/fallback/volunteering.js)), the app is captioned "Preview: … stand-in module" on screen, the scenes that show the hub's own Classes pages are skipped, and the run ends with a warning. `--no-shims` (and `--publish`) refuse stand-ins, so a published video simply leaves the developer story out until the hub has the feature.
 
-During a recording the browser may only reach the exact origins of the hub being recorded and the local stage server. Anything else is blocked and listed in `report.json`; `--publish` fails if there was any. CDN modules (n3, @rdfjs/wrapper) are served from local bundles, and the web fonts the app loads from Google Fonts are served from [fonts/](fonts/), so a recording needs no network. If the app starts using a font that isn't there yet, a normal run fetches it once and saves it (commit the new files); a `--publish` run refuses instead.
+During a recording the browser may only reach the exact origins of the hub being recorded and the local stage server. Redirects are checked before they are followed. Anything else is blocked and listed in `report.json`; `--publish` fails if there was any. CDN modules (n3, @rdfjs/wrapper) are served from local bundles, and the web fonts the app loads from Google Fonts are served from [fonts/](fonts/), so a recording needs no network. If the app starts using a font that isn't there yet, a normal run fetches it once and saves it (commit the new files); a `--publish` run refuses instead.
+
+Video frames are counted against the clock, so a slow encoder never shifts the timeline; it only queues frames in memory. That queue is capped at 1 GB, checked before every frame, and a recording that hits it stops with an error rather than running the machine out of memory.
 
 `report.json` lists the Node, Chromium, ffmpeg and OS versions used, for comparing two recordings. GitHub's `ubuntu-24.04` runner image is updated weekly and its ffmpeg comes from apt, so those can change between releases; the report says when they did.
 

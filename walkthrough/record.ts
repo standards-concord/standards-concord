@@ -14,7 +14,7 @@
  * Output goes to walkthrough/out/: concord-walkthrough.mp4 (1080p, AAC, soft captions),
  * .vtt captions, chapters.txt (YouTube-style) and report.json.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -23,7 +23,7 @@ import { Capture } from './lib/capture.ts';
 import { Director, sleep } from './lib/director.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { cuesFor, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
+import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
@@ -75,6 +75,13 @@ if (argv.publish) {
   if (argv.draft || argv.check) throw new Error('--publish records the real thing: drop --draft/--check');
 }
 
+/**
+ * Pages served through the network guard (route.fulfill) lose Chromium's record that
+ * they came from localhost, so its local-network checks would then block the dev
+ * server's own websocket. Everything here is local, so turn those checks off.
+ */
+const LOCAL_NETWORK_ARGS = ['--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights'];
+
 /** "Now", as far as the recorded hub and browser are concerned, so dates on screen never drift. */
 const EPOCH = '2026-11-23T10:00:00Z';
 
@@ -104,7 +111,7 @@ async function main() {
   const hub = (argv.hub ?? concord!.web).replace(/\/$/, '');
   const shownHub = argv['shown-hub']!.replace(/\/$/, '');
   try {
-    const browser = await chromium.launch({ headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars'] });
+    const browser = await chromium.launch({ headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars', ...LOCAL_NETWORK_ARGS] });
     const chromiumVersion = browser.version();
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
     // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
@@ -144,6 +151,9 @@ async function main() {
     const { kept, skipped } = selectScenes(narration, features, argv.only?.split(','));
     for (const s of skipped) log(`  skip ${s.id}: ${s.reason}`);
     if (!kept.length) throw new Error('No scenes to record');
+    const promisesLength = kept.some((s) => s.steps.some((st) => st.text.includes('{minutes}')));
+    const promisedMinutes = fillMinutes(kept);
+    if (promisesLength) log(`  the intro will say about ${promisedMinutes} minutes`);
 
     // 2. Voice every paragraph (cached), with its neighbours for natural flow.
     const steps = kept.flatMap((s) => s.steps.map((st) => ({ scene: s, step: st })));
@@ -245,6 +255,9 @@ async function main() {
     }
     await sleep(1500);
     const seconds = await cap.stop();
+    // The intro says how long the video is; check it said the truth.
+    if (promisesLength && Math.abs(seconds / 60 - promisedMinutes) > 1.5)
+      d.note(`The intro promises about ${promisedMinutes} minutes, but the video is ${fmt(seconds)}`);
     // A big backlog means the encoder couldn't keep up. Timing stays right (frames are counted),
     // but the machine is close to running out of memory, so it's worth knowing.
     if (cap.peakBacklogBytes > 256 * 1024 * 1024) d.warnings.push(`video encoder fell behind (peak backlog ${Math.round(cap.peakBacklogBytes / 1048576)} MB); use a faster machine`);
@@ -274,6 +287,7 @@ async function main() {
       outsideRequests: [...outside],
       fontsFetchedLive: [...fonts.fetched],
       fontsMissing: [...fonts.missing],
+      promisedMinutes: promisesLength ? promisedMinutes : undefined,
       toolchain: await toolchain(chromiumVersion),
       warnings: d.warnings,
       captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
@@ -282,6 +296,8 @@ async function main() {
     if (argv.publish && (d.warnings.length || shims.size || outside.size || fonts.missing.size)) {
       throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s), ${fonts.missing.size} missing font file(s). See report.json.`);
     }
+    // Some warnings arrive between steps (page errors, failed requests), so strict mode checks again at the end.
+    if (argv.strict && d.warnings.length) throw new Error(`--strict: ${d.warnings.length} warning(s) during the recording. See report.json.`);
     log(`\nDone: ${out} (${fmt(seconds)})`);
     if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
     if (shims.size) log(`\n⚠ Stand-ins were used for platform features this hub doesn't serve yet:\n  ${[...shims].join('\n  ')}\n  Re-record once they're deployed, or pass --no-shims to refuse.`);
@@ -371,14 +387,34 @@ async function detectFeatures(hub: string, mcp: McpClient, ontologyId: string): 
  * being recorded, the stage server, or a route below is blocked and reported. The app's
  * web fonts are the one exception, so the video shows the real typography.
  */
-/** Lets the browser reach only these exact origins (scheme, host and port); everything else is blocked and reported. */
+/**
+ * Lets the browser reach only these exact origins (scheme, host and port); everything
+ * else is blocked and reported. Allowed requests are made here with redirects off, so a
+ * redirect is checked before it is followed: the browser then follows an allowed one as
+ * a new request, which comes back through this guard.
+ */
 async function guardNetwork(context: import('@playwright/test').BrowserContext, o: { allowed: string[]; outside: Set<string> }) {
   const allowed = new Set(o.allowed.map((a) => new URL(a).origin));
   await context.route(/^https?:\/\//, async (route) => {
-    const origin = new URL(route.request().url()).origin;
-    if (allowed.has(origin)) return route.fallback();
-    o.outside.add(origin);
-    return route.abort('blockedbyclient');
+    const req = route.request();
+    const origin = new URL(req.url()).origin;
+    if (!allowed.has(origin)) {
+      o.outside.add(origin);
+      return route.abort('blockedbyclient');
+    }
+    // Event streams never end, so they can't be fetched whole; same-origin streams don't redirect.
+    if (req.resourceType() === 'eventsource') return route.fallback();
+    const res = await route.fetch({ maxRedirects: 0 }).catch(() => undefined);
+    if (!res) return route.abort('failed');
+    const location = res.headers()['location'];
+    if (res.status() >= 300 && res.status() < 400 && location) {
+      const to = new URL(location, req.url()).origin;
+      if (!allowed.has(to)) {
+        o.outside.add(to);
+        return route.abort('blockedbyclient');
+      }
+    }
+    return route.fulfill({ response: res });
   });
 }
 
@@ -423,8 +459,10 @@ async function routeModules(page: import('@playwright/test').Page, o: { hub: str
 /** Versions of everything that affects the pixels and the sound, for comparing recordings. */
 async function toolchain(chromiumVersion: string) {
   const { execFile } = await import('node:child_process');
+  const os = await import('node:os');
   const out = (cmd: string, args: string[]) => new Promise<string>((r) => execFile(cmd, args, (_e, stdout) => r(String(stdout ?? '').split('\n')[0].trim())));
-  return { node: process.version, chromium: chromiumVersion, ffmpeg: await out('ffmpeg', ['-version']), os: await out('sh', ['-c', '. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -sr']) };
+  const distro = existsSync('/etc/os-release') ? (await readFile('/etc/os-release', 'utf8')).match(/^PRETTY_NAME="?([^"\n]*)/m)?.[1] : process.platform === 'darwin' ? `macOS ${await out('sw_vers', ['-productVersion'])}` : undefined;
+  return { node: process.version, chromium: chromiumVersion, ffmpeg: await out('ffmpeg', ['-version']), os: [distro, `${os.type()} ${os.release()} ${os.arch()}`].filter(Boolean).join(' · ') };
 }
 
 main().catch((e) => {

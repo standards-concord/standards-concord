@@ -13,6 +13,8 @@
  *   [if: jsClasses,!forks]          keeps the paragraph below only when the hub has (or,
  *                                   with !, lacks) those features
  *
+ * "{minutes}" in a paragraph becomes the estimated length of the recording, in words.
+ *
  * Paragraphs with no [do:] keep the screen as it is. A [do:] with no paragraph after it
  * runs on its own, silently. HTML comments are notes for editors and are ignored.
  */
@@ -266,4 +268,19 @@ export function selectScenes(n: Narration, features: Set<string>, only?: string[
     else kept.push({ ...s, steps: s.steps.filter((st) => (st.when ?? []).every((w) => (w.startsWith('!') ? !features.has(w.slice(1)) : features.has(w)))) });
   }
   return { kept, skipped };
+}
+
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+
+/**
+ * Fills "{minutes}" in the selected scenes with the expected length of the video, as a
+ * word ("nine"), so the intro states the length of what is actually recorded. The
+ * estimate is speech at 155 words a minute plus 10% for actions that outlast it, which
+ * matched a measured recording to within ten seconds.
+ */
+export function fillMinutes(scenes: Scene[]): number {
+  const words = scenes.flatMap((s) => s.steps).reduce((n, st) => n + st.text.split(/\s+/).filter(Boolean).length, 0);
+  const minutes = Math.max(1, Math.round((words / 155) * 1.1));
+  for (const st of scenes.flatMap((s) => s.steps)) st.text = st.text.replace(/\{minutes\}/g, NUMBER_WORDS[minutes] ?? String(minutes));
+  return minutes;
 }

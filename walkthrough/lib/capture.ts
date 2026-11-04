@@ -77,19 +77,22 @@ export class Capture {
   }
 
   private pump() {
-    if (!this.last || !this.ffmpeg?.stdin?.writable) return;
+    if (this.overrun || !this.last || !this.ffmpeg?.stdin?.writable) return;
+    const stdin = this.ffmpeg.stdin;
     const due = Math.floor(this.now() * this.opts.fps);
     while (this.written < due) {
       // Frames are counted, not timed by ffmpeg, so a slow encoder never shifts the timeline;
-      // it only queues bytes in memory. Track that so a run can warn before memory runs out.
-      this.ffmpeg.stdin.write(this.last);
+      // it only queues bytes in memory (Node's back-pressure signal). That queue is capped
+      // here, before every write: past the cap the recording stops instead of growing.
+      if (stdin.writableLength + this.last.length > Capture.maxBacklogBytes) {
+        this.overrun = new Error(`The video encoder fell more than ${Math.round(Capture.maxBacklogBytes / 1048576)} MB behind; record on a faster machine`);
+        clearInterval(this.timer);
+        stdin.destroy();
+        return;
+      }
+      stdin.write(this.last);
       this.written++;
-    }
-    this.peakBacklogBytes = Math.max(this.peakBacklogBytes, this.ffmpeg.stdin.writableLength);
-    if (this.peakBacklogBytes > Capture.maxBacklogBytes && !this.overrun) {
-      this.overrun = new Error(`The video encoder fell more than ${Math.round(Capture.maxBacklogBytes / 1048576)} MB behind; record on a faster machine`);
-      clearInterval(this.timer);
-      this.ffmpeg.stdin.destroy();
+      this.peakBacklogBytes = Math.max(this.peakBacklogBytes, stdin.writableLength);
     }
   }
 

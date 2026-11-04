@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lineDiff } from '../lib/terminal.ts';
 import { vtt } from '../lib/mux.ts';
-import { cuesFor, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap } from '../lib/narration.ts';
+import { cuesFor, fillMinutes, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap } from '../lib/narration.ts';
 import { actions } from '../scenes.ts';
 
 describe('narration parser', () => {
@@ -106,6 +106,16 @@ Always said.
     const without = selectScenes(n, new Set()).kept[0].steps.map((s) => s.text);
     expect(withClasses).toEqual(['Long tour with the developer story.', 'Always said.']);
     expect(without).toEqual(['Short tour.', 'Always said.']);
+  });
+});
+
+describe('spoken length', () => {
+  it('fills {minutes} from the words in the selected scenes', () => {
+    const words = Array.from({ length: 560 }, () => 'word').join(' ');
+    const n = parseNarration(`## A {#a}\n\nIn about {minutes} minutes.\n\n${words}\n`);
+    const kept = selectScenes(n, new Set()).kept;
+    expect(fillMinutes(kept)).toBe(4);
+    expect(kept[0].steps[0].text).toBe('In about four minutes.');
   });
 });
 
