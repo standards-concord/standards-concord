@@ -94,25 +94,34 @@ function spawn(): Slot {
   return slot;
 }
 
-/** Removes a worker, failing its job, and starts a fresh one for the queue. */
+/** Workers being stopped. They still count against the limit until they have exited. */
+let stopping = 0;
+
+/**
+ * Stops a worker, then fails its job and lets the queue go on. Its job's
+ * caller (and so its place) is only let go once the thread has exited, so
+ * a stopped worker and its replacement never run side by side.
+ */
 function retire(slot: Slot, err: unknown) {
   const i = slots.indexOf(slot);
   if (i < 0) return;
   slots.splice(i, 1);
   const cur = slot.current;
   slot.current = undefined;
-  if (cur) {
-    clearTimeout(cur.timer);
-    cur.reject(err);
-  }
-  void slot.worker.terminate();
-  pump();
+  if (cur) clearTimeout(cur.timer);
+  stopping++;
+  const done = () => {
+    stopping--;
+    cur?.reject(err);
+    pump();
+  };
+  slot.worker.terminate().then(done, done);
 }
 
 function pump() {
   while (queue.length) {
     let slot = slots.find((s) => !s.current);
-    if (!slot && slots.length < POOL_LIMITS.workers) slot = spawn();
+    if (!slot && slots.length + stopping < POOL_LIMITS.workers) slot = spawn();
     if (!slot) return;
     const next = queue.shift()!;
     clearTimeout(next.wait);
@@ -163,4 +172,4 @@ export function runValidation(job: Omit<ValidationJob, 'id'>, signal?: AbortSign
 }
 
 /** Places taken and jobs waiting or running, for tests and health checks. */
-export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length });
+export const poolState = () => ({ admitted, queued: queue.length, running: slots.filter((s) => s.current).length, stopping, threads: slots.length + stopping });

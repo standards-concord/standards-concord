@@ -159,6 +159,22 @@ describe('POST to the ontology IRI validates data', () => {
     expect((await post('/def/volunteering', VALID).set('Accept', 'image/png')).status).toBe(406);
   });
 
+  it('negotiates the report with its charset, like any other parameter', async () => {
+    const type = async (accept: string) => {
+      const res = await post('/def/volunteering', VALID).set('Accept', accept);
+      return res.status === 200 ? res.headers['content-type'].split(';')[0] : res.status;
+    };
+    expect(await type('text/turtle;charset=utf-8')).toBe('text/turtle');
+    expect(await type('application/json;charset=utf-8')).toBe('application/json');
+    expect(await type('text/turtle;charset=utf-8;q=0, text/turtle;q=1')).toBe(406);
+    expect(await type('application/json;charset=utf-8;q=0, application/json')).toBe(406);
+    expect(await type('application/json;charset=utf-8;q=0, */*')).toBe('text/turtle');
+    expect(await type('text/turtle;charset=iso-8859-1')).toBe(406);
+    expect(await type('text/turtle, application/json')).toBe('text/turtle');
+    expect(await type('application/json;q=0.5, text/turtle;q=0.9')).toBe('text/turtle');
+    expect(await type('*/*')).toBe('application/json');
+  });
+
   it('refuses data over the size and triple limits', async () => {
     const big = await post('/def/volunteering', `# ${'x'.repeat(5 * 1024 * 1024 + 10)}\n`);
     expect(big.status).toBe(413);
@@ -248,11 +264,12 @@ describe('POST to the ontology IRI validates data', () => {
     /** Waits until every place is free and no job is waiting or running. */
     const idle = async (ms = 3000) => {
       for (let i = 0; i < ms / 10; i++) {
-        const st = poolState();
-        if (!st.admitted && !st.queued && !st.running) return st;
+        const { admitted, queued, running } = poolState();
+        if (!admitted && !queued && !running) return { admitted, queued, running };
         await new Promise((r) => setTimeout(r, 10));
       }
-      return poolState();
+      const { admitted, queued, running } = poolState();
+      return { admitted, queued, running };
     };
     const bigData = (n: number) => {
       let big = PREFIXES;
@@ -283,9 +300,18 @@ describe('POST to the ontology IRI validates data', () => {
         const sent = Array.from({ length: POOL_LIMITS.workers + POOL_LIMITS.queue }, () => send(data.slice(0, 10), {}, data.slice(10)));
         for (let i = 0; i < 100 && poolState().running < POOL_LIMITS.workers; i++) await new Promise((r) => setTimeout(r, 10));
         expect(poolState().running).toBe(POOL_LIMITS.workers);
+        // Watch the pool while they stop: never more threads than workers, and no place
+        // given back while a stopped worker is still exiting.
+        const samples: ReturnType<typeof poolState>[] = [];
+        const watch = setInterval(() => samples.push(poolState()), 0);
         for (const s of sent) s.req.destroy();
         // Far sooner than the jobs could finish: they were stopped, not waited for.
-        expect(await idle(300)).toEqual({ admitted: 0, queued: 0, running: 0 });
+        const end = await idle(300);
+        clearInterval(watch);
+        expect(end).toEqual({ admitted: 0, queued: 0, running: 0 });
+        expect(samples.length).toBeGreaterThan(0);
+        expect(Math.max(...samples.map((x) => x.threads))).toBeLessThanOrEqual(POOL_LIMITS.workers);
+        expect(samples.filter((x) => x.stopping > 0 && x.admitted < x.stopping)).toEqual([]);
       } finally {
         POOL_LIMITS.perClient = before;
       }

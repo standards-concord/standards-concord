@@ -7,7 +7,7 @@ import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { VALIDATION_LIMITS, validateDataAgainst } from '../services/dataValidation.js';
 import { admit } from '../services/validationPool.js';
-import { latestVersion } from './routes.js';
+import { acceptMatch, latestVersion } from './routes.js';
 import { PUBLIC_BASE } from './w3id.js';
 
 /**
@@ -133,6 +133,19 @@ function declaredFormat(req: Request): DataFormat | 'sniff' | undefined {
 /** The site's own address, as in routes.ts. */
 const origin = (req: Request) => (process.env.PUBLIC_URL ? config.publicUrl : `${req.protocol}://${req.host}`);
 
+/**
+ * Which report to send: JSON or Turtle, both UTF-8, by the Accept header's
+ * most specific matching ranges (charset counts, as for the SHACL profile).
+ * The higher quality wins; on a tie, the one listed first; JSON by default.
+ */
+function reportType(accept: string | undefined): Target['wants'] | undefined {
+  const json = acceptMatch(accept, 'application/json', { charset: 'utf-8' });
+  const turtle = acceptMatch(accept, 'text/turtle', { charset: 'utf-8' });
+  if (json.q <= 0 && turtle.q <= 0) return undefined;
+  if (turtle.q > json.q || (turtle.q === json.q && turtle.position < json.position)) return 'text/turtle';
+  return 'application/json';
+}
+
 interface Target {
   project: NonNullable<ReturnType<typeof findProject>>;
   version: string;
@@ -152,10 +165,10 @@ const target = (req: Request, res: Response, next: NextFunction) => {
   const version =
     requested === 'latest' ? (latest ?? 'draft') : requested === 'draft' || requested === 'working' ? 'draft' : ontologyStore.versions(project).includes(requested) ? requested : undefined;
   if (!version) return fail(404, `${project.title} has no version “${requested}”.`);
-  const wants = req.accepts(['application/json', 'text/turtle']);
-  if (!wants) return fail(406, 'Reports are available as application/json or text/turtle.');
+  const wants = reportType(req.get('Accept'));
+  if (!wants) return fail(406, 'Reports are available as application/json or text/turtle (UTF-8).');
   if (!declaredFormat(req)) return void res.status(415).set('Connection', 'close').set('Accept-Post', ACCEPT_POST).json({ error: UNSUPPORTED });
-  res.locals.target = { project, version, wants: wants as Target['wants'] } satisfies Target;
+  res.locals.target = { project, version, wants } satisfies Target;
   next();
 };
 

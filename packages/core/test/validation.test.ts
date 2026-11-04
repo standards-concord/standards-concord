@@ -93,6 +93,15 @@ describe('reading data', () => {
     const list = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', items: Array.from({ length: 10 }, (_, i) => i) });
     expect(await parseData(list, 'jsonld', { maxTriples: 21 })).toHaveLength(21);
     expect((await parseData(list, 'jsonld', { maxTriples: 20 }).catch((e) => e)).status).toBe(413);
+    // Lists of lists count their inner items too.
+    const lists = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', items: [[1, 2, 3], [4, [5, 6]]] });
+    expect(await parseData(lists, 'jsonld')).toHaveLength(1 + 2 * 2 + 2 * 3 + 2 * 2 + 2 * 2);
+    expect((await parseData(lists, 'jsonld', { maxTriples: 18 }).catch((e) => e)).status).toBe(413);
+    const deepList = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', items: [[Array.from({ length: 5000 }, (_, i) => i)]] });
+    expect((await parseData(deepList, 'jsonld', { maxTriples: 25 }).catch((e) => e)).message).toMatch(/more than 25 triples/);
+    // The same description repeated is one set of triples.
+    const repeated = JSON.stringify({ '@context': ctx, '@graph': Array.from({ length: 50 }, () => ({ '@id': 'https://e/a', '@type': 'https://e/T', p: 1 })) });
+    expect(await parseData(repeated, 'jsonld', { maxTriples: 2 })).toHaveLength(2);
     // Arrays nested in arrays are flattened into one set of values.
     const nested = JSON.stringify({ '@context': ctx, '@id': 'https://e/a', p: [[1, [2, [3]]]] });
     expect(await parseData(nested, 'jsonld', { maxTriples: 3 })).toHaveLength(3);

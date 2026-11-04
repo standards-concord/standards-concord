@@ -94,12 +94,21 @@ export function wantsShaclProfile(req: Request): boolean {
  * 'text/turtle;profile="…shacl#";q=0, text/turtle' refuses the SHACL profile.
  */
 export function acceptsRepresentation(header: string | undefined, type: string, params: Record<string, string> = {}): boolean {
-  if (!header?.trim()) return true;
+  return acceptMatch(header, type, params).q > 0;
+}
+
+/**
+ * How Accept rates a representation: the quality of the most specific range
+ * that matches it, and where that range is in the header (for ties). No
+ * header accepts everything at q=1.
+ */
+export function acceptMatch(header: string | undefined, type: string, params: Record<string, string> = {}): { q: number; position: number } {
+  if (!header?.trim()) return { q: 1, position: 0 };
   const want = type.toLowerCase();
   const [major] = want.split('/');
   const norm = (k: string, v: string) => (k === 'profile' ? v.replace(/^<|>$/g, '') : v.toLowerCase());
-  let best: { specificity: number; q: number } | undefined;
-  for (const part of header.split(',')) {
+  let best: { specificity: number; q: number; position: number } | undefined;
+  header.split(',').forEach((part, position) => {
     const [rangeRaw, ...paramParts] = part.split(';');
     const range = rangeRaw.trim().toLowerCase();
     let q = 1;
@@ -113,16 +122,16 @@ export function acceptsRepresentation(header: string | undefined, type: string, 
       else rangeParams.push([key, value]);
     }
     let specificity = range === want ? 3 : range === `${major}/*` ? 2 : range === '*/*' ? 1 : 0;
-    if (!specificity) continue;
+    if (!specificity) return;
     if (rangeParams.length) {
       const matches = rangeParams.every(([k, v]) => params[k] !== undefined && norm(k, params[k]) === norm(k, v));
-      if (!matches) continue;
+      if (!matches) return;
       specificity += 3 + rangeParams.length;
     }
     if (!Number.isFinite(q)) q = 0;
-    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q };
-  }
-  return !!best && best.q > 0;
+    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q, position };
+  });
+  return best ? { q: best.q, position: best.position } : { q: 0, position: Infinity };
 }
 
 function splitExtension(segment: string): { base: string; format?: OutputFormat | 'html' } {

@@ -192,42 +192,51 @@ function jsonDepth(doc: unknown, limit: number): number {
 }
 
 /**
- * How many triples an expanded JSON-LD document makes, at most. Expanded
- * JSON-LD has every context applied (terms, coercion, @json literals,
- * context-defined lists and indexes are all explicit), so this counts what
- * toRDF will emit: one triple per property value and per @type, and two per
- * list item. @json and other literal values are never looked inside.
+ * How many triples a flattened JSON-LD document (jsonld.flatten with no
+ * context) makes. Flattening applies every context and merges each node's
+ * descriptions into one, dropping duplicate values, so this is what toRDF
+ * will emit: one triple per @type and per property value, and two per list
+ * item, lists of lists included. (Values toRDF drops, such as relative IRIs,
+ * are still counted, so it never undercounts.) @json and other literals are
+ * never looked inside.
  */
-export function expandedTripleCount(expanded: unknown): number {
+export function flattenedTripleCount(flattened: unknown): number {
   let count = 0;
-  // Node objects (and arrays of them) still to count.
-  const stack: unknown[] = [expanded];
   const isObject = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
-  /** A property's values: each makes one triple; lists add two per item; nested nodes are counted in turn. */
+  const asArray = (x: unknown): unknown[] => (Array.isArray(x) ? x : [x]);
+  // Node objects (or arrays of them) and the items of lists still to count.
+  const stack: ({ node: unknown } | { list: unknown[] })[] = [{ node: flattened }];
+  /** A property's values: one triple each; a list adds its own; nested nodes are counted in turn. */
   const values = (vs: unknown) => {
-    for (const v of Array.isArray(vs) ? vs : [vs]) {
+    for (const v of asArray(vs)) {
       count++;
       if (!isObject(v) || '@value' in v) continue;
-      if ('@list' in v) {
-        const items = Array.isArray(v['@list']) ? v['@list'] : [v['@list']];
-        for (const item of items) {
-          count += 2;
-          if (isObject(item) && !('@value' in item)) stack.push(item);
-        }
-      } else stack.push(v);
+      if ('@list' in v) stack.push({ list: asArray(v['@list']) });
+      else stack.push({ node: v });
     }
   };
   while (stack.length) {
-    const node = stack.pop();
+    const next = stack.pop()!;
+    if ('list' in next) {
+      for (const item of next.list) {
+        count += 2;
+        if (!isObject(item) || '@value' in item) continue;
+        if ('@list' in item) stack.push({ list: asArray(item['@list']) });
+        else stack.push({ node: item });
+      }
+      continue;
+    }
+    const node = next.node;
     if (Array.isArray(node)) {
-      for (const x of node) stack.push(x);
+      for (const x of node) stack.push({ node: x });
       continue;
     }
     if (!isObject(node) || '@value' in node) continue;
     for (const [key, v] of Object.entries(node)) {
-      if (key === '@type') count += Array.isArray(v) ? v.length : 1;
-      else if (key === '@graph' || key === '@included') stack.push(v);
+      if (key === '@type') count += asArray(v).length;
+      else if (key === '@graph' || key === '@included') stack.push({ node: v });
       else if (key === '@reverse' && isObject(v)) for (const rv of Object.values(v)) values(rv);
+      else if (key === '@list') stack.push({ list: asArray(v) });
       else if (!key.startsWith('@')) values(v);
     }
   }
@@ -269,12 +278,13 @@ async function streamQuads(text: string, format: DataFormat, baseIRI: string | u
         },
       };
       try {
-        // Expand first: with every context applied, the triples it will make can be
-        // counted exactly, and refused before any are made.
-        const expanded = await jsonld.expand(doc as object, options as never);
+        // Flatten first (expanding with every context, merging each node's descriptions
+        // and dropping duplicates): the triples it will make can then be counted, and
+        // refused before any are made. Flattening only shrinks the expanded document.
+        const flattened = await jsonld.flatten(doc as object, null as never, options as never);
         doc = undefined;
-        if (expandedTripleCount(expanded) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
-        const nquads = (await jsonld.toRDF(expanded as unknown as object, { ...options, format: 'application/n-quads' } as never)) as unknown as string;
+        if (flattenedTripleCount(flattened) > maxTriples) throw new DataError(413, `The data has more than ${maxTriples.toLocaleString('en')} triples, the limit.`);
+        const nquads = (await jsonld.toRDF(flattened as unknown as object, { ...options, format: 'application/n-quads' } as never)) as unknown as string;
         return streamN3(nquads, 'N-Quads', undefined, emit);
       } catch (err) {
         if (remote) throw new DataError(400, `Remote JSON-LD contexts are not fetched (${remote}). Put the context inline in the document.`);
