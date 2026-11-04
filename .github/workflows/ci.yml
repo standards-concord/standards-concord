@@ -9,9 +9,13 @@ on:
 permissions:
   contents: read
 
+# Branches cancel superseded runs. main never does: a run that is building the
+# backend image finishes, and newer main pushes queue behind it (GitHub keeps the
+# newest pending one), so the latest main commit always reaches the server and
+# an older image never overwrites a newer one.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -39,6 +43,18 @@ jobs:
         run: pnpm -r test
       - name: Build the web app
         run: pnpm --filter @concord/web build
+      - name: Check the public MCP URL is the same in every listing
+        run: node scripts/public-url.mjs --check
+      - name: Check the plugin files match their schemas
+        run: node scripts/validate-listings.mjs
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - name: Check the MCP Registry entry (pinned publisher, as the publish workflow uses)
+        run: |
+          go install github.com/modelcontextprotocol/registry/cmd/publisher@v1.8.6
+          "$(go env GOPATH)/bin/publisher" validate
 
   # Browser tests: the alpha walkthrough and every page of the app, against both the
   # Vite dev server (what `pnpm dev` runs) and the production build (what Vercel serves).

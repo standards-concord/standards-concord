@@ -30,7 +30,9 @@ let minorId: string;
 let seededMinorId: string;
 let majorId: string;
 
-const detail = async (id: string) => (await request(app).get(`/api/change-requests/${id}`)).body as ChangeRequestDetail;
+/** Change requests are read signed in, as testers do. */
+let reader: Agent;
+const detail = async (id: string) => (await reader.get(`/api/change-requests/${id}`)).body as ChangeRequestDetail;
 const pending = async (token: string, all = false, commit?: string) => {
   const q = new URLSearchParams({ ...(all && { all: '1' }), ...(commit && { commit }) }).toString();
   const res = await request(app).get(`/api/app-checks/pending${q ? `?${q}` : ''}`).set('Authorization', `Bearer ${token}`);
@@ -121,7 +123,8 @@ beforeAll(async () => {
   openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
-  const crs = (await request(app).get(`/api/ontologies/${demoId}/change-requests`)).body as { id: string; title: string }[];
+  reader = await login('member', 'Reader of change requests');
+  const crs = (await reader.get(`/api/ontologies/${demoId}/change-requests`)).body as { id: string; title: string }[];
   seededMinorId = crs.find((c) => c.title === 'Say whether an opportunity reimburses expenses')!.id;
   majorId = crs.find((c) => c.title === 'Allow only one location per session')!.id;
   // A fresh minor change of our own, so the demo's connected app hasn't tested it.
@@ -206,14 +209,18 @@ describe('connected apps', () => {
     expect(minor.status).toBe('review');
     expect(p.targets.every((t) => ['review', 'voting', 'approved'].includes(t.status))).toBe(true);
 
-    const proposed = await request(app).get(minor.source);
+    // Change requests aren't public, so neither is what they'd produce: the app's CI reads it with its token.
+    expect((await request(app).get(minor.source)).status).toBe(401);
+    expect((await request(app).get(minor.source).set('Authorization', 'Bearer cna_nope')).status).toBe(401);
+    const proposed = await request(app).get(minor.source).set('Authorization', `Bearer ${created.token}`);
     expect(proposed.status).toBe(200);
+    expect((await reader.get(minor.source)).status).toBe(200);
     expect(proposed.headers['content-type']).toContain('text/turtle');
     expect(proposed.headers['x-concord-revision']).toBe(minor.revision);
     expect(proposed.text).toContain('accessNote');
     const working = await request(app).get(`${p.baseline.source}&format=turtle`);
     expect(working.text).not.toContain('accessNote');
-    const jsonld = await request(app).get(`${minor.source}?format=jsonld`);
+    const jsonld = await request(app).get(`${minor.source}?format=jsonld`).set('Authorization', `Bearer ${created.token}`);
     expect(jsonld.headers['content-type']).toContain('application/ld+json');
     expect(JSON.parse(jsonld.text)).toBeTruthy();
   });

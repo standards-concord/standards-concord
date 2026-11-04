@@ -21,20 +21,21 @@ test.describe('app checks', () => {
     demo = await demoOntology(request);
   });
 
-  test('the demo shows a connected app’s results and its autopilot approval', async ({ page, request }) => {
+  test('the demo shows a connected app’s results and its autopilot approval', async ({ page }) => {
     await signIn(page, { name: 'Checks viewer', role: 'member' });
-    const expenses = await changeByTitle(request, demo.id, 'Say whether an opportunity reimburses expenses');
-    await page.goto(`/o/${demo.id}/changes/${expenses}`);
+    const expenses = await changeByTitle(page.request, demo.id, 'Say whether an opportunity reimburses expenses');
+    await page.goto(`/o/${demo.id}/changes/${expenses}?view=checks`);
     await settle(page);
     const card = page.locator('section').filter({ has: page.getByRole('heading', { name: 'App checks' }) });
     await expect(card.getByTestId('app-check').filter({ hasText: 'CharityBase volunteer export' })).toContainText('Passed');
     await expect(card).toContainText('Gareth Lewis’s app');
     // Gareth's approval in the timeline came from autopilot.
+    await page.getByRole('tab', { name: /Discussion/ }).click();
     const timeline = page.locator('li').filter({ hasText: 'Gareth Lewis' }).filter({ hasText: 'Approved' });
     await expect(timeline.getByText('Autopilot', { exact: true })).toBeVisible();
 
-    const major = await changeByTitle(request, demo.id, 'Allow only one location per session');
-    await page.goto(`/o/${demo.id}/changes/${major}`);
+    const major = await changeByTitle(page.request, demo.id, 'Allow only one location per session');
+    await page.goto(`/o/${demo.id}/changes/${major}?view=checks`);
     await settle(page);
     const failed = page.getByTestId('app-check').filter({ hasText: 'CharityBase volunteer export' });
     await expect(failed).toContainText('Failed');
@@ -111,11 +112,12 @@ test.describe('app checks', () => {
     await page.getByRole('button', { name: 'Refresh' }).click();
     await expect(app.getByText('Passes the working draft')).toBeVisible();
 
-    await page.goto(`/o/${demo.id}/changes/${crId}`);
+    await page.goto(`/o/${demo.id}/changes/${crId}?view=checks`);
     await settle(page);
     const check = page.getByTestId('app-check').filter({ hasText: 'Family finder' });
     await expect(check).toContainText('Passed');
     await expect(check.getByRole('link', { name: /CI run/ })).toHaveAttribute('href', 'https://github.com/example/family-finder/actions/runs/7');
+    await page.getByRole('tab', { name: /Discussion/ }).click();
     const approval = page.locator('li').filter({ hasText: 'Ravi Reviewer' }).filter({ hasText: 'Approved' });
     await expect(approval.getByText('Autopilot', { exact: true })).toBeVisible();
     await expect(page.getByText(/Approvals: 1\/2|1 more approval/).first()).toBeVisible();
@@ -124,9 +126,10 @@ test.describe('app checks', () => {
     const next = await (await page.request.get('/api/app-checks/pending?all=1', { headers: auth })).json();
     await page.request.post('/api/app-checks', { headers: auth, data: { target: 'baseline', revision: next.baseline.revision, attempt: next.attempt, outcome: 'passed' } });
     await page.request.post('/api/app-checks', { headers: auth, data: { target: crId, revision: target.revision, attempt: next.attempt, outcome: 'failed', summary: '`npm test` exited with code 1.' } });
-    await page.reload();
+    await page.goto(`/o/${demo.id}/changes/${crId}?view=checks`);
     await settle(page);
     await expect(page.getByTestId('app-check').filter({ hasText: 'Family finder' })).toContainText('Failed');
+    await page.getByRole('tab', { name: /Discussion/ }).click();
     await expect(page.getByText(/Autopilot withdrew Ravi Reviewer’s yes/)).toBeVisible();
     await expect(approval.getByText('Withdrawn', { exact: true })).toBeVisible();
     await expect(page.getByText(/Approvals: 0\/2|2 more approval/).first()).toBeVisible();
@@ -145,7 +148,7 @@ test.describe('app checks', () => {
     });
     const crId = ((await created.json()) as { id: string }).id;
     await page.request.post(`/api/change-requests/${crId}/submit`);
-    await page.goto(`/o/${demo.id}/changes/${crId}`);
+    await page.goto(`/o/${demo.id}/changes/${crId}?view=checks`);
     await settle(page);
     await expect(page.getByText('No app has tested this change yet.')).toBeVisible();
     await page.getByRole('link', { name: 'Connect your app' }).click();
@@ -156,7 +159,10 @@ test.describe('app checks', () => {
     await signIn(page, { name: 'Steward of autopilot', role: 'steward' });
     await page.goto(`/o/${demo.id}/governance`);
     await settle(page);
+    await expect(page.getByText(/of 5 automations on/)).toBeVisible();
     await page.getByRole('button', { name: /Ownership, ODI and automation/ }).click();
+    await expect(page.getByText(/On: autopilot/)).toBeVisible();
+    await page.getByRole('button', { name: 'Edit policy' }).click();
     const sw = page.getByRole('switch', { name: /Autopilot: members can have Concord approve or vote yes/ });
     await expect(sw).toHaveAttribute('aria-checked', 'true');
   });

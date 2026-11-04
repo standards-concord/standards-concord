@@ -125,6 +125,16 @@ export const ontologyStore = {
     return this.head(project);
   },
 
+  /** Rewrites files beside released versions (releases/<version>/<name>) in one commit; tags stay where they were. */
+  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string>>, message: string): string {
+    const dir = repoDir(project);
+    for (const [version, named] of Object.entries(files))
+      for (const [name, content] of Object.entries(named)) fs.writeFileSync(path.join(dir, 'releases', version, name), content);
+    git(dir, ['add', 'releases']);
+    if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    return this.head(project);
+  },
+
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
     const relRoot = path.join(repoDir(project), 'releases');
     if (!fs.existsSync(relRoot)) return [];

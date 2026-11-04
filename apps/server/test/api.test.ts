@@ -25,11 +25,12 @@ beforeAll(async () => {
 
 describe('demo seed', () => {
   it('has the volunteering ontology at 1.0.0 with members and open change requests', async () => {
-    const res = await request(app).get(`/api/ontologies/volunteering`);
+    const agent = await login('member', 'Seed reader');
+    const res = await agent.get(`/api/ontologies/volunteering`);
     expect(res.status).toBe(200);
     expect(res.body.currentVersion).toBe('1.0.0');
     expect(res.body.members.length).toBeGreaterThanOrEqual(6);
-    const crs = await request(app).get(`/api/ontologies/${demoId}/change-requests`);
+    const crs = await agent.get(`/api/ontologies/${demoId}/change-requests`);
     const byTitle = Object.fromEntries(crs.body.map((c: { title: string }) => [c.title, c]));
     expect(byTitle['Clarify the definition of cause'].status).toBe('merged');
     expect(byTitle['Clarify the definition of cause'].classification.level).toBe('patch');
@@ -49,7 +50,7 @@ describe('demo seed', () => {
   });
 
   it('validates the working draft as consistent and FAIR', async () => {
-    const res = await request(app).get(`/api/ontologies/${demoId}/validation`);
+    const res = await (await login('contributor')).get(`/api/ontologies/${demoId}/validation`);
     expect(res.status).toBe(200);
     expect(res.body.reasoner.consistent).toBe(true);
     expect(res.body.fair.score).toBeGreaterThan(0.7);
@@ -244,5 +245,73 @@ describe('feedback', () => {
     expect(second.body.nextQuestionId).toBe('familiarity');
     const sub = await request(app).post('/api/feedback').send({ pathway: 'structured', answers, transcript: messages, usedVoice: false });
     expect(sub.status).toBe(201);
+  });
+});
+
+describe('anonymous access', () => {
+  it('keeps use cases, interviews, meetings, change requests, releases and feedback behind sign-in', async () => {
+    const agent = await login('contributor', 'Private author');
+    const uc = await agent.post(`/api/ontologies/${demoId}/interviews`).send({});
+    expect(uc.status).toBe(201);
+    const useCaseId = uc.body.useCaseId ?? uc.body.session?.useCaseId;
+    const ucs = (await agent.get(`/api/ontologies/${demoId}/use-cases`)).body as { id: string }[];
+    const cr = (await agent.get(`/api/ontologies/${demoId}/change-requests`)).body[0] as { id: string };
+    const rel = (await agent.get(`/api/ontologies/${demoId}/releases`)).body[0] as { id: string };
+    const meetings = (await agent.get(`/api/ontologies/${demoId}/meetings`)).body as { id: string }[];
+    const paths = [
+      `/api/ontologies/${demoId}/use-cases`,
+      `/api/use-cases/${useCaseId ?? ucs[0].id}`,
+      `/api/interviews/${uc.body.id}`,
+      `/api/ontologies/${demoId}/change-requests`,
+      `/api/change-requests/${cr.id}`,
+      `/api/ontologies/${demoId}/releases`,
+      `/api/releases/${rel.id}`,
+      `/api/ontologies/${demoId}/meetings`,
+      ...(meetings[0] ? [`/api/meetings/${meetings[0].id}`] : []),
+      `/api/ontologies/${demoId}/agent-reports`,
+      '/api/activity',
+      '/api/feedback',
+      '/api/feedback/summary',
+    ];
+    for (const path of paths) {
+      expect((await agent.get(path)).status, `signed in: ${path}`).not.toBe(401);
+      const anon = await request(app).get(path);
+      expect(anon.status, `anonymous: ${path}`).toBe(401);
+      expect(JSON.stringify(anon.body)).not.toContain('Private author');
+    }
+  });
+
+  it('still serves the ontologies themselves, without members or commit authors', async () => {
+    for (const path of ['/api/ontologies', `/api/ontologies/${demoId}/view`, `/api/ontologies/${demoId}/source`, '/api/governance/templates', '/api/feedback/questions', '/api/session']) {
+      expect((await request(app).get(path)).status, path).toBe(200);
+    }
+    // Paths that don't exist are still 404, not 401.
+    expect((await request(app).get('/api/no-such-thing/pending')).status).toBe(404);
+    const detail = await request(app).get('/api/ontologies/volunteering');
+    expect(detail.status).toBe(200);
+    expect(detail.body.members).toEqual([]);
+    expect(detail.body.history).toEqual([]);
+    // Owner ids lead to names via /people, and the counts reveal private work.
+    for (const s of [detail.body, ...(await request(app).get('/api/ontologies')).body]) {
+      expect(s.ownerIds).toEqual([]);
+      expect(s.stats.useCases).toBeUndefined();
+      expect(s.stats.openChangeRequests).toBeUndefined();
+      expect(s.stats.members).toBeUndefined();
+      expect(s.stats.classes).toBeGreaterThanOrEqual(0);
+    }
+    const owner = await login('contributor', 'Owner check');
+    expect((await owner.get('/api/ontologies/volunteering')).body.ownerIds.length).toBeGreaterThan(0);
+  });
+
+  it('keeps validation (private competency questions) and the simulation behind sign-in', async () => {
+    expect((await request(app).get(`/api/ontologies/${demoId}/validation`)).status).toBe(401);
+    expect((await request(app).get(`/api/ontologies/${demoId}/validation?ref=1.0.0`)).status).toBe(401);
+    const step = await request(app).post('/api/simulation/step').send({ ontologyId: demoId });
+    expect(step.status).toBe(401);
+    expect(JSON.stringify(step.body)).not.toContain('events');
+    expect((await request(app).post('/api/simulation/clock').send({ advanceDays: 1 })).status).toBe(401);
+    const agent = await login('contributor', 'Validator');
+    expect((await agent.get(`/api/ontologies/${demoId}/validation`)).status).toBe(200);
+    expect((await agent.post('/api/simulation/step').send({ ontologyId: demoId })).status).toBe(200);
   });
 });

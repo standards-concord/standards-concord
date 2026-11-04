@@ -2,6 +2,7 @@ import type { Router } from 'express';
 import { FORMAT_INFO } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import { requireUser } from '../auth.js';
+import { HttpError } from '../db.js';
 import * as apps from '../services/appChecks.js';
 import { getCR } from '../services/changeRequests.js';
 import { mustFindProject } from '../services/ontologies.js';
@@ -31,10 +32,13 @@ export function mountAppChecks(r: Router) {
     res.status(204).end();
   });
 
-  // The ontology as it would be with this change merged. Public, like the change request itself.
+  // The ontology as it would be with this change merged. For signed-in people, like the change
+  // request itself, and for the CI of an app connected to that ontology (with its app token).
   r.get('/change-requests/:id/proposed', async (req, res) => {
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
-    const { text, revision, filename } = await apps.proposedSource(getCR(String(req.params.id)), format);
+    const cr = getCR(String(req.params.id));
+    if (!req.user && apps.appForToken(req.get('authorization')).ontologyId !== cr.ontologyId) throw new HttpError(404, 'No such change request');
+    const { text, revision, filename } = await apps.proposedSource(cr, format);
     res.set('X-Concord-Revision', revision);
     res.type(`${FORMAT_INFO[format].mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(filename);
