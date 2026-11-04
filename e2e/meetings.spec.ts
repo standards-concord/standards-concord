@@ -293,6 +293,78 @@ test.describe('Meet co-lead bot', () => {
   });
 });
 
+test.describe('Meet co-lead bot: bookings Recall.ai never confirmed', () => {
+  // These states only arise with a real Recall.ai provider, which this suite doesn't have (there is no key), so the
+  // server's answers are stood in for here. The state machine behind them is covered by apps/server/test/meetBot.test.ts.
+  test('a facilitator sees calls still getting rid of a bot, and can let go of a booking that can no longer be checked', async ({ page }) => {
+    await signIn(page, { name: 'E2E unconfirmed steward', role: 'steward' });
+    const demo = await demoOntology(page.request);
+    const title = `E2E unconfirmed ${Date.now()}`;
+    await writeBotCalendar(page.request, invite({ uid: `e2e-unconfirmed-${Date.now()}`, title, start: inHours(6), description: '#volunteering' }));
+    const listed = (await (await page.request.get(`/api/ontologies/${demo.id}/meetings`)).json()) as { id: string; title: string; calendar?: object }[];
+    const real = listed.find((x) => x.title === title)!;
+    // The real server refuses to let go of a booking that isn't unconfirmed.
+    expect((await page.request.post(`/api/meetings/${real.id}/bot/dismiss`)).status()).toBe(409);
+
+    const approved = { ...real, calendar: { ...real.calendar, approval: 'approved' } };
+    const unconfirmed = { ...approved, bot: { provider: 'recall', phase: 'booking', status: 'scheduled', uncertain: true, unconfirmed: true, error: 'Recall.ai hasn’t confirmed the bot’s booking and doesn’t list it yet; Concord keeps looking for it.' } };
+    const letGo = { ...approved, bot: { provider: 'recall', phase: 'idle', status: 'scheduled' } };
+    let dismissed = false;
+    await page.route(`**/api/meetings/${real.id}`, (route) => route.fulfill({ json: dismissed ? letGo : unconfirmed }));
+    await page.route(`**/api/meetings/${real.id}/bot/dismiss`, (route) => {
+      dismissed = true;
+      return route.fulfill({ json: letGo });
+    });
+    await page.goto(`/o/${demo.id}/meetings/${real.id}`);
+    await settle(page);
+    const notice = page.getByTestId('unconfirmed-booking');
+    await expect(notice).toContainText('never confirmed this call’s bot booking');
+    await notice.getByRole('button', { name: 'It has gone: let the booking go' }).click();
+    await expect(notice).toHaveCount(0);
+    expect(dismissed).toBe(true);
+    await page.unroute(`**/api/meetings/${real.id}`);
+
+    // In the list: a cancelled call kept until its bot has gone, one cancelling an old bot, and one whose booking is unconfirmed.
+    const upcoming = [
+      { ...approved, id: 'mtg_e2e_withdrawn', title: `${title} (cancelled)`, withdrawn: true, bot: { provider: 'recall', phase: 'releasing', status: 'scheduled' } },
+      { ...approved, id: 'mtg_e2e_releasing', title: `${title} (moved)`, bot: { provider: 'recall', phase: 'releasing', status: 'scheduled' } },
+      { ...unconfirmed, id: 'mtg_e2e_unconfirmed', title: `${title} (unconfirmed)` },
+    ];
+    await page.route('**/api/ontologies/*/meetings', (route) => route.fulfill({ json: upcoming }));
+    await page.goto(`/o/${demo.id}/meetings`);
+    await settle(page);
+    await expect(page.getByRole('listitem').filter({ hasText: `${title} (cancelled)` }).getByText('Cancelled; making sure the bot has gone')).toBeVisible();
+    await expect(page.getByRole('listitem').filter({ hasText: `${title} (moved)` }).getByText('Cancelling the old bot')).toBeVisible();
+    await expect(page.getByRole('listitem').filter({ hasText: `${title} (unconfirmed)` }).getByText('Booking unconfirmed')).toBeVisible();
+    await page.unroute('**/api/ontologies/*/meetings');
+    await writeBotCalendar(page.request);
+  });
+
+  test('people who can’t run calls don’t get the button to let a booking go', async ({ page }) => {
+    await signIn(page, { name: 'E2E unconfirmed steward 2', role: 'steward' });
+    const demo = await demoOntology(page.request);
+    const title = `E2E unconfirmed contributor ${Date.now()}`;
+    await writeBotCalendar(page.request, invite({ uid: `e2e-unconfirmed-c-${Date.now()}`, title, start: inHours(6), description: '#volunteering' }));
+    const listed = (await (await page.request.get(`/api/ontologies/${demo.id}/meetings`)).json()) as { id: string; title: string; calendar?: object }[];
+    const real = listed.find((x) => x.title === title)!;
+    await page.request.patch(`/api/meetings/${real.id}`, { data: { approve: true } });
+    await signIn(page, { name: 'E2E unconfirmed contributor', role: 'contributor' });
+    const seen = (await (await page.request.get(`/api/meetings/${real.id}`)).json()) as { calendar?: object };
+    await page.route(`**/api/meetings/${real.id}`, (route) =>
+      route.fulfill({ json: { ...seen, bot: { provider: 'recall', phase: 'booking', status: 'scheduled', uncertain: true, unconfirmed: true } } }),
+    );
+    await page.goto(`/o/${demo.id}/meetings/${real.id}`);
+    await settle(page);
+    await expect(page.getByTestId('unconfirmed-booking')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'It has gone: let the booking go' })).toHaveCount(0);
+    // And the server refuses them too.
+    expect((await page.request.post(`/api/meetings/${real.id}/bot/dismiss`)).status()).toBe(403);
+    await page.unroute(`**/api/meetings/${real.id}`);
+    await signIn(page, { name: 'E2E unconfirmed steward 3', role: 'steward' });
+    await writeBotCalendar(page.request);
+  });
+});
+
 test.describe('Meet co-lead bot, as a contributor', () => {
   test('only owners, stewards and editors can bring the bot in or change its calls', async ({ page, request }) => {
     const demo = await demoOntology(request);

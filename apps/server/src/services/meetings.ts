@@ -617,6 +617,8 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
         if (!tracked(x)) return false;
         const b = x.bot;
         if (fromBot && knownGone(b, fromBot)) return false;
+        // A line that names another booking than the current one is never the current bot's.
+        if (!fromBot && fromBooking && fromBooking !== b.bookingId) return false;
         if (fromBot && fromBot !== b.botId) {
           // The current booking's bot, before Recall.ai's reply named it (the webhook is signed with this meeting's secret).
           // A bot that doesn't say which booking it belongs to is never taken for the current one.

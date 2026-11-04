@@ -1804,6 +1804,18 @@ describe('invite-by-email', () => {
     expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: m.bot!.botId, released: ['bot-999'] });
   });
 
+  it('a line that names another booking, with no bot id, is never heard as the call’s bot', async () => {
+    // Used to be heard: a line without a bot id skipped the identity check altogether.
+    const m = await liveCall();
+    await recallWebhook(m.id, secretOf(m.id), {
+      event: 'transcript.data',
+      data: { bot: { metadata: { concord_booking: 'some-other-booking' } }, data: { participant: { name: 'Aisha Rahman' }, words: [{ text: 'Not from this booking.' }] } },
+    });
+    await meetBotIdle();
+    expect(getMeeting(m.id).transcript.map((l) => l.text)).toEqual(['Hello everyone.']);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked', botId: m.bot!.botId, bookingId: m.bot!.bookingId });
+  });
+
   it('the calendar reader agrees with the cancellation reader', () => {
     // A cancelled week with no start time of its own.
     const bare = calendar(

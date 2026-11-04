@@ -91,7 +91,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | PR | Adds | Spec |
 | --- | --- | --- |
 | #9 | Class diagram, better graph, accessible tree, richer class pages | browse.spec.ts |
-| #11 | Meet bot by invite email, prompts in Meet chat | meetings.spec.ts |
+| #11 | Meet bot by invite email, prompts in Meet chat; calls still getting rid of a bot, and letting go of a booking Recall.ai never confirmed (stood-in server answers: no Recall.ai key in e2e; the bot state machine is in apps/server/test/meetBot.test.ts) | meetings.spec.ts |
 | #15 | Use case sharing modes, anonymised versions, per-release requirements | use-cases.spec.ts |
 | #17 | App checks against proposed changes, autopilot votes | app-checks.spec.ts |
 | #18 | SHACL compact syntax and JavaScript classes at the ontology URI | classes.spec.ts |
