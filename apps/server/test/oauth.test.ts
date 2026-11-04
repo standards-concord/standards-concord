@@ -689,22 +689,60 @@ describe('client metadata documents and redirect safety', () => {
       expect(res.body.error_description).toContain('expired');
     }
     expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id, client_secret: c.client_secret })).status).toBe(401);
-    put('oauthClients', { ...doc, secretHash: 'ab' });
-    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(401);
+    for (const bad of ['ab', 'zz'.repeat(32), [doc.secretHash], { h: doc.secretHash }, 7]) {
+      put('oauthClients', { ...doc, secretHash: bad });
+      const res = await token({ ...exchange, client_secret: c.client_secret });
+      expect(res.status, JSON.stringify(bad)).toBe(401);
+    }
     put('oauthClients', doc);
     expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
+  });
+
+  it('fails closed when a confidential client’s stored hash is missing or damaged', async () => {
+    const c = await confidentialClient();
+    const doc = get<{ id: string; info: Record<string, unknown>; secretHash?: unknown }>('oauthClients', c.client_id)!;
+    const { secretHash: _drop, ...noHash } = doc;
+    const exchange = await c.newCode();
+    for (const damaged of [noHash, { ...doc, secretHash: '' }, { ...doc, secretHash: null }, { ...doc, secretHash: false }, { ...doc, secretHash: 0 }] as { id: string; secretHash?: unknown }[]) {
+      put('oauthClients', damaged);
+      for (const body of [exchange, c.refresh]) {
+        const res = await token(body);
+        expect(res.status, `${JSON.stringify(damaged.secretHash)} ${body.grant_type}`).toBe(401);
+        expect(res.body.error).toBe('invalid_client');
+      }
+      expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id })).status).toBe(401);
+    }
+    // A public client with a hash stored against it is just as inconsistent.
+    put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: 'none' } });
+    expect((await token(c.refresh)).status).toBe(401);
+    put('oauthClients', doc);
+    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
+  });
+
+  it('answers only on the exact OAuth paths: near-misses are not found, never the web app', async () => {
+    const variants = ['/token/', '/token//', '/TOKEN', '/token%2f', '/token;x', '/./token', '//token', '/%2e/token', '/%2ftoken', '/x/../token', '/Revoke', '/register/', '/AUTHORIZE', '/.well-known/OAUTH-authorization-server', '//.well-known/oauth-protected-resource'];
+    for (const path of variants) {
+      for (const method of ['get', 'post', 'head', 'options'] as const) {
+        const res = await request(base)[method](path);
+        expect(res.status, `${method} ${path}`).toBe(404);
+      }
+    }
+    // The real ones still work, and so do pages that merely contain the words.
+    expect((await request(base).get('/.well-known/oauth-authorization-server')).status).toBe(200);
+    expect((await request(base).post('/token').type('form').send({})).status).not.toBe(404);
+    expect((await request(base).get('/api/ontologies')).status).toBe(200);
   });
 
   it('hashes every plain-text secret at startup, including clients nobody has used since', () => {
     const ids = [newId('client'), newId('client')];
     for (const id of ids) put('oauthClients', { id, info: { client_id: id, client_name: 'Untouched', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: `plain-${id}` } });
-    expect(migrateClientSecrets()).toBeGreaterThanOrEqual(2);
+    expect(migrateClientSecrets()).toMatchObject({ hashed: 2, scrubbed: true });
     for (const id of ids) {
       const d = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id)!;
       expect(d.info.client_secret).toBeUndefined();
       expect(d.secretHash).toBe(createHash('sha256').update(`plain-${id}`).digest('hex'));
     }
-    expect(migrateClientSecrets()).toBe(0);
+    expect(migrateClientSecrets()).toEqual({ hashed: 0, scrubbed: true });
   });
 
   it('moves a secret stored in plain text by older code into a hash, and still accepts it', async () => {

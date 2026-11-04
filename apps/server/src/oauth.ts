@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { checkpoint, claim, get, HttpError, list, put, remove, take, transaction } from './db.js';
+import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -285,20 +285,30 @@ function hashSecret(doc: ClientDoc): ClientDoc {
   return migrated;
 }
 
-/** Run at startup: hash every client secret older code stored in plain text, and leave no copy in the WAL. */
-export function migrateClientSecrets(): number {
-  const n = transaction(() => {
+const SCRUB = 'oauth-secret-scrub';
+
+/**
+ * Run at startup: hash every client secret older code stored in plain text, then scrub the database file
+ * and its write-ahead log of old copies. The scrub runs once (and again whenever more secrets are hashed),
+ * and only counts as done once SQLite confirms it; a blocked one is retried at the next start.
+ */
+export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
+  const hashed = transaction(() => {
     const plain = list<ClientDoc>('oauthClients').filter((d) => d.info.client_secret);
     for (const d of plain) hashSecret(d);
+    if (plain.length) put('kv', { id: SCRUB, done: false });
     return plain.length;
   });
-  if (n) checkpoint();
-  return n;
+  if (get<{ done: boolean }>('kv', SCRUB)?.done) return { hashed, scrubbed: true };
+  if (!scrubFreeSpace()) return { hashed, scrubbed: false };
+  put('kv', { id: SCRUB, done: true });
+  return { hashed, scrubbed: true };
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+const isSecretHash = (h: unknown): h is string => typeof h === 'string' && SHA256_HEX.test(h);
 /** Constant-time check of a presented secret against its stored hash. A malformed stored hash never matches. */
-const sameSecret = (given: string, hash: string) => SHA256_HEX.test(hash) && timingSafeEqual(Buffer.from(sha(given), 'hex'), Buffer.from(hash, 'hex'));
+const sameSecret = (given: string, hash: unknown) => isSecretHash(hash) && timingSafeEqual(Buffer.from(sha(given), 'hex'), Buffer.from(hash, 'hex'));
 
 const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
@@ -642,7 +652,11 @@ function routerFor(origin: string): Router {
     if (typeof body.client_id !== 'string') return next(); // the SDK answers invalid_request
     const doc = body.client_id.startsWith('https://') ? undefined : registeredClient(body.client_id);
     const given = body.client_secret;
-    if (doc?.secretHash) {
+    // Whether a secret is needed comes from the registered method, never from whether a hash happens to be
+    // there: a confidential client whose stored hash is missing or damaged fails closed.
+    const confidential = doc !== undefined && doc.info.token_endpoint_auth_method !== 'none';
+    if (doc && confidential !== (doc.secretHash !== undefined && doc.secretHash !== null)) return refuse('This client’s registration is damaged. Register it again.');
+    if (confidential) {
       if (typeof given !== 'string' || !sameSecret(given, doc.secretHash)) return refuse('The client secret is missing or wrong.');
       const expires = doc.info.client_secret_expires_at;
       if (expires && expires < now()) return refuse('The client secret has expired. Register the client again.');
@@ -680,9 +694,31 @@ const OAUTH_PATHS = /^\/(\.well-known\/(oauth-authorization-server|oauth-protect
 /** The only paths the OAuth endpoints answer on; anything else that looks like one (/token/, /token//) is not found. */
 const CANONICAL_OAUTH_PATHS = new Set(['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/authorize', '/token', '/register', '/revoke']);
 
+/**
+ * The path as a lenient server or proxy might read it: percent-decoded, lower-cased, without ;parameters,
+ * empty or dot segments. Used only to recognise near-misses of the OAuth endpoints and refuse them.
+ */
+function looseOAuthPath(path: string): boolean {
+  let p = path;
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // keep it as it is
+  }
+  const segments: string[] = [];
+  for (const s of p.toLowerCase().split('/')) {
+    const seg = s.split(';')[0];
+    if (!seg || seg === '.') continue;
+    if (seg === '..') segments.pop();
+    else segments.push(seg);
+  }
+  return OAUTH_PATHS.test(`/${segments.join('/')}`);
+}
+
 export function oauthRoutes(req: Request, res: Response, next: NextFunction) {
-  if (!OAUTH_PATHS.test(req.path)) return next();
-  if (!CANONICAL_OAUTH_PATHS.has(req.path)) return void res.status(404).json({ error: 'not_found' });
+  const exact = OAUTH_PATHS.test(req.path);
+  if (!exact && !looseOAuthPath(req.path)) return next();
+  if (!exact || !CANONICAL_OAUTH_PATHS.has(req.path)) return void res.status(404).json({ error: 'not_found' });
   const origin = publicOrigin(req);
   if (!origin) return refuseUnknownOrigin(res);
   const limit = limits.find(([re]) => re.test(req.path))?.[1];

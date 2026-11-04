@@ -6,8 +6,9 @@ import { refreshReleasePages } from './public/routes.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
-const migrated = migrateClientSecrets();
-if (migrated) console.log(`[oauth] hashed ${migrated} stored client secret(s)`);
+const secrets = migrateClientSecrets();
+if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
+if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }

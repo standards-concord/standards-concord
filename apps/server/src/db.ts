@@ -55,11 +55,20 @@ export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): Data
 }
 
 /**
- * Copy the write-ahead log into the database and empty it. With secure_delete on, overwritten rows are
- * zeroed in the database file, so after this no old copy of a rewritten row is left in either file.
+ * Remove every old copy of rewritten or deleted rows: VACUUM rebuilds the database file without its free
+ * space (secure_delete only zeroes what is freed from now on, not what older versions left behind), then the
+ * write-ahead log is copied in and emptied. Returns false, leaving the job to be retried, if another
+ * connection blocked either step.
  */
-export function checkpoint() {
-  conn().exec('PRAGMA wal_checkpoint(TRUNCATE)');
+export function scrubFreeSpace(): boolean {
+  const c = conn();
+  try {
+    c.exec('VACUUM');
+    const r = c.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number };
+    return r.busy === 0 && r.log === r.checkpointed;
+  } catch {
+    return false;
+  }
 }
 
 export function closeDb() {
