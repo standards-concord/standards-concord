@@ -71,7 +71,7 @@ export function PageHeader({ title, subtitle, actions, eyebrow }: { title: React
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        {eyebrow && <div className="page-eyebrow mb-1 text-xs font-medium tracking-wide text-muted uppercase">{eyebrow}</div>}
+        {eyebrow && <div className="page-eyebrow mb-1 text-sm font-medium text-muted">{eyebrow}</div>}
         <h1 className="page-title">{title}</h1>
         {subtitle && <p className="mt-1 max-w-2xl text-sm text-muted">{subtitle}</p>}
       </div>

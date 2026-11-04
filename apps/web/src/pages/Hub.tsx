@@ -6,7 +6,7 @@ import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useOntologies } from '../lib/ontologies';
 import { useSession } from '../lib/session';
-import { relativeTime, titleCase } from '../lib/format';
+import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
@@ -169,24 +169,15 @@ export function HubPage() {
                     </div>
                     <p className="mt-0.5 font-mono text-xs text-subtle">{o.prefix}:</p>
                     <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
-                    <div className="mt-4 grid grid-cols-4 gap-2 border-t border-line pt-3 text-center">
-                      {[
-                        ['Classes', o.stats.classes],
-                        ['Properties', o.stats.properties],
-                        ['Use cases', o.stats.useCases],
-                        ['Members', o.stats.members],
-                      ].map(([l, v]) => (
-                        <div key={l}>
-                          <div className="text-base font-semibold tabular-nums">{v}</div>
-                          <div className="text-[0.7rem] text-muted">{l}</div>
-                        </div>
-                      ))}
-                    </div>
+                    <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
+                      {plural(o.stats.classes, 'class', 'classes')}, {plural(o.stats.properties, 'property', 'properties')}, {plural(o.stats.useCases, 'use case')} and{' '}
+                      {plural(o.stats.members, 'member')}.
+                    </p>
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                       <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
                         <HealthChip o={o} />
-                        v{o.currentVersion}
-                        {o.stats.openChangeRequests > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
+                        <span>Version {o.currentVersion}</span>
+                        {o.stats.openChangeRequests > 0 && <span>{plural(o.stats.openChangeRequests, 'open change')}</span>}
                       </span>
                       <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
                     </div>

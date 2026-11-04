@@ -172,7 +172,7 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
   if (!c) return <LevelBadge level={undefined} />;
   return (
     <Popover label={`Level: ${c.level}. Why it’s ${c.level}`} className="rounded-pill focus-visible:outline-offset-2" trigger={<LevelBadge level={c.level} />}>
-      <h4 className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Why it’s {c.level}</h4>
+      <h4 className="mb-1 text-sm font-semibold">Why it’s {c.level}</h4>
       <p className="mb-3 text-xs text-muted">Rule-based semantic versioning classification. The level decides which governance rules apply.</p>
       <ul className="space-y-2 text-sm">
         {c.reasons.map((r, i) => (
@@ -362,12 +362,12 @@ export function ChangeRequestPage() {
                   <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>
                     <div className="space-y-3">
                       <div>
-                        <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Rationale</div>
+                        <div className="mb-1 text-sm font-semibold">Rationale</div>
                         <Markdown text={cr.analysis.rationale} className="text-muted" />
                       </div>
                       {cr.analysis.risks?.length ? (
                         <div>
-                          <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Risks</div>
+                          <div className="mb-1 text-sm font-semibold">Risks</div>
                           <ul className="list-disc space-y-0.5 pl-5">
                             {cr.analysis.risks.map((r, i) => (
                               <li key={i}>{r}</li>

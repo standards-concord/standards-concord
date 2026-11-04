@@ -284,7 +284,7 @@ function PolicySummary({ policy, preview }: { policy: GovernancePolicy; preview?
   return (
     <Card className="p-5">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="text-xs font-semibold tracking-wide text-muted uppercase">In short</div>
+        <div className="text-sm font-semibold">In short</div>
         {preview && <Badge tone="warn">Preview of unsaved changes</Badge>}
       </div>
       <p className="mt-1 text-sm">

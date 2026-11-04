@@ -4,8 +4,16 @@
  * Every look is a set of CSS variables in index.css (colours, fonts, radii, shadows),
  * so components never name a look. `?look=<id>` in any URL switches and remembers it,
  * which is how reviewers compare them on the live site.
+ *
+ * `odi` is the Open Data Institute's own brand and the default for the Open Data Institute. The
+ * others carry no ODI branding, so a deployment outside the ODI can pick one of them instead.
  */
 export const LOOKS = [
+  {
+    id: 'odi',
+    name: 'ODI',
+    blurb: 'The Open Data Institute brand: Helvetica, black on white, ODI blue and the ODI logo.',
+  },
   {
     id: 'spec',
     name: 'Specification',
@@ -29,8 +37,9 @@ export const LOOKS = [
 ] as const;
 
 export type LookId = (typeof LOOKS)[number]['id'];
-export const DEFAULT_LOOK: LookId = 'spec';
-const KEY = 'concord-look';
+export const DEFAULT_LOOK: LookId = 'odi';
+// Renamed when the ODI look became the default, so earlier choices start again from it.
+const KEY = 'concord-look-2';
 
 export function isLook(v: unknown): v is LookId {
   return LOOKS.some((l) => l.id === v);
@@ -45,8 +54,20 @@ export function storedLook(): LookId {
   }
 }
 
+const ODI_ICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -61 208 208'%3E%3Crect x='-4' y='-61' width='208' height='208' fill='white'/%3E%3Cpath d='M160,.7V27.2A37.9,37.9,0,0,0,136.6,3.7,49.7,49.7,0,0,0,119.1.6H82.7V27a42.9,42.9,0,1,0,0,31.8V85.1h36.4a51.9,51.9,0,0,0,17.5-3,41.9,41.9,0,0,0,13.8-8.5A40.1,40.1,0,0,0,160,58.5V85.1h40V.7Z'/%3E%3C/svg%3E";
+
+/** The ODI look uses the ODI logo as the tab icon; the others keep Concord's own. */
+function applyIcon(id: LookId) {
+  const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (!link) return;
+  link.dataset.generic ??= link.href;
+  link.href = id === 'odi' ? ODI_ICON : link.dataset.generic;
+}
+
 export function applyLook(id: LookId, persist = true) {
   document.documentElement.dataset.look = id;
+  applyIcon(id);
   if (persist) {
     try {
       localStorage.setItem(KEY, id);

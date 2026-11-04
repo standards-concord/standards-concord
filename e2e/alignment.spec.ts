@@ -7,7 +7,7 @@ import { test, expect, signIn, demoOntology, settle } from './fixtures';
  * values start in one column. Checked in every look, since each look restyles the chips.
  */
 
-const LOOKS = ['spec', 'civic', 'workbench', 'classic'] as const;
+const LOOKS = ['odi', 'spec', 'civic', 'workbench', 'classic'] as const;
 /** Sub-pixel rounding only. The reported misalignment was 3-4px. */
 const TOLERANCE = 1;
 

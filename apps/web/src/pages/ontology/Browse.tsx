@@ -234,7 +234,7 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
   if (!items.length) return null;
   return (
     <div className="mt-4">
-      <button className="mb-1 flex w-full items-center gap-1 text-xs font-semibold tracking-wide text-muted uppercase" onClick={() => setOpen((o) => !o)}>
+      <button className="mb-1 flex w-full items-center gap-1 text-sm font-semibold" onClick={() => setOpen((o) => !o)}>
         {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />} {title} ({items.length})
       </button>
       {open && (
@@ -319,7 +319,7 @@ export function BrowseTab() {
           <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
             {debounced ? (
               <div>
-                <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Search results</div>
+                <div className="mb-2 text-sm font-semibold">Search results</div>
                 {results.loading && !results.data ? (
                   <Loading />
                 ) : results.error ? (
@@ -344,7 +344,7 @@ export function BrowseTab() {
               </div>
             ) : (
               <>
-                <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Classes ({v.classes.length})</div>
+                <div className="mb-1 text-sm font-semibold">Classes ({v.classes.length})</div>
                 <ul>
                   {tree.roots.map((c) => (
                     <TreeNode key={c.iri} c={c} children={tree.children} depth={0} selected={selected} onSelect={select} label={label} seen={new Set()} />

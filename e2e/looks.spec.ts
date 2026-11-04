@@ -8,20 +8,48 @@ import { test, expect, expectNoCrash, settle, signIn, demoOntology } from './fix
  * main pages cleanly, and that each look's colour pairs meet WCAG AA in light and dark.
  */
 
-const LOOKS = ['spec', 'civic', 'workbench', 'classic'] as const;
+const LOOKS = ['odi', 'spec', 'civic', 'workbench', 'classic'] as const;
 
 const look = (page: Page) => page.evaluate(() => document.documentElement.dataset.look);
 
 test.describe('looks', () => {
-  test('the Specification look is the default, applied before the app renders', async ({ page }) => {
+  test('the ODI look is the default, applied before the app renders', async ({ page }) => {
     await page.goto('/login');
-    expect(await look(page)).toBe('spec');
+    expect(await look(page)).toBe('odi');
     const fonts = await page.evaluate(() => ({
       body: getComputedStyle(document.body).fontFamily,
       heading: getComputedStyle(document.querySelector('h1')!).fontFamily,
     }));
-    expect(fonts.body).toContain('Source Sans 3');
-    expect(fonts.heading).toContain('Source Serif 4');
+    expect(fonts.body).toContain('Helvetica Neue');
+    expect(fonts.heading).toContain('Helvetica Neue');
+  });
+
+  test('the ODI look carries the ODI logo; the other looks carry no ODI branding', async ({ page }) => {
+    await signIn(page, { name: 'Brand tester' });
+    const icon = () => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
+    await page.goto('/?look=odi');
+    await settle(page);
+    const header = page.locator('.app-header');
+    await expect(header.getByRole('img', { name: 'Open Data Institute' })).toBeVisible();
+    expect(await icon()).toContain('M160');
+    // Square corners and no drop shadows, as the ODI brand asks.
+    const card = await page.evaluate(() => {
+      const probe = document.createElement('div');
+      probe.className = 'rounded-xl shadow-lg';
+      document.body.appendChild(probe);
+      const cs = getComputedStyle(probe);
+      const out = { radius: cs.borderTopLeftRadius, shadow: cs.boxShadow };
+      probe.remove();
+      return out;
+    });
+    expect(card.radius).toBe('0px');
+    expect(card.shadow).not.toMatch(/rgba?\([^)]*\) \d+px \d+px [1-9]/);
+    for (const id of LOOKS.filter((l) => l !== 'odi')) {
+      await page.goto(`/?look=${id}`);
+      await settle(page);
+      await expect(header.getByRole('img', { name: 'Open Data Institute' }), id).toBeHidden();
+      expect(await icon(), id).not.toContain('M160');
+    }
   });
 
   test('?look= switches the look and is remembered on later pages', async ({ page }) => {
@@ -43,19 +71,19 @@ test.describe('looks', () => {
     const group = page.getByRole('radiogroup', { name: 'Visual style' });
     await expect(group).toBeVisible();
     await expect(group.getByRole('radio')).toHaveCount(LOOKS.length);
-    await expect(group.getByRole('radio', { name: /Specification/ })).toHaveAttribute('aria-checked', 'true');
+    await expect(group.getByRole('radio', { name: /^ODI/ })).toHaveAttribute('aria-checked', 'true');
 
     await group.getByRole('radio', { name: /Workbench/ }).click();
     expect(await look(page)).toBe('workbench');
     await expect(group.getByRole('radio', { name: /Workbench/ })).toHaveAttribute('aria-checked', 'true');
-    await expect(group.getByRole('radio', { name: /Specification/ })).toHaveAttribute('aria-checked', 'false');
+    await expect(group.getByRole('radio', { name: /^ODI/ })).toHaveAttribute('aria-checked', 'false');
 
     // Arrow keys move the selection, as in any radio group.
     await page.keyboard.press('ArrowRight');
     expect(await look(page)).toBe('classic');
     await expect(group.getByRole('radio', { name: /Original/ })).toBeFocused();
     await page.keyboard.press('ArrowRight');
-    expect(await look(page)).toBe('spec');
+    expect(await look(page)).toBe('odi');
 
     await group.getByRole('radio', { name: /Civic grid/ }).click();
     await page.reload();

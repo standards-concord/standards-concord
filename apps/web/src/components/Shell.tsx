@@ -7,7 +7,7 @@ import { useOntologies } from '../lib/ontologies';
 import { useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
-import { Logo } from './badges';
+import { Logo, OdiLogo } from './badges';
 import { Avatar, Button, cx } from './ui';
 import { WalkthroughDock } from './Walkthrough';
 import { Popover } from './Disclosure';
@@ -179,12 +179,15 @@ export function Shell({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen flex-col">
       <header className="app-header sticky top-0 z-30 border-b border-line backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
-          <Link to="/" className="flex min-w-0 items-center gap-2.5">
-            <Logo />
+          <Link to="/" className="flex min-w-0 items-center gap-2.5" aria-label="Concord: home">
+            {/* The ODI look shows the ODI logo; the unbranded looks show Concord's own mark (index.css). */}
+            <OdiLogo className="brand-odi h-6 shrink-0" />
+            <span className="brand-odi h-6 w-px shrink-0 bg-line-strong" aria-hidden />
+            <Logo className="brand-generic" />
             <span className="truncate text-sm font-semibold tracking-tight">
               Concord<span className="app-brand-sub hidden sm:inline"></span>
             </span>
-            <span className="rounded bg-warn-soft px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide text-warn uppercase">alpha</span>
+            <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs font-semibold text-warn">Alpha</span>
           </Link>
           <div className="flex-1" />
           <OntologySwitcher />

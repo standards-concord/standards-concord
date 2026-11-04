@@ -104,8 +104,9 @@ test.describe('summaries, popups and disclosures', () => {
     await expect(main.getByText('Classes', { exact: true })).toBeHidden();
     // "Open changes" lives in the header only.
     await expect(main.getByText('Open changes', { exact: true })).toHaveCount(0);
+    // The counts are said once, in a sentence, and each is listed again only inside the details.
+    await expect(page.getByTestId('overview-summary')).toContainText(/\d+ class/);
     const details = page.getByRole('button', { name: /Ontology details/ });
-    await expect(details).toContainText(/\d+ class/);
     await details.click();
     for (const label of ['Classes', 'Properties', 'Individuals', 'Use cases', 'Releases', 'Ontology IRI', 'Governance', 'Created']) await expect(main.getByText(label, { exact: true }).first()).toBeVisible();
   });

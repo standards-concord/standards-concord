@@ -73,13 +73,13 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
         // Suggestions stay one click away when there are errors or warnings to deal with first.
         if (sev === 'info' && serious)
           return (
-            <Disclosure key={sev} tone="muted" heading={4} title={<span className={cx('inline-flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}><Icon className="size-3.5" /> {l} ({items.length})</span>}>
+            <Disclosure key={sev} tone="muted" heading={4} title={<span className={cx('inline-flex items-center gap-1.5 text-sm font-semibold', cls)}><Icon className="size-3.5" /> {l} ({items.length})</span>}>
               {list}
             </Disclosure>
           );
         return (
           <div key={sev}>
-            <h4 className={cx('mb-1.5 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}>
+            <h4 className={cx('mb-1.5 flex items-center gap-1.5 text-sm font-semibold', cls)}>
               <Icon className="size-3.5" /> {l} ({items.length})
             </h4>
             {list}

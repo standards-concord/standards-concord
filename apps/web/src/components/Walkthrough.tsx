@@ -174,7 +174,7 @@ function TourStep({ compact }: { compact?: boolean }) {
       </p>
       {nextTask ? (
         <div className="rounded-xl border border-accent/40 bg-accent-soft/40 p-3" aria-label="Suggested next task" role="group">
-          <div className="text-xs font-medium tracking-wide text-muted uppercase">Try next</div>
+          <div className="text-sm font-medium text-muted">Try next</div>
           <Link to={nextTask.to} className="mt-0.5 block text-sm font-semibold hover:text-accent">
             {nextTask.label}
           </Link>
@@ -229,7 +229,7 @@ function TourStep({ compact }: { compact?: boolean }) {
               )}
               {finished.length > 0 && (
                 <div>
-                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-muted uppercase">Done ({finished.length})</h4>
+                  <h4 className="mb-1.5 text-sm font-semibold">Done ({finished.length})</h4>
                   <ul className="space-y-1.5" aria-label="Done">
                     {finished.map(row)}
                   </ul>
@@ -366,7 +366,7 @@ export function WalkthroughDock() {
             </div>
           </div>
           <div className="flex items-center justify-between gap-2 px-4 pt-3">
-            <div className="text-xs font-medium tracking-wide text-muted uppercase">
+            <div className="text-sm font-medium text-muted">
               Step {w.step + 1}: {STEPS[w.step].title}
             </div>
             <Popover label="All walkthrough steps" align="right" className="px-2 py-0.5 text-xs text-muted hover:bg-surface-2 hover:text-fg" trigger={<>Steps</>}>

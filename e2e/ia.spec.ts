@@ -109,10 +109,44 @@ test.describe('progressive disclosure', () => {
     await expect(cqs).toHaveAttribute('aria-expanded', 'false');
   });
 
+  test('the overview reads as a short report: summary, what waits for you, changes in progress', async ({ page }) => {
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string; number: number; title: string; status: string }[];
+    const open = crs.filter((c) => ['voting', 'review', 'triage', 'needs-work', 'approved'].includes(c.status));
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    // One plain sentence of counts, each linking to where the detail lives.
+    const summary = page.getByTestId('overview-summary');
+    await expect(summary).toContainText(/\d+ class(es)? and \d+ propert(y|ies)/);
+    await expect(summary.getByRole('link', { name: /class/ })).toHaveAttribute('href', `/o/${demo.id}/browse`);
+    await expect(summary.getByRole('link', { name: /use case/ })).toHaveAttribute('href', `/o/${demo.id}/use-cases`);
+    // Changes in progress are a table that links to each change.
+    const table = page.getByTestId('changes-in-progress');
+    expect(open.length, 'the demo has changes in progress').toBeGreaterThan(0);
+    await expect(table.getByRole('columnheader')).toHaveText(['Change', 'Stage', 'Size', 'Updated']);
+    await expect(table.getByRole('row')).toHaveCount(Math.min(open.length, 8) + 1);
+    await table.getByRole('link', { name: new RegExp(`#${open[0].number}`) }).first().waitFor();
+    // A steward sees the changes waiting on them, each a link to act on.
+    const asks = page.getByTestId('overview-asks');
+    await expect(asks.getByRole('heading', { name: /waiting for you/ })).toBeVisible();
+    const first = asks.getByRole('link').first();
+    await expect(first).toHaveText(/^(Review|Vote on|Triage|Merge|Revise) #\d+: /);
+    await first.click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/changes/`));
+  });
+
+  test('a contributor with nothing to act on sees no waiting panel', async ({ page }) => {
+    await signIn(page, { name: 'Bystander', role: 'contributor' });
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    await expect(page.getByTestId('changes-in-progress')).toBeVisible();
+    await expect(page.getByTestId('overview-asks')).toHaveCount(0);
+  });
+
   test('members show as avatars, with roles one click away', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const card = page.locator('main').locator('div.rounded-xl', { has: page.getByRole('heading', { name: /^Members \(\d+\)$/ }) });
+    const card = page.getByTestId('overview-members');
+    await expect(card.getByRole('heading', { name: /^Members \(\d+\)$/ })).toBeVisible();
     const avatars = card.getByRole('list', { name: 'Members' }).getByRole('listitem');
     expect(await avatars.count()).toBeGreaterThan(1);
     await expect(card.getByText('Voting member')).toHaveCount(0);
@@ -124,7 +158,7 @@ test.describe('progressive disclosure', () => {
   test('recent activity starts short and expands', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const feed = page.locator('text=Recent activity').locator('xpath=ancestor::div[contains(@class,"rounded-xl")][1]');
+    const feed = page.getByTestId('overview-activity');
     const before = await feed.locator('ol > li').count();
     expect(before).toBeLessThanOrEqual(3);
     await page.getByRole('button', { name: 'Show more activity' }).click();
@@ -140,7 +174,7 @@ test.describe('progressive disclosure', () => {
     for (const name of ['What each kind of change needs', 'What each kind of release needs']) {
       const summary = page.getByRole('list', { name });
       await expect(summary.getByRole('listitem')).toHaveCount(3);
-      for (const level of ['patch', 'minor', 'major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
+      for (const level of ['Patch', 'Minor', 'Major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
       await expect(summary).toContainText(/sign-off/);
     }
 

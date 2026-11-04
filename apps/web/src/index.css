@@ -8,7 +8,8 @@
  * so components pick up the active look without knowing which it is.
  *
  * Looks are chosen with <html data-look="..."> (see lib/look.ts):
- *   spec       Specification: standards-document typography (default)
+ *   odi        The ODI brand (default): Helvetica, black on white, ODI blue, the ODI logo
+ *   spec       Specification: standards-document typography
  *   civic      Civic grid: Swiss/civic grotesque, black rules, square corners
  *   workbench  Workbench: IBM Plex engineering tool with a dark masthead
  *   classic    Original prototype style
@@ -127,6 +128,79 @@
     --avatar-l: 40%;
     color-scheme: dark;
   }
+}
+
+/* ------------------------------------------------------------ ODI
+ * From the ODI brand guidelines: Helvetica Neue, functional and bold, black on white,
+ * ODI blue #2254F4 as the one accent, left-aligned text, no drop shadows or effects, and
+ * the ODI palette for status and code. "We never use four colours when three will work."
+ */
+[data-look='odi'] {
+  --danger-fg: #ffffff;
+  --control-line: #767676;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f2f2f2;
+  --fg: #000000;
+  --muted: #333333;
+  --subtle: #5c5c5c;
+  --line: #d9d9d9;
+  --line-strong: #999999;
+  --accent: #2254f4;
+  --accent-hover: #1a40c4;
+  --accent-soft: #e9eefe;
+  --accent-fg: #ffffff;
+  --ok: #08722c;
+  --ok-soft: #e4f6e9;
+  --warn: #855400;
+  --warn-soft: #fef4d6;
+  --danger: #d60303;
+  --danger-soft: #fff0f0;
+  --info-soft: #e9eefe;
+  --focus: #2254f4;
+  --syn-keyword: #722ea5;
+  --syn-iri: #2f529f;
+  --syn-prefix: #5c5c5c;
+  --syn-name: #2254f4;
+  --syn-string: #08722c;
+  --syn-number: #a34200;
+  --syn-variable: #d60303;
+  --syn-comment: #5c5c5c;
+  --syn-meta: #855400;
+  --syn-func: #006d8f;
+  --syn-tag: #2254f4;
+  --syn-attr: #b13198;
+  --syn-selection: #d3defd;
+
+  --font-body: 'Helvetica Neue', Helvetica, Arial, ui-sans-serif, sans-serif;
+  --font-heading: var(--font-body);
+  --font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --heading-weight: 700;
+  --heading-tracking: -0.01em;
+  --title-size: 2.25rem;
+  --r-xs: 0;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-xl: 0;
+  --r-2xl: 0;
+  --r-pill: 0;
+  --r-avatar: 9999px;
+  /* No drop shadows: raised things (menus, dialogs) get a plain outline instead. */
+  --sh-xs: none;
+  --sh-sm: none;
+  --sh-md: 0 0 0 1px var(--line-strong);
+  --sh-lg: 0 0 0 1px var(--line-strong);
+  --sh-xl: 0 0 0 1px var(--fg);
+  --sh-2xl: 0 0 0 1px var(--fg);
+  --avatar-s: 55%;
+  --avatar-l: 36%;
+  --header-bg: var(--surface);
+  --header-fg: var(--fg);
+  --header-muted: var(--muted);
+  --header-focus: var(--focus);
+  --header-rule: 0px;
+  color-scheme: light;
 }
 
 /* ------------------------------------------------------------ Specification */
@@ -326,6 +400,45 @@
 }
 
 @media (prefers-color-scheme: dark) {
+  [data-look='odi'] {
+    --danger-fg: #000000;
+    --control-line: #8c8c8c;
+    --bg: #000000;
+    --surface: #111111;
+    --surface-2: #1c1c1c;
+    --fg: #ffffff;
+    --muted: #cccccc;
+    --subtle: #a6a6a6;
+    --line: #333333;
+    --line-strong: #666666;
+    --accent: #178cff;
+    --accent-hover: #4da6ff;
+    --accent-soft: #0b1d3d;
+    --accent-fg: #000000;
+    --ok: #1dd3a7;
+    --ok-soft: #062a20;
+    --warn: #f9bc26;
+    --warn-soft: #2b2006;
+    --danger: #ff5c5c;
+    --danger-soft: #330a0a;
+    --info-soft: #0b1d3d;
+    --focus: #178cff;
+    --syn-keyword: #c9a0ff;
+    --syn-iri: #7dc5ea;
+    --syn-prefix: #a6a6a6;
+    --syn-name: #6fa8ff;
+    --syn-string: #67ee67;
+    --syn-number: #ff9f59;
+    --syn-variable: #ff8080;
+    --syn-comment: #a6a6a6;
+    --syn-meta: #f9bc26;
+    --syn-func: #08def9;
+    --syn-tag: #6fa8ff;
+    --syn-attr: #ef3aab;
+    --syn-selection: #1a2f66;
+    --avatar-l: 32%;
+    color-scheme: dark;
+  }
   [data-look='spec'] {
     --danger-fg: #1a0b0a;
     --control-line: #6d685e;
@@ -528,6 +641,39 @@
   font-size: var(--title-size);
   line-height: 1.15;
   font-weight: var(--heading-weight);
+}
+
+/* ODI: the ODI logo in the masthead, plain bold headings, underlined links, square badges. */
+.brand-odi {
+  display: none;
+}
+[data-look='odi'] .brand-odi {
+  display: block;
+}
+[data-look='odi'] .brand-generic,
+[data-look='odi'] .app-brand-sub {
+  display: none;
+}
+[data-look='odi'] .app-header {
+  backdrop-filter: none;
+}
+[data-look='odi'] .ui-card-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+[data-look='odi'] .ui-badge {
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 35%, transparent);
+}
+[data-look='odi'] .prose-chat a,
+[data-look='odi'] main a.text-accent:not(nav *) {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+[data-look='odi'] :focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* Specification: links and section headings read like a W3C document. */
