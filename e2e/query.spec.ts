@@ -2,8 +2,8 @@ import { test, expect, signIn, demoOntology, type Page } from './fixtures';
 
 /**
  * The Query tab: sparq (WebAssembly) loads in the browser, the query assistant
- * writes and refines SPARQL from a chat (the offline helper in tests) and runs
- * it, the SPARQL editor highlights, autocompletes and runs every query form,
+ * writes and refines SPARQL from a chat (the offline helper in tests), which
+ * runs when the person presses Run, the SPARQL editor highlights, autocompletes and runs every query form,
  * and SHACL checks run.
  */
 
@@ -24,9 +24,22 @@ async function ask(page: Page, text: string) {
   const replies = chat(page).getByTestId('chat-message-assistant');
   await expect(replies.first()).toBeVisible();
   const before = await replies.count();
-  await chat(page).getByLabel('Your message').fill(text);
+  await chat(page).getByLabel('Describe what you want to find…').fill(text);
   await chat(page).getByRole('button', { name: 'Send' }).click();
   await expect(replies).toHaveCount(before + 1);
+}
+
+/** Runs the query the assistant just wrote: it never runs without this click. */
+async function runWritten(page: Page) {
+  const prompt = page.getByTestId('query-run-prompt');
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole('button', { name: 'Run this query' }).click();
+  await expect(prompt).toHaveCount(0);
+}
+
+async function askAndRun(page: Page, text: string) {
+  await ask(page, text);
+  await runWritten(page);
 }
 
 test.describe('Query tab', () => {
@@ -54,6 +67,10 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('query-chat-offline')).toBeVisible();
     expect(await editorText(page)).toContain('vol:VolunteeringOpportunity');
     await expect(page.getByLabel('Run against')).toHaveValue('data');
+    // Nothing runs until the person has looked at the query and pressed Run.
+    await expect(page.getByTestId('query-run-prompt')).toContainText('The assistant wrote a query');
+    await expect(results(page)).toHaveCount(0);
+    await runWritten(page);
     await expect(results(page)).toContainText('2 rows');
     await expect(results(page)).toContainText('Park clean-up');
     // Readable headings from the assistant, with the variable behind each one on hover.
@@ -62,10 +79,10 @@ test.describe('Query tab', () => {
   });
 
   test('each message refines the query: more columns, a number filter, then a count', async ({ page }) => {
-    await ask(page, 'List every volunteering opportunity');
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('2 rows');
 
-    await ask(page, 'Also show the minimum age and who offers it');
+    await askAndRun(page, 'Also show the minimum age and who offers it');
     let q = await editorText(page);
     expect(q).toContain('vol:minimumAge');
     expect(q).toContain('vol:offeredBy');
@@ -73,14 +90,14 @@ test.describe('Query tab', () => {
     await expect(results(page)).toContainText('Northvale Food Bank');
 
     // The Saturday shift's age is the text "sixteen", so only the park clean-up is under 15.
-    await ask(page, 'Only those with a minimum age under 15');
+    await askAndRun(page, 'Only those with a minimum age under 15');
     q = await editorText(page);
     expect(q).toContain('FILTER(?minimumAge < 15)');
     expect(q).toContain('vol:offeredBy');
     await expect(results(page)).toContainText('1 row');
     await expect(results(page)).toContainText('Park clean-up');
 
-    await ask(page, 'How many organisations are there?');
+    await askAndRun(page, 'How many organisations are there?');
     expect(await editorText(page)).toContain('COUNT(DISTINCT');
     await expect(results(page).locator('th')).toHaveText([/Number of organisation/i]);
     await expect(results(page).locator('tbody td')).toHaveText(['1']);
@@ -88,14 +105,17 @@ test.describe('Query tab', () => {
 
   test('questions about the model itself run against the ontology', async ({ page }) => {
     await page.getByTestId('query-suggestions').getByRole('button', { name: 'Which classes have no definition?' }).click();
+    // The starting query already runs against the ontology, so wait for the reply before checking.
+    await expect(chat(page).getByTestId('chat-message-assistant')).toHaveCount(2);
     await expect(page.getByLabel('Run against')).toHaveValue('ontology');
     expect(await editorText(page)).toContain('FILTER NOT EXISTS');
+    await runWritten(page);
     await expect(results(page)).toBeVisible();
   });
 
   test('Start over clears the conversation and puts the starting query back', async ({ page }) => {
     const start = await editorText(page);
-    await ask(page, 'List every volunteering opportunity');
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toBeVisible();
     expect(await editorText(page)).not.toBe(start);
     await chat(page).getByRole('button', { name: 'Start over' }).click();
@@ -124,7 +144,7 @@ test.describe('Query tab', () => {
     consoleGuard.allow(/status of 500/);
     await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
     const start = await editorText(page);
-    await chat(page).getByLabel('Your message').fill('List every volunteering opportunity');
+    await chat(page).getByLabel('Describe what you want to find…').fill('List every volunteering opportunity');
     await chat(page).getByRole('button', { name: 'Send' }).click();
     await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
@@ -161,7 +181,7 @@ test.describe('Query tab', () => {
       await held;
       await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'Here you go.', query: 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 3 # assistant', target: 'ontology', columns: [], simulated: false }) });
     });
-    await chat(page).getByLabel('Your message').fill('List three classes');
+    await chat(page).getByLabel('Describe what you want to find…').fill('List three classes');
     await chat(page).getByRole('button', { name: 'Send' }).click();
     await expect(page.getByTestId('editor-locked')).toBeVisible();
     await expect(page.getByLabel('Run against')).toBeDisabled();
@@ -171,6 +191,7 @@ test.describe('Query tab', () => {
     release();
     await expect(page.getByTestId('editor-locked')).toHaveCount(0);
     expect(await editorText(page)).toContain('# assistant');
+    await runWritten(page);
     await expect(results(page)).toContainText('3 rows');
   });
 
@@ -239,7 +260,7 @@ test.describe('Query tab', () => {
       await held;
       await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'No change.', query: '', target: 'data', columns: [], simulated: true, unchanged: true }) });
     });
-    await chat(page).getByLabel('Your message').fill('Also show the title');
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the title');
     await chat(page).getByRole('button', { name: 'Send' }).click();
     await expect(page.getByTestId('result-limited').getByRole('button', { name: 'Show all rows' })).toBeDisabled();
     release();
@@ -256,6 +277,34 @@ test.describe('Query tab', () => {
     expect(await mine()).toEqual([]);
   });
 
+  test('a reply that arrives after signing out is dropped, not saved', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let body: { account?: string } = {};
+    await page.route(/\/query-chat$/, async (r) => {
+      body = r.request().postDataJSON() as { account?: string };
+      // The server has answered; the answer is held on its way back.
+      const answer = await r.fetch();
+      await held;
+      await r.fulfill({ response: answer });
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect.poll(() => body.account).toBeTruthy();
+    // The request names the account it belongs to, so the server can refuse it under any other.
+    const me = await page.evaluate(() => fetch('/api/session').then((r) => r.json()) as Promise<{ user: { id: string } }>);
+    expect(body.account).toBe(me.user.id);
+    await page.locator('.app-user-button').click();
+    await page.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+    release();
+    // Give the late reply time to arrive: nothing of the old account comes back.
+    await page.waitForTimeout(1000);
+    const left = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(left).toEqual([]);
+  });
+
   test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
     await ask(page, 'List every volunteering opportunity');
     // Another tab signs in as someone else (the session cookie is shared).
@@ -267,7 +316,7 @@ test.describe('Query tab', () => {
       sent++;
       return r.continue();
     });
-    await chat(page).getByLabel('Your message').fill('Also show the minimum age');
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
     await chat(page).getByRole('button', { name: 'Send' }).click();
     // The page notices, drops to the new account's own (empty) workspace, and nothing was sent.
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
@@ -275,7 +324,7 @@ test.describe('Query tab', () => {
   });
 
   test('changing the question marks the old answer as stale', async ({ page }) => {
-    await ask(page, 'List every volunteering opportunity');
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('2 rows');
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
     await page.getByTestId('sparql-editor').click();
@@ -455,10 +504,24 @@ test.describe('Query tab', () => {
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
     await toggle(page, 'Query ontology').click();
-    await ask(page, 'List every volunteering opportunity');
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');
   });
+  test('very long values are shortened in the results', async ({ page }) => {
+    const x10 = (v: string) => `CONCAT(${Array(10).fill(v).join(', ')})`;
+    await setEditor(
+      page,
+      'sparql-editor',
+      `SELECT ?e WHERE { BIND("xxxxxxxxxx" AS ?a) BIND(${x10('?a')} AS ?b) BIND(${x10('?b')} AS ?c) BIND(${x10('?c')} AS ?d) BIND(CONCAT(?d, ?d) AS ?e) }`,
+    );
+    await run(page);
+    await expect(results(page)).toContainText('very long values are shortened');
+    const cell = await results(page).locator('tbody td').first().getAttribute('title');
+    expect(cell!.length).toBeLessThanOrEqual(10_001);
+    expect(cell!.endsWith('…')).toBe(true);
+  });
+
   test('long results are paginated', async ({ page }) => {
     await setEditor(page, 'sparql-editor', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
     await run(page);

@@ -5,7 +5,7 @@ import { ontologyDigest } from '../llm/context.js';
 import { QUERY_ASSISTANT } from '../llm/prompts.js';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { get, HttpError, put } from '../db.js';
+import { HttpError, releaseCounters, reserveCounters } from '../db.js';
 import { llm } from '../llm/provider.js';
 import { QueryChatSchema } from '../llm/schemas.js';
 import { MAX_QUERY_LENGTH, queryProblem } from './queryPolicy.js';
@@ -70,45 +70,63 @@ export const QUERY_CHAT_LIMITS = { perUser: 30, windowMs: 10 * 60_000, messages:
 const recent = new Map<string, number[]>();
 const busy = new Set<string>();
 
-/**
- * Today's Claude-backed questions, per person, per ontology and for the whole
- * deployment, kept in the database so a restart doesn't reset them. Checked
- * and counted in one synchronous step, so concurrent requests can't both take
- * the last one.
- */
-function takeClaudeAllowance(day: string, userId: string, ontologyId: string): boolean {
+/** Today's counters for one question: per person, per ontology and for the deployment. */
+function allowanceCounters(day: string, userId: string, ontologyId: string) {
   const L = config.llm.queryAssistant;
-  const scopes = [
-    [`query-assistant:${day}:user:${userId}`, L.perUserPerDay],
-    [`query-assistant:${day}:ontology:${ontologyId}`, L.perOntologyPerDay],
-    [`query-assistant:${day}:all`, L.perDay],
-  ] as const;
-  const used = scopes.map(([id]) => get<{ id: string; count: number }>('kv', id)?.count ?? 0);
-  if (scopes.some(([, max], i) => used[i] >= max)) return false;
-  scopes.forEach(([id], i) => put('kv', { id, count: used[i] + 1 }, `query-assistant:${day}`));
-  return true;
+  return [
+    { id: `query-assistant:${day}:user:${userId}`, max: L.perUserPerDay },
+    { id: `query-assistant:${day}:ontology:${ontologyId}`, max: L.perOntologyPerDay },
+    { id: `query-assistant:${day}:all`, max: L.perDay },
+  ];
+}
+
+export interface QueryChatGate {
+  useClaude: boolean;
+  offlineReason?: QueryChatResponse['offlineReason'];
+  /** Call just before the first request to Claude: from then on the allowance is spent. */
+  spend: () => void;
+  /** Always call when the request ends: frees the person to ask again, and gives back an allowance that wasn't spent. */
+  done: () => void;
 }
 
 /**
  * Admits one question from this person: at most one at a time and
  * QUERY_CHAT_LIMITS.perUser per ten minutes (429 otherwise). Claude answers
  * for members of the ontology while today's allowances last (per person, per
- * ontology and for the deployment); otherwise the offline helper answers.
- * Call `done()` when the answer is sent.
+ * ontology and for the deployment), reserved together in one database
+ * transaction and given back if Claude is never called; otherwise the
+ * offline helper answers.
  */
-export function admitQueryChat(userId: string, ontologyId: string, isMember: boolean): { useClaude: boolean; offlineReason?: QueryChatResponse['offlineReason']; done: () => void } {
+export function admitQueryChat(userId: string, ontologyId: string, isMember: boolean): QueryChatGate {
   if (busy.has(userId)) throw new HttpError(429, 'Still answering your previous question');
   const now = Date.now();
   const mine = (recent.get(userId) ?? []).filter((t) => now - t < QUERY_CHAT_LIMITS.windowMs);
   if (mine.length >= QUERY_CHAT_LIMITS.perUser) throw new HttpError(429, 'That’s a lot of questions in a short time. Try again in a few minutes, or edit the query directly.');
   recent.set(userId, [...mine, now]);
   busy.add(userId);
-  const done = () => busy.delete(userId);
-
-  if (config.llm.provider !== 'anthropic') return { useClaude: false, offlineReason: 'unavailable', done };
-  if (!isMember) return { useClaude: false, offlineReason: 'not-member', done };
-  if (!takeClaudeAllowance(new Date(now).toISOString().slice(0, 10), userId, ontologyId)) return { useClaude: false, offlineReason: 'limit', done };
-  return { useClaude: true, done };
+  let reserved: string[] = [];
+  let spent = false;
+  const gate = (useClaude: boolean, offlineReason?: QueryChatResponse['offlineReason']): QueryChatGate => ({
+    useClaude,
+    offlineReason,
+    spend: () => void (spent = true),
+    done: () => {
+      busy.delete(userId);
+      if (reserved.length && !spent) releaseCounters(reserved);
+      reserved = [];
+    },
+  });
+  try {
+    if (config.llm.provider !== 'anthropic') return gate(false, 'unavailable');
+    if (!isMember) return gate(false, 'not-member');
+    const counters = allowanceCounters(new Date(now).toISOString().slice(0, 10), userId, ontologyId);
+    if (!reserveCounters(counters, `query-assistant:${new Date(now).toISOString().slice(0, 10)}`)) return gate(false, 'limit');
+    reserved = counters.map((c) => c.id);
+    return gate(true);
+  } catch (e) {
+    busy.delete(userId);
+    throw e;
+  }
 }
 
 /** Tests only. */
@@ -147,6 +165,8 @@ export function boundedQueryChatRequest(body: unknown): QueryChatRequest {
 export interface QueryChatOptions {
   /** Whether Claude may answer (membership and budget allowing); otherwise the offline helper does. */
   useClaude: boolean;
+  /** Called just before the first request to Claude. */
+  onClaude?: () => void;
 }
 
 export async function queryChat(graph: OntologyGraph, req: QueryChatRequest, opts: QueryChatOptions): Promise<Omit<QueryChatResponse, 'offlineReason'>> {
@@ -165,6 +185,7 @@ export async function queryChat(graph: OntologyGraph, req: QueryChatRequest, opt
     llm.json({ task, system: QUERY_ASSISTANT, schema: QueryChatSchema, effort: 'medium', maxTokens: 2500, messages, fallback: () => offlineQuery(view, req) });
 
   const ask = [{ role: 'user' as const, content: `${context}\n\nWrite the next turn for the person's latest message.` }];
+  opts.onClaude?.();
   const first = await call(ask, 'query-chat');
   if (first.simulated) return offline();
   let draft: Draft = first.value;
@@ -322,9 +343,11 @@ function fromWire(ctx: Ctx, raw: unknown): OfflineState | undefined {
 /** "also…", "only…", "remove…": the message changes the previous query rather than asking a new question. */
 const REFINE = /^\s*(also|and|only|just|now|but|then|plus|add|include|remove|drop|hide|without|exclude|except|sort|order|filter|limit|show only|make it|instead)\b|\b(as well|too|instead|those|them|these)\b/i;
 const REMOVE = /\b(remove|drop|hide|without|exclude|no longer show|don['’]?t show|do not show|leave out|take out)\b/i;
-/** "only those offered by …", "where …": a condition, which must become a filter or the message is declined. */
+/** "only those offered by …", "where …": a condition, which must become filters or the message is declined. */
 const CONDITION = /\b(only|just)\s+(those|the ones|ones|records|items|where|whose|with|that|which|if)\b|\b(where|whose)\b/i;
-const FILTER_HELP = 'Offline, I can filter on a quoted phrase in the name (only those called “park”) or on a number (only those with a minimum age under 15). For anything else, edit the query directly.';
+const NO_LIMIT = /\b(all of them|everything|every one|all results|all records|all rows|no limit|without (a |the )?(row )?limit|(remove|drop|lift|take off) the (row )?limit)\b/i;
+const FILTER_HELP =
+  'Offline, I can filter on a number (only those with a minimum age under 15) or on a quoted phrase, in the name or in a named property (only those offered by “Northvale”), joined with “and”. For anything else, edit the query directly.';
 
 const NUMBER_OPS: [RegExp, FilterOp][] = [
   [/\b(at least|no less than|minimum of|or more)\b/i, 'gte'],
@@ -354,111 +377,178 @@ function stepFor(p: PropertyView): PathStep {
   return step;
 }
 
-function startRecords(ctx: Ctx, cls: ClassView, text: string): { state: RecordsState; filtered: boolean } {
-  const { all, nameProp } = propsFor(ctx.view, cls);
-  const mentioned = all.filter((p) => mentions(text, labelOf(p)));
-  const chosen = [...new Set([...(nameProp ? [nameProp] : []), ...mentioned])];
-  const steps = chosen.map(stepFor);
-  if (!nameProp) steps.unshift(newStep(RDFS_LABEL));
-  const model: BuilderModel = { rootClass: cls.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 };
-  const state: RecordsState = { kind: 'records', cls, model };
-  const { filtered } = applyFilters(ctx, state, text);
-  return { state, filtered };
+/** The message split into what to show (before any condition) and the condition itself. */
+function split(text: string): { show: string; condition?: string } {
+  const m = CONDITION.exec(text);
+  return m ? { show: text.slice(0, m.index), condition: text.slice(m.index) } : { show: text };
 }
 
-/** Number and text filters, counting, sorting and the row limit, from one message. */
-function applyFilters(ctx: Ctx, state: RecordsState, text: string): { changed: boolean; filtered: boolean } {
+/**
+ * Every clause of a condition as a filter, or why one can't be: a number
+ * comparison on a number property (named, or the only one shown), or a quoted
+ * phrase in a named property, in a linked thing's label, or in the name.
+ * Clauses are joined with "and"; anything else is declined, never guessed.
+ */
+function conditionFilters(ctx: Ctx, state: RecordsState, condition: string): { apply: () => void } | { declined: string } {
+  const { all, nameProp } = propsFor(ctx.view, state.cls);
+  const model = state.model;
+  const propOf = (s: PathStep) => all.find((p) => p.iri === s.property);
+  // Quoted phrases out of the way first, so their words don't split clauses or name properties.
+  const phrases: string[] = [];
+  const masked = condition.replace(/["“'‘]([^"”'’]{1,200})["”'’]/g, (_, q: string) => `\u0000${phrases.push(q) - 1}\u0000`);
+  if (/\bor\b|\bnot\b|\bisn['’]?t\b|\bexcept\b/i.test(masked)) return { declined: `I can’t combine conditions with “or” or “not” offline. ${FILTER_HELP}` };
+  const clauses = masked
+    .replace(CONDITION, ' ')
+    .split(/,|\band\b|\bbut\b|(?=\b(?:called|named|titled|containing|contains)\b)/i)
+    .map((c) => c.trim())
+    .filter((c) => c && !/^(those|the ones|ones|records|items|with|that|which|if)$/i.test(c));
+  if (!clauses.length) return { declined: `I couldn’t find a condition in that. ${FILTER_HELP}` };
+  const actions: (() => void)[] = [];
+  for (const clause of clauses) {
+    const named = all.filter((p) => mentions(clause.replace(/\u0000\d+\u0000/g, ' '), labelOf(p)));
+    const quoted = /\u0000(\d+)\u0000/.exec(clause);
+    const num = /(-?\d+(?:\.\d+)?)/.exec(clause.replace(/\u0000\d+\u0000/g, ' '));
+    const op = NUMBER_OPS.find(([re]) => re.test(clause))?.[1];
+    if (quoted && !op) {
+      const value = phrases[Number(quoted[1])].trim();
+      if (named.length > 1) return { declined: `I couldn’t tell which property “${value}” is about. ${FILTER_HELP}` };
+      const p = named[0] ?? nameProp;
+      if (!named[0] && !/\b(called|named|titled|containing|contains|with (the )?(name|title))\b/i.test(clause) && clause.replace(/\u0000\d+\u0000/, '').trim())
+        return { declined: `I couldn’t tell what “${value}” should match. ${FILTER_HELP}` };
+      if (p && valueTypeOf(p) === 'number') return { declined: `${labelOf(p)} is a number, so compare it with “over”, “under” or “at least”. ${FILTER_HELP}` };
+      actions.push(() => {
+        let step = p ? model.steps.find((s) => s.property === p.iri) : model.steps.find((s) => s.property === RDFS_LABEL);
+        if (!step) model.steps.push((step = p ? stepFor(p) : newStep(RDFS_LABEL)));
+        // A linked thing matches on its label.
+        const target = step.children.find((c) => c.property === RDFS_LABEL) ?? step;
+        target.filter = { op: 'contains', value };
+      });
+    } else if (num && op && !quoted) {
+      const numberNamed = named.filter((p) => valueTypeOf(p) === 'number');
+      const shown = model.steps.filter((s) => s.valueType === 'number');
+      const p = numberNamed.length === 1 ? numberNamed[0] : named.length === 0 && shown.length === 1 ? propOf(shown[0]) : undefined;
+      if (!p) return { declined: `I couldn’t tell which number “${clause.trim()}” is about. ${FILTER_HELP}` };
+      actions.push(() => {
+        let step = model.steps.find((s) => s.property === p.iri);
+        if (!step) model.steps.push((step = stepFor(p)));
+        step.filter = { op, value: num[1] };
+      });
+    } else return { declined: `I couldn’t turn “${clause.replace(/\u0000(\d+)\u0000/g, (_, i: string) => `“${phrases[Number(i)]}”`).trim()}” into a filter, so I haven’t changed the query. ${FILTER_HELP}` };
+  }
+  return { apply: () => actions.forEach((a) => a()) };
+}
+
+/** Counting, sorting and the row limit, from one message. Returns whether anything changed. */
+function applyShape(ctx: Ctx, state: RecordsState, text: string): boolean {
   const { model, cls } = state;
-  const { all, nameProp } = propsFor(ctx.view, cls);
+  const { all } = propsFor(ctx.view, cls);
   const propOf = (s: PathStep) => all.find((p) => p.iri === s.property);
   let changed = false;
-  let filtered = false;
-
-  // "called 'X'", "containing "X"": a text filter on the name column.
-  const quoted = /["“'‘]([^"”'’]{2,})["”'’]/.exec(text)?.[1];
-  const textStep = model.steps.find((s) => s.property === nameProp?.iri) ?? model.steps.find((s) => s.property === RDFS_LABEL);
-  if (quoted && textStep) (textStep.filter = { op: 'contains', value: quoted }), (filtered = true);
-
-  // "with a minimum age of at least 16": a number filter, on the number property named, or the only one shown.
-  const num = /(-?\d+(?:\.\d+)?)/.exec(text.replace(/\b(first|top|limit(?: to)?)\s+\d+/gi, ''));
-  const op = NUMBER_OPS.find(([re]) => re.test(text))?.[1];
-  if (num && op) {
-    const numberSteps = model.steps.filter((s) => s.valueType === 'number');
-    let step = numberSteps.find((s) => mentions(text, labelOf(propOf(s) ?? { iri: s.property })));
-    if (!step) {
-      const named = all.find((p) => valueTypeOf(p) === 'number' && mentions(text, labelOf(p)));
-      if (named) model.steps.push((step = stepFor(named)));
-      else if (numberSteps.length === 1) step = numberSteps[0];
-    }
-    if (step) (step.filter = { op, value: num[1] }), (filtered = true);
-  }
-  changed = filtered;
-
   if (/\bhow many\b|\bcount\b|\bnumber of\b/i.test(text)) (model.countOnly = true), (changed = true);
   else if (model.countOnly && /\b(list|show|which)\b/i.test(text)) (model.countOnly = false), (changed = true);
-
-  if (/\b(all of them|everything|every one|all results|all records|all rows|no limit|without (a |the )?limit|remove the limit)\b/i.test(text)) (model.limit = undefined), (changed = true);
+  if (NO_LIMIT.test(text)) (model.limit = undefined), (changed = true);
   const limit = /\b(?:first|top|limit(?: to)?)\s+(\d{1,5})\b/i.exec(text);
   if (limit) (model.limit = Math.max(1, Number(limit[1]))), (changed = true);
-
   const sort = /\b(?:sort|order)(?:ed)? by (?:the |its )?([\w ’'-]+?)(?:\s+(descending|ascending|highest first|lowest first|newest first|oldest first))?[.?!]?$/i.exec(text.trim());
   if (sort) {
     const step = model.steps.find((s) => mentions(sort[1], s.property === RDFS_LABEL ? 'label' : labelOf(propOf(s) ?? { iri: s.property })));
     if (step) (model.orderBy = step.id), (changed = true);
     if (sort[2]) (model.descending = /descending|highest|newest/i.test(sort[2])), (changed = true);
   }
-  return { changed, filtered };
+  return changed;
 }
 
-type Step = { state: OfflineState; refined: false } | { state: OfflineState; refined: true } | { declined: string };
+/** A new list of records, from a message that names the class (or none, for the class with the most records). */
+function startRecords(ctx: Ctx, cls: ClassView, text: string): RecordsState | { declined: string } {
+  const { all, nameProp } = propsFor(ctx.view, cls);
+  const { show, condition } = split(text);
+  const mentioned = all.filter((p) => mentions(show, labelOf(p)));
+  const chosen = [...new Set([...(nameProp ? [nameProp] : []), ...mentioned])];
+  const steps = chosen.map(stepFor);
+  if (!nameProp) steps.unshift(newStep(RDFS_LABEL));
+  const model: BuilderModel = { rootClass: cls.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 };
+  const state: RecordsState = { kind: 'records', cls, model };
+  // "called 'park'" without "only": a name filter too.
+  const cond = condition ?? (/["“'‘][^"”'’]{1,200}["”'’]/.test(show) || NUMBER_OPS.some(([re]) => re.test(show)) ? show.replace(new RegExp(`\\b${labelOf(cls)}\\w*\\b`, 'i'), ' ') : undefined);
+  if (cond) {
+    const f = conditionFilters(ctx, state, cond);
+    if ('declined' in f) return f;
+    f.apply();
+  }
+  applyShape(ctx, state, text);
+  return state;
+}
 
-/** Applies one message to the previous state: a new question starts afresh; a refinement changes it, or is declined. */
+type Step = { state: OfflineState } | { declined: string };
+
+const NOT_MINE = 'The offline helper can only change queries it wrote itself, and it didn’t write the one in the editor (or it has been changed since). Edit it directly, or ask a new question such as “List every …”.';
+
+/** Applies one message to the previous state: a new question starts afresh; a refinement changes it, or is declined whole. */
 function step(ctx: Ctx, prev: OfflineState | undefined, text: string): Step {
   const cls = mentionedClass(ctx, text);
-  const refining = REFINE.test(text);
-  if (refining && !cls) {
-    if (!prev) return { declined: 'The offline helper can only change queries it wrote itself, and it didn’t write the one in the editor (or it has been changed since). Edit it directly, or ask a new question such as “List every …”.' };
+  if (REFINE.test(text)) {
+    if (!prev) return { declined: NOT_MINE };
     if (prev.kind === 'ontology') return { declined: 'That last question was about the model itself, so there’s no list of records to change. Ask for records first, for example “List every …”.' };
+    if (cls && cls.iri !== prev.cls.iri) return { declined: `That mentions ${labelOf(cls)} records, but the query lists ${labelOf(prev.cls)} records. To start a new list, ask without “also” or “only”, for example “List every ${labelOf(cls)}”.` };
+    return refine(ctx, prev, text);
   }
-  if (!refining || !prev || prev.kind !== 'records') {
-    const ontology = ontologyQuestion(normalise(text));
-    if (ontology && !cls) return { state: { kind: 'ontology', question: ontology }, refined: false };
-    let start = cls;
-    if (!start && (!prev || prev.kind !== 'records')) start = [...ctx.classes].sort((a, b) => (ctx.counts.get(b.iri) ?? 0) - (ctx.counts.get(a.iri) ?? 0))[0];
-    if (start) {
-      const { state, filtered } = startRecords(ctx, start, text);
-      if (CONDITION.test(text) && !filtered) return { declined: `I couldn’t turn the condition in that into a filter. ${FILTER_HELP}` };
-      return { state, refined: false };
-    }
+  const ontology = ontologyQuestion(normalise(text));
+  if (ontology && !cls) return { state: { kind: 'ontology', question: ontology } };
+  if (cls) {
+    const r = startRecords(ctx, cls, text);
+    return 'declined' in r ? r : { state: r };
   }
-  // A refinement of the previous list.
+  // No class named: "how many are there?" refines the list; otherwise start from the class with the most records.
+  if (prev?.kind === 'records') return refine(ctx, prev, text);
+  const top = [...ctx.classes].sort((a, b) => (ctx.counts.get(b.iri) ?? 0) - (ctx.counts.get(a.iri) ?? 0))[0];
+  const r = startRecords(ctx, top, text);
+  return 'declined' in r ? r : { state: r };
+}
+
+function refine(ctx: Ctx, prev: RecordsState, text: string): Step {
   const state = structuredClone(prev) as RecordsState;
-  state.cls = (prev as RecordsState).cls;
+  state.cls = prev.cls;
   const { all } = propsFor(ctx.view, state.cls);
   let changed = false;
-  let filtered = false;
-  if (REMOVE.test(text)) {
+  if (REMOVE.test(text) && !NO_LIMIT.test(text)) {
     const after = text.slice(REMOVE.exec(text)!.index);
-    const named = new Set(all.filter((p) => mentions(after, labelOf(p))).map((p) => p.iri));
+    const named = all.filter((p) => mentions(after, labelOf(p)));
     if (/\b(filters?|conditions?|restrictions?)\b/i.test(after)) {
-      // "remove the minimum age filter": that condition only; "remove the filters": all of them. Columns stay.
-      for (const s of state.model.steps) if (s.filter && (!named.size || named.has(s.property))) delete s.filter, (changed = true);
+      // "remove the minimum age filter": that one only; "remove all the filters": every one. Columns stay.
+      if (named.length) {
+        for (const p of named) {
+          const s = state.model.steps.find((x) => x.property === p.iri);
+          const target = s && (s.filter ? s : s.children.find((c) => c.filter));
+          if (!target) return { declined: `There’s no ${labelOf(p)} filter to remove.` };
+          delete target.filter;
+        }
+      } else if (/\b(all|every|filters|conditions|restrictions)\b/i.test(after)) {
+        for (const s of state.model.steps) for (const x of [s, ...s.children]) delete x.filter;
+      } else return { declined: 'I couldn’t tell which filter to remove. Name it, for example “remove the minimum age filter”, or say “remove all the filters”.' };
+      changed = true;
     } else {
-      const before = state.model.steps.length;
-      state.model.steps = state.model.steps.filter((s) => !named.has(s.property));
-      changed = state.model.steps.length !== before;
+      if (!named.length) return { declined: 'I couldn’t tell which column to remove. Name it, for example “remove the minimum age”.' };
+      state.model.steps = state.model.steps.filter((s) => !named.some((p) => p.iri === s.property));
       if (!state.model.steps.length) state.model.steps = [newStep(RDFS_LABEL)];
       if (!state.model.steps.some((s) => s.id === state.model.orderBy)) state.model.orderBy = state.model.steps[0].id;
+      changed = true;
     }
+    if (CONDITION.test(after)) return { declined: `I can remove things or add conditions, but not both in one message. ${FILTER_HELP}` };
   } else {
-    for (const p of all.filter((p) => mentions(text, labelOf(p)))) if (!state.model.steps.some((s) => s.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
-    const r = applyFilters(ctx, state, text);
-    changed ||= r.changed;
-    filtered = r.filtered;
+    const { show, condition } = split(text);
+    for (const p of all.filter((p) => mentions(show, labelOf(p)))) if (!state.model.steps.some((s) => s.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
+    // A quoted phrase or a comparison without "only" still reads as a condition ("those called 'park'").
+    const cond = condition ?? (/["“'‘][^"”'’]{1,200}["”'’]/.test(show) || NUMBER_OPS.some(([re]) => re.test(show)) ? show : undefined);
+    if (cond) {
+      const f = conditionFilters(ctx, state, cond);
+      if ('declined' in f) return f;
+      f.apply();
+      changed = true;
+    }
   }
-  if (CONDITION.test(text) && !REMOVE.test(text) && !filtered) return { declined: `I couldn’t turn the condition in that into a filter, so I haven’t changed the query. ${FILTER_HELP}` };
+  changed = applyShape(ctx, state, text) || changed;
   if (!changed) return { declined: 'I couldn’t tell what to change. Try “also show …”, “only those with … over 10”, “remove …”, or “all of them”.' };
-  return { state, refined: true };
+  return { state };
 }
 
 function mentionedClass(ctx: Ctx, text: string): ClassView | undefined {

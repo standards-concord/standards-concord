@@ -79,7 +79,7 @@ And for developers there's a Classes format: JavaScript and TypeScript classes g
 On the Query page you can ask questions of the ontology in SPARQL. The query engine is compiled to WebAssembly and runs right here in your browser.
 
 [do: ask-query]
-If you'd rather not write SPARQL, describe what you want in the chat beside the editor. It writes the query and runs it, and each follow-up message refines it.
+If you'd rather not write SPARQL, describe what you want in the chat beside the editor. It writes the query for you to check and run, and each follow-up message refines it.
 
 ## Gathering requirements {#requirements}
 

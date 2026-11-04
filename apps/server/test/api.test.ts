@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
@@ -280,6 +282,14 @@ describe('query assistant (offline helper)', () => {
     expect(over.status).toBe(429);
   });
 
+  it('refuses a conversation sent on under another account', async () => {
+    const agent = await login('contributor', 'Account check');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data' };
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: 'someone-else' })).status).toBe(409);
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: me })).status).toBe(200);
+  });
+
   it('says why the offline helper answered', async () => {
     const member = await login('contributor');
     expect((await ask(member, [{ role: 'user', content: 'List every organisation' }])).offlineReason).toBe('unavailable');
@@ -296,6 +306,7 @@ describe('query assistant (offline helper)', () => {
       Object.assign(config.llm.queryAssistant, { perUserPerDay: 2, perOntologyPerDay: 3, perDay: 100 });
       const take = (user: string, ontology = 'ont-quota') => {
         const g = admitQueryChat(user, ontology, true);
+        if (g.useClaude) g.spend();
         g.done();
         return g.useClaude;
       };
@@ -313,6 +324,50 @@ describe('query assistant (offline helper)', () => {
       Object.assign(config.llm.queryAssistant, limits);
     } finally {
       (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const { get, withoutWaiting } = await import('../src/db.js');
+    const day = new Date().toISOString().slice(0, 10);
+    const used = (id: string) => get<{ count: number }>('kv', `query-assistant:${day}:${id}`)?.count ?? 0;
+    const provider = config.llm.provider;
+    const limits = { ...config.llm.queryAssistant };
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      Object.assign(config.llm.queryAssistant, { perUserPerDay: 1, perOntologyPerDay: 1, perDay: 1000 });
+      // Something fails before the provider is called: the reservation is refunded, so the last allowance is still there.
+      const failed = admitQueryChat('refund-a', 'ont-refund', true);
+      expect(failed.useClaude).toBe(true);
+      expect(used('user:refund-a')).toBe(1);
+      failed.done();
+      expect([used('user:refund-a'), used('ontology:ont-refund')]).toEqual([0, 0]);
+      const second = admitQueryChat('refund-a', 'ont-refund', true);
+      expect(second.useClaude).toBe(true);
+      second.spend();
+      second.done();
+      expect(used('user:refund-a')).toBe(1);
+
+      // Another connection holding the write lock: the reservation can't read and then write around it,
+      // and when admission fails the person isn't left "busy".
+      const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
+      other.exec('BEGIN IMMEDIATE');
+      expect(() => withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).toThrow(/locked|busy/i);
+      // Meanwhile the other connection takes the last ontology allowance.
+      other
+        .prepare(`INSERT INTO docs (collection, id, parent, data, created_at) VALUES ('kv', ?, NULL, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data`)
+        .run(`query-assistant:${day}:ontology:ont-refund-b`, JSON.stringify({ id: `query-assistant:${day}:ontology:ont-refund-b`, count: 1 }), new Date().toISOString());
+      other.exec('COMMIT');
+      other.close();
+      const after = admitQueryChat('refund-b', 'ont-refund-b', true);
+      after.done();
+      expect(after).toMatchObject({ useClaude: false, offlineReason: 'limit' });
+      expect(used('user:refund-b')).toBe(0);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      Object.assign(config.llm.queryAssistant, limits);
     }
   });
 
@@ -386,11 +441,55 @@ describe('query assistant (offline helper)', () => {
     // A condition it can't express offline.
     const [, northvale] = await converse(agent, 'List every volunteering opportunity', 'Also show the title and only those offered by Northvale');
     expect(northvale.unchanged).toBe(true);
-    expect(northvale.reply).toMatch(/couldn’t turn the condition/);
+    expect(northvale.reply).toMatch(/couldn’t turn “offered by Northvale”/);
     // A forged record of a previous query that uses terms outside the ontology is ignored.
     const forged = { kind: 'records', classIri: 'https://w3id.org/odi/volunteering#VolunteeringOpportunity', model: { steps: [{ id: 'a', property: 'http://evil.example/p', optional: true, show: true, children: [] }], countOnly: false, descending: false } };
     const r = await ask(agent, [{ role: 'user', content: 'Also show the title' }], '', forged);
     expect(r.unchanged).toBe(true);
+  });
+
+  it('a refinement that names the class still refines, and is declined rather than replacing a query it didn’t write', async () => {
+    const agent = await login('contributor');
+    const mine = 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> ; <https://w3id.org/odi/volunteering#minimumAge> 18 }';
+    const handwritten = await ask(agent, [{ role: 'user', content: 'Also show the minimum age for volunteering opportunities' }], mine);
+    expect(handwritten).toMatchObject({ unchanged: true, query: mine });
+    const [, also] = await converse(agent, 'List every volunteering opportunity', 'Also show the minimum age for volunteering opportunities');
+    expect(also.unchanged).toBeUndefined();
+    expect(also.query).toContain('vol:minimumAge');
+    const [, other] = await converse(agent, 'List every volunteering opportunity', 'Also show organisations');
+    expect(other.unchanged).toBe(true);
+  });
+
+  it('applies a quoted phrase to the property it names, and every clause of a compound condition', async () => {
+    const agent = await login('contributor');
+    const [, by] = await converse(agent, 'List every volunteering opportunity', 'Only those offered by "Northvale"');
+    expect(by.unchanged).toBeUndefined();
+    expect(by.query).not.toContain('CONTAINS(LCASE(STR(?title))');
+    expect(by.query).toMatch(/vol:offeredBy \?offeredBy\b[^}]*rdfs:label \?offeredBy\w*/);
+    expect(by.query).toMatch(/CONTAINS\(LCASE\(STR\(\?offeredBy\w*\)\), "northvale"\)/);
+    expect(by.query).not.toMatch(/OPTIONAL \{[^}]*vol:offeredBy/);
+    const [, both] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by "Northvale"');
+    expect(both.query).toContain('FILTER(?minimumAge < 15)');
+    expect(both.query).toMatch(/"northvale"/);
+    // One clause it can't express declines the whole message.
+    const [, part] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by Northvale');
+    expect(part.unchanged).toBe(true);
+    expect(part.query).not.toContain('minimumAge < 15');
+  });
+
+  it('removes only the filter it names, declines an unknown one, and lifts the limit on request', async () => {
+    const agent = await login('contributor');
+    const said = ['List every volunteering opportunity with its minimum age', 'Only those with a minimum age under 15 called "park"'];
+    const [, filtered, postcode] = await converse(agent, ...said, 'Remove the postcode filter');
+    expect(postcode.unchanged).toBe(true);
+    expect(postcode.query).toBe(filtered.query);
+    const [, , every] = await converse(agent, ...said, 'Remove all the filters');
+    expect(every.query).not.toContain('FILTER');
+    expect(every.query).toContain('?minimumAge');
+    const [, , limit] = await converse(agent, ...said, 'Remove the limit');
+    expect(limit.unchanged).toBeUndefined();
+    expect(limit.query).not.toContain('LIMIT');
+    expect(limit.query).toContain('FILTER(?minimumAge < 15)');
   });
 
   it('escapes delimiters in user-written text rather than deleting them', async () => {
@@ -426,7 +525,16 @@ describe('query assistant (offline helper)', () => {
     expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } VALUES ?b { ${values} } VALUES ?c { ${values} } VALUES ?d { ${values} } }`)).toMatch(/1,600,000,000 rows/);
     expect(queryProblem('SELECT * WHERE { VALUES (?a ?b) { (1 2) (3 4) } VALUES ?c { 1 2 3 } }')).toBeUndefined();
     expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } }`)).toBeUndefined();
-    expect(performance.now() - t0).toBeLessThan(500);
+    // However the terms or names are written: signed numbers without spaces, Unicode variable names.
+    const packed = Array.from({ length: 200 }, (_, i) => i).join('+');
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${packed} } VALUES ?b { ${packed} } VALUES ?c { ${packed} } VALUES ?d { ${packed} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { VALUES ?ä { ${values} } VALUES ?ö { ${values} } VALUES ?ü { ${values} } VALUES ?é { ${values} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { ?s ?p ?o } VALUES ?a { ${values} }`)).toBeUndefined();
+    expect(performance.now() - t0).toBeLessThan(1000);
+    // A comment ended by a carriage return can't hide what follows it.
+    expect(queryProblem('SELECT * WHERE { # note\r SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * # note\rFROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('SELECT * WHERE { { SELECT * FROM NAMED <http://example.org/g> WHERE { ?s ?p ?o } } }')).toMatch(/doesn’t parse|FROM/);
   });
 });
 

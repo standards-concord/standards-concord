@@ -56,10 +56,12 @@ test.describe('with the backend', () => {
     await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Run', exact: true }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
-    // The query assistant answers through the backend and its query runs here.
+    // The query assistant answers through the backend, and its query runs here when asked.
     await page.getByTestId('query-suggestions').getByRole('button').first().click();
     await expect(page.getByTestId('query-chat').getByTestId('chat-message-assistant')).toHaveCount(2, { timeout: 60_000 });
     await expect(page.getByLabel('Run against')).toHaveValue(/data|ontology/);
+    // It runs only once the person presses Run.
+    await page.getByTestId('query-run-prompt').getByRole('button', { name: 'Run this query' }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
     await page.goto(`/o/${demo.id}/source?format=turtle`);
     await expect(page.getByTestId('source-code').locator('.tok-iri').first()).toBeVisible();

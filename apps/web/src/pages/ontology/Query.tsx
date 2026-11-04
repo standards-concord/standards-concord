@@ -10,13 +10,13 @@ import { allTerms, makeLabeler } from '../../lib/ontology';
 import { insertTerm } from '../../lib/prefixes';
 import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
-import { MAX_ROWS, QueryRunner, QueryStopped, type RunResult } from '../../lib/queryRunner';
+import { QueryRunner, QueryStopped, type RunResult } from '../../lib/queryRunner';
 import { limitOf, withoutLimit } from '../../lib/sparqlLimit';
 import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
 import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
 import { ChatView } from '../../components/ChatView';
-import { useSession } from '../../lib/session';
+import { currentAccount, useSession } from '../../lib/session';
 import { useOntology } from './Layout';
 
 /**
@@ -298,7 +298,11 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const questionKey = keyFor(query, target);
   const [ranKey, setRanKey] = useState<string>();
   const [checkedData, setCheckedData] = useState<string>();
+  // The query the assistant last wrote, waiting for the person to read it and press Run.
+  const [wroteKey, setWroteKey] = useState<string>();
+  const awaitingRun = wroteKey === questionKey && ranKey !== questionKey;
   const resultStale = !!result && ranKey !== questionKey;
+  const queryLimit = useMemo(() => limitOf(query), [query]);
   const reportStale = !!report && checkedData !== data;
 
   /** Runs the editor's query, or the one the assistant just wrote (state hasn't caught up yet). */
@@ -337,6 +341,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     setChatError(undefined);
     try {
       // This conversation belongs to one account: never send it on under another one signed in from another tab.
+      // The server refuses it too if the session changes after this check.
       const now = await api.session();
       if ((now.user?.id ?? 'guest') !== account) {
         setSession(now);
@@ -348,18 +353,22 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         target,
         dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
         offlineState: offlineState ?? undefined,
+        account,
       });
+      // Signed out, or into another account, while waiting: this answer belongs to nobody here now.
+      if (currentAccount() !== account) return;
       setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
       // The editor is read-only while the assistant works, so its answer never replaces newer edits.
+      // It isn't run until the person has looked at it and pressed Run.
       if (!r.unchanged) {
         setOfflineState(r.offlineState ?? null);
         setQuery(r.query);
         setTarget(r.target);
         setColumns(r.columns);
-        await run({ query: r.query, target: r.target, columns: r.columns });
+        setWroteKey(keyFor(r.query, r.target));
       }
     } catch (e) {
-      setChatError(e);
+      if (currentAccount() === account) setChatError(e);
     } finally {
       setAsking(false);
     }
@@ -394,7 +403,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const greeting: ChatMessage = {
     id: 'greeting',
     role: 'assistant',
-    content: `Tell me what you’d like to find in ${ontology.title} and I’ll write the SPARQL and run it. Then ask for changes (“also show…”, “only the ones…”) or edit the query yourself.`,
+    content: `Tell me what you’d like to find in ${ontology.title} and I’ll write the SPARQL for you to check and run. Then ask for changes (“also show…”, “only the ones…”) or edit the query yourself.`,
     at: '',
   };
   const lastReply = [...chat].reverse().find((m) => m.role === 'assistant');
@@ -591,7 +600,15 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 </p>
               )}
               {queryError ? <InlineError error={queryError} /> : null}
-              {resultStale && !running && (
+              {awaitingRun && !running && !asking && (
+                <p role="status" className="flex flex-wrap items-center gap-2 rounded-md bg-accent-soft px-3 py-2 text-sm" data-testid="query-run-prompt">
+                  {result ? 'The assistant changed the query.' : 'The assistant wrote a query.'} Check it in the editor, then run it.
+                  <Button size="sm" variant="primary" icon={Play} onClick={() => void run()}>
+                    Run this query
+                  </Button>
+                </p>
+              )}
+              {resultStale && !running && !awaitingRun && (
                 <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="result-stale">
                   The question or data changed since this ran.
                   <Button size="sm" icon={Play} onClick={() => void run()} disabled={asking}>
@@ -599,7 +616,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                   </Button>
                 </p>
               )}
-              {!result && !queryError && ready && <p className="text-sm text-muted">Ask for a query, or press Run, and the answer appears here.</p>}
+              {!result && !queryError && ready && !awaitingRun && <p className="text-sm text-muted">Ask for a query, or press Run, and the answer appears here.</p>}
               <div className={cx('space-y-3', resultStale && 'opacity-50')}>
                 {result?.kind === 'ask' && (
                   <p className="text-sm" data-testid="query-answer">
@@ -609,8 +626,10 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 {result?.kind === 'graph' && (
                   <div className="space-y-1" data-testid="query-graph">
                     <p className="text-xs text-muted">
+                      {result.complete ? '' : 'More than '}
                       {result.count.toLocaleString()} triple{result.count === 1 ? '' : 's'}
-                      {result.truncated ? ` (showing the first ${MAX_ROWS.toLocaleString()})` : ''}
+                      {result.shown < result.count ? ` (showing the first ${result.shown.toLocaleString()})` : ''}
+                      {result.cut ? ' · very long values are shortened' : ''}
                       {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                     </p>
                     <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
@@ -620,7 +639,10 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                   <div className="overflow-x-auto rounded-md border border-line" data-testid="query-results">
                     <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
                       <span>
-                        {result.total > result.rows.length ? `Showing the first ${result.rows.length.toLocaleString()} of ${result.total.toLocaleString()} rows` : `${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`}
+                        {result.total > result.rows.length
+                          ? `Showing the first ${result.rows.length.toLocaleString()} of ${result.complete ? '' : 'more than '}${result.total.toLocaleString()} rows`
+                          : `${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`}
+                        {result.cut ? ' · very long values are shortened' : ''}
                         {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                       </span>
                       <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
@@ -656,7 +678,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                       </tbody>
                     </table>
                     <Pager page={rowPage} pageSize={ROWS_PER_PAGE} total={result.rows.length} onPage={setRowPage} label="Result pages" />
-                    {limitOf(query) === result.total && !resultStale && (
+                    {queryLimit === result.total && !resultStale && (
                       <p role="status" className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-2 text-xs text-warn" data-testid="result-limited">
                         These are the first {result.rows.length.toLocaleString()} rows: the query stops there, so there may be more.
                         <Button

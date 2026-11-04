@@ -15,6 +15,17 @@ interface SessionCtx {
 
 const Ctx = createContext<SessionCtx | null>(null);
 
+/**
+ * The account this tab is signed in as right now ('guest' when nobody is), or
+ * undefined while signing out. Work that started under one account (an
+ * assistant reply on its way) checks this before saving anything, so a late
+ * answer never lands in another account's drafts or after they were cleared.
+ */
+let activeAccount: string | undefined;
+export function currentAccount() {
+  return activeAccount;
+}
+
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [session, setSessionState] = useState<SessionInfo>();
   const [loading, setLoading] = useState(true);
@@ -22,6 +33,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const fetchedAt = useRef(Date.now());
 
   const setSession = useCallback((s: SessionInfo) => {
+    activeAccount = s.user?.id ?? 'guest';
     fetchedAt.current = Date.now();
     setSessionState(s);
     setError(undefined);
@@ -88,6 +100,8 @@ export function useSession() {
 
 /** Drafts this browser keeps for an account (query drafts and query-assistant chats): removed on sign-out. */
 export function forgetAccountDrafts(userId: string) {
+  // First, so a reply still on its way for this account is dropped rather than saved after the clear-out.
+  activeAccount = undefined;
   try {
     for (const k of Object.keys(localStorage)) if (k.startsWith(`concord.query.${userId}.`)) localStorage.removeItem(k);
   } catch {

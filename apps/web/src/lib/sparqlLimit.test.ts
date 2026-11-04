@@ -16,6 +16,16 @@ describe('outer LIMIT', () => {
     expect(limitOf("SELECT * WHERE { ?s ?p '''}\nLIMIT 4''' }")).toBeUndefined();
   });
 
+  it('reads valid syntax that fools a tokenizer: escaped quotes in long strings, carriage-return comments', () => {
+    expect(limitOf('SELECT ?s WHERE { BIND("""a\\"""{""" AS ?s) } LIMIT 1')).toBe(1);
+    expect(limitOf('SELECT * WHERE { ?s ?p ?o } LIMIT # one row\r1')).toBe(1);
+    expect(limitOf('SELECT * WHERE { ?s ?p ?o } # LIMIT 5\r')).toBeUndefined();
+    expect(withoutLimit('SELECT * WHERE { ?s ?p ?o } LIMIT # one row\r1')).toBe('SELECT * WHERE { ?s ?p ?o }\n');
+    const tricky = 'SELECT ?s WHERE { BIND("""a\\""" LIMIT 9 {""" AS ?s) } LIMIT 1';
+    expect(withoutLimit(tricky)).toBe('SELECT ?s WHERE { BIND("""a\\""" LIMIT 9 {""" AS ?s) }\n');
+    expect(limitOf('not SPARQL LIMIT 5')).toBeUndefined();
+  });
+
   it('removes only the outer LIMIT', () => {
     expect(withoutLimit('SELECT * WHERE { ?s ?p ?o }\nLIMIT 10')).toBe('SELECT * WHERE { ?s ?p ?o }\n');
     expect(withoutLimit('SELECT * WHERE { ?s ?p ?o }\nLIMIT # one row\n1')).toBe('SELECT * WHERE { ?s ?p ?o }\n');

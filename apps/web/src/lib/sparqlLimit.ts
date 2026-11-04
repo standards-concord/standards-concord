@@ -1,49 +1,53 @@
+import sparqljs, { type SparqlQuery } from 'sparqljs';
+
 /**
- * The outer LIMIT of a SPARQL query, read from its tokens the way a parser
- * would: comments, strings and IRIs are skipped, and only a LIMIT at the top
- * level (outside every { }) counts, so a subquery's LIMIT or the word inside
- * a string or comment never does.
+ * The outer LIMIT of a SPARQL query, from the query as a SPARQL parser reads
+ * it, so a subquery's LIMIT, or the word in a string, IRI or comment (however
+ * its line ends), never counts.
  */
 
-interface Token {
-  text: string;
-  start: number;
-  end: number;
+/** The parsed request; a query's `limit` is its outer LIMIT (subqueries keep theirs inside the pattern). */
+type Parsed = SparqlQuery & { limit?: number };
+
+function parse(q: string): Parsed | undefined {
+  try {
+    return new sparqljs.Parser().parse(q) as Parsed;
+  } catch {
+    return undefined;
+  }
 }
 
-/** Tokens outside comments, strings and IRIs, with their positions. Braces are their own tokens. */
-function tokens(q: string): Token[] {
-  const out: Token[] = [];
-  const re = /<[^<>\s]*>|"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|#[^\n]*|([{}])|([^\s{}#"'<]+)/g;
-  for (const m of q.matchAll(re)) {
-    const text = m[1] ?? m[2];
-    if (text) out.push({ text, start: m.index!, end: m.index! + m[0].length });
-  }
-  return out;
-}
-
-/** The top-level LIMIT keyword and its number, if the query has one. */
-function outerLimit(q: string): { keyword: Token; value: Token } | undefined {
-  const ts = tokens(q);
-  let depth = 0;
-  let found: { keyword: Token; value: Token } | undefined;
-  for (let i = 0; i < ts.length; i++) {
-    const t = ts[i];
-    if (t.text === '{') depth++;
-    else if (t.text === '}') depth = Math.max(0, depth - 1);
-    else if (depth === 0 && /^limit$/i.test(t.text) && /^\d+$/.test(ts[i + 1]?.text ?? '')) found = { keyword: t, value: ts[i + 1] };
-  }
-  return found;
+/** The parsed query without its outer LIMIT, for comparing two queries. */
+function withoutLimitTree(tree: Parsed): string {
+  const copy = { ...tree } as Record<string, unknown>;
+  delete copy.limit;
+  return JSON.stringify(copy);
 }
 
 export function limitOf(q: string): number | undefined {
-  const l = outerLimit(q);
-  return l ? Number(l.value.text) : undefined;
+  const tree = parse(q);
+  return tree?.type === 'query' && typeof tree.limit === 'number' ? tree.limit : undefined;
 }
 
-/** The query without its outer LIMIT (any OFFSET stays). */
+/**
+ * The query without its outer LIMIT (any OFFSET stays). The text is edited in
+ * place so the rest keeps its layout: each `LIMIT n` in the text is tried, from
+ * the end, and the edit kept only if the result parses to the same query with
+ * no limit. If none does, the query is written out afresh without it.
+ */
 export function withoutLimit(q: string): string {
-  const l = outerLimit(q);
-  if (!l) return q;
-  return `${q.slice(0, l.keyword.start)}${q.slice(l.value.end).replace(/^[ \t]+/, '')}`.replace(/[ \t]+\n/g, '\n').trimEnd() + '\n';
+  const tree = parse(q);
+  if (tree?.type !== 'query' || tree.limit === undefined) return q;
+  const want = withoutLimitTree(tree);
+  const candidates = [...q.matchAll(/\blimit\b/gi)].map((m) => m.index!).reverse();
+  for (const at of candidates) {
+    const m = /limit(?:\s|#[^\n\r]*)*\d+/iy;
+    m.lastIndex = at;
+    const hit = m.exec(q);
+    if (!hit) continue;
+    const edited = `${q.slice(0, at)}${q.slice(at + hit[0].length).replace(/^[ \t]+/, '')}`.replace(/[ \t]+(\r?\n)/g, '$1').trimEnd() + '\n';
+    const t = parse(edited);
+    if (t?.type === 'query' && t.limit === undefined && withoutLimitTree(t) === want) return edited;
+  }
+  return new sparqljs.Generator().stringify({ ...tree, limit: undefined } as SparqlQuery);
 }

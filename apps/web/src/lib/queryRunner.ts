@@ -9,15 +9,26 @@ export interface QueryRun {
   maxRows: number;
 }
 
+/**
+ * A result as the page gets it. `total` (rows) and `count` (triples) are exact
+ * when `complete`, and otherwise a lower bound: the worker stopped reading.
+ * `cut` means at least one value was longer than a cell may be and was shortened.
+ */
 export type RunResult =
-  | { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; total: number }
+  | { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; total: number; complete: boolean; cut: boolean }
   | { kind: 'ask'; answer: boolean }
-  | { kind: 'graph'; text: string; count: number; truncated: boolean };
+  | { kind: 'graph'; text: string; shown: number; count: number; complete: boolean; cut: boolean };
 
 export type QueryRunResult = { id: number; ok: true; result: RunResult; ms: number } | { id: number; ok: false; error: string };
 
 /** Results beyond this many rows are counted but not shown. */
 export const MAX_ROWS = 5000;
+/**
+ * What the worker keeps while results stream in: rows stop being kept past
+ * `keptChars` of values (about 16 MB of memory), any value is cut to
+ * `cellChars`, and reading stops altogether after `readChars` of results.
+ */
+export const RESULT_BUDGET = { keptChars: 8 * 1024 * 1024, cellChars: 10_000, readChars: 64 * 1024 * 1024 };
 /** A query still running after this long is stopped. */
 export const TIME_LIMIT_MS = 20_000;
 

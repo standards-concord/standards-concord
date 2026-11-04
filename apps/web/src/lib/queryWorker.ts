@@ -2,33 +2,99 @@
 /**
  * Runs SPARQL queries with sparq off the main thread, so a slow or explosive
  * query never freezes the page: the page can stop it at any time (Cancel, or
- * the time limit) by terminating this worker. Results are capped before they
- * are sent back, so a huge answer never floods the page either.
+ * the time limit) by terminating this worker. Results are read as a stream and
+ * collection stops at a row budget, a byte budget and a cell size, so a huge
+ * answer never floods the worker's memory or the page. (sparq builds the result
+ * inside WebAssembly before streaming it; the time limit bounds that part.)
  */
 import type { SparqStore } from '@sparq-org/sparq';
-import type { QueryRun, QueryRunResult, RunResult } from './queryRunner';
+import { RESULT_BUDGET, type QueryRun, type QueryRunResult, type RunResult } from './queryRunner';
 
 let cached: { key: string; store: SparqStore } | undefined;
+let sparq: typeof import('@sparq-org/sparq') | undefined;
 
 async function storeFor(source: string): Promise<SparqStore> {
+  sparq ??= await import('@sparq-org/sparq');
   if (cached?.key === source) return cached.store;
-  const { SparqStore } = await import('@sparq-org/sparq');
-  const store = await SparqStore.fromString(source, 'turtle');
+  const store = await sparq.SparqStore.fromString(source, 'turtle');
   cached?.store.free();
   cached = { key: source, store };
   return store;
 }
 
+/** A value no longer than one cell may be, and whether it was cut. */
+function cell(value: string): [string, boolean] {
+  return value.length > RESULT_BUDGET.cellChars ? [`${value.slice(0, RESULT_BUDGET.cellChars)}…`, true] : [value, false];
+}
+
+function rows(store: SparqStore, req: QueryRun): RunResult {
+  const parser = new sparq!.SparqlJsonRowsParser();
+  let vars: string[] | undefined;
+  let head = '';
+  const out: Record<string, string>[] = [];
+  let total = 0;
+  let kept = 0;
+  let read = 0;
+  let complete = true;
+  let cut = false;
+  // Breaking out of the loop frees the engine's cursor.
+  for (const chunk of store.queryJsonChunks(req.query)) {
+    read += chunk.length;
+    if (!vars) {
+      head += chunk;
+      const m = /"vars"\s*:\s*(\[[^\]]*\])/.exec(head);
+      if (m) (vars = JSON.parse(m[1]) as string[]), (head = '');
+    }
+    for (const b of parser.push(chunk)) {
+      total++;
+      if (out.length >= req.maxRows || kept >= RESULT_BUDGET.keptChars) continue;
+      const row: Record<string, string> = {};
+      for (const [k, v] of Object.entries(b)) {
+        const [value, wasCut] = cell(v.value);
+        cut ||= wasCut;
+        kept += k.length + value.length;
+        row[k] = value;
+      }
+      out.push(row);
+    }
+    // Past this, only counting is left to do: stop, and say the count is a lower bound.
+    if (read > RESULT_BUDGET.readChars) {
+      complete = false;
+      break;
+    }
+  }
+  return { kind: 'rows', vars: vars ?? [], rows: out, total, complete, cut };
+}
+
+function graph(store: SparqStore, req: QueryRun): RunResult {
+  const lines: string[] = [];
+  let count = 0;
+  let kept = 0;
+  let read = 0;
+  let complete = true;
+  let cut = false;
+  for (const q of store.queryQuadsStream(req.query)) {
+    count++;
+    const line = `${sparq!.termToNT(q.subject)} ${sparq!.termToNT(q.predicate)} ${sparq!.termToNT(q.object)} .`;
+    read += line.length;
+    if (lines.length < req.maxRows && kept < RESULT_BUDGET.keptChars) {
+      const [text, wasCut] = cell(line);
+      cut ||= wasCut;
+      kept += text.length;
+      lines.push(text);
+    }
+    if (read > RESULT_BUDGET.readChars) {
+      complete = false;
+      break;
+    }
+  }
+  return { kind: 'graph', text: lines.join('\n'), shown: lines.length, count, complete, cut };
+}
+
 function run(store: SparqStore, req: QueryRun): RunResult {
   if (req.form === 'ask') return { kind: 'ask', answer: store.queryBoolean(req.query) };
-  if (req.form === 'construct' || req.form === 'describe') {
-    const lines = store.queryQuadsString(req.query).split('\n').filter((l) => l.trim());
-    return { kind: 'graph', text: lines.slice(0, req.maxRows).join('\n'), count: lines.length, truncated: lines.length > req.maxRows };
-  }
-  const json = JSON.parse(store.queryJson(req.query)) as { head: { vars: string[] }; results: { bindings: Record<string, { value: string }>[] } };
-  const all = json.results.bindings;
-  const rows = all.slice(0, req.maxRows).map((b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.value])));
-  return { kind: 'rows', vars: json.head.vars, rows, total: all.length };
+  if (req.form === 'construct' || req.form === 'describe') return graph(store, req);
+  return rows(store, req);
 }
 
 self.onmessage = async (e: MessageEvent<QueryRun>) => {

@@ -774,6 +774,8 @@ export interface QueryChatRequest {
   dataSummary?: { classIri: string; count: number }[];
   /** The offline helper's own record of its last query, as it returned it (checked against the ontology and the query before use). */
   offlineState?: unknown;
+  /** The account this conversation belongs to: refused (409) if the request arrives signed in as anyone else. */
+  account?: string;
 }
 
 export interface QueryChatResponse {

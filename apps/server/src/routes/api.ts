@@ -189,12 +189,14 @@ export function apiRouter(): Router {
   // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.
   r.post('/ontologies/:id/query-chat', async (req, res) => {
     const user = requireUser(req);
+    // The page says whose conversation this is; another account signed in meanwhile never receives it.
+    if (typeof req.body?.account === 'string' && req.body.account !== user.id) throw new HttpError(409, 'You’re signed in as someone else now, so this conversation wasn’t sent. Reload the page.');
     const p = project(req);
     const body = boundedQueryChatRequest(req.body);
     const gate = admitQueryChat(user.id, p.id, !!user.isPlatformAdmin || rolesFor(p.id, user.id).length > 0);
     try {
       const graph = await ontologyStore.at(p, undefined);
-      const answer = await queryChat(graph, body, { useClaude: gate.useClaude });
+      const answer = await queryChat(graph, body, { useClaude: gate.useClaude, onClaude: gate.spend });
       res.json({ ...answer, ...(answer.simulated ? { offlineReason: gate.offlineReason ?? 'unavailable' } : {}) });
     } finally {
       gate.done();
