@@ -6,7 +6,7 @@ This is the prompt of the hourly scheduled task "Triage Concord feedback issues"
 
 The prompt is not a security boundary on its own. The routine writes to GitHub only through Concord's server, which enforces the label list, the comment rules and one comment per issue. Before enabling the task at claude.ai:
 
-1. **Server key:** set a long random `FEEDBACK_TRIAGE_TOKEN` on the server (`./deploy/azure/set-key.sh FEEDBACK_TRIAGE_TOKEN`), and the same value as the secret `CONCORD_TRIAGE_TOKEN` in the routine's environment. Set `CONCORD_API` there too (the backend's URL, for example `https://74.152.52.138.sslip.io`), and allow that host in the environment's network access.
+1. **Server key:** generate a token with `openssl rand -hex 32` (the server ignores one shorter than 32 characters) and set it as `FEEDBACK_TRIAGE_TOKEN` on the server (`./deploy/azure/set-key.sh FEEDBACK_TRIAGE_TOKEN`), and the same value as the secret `CONCORD_TRIAGE_TOKEN` in the routine's environment. Set `CONCORD_API` there too (the backend's URL, for example `https://74.152.52.138.sslip.io`), and allow that host in the environment's network access.
 2. **Tools:** an explicit allowlist with file reading and search for the source, and shell limited to `curl` against `$CONCORD_API/api/feedback/triage/`. Turn off file editing, web fetch and search, subagents and skills, the session and scheduled-task management tools, and every GitHub write tool. It needs no GitHub access at all.
 3. **Labels:** none to create by hand. GitHub creates a label the first time the server adds it.
 

@@ -64,7 +64,7 @@ test('a tester posts a public summary exactly as previewed, then withdraws it', 
   expect(issue.authorized).toBe(true);
   expect(issue.labels).toEqual(['feedback', 'needs-triage']);
   expect(issue.title).toMatch(/^Feedback: Release notes need a link back to the ontology\. Details: /);
-  expect(issue.body).toContain('> Release notes need a link back to the ontology. Details: \\[email removed\\] \\[link removed\\]');
+  expect(issue.body).toContain('> Release notes need a link back to the ontology. Details\\: \\[email removed\\] \\[link removed\\]');
   expect(`${issue.title}\n${issue.body}`).not.toMatch(/Robin|Okafor|example\.org|organisation|member/);
 
   await note.getByRole('button', { name: 'Withdraw the public summary' }).click();

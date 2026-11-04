@@ -10,7 +10,7 @@ To post anything, a tester ticks **Also post a short public summary as a GitHub 
 
 - **Only the summary.** Their answers, name, email, account, role, the date, the app version and the conversation are never posted.
 - **Cleaned first.** Links in any form, email addresses (including look-alike characters and `name [at] domain`) and `@handles` are removed, after Unicode normalisation. The server refuses a summary that its own cleaning would change, so what is posted is exactly what the tester saw. Names can't be detected reliably, so the notice asks testers not to include any.
-- **Escaped.** Markdown in the summary is escaped in the issue, so it can't add links, images, mentions or headings.
+- **Escaped.** Markdown, HTML and character references in the summary are escaped in the issue, so it can't add links, images, mentions or headings.
 - **Unlinked from the feedback.** Each issue carries a random publication id (`<!-- concord-feedback-publication: pub_… -->`), not the feedback id. Issues are labelled `feedback` and `needs-triage`.
 - **Consent is recorded.** Each publication stores the version of the notice the tester agreed to (`PUBLIC_NOTICE_VERSION`).
 - **Withdrawable.** After submitting, the tester can withdraw the summary.
@@ -66,6 +66,16 @@ A scheduled Claude session can triage these issues every hour. It writes nothing
 | Endpoint | What it does |
 | --- | --- |
 | `GET /api/feedback/triage/queue` | Up to 10 filed summaries not yet triaged, oldest first (`issue`, `url`, `summary`), and the last 100 triaged ones for spotting duplicates |
-| `POST /api/feedback/triage/<issue>` | `{ kind, size, needsJesse?, possibleDuplicateOf?, comment }`. `kind` is one of bug, enhancement, ux, docs, question, insight; `size` is size:small or size:large. The comment follows the same rules as testers' summaries (plain text, no links, email addresses or @mentions, at most 500 characters). The server adds the footer, the labels and `triaged`, and removes `needs-triage`. A second call on the same issue is refused; after a failure part-way it finishes the labels without a second comment. |
+| `POST /api/feedback/triage/<issue>` | `{ kind, size, needsJesse?, possibleDuplicateOf?, comment }`. See the rules below. |
 
-Both need `Authorization: Bearer <FEEDBACK_TRIAGE_TOKEN>`; without that key on the server they answer 404. The routine's prompt and what has to be in place before it's switched on are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until then.
+The server enforces, for each decision:
+
+- **Which issues.** Only one of the ten oldest filed summaries waiting, whose feedback still exists, and which GitHub says is open and still labelled `feedback` and `needs-triage`. At most ten decisions in any rolling hour.
+- **What it says.** `kind` is one of bug, enhancement, ux, docs, question, insight; `size` is size:small or size:large; `needsJesse` must be true or false, and when true the comment must be exactly “Flagged for the maintainer to review.” `possibleDuplicateOf` must be another, already triaged summary's issue. The comment follows the same rules as testers' summaries (no links, email addresses or @mentions, at most 500 characters) and is posted with all Markdown escaped, followed by the footer.
+- **Labels.** It removes any other kind or size label, adds the chosen ones and `triaged`, removes `needs-triage`, and checks the labels GitHub reports back.
+- **Exactly one comment, recorded.** The decision is saved before anything is written, and a retry must send the same decision; after a failure part-way, the retry finishes the labels without a second comment. If GitHub's answer to the comment is lost, cut off or has no id, or the worker posting it vanished, the comment is never posted again: the summary leaves the queue for a maintainer to triage by hand, and a withdrawal asks an administrator to check the issue's comments.
+- **Withdrawals win.** Before every request it checks the summary is still filed, its feedback still exists and the queue isn't paused; a withdrawal waits until a triage in progress stops.
+
+Both need `Authorization: Bearer <FEEDBACK_TRIAGE_TOKEN>`. The token must be at least 32 characters; without it (or with a shorter one) the endpoints answer 404.
+
+**Rotating the token:** generate a new one (`openssl rand -hex 32`), set it on the server with `./deploy/azure/set-key.sh FEEDBACK_TRIAGE_TOKEN`, then replace `CONCORD_TRIAGE_TOKEN` in the routine's environment. The old token stops working as soon as the server picks up the new one (within five minutes); a run in between gets 401 and changes nothing. The routine's prompt and what has to be in place before it's switched on are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until then.
