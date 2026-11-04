@@ -156,6 +156,8 @@ export interface EvalInput {
   /** When review started (for change requests: when it entered 'review'). */
   reviewStartedAt: string;
   authorId: string;
+  /** Others who wrote the current edits; their approvals don't count either. */
+  coAuthorIds?: string[];
   reviews: Review[];
   votes: Vote[];
   members: Membership[];
@@ -201,7 +203,8 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
 
   const latest = latestReviews(input.reviews);
   const approverRoles: Role[] = r.approverRoles.length ? r.approverRoles : ['owner', 'steward', 'editor', 'reviewer'];
-  const counts = (rev: Review) => rev.userId !== input.authorId && rolesOf(members, rev.userId).some((role) => approverRoles.includes(role));
+  const writers = new Set([input.authorId, ...(input.coAuthorIds ?? [])]);
+  const counts = (rev: Review) => !writers.has(rev.userId) && rolesOf(members, rev.userId).some((role) => approverRoles.includes(role));
   const approvals = latest.filter((rev) => rev.decision === 'approve' && counts(rev)).length;
 
   const odiFinalSay = policy.odiPrivilege === 'final-say' && level === 'major';
@@ -295,7 +298,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     if (!reviewPeriodOver) unmet.push(`Review period: open for comment until ${reviewPeriodEndsAt}.`);
     if (approvals < requiredApprovals)
       unmet.push(
-        `Approvals: ${approvals}/${requiredApprovals} from ${roleList(approverRoles)} (not the author).${requiredApprovals > policyApprovals && input.independentConfirmation ? ` ${input.independentConfirmation}` : ''}`,
+        `Approvals: ${approvals}/${requiredApprovals} from ${roleList(approverRoles)} (not the author or anyone who rewrote the edits).${requiredApprovals > policyApprovals && input.independentConfirmation ? ` ${input.independentConfirmation}` : ''}`,
       );
     if (odiFinalSay && !odiApproved) unmet.push('ODI oversight must approve major changes.');
     const reviewDone = reviewPeriodOver && approvals >= requiredApprovals && (!odiFinalSay || odiApproved || voteNeeded);

@@ -498,6 +498,8 @@ export interface ChangeRequest {
    * term means). Re-applied every time the request is triaged.
    */
   declaredLevel?: { level: ChangeLevel; rule: string; message: string; iri?: string };
+  /** People other than the author who rewrote the edits; like the author, they can't give the independent approval. */
+  revisedBy?: string[];
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;

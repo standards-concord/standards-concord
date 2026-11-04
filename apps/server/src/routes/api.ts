@@ -415,7 +415,7 @@ export function apiRouter(): Router {
   r.post('/change-requests/:id/revise', async (req, res) => res.json(crs.detail(await crs.revise(cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)))));
   r.post('/change-requests/:id/retriage', async (req, res) => {
     const user = requireUser(req);
-    res.json(crs.detail(await withTriageBudget(user.id, async () => crs.advance(await crs.triage(cr(req))))));
+    res.json(crs.detail(await withTriageBudget(user, async () => crs.advance(await crs.triage(cr(req))))));
   });
 
   /* ------------------------------ releases --------------------------- */

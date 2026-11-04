@@ -378,8 +378,13 @@ describe('inline term edits', () => {
     const original = (await a.get(termPath(SESSION))).body.editorialNote ?? '';
     const one = await edit(a, { termIri: SESSION, set: { editorialNote: 'Race note A' }, previous: { editorialNote: original } });
     const two = await edit(b, { termIri: SESSION, set: { editorialNote: 'Race note B' }, previous: { editorialNote: original } });
-    // Mark both approved directly, then merge them at the same time.
-    for (const id of [one.body.id, two.body.id]) put('changeRequests', { ...crsMod.getCR(id), status: 'approved' }, demoId);
+    // Both approved (one sign-off each, review period treated as over), then merged at the same time.
+    const editor = await login('editor', 'Editor Race');
+    for (const id of [one.body.id, two.body.id]) {
+      await (id === one.body.id ? a : b).post(`/api/change-requests/${id}/submit`);
+      await editor.post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+      put('changeRequests', { ...crsMod.getCR(id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z' }, demoId);
+    }
     const results = await Promise.all([crsMod.merge(crsMod.getCR(one.body.id), undefined), crsMod.merge(crsMod.getCR(two.body.id), undefined)]);
     expect(results.map((r) => r.status).sort()).toEqual(['merged', 'needs-work']);
     const loser = results.find((r) => r.status === 'needs-work')!;
@@ -417,6 +422,52 @@ describe('inline term edits', () => {
     const current = (await editor.get(termPath())).body.definition;
     const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Reword skill', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: SKILL, set: { definition: `${current} Reworded.` } }], submit: true });
     expect(res.body.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('definition-reworded');
+  });
+
+  it('keeps a withdrawal made while a re-triage was running', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const contributor = await login('contributor', 'Contributor Withdraw');
+    const created = await edit(contributor, { termIri: SKILL, set: { examples: ['withdraw me'] }, submit: true });
+    const snapshot = crsMod.getCR(created.body.id); // what a slow re-triage started from
+    expect((await contributor.post(`/api/change-requests/${created.body.id}/withdraw`)).status).toBe(200);
+    const after = await crsMod.triage(snapshot);
+    expect(after.status).toBe('withdrawn');
+    expect(crsMod.getCR(created.body.id).status).toBe('withdrawn');
+  });
+
+  it('does not count an approval from someone who rewrote the edits', async () => {
+    const contributor = await login('contributor', 'Contributor Orig');
+    const rewriter = await login('editor', 'Editor Rewriter');
+    const other = await login('editor', 'Editor Other');
+    const created = await edit(contributor, { termIri: SKILL, set: { comment: 'Original wording.' }, submit: true });
+    const id = created.body.id;
+    const patched = await rewriter.patch(`/api/change-requests/${id}`).send({ ops: [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Rewritten wording.' } }] });
+    expect(patched.status).toBe(200);
+    expect(patched.body.revisedBy).toContain((await rewriter.get('/api/session')).body.user.id);
+    const own = await rewriter.post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+    expect(own.body.governance.approvals).toBe(0);
+    const independent = await other.post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+    expect(independent.body.governance.approvals).toBe(1);
+  });
+
+  it('classifies a stale draft against the current draft when it is submitted', async () => {
+    const contributor = await login('contributor', 'Contributor Stale');
+    const editor = await login('editor', 'Editor Stale');
+    const TC = `${VOL}TimeCommitment`;
+    const original = (await contributor.get(termPath(TC))).body.definition;
+    // A draft that "sets" the definition to what it already is: no change, so nothing to confirm.
+    const stale = await contributor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Keep definition', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: TC, set: { definition: original } }] });
+    expect(stale.body.classification.reasons.map((r: { rule: string }) => r.rule)).not.toContain('definition-reworded');
+    // Someone else's reworded definition is approved and merged meanwhile.
+    const reworded = await edit(editor, { termIri: TC, set: { definition: `${original} It can be regular or one-off.` }, previous: { definition: original }, definitionIntent: 'same-meaning', submit: true });
+    await (await login('steward', 'Steward Stale')).post(`/api/change-requests/${reworded.body.id}/reviews`).send({ decision: 'approve' });
+    await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
+    expect((await editor.get(`/api/change-requests/${reworded.body.id}`)).body.status).toBe('merged');
+    // Submitting the stale draft now would put the old definition back: that is a rewording that needs confirming.
+    const submitted = await contributor.post(`/api/change-requests/${stale.body.id}/submit`);
+    expect(submitted.body.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('definition-reworded');
+    expect(submitted.body.status).not.toBe('approved');
+    expect(submitted.body.governance.requiredApprovals).toBeGreaterThanOrEqual(1);
   });
 
   it('keeps a draft when not submitted, and classifies removing a definition or changing its meaning as major', async () => {
@@ -463,6 +514,10 @@ describe('inline term edits', () => {
       const third = await edit(contributor, { termIri: SKILL, set: { examples: ['example 3'] } });
       expect(third.status).toBe(429);
       expect((await contributor.post(`/api/change-requests/${first.body.id}/retriage`)).status).toBe(429);
+      // Every other path that validates and triages shares the same budget.
+      expect((await contributor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'More', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: SKILL, set: { examples: ['x'] } }] })).status).toBe(429);
+      expect((await contributor.patch(`/api/change-requests/${first.body.id}`).send({ ops: [{ op: 'updateAnnotations', iri: SKILL, set: { examples: ['y'] } }] })).status).toBe(429);
+      expect((await contributor.post(`/api/ontologies/${demoId}/bug-reports`).send({ title: 'Bug', description: 'Broken' })).status).toBe(429);
       // Someone else is unaffected.
       expect((await edit(await login('contributor', 'Contributor Calm'), { termIri: SKILL, set: { examples: ['calm'] } })).status).toBe(201);
     } finally {

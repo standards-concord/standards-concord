@@ -171,7 +171,9 @@ test.describe('editing a term inline', () => {
     // Pretend someone else changed the label and comment after this page loaded
     // the term: the first response the editor sees carries out-of-date values.
     let stale = true;
+    let hold: Promise<void> | undefined;
     await page.route('**/api/ontologies/*/terms/**', async (route) => {
+      if (hold) await hold;
       if (!stale) return route.continue();
       const res = await route.fetch();
       const body = await res.json();
@@ -185,7 +187,12 @@ test.describe('editing a term inline', () => {
     await form.getByLabel('Comment').fill('Sessions can repeat weekly.');
     await form.getByRole('button', { name: 'Propose change' }).click();
     await expect(form.getByRole('alert')).toContainText('changed since you opened the editor');
+    // Hold the refresh so we can keep typing while it loads: that text must survive.
+    let release!: () => void;
+    hold = new Promise<void>((r) => (release = r));
     await form.getByRole('button', { name: 'Load the latest values (keeps your text)' }).click();
+    await form.getByLabel('Editorial note').fill('Typed while loading.');
+    release();
 
     const status = form.getByRole('status');
     await expect(status).toContainText('Someone else changed');
@@ -197,14 +204,15 @@ test.describe('editing a term inline', () => {
     await expect(form.getByText('Choose yours or theirs for: comment')).toBeVisible();
     await expect(form.getByRole('button', { name: 'Propose change' })).toBeDisabled();
     await status.getByRole('button', { name: 'Keep mine' }).click();
-    await expect(form.getByText('Changing: comment')).toBeVisible();
+    await expect(form.getByLabel('Editorial note')).toHaveValue('Typed while loading.');
+    await expect(form.getByText('Changing: comment, editorial note')).toBeVisible();
     await form.getByRole('button', { name: 'Propose change' }).click();
 
     const notice = page.getByRole('status').filter({ hasText: 'Proposed as' });
     await expect(notice).toBeVisible();
     const crId = (await notice.getByRole('link').getAttribute('href'))!.split('/').pop();
     const cr = await (await page.request.get(`/api/change-requests/${crId}`)).json();
-    expect(cr.ops[0].set).toEqual({ comment: 'Sessions can repeat weekly.' });
+    expect(cr.ops[0].set).toEqual({ comment: 'Sessions can repeat weekly.', editorialNote: 'Typed while loading.' });
   });
 
   test('a save that finishes after you moved to another term leaves that term’s editor alone', async ({ page }) => {

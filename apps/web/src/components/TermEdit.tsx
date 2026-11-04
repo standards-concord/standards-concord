@@ -165,9 +165,13 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
   // you edited keep your text; fields you didn't touch take the latest value (so
   // the edit never reverts someone else's change); fields both of you changed
   // must be resolved, one way or the other, before saving.
+  // The form as it is right now, for work that finishes after an await (text typed meanwhile counts).
+  const formNow = useRef(form);
+  formNow.current = form;
   const loadLatest = useAction(async () => {
     const latest = valuesFrom(await api.term(id, term.iri));
     if (!alive.current) return;
+    const form = formNow.current;
     const mine = TERM_EDIT_FIELDS.filter((f) => !same(f, form, baseline));
     const theirs = TERM_EDIT_FIELDS.filter((f) => !same(f, latest, baseline));
     const next = { ...latest };

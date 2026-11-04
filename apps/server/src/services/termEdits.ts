@@ -100,7 +100,7 @@ export async function proposeTermEdit(project: OntologyProject, user: User, inpu
   if (rewordsDefinition && !input.definitionIntent) throw new HttpError(400, 'Say whether the new definition keeps the term’s meaning (definitionIntent: same-meaning or new-meaning)');
   const intent = rewordsDefinition ? input.definitionIntent : undefined;
 
-  return withTriageBudget(user.id, async () => {
+  return withTriageBudget(user, async () => {
     if (!rolesFor(project.id, user.id).length) setRoles(project.id, user.id, ['contributor']);
     const name = term.label ?? input.termIri;
     const reason = typeof input.reason === 'string' ? input.reason.trim().slice(0, MAX_TEXT) : '';
