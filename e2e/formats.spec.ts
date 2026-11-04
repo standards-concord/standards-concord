@@ -13,6 +13,8 @@ const FORMATS = [
   { tab: 'Manchester', id: 'manchester', language: 'manchester', text: 'Prefix:', tokens: ['tok-meta', 'tok-iri', 'tok-name'] },
   { tab: 'LinkML', id: 'linkml', language: 'yaml', text: 'classes:', tokens: ['tok-attr'] },
   { tab: 'SHACL', id: 'shacl', language: 'turtle', text: '@prefix sh:', tokens: ['tok-meta', 'tok-iri', 'tok-name'] },
+  { tab: 'SHACLC', id: 'shaclc', language: 'shaclc', text: 'shape volsh:ApplicationShape -> vol:Application', tokens: ['tok-meta', 'tok-keyword', 'tok-prefix', 'tok-name'] },
+  { tab: 'Classes', id: 'typescript', language: 'typescript', text: 'export class AccessibilityFeature extends TermWrapper', tokens: ['tok-keyword', 'tok-string'] },
 ] as const;
 
 test.describe('Formats tab', () => {
@@ -25,7 +27,7 @@ test.describe('Formats tab', () => {
   for (const f of FORMATS) {
     test(`${f.tab} is highlighted as ${f.language}`, async ({ page }) => {
       await page.goto(`/o/${ontologyId}/source`);
-      await page.getByRole('tablist', { name: 'Format' }).getByRole('tab', { name: f.tab, exact: true }).click();
+      await page.getByLabel('Format', { exact: true }).selectOption({ label: f.tab });
       await expect(page).toHaveURL(new RegExp(`format=${f.id}`));
       const code = page.getByTestId('source-code');
       await expect(code).toBeVisible();
@@ -38,6 +40,31 @@ test.describe('Formats tab', () => {
       await expect(code).not.toContainText('zzz');
     });
   }
+
+  test('Turtle is the default, and each format explains itself on request', async ({ page }) => {
+    await page.goto(`/o/${ontologyId}/source`);
+    await expect(page.getByLabel('Format', { exact: true })).toHaveValue('turtle');
+    const about = page.getByTestId('format-about');
+    await expect(about.getByText('stored in git')).toBeHidden();
+    await about.getByText('About Turtle').click();
+    await expect(about.getByText('stored in git')).toBeVisible();
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'LinkML' });
+    await expect(about).toContainText('About LinkML');
+    await expect(about).toContainText('YAML');
+  });
+
+  test('a failed load shows the error, never the previous format’s text', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 500/);
+    await page.goto(`/o/${ontologyId}/source?format=turtle`);
+    await expect(page.getByTestId('source-code')).toContainText('@prefix');
+    await page.route(/format=jsonld/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'boom' }) }));
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'JSON-LD' });
+    await expect(page.getByText('Couldn’t load JSON-LD')).toBeVisible();
+    await expect(page.getByTestId('source-code')).toHaveCount(0);
+    await page.unroute(/format=jsonld/);
+    await page.getByRole('button', { name: /retry|try again/i }).click();
+    await expect(page.getByTestId('source-code')).toContainText('"@context"');
+  });
 
   test('search, folding, copy and download work', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -70,7 +97,7 @@ test.describe('Formats tab', () => {
   });
 
   test('a published release renders too', async ({ page, request }) => {
-    const releases = (await (await request.get(`/api/ontologies/${ontologyId}/releases`)).json()) as { version: string; status: string }[];
+    const releases = (await (await page.request.get(`/api/ontologies/${ontologyId}/releases`)).json()) as { version: string; status: string }[];
     const published = releases.find((r) => r.status === 'published');
     test.skip(!published, 'no published release in the demo data');
     await page.goto(`/o/${ontologyId}/source?format=manchester&ref=${published!.version}`);

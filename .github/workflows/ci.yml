@@ -9,9 +9,13 @@ on:
 permissions:
   contents: read
 
+# Branches cancel superseded runs. main never does: a run that is building the
+# backend image finishes, and newer main pushes queue behind it (GitHub keeps the
+# newest pending one), so the latest main commit always reaches the server and
+# an older image never overwrites a newer one.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -39,6 +43,18 @@ jobs:
         run: pnpm -r test
       - name: Build the web app
         run: pnpm --filter @concord/web build
+      - name: Check the public MCP URL is the same in every listing
+        run: node scripts/public-url.mjs --check
+      - name: Check the plugin files match their schemas
+        run: node scripts/validate-listings.mjs
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - name: Check the MCP Registry entry (pinned publisher, as the publish workflow uses)
+        run: |
+          go install github.com/modelcontextprotocol/registry/cmd/publisher@v1.8.6
+          "$(go env GOPATH)/bin/publisher" validate
 
   # Browser tests: the alpha walkthrough and every page of the app, against both the
   # Vite dev server (what `pnpm dev` runs) and the production build (what Vercel serves).
@@ -72,6 +88,33 @@ jobs:
           path: |
             playwright-report
             test-results
+          retention-days: 14
+
+  # The narrated walkthrough video: every step of its script must still work against
+  # this commit's app, so a renamed button fails here rather than in the next recording.
+  walkthrough:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium and ffmpeg
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Walkthrough unit tests
+        run: pnpm --filter @concord/walkthrough test
+      - name: Run every walkthrough step
+        run: pnpm walkthrough --check --strict
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: walkthrough-check
+          path: walkthrough/out/report.json
           retention-days: 14
 
   # Builds the backend image the AWS server runs. The server pulls a new image every

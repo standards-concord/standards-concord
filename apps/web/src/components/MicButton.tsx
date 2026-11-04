@@ -14,7 +14,7 @@ export function MicButton({ listening, transcribing, onClick, size = 'md', disab
       className={cx(
         'inline-flex shrink-0 items-center justify-center rounded-full border transition-colors disabled:opacity-50',
         dims,
-        listening ? 'mic-live border-danger bg-danger text-white' : 'border-line-strong bg-surface text-fg hover:bg-surface-2',
+        listening ? 'mic-live border-danger bg-danger text-danger-fg' : 'border-line-strong bg-surface text-fg hover:bg-surface-2',
       )}
     >
       {transcribing ? <LoaderCircle className="size-4 animate-spin" /> : listening ? <MicOff className="size-4" /> : <Mic className={size === 'lg' ? 'size-5' : 'size-4'} />}

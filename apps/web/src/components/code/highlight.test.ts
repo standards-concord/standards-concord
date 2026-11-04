@@ -26,6 +26,12 @@ describe('RDF highlighting', () => {
     });
   });
 
+  it('Turtle: a statement-ending dot is not part of a prefixed name', () => {
+    const segs = highlightSegments('ex:a ex:p ex:o.', 'turtle');
+    expect(segs.find((s) => s.text === 'o')?.cls).toBe('tok-name');
+    expect(segs.at(-1)).toEqual({ text: '.', cls: 'tok-punct' });
+  });
+
   it('Turtle: long strings spanning lines stay strings', () => {
     const segs = highlightSegments('ex:a rdfs:comment """line one\nline "two"\nend""" .', 'turtle');
     expect(segs.filter((s) => s.cls === 'tok-string').map((s) => s.text).join('')).toContain('line "two"');
@@ -70,6 +76,26 @@ describe('RDF highlighting', () => {
     expect(highlightSegments('<rdf:RDF xmlns:a="x"/>', 'xml').some((s) => s.cls === 'tok-tag')).toBe(true);
     expect(classesOf('{"@id": "vol:Thing", "n": 2}', 'json', ['"@id"', '"vol:Thing"', '2'])).toEqual({ '"@id"': 'tok-attr', '"vol:Thing"': 'tok-string', '2': 'tok-number' });
     expect(highlightSegments('classes:\n  Thing:\n    class_uri: vol:Thing\n', 'yaml').some((s) => s.cls === 'tok-attr')).toBe(true);
+  });
+
+  it('SHACL compact syntax: shape keywords, parameters and the Turtle terms', () => {
+    const code = 'BASE <https://w3id.org/odi/volunteering/shapes>\nPREFIX vol: <https://w3id.org/odi/volunteering#>\n\nshape volsh:SessionShape -> vol:Session {\n\tvol:startDateTime xsd:dateTime [1..1] .\n\tvol:joiningUrl datatype=xsd:anyURI .\n}';
+    expect(classesOf(code, 'shaclc', ['BASE', 'PREFIX', 'shape', 'datatype', 'SessionShape', 'vol:'])).toEqual({
+      BASE: 'tok-meta',
+      PREFIX: 'tok-meta',
+      shape: 'tok-keyword',
+      datatype: 'tok-keyword',
+      SessionShape: 'tok-name',
+      'vol:': 'tok-prefix',
+    });
+  });
+
+  it('the generated classes use the JavaScript and TypeScript modes', () => {
+    const code = 'export class Volunteer extends Person {\n  get title(): Set<string> {\n    return SetFrom.subjectPredicate(this, "https://x", LiteralAs.string, LiteralFrom.string);\n  }\n}';
+    const ts = highlightSegments(code, 'typescript');
+    expect(ts.find((s) => s.text === 'class')?.cls).toBe('tok-keyword');
+    expect(ts.find((s) => s.text === '"https://x"')?.cls).toBe('tok-string');
+    expect(highlightSegments('import { A } from "https://x/a.js";', 'javascript').find((s) => s.text === 'import')?.cls).toBe('tok-keyword');
   });
 
   it('plain text is left alone', () => {

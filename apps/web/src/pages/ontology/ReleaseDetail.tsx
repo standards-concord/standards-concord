@@ -4,7 +4,7 @@ import { ArrowLeft, ExternalLink, Minus, Rocket, Scale, ThumbsDown, ThumbsUp } f
 import { api, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { formatDate, roleLabel } from '../../lib/format';
+import { formatDate, publicPageUrl, roleLabel } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
@@ -15,7 +15,7 @@ import { ReleaseStatus } from './Releases';
 
 export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
-  const { id, userById, hasRole, myRoles, reload } = useOntology();
+  const { id, ontology, userById, hasRole, myRoles, reload } = useOntology();
   const { session } = useSession();
   const state = useAsync(() => api.release(releaseId), [releaseId]);
   const act = useAction(async (fn: () => Promise<ReleaseDetail>) => {
@@ -50,6 +50,14 @@ export function ReleaseDetailPage() {
             <p className="mt-4 border-t border-line pt-3 text-xs text-muted">
               Drafted by {userById(r.createdBy)?.name ?? 'someone'} on {formatDate(r.createdAt)}
               {r.publishedAt && ` · published ${formatDate(r.publishedAt, true)}`}
+              {r.status === 'published' && (
+                <>
+                  {' · '}
+                  <a href={publicPageUrl(ontology.slug, r.version)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="release-public-page">
+                    Public page <ExternalLink className="size-3" aria-hidden />
+                  </a>
+                </>
+              )}
             </p>
             <Disclosure className="mt-2" tone="muted" title="Technical details" summary="version IRI, commit">
               <div className="space-y-1 text-xs text-muted">
@@ -81,54 +89,67 @@ export function ReleaseDetailPage() {
         </div>
         <div className="space-y-4">
           {r.status === 'published' ? (
-            <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release">
-              <div className="p-5">
-                <GovernancePanel g={g} userById={userById} />
-              </div>
-            </CollapsibleCard>
+            <>
+              <Card className="p-5">
+                <p className="text-sm">
+                  Published {formatDate(r.publishedAt, true)}.{' '}
+                  {r.githubUrl && (
+                    <a href={r.githubUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent hover:underline">
+                      <GitHubIcon className="size-3.5" /> View on GitHub <ExternalLink className="size-3" />
+                    </a>
+                  )}
+                </p>
+              </Card>
+              {/* One click reveals the whole approval history: the panel's own details start open. */}
+              <CollapsibleCard icon={Scale} title="How this was approved" summary="The approvals, review period and any vote behind this release">
+                <div className="p-5">
+                  <GovernancePanel g={g} userById={userById} subject="release" detailsOpen />
+                </div>
+              </CollapsibleCard>
+            </>
           ) : (
             <Card>
               <CardHeader icon={Scale} title="Release approval" />
               <div className="p-5">
-                <GovernancePanel g={g} userById={userById} />
+                <GovernancePanel
+                  g={g}
+                  userById={userById}
+                  subject="release"
+                  actions={
+                    <div className="space-y-3">
+                      {r.status === 'voting' && (
+                        <>
+                          <div className="grid grid-cols-3 gap-2">
+                            <Button variant={myVote?.choice === 'yes' ? 'primary' : 'secondary'} icon={ThumbsUp} disabled={!canVote || act.pending} onClick={() => void vote('yes')}>
+                              Yes
+                            </Button>
+                            <Button variant={myVote?.choice === 'no' ? 'danger' : 'secondary'} icon={ThumbsDown} disabled={!canVote || act.pending} onClick={() => void vote('no')}>
+                              No
+                            </Button>
+                            <Button variant={myVote?.choice === 'abstain' ? 'subtle' : 'secondary'} icon={Minus} disabled={!canVote || act.pending} onClick={() => void vote('abstain')}>
+                              Abstain
+                            </Button>
+                          </div>
+                          {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on releases at this level.</p>}
+                        </>
+                      )}
+                      {r.status !== 'rejected' ? (
+                        <>
+                          <Button variant="primary" icon={Rocket} className="w-full" loading={act.pending} disabled={!canPublish} onClick={() => void act.run(() => api.publishRelease(r.id))}>
+                            Publish v{r.version}
+                          </Button>
+                          {!canPublish && <p className="text-xs text-muted">A steward or owner publishes releases once approval conditions are met.</p>}
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted">This release attempt was rejected. Draft a new release to try again.</p>
+                      )}
+                      <InlineError error={act.error} />
+                    </div>
+                  }
+                />
               </div>
             </Card>
           )}
-          <Card className="space-y-3 p-5">
-            {r.status === 'voting' && (
-              <>
-                <div className="grid grid-cols-3 gap-2">
-                  <Button variant={myVote?.choice === 'yes' ? 'primary' : 'secondary'} icon={ThumbsUp} disabled={!canVote || act.pending} onClick={() => void vote('yes')}>
-                    Yes
-                  </Button>
-                  <Button variant={myVote?.choice === 'no' ? 'danger' : 'secondary'} icon={ThumbsDown} disabled={!canVote || act.pending} onClick={() => void vote('no')}>
-                    No
-                  </Button>
-                  <Button variant={myVote?.choice === 'abstain' ? 'subtle' : 'secondary'} icon={Minus} disabled={!canVote || act.pending} onClick={() => void vote('abstain')}>
-                    Abstain
-                  </Button>
-                </div>
-                {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on releases at this level.</p>}
-              </>
-            )}
-            {r.status !== 'published' && r.status !== 'rejected' && (
-              <Button variant="primary" icon={Rocket} className="w-full" loading={act.pending} disabled={!canPublish} onClick={() => void act.run(() => api.publishRelease(r.id))}>
-                Publish v{r.version}
-              </Button>
-            )}
-            {!canPublish && r.status !== 'published' && <p className="text-xs text-muted">A steward or owner publishes releases once approval conditions are met.</p>}
-            {r.status === 'published' && (
-              <p className="text-sm">
-                Published {formatDate(r.publishedAt, true)}.{' '}
-                {r.githubUrl && (
-                  <a href={r.githubUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent hover:underline">
-                    <GitHubIcon className="size-3.5" /> View on GitHub <ExternalLink className="size-3" />
-                  </a>
-                )}
-              </p>
-            )}
-            <InlineError error={act.error} />
-          </Card>
         </div>
       </div>
     </div>

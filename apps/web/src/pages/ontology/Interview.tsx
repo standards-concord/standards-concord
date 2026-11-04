@@ -1,12 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { ChatMessage } from '@concord/shared';
-import { ArrowLeft, CircleCheck, FileText, Lock, MessageSquareText } from 'lucide-react';
+import { ArrowLeft, CircleCheck, Columns2, FileText, Lock, MessageSquareText } from 'lucide-react';
 import { api, type InterviewDetail } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { ChatView } from '../../components/ChatView';
-import { CompletenessMeter, UseCaseDocument } from '../../components/UseCaseDocument';
+import { CompletenessMeter, UseCaseDocument, sectionLabel, sectionProgress } from '../../components/UseCaseDocument';
 import { Button, Card, ErrorCard, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -18,7 +18,29 @@ export function InterviewPage() {
   const state = useAsync(() => api.interview(sessionId), [sessionId]);
   const [pending, setPending] = useState(false);
   const [sendError, setSendError] = useState<unknown>();
-  const [panel, setPanel] = useState<'chat' | 'doc'>('chat');
+  const [layout, setLayoutState] = useState<Layout>(readLayout);
+  const setLayout = (l: Layout) => {
+    setLayoutState(l);
+    try {
+      localStorage.setItem(LAYOUT_KEY, l);
+    } catch {
+      /* not remembered */
+    }
+  };
+  // Sections captured since the previous answer, so the conversation view can say what was just recorded.
+  const seen = useRef<Set<string> | undefined>(undefined);
+  const [justCaptured, setJustCaptured] = useState<string[]>([]);
+  const filledKeys = state.data ? Object.entries(state.data.useCase.sections ?? {}).filter(([, v]) => (Array.isArray(v) ? v.length : typeof v === 'string' ? v.trim() : v)).map(([k]) => k) : [];
+  const filledSig = filledKeys.join(',');
+  useEffect(() => {
+    if (!state.data) return;
+    const now = new Set(filledKeys);
+    if (seen.current) {
+      const fresh = [...now].filter((k) => !seen.current!.has(k));
+      if (fresh.length) setJustCaptured(fresh);
+    }
+    seen.current = now;
+  }, [filledSig]); // eslint-disable-line react-hooks/exhaustive-deps
   const finish = useAction(async () => {
     const { useCase } = await api.finishInterview(sessionId);
     nav(`/o/${id}/use-cases/${useCase.id}`);
@@ -61,17 +83,25 @@ export function InterviewPage() {
       </div>
       {finish.error ? <ErrorCard error={finish.error} className="mb-4" /> : null}
 
-      <div className="mb-3 inline-flex rounded-lg border border-line-strong p-0.5 lg:hidden">
-        <button onClick={() => setPanel('chat')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', panel === 'chat' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-          <MessageSquareText className="size-4" /> Conversation
-        </button>
-        <button onClick={() => setPanel('doc')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', panel === 'doc' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-          <FileText className="size-4" /> Use case document
-        </button>
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="group" aria-label="Interview layout">
+          {LAYOUTS.map(({ id: l, label, icon: Icon, wide }) => (
+            <button
+              key={l}
+              aria-pressed={layout === l}
+              onClick={() => setLayout(l)}
+              className={cx('items-center gap-1.5 rounded-md px-3 py-1 text-sm', wide ? 'hidden lg:inline-flex' : 'inline-flex', layout === l ? 'bg-surface-2 font-medium' : 'text-muted')}
+            >
+              <Icon className="size-4" /> {label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
-        <Card className={cx('flex h-[calc(100vh-15rem)] min-h-[480px] flex-col p-4', panel !== 'chat' && 'hidden lg:flex')}>
+      {layout === 'chat' && <ProgressStrip s={s} targets={lastTargets as string[]} justCaptured={justCaptured} onView={() => setLayout('doc')} />}
+
+      <div className={cx('grid gap-6', layout === 'split' && 'lg:grid-cols-[minmax(0,1fr)_420px]')}>
+        <Card className={cx('flex h-[calc(100vh-15rem)] min-h-[480px] flex-col p-4', layout === 'doc' && 'hidden', layout === 'split' && 'max-lg:hidden')}>
           <ChatView
             className="h-full"
             messages={s.messages}
@@ -102,17 +132,73 @@ export function InterviewPage() {
             }
           />
         </Card>
-        <Card className={cx('h-fit p-5 lg:sticky lg:top-20 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto', panel !== 'doc' && 'hidden lg:block')}>
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold">
-            <FileText className="size-4 text-muted" /> Use case document
-          </div>
-          <div className="mb-5">
-            <CompletenessMeter value={s.useCase.completeness} />
-            <p className="mt-1.5 text-xs text-muted">Fills in as you talk, following Elisa Kendall’s use case template.</p>
-          </div>
-          <UseCaseDocument uc={s.useCase} live highlight={lastTargets as string[]} />
-        </Card>
+        {layout !== 'chat' && (
+          <section aria-label="Use case document" className={cx('h-fit', layout === 'split' && 'lg:sticky lg:top-20 lg:self-start')}>
+            <Card className={cx('p-5', layout === 'split' && 'lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto')}>
+              <div className="mb-4 flex items-center gap-2 text-sm font-semibold">
+                <FileText className="size-4 text-muted" /> Use case document
+              </div>
+              <div className="mb-5">
+                <CompletenessMeter value={s.useCase.completeness} />
+                <p className="mt-1.5 text-xs text-muted">Fills in as you talk, following Elisa Kendall’s use case template.</p>
+              </div>
+              <UseCaseDocument uc={s.useCase} live highlight={lastTargets as string[]} />
+            </Card>
+          </section>
+        )}
       </div>
+    </div>
+  );
+}
+
+type Layout = 'chat' | 'doc' | 'split';
+const LAYOUT_KEY = 'concord.interview.layout';
+const LAYOUTS: { id: Layout; label: string; icon: typeof FileText; wide?: boolean }[] = [
+  { id: 'chat', label: 'Conversation', icon: MessageSquareText },
+  { id: 'doc', label: 'View document', icon: FileText },
+  { id: 'split', label: 'Side by side', icon: Columns2, wide: true },
+];
+function readLayout(): Layout {
+  try {
+    const v = localStorage.getItem(LAYOUT_KEY);
+    return v === 'doc' || v === 'split' ? v : 'chat';
+  } catch {
+    return 'chat';
+  }
+}
+
+/** Conversation-first summary: how complete the document is, what the interviewer is asking about, and what was just captured. */
+function ProgressStrip({ s, targets, justCaptured, onView }: { s: InterviewDetail; targets: string[]; justCaptured: string[]; onView: () => void }) {
+  const p = sectionProgress(s.useCase);
+  const asking = targets.filter((t) => t !== 'name').map(sectionLabel);
+  return (
+    <div className="mb-3 grid gap-3 rounded-xl border border-line bg-surface p-3 text-sm sm:grid-cols-[12rem_1fr_auto] sm:items-center" aria-label="Use case progress" role="region">
+      <div>
+        <CompletenessMeter value={s.useCase.completeness} />
+        <p className="mt-1 text-xs text-muted">
+          {p.filled} of {p.total} sections filled
+        </p>
+      </div>
+      <div className="min-w-0 space-y-0.5 text-xs">
+        {asking.length > 0 && (
+          <p>
+            <span className="font-medium">Now discussing:</span> {asking.join(', ')}
+          </p>
+        )}
+        {justCaptured.length > 0 && (
+          <p className="text-ok">
+            <span className="font-medium">Just captured:</span> {justCaptured.map(sectionLabel).join(', ')}
+          </p>
+        )}
+        {p.missing.length > 0 && (
+          <p className="truncate text-muted" title={p.missing.join(', ')}>
+            <span className="font-medium">Not covered yet:</span> {p.missing.join(', ')}
+          </p>
+        )}
+      </div>
+      <Button size="sm" variant="ghost" icon={FileText} onClick={onView}>
+        Open document
+      </Button>
     </div>
   );
 }

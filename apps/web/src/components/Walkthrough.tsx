@@ -10,7 +10,7 @@ import { STEPS, TESTER_ROLES, tasksFor, testerRoleFor, useWalkthrough } from '..
 import { formatDate, roleLabel } from '../lib/format';
 import { ActivityList } from './ActivityFeed';
 import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx } from './ui';
-import { Disclosure } from './Disclosure';
+import { Disclosure, Popover } from './Disclosure';
 
 export function Stepper({ current, onPick, compact }: { current: number; onPick?: (i: number) => void; compact?: boolean }) {
   return (
@@ -196,13 +196,13 @@ function TourStep({ compact }: { compact?: boolean }) {
       <div className="text-xs text-muted">
         {doneCount} of {tasks.length} done
       </div>
-      <Disclosure tone="muted" title="Choose another task" summary={`${tasks.length}`}>
-        <ul className="space-y-1.5">
-          {tasks.map((t) => (
+      <Disclosure tone="muted" title="Choose another task" summary={`${tasks.length - doneCount} left`}>
+        {(() => {
+          const row = (t: (typeof tasks)[number]) => (
             <li key={t.id} className="flex items-start gap-2.5 rounded-lg border border-line bg-surface p-2.5">
               <button
                 onClick={() => w.toggleTask(t.id)}
-                className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong')}
+                className={cx('mt-0.5 flex size-4.5 shrink-0 items-center justify-center rounded border', w.done[t.id] ? 'border-accent bg-accent text-accent-fg' : 'border-control')}
                 aria-label={w.done[t.id] ? 'Mark not done' : 'Mark done'}
               >
                 {w.done[t.id] && <Check className="size-3" />}
@@ -217,8 +217,27 @@ function TourStep({ compact }: { compact?: boolean }) {
                 <ArrowRight className="size-4" />
               </Link>
             </li>
-          ))}
-        </ul>
+          );
+          const todo = tasks.filter((t) => !w.done[t.id]);
+          const finished = tasks.filter((t) => w.done[t.id]);
+          return (
+            <div className="space-y-3">
+              {todo.length > 0 && (
+                <ul className="space-y-1.5" aria-label="Still to try">
+                  {todo.map(row)}
+                </ul>
+              )}
+              {finished.length > 0 && (
+                <div>
+                  <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-muted uppercase">Done ({finished.length})</h4>
+                  <ul className="space-y-1.5" aria-label="Done">
+                    {finished.map(row)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </Disclosure>
       <Button variant="primary" size="sm" icon={ArrowRight} onClick={w.next}>
         Next: simulate the others
@@ -310,19 +329,25 @@ export function WalkthroughDock() {
   const w = useWalkthrough();
   const loc = useLocation();
   const nav = useNavigate();
+  const demo = useDemoOntology();
   if (loc.pathname.startsWith('/alpha') || loc.pathname.startsWith('/login')) return null;
+  // On the explore step, the pill names the next suggested task and how many are done; otherwise the step.
+  const tasks = STEPS[w.step]?.id === 'tour' && demo ? tasksFor(w.myRoles, demo.id) : [];
+  const nextTask = tasks.find((t) => !w.done[t.id]);
+  const pillLabel = nextTask ? `Try next: ${nextTask.label}` : STEPS[w.step].title;
+  const pillProgress = tasks.length ? `${tasks.filter((t) => w.done[t.id]).length}/${tasks.length} tasks` : `Step ${w.step + 1}/${STEPS.length}`;
   return (
     <>
       {!w.open && (
         <button
           onClick={() => w.setOpen(true)}
-          className="fixed right-4 bottom-4 z-40 inline-flex items-center gap-2 rounded-full border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
+          aria-label={`Walkthrough: ${pillLabel}. Open the guide`}
+          className="fixed right-4 bottom-4 z-40 inline-flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-pill border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
         >
-          <Compass className="size-4 text-accent" />
-          Walkthrough
-          <Badge tone="accent">
-            {w.step + 1}/{STEPS.length}
-          </Badge>
+          <Compass className="size-4 shrink-0 text-accent" />
+          <span className="shrink-0">Walkthrough</span>
+          <span className="hidden min-w-0 truncate font-normal text-muted sm:inline">· {pillLabel}</span>
+          <Badge tone="accent">{pillProgress}</Badge>
         </button>
       )}
       {w.open && (
@@ -340,11 +365,33 @@ export function WalkthroughDock() {
               </button>
             </div>
           </div>
-          <div className="px-4 pt-3">
-            <Stepper current={w.step} onPick={w.setStep} compact />
-            <div className="mt-2 text-xs font-medium tracking-wide text-muted uppercase">
+          <div className="flex items-center justify-between gap-2 px-4 pt-3">
+            <div className="text-xs font-medium tracking-wide text-muted uppercase">
               Step {w.step + 1}: {STEPS[w.step].title}
             </div>
+            <Popover label="All walkthrough steps" align="right" className="px-2 py-0.5 text-xs text-muted hover:bg-surface-2 hover:text-fg" trigger={<>Steps</>}>
+              {(close) => (
+                <ol className="space-y-1">
+                  {STEPS.map((st, i) => (
+                    <li key={st.id}>
+                      <button
+                        className={cx('flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-surface-2', i === w.step && 'font-medium text-accent')}
+                        aria-current={i === w.step ? 'step' : undefined}
+                        onClick={() => {
+                          w.setStep(i);
+                          close();
+                        }}
+                      >
+                        <span className={cx('flex size-5 shrink-0 items-center justify-center rounded-full border text-[0.65rem]', i < w.step ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong')}>
+                          {i < w.step ? <Check className="size-3" /> : i + 1}
+                        </span>
+                        {st.title}
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </Popover>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
             <StepBody step={w.step} compact onNavigate={() => w.setOpen(false)} />

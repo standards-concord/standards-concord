@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useParams, useSearchParams } from 'react-router';
 import type { ChangeOp, ChangeRequestDetail } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, GitMerge, MessageSquare, Send, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Undo2, Wand2, X, Minus, History, Scale } from 'lucide-react';
+import { ArrowLeft, Check, CircleSlash, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { formatDate, relativeTime, roleLabel, titleCase } from '../../lib/format';
+import { formatDate, plural, relativeTime, roleLabel, titleCase } from '../../lib/format';
 import { makeLabeler } from '../../lib/ontology';
 import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
@@ -13,7 +13,7 @@ import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
 import { ValidationDetails } from '../../components/Validation';
 import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
-import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
+import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -104,7 +104,7 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
       {cr.status === 'approved' && !hasRole('editor', 'steward', 'owner') && <p className="text-xs text-muted">An editor or steward will merge this.</p>}
       <div className="flex flex-wrap gap-2 border-t border-line pt-3">
         {['draft', 'review', 'needs-work', 'triage'].includes(cr.status) && (
-          <Button size="sm" icon={Wand2} onClick={() => setReviseOpen(true)}>
+          <Button size="sm" icon={PenLine} onClick={() => setReviseOpen(true)}>
             Ask AI to revise
           </Button>
         )}
@@ -124,7 +124,7 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             <Button variant="ghost" onClick={() => setReviseOpen(false)}>
               Cancel
             </Button>
-            <Button variant="primary" icon={Sparkles} loading={revise.pending} disabled={!instruction.trim()} onClick={() => void revise.run()}>
+            <Button variant="primary" icon={PenLine} loading={revise.pending} disabled={!instruction.trim()} onClick={() => void revise.run()}>
               Revise
             </Button>
           </>
@@ -166,12 +166,67 @@ const RECOMMENDATION: Record<string, string> = {
   'needs-discussion': 'Needs discussion',
 };
 
+/** The level badge opens the rule-based reasons for the classification, so the explanation sits on the badge itself. */
+function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
+  const c = cr.classification;
+  if (!c) return <LevelBadge level={undefined} />;
+  return (
+    <Popover label={`Level: ${c.level}. Why it’s ${c.level}`} className="rounded-pill focus-visible:outline-offset-2" trigger={<LevelBadge level={c.level} />}>
+      <h4 className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Why it’s {c.level}</h4>
+      <p className="mb-3 text-xs text-muted">Rule-based semantic versioning classification. The level decides which governance rules apply.</p>
+      <ul className="space-y-2 text-sm">
+        {c.reasons.map((r, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <LevelBadge level={r.level} className="mt-0.5" />
+            <span>
+              {r.message}
+              <span className="block font-mono text-[0.7rem] text-subtle">{r.rule}</span>
+            </span>
+          </li>
+        ))}
+        {!c.reasons.length && <li className="text-muted">No reasons recorded.</li>}
+      </ul>
+    </Popover>
+  );
+}
+
+type View = 'changes' | 'checks' | 'discussion';
+
+function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => void; items: { id: View; label: string; note?: string; tone?: 'danger' | 'warn' }[] }) {
+  return (
+    <div role="tablist" aria-label="Change request views" className="flex gap-1 overflow-x-auto border-b border-line">
+      {items.map((t) => (
+        <button
+          key={t.id}
+          role="tab"
+          id={`cr-tab-${t.id}`}
+          aria-selected={view === t.id}
+          aria-controls={`cr-panel-${t.id}`}
+          onClick={() => onChange(t.id)}
+          className={cx('-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap', view === t.id ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
+        >
+          {t.label}
+          {t.note && <span className={cx('text-xs', t.tone === 'danger' ? 'text-danger' : t.tone === 'warn' ? 'text-warn' : 'text-muted')}>{t.note}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ChangeRequestPage() {
   const { crId = '' } = useParams();
   const { id, ontology, view, userById } = useOntology();
   const { now } = useSession();
   const state = useAsync(() => api.changeRequest(crId), [crId]);
   const [showTriples, setShowTriples] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const tab = (['changes', 'checks', 'discussion'].includes(params.get('view') ?? '') ? params.get('view') : 'changes') as View;
+  const setTab = (v: View) => {
+    const n = new URLSearchParams(params);
+    if (v === 'changes') n.delete('view');
+    else n.set('view', v);
+    setParams(n, { replace: true });
+  };
 
   const label = useMemo(() => {
     const extra: Record<string, string> = {};
@@ -196,7 +251,7 @@ export function ChangeRequestPage() {
             <span className="font-normal text-muted">#{cr.number}</span> {cr.title}
           </h2>
           <ChangeStatusBubble status={cr.status} hasVote={!!cr.governance.rule.vote} />
-          <LevelBadge level={cr.classification?.level} />
+          <ClassificationBubble cr={cr} />
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
           <span className="flex items-center gap-1.5">
@@ -227,171 +282,180 @@ export function ChangeRequestPage() {
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-6">
-          {cr.description && (
-            <Card className="p-5">
-              <Markdown text={cr.description} />
-            </Card>
-          )}
+          <Tabs
+            view={tab}
+            onChange={setTab}
+            items={[
+              { id: 'changes', label: 'Changes', note: `${cr.ops.length}` },
+              {
+                id: 'checks',
+                label: 'Checks',
+                note: !cr.validation ? 'not run' : cr.validation.passed ? 'passing' : 'failing',
+                tone: cr.validation && !cr.validation.passed ? 'danger' : undefined,
+              },
+              { id: 'discussion', label: 'Discussion', note: `${cr.reviews.length + cr.votes.length}` },
+            ]}
+          />
+          {tab === 'changes' && (
+            <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" className="space-y-6">
+            {cr.description && (
+              <Card className="p-5">
+                <Markdown text={cr.description} />
+              </Card>
+            )}
 
-          <Card>
-            <CardHeader
-              title={`Proposed changes (${cr.ops.length})`}
-              actions={
-                <div className="inline-flex rounded-lg border border-line-strong p-0.5 text-xs">
-                  <button onClick={() => setShowTriples(false)} className={cx('rounded-md px-2.5 py-1', !showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
-                    Readable
-                  </button>
-                  <button onClick={() => setShowTriples(true)} className={cx('rounded-md px-2.5 py-1', showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
-                    Triples
-                  </button>
-                </div>
-              }
-            />
-            <div className="p-5">
-              {showTriples ? (
-                <TripleDiff diff={cr.diff} />
-              ) : (
-                <div className="space-y-4">
-                  <OpCards ops={cr.ops} label={label} />
-                  {cr.diff?.terms.length ? (
-                    <details>
-                      <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
-                      <div className="mt-2">
-                        <TermChanges diff={cr.diff} />
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          </Card>
-
-          {cr.analysis && (
             <Card>
-              <CardHeader icon={Sparkles} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
-              <div className="space-y-3 p-5 text-sm">
-                <Markdown text={cr.analysis.summary} />
-                <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>
-                  <div className="space-y-3">
-                    <div>
-                      <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Rationale</div>
-                      <Markdown text={cr.analysis.rationale} className="text-muted" />
-                    </div>
-                    {cr.analysis.risks?.length ? (
-                      <div>
-                        <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Risks</div>
-                        <ul className="list-disc space-y-0.5 pl-5">
-                          {cr.analysis.risks.map((r, i) => (
-                            <li key={i}>{r}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {cr.analysis.existingTerms?.length ? <p className="text-xs text-muted">Existing terms that may already cover this: {cr.analysis.existingTerms.map(label).join(', ')}</p> : null}
-                    {cr.analysis.suggestedLevel && cr.analysis.suggestedLevel !== cr.classification?.level && (
-                      <p className="text-xs text-muted">
-                        The AI would rate this <LevelBadge level={cr.analysis.suggestedLevel} />, but the rule-based classification wins.
-                      </p>
-                    )}
+              <CardHeader
+                title={`Proposed changes (${cr.ops.length})`}
+                actions={
+                  <div className="inline-flex rounded-lg border border-line-strong p-0.5 text-xs">
+                    <button onClick={() => setShowTriples(false)} className={cx('rounded-md px-2.5 py-1', !showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
+                      Readable
+                    </button>
+                    <button onClick={() => setShowTriples(true)} className={cx('rounded-md px-2.5 py-1', showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
+                      Triples
+                    </button>
                   </div>
-                </Disclosure>
+                }
+              />
+              <div className="p-5">
+                {showTriples ? (
+                  <TripleDiff diff={cr.diff} />
+                ) : (
+                  <div className="space-y-4">
+                    <OpCards ops={cr.ops} label={label} />
+                    {cr.diff?.terms.length ? (
+                      <details>
+                        <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
+                        <div className="mt-2">
+                          <TermChanges diff={cr.diff} />
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                )}
               </div>
             </Card>
-          )}
 
-          <Card>
-            <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
-            <div className="p-5">
-              {cr.validation ? (
-                <ValidationDetails report={cr.validation} label={label} />
-              ) : (
-                <p className="text-sm text-muted">Not validated yet — validation runs when the request is submitted.</p>
-              )}
-            </div>
-          </Card>
-
-          <Card>
-            <CardHeader icon={History} title="Reviews and timeline" />
-            <ol className="relative space-y-4 p-5">
-              {[
-                ...cr.reviews.map((r) => ({ at: r.at, kind: 'review' as const, r })),
-                ...cr.votes.map((v) => ({ at: v.at, kind: 'vote' as const, v })),
-                ...cr.timeline.filter((e) => e.type !== 'review' && e.type !== 'vote').map((e) => ({ at: e.at, kind: 'event' as const, e })),
-              ]
-                .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
-                .map((item, i) => (
-                  <li key={i} className="flex gap-3">
-                    {item.kind === 'event' ? (
-                      <span className="mt-1.5 ml-2 size-2 shrink-0 rounded-full bg-line-strong" />
-                    ) : (
-                      <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
-                    )}
-                    <div className="min-w-0 flex-1 text-sm">
-                      {item.kind === 'review' && (
-                        <>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <strong className="font-medium">{nameOf(item.r.userId)}</strong>
-                            <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
-                            <RoleChips roles={item.r.roles} />
-                            <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
-                          </div>
-                          {item.r.comment && <div className="mt-1 rounded-lg border border-line bg-surface-2/50 p-2.5"><Markdown text={item.r.comment} /></div>}
-                        </>
-                      )}
-                      {item.kind === 'vote' && (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
-                          <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
-                          <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
-                          {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
+            {cr.analysis && (
+              <Card>
+                <CardHeader icon={ScanSearch} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
+                <div className="space-y-3 p-5 text-sm">
+                  <Markdown text={cr.analysis.summary} />
+                  {/* Decision-relevant cautions stay visible; the supporting explanation is behind the disclosure. */}
+                  {cr.analysis.existingTerms?.length ? (
+                    <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-2.5 text-xs" role="note">
+                      <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-warn" />
+                      <span>
+                        <strong className="font-medium">Existing terms may already cover this:</strong> {cr.analysis.existingTerms.map(label).join(', ')}. Consider reusing them instead of adding new ones.
+                      </span>
+                    </p>
+                  ) : null}
+                  {cr.analysis.suggestedLevel && cr.analysis.suggestedLevel !== cr.classification?.level && (
+                    <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-2.5 text-xs" role="note">
+                      <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warn" />
+                      <span>
+                        The AI would rate this <LevelBadge level={cr.analysis.suggestedLevel} />, but the rule-based classification (<LevelBadge level={cr.classification?.level} />) decides which rules apply.
+                      </span>
+                    </p>
+                  )}
+                  <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Rationale</div>
+                        <Markdown text={cr.analysis.rationale} className="text-muted" />
+                      </div>
+                      {cr.analysis.risks?.length ? (
+                        <div>
+                          <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Risks</div>
+                          <ul className="list-disc space-y-0.5 pl-5">
+                            {cr.analysis.risks.map((r, i) => (
+                              <li key={i}>{r}</li>
+                            ))}
+                          </ul>
                         </div>
-                      )}
-                      {item.kind === 'event' && (
-                        <p className="text-muted">
-                          {item.e.actorId && <strong className="font-medium text-fg">{nameOf(item.e.actorId)} </strong>}
-                          {item.e.message} <span className="text-xs text-subtle" title={formatDate(item.at, true)}>{relativeTime(item.at, now())}</span>
-                        </p>
-                      )}
+                      ) : null}
                     </div>
-                  </li>
-                ))}
-            </ol>
-          </Card>
+                  </Disclosure>
+                </div>
+              </Card>
+            )}
+            </div>
+          )}
+          {tab === 'checks' && (
+            <div role="tabpanel" id="cr-panel-checks" aria-labelledby="cr-tab-checks" className="space-y-6">
+            <Card>
+              <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
+              <div className="p-5">
+                {cr.validation ? (
+                  <ValidationDetails report={cr.validation} label={label} />
+                ) : (
+                  <p className="text-sm text-muted">Not validated yet — validation runs when the request is submitted.</p>
+                )}
+              </div>
+            </Card>
+            </div>
+          )}
+          {tab === 'discussion' && (
+            <div role="tabpanel" id="cr-panel-discussion" aria-labelledby="cr-tab-discussion" className="space-y-6">
+            <Card>
+              <CardHeader icon={History} title="Reviews and timeline" />
+              <ol className="relative space-y-4 p-5">
+                {[
+                  ...cr.reviews.map((r) => ({ at: r.at, kind: 'review' as const, r })),
+                  ...cr.votes.map((v) => ({ at: v.at, kind: 'vote' as const, v })),
+                  ...cr.timeline.filter((e) => e.type !== 'review' && e.type !== 'vote').map((e) => ({ at: e.at, kind: 'event' as const, e })),
+                ]
+                  .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+                  .map((item, i) => (
+                    <li key={i} className="flex gap-3">
+                      {item.kind === 'event' ? (
+                        <span className="mt-1.5 ml-2 size-2 shrink-0 rounded-full bg-line-strong" />
+                      ) : (
+                        <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
+                      )}
+                      <div className="min-w-0 flex-1 text-sm">
+                        {item.kind === 'review' && (
+                          <>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <strong className="font-medium">{nameOf(item.r.userId)}</strong>
+                              <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
+                              <RoleChips roles={item.r.roles} />
+                              <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
+                            </div>
+                            {item.r.comment && <div className="mt-1 rounded-lg border border-line bg-surface-2/50 p-2.5"><Markdown text={item.r.comment} /></div>}
+                          </>
+                        )}
+                        {item.kind === 'vote' && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
+                            <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
+                            <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
+                            {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
+                          </div>
+                        )}
+                        {item.kind === 'event' && (
+                          <p className="text-muted">
+                            {item.e.actorId && <strong className="font-medium text-fg">{nameOf(item.e.actorId)} </strong>}
+                            {item.e.message} <span className="text-xs text-subtle" title={formatDate(item.at, true)}>{relativeTime(item.at, now())}</span>
+                          </p>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+              </ol>
+            </Card>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
           <Card>
-            <CardHeader icon={Scale} title="Governance" subtitle={ontology.governance.name} />
+            <CardHeader icon={Scale} title="Decision" subtitle={`${ontology.governance.name} · ${plural(cr.reviews.filter((r) => r.decision !== 'comment').length, 'review')}`} />
             <div className="p-5">
-              <GovernancePanel g={cr.governance} userById={userById} />
+              <GovernancePanel g={cr.governance} userById={userById} actions={<ActionBar cr={cr} onUpdate={state.setData} />} />
             </div>
           </Card>
-          <Card>
-            <CardHeader title="Your actions" />
-            <div className="p-5">
-              <ActionBar cr={cr} onUpdate={state.setData} />
-            </div>
-          </Card>
-          {cr.classification && (
-            <CollapsibleCard
-              title={<>Why it’s <LevelBadge level={cr.classification.level} /></>}
-              subtitle="Rule-based semantic versioning classification"
-              summary={cr.classification.reasons[0]?.message}
-            >
-              <ul className="space-y-2 p-5 text-sm">
-                {cr.classification.reasons.map((r, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <LevelBadge level={r.level} className="mt-0.5" />
-                    <span>
-                      {r.message}
-                      <span className="block font-mono text-[0.7rem] text-subtle">{r.rule}</span>
-                    </span>
-                  </li>
-                ))}
-                {!cr.classification.reasons.length && <li className="text-muted">No reasons recorded.</li>}
-              </ul>
-            </CollapsibleCard>
-          )}
         </div>
       </div>
     </div>

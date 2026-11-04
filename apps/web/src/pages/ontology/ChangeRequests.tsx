@@ -11,7 +11,9 @@ import { BugReportDialog } from '../../components/BugReport';
 import { Button, Card, Chip, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Select, Textarea, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
-const FILTERS: (ChangeRequestStatus | 'open' | 'all')[] = ['open', 'draft', 'review', 'voting', 'approved', 'needs-work', 'merged', 'released', 'all'];
+/** Every status, in the order a request moves through them; Open and All are the two scopes. */
+const STATUSES: ChangeRequestStatus[] = ['draft', 'triage', 'review', 'voting', 'needs-work', 'approved', 'merged', 'released', 'rejected', 'withdrawn'];
+const FILTERS: (ChangeRequestStatus | 'open' | 'all')[] = ['open', 'all', ...STATUSES];
 const OPEN: ChangeRequestStatus[] = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
 
 const KINDS: { id: ChangeRequestKind; label: string }[] = [
@@ -95,6 +97,7 @@ export function ChangeRequestsTab() {
     n.set('status', s);
     setParams(n, { replace: true });
   };
+  const isStatus = filter !== 'open' && filter !== 'all';
   const rows = (list.data ?? []).filter((cr) => (filter === 'open' ? OPEN.includes(cr.status) : true)).sort((a, b) => b.number - a.number);
 
   return (
@@ -113,25 +116,44 @@ export function ChangeRequestsTab() {
           </Button>
         </div>
       </div>
-      <div className="mb-4 flex flex-wrap items-center gap-1.5">
-        {(['open', 'all'] as const).map((s) => (
-          <Chip key={s} active={filter === s} onClick={() => setFilter(s)}>
-            {s === 'open' ? 'Open' : 'All'}
-          </Chip>
-        ))}
-        <Select
-          aria-label="Filter by status"
-          value={filter === 'open' || filter === 'all' ? '' : filter}
-          onChange={(e) => setFilter((e.target.value || 'open') as (typeof FILTERS)[number])}
-          className={cx('ml-1 h-8 w-auto py-0 text-xs', filter !== 'open' && filter !== 'all' && 'border-accent text-accent')}
-        >
-          <option value="">A single status…</option>
-          {FILTERS.filter((s) => s !== 'open' && s !== 'all').map((s) => (
-            <option key={s} value={s}>
-              {CR_STATUS_LABEL[s as ChangeRequestStatus]}
-            </option>
+      <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2" role="group" aria-label="Filter change requests">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-muted">Show</span>
+          {(['open', 'all'] as const).map((s) => (
+            <Chip key={s} active={filter === s} onClick={() => setFilter(s)}>
+              {s === 'open' ? 'Open' : 'All'}
+            </Chip>
           ))}
-        </Select>
+        </div>
+        <label className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-muted">Status</span>
+          <Select
+            value={isStatus ? filter : ''}
+            onChange={(e) => setFilter((e.target.value || 'all') as (typeof FILTERS)[number])}
+            className={cx('h-8 w-40 py-0 text-xs', isStatus && 'border-accent text-accent')}
+          >
+            <option value="">{filter === 'open' ? 'Any open status' : 'Any status'}</option>
+            {STATUSES.map((st) => (
+              <option key={st} value={st}>
+                {CR_STATUS_LABEL[st]}
+              </option>
+            ))}
+          </Select>
+        </label>
+        {list.data && (
+          <p className="text-xs text-muted" aria-live="polite">
+            {isStatus ? (
+              <>
+                {rows.length} {CR_STATUS_LABEL[filter as ChangeRequestStatus].toLowerCase()} ·{' '}
+                <button className="font-medium text-accent hover:underline" onClick={() => setFilter('open')}>
+                  Clear
+                </button>
+              </>
+            ) : (
+              `${rows.length} ${filter === 'open' ? 'open' : 'in total'}`
+            )}
+          </p>
+        )}
       </div>
       {list.error && !list.data ? (
         <ErrorCard error={list.error} onRetry={list.reload} />

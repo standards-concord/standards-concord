@@ -59,6 +59,8 @@ export async function createProject(
     namespace?: string;
     domain?: string;
     governanceTemplate?: GovernanceTemplateId;
+    /** List the owner as dct:creator, which is public on the ontology's page. Default true. */
+    creditCreator?: boolean;
     seedTurtle?: string;
     demo?: boolean;
     slug?: string;
@@ -77,7 +79,7 @@ export async function createProject(
       prefix,
       title: input.title,
       description: input.description,
-      creators: [owner.name],
+      creators: input.creditCreator === false ? [] : [owner.name],
       license: 'https://creativecommons.org/licenses/by/4.0/',
     });
   }
@@ -174,6 +176,9 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
         warnings: v.lint.filter((i) => i.severity === 'warning').length,
         fairScore: v.fair.score,
         consistent: v.reasoner.consistent && v.reasoner.unsatisfiable.length === 0,
+        reasoner: v.reasoner.available ? v.reasoner.engine : 'structural',
+        // Required checks that could not run. FAIR checks that need the network are left out of the score instead.
+        incomplete: v.reasoner.available ? [] : ['OWL reasoner (HermiT) did not run, so only structural checks ran'],
       };
     } catch (err) {
       console.warn(`[validate] ${p.slug}: ${(err as Error).message}`);

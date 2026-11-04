@@ -11,12 +11,15 @@ import { reportGap, sparql, validateData } from './services/agents.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
-import { userForAgentToken } from './services/users.js';
+import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
 
 /**
  * MCP connector for coding agents (Claude Code, Codex, Cursor…).
  *
- *   claude mcp add --transport http concord https://<host>/mcp --header "Authorization: Bearer cnc_…"
+ *   claude mcp add --transport http concord https://<host>/mcp
+ *
+ * The client signs the person in with OAuth (see oauth.ts); a personal token
+ * in an Authorization header also works for headless agents.
  *
  * Agents can read ontologies in any format (including LinkML), query them,
  * check their data, and report missing or ill-fitting concepts. Reports are
@@ -71,11 +74,11 @@ function buildServer(user: User, agentName: string) {
     'get_ontology',
     {
       title: 'Get ontology source',
-      description: `Get an ontology in a given format. Formats: ${Object.keys(FORMAT_INFO).join(', ')}. LinkML is useful for generating code (pydantic, TypeScript, JSON Schema).`,
+      description: `Get an ontology in a given format. Formats: ${Object.keys(FORMAT_INFO).join(', ')}. LinkML is useful for generating code (pydantic, TypeScript, JSON Schema); typescript and javascript are ready-made @rdfjs/wrapper classes for every SHACL shape (also importable from the public URL, e.g. /def/<slug>/<version>.js); shaclc is the readable form of the SHACL shapes.`,
       inputSchema: { ontology: ontologyArg, format: z.enum(Object.keys(FORMAT_INFO) as [OutputFormat, ...OutputFormat[]]).default('turtle'), version: z.string().optional().describe('Released version such as 1.2.0; default is the working draft') },
       annotations: { readOnlyHint: true },
     },
-    ({ ontology, format, version }) => withProject(ontology, async (p) => text(await serialize(await ontologyStore.at(p, version), format))),
+    ({ ontology, format, version }) => withProject(ontology, async (p) => text(await serialize(await ontologyStore.at(p, version), format, { name: p.slug }))),
   );
 
   server.registerTool(
@@ -140,6 +143,8 @@ function buildServer(user: User, agentName: string) {
         details: z.string().describe('What you need and why'),
         context: z.string().optional().describe('Code, schema or sample data that shows the problem'),
       },
+      // Adds a report (and maybe a change request) for maintainers to review; never edits the ontology directly.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) =>
       withProject(args.ontology, async (p) => {
@@ -160,6 +165,8 @@ function buildServer(user: User, agentName: string) {
       title: 'Propose a change',
       description: 'Propose a specific change to the ontology in plain language ("add a datatype property expensesReimbursed on VolunteeringOpportunity"). It is drafted into structured edits, classified as patch/minor/major, validated and opened for review under the ontology\'s governance policy.',
       inputSchema: { ontology: ontologyArg, title: z.string(), description: z.string() },
+      // Opens a change request for review under the ontology's governance; nothing changes until it is approved.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     ({ ontology, title, description }) =>
       withProject(ontology, async (p) => {
@@ -201,17 +208,23 @@ function summariseCR(id: string, p: OntologyProject) {
 }
 
 export async function mcpHandler(req: Request, res: Response) {
-  const auth = req.header('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
-  const who = auth ? userForAgentToken(auth) : undefined;
-  if (!who) {
-    res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Missing or invalid token. Create one under Settings → Agent access.' }, id: null });
+  const origin = publicOrigin(req);
+  if (!origin) return refuseUnknownOrigin(res);
+  const who = await authenticateMcp(req);
+  if (who.error) {
+    // Per the MCP authorization spec: point the client at our Protected Resource Metadata so it can start the OAuth flow.
+    const challenge = `Bearer resource_metadata="${resourceMetadataUrlFor(origin)}"${who.error === 'invalid' ? ', error="invalid_token", error_description="The access token is invalid or expired"' : ''}`;
+    res
+      .status(401)
+      .set('WWW-Authenticate', challenge)
+      .json({ jsonrpc: '2.0', error: { code: -32001, message: `Sign in to connect: your MCP client should open a browser window. Setup help: ${origin}/connect` }, id: null });
     return;
   }
   if (req.method !== 'POST') {
     res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
     return;
   }
-  const agentName = req.header('x-agent-name') ?? (req.body?.params?.clientInfo?.name as string | undefined) ?? who.tokenName;
+  const agentName = req.header('x-agent-name') ?? (req.body?.params?.clientInfo?.name as string | undefined) ?? who.agentName;
   const server = buildServer(who.user, agentName);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on('close', () => {
