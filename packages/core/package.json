@@ -11,13 +11,20 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@rdfjs/wrapper": "0.34.0",
+    "@theodi/shacl-converter": "1.0.5",
+    "esbuild": "0.28.2",
     "jsonld": "^9.0.0",
     "n3": "^2.13.12",
     "oxigraph": "^0.5.11",
     "rdfxml-streaming-parser": "^3.3.0",
+    "shaclc-parse": "2.0.0",
+    "shaclc-write": "1.6.3",
     "yaml": "^2.9.1"
   },
   "devDependencies": {
+    "@rdfjs/types": "^2",
+    "@sparq-org/sparq": "0.1.5",
     "@types/jsonld": "^1.5.15",
     "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",
