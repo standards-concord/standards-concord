@@ -47,14 +47,16 @@ export function findByProvider(provider: AuthProvider, subject: string): User | 
 }
 
 /**
- * Find or create the account for a Google or GitHub identity. `linkTo` is a demo
- * tester account the person was already using: when the identity is new, it is
- * attached to that account, so what they saved to its pod stays theirs.
+ * Find or create the account for a Google or GitHub identity. Sign-in is by
+ * provider and subject only: matching on email would let a new identity that
+ * merely shares an address take over an existing account.
+ *
+ * `linkTo` is the demo tester account the same browser was using (the caller has
+ * checked the OAuth state, so the browser started this sign-in). When the
+ * identity is new it is attached to that account, so what they saved stays theirs.
  */
 export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }, linkTo?: User) {
-  const existing =
-    findByProvider(p.provider, p.subject) ??
-    (p.email ? list<User>('users').find((u) => !u.simulated && u.email && u.email.toLowerCase() === p.email!.toLowerCase()) : undefined);
+  const existing = findByProvider(p.provider, p.subject);
   if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
     const linked = get<User>('users', linkTo.id);
     if (linked) {

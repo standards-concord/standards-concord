@@ -3,8 +3,8 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
-import { createSession, sessionUser, upsertFederatedUser } from './services/users.js';
-import { clearTesterCookie, testerFor } from './services/alpha.js';
+import { createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
+import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -20,7 +20,8 @@ declare global {
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
   const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
   // ADMIN_EMAILS makes people who sign in with Google or GitHub administrators of the deployment.
-  req.user = user?.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
+  const federated = user?.providers.some((p) => p.provider === 'google' || p.provider === 'github');
+  req.user = user && federated && !user.simulated && user.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
   next();
 }
 
@@ -46,7 +47,45 @@ const github = () =>
 
 export const providers = () => ({ google: !!google(), github: !!github(), demo: config.demoMode });
 
-const tmpCookie = { httpOnly: true, sameSite: 'lax' as const, maxAge: 10 * 60 * 1000, path: '/' };
+const tmpCookie = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: config.publicUrl.startsWith('https://'), maxAge: 10 * 60 * 1000, path: '/' });
+const OAUTH_COOKIES = ['oauth_state', 'oauth_verifier', 'oauth_return'];
+
+/**
+ * The callback must carry the state this browser was given when it started
+ * signing in. Both must be present: a missing query state and a missing cookie
+ * would otherwise compare equal. The state is single-use.
+ */
+function checkState(req: Request, res: Response) {
+  const { code, state } = req.query as Record<string, unknown>;
+  const expected = req.cookies?.oauth_state;
+  const ok = typeof code === 'string' && code && typeof state === 'string' && state && typeof expected === 'string' && expected && state === expected;
+  const returnTo = safeReturn(req.cookies?.oauth_return);
+  const verifier = req.cookies?.oauth_verifier as string | undefined;
+  for (const c of OAUTH_COOKIES) res.clearCookie(c, { path: '/' });
+  if (!ok) throw new HttpError(400, 'Sign-in failed: invalid state. Please try again.');
+  return { code: code as string, returnTo, verifier };
+}
+
+/** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
+function signInAs(req: Request, res: Response, userId: string) {
+  destroySession(req.cookies?.[SESSION_COOKIE]);
+  setSessionCookie(res, userId);
+}
+
+/**
+ * Sign in with a provider identity. An alpha tester using a demo account in
+ * this browser keeps their testing record: a new identity is attached to the
+ * demo account, and an existing account takes over the demo account's record.
+ */
+async function federatedSignIn(req: Request, res: Response, identity: Parameters<typeof upsertFederatedUser>[0]) {
+  const tester = testerFor(req);
+  const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
+  const user = await upsertFederatedUser(identity, demoTester);
+  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user).catch((err) => console.warn(`[alpha] could not move testing record: ${(err as Error).message}`));
+  clearTesterCookie(req, res);
+  signInAs(req, res, user.id);
+  return user;
+}
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/');
 
 /**
@@ -60,20 +99,21 @@ export function mountAuth(router: Router) {
     const state = arctic.generateState();
     const verifier = arctic.generateCodeVerifier();
     const url = g.createAuthorizationURL(state, verifier, ['openid', 'profile', 'email']);
-    res.cookie('oauth_state', state, tmpCookie).cookie('oauth_verifier', verifier, tmpCookie).cookie('oauth_return', safeReturn(req.query.returnTo), tmpCookie);
+    res.cookie('oauth_state', state, tmpCookie()).cookie('oauth_verifier', verifier, tmpCookie()).cookie('oauth_return', safeReturn(req.query.returnTo), tmpCookie());
     res.redirect(url.toString());
   });
 
   router.get('/auth/google/callback', async (req, res) => {
     const g = google();
-    const { code, state } = req.query as Record<string, string>;
-    if (!g || !code || state !== req.cookies.oauth_state) throw new HttpError(400, 'Sign-in failed: invalid state. Please try again.');
-    const tokens = await g.validateAuthorizationCode(code, req.cookies.oauth_verifier);
-    const claims = arctic.decodeIdToken(tokens.idToken()) as { sub: string; name?: string; email?: string; picture?: string };
-    const user = await upsertFederatedUser({ provider: 'google', subject: claims.sub, name: claims.name ?? claims.email ?? 'Google user', email: claims.email, avatarUrl: claims.picture }, testerFor(req));
-    setSessionCookie(res, user.id);
-    clearTesterCookie(req, res);
-    res.redirect(`${config.webUrl}${safeReturn(req.cookies.oauth_return)}`);
+    if (!g) throw new HttpError(404, 'Google sign-in is not configured on this server');
+    const { code, returnTo, verifier } = checkState(req, res);
+    if (!verifier) throw new HttpError(400, 'Sign-in failed: invalid state. Please try again.');
+    const tokens = await g.validateAuthorizationCode(code, verifier);
+    const claims = arctic.decodeIdToken(tokens.idToken()) as { sub: string; name?: string; email?: string; email_verified?: boolean; picture?: string };
+    // Only a verified address counts (ADMIN_EMAILS matches on it).
+    const email = claims.email_verified === true ? claims.email : undefined;
+    await federatedSignIn(req, res, { provider: 'google', subject: claims.sub, name: claims.name ?? email ?? 'Google user', email, avatarUrl: claims.picture });
+    res.redirect(`${config.webUrl}${returnTo}`);
   });
 
   router.get('/auth/github', (req, res) => {
@@ -81,25 +121,21 @@ export function mountAuth(router: Router) {
     if (!g) throw new HttpError(404, 'GitHub sign-in is not configured on this server');
     const state = arctic.generateState();
     const url = g.createAuthorizationURL(state, ['read:user', 'user:email']);
-    res.cookie('oauth_state', state, tmpCookie).cookie('oauth_return', safeReturn(req.query.returnTo), tmpCookie);
+    res.cookie('oauth_state', state, tmpCookie()).cookie('oauth_return', safeReturn(req.query.returnTo), tmpCookie());
     res.redirect(url.toString());
   });
 
   router.get('/auth/github/callback', async (req, res) => {
     const g = github();
-    const { code, state } = req.query as Record<string, string>;
-    if (!g || !code || state !== req.cookies.oauth_state) throw new HttpError(400, 'Sign-in failed: invalid state. Please try again.');
+    if (!g) throw new HttpError(404, 'GitHub sign-in is not configured on this server');
+    const { code, returnTo } = checkState(req, res);
     const tokens = await g.validateAuthorizationCode(code);
     const headers = { Authorization: `Bearer ${tokens.accessToken()}`, 'User-Agent': 'concord' };
-    const gh = (await (await fetch('https://api.github.com/user', { headers })).json()) as { id: number; login: string; name?: string; email?: string; avatar_url?: string };
-    let email = gh.email;
-    if (!email) {
-      const emails = (await (await fetch('https://api.github.com/user/emails', { headers })).json().catch(() => [])) as { email: string; primary: boolean; verified: boolean }[];
-      email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
-    }
-    const user = await upsertFederatedUser({ provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url }, testerFor(req));
-    setSessionCookie(res, user.id);
-    clearTesterCookie(req, res);
-    res.redirect(`${config.webUrl}${safeReturn(req.cookies.oauth_return)}`);
+    const gh = (await (await fetch('https://api.github.com/user', { headers })).json()) as { id: number; login: string; name?: string; avatar_url?: string };
+    // The primary, verified address (the public profile email is not checked here).
+    const emails = (await (await fetch('https://api.github.com/user/emails', { headers })).json().catch(() => [])) as { email: string; primary: boolean; verified: boolean }[];
+    const email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
+    await federatedSignIn(req, res, { provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
+    res.redirect(`${config.webUrl}${returnTo}`);
   });
 }

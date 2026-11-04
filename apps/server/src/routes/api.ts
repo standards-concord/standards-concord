@@ -551,9 +551,10 @@ export function apiRouter(): Router {
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
   });
   const feedbackAdmin = (req: Request) => {
+    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
-    const odi = list<import('@concord/shared').Membership>('memberships').some((m) => m.userId === user.id && (m.roles.includes('odi') || m.roles.includes('owner')));
-    if (!user.isPlatformAdmin && !odi) throw new HttpError(403, 'Only ODI staff and ontology owners can read feedback');
+    if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');
   };
   r.get('/feedback', (req, res) => {
     feedbackAdmin(req);
