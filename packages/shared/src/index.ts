@@ -471,6 +471,8 @@ export interface ChangeRequest {
   number: number; // per-ontology sequence, shown as #12
   /** Record version: every save advances it, and a save only goes through if it hasn't moved since the request was read. */
   rev?: number;
+  /** Set while a merge holds the request (until: epoch ms): no other save goes through until it finishes or runs out. */
+  merging?: { until: number };
   ontologyId: string;
   title: string;
   description: string;
@@ -543,7 +545,7 @@ export interface OntologyFork {
   seq?: number;
   /** The revision last proposed upstream; edits after it are not in the change request yet. */
   proposedRevision?: number;
-  /** 2 once generated provenance on the fork is recorded as dcterms:provenance (migrateForkProvenance). */
+  /** 2: generated provenance on the fork is recorded as dcterms:provenance. Forks without it (none were ever deployed) can't be changed. */
   provenanceFormat?: 2;
   /** Set while a proposal is being made (until: epoch ms), so no other change starts until it has finished or the lease has run out. */
   proposing?: { until: number };

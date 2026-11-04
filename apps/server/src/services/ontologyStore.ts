@@ -103,6 +103,37 @@ export const ontologyStore = {
     return this.head(project);
   },
 
+  /**
+   * Commit a new working draft on top of `expectedHead`, only if the draft is
+   * still there (a compare-and-swap on the branch ref, atomic across
+   * processes). On a 409 nothing is written.
+   */
+  async commitWorkingIf(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor, expectedHead: string): Promise<string> {
+    const dir = repoDir(project);
+    const turtle = await graph.toTurtle();
+    const index = path.join(dir, '.git', `concord-merge-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
+    try {
+      const env = { GIT_INDEX_FILE: index };
+      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, turtle);
+      git(dir, ['read-tree', expectedHead], env);
+      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], env);
+      const tree = git(dir, ['write-tree'], env);
+      const commit = git(dir, ['commit-tree', tree, '-p', expectedHead, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
+      const ref = git(dir, ['symbolic-ref', 'HEAD']);
+      try {
+        git(dir, ['update-ref', ref, commit, expectedHead]);
+      } catch {
+        throw new HttpError(409, 'The working draft changed while this was being merged. Nothing was merged; try again.');
+      }
+      // Bring the checkout up to the new commit (synchronously, so nothing in this process sees them disagree).
+      fs.writeFileSync(path.join(dir, FILE), turtle);
+      git(dir, ['add', FILE]);
+      return commit;
+    } finally {
+      fs.rmSync(index, { force: true });
+    }
+  },
+
   async writeRelease(
     project: OntologyProject,
     version: string,

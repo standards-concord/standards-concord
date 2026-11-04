@@ -72,7 +72,7 @@ const fail = (msg: string): never => {
  */
 const ENGINE_RECORDED = new Set([P.provenance, P.created, P.contributor, NS.dcterms + 'modified']);
 const notRecorded = (pred: string) => {
-  if (ENGINE_RECORDED.has(pred)) fail(`<${pred}> is recorded by Concord when a term changes and can't be set by an edit; use dcterms:source or a note for provenance you want to state`);
+  if (ENGINE_RECORDED.has(pred)) fail(`<${pred}> is recorded by Concord when a term changes and can't be changed by an edit; use dcterms:source or a note for provenance you want to state`);
   return pred;
 };
 
@@ -89,6 +89,11 @@ const ANNOTATION_FIELDS: Record<keyof Omit<TermAnnotations, 'mappings'>, string>
 function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: string[], touched: Set<string>): void {
   const s = g.store;
   const ex = (i: IRI) => expandIRI(i, g.prefixes);
+  // No edit may add, change, rename, deprecate or remove the recorded provenance properties
+  // themselves (removing dcterms:provenance as a term would erase every record).
+  if ('iri' in op && typeof op.iri === 'string') notRecorded(ex(op.iri));
+  // (The ontology header's created, contributors and modified are ordinary metadata people edit:
+  // forks compare them field by field, and refuse only the fields they stamp themselves.)
   const known = (iri: IRI) => g.isDeclared(iri) || isWellKnown(iri) || isBuiltinDatatype(iri) || inImports(g, iri);
   const requireKnown = (iri: IRI, what: string) => {
     if (!known(iri)) fail(`unknown ${what} <${iri}>: declare it first (or use a well-known vocabulary term)`);
@@ -391,28 +396,6 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
 
 function inImports(g: OntologyGraph, iri: string): boolean {
   return g.metadata().imports.some((imp) => iri.startsWith(imp));
-}
-
-/**
- * Turn dcterms:source statements that recorded provenance (written before it
- * had its own property) into dcterms:provenance: for each {iri, value}, a
- * dcterms:source of exactly that value on that term moves. Returns a new
- * graph, and how many statements moved.
- */
-export function recordAsProvenance(graph: OntologyGraph, statements: { iri: string; value: string }[]): { graph: OntologyGraph; moved: number } {
-  const g = graph.clone();
-  const s = g.store;
-  let moved = 0;
-  for (const { iri, value } of statements) {
-    for (const o of objects(s, iri, P.source)) {
-      if (o.value !== value) continue;
-      s.removeQuad(nn(iri), nn(P.source), o as any, defaultGraph());
-      s.addQuad(nn(iri), nn(P.provenance), literal(value), defaultGraph());
-      moved++;
-    }
-  }
-  if (moved) declareAnnotationProperties(s, [P.provenance]);
-  return { graph: g, moved };
 }
 
 export function isDatatype(g: OntologyGraph, iri: string): boolean {

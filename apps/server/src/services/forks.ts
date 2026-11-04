@@ -1,4 +1,4 @@
-import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, recordAsProvenance, termDescription, validate, type OntologyGraph } from '@concord/core';
+import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, setMetadata, termDescription, validate, type OntologyGraph } from '@concord/core';
 import type { ChangeOp, OutputFormat, ValidationReport } from '@concord/core/types';
 import type {
   ChangeRequest,
@@ -195,19 +195,16 @@ const releaseVersionIRI = (p: OntologyProject, version: string) => `${p.ontology
 
 export const forkVersion = (f: Pick<OntologyFork, 'baseVersion' | 'slug' | 'revision'>) => `${f.baseVersion}-fork.${f.slug}.${f.revision}`;
 
-/** The fork document's own version metadata, so tools can tell it apart from a release. */
+/** The fork document's own version metadata, so tools can tell it apart from a release. (Not an edit: `modified` is refused in edits.) */
 function stamp(graph: OntologyGraph, p: OntologyProject, f: OntologyFork): OntologyGraph {
-  return applyChangeOps(graph, [
-    {
-      op: 'setMetadata',
-      set: {
-        versionIRI: forkUrls(p, f).iri,
-        versionInfo: forkVersion(f),
-        ...(f.baseVersion !== '0.0.0' ? { priorVersion: releaseVersionIRI(p, f.baseVersion) } : {}),
-        modified: clock.iso().slice(0, 10),
-      },
-    },
-  ]).graph;
+  const g = graph.clone();
+  setMetadata(g, {
+    versionIRI: forkUrls(p, f).iri,
+    versionInfo: forkVersion(f),
+    ...(f.baseVersion !== '0.0.0' ? { priorVersion: releaseVersionIRI(p, f.baseVersion) } : {}),
+    modified: clock.iso().slice(0, 10),
+  });
+  return g;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -466,6 +463,10 @@ function requireOwner(f: OntologyFork, user: User | undefined, action: string): 
 
 function requireOpen(f: OntologyFork) {
   if (f.status === 'closed') throw new HttpError(409, 'This fork is closed. It still resolves, but it no longer changes.');
+  // Forks record generated provenance as dcterms:provenance (format 2). Earlier ones mixed it into
+  // dcterms:source, which can't be told apart from sources people asked for, so they aren't converted.
+  if (f.provenanceFormat !== 2)
+    throw new HttpError(409, 'This fork was made by an earlier version of Concord and can no longer be changed. It still resolves; create a new fork, redo its changes there, and close this one.');
 }
 
 function uniqueForkSlug(ontologyId: string, base: string) {
@@ -826,47 +827,6 @@ function toKey(t: string, prefixes: Record<string, string>) {
   if (s.startsWith('meta:')) return s;
   return expand(s, prefixes);
 }
-
-/**
- * Forks made before generated provenance had its own property carry it as
- * dcterms:source "<ontology> fork <fork>" on the terms their edits created,
- * which comparisons now treat as a requested annotation (so every sync would
- * conflict). Move those to dcterms:provenance, keeping any value an edit asked
- * for explicitly, and mark the fork migrated. Runs at startup, and again later
- * for a fork that was busy (a proposal's lease); safe to repeat.
- */
-export async function migrateForkProvenance(): Promise<{ migrated: number; deferred: number }> {
-  let migrated = 0;
-  let deferred = 0;
-  for (const fork of list<OntologyFork>('forks')) {
-    if (fork.provenanceFormat === 2) continue;
-    const p = get<OntologyProject>('ontologies', fork.ontologyId);
-    if (!p) continue;
-    try {
-      await locked(fork.id, async (f, from) => {
-        if (f.provenanceFormat === 2) return;
-        const tag = `${p.slug} fork ${f.slug}`;
-        const graph = await ontologyStore.forkGraph(p, f.slug);
-        const statements = f.ops
-          .filter((op) => CREATES.has(op.op) && !((op as { source?: string[] }).source ?? []).includes(tag))
-          .map((op) => ({ iri: graph.namespace + (op as { localName: string }).localName, value: tag }));
-        const { graph: next, moved } = recordAsProvenance(graph, statements);
-        f.provenanceFormat = 2;
-        const head = f.head;
-        if (moved) await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, next, 'Record generated provenance as dcterms:provenance', { name: 'Concord', email: 'concord@localhost' }, { expectedParent: head }));
-        else save(f, from);
-        migrated++;
-      });
-    } catch (err) {
-      deferred++;
-      console.warn(`[forks] provenance migration of ${fork.slug} deferred: ${(err as Error).message}`);
-    }
-  }
-  return { migrated, deferred };
-}
-
-/** Edits that create a term, which is where the engine records provenance. */
-const CREATES = new Set<ChangeOp['op']>(['addClass', 'addObjectProperty', 'addDatatypeProperty', 'addIndividual']);
 
 export async function closeFork(fork: OntologyFork, user: User | undefined) {
   requireOwner(fork, user, 'close it');

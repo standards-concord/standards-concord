@@ -6,9 +6,9 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { createChangeRequest, getCR, updateOps } from '../src/services/changeRequests.js';
+import { createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from '../src/services/changeRequests.js';
 import { getUser } from '../src/services/users.js';
-import { forkDetail, forkSummary, forTests, migrateForkProvenance } from '../src/services/forks.js';
+import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -716,35 +716,140 @@ describe('sixth review', () => {
     await expect(withFence(fence, () => updateOps(getCR(crId), owner, { title: 'From a stalled proposal' }))).rejects.toThrow(/lost its hold/);
     expect(getCR(crId).title).not.toBe('From a stalled proposal');
   });
+});
 
-  it('forks from before dcterms:provenance are migrated, keeping requested sources', async () => {
-    const p = findProject('volunteering')!;
-    const path = await newFork('Legacy provenance');
-    const slug = path.split('/').at(-1)!;
-    const tag = `volunteering fork ${slug}`;
-    await dev.post(`${path}/edits`).send({ ops: [addClass('LegacyStamped', 'legacy stamped'), addClass('LegacyAsked', 'legacy asked', { source: [tag] })] });
-    // Rewrite the fork as the earlier format wrote it: the generated record as a dcterms:source.
-    const f = await record(path);
-    const g = (await ontologyStore.forkGraph(p, slug)).clone();
-    const DCT = 'http://purl.org/dc/terms/';
-    for (const q of g.store.getQuads(null, DCT + 'provenance', null, null)) {
-      g.store.removeQuad(q);
-      if (q.subject.value === `${VOL}LegacyStamped`) g.store.addQuad(q.subject, { termType: 'NamedNode', value: DCT + 'source' } as never, q.object);
+describe('seventh review', () => {
+  const fork = async (path: string) => (await reader.get(path)).body;
+  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
+  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+    const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
+    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    return next;
+  };
+  /** Runs `during` once, the first time a read of the working draft happens while `when` holds. */
+  async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
+    const original = ontologyStore.working;
+    let done = false;
+    ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      if (!done && when()) {
+        done = true;
+        await during();
+      }
+      return original.apply(this, args);
+    };
+    try {
+      return await fn();
+    } finally {
+      ontologyStore.working = original;
     }
-    const head = await ontologyStore.commitFork(p, slug, g, 'Old format', { name: 'Old', email: 'old@example.org' }, { expectedParent: f.head });
-    const legacy = elsewhere(f, { head, provenanceFormat: undefined });
-    await upstream([addClass('UnrelatedToLegacy', 'unrelated to legacy')]);
-    expect((await dev.post(`${path}/sync`)).body.synced).toBe(false);
+  }
+  const proposeFrom = async (name: string, localName: string) => {
+    const path = await newFork(name);
+    await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
+    const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
+    return { path, crId };
+  };
+  const approve = (id: string) => {
+    const c = getCR(id);
+    c.status = 'approved';
+    saveChangeRequest(c);
+  };
 
-    const { migrated } = await migrateForkProvenance();
-    expect(migrated).toBeGreaterThanOrEqual(1);
-    const after = await ontologyStore.forkGraph(p, slug);
-    expect(after.term(`${VOL}LegacyStamped`)!.source ?? []).toEqual([]);
-    expect(after.term(`${VOL}LegacyAsked`)!.source).toEqual([tag]);
-    expect(get<OntologyFork>('forks', legacy.id)!.provenanceFormat).toBe(2);
-    const sync = (await dev.post(`${path}/sync`)).body;
-    expect(sync.conflicts).toEqual([]);
-    expect(sync.synced).toBe(true);
-    expect((await migrateForkProvenance()).migrated).toBe(0);
+  it('a proposal that loses its lease mid-way writes nothing (the production fence)', async () => {
+    const path = await newFork('Lease lost mid-way');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('LeaseLost', 'lease lost')] });
+    const f = await record(path);
+    const res = await interleave(
+      () => !!get<OntologyFork>('forks', f.id)?.proposing,
+      () => {
+        // The lease runs out and another process changes the fork.
+        elsewhere(get<OntologyFork>('forks', f.id)!, { proposing: undefined });
+      },
+      () => dev.post(`${path}/propose`).send({}),
+    );
+    expect(res.status).toBe(409);
+    const p = findProject('volunteering')!;
+    expect(list<{ origin: { forkId?: string } }>('changeRequests', p.id).filter((cr) => cr.origin.forkId === f.id)).toEqual([]);
+  });
+
+  it('a merge from an out-of-date copy of a request changes nothing', async () => {
+    const p = findProject('volunteering')!;
+    const { crId } = await proposeFrom('Stale merge', 'StaleMerge');
+    approve(crId);
+    const stale = getCR(crId);
+    // Someone saves an edit to the request after the merge read it.
+    const edited = getCR(crId);
+    edited.title = 'Edited before the merge finished';
+    saveChangeRequest(edited);
+    const head = ontologyStore.head(p);
+    await expect(merge(stale, undefined)).rejects.toThrow(/changed by someone else/);
+    expect(ontologyStore.head(p)).toBe(head);
+    expect((await ontologyStore.working(p)).term(`${VOL}StaleMerge`)).toBeUndefined();
+    expect(getCR(crId).status).toBe('approved');
+  });
+
+  it('while a merge holds a request, other saves are refused, and the merge records exactly what it committed', async () => {
+    const p = findProject('volunteering')!;
+    const { crId } = await proposeFrom('Held merge', 'HeldMerge');
+    approve(crId);
+    const owner = getUser(getCR(crId).authorId)!;
+    let refused: unknown;
+    const merged = await interleave(
+      () => !!getCR(crId).merging,
+      async () => {
+        refused = await updateOps(getCR(crId), owner, { ops: [addClass('Replacement', 'replacement')] }).catch((e: Error) => e);
+      },
+      () => merge(getCR(crId), undefined),
+    );
+    expect(String(refused)).toMatch(/being merged/);
+    expect(merged.status).toBe('merged');
+    expect(getCR(crId).merging).toBeUndefined();
+    expect(JSON.stringify(getCR(crId).ops)).toMatch(/HeldMerge/);
+    expect((await ontologyStore.working(p)).term(`${VOL}HeldMerge`)).toBeDefined();
+    expect((await ontologyStore.working(p)).term(`${VOL}Replacement`)).toBeUndefined();
+  });
+
+  it('a merge whose draft moved underneath it commits nothing and gives the request back', async () => {
+    const p = findProject('volunteering')!;
+    const { crId } = await proposeFrom('Draft moved', 'DraftMoved');
+    approve(crId);
+    await expect(
+      interleave(
+        () => !!getCR(crId).merging,
+        () => upstream([addClass('MovedUnderneath', 'moved underneath')]),
+        () => merge(getCR(crId), undefined),
+      ),
+    ).rejects.toThrow(/working draft changed/);
+    expect((await ontologyStore.working(p)).term(`${VOL}DraftMoved`)).toBeUndefined();
+    expect(getCR(crId).merging).toBeUndefined();
+    expect(getCR(crId).status).toBe('approved');
+  });
+
+  it.each([
+    ['removing dcterms:provenance', { op: 'removeTerm', iri: 'http://purl.org/dc/terms/provenance' }],
+    ['deprecating dcterms:contributor', { op: 'deprecate', iri: 'http://purl.org/dc/terms/contributor', reason: 'x' }],
+    ['annotating dcterms:created', { op: 'updateAnnotations', iri: 'http://purl.org/dc/terms/created', set: { comment: 'x' } }],
+  ])('edits cannot touch recorded provenance: %s', async (_, op) => {
+    const path = await newFork(`Guard ${_}`);
+    const res = await dev.post(`${path}/edits`).send({ ops: [op] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/recorded by Concord/);
+  });
+
+  it('header metadata is compared, and the header fields a fork stamps itself are refused', async () => {
+    const path = await newFork('Header fields');
+    expect((await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { modified: '2020-01-01' } }] })).status).toBe(400);
+    const res = await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { contributors: ['Fork Contributor'] } }] });
+    expect(res.status).toBe(200);
+    expect(res.body.fork.terms).toEqual([expect.objectContaining({ iri: 'meta:contributors', upstream: 'not-proposed' })]);
+  });
+
+  it('a fork from before dcterms:provenance is refused, not converted', async () => {
+    const path = await newFork('Legacy refused');
+    elsewhere(await record(path), { provenanceFormat: undefined });
+    const res = await dev.post(`${path}/edits`).send({ ops: [addClass('NotOnLegacy', 'not on legacy')] });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/earlier version of Concord/);
+    expect((await request(app).get(`/def/volunteering/forks/${path.split('/').at(-1)}.ttl`)).status).toBe(200);
   });
 });
