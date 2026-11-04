@@ -276,7 +276,7 @@ describe('review fixes', () => {
     expect(noHtml.headers['content-type']).not.toMatch(/html/);
     const app_ = await request(app).get('/def/volunteering').set('Accept', 'application/*');
     expect(app_.headers['content-type']).toMatch(/^application\//);
-    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle']) {
+    for (const accept of ['application/owl+xml', 'application/xhtml+xml', 'application/x-turtle', 'application/javascript', 'text/typescript']) {
       const res = await request(app).get('/def/volunteering').set('Accept', accept);
       expect(res.status, accept).toBe(406);
       expect(res.headers.vary, accept).toMatch(/Accept/);

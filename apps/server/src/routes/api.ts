@@ -209,7 +209,7 @@ export function apiRouter(): Router {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format);
+    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -543,9 +543,10 @@ export function apiRouter(): Router {
     );
   });
   const feedbackAdmin = (req: Request) => {
+    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
-    const odi = list<import('@concord/shared').Membership>('memberships').some((m) => m.userId === user.id && (m.roles.includes('odi') || m.roles.includes('owner')));
-    if (!user.isPlatformAdmin && !odi) throw new HttpError(403, 'Only ODI staff and ontology owners can read feedback');
+    if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');
   };
   r.get('/feedback', (req, res) => {
     feedbackAdmin(req);
