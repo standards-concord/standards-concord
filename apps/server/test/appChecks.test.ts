@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -10,7 +11,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeRequestDetail, ConnectedApp, PendingAppChecks } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { get as getDoc, insertOnce, openDb } from '../src/db.js';
-import { appForToken, report as reportResult } from '../src/services/appChecks.js';
+import { clock } from '../src/clock.js';
+import { config } from '../src/config.js';
+import { appForToken, byToken, pending as startRun, report as reportResult, touchSeen } from '../src/services/appChecks.js';
 import { getCR, merge, saveCR } from '../src/services/changeRequests.js';
 import { getProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
@@ -97,8 +100,8 @@ const repoIdOf = (repository: string) => [...repository].reduce((h, c) => (h * 3
 const oidcFor = (appId: string, repository: string, sha: string) => mintOidc({ aud: `concord-app-check:${appId}`, repository, sha });
 /** Apps the tests connected with a repository, by token, so their CI runs come with GitHub's proof. */
 const repos = new Map<string, { appId: string; repo: string }>();
-/** The run key each verified run's draft result was answered with, by token and attempt. */
-const runKeys = new Map<string, string>();
+/** The change keys each verified run's draft result was answered with, by token and attempt. */
+const runKeys = new Map<string, Record<string, string>>();
 
 const report = async (token: string, body: Record<string, unknown>) => {
   const known = repos.get(token);
@@ -111,11 +114,11 @@ const report = async (token: string, body: Record<string, unknown>) => {
       ? !('oidc' in body) && known && typeof body.commit === 'string'
         ? { oidc: oidcFor(known.appId, known.repo, body.commit) }
         : {}
-      : !('runKey' in body) && runKeys.has(key)
-        ? { runKey: runKeys.get(key) }
+      : !('runKey' in body) && runKeys.get(key)?.[body.target as string]
+        ? { runKey: runKeys.get(key)![body.target as string] }
         : {};
   const res = await request(app).post('/api/app-checks').set('Authorization', `Bearer ${token}`).send({ ...body, ...extra });
-  if (body.target === 'baseline' && res.body?.runKey) runKeys.set(key, res.body.runKey);
+  if (body.target === 'baseline' && res.body?.runKeys) runKeys.set(key, res.body.runKeys);
   return res;
 };
 
@@ -743,7 +746,7 @@ describe('autopilot', () => {
     // The same report retried with the same proof is fine (and gets a fresh run key); another run can't use it.
     const retried = await report(a.token!, first);
     expect(retried.body).toMatchObject({ replay: true, verified: true });
-    expect(retried.body.runKey).toMatch(/^crk_/);
+    expect(Object.values(retried.body.runKeys as Record<string, string>).every((k) => k.startsWith('crk_'))).toBe(true);
     await bad(once, /already used/);
     // Its use is on record in the database, so no other server process accepts it either.
     const jti = JSON.parse(Buffer.from(once.split('.')[1], 'base64url').toString()).jti;
@@ -781,12 +784,23 @@ describe('autopilot', () => {
     const real = await pending(a.token!, true, 'xia-v1');
     const answer = await report(a.token!, { target: 'baseline', revision: real.baseline.revision, attempt: real.attempt, outcome: 'passed', commit: 'xia-v1' });
     expect(answer.body.verified).toBe(true);
-    expect(answer.body.runKey).toMatch(/^crk_/);
+    expect(answer.body.runKeys[crId2]).toMatch(/^crk_/);
     const revision2 = real.targets.find((t) => t.changeRequestId === crId2)!.revision;
     const forged = await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed', runKey: undefined });
     expect(forged.body.autopilot.action).toBe('none');
     expect((await detail(crId2)).appChecks!.find((c) => c.appId === a.id)).toMatchObject({ verified: false });
     expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed', runKey: 'crk_guess' })).status).toBe(401);
+    // Each key works for its own change only, and only for a few hours.
+    const otherKey = Object.entries(answer.body.runKeys as Record<string, string>).find(([id]) => id !== crId2)![1];
+    expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed', runKey: otherKey })).status).toBe(401);
+    clock.advance(7 * 3600_000);
+    try {
+      const expired = await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed' });
+      expect(expired.status).toBe(401);
+      expect(expired.body.error).toMatch(/expired/);
+    } finally {
+      clock.advance(-7 * 3600_000);
+    }
     // The verified run's own result replaces the forged one.
     expect((await report(a.token!, { target: crId2, revision: revision2, attempt: real.attempt, outcome: 'passed' })).body.autopilot.action).toBe('approved');
   });
@@ -850,6 +864,53 @@ describe('autopilot', () => {
       const apps = (await gus.get(`/api/ontologies/${demoId}/apps`)).body as ConnectedApp[];
       expect(apps.find((x) => x.id === a.id)!.baseline).toMatchObject({ outcome: 'failed', attempt: newer.attempt });
     });
+  });
+
+  describe('writes from another request or process', () => {
+    it('noting when an app was last seen never writes an old copy of it back', async () => {
+      const hal = await login('reviewer', 'Reviewer Hal');
+      const a = await connect(hal, 'Hal’s app');
+      // A request reads the app by its token; meanwhile its owner replaces the token.
+      const seen = appForToken(`Bearer ${a.token}`);
+      const rotated = (await hal.post(`/api/apps/${a.id}/token`)).body as ConnectedApp;
+      touchSeen(seen);
+      expect((await request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${a.token}`)).status).toBe(401);
+      expect((await request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${rotated.token}`)).status).toBe(200);
+      // Or removes the app: it stays removed.
+      const again = appForToken(`Bearer ${rotated.token}`);
+      expect((await hal.delete(`/api/apps/${a.id}`)).status).toBe(204);
+      touchSeen(again);
+      expect(getDoc('apps', a.id)).toBeUndefined();
+    });
+
+    it('starting a run re-reads the app, so a replaced token can’t start one', async () => {
+      const ivy = await login('reviewer', 'Reviewer Ivy');
+      const a = await connect(ivy, 'Ivy’s app');
+      const seen = appForToken(`Bearer ${a.token}`);
+      await ivy.post(`/api/apps/${a.id}/token`);
+      expect(() => startRun(seen, true, undefined, byToken(seen))).toThrow(/replaced/);
+    });
+
+    it('a report that fails to save leaves GitHub’s proof unused, so the retry works', async () => {
+      const jan = await login('reviewer', 'Reviewer Jan');
+      const a = await connect(jan, 'Jan’s app', undefined, 'example/jan-app');
+      const p = await pending(a.token!, true, 'jan-v1');
+      const body = { target: 'baseline', revision: p.baseline.revision, attempt: p.attempt, outcome: 'passed', commit: 'jan-v1', oidc: oidcFor(a.id, 'example/jan-app', 'jan-v1') };
+      // Another process holds the database's write lock, so the report can't save.
+      const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
+      other.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE');
+      let failed;
+      try {
+        failed = await report(a.token!, body);
+      } finally {
+        other.exec('ROLLBACK');
+        other.close();
+      }
+      expect(failed.status).toBe(500);
+      const retried = await report(a.token!, body);
+      expect(retried.status, retried.text).toBe(200);
+      expect(retried.body.verified).toBe(true);
+    }, 180_000);
   });
 
   it('stops an app working once its owner leaves the ontology, and lets owners and stewards disconnect any app', async () => {
@@ -1004,7 +1065,7 @@ describe('autopilot', () => {
 
       // Start the merge, and before it can commit, the app's failure comes in.
       const merging = merge(getCR(crId), undefined);
-      const reporting = reportResult(appForToken(`Bearer ${token}`), { target: crId, revision, attempt: run.attempt, outcome: 'failed', runKey: runKeys.get(`${token}#${run.attempt}`) });
+      const reporting = reportResult(appForToken(`Bearer ${token}`), { target: crId, revision, attempt: run.attempt, outcome: 'failed', runKey: runKeys.get(`${token}#${run.attempt}`)![crId] });
       const merged = await merging;
       await reporting;
       expect(merged.status).toBe('review');

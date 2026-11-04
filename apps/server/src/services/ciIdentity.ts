@@ -58,9 +58,10 @@ export interface VerifiedRun {
   event: string;
   workflowRef: string;
   runId?: string;
-  /** Issuer and token id, as recorded when the token was used. */
+  /** Issuer, token id and expiry, as recorded when the token is used (see consumeRunProof). */
   iss: string;
   jti: string;
+  exp: number;
 }
 
 const num = (v: unknown, what: string, required: boolean) => {
@@ -71,11 +72,9 @@ const num = (v: unknown, what: string, required: boolean) => {
 
 /**
  * Check a GitHub Actions OIDC token for this audience; throws 400 with the reason if it doesn't
- * hold. Each token is used once: its (issuer, token id) is recorded in the database, which
- * refuses a second use in any process. `mayReuse` lets the same report be retried with the
- * same token (it is asked only about a token that was already used).
+ * hold. This only checks it: consumeRunProof uses it up, in the transaction that records the report.
  */
-export async function verifyGithubRun(token: unknown, audience: string, opts: { mayReuse?: (jti: string) => boolean } = {}): Promise<VerifiedRun> {
+export async function verifyGithubRun(token: unknown, audience: string): Promise<VerifiedRun> {
   if (typeof token !== 'string' || token.length > 8192) throw new HttpError(400, 'The run identity token is malformed');
   const [h, p, s, extra] = token.split('.');
   if (!h || !p || !s || extra !== undefined) throw new HttpError(400, 'The run identity token is malformed');
@@ -116,12 +115,19 @@ export async function verifyGithubRun(token: unknown, audience: string, opts: { 
   const jti = str('jti');
   if (!jti) throw new HttpError(400, 'The run identity token has no id');
 
-  // Used once: the database refuses a second insert of the same (issuer, id), in any process.
-  removeBelow('oidcTokens', 'exp', now - 120);
-  if (!insertOnce('oidcTokens', { id: `${iss}#${jti}`, iss, jti, exp }) && !opts.mayReuse?.(jti))
-    throw new HttpError(400, 'This run identity token was already used; each run asks GitHub for its own');
+  return { repository, repositoryId, sha, event, workflowRef, runId: claims.run_id === undefined ? undefined : String(claims.run_id), iss, jti, exp };
+}
 
-  return { repository, repositoryId, sha, event, workflowRef, runId: claims.run_id === undefined ? undefined : String(claims.run_id), iss, jti };
+/**
+ * Use a checked token up. Call it inside the transaction that records what the token proves, so
+ * the two are kept or lost together: the database refuses a second insert of the same (issuer,
+ * id), in any process, and a transaction that fails takes the insert back with it. `mayReuse`
+ * says this is the same report retried with the same token.
+ */
+export function consumeRunProof(proof: VerifiedRun, mayReuse: boolean) {
+  removeBelow('oidcTokens', 'exp', Date.now() / 1000 - 120);
+  if (!insertOnce('oidcTokens', { id: `${proof.iss}#${proof.jti}`, iss: proof.iss, jti: proof.jti, exp: proof.exp }) && !mayReuse)
+    throw new HttpError(400, 'This run identity token was already used; each run asks GitHub for its own');
 }
 
 /** The audience an app's CI asks GitHub for: tied to the one app, so the token proves a run for it. */

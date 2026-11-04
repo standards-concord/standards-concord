@@ -17,13 +17,13 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put, remove, transaction } from '../db.js';
+import { get, HttpError, list, mustGet, put, remove, setField, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { addReview, addVote, advance, getCR, governanceFor, listCRs, reviewsFor, saveCR, votesFor } from './changeRequests.js';
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { runAudience, verifyGithubRun, type VerifiedRun } from './ciIdentity.js';
+import { consumeRunProof, runAudience, verifyGithubRun, type VerifiedRun } from './ciIdentity.js';
 import { getUser, logActivity, publicUser } from './users.js';
 
 /**
@@ -53,8 +53,10 @@ interface AppDoc extends ConnectedApp {
       verified?: boolean;
       /** The GitHub token that proved the run, so a retry of the same report may bring it again. */
       jti?: string;
-      /** Hash of the key change results from this run present to count as verified. */
-      keyHash?: string;
+      /** Hashes of each change's key, which its result from this run presents to count as verified. */
+      keys?: Record<string, string>;
+      /** When those keys stop working. */
+      keysUntil?: string;
     };
     /** The run asked to test everything again (recheck). */
     all?: boolean;
@@ -70,6 +72,8 @@ interface AppDoc extends ConnectedApp {
 }
 
 const RUNS_KEPT = 20;
+/** How long a verified run's change keys work: as long as GitHub lets a job run. */
+const RUN_KEY_HOURS = 6;
 
 /**
  * Change request statuses the CI is asked to test. Approved changes are still tested until they
@@ -152,16 +156,20 @@ function manageApp(id: string, actor: User): AppDoc {
 }
 
 export async function updateApp(id: string, actor: User, patch: { name?: unknown; repo?: unknown; autopilot?: unknown }): Promise<ConnectedApp> {
-  const doc = ownApp(id, actor);
-  if (patch.name !== undefined) doc.name = cleanName(patch.name);
-  if (patch.repo !== undefined) {
-    const repo = cleanRepo(patch.repo);
-    if (repo?.toLowerCase() !== doc.repo?.toLowerCase()) doc.repoId = undefined;
-    doc.repo = repo;
-  }
-  const wasOn = doc.autopilot.enabled;
-  if (patch.autopilot !== undefined) doc.autopilot = cleanAutopilot(patch.autopilot, doc.autopilot);
-  saveApp(doc);
+  // Read, change and save in one transaction, so nothing written meanwhile (a new token, a result) is lost.
+  const { doc, wasOn } = transaction(() => {
+    const doc = ownApp(id, actor);
+    if (patch.name !== undefined) doc.name = cleanName(patch.name);
+    if (patch.repo !== undefined) {
+      const repo = cleanRepo(patch.repo);
+      if (repo?.toLowerCase() !== doc.repo?.toLowerCase()) doc.repoId = undefined;
+      doc.repo = repo;
+    }
+    const wasOn = doc.autopilot.enabled;
+    if (patch.autopilot !== undefined) doc.autopilot = cleanAutopilot(patch.autopilot, doc.autopilot);
+    saveApp(doc);
+    return { doc, wasOn };
+  });
   if (doc.autopilot.enabled !== wasOn)
     logActivity({ ontologyId: doc.ontologyId, actorId: doc.ownerId, type: 'app.autopilot', message: `turned autopilot ${doc.autopilot.enabled ? 'on' : 'off'} for ${doc.name}`, link: `/o/${doc.ontologyId}/apps` });
   // Settings changed: results already in may now call for (or no longer allow) an autopilot say.
@@ -170,18 +178,23 @@ export async function updateApp(id: string, actor: User, patch: { name?: unknown
 }
 
 export function rotateToken(id: string, actor: User): ConnectedApp {
-  const doc = ownApp(id, actor);
-  const token = newAppToken();
-  doc.tokenPrefix = token.slice(0, 10);
-  doc.tokenHash = hash(token);
-  saveApp(doc);
-  return { ...publicApp(doc), token };
+  return transaction(() => {
+    const doc = ownApp(id, actor);
+    const token = newAppToken();
+    doc.tokenPrefix = token.slice(0, 10);
+    doc.tokenHash = hash(token);
+    saveApp(doc);
+    return { ...publicApp(doc), token };
+  });
 }
 
 export async function deleteApp(id: string, actor: User) {
-  const doc = manageApp(id, actor);
-  for (const c of list<AppCheck>('appChecks').filter((x) => x.appId === id)) remove('appChecks', c.id);
-  remove('apps', id);
+  const doc = transaction(() => {
+    const doc = manageApp(id, actor);
+    for (const c of list<AppCheck>('appChecks').filter((x) => x.appId === id)) remove('appChecks', c.id);
+    remove('apps', id);
+    return doc;
+  });
   if (doc.ownerId !== actor.id)
     logActivity({ ontologyId: doc.ontologyId, actorId: actor.id, type: 'app.disconnected', message: `disconnected ${getUser(doc.ownerId)?.name ?? 'someone'}’s app ${doc.name}, so its token no longer works`, link: `/o/${doc.ontologyId}/apps` });
   // Anything autopilot said on the strength of this app no longer stands.
@@ -196,9 +209,31 @@ export function appForToken(authorization: string | undefined): AppDoc {
   const doc = list<AppDoc>('apps').find((a) => a.tokenHash === h);
   if (!doc) throw new HttpError(401, 'Unknown or replaced app token');
   stillConnected(doc);
-  doc.lastSeenAt = clock.iso();
-  saveApp(doc);
+  touchSeen(doc);
   return doc;
+}
+
+/**
+ * Note when an app was last heard from: that one field only, so a token replaced, an app
+ * removed or a result recorded since `doc` was read is never written back over.
+ */
+export function touchSeen(doc: AppDoc) {
+  doc.lastSeenAt = clock.iso();
+  setField('apps', doc.id, 'lastSeenAt', doc.lastSeenAt);
+}
+
+/**
+ * The app as stored now, for a request that came in as `by`: still there, still with the token
+ * the request used (or still owned by the person who sent it), and still connected. Call it
+ * inside the transaction that changes the app.
+ */
+function currentApp(appId: string, by: ReportedBy): AppDoc {
+  const app = get<AppDoc>('apps', appId);
+  if (!app) throw new HttpError(401, 'This app was disconnected');
+  if (by.tokenHash !== undefined && app.tokenHash !== by.tokenHash) throw new HttpError(401, 'This app token was replaced');
+  if (by.ownerId !== undefined && app.ownerId !== by.ownerId) throw new HttpError(403, 'Only the person who connected this app can report for it without its token');
+  stillConnected(app);
+  return app;
 }
 
 /** An app works only while the person who connected it is still a member of the ontology. */
@@ -332,7 +367,12 @@ function targetsFor(app: AppDoc, project: OntologyProject, crIds?: Record<string
  * change). The targets listed are a first guess: the run's own result for the working draft
  * decides which earlier results still count, so the reply to that result says what to test.
  */
-export function pending(app: AppDoc, all: boolean, commitParam?: unknown): PendingAppChecks {
+export function pending(appIn: AppDoc, all: boolean, commitParam?: unknown, by: ReportedBy = {}): PendingAppChecks {
+  // A new run changes the app record, so it reads and saves it in one transaction.
+  return transaction(() => startRun(currentApp(appIn.id, by), all, commitParam));
+}
+
+function startRun(app: AppDoc, all: boolean, commitParam: unknown): PendingAppChecks {
   // A result can carry over to this run only if it tests the same app commit as the one behind
   // the draft result in force.
   const commit = short(commitParam, 64);
@@ -390,7 +430,7 @@ export interface ReportInput {
   commit?: unknown;
   /** With the working draft result: a GitHub Actions OIDC token proving the run (see ciIdentity). */
   oidc?: unknown;
-  /** With a change's result: the key the run's verified working-draft result was answered with. */
+  /** With a change's result: that change's key, from the reply to the run's verified working-draft result. */
   runKey?: unknown;
 }
 
@@ -430,16 +470,10 @@ function ordering(
 export async function report(appIn: AppDoc, input: ReportInput, by: ReportedBy = {}) {
   const appId = appIn.id;
   // GitHub's proof is the one thing a report waits for, so it is checked first. Everything after
-  // works on the app as stored once the proof is in, in one transaction: a disconnection, a new
-  // token or a newer result that landed meanwhile is never overwritten by what was read before.
-  const attempt = Number(input.attempt);
-  const proof =
-    input.target === 'baseline' && input.oidc !== undefined
-      ? await verifyGithubRun(input.oidc, runAudience(appId), {
-          // The same report retried (say after a dropped connection) may bring the same proof again.
-          mayReuse: (jti) => get<AppDoc>('apps', appId)?.runs?.find((r) => r.attempt === attempt)?.reported?.jti === jti,
-        })
-      : undefined;
+  // (using the proof up included) works on the app as stored once the proof is in, in one
+  // transaction: a disconnection, a new token or a newer result that landed meanwhile is never
+  // overwritten by what was read before, and a report that fails leaves its proof unused.
+  const proof = input.target === 'baseline' && input.oidc !== undefined ? await verifyGithubRun(input.oidc, runAudience(appId)) : undefined;
   const step = transaction(() => applyReport(appId, input, by, proof));
   if (step.kind === 'done') return step.reply;
   if (step.kind === 'baseline') {
@@ -463,11 +497,7 @@ const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEq
 
 /** The synchronous part of a report, run in one transaction on the app as it is stored now. */
 function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: VerifiedRun | undefined): Step {
-  const app = get<AppDoc>('apps', appId);
-  if (!app) throw new HttpError(401, 'This app was disconnected');
-  if (by.tokenHash !== undefined && app.tokenHash !== by.tokenHash) throw new HttpError(401, 'This app token was replaced');
-  if (by.ownerId !== undefined && app.ownerId !== by.ownerId) throw new HttpError(403, 'Only the person who connected this app can report for it without its token');
-  stillConnected(app);
+  const app = currentApp(appId, by);
 
   const outcome = input.outcome as AppCheckOutcome;
   if (!OUTCOMES.includes(outcome)) throw new HttpError(400, `outcome must be one of ${OUTCOMES.join(', ')}`);
@@ -492,8 +522,9 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
     // reported it signed in. Only verified results move autopilot, so a leaked token can't.
     let verified = !!by.trusted;
     let jti: string | undefined;
-    let keyHash: string | undefined;
-    let runKey: string | undefined;
+    let keys: Record<string, string> | undefined;
+    let keysUntil: string | undefined;
+    let runKeys: Record<string, string> | undefined;
     if (proof) {
       if (!app.repo) throw new HttpError(400, 'Set the app’s GitHub repository on Concord, so it can check the run comes from there');
       if (proof.repository.toLowerCase() !== app.repo.toLowerCase()) throw new HttpError(400, `The run is from ${proof.repository}, not this app’s repository ${app.repo}`);
@@ -501,14 +532,18 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
       if (app.repoId && app.repoId !== proof.repositoryId)
         throw new HttpError(400, `${app.repo} isn’t the repository this app first ran from (its id changed). If you re-created it, set the repository on Concord again.`);
       if (commit && commit !== proof.sha) throw new HttpError(400, `The run tested commit ${proof.sha}, not ${commit}`);
+      // Used once, in this transaction; the same report retried with the same proof may use it again.
+      consumeRunProof(proof, run.reported?.jti === proof.jti);
       commit = proof.sha;
       app.repoId = proof.repositoryId;
       verified = true;
       jti = proof.jti;
-      // Results for changes in this run prove they belong to it with this key, which only the
-      // caller holding GitHub's proof gets back.
-      runKey = `crk_${randomBytes(24).toString('base64url')}`;
-      keyHash = hash(runKey);
+      // Each change in this run gets its own key, which only the caller holding GitHub's proof
+      // gets back: a change's result counts as verified only with that change's key, until the
+      // keys expire (GitHub stops a job after six hours anyway).
+      runKeys = Object.fromEntries(Object.keys(run.targets).map((id) => [id, `crk_${randomBytes(24).toString('base64url')}`]));
+      keys = Object.fromEntries(Object.entries(runKeys).map(([id, k]) => [id, hash(k)]));
+      keysUntil = new Date(clock.now().getTime() + RUN_KEY_HOURS * 3600_000).toISOString();
     }
     const prior = run.reported;
     // A verified report replaces an unverified one for the same run (which anyone with the token could have sent first).
@@ -518,12 +553,13 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
       verified = !!prior.verified;
       if (!proof) {
         jti = prior.jti;
-        keyHash = prior.keyHash;
+        keys = prior.keys;
+        keysUntil = prior.keysUntil;
       }
     }
-    run.reported = { outcome, commit, verified, jti, keyHash };
+    run.reported = { outcome, commit, verified, jti, keys, keysUntil };
     saveApp(app);
-    const keyReply = runKey ? { runKey } : {};
+    const keyReply = runKeys ? { runKeys, runKeysUntil: keysUntil } : {};
     const order = ordering(app.baseline, { revision, attempt, outcome, verified }, baselineRevision(project));
     if (order === 'stale') return { kind: 'done', reply: { stale: true, verified, ...keyReply, targets: [] } };
     if (order === 'replay') return { kind: 'done', reply: { stale: false, replay: true, verified, ...keyReply, targets: retestsFor(app, run, project) } };
@@ -551,7 +587,9 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
   // proves nothing: anyone holding the app token can learn it.
   let verified = false;
   if (input.runKey !== undefined) {
-    if (!run.reported.keyHash || !sameHash(hash(String(input.runKey)), run.reported.keyHash)) throw new HttpError(401, `That isn’t run ${attempt}’s key`);
+    const expected = run.reported.keys?.[cr.id];
+    if (!expected || !sameHash(hash(String(input.runKey)), expected)) throw new HttpError(401, `That isn’t run ${attempt}’s key for this change`);
+    if (!run.reported.keysUntil || clock.iso() > run.reported.keysUntil) throw new HttpError(401, `Run ${attempt}’s keys have expired; start a new run`);
     verified = !!run.reported.verified;
   } else if (by.trusted) verified = !!run.reported.verified;
   const previous = latestCheck(app.id, cr.id);

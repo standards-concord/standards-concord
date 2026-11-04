@@ -62,7 +62,8 @@ export function mountAppChecks(r: Router) {
   };
   r.get('/app-checks/pending', (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json(apps.pending(caller(req, req.query.appId).app, req.query.all === '1' || req.query.all === 'true', req.query.commit));
+    const { app, by } = caller(req, req.query.appId);
+    res.json(apps.pending(app, req.query.all === '1' || req.query.all === 'true', req.query.commit, by));
   });
   r.post('/app-checks', async (req, res) => {
     const { app, by } = caller(req, req.body?.appId);

@@ -88,6 +88,12 @@ export function insertOnce<T extends { id: string }>(collection: Collection, doc
   return !!row;
 }
 
+/** Set one field of a stored document, in one statement, leaving the rest as stored. */
+export function setField(collection: Collection, id: string, field: string, value: string | number) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
+  conn().prepare(`UPDATE docs SET data = json_set(data, '$.${field}', ?) WHERE collection = ? AND id = ?`).run(value, collection, id);
+}
+
 /** Delete documents in a collection whose numeric `field` is below `value`. */
 export function removeBelow(collection: Collection, field: string, value: number) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
