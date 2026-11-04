@@ -112,37 +112,6 @@ export function CqStatusChip({ status }: { status: CompetencyQuestion['status'] 
   return <Badge tone={m.tone}>{m.label}</Badge>;
 }
 
-export function HealthBadges({ o }: { o: OntologySummary }) {
-  const h = o.health;
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {h ? (
-        <>
-          <Badge tone={h.consistent ? 'ok' : 'danger'} icon={h.consistent ? CircleCheck : CircleAlert} title="OWL reasoner consistency">
-            {h.consistent ? 'Consistent' : 'Inconsistent'}
-          </Badge>
-          <Badge tone={h.fairScore >= 0.8 ? 'ok' : h.fairScore >= 0.5 ? 'warn' : 'danger'} title="FAIR score">
-            FAIR {pct(h.fairScore)}
-          </Badge>
-          {(h.errors > 0 || h.warnings > 0) && (
-            <Badge tone={h.errors ? 'danger' : 'warn'} title="Lint issues">
-              {h.errors ? `${h.errors} errors` : `${h.warnings} warnings`}
-            </Badge>
-          )}
-        </>
-      ) : (
-        <Badge tone="outline">Not validated yet</Badge>
-      )}
-      <Badge tone="outline">v{o.currentVersion}</Badge>
-      {o.stats.openChangeRequests > 0 && (
-        <Badge tone="accent" icon={GitMerge}>
-          {o.stats.openChangeRequests} open
-        </Badge>
-      )}
-    </div>
-  );
-}
-
 export function GoogleIcon({ className = 'size-4' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden>

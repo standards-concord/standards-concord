@@ -2,7 +2,7 @@
  * Competency questions (Grüninger & Fox): SPARQL queries run against the ontology
  * plus example data in an in-memory Oxigraph store, and whole-ontology validation.
  */
-import type { CompetencyQuestionResult, ValidationReport } from './types.js';
+import type { CompetencyQuestionResult, FairContext, ValidationReport } from './types.js';
 import type { OntologyGraph } from './graph.js';
 import { writeNTriples } from './turtle.js';
 import { lint } from './lint.js';
@@ -62,12 +62,14 @@ export async function runCompetencyQuestions(graph: OntologyGraph, cqs: Competen
 export interface ValidateOptions {
   cqs?: CompetencyQuestion[];
   reasoner?: 'owl' | 'structural';
+  /** Network facts for the FAIR checks (whether the ontology IRI resolves). */
+  fair?: FairContext;
 }
 
 /** Strict lint + FAIR + reasoner (+ CQs). Passes when lint has no errors and the ontology is coherent. */
 export async function validate(graph: OntologyGraph, opts: ValidateOptions = {}): Promise<ValidationReport> {
   const issues = lint(graph, { strict: true });
-  const fair = fairCheck(graph);
+  const fair = fairCheck(graph, opts.fair);
   const reasoner = opts.reasoner === 'structural' ? structuralReasoner(graph) : await owlReasoner(graph);
   const competencyQuestions = opts.cqs?.length ? await runCompetencyQuestions(graph, opts.cqs) : [];
   const passed = !issues.some((i) => i.severity === 'error') && reasoner.consistent && reasoner.unsatisfiable.length === 0;

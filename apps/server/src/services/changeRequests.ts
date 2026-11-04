@@ -9,6 +9,7 @@ import {
   type OntologyGraph,
 } from '@concord/core';
 import type { ChangeOp, ValidationReport } from '@concord/core/types';
+import { fairContext } from './fairResolution.js';
 import type {
   AiAnalysis,
   ChangeRequest,
@@ -193,7 +194,7 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
   const cqs = [...competencyTests(project.id), ...(tests ?? [])];
-  const validation = await validate(after, { cqs, reasoner: 'owl' });
+  const validation = await validate(after, { cqs, reasoner: 'owl', fair: await fairContext(after.ontologyIRI) });
   return { before, after, diff, classification, validation, warnings };
 }
 
@@ -226,7 +227,7 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
     const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
     cr.validation = {
       lint: [{ severity: 'error', code: 'change-not-applicable', message }],
-      fair: { score: 0, checks: [] },
+      fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
       reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
       competencyQuestions: [],
       passed: false,

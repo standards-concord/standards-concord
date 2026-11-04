@@ -43,4 +43,20 @@ test.describe('with the backend', () => {
       });
     }
   });
+
+  test('the Query tab loads sparq (WebAssembly) and the Formats tab is highlighted', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByRole('button', { name: 'Try the demo' }).click();
+    await expect(page).toHaveURL(/\/alpha$/);
+    const ontologies = (await (await page.request.get('/api/ontologies')).json()) as { id: string; demo?: boolean }[];
+    const demo = ontologies.find((o) => o.demo) ?? ontologies[0];
+    const wasm = page.waitForResponse((r) => r.url().endsWith('.wasm'));
+    await page.goto(`/o/${demo.id}/query`);
+    expect((await wasm).headers()['content-type']).toContain('application/wasm');
+    await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
+    await page.getByRole('button', { name: 'Run', exact: true }).click();
+    await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
+    await page.goto(`/o/${demo.id}/source?format=turtle`);
+    await expect(page.getByTestId('source-code').locator('.tok-iri').first()).toBeVisible();
+  });
 });

@@ -1,12 +1,11 @@
 import { createContext, useContext, useMemo } from 'react';
-import { NavLink, Outlet, useParams } from 'react-router';
+import { Link, NavLink, Outlet, useLocation, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
-import { titleCase } from '../../lib/format';
-import { HealthBadges } from '../../components/badges';
+import { HealthBubble, LifecycleBubble } from '../../components/Phase';
 import { Badge, ErrorCard, Loading, cx } from '../../components/ui';
 
 interface OntologyCtx {
@@ -28,18 +27,64 @@ export function useOntology() {
   return c;
 }
 
-const TABS: [string, string][] = [
-  ['', 'Overview'],
-  ['browse', 'Browse'],
-  ['source', 'Formats'],
-  ['query', 'Query'],
-  ['use-cases', 'Use cases'],
-  ['meetings', 'Meetings'],
-  ['changes', 'Change requests'],
-  ['releases', 'Releases'],
-  ['governance', 'Governance'],
-  ['agents', 'Agents'],
+/**
+ * The ontology's pages, grouped into five sections so the top-level navigation stays short.
+ * URLs are unchanged; `also` lists extra path segments that belong to a section.
+ */
+export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
+  { label: 'Overview', tabs: [['', 'Overview']] },
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Formats'], ['query', 'Query']] },
+  { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agents']], also: ['interview'] },
+  { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
+  { label: 'Governance', tabs: [['governance', 'Governance']] },
 ];
+
+function sectionOf(segment: string) {
+  return SECTIONS.find((s) => s.tabs.some(([p]) => p === segment) || s.also?.includes(segment)) ?? SECTIONS[0];
+}
+
+function SectionNav({ id }: { id: string }) {
+  const loc = useLocation();
+  const segment = loc.pathname.split('/')[3] ?? '';
+  const current = sectionOf(segment);
+  const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
+  return (
+    <>
+      <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
+        {SECTIONS.map((s) => {
+          const active = s === current;
+          return (
+            <Link
+              key={s.label}
+              to={href(s.tabs[0][0])}
+              aria-current={active ? 'page' : undefined}
+              className={cx('border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', active ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
+            >
+              {s.label}
+            </Link>
+          );
+        })}
+      </nav>
+      {current.tabs.length > 1 && (
+        <div className="border-t border-line">
+          <nav className="flex gap-1 overflow-x-auto py-2" aria-label={`${current.label} pages`}>
+            {current.tabs.map(([path, label]) => (
+              <NavLink
+                key={path}
+                to={href(path)}
+                className={({ isActive }) =>
+                  cx('rounded-full px-3 py-1 text-sm whitespace-nowrap transition-colors', isActive ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')
+                }
+              >
+                {label}
+              </NavLink>
+            ))}
+          </nav>
+        </div>
+      )}
+    </>
+  );
+}
 
 export function OntologyLayout() {
   const { id = '' } = useParams();
@@ -82,27 +127,23 @@ export function OntologyLayout() {
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl font-semibold tracking-tight">{o.title}</h1>
-                <Badge tone="outline">{titleCase(o.stage)}</Badge>
+                <LifecycleBubble stage={o.stage} />
                 {o.demo && <Badge tone="warn">Demo</Badge>}
               </div>
-              <p className="mt-0.5 truncate font-mono text-xs text-subtle">{o.ontologyIRI}</p>
+              <p className="mt-0.5 truncate text-xs text-subtle">
+                <span className="font-mono">{o.ontologyIRI}</span> · v{o.currentVersion}
+              </p>
             </div>
-            <HealthBadges o={o} />
+            <div className="flex flex-wrap items-center gap-2">
+              {o.stats.openChangeRequests > 0 && (
+                <Link to={`/o/${id}/changes`} className="text-xs font-medium text-accent hover:underline">
+                  {o.stats.openChangeRequests} open {o.stats.openChangeRequests === 1 ? 'change' : 'changes'}
+                </Link>
+              )}
+              <HealthBubble o={o} detailsHref={`/o/${id}#health`} />
+            </div>
           </div>
-          <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
-            {TABS.map(([path, label]) => (
-              <NavLink
-                key={path}
-                to={path ? `/o/${id}/${path}` : `/o/${id}`}
-                end={!path}
-                className={({ isActive }) =>
-                  cx('border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', isActive ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')
-                }
-              >
-                {label}
-              </NavLink>
-            ))}
-          </nav>
+          <SectionNav id={id} />
         </div>
       </div>
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
