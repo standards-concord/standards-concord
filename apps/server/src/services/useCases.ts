@@ -1,4 +1,5 @@
 import type {
+  ActivityItem,
   AnonymisedDraft,
   ChangeRequest,
   ChatMessage,
@@ -15,7 +16,7 @@ import type {
   UseCaseVisibility,
   User,
 } from '@concord/shared';
-import { USE_CASE_STATUS_INFO } from '@concord/shared';
+import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
@@ -24,7 +25,7 @@ import { ANONYMISER, INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnonymisedDraftSchema, InterviewTurnSchema, ProposalSchema, type InterviewTurn, type Proposal } from '../llm/schemas.js';
 import { createChangeRequest } from './changeRequests.js';
-import { getProject, rolesFor, setRoles } from './ontologies.js';
+import { getProject, isGroupMember, members, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { proposalToOps, toLocalName } from './proposals.js';
 import { solid, transcriptToTurtle } from './solid.js';
@@ -36,20 +37,44 @@ import { logActivity } from './users.js';
 /* ------------------------------------------------------------------------ */
 
 const LEGACY_STATUS: Record<string, UseCaseStatus> = { eliciting: 'draft', ready: 'triage', synthesised: 'in-progress' };
-const GROUP_ROLES: Role[] = ['owner', 'steward', 'editor', 'reviewer', 'member', 'odi'];
 const TRIAGE_ROLES: Role[] = ['editor', 'steward', 'owner'];
 
-/** Working group members: anyone with a role beyond contributor or agent. */
-export const isGroupMember = (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || rolesFor(ontologyId, user.id).some((r) => GROUP_ROLES.includes(r)));
+export { isGroupMember };
 export const canTriage = (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || rolesFor(ontologyId, user.id).some((r) => TRIAGE_ROLES.includes(r)));
 
-/** Can this viewer see the use case at all? */
+/** Can this viewer see the use case at all? A withdrawn one is visible to its author only. */
 export function canSee(u: UseCase, viewer?: User): boolean {
   if (viewer && u.authorId === viewer.id) return true;
+  if (u.withdrawnAt) return false;
   if (u.visibility === 'public') return true;
   if (u.visibility === 'group') return isGroupMember(u.ontologyId, viewer);
   return false;
 }
+
+/** Meetings are working group business: members see them, and so does whoever recorded one. */
+export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, viewer?: User) => !!viewer && (isGroupMember(m.ontologyId, viewer) || m.createdBy === viewer.id);
+
+/**
+ * Called when a use case stops being public (made private or group-only,
+ * withdrawn or archived), so everything derived from it can be dropped:
+ * requirements drafts (services/requirements.ts registers) and its questions in
+ * saved validation results (below).
+ */
+const noLongerPublic: ((u: UseCase) => void)[] = [];
+export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPublic.push(fn);
+const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived';
+
+/** Remove a use case's competency questions from validation results saved on change requests. */
+onNoLongerPublic((u) => {
+  const questions = new Set(u.competencyQuestions.map((q) => q.question));
+  if (!questions.size) return;
+  for (const cr of list<ChangeRequest>('changeRequests', u.ontologyId)) {
+    const cqs = cr.validation?.competencyQuestions;
+    if (!cqs?.some((r) => questions.has(r.question))) continue;
+    cr.validation = { ...cr.validation!, competencyQuestions: cqs.filter((r) => !questions.has(r.question)) };
+    put('changeRequests', cr, cr.ontologyId);
+  }
+});
 
 /** Bring documents written before sharing modes existed up to date. */
 function normalise(u: UseCase): UseCase {
@@ -68,10 +93,11 @@ function normalise(u: UseCase): UseCase {
   return u;
 }
 
+/** Numbers are given when a use case is first shared, so gaps never reveal private drafts. */
 function ensureNumbers(ontologyId: string, all: UseCase[]) {
   let max = all.reduce((m, u) => Math.max(m, u.number ?? 0), 0);
   for (const u of [...all].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-    if (u.number) continue;
+    if (u.number || u.visibility === 'private') continue;
     u.number = ++max;
     put('useCases', u, ontologyId);
   }
@@ -86,7 +112,7 @@ const nextNumber = (ontologyId: string) => {
 /** Raw access for services (no visibility check). */
 export const getUseCase = (id: string) => {
   const u = normalise(mustGet<UseCase>('useCases', id));
-  if (!u.number) ensureNumbers(u.ontologyId, list<UseCase>('useCases', u.ontologyId));
+  if (!u.number && u.visibility !== 'private') ensureNumbers(u.ontologyId, list<UseCase>('useCases', u.ontologyId));
   return mustGet<UseCase>('useCases', id);
 };
 
@@ -103,15 +129,49 @@ export const listUseCases = (ontologyId: string, viewer?: User) =>
     .filter((u) => canSee(u, viewer))
     .map((u) => present(u, viewer));
 
-/** A use case as one viewer may see it: hides the author of anonymous ones and private storage details. */
+/**
+ * A use case as one viewer may see it. Authors get their own record. Everyone
+ * else gets a copy built field by field: no private storage details, links only
+ * to things they may see, no meeting details unless they may see the meeting,
+ * and for an anonymous use case nothing that points back at its author.
+ * `present` is not an access check: callers filter with canSee first.
+ */
 export function present(u: UseCase, viewer?: User): UseCase {
-  const own = !!viewer && viewer.id === u.authorId;
-  if (own) return u;
-  const out: UseCase = { ...u };
-  if (u.anonymous) out.authorId = 'anonymous';
-  delete out.anonymisation;
-  delete out.podUrl;
-  delete out.transcriptUrl;
+  if (viewer && viewer.id === u.authorId) return u;
+  const meetingOk = (id?: string) => {
+    if (!id) return false;
+    const m = get<{ ontologyId: string; createdBy?: string }>('meetings', id);
+    return !!m && canSeeMeeting(m, viewer);
+  };
+  const linkOk = (l: UseCaseLink) => {
+    if (l.type === 'url' || l.type === 'change-request') return true;
+    if (l.type === 'meeting') return meetingOk(l.id);
+    const t = l.id ? get<UseCase>('useCases', l.id) : undefined;
+    return !!t && canSee(t, viewer);
+  };
+  const fromMeeting = u.source === 'meeting' && meetingOk(u.sourceRef);
+  const out: UseCase = {
+    id: u.id,
+    number: u.number,
+    ontologyId: u.ontologyId,
+    authorId: u.anonymous ? 'anonymous' : u.authorId,
+    source: u.source,
+    ...(fromMeeting ? { sourceRef: u.sourceRef, sourceLines: u.sourceLines } : {}),
+    status: u.status,
+    visibility: u.visibility,
+    ...(u.anonymous ? { anonymous: true } : {}),
+    // Notes on a call's use case name the call and its speakers: only for those who may see the call.
+    sections: u.source === 'meeting' && !fromMeeting ? { ...u.sections, notes: undefined } : u.sections,
+    competencyQuestions: u.competencyQuestions,
+    // Evidence quotes can name people: dropped for anonymous use cases, and for a call's use cases when the viewer can't see the call.
+    terms: u.anonymous || (u.source === 'meeting' && !fromMeeting) ? u.terms.map(({ label, kind, definition, existingIri }) => ({ label, kind, definition, existingIri })) : u.terms,
+    links: (u.links ?? []).filter(linkOk).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
+    changeRequestIds: u.changeRequestIds,
+    resolution: u.resolution,
+    completeness: u.completeness,
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+  };
   return out;
 }
 
@@ -134,7 +194,7 @@ export const refOf = (u: UseCase): UseCaseRef => ({
 export function useCaseRefs(ids: string[], viewer?: User): UseCaseRef[] {
   return ids
     .map((id) => get<UseCase>('useCases', id))
-    .filter((u): u is UseCase => !!u && canSee(u, viewer))
+    .filter((u): u is UseCase => !!u && canSee(normalise(u), viewer))
     .map((u) => refOf(normalise(u)))
     .sort((a, b) => a.number - b.number);
 }
@@ -165,10 +225,13 @@ export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'
 }
 
 function saveUseCase(u: UseCase) {
+  const before = get<UseCase>('useCases', u.id);
+  if (!u.number && u.visibility !== 'private') u.number = nextNumber(u.ontologyId);
   u.completeness = completeness(u);
   u.updatedAt = clock.iso();
   put('useCases', u, u.ontologyId);
   if (u.visibility === 'private') void mirrorToPod(u);
+  if (before && isPublic(before) && !isPublic(u)) for (const fn of noLongerPublic) fn(u);
   return u;
 }
 
@@ -212,16 +275,17 @@ export function createUseCase(
   // Anyone describing a use case becomes a contributor.
   if (!rolesFor(project.id, author.id).length) setRoles(project.id, author.id, ['contributor']);
   const source = init.source ?? 'chat';
+  const visibility = init.visibility ?? defaultVisibility(source);
   return saveUseCase({
     id: newId('uc'),
-    number: nextNumber(project.id),
+    number: visibility === 'private' ? 0 : nextNumber(project.id),
     ontologyId: project.id,
     authorId: author.id,
     source,
     sourceRef: init.sourceRef,
     sourceLines: init.sourceLines,
     status: init.status ?? 'draft',
-    visibility: init.visibility ?? defaultVisibility(source),
+    visibility,
     anonymous: init.anonymous,
     sections: init.sections ?? {},
     competencyQuestions: init.competencyQuestions ?? [],
@@ -235,6 +299,31 @@ export function createUseCase(
 }
 
 const isAuthor = (u: UseCase, actor: User) => u.authorId === actor.id;
+
+const NOT_PUBLIC =
+  'Change requests are public, so they can only draw on public use cases. Make the use case public (only its author can), or publish an anonymised version of a private one, and use that.';
+
+/**
+ * Activity items a viewer may see. Items about a use case or a meeting follow
+ * that thing's current visibility (read from the item's link, which covers items
+ * written before this check existed). Anonymous use cases never show an actor.
+ */
+export function visibleActivity(items: ActivityItem[], viewer?: User): ActivityItem[] {
+  return items.flatMap((a) => {
+    const uc = a.link?.match(/\/use-cases\/([^/?#]+)/)?.[1];
+    if (uc) {
+      const u = get<UseCase>('useCases', uc);
+      if (!u || !canSee(u, viewer)) return [];
+      if (u.anonymous && !(viewer && viewer.id === u.authorId)) return [{ ...a, actorId: undefined, actorName: undefined }];
+    }
+    const mtg = a.link?.match(/\/meetings\/([^/?#]+)/)?.[1];
+    if (mtg) {
+      const m = get<{ ontologyId: string; createdBy?: string }>('meetings', mtg);
+      if (!m || !canSeeMeeting(m, viewer)) return [];
+    }
+    return [a];
+  });
+}
 
 /** Author or editor edits the content. */
 export function updateUseCase(
@@ -260,18 +349,43 @@ export function updateUseCase(
   return saveUseCase(u);
 }
 
-/** Who can see it. Only the author decides; anonymous versions are always public. */
+/** Who can see it. Only the author decides. An anonymised version is public, or withdrawn. */
 export function setVisibility(u: UseCase, actor: User, visibility: UseCaseVisibility, save = true) {
   if (!isAuthor(u, actor)) throw new HttpError(403, 'Only the author can change who sees a use case');
   if (!['private', 'group', 'public'].includes(visibility)) throw new HttpError(400, 'visibility must be private, group or public');
-  if (u.anonymous && visibility !== 'public') throw new HttpError(409, 'An anonymised use case is always public. Archive it to withdraw it.');
+  if (u.anonymous && visibility === 'group') throw new HttpError(409, 'An anonymised use case is either public or withdrawn.');
+  if (u.anonymous && visibility === 'private') return withdrawUseCase(u, actor);
   const from = u.visibility;
   u.visibility = visibility;
+  if (visibility !== 'private') u.withdrawnAt = undefined;
   // Sharing a finished private draft submits it for triage.
   if (from === 'private' && visibility !== 'private' && u.status === 'draft' && interviewDone(u)) u.status = 'triage';
   if (save) saveUseCase(u);
   if (from === 'private' && visibility !== 'private') {
-    logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared UC-${u.number} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared ${useCaseLabel(u.number)} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+  }
+  return u;
+}
+
+/**
+ * The author takes a shared, public or anonymised use case back. From then on
+ * only they can see it: every read, list, activity item, requirements draft and
+ * public page leaves it out, and its questions leave saved validation results.
+ * Files already released to GitHub can't be recalled.
+ */
+export function withdrawUseCase(u: UseCase, actor: User) {
+  if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
+  u.withdrawnAt = clock.iso();
+  u.visibility = 'private';
+  u.status = 'archived';
+  saveUseCase(u);
+  for (const fn of noLongerPublic) fn(u);
+  if (u.anonymous) {
+    const original = list<UseCase>('useCases', u.ontologyId).find((o) => o.anonymisation?.publishedId === u.id);
+    if (original) {
+      original.anonymisation = { ...original.anonymisation!, status: 'withdrawn', decidedAt: clock.iso(), publishedId: undefined };
+      saveUseCase(original);
+    }
   }
   return u;
 }
@@ -305,7 +419,7 @@ export function triageUseCase(u: UseCase, actor: User, status: UseCaseStatus, no
   // Accepting a use case that already has changes in flight picks their status up straight away.
   if (status === 'accepted') syncUseCase(u);
   const label = USE_CASE_STATUS_INFO[status].label.toLowerCase();
-  logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked UC-${u.number} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+  logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked ${useCaseLabel(u.number)} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   return u;
 }
 
@@ -324,8 +438,8 @@ export function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, 'at' | 
       const target = get<UseCase>('useCases', link.id);
       if (!target || target.ontologyId !== u.ontologyId || !canSee(target, actor)) throw new HttpError(404, 'No such use case');
     } else {
-      const target = get<{ ontologyId: string }>(link.type === 'meeting' ? 'meetings' : 'changeRequests', link.id);
-      if (!target || target.ontologyId !== u.ontologyId) throw new HttpError(404, `No such ${link.type.replace('-', ' ')}`);
+      const target = get<{ ontologyId: string; createdBy?: string }>(link.type === 'meeting' ? 'meetings' : 'changeRequests', link.id);
+      if (!target || target.ontologyId !== u.ontologyId || (link.type === 'meeting' && !canSeeMeeting(target, actor))) throw new HttpError(404, `No such ${link.type.replace('-', ' ')}`);
     }
   }
   u.links = [...(u.links ?? []).filter((l) => !(l.type === link.type && (l.id ?? l.url) === (link.id ?? link.url))), { ...link, addedBy: actor.id, at: clock.iso() }];
@@ -342,7 +456,8 @@ export function removeLink(u: UseCase, actor: User, target: string) {
 /** Record that a change request addresses some use cases (both directions), and move them along. */
 export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor: User) {
   const ucs = useCaseIds.map((id) => getUseCaseFor(id, actor)).filter((u) => u.ontologyId === cr.ontologyId);
-  if (ucs.some((u) => u.visibility === 'private')) throw new HttpError(409, 'A change request cannot cite a private use case. Publish an anonymised version and cite that.');
+  // Change requests are public records: they may only cite public use cases.
+  if (ucs.some((u) => !isPublic(u))) throw new HttpError(409, NOT_PUBLIC);
   cr.useCaseIds = [...new Set([...(cr.useCaseIds ?? []), ...ucs.map((u) => u.id)])];
   put('changeRequests', cr, cr.ontologyId);
   for (const u of ucs) {
@@ -354,47 +469,149 @@ export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor
   return cr;
 }
 
+/**
+ * A change request as a viewer may see it: use case ids (in its links and its
+ * origin) are kept only for use cases the viewer can see.
+ */
+export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
+  const ok = (id: string) => {
+    const u = get<UseCase>('useCases', id);
+    return !!u && canSee(u, viewer);
+  };
+  const origin =
+    cr.origin.type === 'synthesis'
+      ? { ...cr.origin, useCaseIds: cr.origin.useCaseIds.filter(ok) }
+      : cr.origin.type === 'chat' && cr.origin.useCaseId && !ok(cr.origin.useCaseId)
+        ? { ...cr.origin, useCaseId: undefined }
+        : cr.origin.type === 'meeting' && !canSeeMeeting(get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId) ?? { ontologyId: cr.ontologyId, createdBy: '' }, viewer)
+          ? { type: 'meeting' as const, meetingId: '' }
+          : cr.origin;
+  return { ...cr, origin, ...(cr.useCaseIds ? { useCaseIds: cr.useCaseIds.filter(ok) } : {}) } as T;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Anonymised synthetic versions of private use cases                       */
 /* ------------------------------------------------------------------------ */
 
 const FICTIONAL_PLACES = ['Anytown', 'Riverton', 'Hillford', 'Lakeside', 'Oakbridge', 'Westmere', 'Eastholm', 'Northcombe'];
 const FICTIONAL_ORGS = ['Brightwater Trust', 'Hillcrest Community Group', 'Greenway Volunteer Centre', 'Meadowbank Foundation'];
+const FICTIONAL = new Set([...FICTIONAL_PLACES, ...FICTIONAL_ORGS.flatMap((o) => o.split(' '))]);
 const COMMON = new Set(
-  'The This That They These Those There When Then What Which Where Who Whom How Why We Our Us And But Or So For With If Each Every Some Many Most It Its A An In On At To Of From By As Is Are Was Be Can Could Would Should Will Also Yes No Not Please Thanks Thank Hi Hello I Im My Me You Your Sometimes Usually Often Today Now Students Teachers Volunteers Charity Platform Paid Our Every Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December UK DBS GDPR API CSV JSON RDF OWL SPARQL URL CRM Excel Email Call See Tell'.split(' '),
+  'The This That They These Those There When Then What Which Where Who Whom How Why We Our Us And But Or So For With If Each Every Some Many Most It Its A An In On At To Of From By As Is Are Was Be Can Could Would Should Will Also Yes No Not Please Thanks Thank Hi Hello I Im My Me You Your Sometimes Usually Often Today Now Students Teachers Volunteers Volunteer Charity Charities Platform Platforms Paid Our Every Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December UK DBS GDPR API CSV JSON RDF OWL SPARQL URL CRM Excel Email Call See Tell Coordinators Coordinator People Residents Organisations Organisation Find Publish Record Report Show Help Make Let Search Sign Join Get Give Use Using After Before During Once Today Tomorrow Yesterday Weekly Daily Monthly Funders Funder Staff Users User Data Admins Admin Managers Manager Officers Officer Council Councils Schools School Local National Public Private Shared New Old First Second Third Next Last One Two Three All Any Both Either Neither Other Another Such Only Just Even Still Already Again Here Where While Because Although Since Until Unless Whether An Am Do Does Did Has Have Had Not Nor Yet Than Into Onto Over Under About Above Below Between Through Without Within Across Along Around Behind Beyond Like Near Off Out Up Down Per Via Step Steps Goal Actors Scenario Scenarios Example Examples E.g'.split(' '),
 );
 const escRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** Every string in a value, deeply. */
+function strings(v: unknown, out: string[] = []): string[] {
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => strings(x, out));
+  else if (v && typeof v === 'object') Object.values(v).forEach((x) => strings(x, out));
+  return out;
+}
+
 /**
- * Offline anonymiser: swaps names of people, places and organisations for fictional
- * ones and removes contact details. Proper nouns are found where they are not
- * sentence-initial, then replaced everywhere (any case), including in term labels.
+ * The only fields an anonymised version can carry. The same allowlist shapes the
+ * proposal (from the model or the offline stand-in), what the author is shown and
+ * can edit, and what is published, so nothing unseen goes public.
  */
-export function heuristicAnonymise(u: Pick<UseCase, 'sections' | 'competencyQuestions' | 'terms'>, authorName?: string): AnonymisedDraft {
-  const counts = { emails: 0, phones: 0, urls: 0 };
-  const strings: string[] = [];
-  const collect = (v: unknown) => {
-    if (typeof v === 'string') strings.push(v);
-    else if (Array.isArray(v)) v.forEach(collect);
-    else if (v && typeof v === 'object') Object.values(v).forEach(collect);
+export function restrictDraft(d: Partial<AnonymisedDraft>): AnonymisedDraft {
+  const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x.trim() : undefined);
+  const s = (d.sections ?? {}) as UseCaseSections;
+  const sections: UseCaseSections = {
+    name: str(s.name),
+    goal: str(s.goal),
+    actors: str(s.actors),
+    description: str(s.description),
+    requirements: str(s.requirements),
+    scope: str(s.scope),
+    usageScenarios: (s.usageScenarios ?? []).map(str).filter((x): x is string => !!x),
+    basicFlow: (s.basicFlow ?? []).map((f, i) => ({ step: i + 1, description: str(f?.description) ?? '' })).filter((f) => f.description),
   };
-  collect([u.sections, u.competencyQuestions.map((q) => [q.question, q.exampleAnswer]), u.terms.map((t) => t.definition)]);
+  for (const k of Object.keys(sections) as (keyof UseCaseSections)[]) {
+    const v = sections[k];
+    if (v === undefined || (Array.isArray(v) && !v.length)) delete sections[k];
+  }
+  return {
+    sections,
+    competencyQuestions: (d.competencyQuestions ?? []).map((q) => ({ question: str(q?.question) ?? '', ...(str(q?.exampleAnswer) ? { exampleAnswer: str(q.exampleAnswer) } : {}) })).filter((q) => q.question),
+    terms: (d.terms ?? []).map((t) => ({ label: str(t?.label) ?? '', kind: t?.kind ?? 'class', ...(str(t?.definition) ? { definition: str(t.definition) } : {}) })).filter((t) => t.label) as ElicitedTerm[],
+    changes: (d.changes ?? []).filter((c) => typeof c === 'string'),
+    warnings: [],
+  };
+}
+
+/** Names that must never appear: the author, their organisation, and the people in this ontology's group. */
+function knownIdentifiers(ontologyId: string, author: User): string[] {
+  const people = members(ontologyId)
+    .map((m) => getUserName(m.userId))
+    .filter((x): x is string => !!x);
+  return [...new Set([author.name, author.organisation, ...people].filter((x): x is string => !!x && x.trim().length >= 2))];
+}
+const getUserName = (id: string) => get<User>('users', id)?.name;
+
+/**
+ * Check every field of an anonymised version for things that may still identify
+ * someone. It can't prove a text is anonymous; it lists what to look at.
+ */
+export function identifyingWarnings(d: AnonymisedDraft, known: string[] = []): string[] {
+  const text = strings([d.sections, d.competencyQuestions, d.terms.map((t) => [t.label, t.definition])]);
+  const all = text.join('\n');
+  const lowerWords = new Set((all.match(/\b[a-z][a-z'’]+\b/g) ?? []).map((w) => w.toLowerCase()));
+  const found = new Map<string, string>();
+  const add = (what: string, why: string) => found.has(what) || found.set(what, why);
+  for (const k of known)
+    for (const part of [k, ...k.split(/\s+/).filter((p) => p.length >= 3)])
+      if (new RegExp(`\\b${escRe(part)}\\b`, 'i').test(all)) add(part, 'a name from your profile or working group');
+  for (const t of text) {
+    for (const m of t.matchAll(/\b[A-Z][A-Za-z'’]+\b/g)) {
+      const w = m[0].replace(/['’]s$/, '');
+      if (COMMON.has(w) || FICTIONAL.has(w) || lowerWords.has(w.toLowerCase())) continue;
+      add(w, /^[A-Z]{2,}$/.test(w) ? 'an organisation or code name' : /[a-z][A-Z]/.test(w) ? 'a product or organisation name' : 'possibly a name');
+    }
+    for (const m of t.matchAll(/\b[a-z]+[A-Z][A-Za-z]*\b/g)) add(m[0], 'a product or organisation name');
+    for (const m of t.matchAll(/\b\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?\b|\b(?:19|20)\d{2}\b/g)) add(m[0], 'a date');
+    for (const m of t.matchAll(/\b\d{4,}\b/g)) if (!/^(?:19|20)\d{2}$/.test(m[0])) add(m[0], 'a distinctive number');
+    for (const m of t.matchAll(/[\w.+-]+@[\w-]+\.[\w.-]+|https?:\/\/\S+/g)) add(m[0], 'contact details or a link');
+  }
+  return [...found].slice(0, 20).map(([w, why]) => `“${w}”: ${why}`);
+}
+
+/**
+ * Offline anonymiser, used when no model is configured or a model call fails.
+ * It swaps names of people, places and organisations it can find for fictional
+ * ones, removes contact details, dates and distinctive numbers, and drops term
+ * labels that look like names. It is only a proposal: the author reads every
+ * field (and the warnings) before anything is published.
+ */
+export function heuristicAnonymise(u: Pick<UseCase, 'sections' | 'competencyQuestions' | 'terms'>, authorName?: string, known: string[] = []): AnonymisedDraft {
+  const counts = { emails: 0, phones: 0, urls: 0, dates: 0, numbers: 0 };
+  const base = restrictDraft({ sections: u.sections, competencyQuestions: u.competencyQuestions, terms: u.terms });
+  const texts = strings([base.sections, base.competencyQuestions, base.terms.map((t) => t.definition)]);
+  const all = texts.join('\n');
+  const lowerWords = new Set((all.match(/\b[a-z][a-z'’]+\b/g) ?? []).map((w) => w.toLowerCase()));
   const proper = new Set<string>();
-  for (const text of strings)
-    for (const m of text.matchAll(/(?<![.!?:]\s|^|\n)\b((?:St\.? )?[A-Z][a-z'’]+(?:\s+(?:of\s+)?[A-Z][a-z'’]+)*)\b/g)) {
+  for (const text of texts) {
+    // Capitalised phrases anywhere, including at the start of a sentence, unless the word is common or also used in lower case.
+    for (const m of text.matchAll(/\b((?:St\.? )?[A-Z][a-z'’]+(?:\s+(?:of\s+)?[A-Z][a-z'’]+)*)\b/g)) {
       const words = m[1].split(/\s+/).filter((w) => w !== 'of');
-      if (words.every((w) => COMMON.has(w.replace(/['’]s$/, '')))) continue;
-      // Drop a leading common word ("Every Northvale" -> "Northvale").
+      const keep = words.filter((w) => !COMMON.has(w.replace(/['’]s$/, '')) && !lowerWords.has(w.toLowerCase().replace(/['’]s$/, '')));
+      if (!keep.length) continue;
       const trimmed = words[0] && COMMON.has(words[0]) ? m[1].split(/\s+/).slice(1).join(' ') : m[1];
       if (trimmed.length > 2) proper.add(trimmed);
     }
+    // Acronyms and mixed-case names (IBM, acmeCorp, DataHub).
+    for (const m of text.matchAll(/\b(?:[A-Z]{2,}|[a-z]+[A-Z][A-Za-z]*|[A-Z][a-z]+[A-Z][A-Za-z]*)\b/g)) if (!COMMON.has(m[0])) proper.add(m[0]);
+  }
+  for (const k of known) if (new RegExp(`\\b${escRe(k)}\\b`, 'i').test(all)) proper.add(k);
   const map = new Map<string, string>();
   let place = 0;
   let org = 0;
   // Longest first, so "Northvale Food Bank" wins over "Northvale".
   for (const name of [...proper].sort((a, b) => b.length - a.length)) {
-    const looksLikeOrg = /(Trust|Council|Charity|Foundation|Fund|Hospice|Hospital|Centre|Center|Group|Ltd|Limited|Society|Network|Association|Church|School|College|University|Bank|Impact|Club)$/.test(name);
-    map.set(name, looksLikeOrg ? FICTIONAL_ORGS[org++ % FICTIONAL_ORGS.length] : FICTIONAL_PLACES[place++ % FICTIONAL_PLACES.length]);
+    const looksLikeOrg =
+      /^[A-Z]{2,}$/.test(name) || /[a-z][A-Z]/.test(name) || /(Trust|Council|Charity|Foundation|Fund|Hospice|Hospital|Centre|Center|Group|Ltd|Limited|Society|Network|Association|Church|School|College|University|Bank|Impact|Club|Corp|Inc)$/.test(name);
+    const isPerson = known.some((k) => k.toLowerCase() === name.toLowerCase()) && !looksLikeOrg;
+    map.set(name, isPerson ? 'a coordinator' : looksLikeOrg ? FICTIONAL_ORGS[org++ % FICTIONAL_ORGS.length] : FICTIONAL_PLACES[place++ % FICTIONAL_PLACES.length]);
   }
   const author = (authorName ?? '').trim();
   const authorParts = author.split(/\s+/).filter((p) => p.length >= 2);
@@ -403,10 +620,12 @@ export function heuristicAnonymise(u: Pick<UseCase, 'sections' | 'competencyQues
     t = t.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, () => (counts.emails++, 'an email address'));
     t = t.replace(/https?:\/\/\S+/g, () => (counts.urls++, 'a website'));
     t = t.replace(/(?:\+44\s?|0)\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4}/g, () => (counts.phones++, 'a phone number'));
+    t = t.replace(/\b\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)(?:\s+(?:19|20)\d{2})?\b|\b(?:19|20)\d{2}\b/g, () => (counts.dates++, 'a date'));
+    t = t.replace(/\b\d{4,}\b/g, () => (counts.numbers++, 'a number'));
     if (author) t = t.replace(new RegExp(`\\b${escRe(author)}\\b`, 'gi'), 'a coordinator');
     for (const part of authorParts) t = t.replace(new RegExp(`\\b${escRe(part)}\\b`, 'g'), 'a coordinator');
     for (const [name, fake] of map) t = t.replace(new RegExp(`\\b${escRe(name)}\\b`, 'gi'), fake);
-    return t.replace(/\b(a|the) a coordinator\b/gi, 'a coordinator').replace(/\b(a coordinator)(\s+a coordinator)+/g, '$1').replace(/\bthe (a|an) /gi, 'the ');
+    return t.replace(/\b(a|the) a coordinator\b/gi, 'a coordinator').replace(/\b(a coordinator)(\s+a coordinator)+/g, '$1').replace(/\bthe (a|an) /gi, 'the ').replace(/(^|[.!?]\s+)a coordinator/g, '$1A coordinator');
   };
   const deep = <T>(v: T): T => {
     if (typeof v === 'string') return scrub(v) as T;
@@ -414,32 +633,39 @@ export function heuristicAnonymise(u: Pick<UseCase, 'sections' | 'competencyQues
     if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, k === 'step' ? x : deep(x)])) as T;
     return v;
   };
-  const sections = deep({ ...u.sections });
-  delete sections.notes;
-  delete sections.references;
-  if (sections.dataSources) sections.dataSources = sections.dataSources.map((d) => ({ name: d.type ?? d.name, type: d.type, description: d.description }));
-  // Terms that are themselves names (e.g. "riverside youth trust") are dropped, not renamed.
-  const isName = (label: string) => [...map.keys()].some((n) => n.toLowerCase() === label.toLowerCase()) || authorParts.some((p) => p.toLowerCase() === label.toLowerCase());
-  const changes: string[] = [];
-  if (map.size) changes.push(`Replaced ${map.size} name${map.size === 1 ? '' : 's'} of places or organisations with fictional ones (${[...map.values()].slice(0, 4).map((x) => `“${x}”`).join(', ')}${map.size > 4 ? ', …' : ''}).`);
-  if (author) changes.push('Removed your name; the use case is published with no name attached.');
-  if (counts.emails) changes.push(`Removed ${counts.emails} email address${counts.emails === 1 ? '' : 'es'}.`);
-  if (counts.phones) changes.push(`Removed ${counts.phones} phone number${counts.phones === 1 ? '' : 's'}.`);
-  if (counts.urls) changes.push(`Removed ${counts.urls} link${counts.urls === 1 ? '' : 's'}.`);
-  changes.push('Dropped your private notes and references, and kept only the kind of each data source.');
-  return {
-    sections,
-    competencyQuestions: u.competencyQuestions.map((q) => ({ question: scrub(q.question), exampleAnswer: q.exampleAnswer ? scrub(q.exampleAnswer) : undefined })),
-    terms: u.terms.filter((t) => !isName(t.label)).map((t) => ({ label: scrub(t.label), kind: t.kind, definition: t.definition ? scrub(t.definition) : undefined })),
-    changes,
+  // Terms whose labels are themselves names (e.g. "riverside youth trust", "acmeCorp") are dropped, not renamed.
+  const isName = (label: string) =>
+    /[a-z][A-Z]|^[A-Z]{2,}$/.test(label) || [...map.keys()].some((n) => label.toLowerCase().includes(n.toLowerCase())) || authorParts.some((p) => label.toLowerCase().includes(p.toLowerCase()));
+  const draft: AnonymisedDraft = {
+    sections: deep(base.sections),
+    competencyQuestions: base.competencyQuestions.map((q) => ({ question: scrub(q.question), ...(q.exampleAnswer ? { exampleAnswer: scrub(q.exampleAnswer) } : {}) })),
+    terms: base.terms.filter((t) => !isName(t.label)).map((t) => ({ label: t.label, kind: t.kind, ...(t.definition ? { definition: scrub(t.definition) } : {}) })),
+    changes: [],
   };
+  const changes: string[] = [];
+  if (map.size) changes.push(`Replaced ${map.size} name${map.size === 1 ? '' : 's'} of people, places or organisations (${[...map.values()].filter((x, i, a) => a.indexOf(x) === i).slice(0, 4).map((x) => `“${x}”`).join(', ')}${map.size > 4 ? ', …' : ''}).`);
+  if (author) changes.push('Took out your name. It is published with no name attached.');
+  const removed = [
+    counts.emails && `${counts.emails} email address${counts.emails === 1 ? '' : 'es'}`,
+    counts.phones && `${counts.phones} phone number${counts.phones === 1 ? '' : 's'}`,
+    counts.urls && `${counts.urls} link${counts.urls === 1 ? '' : 's'}`,
+    counts.dates && `${counts.dates} date${counts.dates === 1 ? '' : 's'}`,
+    counts.numbers && `${counts.numbers} distinctive number${counts.numbers === 1 ? '' : 's'}`,
+  ].filter(Boolean);
+  if (removed.length) changes.push(`Removed ${removed.join(', ')}.`);
+  if (u.terms.length > draft.terms.length) changes.push(`Left out ${u.terms.length - draft.terms.length} term${u.terms.length - draft.terms.length === 1 ? '' : 's'} that looked like names.`);
+  changes.push('Kept only the title, goal, actors, description, requirements, scope, scenarios, main steps, questions and terms. Your notes, stakeholders, data sources, references and evidence quotes are left out.');
+  draft.changes = changes;
+  return draft;
 }
 
 /** Ask the model (or the offline stand-in) for an anonymised synthetic version, and store it as a proposal for the author. */
 export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCase> {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (u.visibility !== 'private') throw new HttpError(409, 'Only private use cases get an anonymised version; this one is already shared.');
+  if (u.anonymous) throw new HttpError(409, 'This is already an anonymised version.');
   const project = getProject(u.ontologyId);
+  const known = knownIdentifiers(project.id, actor);
   const { value } = await llm.json<AnonymisedDraft>({
     task: 'anonymise',
     system: ANONYMISER,
@@ -449,49 +675,57 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
     messages: [
       {
         role: 'user',
-        content: `Ontology: ${project.title}${project.domain ? ` (domain: ${project.domain})` : ''}.\nThe author's name (must not appear): ${actor.name}${actor.organisation ? `, of ${actor.organisation}` : ''}.\n\nPrivate use case (JSON):\n${JSON.stringify({ sections: u.sections, competencyQuestions: u.competencyQuestions.map(({ question, exampleAnswer }) => ({ question, exampleAnswer })), terms: u.terms.map(({ label, kind, definition }) => ({ label, kind, definition })) })}\n\nWrite the anonymised synthetic version.`,
+        content: `Ontology: ${project.title}${project.domain ? ` (domain: ${project.domain})` : ''}.\nNames that must not appear (the author, their organisation, and the working group): ${known.join('; ')}.\n\nPrivate use case (JSON):\n${JSON.stringify({ sections: restrictDraft({ sections: u.sections }).sections, competencyQuestions: u.competencyQuestions.map(({ question, exampleAnswer }) => ({ question, exampleAnswer })), terms: u.terms.map(({ label, kind, definition }) => ({ label, kind, definition })) })}\n\nWrite the anonymised synthetic version.`,
       },
     ],
-    fallback: () => heuristicAnonymise(u, actor.name),
+    fallback: () => heuristicAnonymise(u, actor.name, known),
   });
-  u.anonymisation = { status: 'proposed', draft: value, proposedAt: clock.iso() };
+  // Whatever wrote it, the proposal is cut to the allowlist and checked field by field.
+  const draft = restrictDraft(value);
+  draft.warnings = identifyingWarnings(draft, known);
+  u.anonymisation = { status: 'proposed', draft, proposedAt: clock.iso() };
   return saveUseCase(u);
 }
 
-/** The author consents: publish the (possibly edited) anonymised version as a new public use case with no name attached. */
+/**
+ * The author consents: publish exactly the version they reviewed (with their
+ * edits) as a new public use case with no name attached. The client sends the
+ * whole draft it showed; the server cuts it to the same allowlist.
+ */
 export function publishAnonymised(u: UseCase, actor: User, edited?: Partial<AnonymisedDraft>): { original: UseCase; published: UseCase } {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
-  if (u.visibility !== 'private') throw new HttpError(409, 'Only private use cases get an anonymised version');
+  if (u.visibility !== 'private' || u.anonymous) throw new HttpError(409, 'Only private use cases get an anonymised version');
   const draft = u.anonymisation?.draft;
   if (!draft) throw new HttpError(409, 'There is no anonymised version to publish yet');
   if (u.anonymisation?.status === 'published' && u.anonymisation.publishedId) throw new HttpError(409, 'An anonymised version is already published');
-  const final: AnonymisedDraft = {
+  const final = restrictDraft({
     sections: edited?.sections ?? draft.sections,
     competencyQuestions: edited?.competencyQuestions ?? draft.competencyQuestions,
     terms: edited?.terms ?? draft.terms,
     changes: draft.changes,
-  };
+  });
+  final.warnings = identifyingWarnings(final, knownIdentifiers(u.ontologyId, actor));
   const project = getProject(u.ontologyId);
   const published = createUseCase(project, actor, {
     source: u.source,
     visibility: 'public',
     anonymous: true,
     status: 'triage',
-    sections: { ...final.sections, notes: 'An anonymised, synthetic version of a use case a participant described privately. It keeps their requirements but not their details.' },
-    competencyQuestions: final.competencyQuestions.filter((q) => q.question?.trim()).map((q) => ({ id: newId('cq'), question: q.question, exampleAnswer: q.exampleAnswer, status: 'untested' as const })),
+    sections: { ...final.sections, notes: 'An anonymised, synthetic version of a use case a participant described privately.' },
+    competencyQuestions: final.competencyQuestions.map((q) => ({ id: newId('cq'), question: q.question, exampleAnswer: q.exampleAnswer, status: 'untested' as const })),
     terms: final.terms,
   });
   u.anonymisation = { ...u.anonymisation!, status: 'published', draft: final, decidedAt: clock.iso(), publishedId: published.id };
   saveUseCase(u);
   // No actor on the activity item: naming the author would undo the anonymisation.
-  logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: UC-${published.number} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
+  logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: ${useCaseLabel(published.number)} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
   return { original: u, published };
 }
 
 export function declineAnonymised(u: UseCase, actor: User) {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (!u.anonymisation) throw new HttpError(409, 'There is no anonymised version to decline');
-  if (u.anonymisation.status === 'published') throw new HttpError(409, 'The anonymised version is already published; archive it instead');
+  if (u.anonymisation.status === 'published') throw new HttpError(409, 'The anonymised version is already published; withdraw it instead');
   u.anonymisation = { ...u.anonymisation, status: 'declined', decidedAt: clock.iso() };
   return saveUseCase(u);
 }
@@ -649,7 +883,8 @@ function candidateTerms(text: string): InterviewTurn['newTerms'] {
 
 export async function startInterview(project: OntologyProject, user: User, useCaseId?: string): Promise<InterviewSession> {
   const u = useCaseId ? getUseCase(useCaseId) : createUseCase(project, user, { source: 'chat' });
-  if (u.authorId !== user.id) throw new HttpError(403, 'Only the author can continue this interview');
+  // Not found, rather than forbidden, so the answer doesn't reveal that someone else's use case exists.
+  if (u.authorId !== user.id) throw new HttpError(404, `useCase ${useCaseId} not found`);
   const first = SCRIPT[0];
   let opening = first.ask(project);
   if (useCaseId && u.sections.goal) opening = `Welcome back. Last time we covered “${u.sections.name ?? u.sections.goal}”. What would you like to add or change?`;
@@ -684,7 +919,7 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
 }
 
 export async function interviewTurn(session: InterviewSession, user: User, content: string) {
-  if (session.userId !== user.id) throw new HttpError(403, 'This interview belongs to someone else');
+  if (session.userId !== user.id) throw new HttpError(404, `interview ${session.id} not found`);
   const project = getProject(session.ontologyId);
   const u = getUseCase(session.useCaseId);
   session.messages.push(msg('user', content));
@@ -713,7 +948,7 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
 }
 
 export async function finishInterview(session: InterviewSession, user: User) {
-  if (session.userId !== user.id) throw new HttpError(403, 'This interview belongs to someone else');
+  if (session.userId !== user.id) throw new HttpError(404, `interview ${session.id} not found`);
   const u = getUseCase(session.useCaseId);
   if (!session.done) await completeInterview(session, u, user);
   saveInterview(session);
@@ -743,7 +978,7 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
   } else {
     if (u.status === 'draft') u.status = 'triage';
     saveUseCase(u);
-    logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described UC-${u.number}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u.number)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
 }
 
@@ -752,14 +987,14 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
 /* ------------------------------------------------------------------------ */
 
 export async function synthesise(project: OntologyProject, actor: User, useCaseIds?: string[]) {
-  const picked = (useCaseIds?.length ? useCaseIds.map((id) => getUseCaseFor(id, actor)) : allUseCases(project.id).filter((u) => ['triage', 'accepted'].includes(u.status) && canSee(u, actor))).filter(
+  const picked = (useCaseIds?.length ? useCaseIds.map((id) => getUseCaseFor(id, actor)) : allUseCases(project.id).filter((u) => ['triage', 'accepted'].includes(u.status) && isPublic(u))).filter(
     (u) => u.ontologyId === project.id,
   );
-  // Private use cases never feed a change request directly: their anonymised version does.
-  if (useCaseIds?.length && picked.some((u) => u.visibility === 'private'))
-    throw new HttpError(409, 'Private use cases are not used directly. Publish an anonymised version (or share the use case) and synthesise from that.');
-  const ucs = picked.filter((u) => u.visibility !== 'private' && !['archived', 'out-of-scope'].includes(u.status));
-  if (!ucs.length) throw new HttpError(409, 'No use cases are ready to synthesise. Finish an interview and share it, or accept a use case first.');
+  // A change request is public: its title, description, terms, definitions and tests are
+  // derived from the use cases, so only public ones (including anonymised versions) are used.
+  if (useCaseIds?.length && picked.some((u) => !isPublic(u))) throw new HttpError(409, NOT_PUBLIC);
+  const ucs = picked.filter((u) => isPublic(u) && u.status !== 'out-of-scope');
+  if (!ucs.length) throw new HttpError(409, 'No public use cases are ready to draft changes from. Make a use case public, or publish an anonymised version of a private one, first.');
   const graph = await ontologyStore.working(project);
   const { value } = await llm.json<Proposal>({
     task: 'synthesise',

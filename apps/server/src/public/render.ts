@@ -541,7 +541,6 @@ function renderUseCases(input: OntologyPageInput, reqs: PublishedRequirements, r
   <h2 id="sec-story">${esc(doc.title)}</h2>
   <div class="prose">${renderMarkdown(doc.intro)}${renderMarkdown(doc.markdown)}${(doc.sections ?? []).map((s) => `<h3 id="sec-story-${esc(anchorSafe(s.id))}">${esc(s.heading)}</h3>${renderMarkdown(s.markdown)}`).join('')}</div>
   ${reqTable(doc.requirements ?? [])}
-  ${doc.unpublished && doc.unpublished.group + doc.unpublished.private > 0 ? `<p class="muted small">${[doc.unpublished.group ? `${plural(doc.unpublished.group, 'working group use case')}` : '', doc.unpublished.private ? `${plural(doc.unpublished.private, 'private use case')}` : ''].filter(Boolean).join(' and ')} also informed this version. They are not published here.</p>` : ''}
   ${doc.generatedAt ? `<p class="muted small">Written from the use cases below on ${esc(formatDate(doc.generatedAt))}. Each reference links to the use case it draws on.</p>` : ''}
 </article>`
     : `<div class="notice" role="note">${

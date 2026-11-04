@@ -66,13 +66,17 @@ test.describe('use cases', () => {
     await expect(share).toBeVisible();
     await expect(share).not.toContainText('Riverside Youth Trust');
     await expect(share).not.toContainText('jo.tester@example.org');
-    await share.getByText(/What was changed/).click();
-    await expect(share.getByText(/fictional/)).toBeVisible();
+    await share.getByText(/What the assistant changed/).click();
+    await expect(share.getByText(/Replaced/)).toBeVisible();
+    // Every published field is shown, including example answers.
+    await expect(share.getByLabel('Example answer 1')).toBeVisible();
     // The private choice is selected.
     await expect(page.getByRole('radio', { name: /Private/ })).toHaveAttribute('aria-checked', 'true');
 
-    await share.getByRole('button', { name: 'Edit first' }).click();
     await share.getByLabel('Title').fill('Match young people with local opportunities');
+    // Publishing needs the author to confirm they have read it all.
+    await expect(share.getByRole('button', { name: 'Publish anonymously' })).toBeDisabled();
+    await share.getByRole('checkbox', { name: /I have read every field/ }).check();
     await share.getByRole('button', { name: 'Publish anonymously' }).click();
     await expect(page.getByTestId('anonymised-published')).toBeVisible();
     await page.getByRole('link', { name: 'View the published version' }).click();
@@ -92,6 +96,15 @@ test.describe('use cases', () => {
     await p2.getByRole('group', { name: 'Filter use cases' }).getByRole('button', { name: /^All/ }).click();
     await expect(p2.getByRole('link', { name: 'Match young people with local opportunities' })).toBeVisible();
     await expect(p2.getByRole('link', { name: /Riverside Youth Trust/ })).toHaveCount(0);
+
+    // The author withdraws it: from then on only they can see it.
+    await page.getByRole('button', { name: 'Withdraw this use case' }).click();
+    await page.getByRole('group', { name: 'Withdraw this use case' }).getByRole('button', { name: 'Withdraw' }).click();
+    await expect(page.getByText(/You withdrew this use case/)).toBeVisible();
+    await p2.reload();
+    await settle(p2);
+    await p2.getByRole('group', { name: 'Filter use cases' }).getByRole('button', { name: /^All/ }).click();
+    await expect(p2.getByRole('link', { name: 'Match young people with local opportunities' })).toHaveCount(0);
     await other.close();
     await expectNoCrash(page);
   });
@@ -132,7 +145,7 @@ test.describe('use cases', () => {
     const chips = page.locator('main').getByRole('link', { name: /^UC-\d+$/ });
     expect(await chips.count()).toBeGreaterThan(0);
     // Once turned into use cases, the button is gone so it can't be done twice.
-    await expect(page.getByRole('button', { name: 'Turn into use cases and a change request' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Turn into use cases' })).toHaveCount(0);
 
     await chips.first().click();
     await settle(page);
@@ -142,9 +155,22 @@ test.describe('use cases', () => {
     await expect(page.getByText('Related to').first()).toBeVisible();
     await expect(page.getByRole('link', { name: /Find weekly shifts that need volunteers/ })).toBeVisible();
 
+    // Group-only, so changes can't be drafted from it until it is public.
+    await expect(page.getByRole('button', { name: 'Draft changes' })).toHaveCount(0);
+
     // And back to the call.
     await page.getByRole('link', { name: 'Working group call: recurring shifts' }).click();
     await expect(page).toHaveURL(/\/meetings\//);
+    await expectNoCrash(page);
+  });
+
+  test('signed-out visitors and contributors see no meetings', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    expect(await (await request.get(`/api/ontologies/${demo.id}/meetings`)).json()).toEqual([]);
+    await signIn(page, { name: 'Contributor Cal', role: 'contributor' });
+    await page.goto(`/o/${demo.id}/meetings`);
+    await settle(page);
+    await expect(page.getByRole('link', { name: 'Working group call: recurring shifts' })).toHaveCount(0);
     await expectNoCrash(page);
   });
 

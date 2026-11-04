@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type { UseCaseDetail, UseCaseLink, UseCaseStatus } from '@concord/shared';
-import { USE_CASE_STATUS_INFO } from '@concord/shared';
-import { Archive, ArrowLeft, ExternalLink, FileText, GitPullRequest, Link2, Lock, MessageSquareText, Send, Sparkles, Tag, Trash2, Users, Workflow } from 'lucide-react';
+import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
+import { Archive, ArrowLeft, ExternalLink, FileText, GitPullRequest, Link2, Lock, MessageSquareText, Send, Sparkles, Tag, Trash2, Undo2, Users, Workflow } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate } from '../../lib/format';
@@ -39,7 +39,8 @@ export function UseCaseDetailPage() {
   const set = (x: UseCaseDetail) => uc.setData(x);
   const isPrivate = u.visibility === 'private';
   const canContinue = u.source === 'chat' && u.status === 'draft' && u.can.changeVisibility;
-  const canDraft = !isPrivate && u.can.edit && !['closed', 'archived', 'out-of-scope'].includes(u.status);
+  // Change requests are public, so changes are drafted only from public use cases.
+  const canDraft = u.visibility === 'public' && !u.withdrawnAt && u.can.edit && !['closed', 'archived', 'out-of-scope'].includes(u.status);
   // Drafting changes is the next step once the working group has accepted the use case.
   const draftIsNext = canDraft && ['accepted', 'in-progress'].includes(u.status);
 
@@ -52,7 +53,7 @@ export function UseCaseDetailPage() {
         <div className="min-w-0 space-y-6">
           <Card className="p-6">
             <div className="mb-1 flex flex-wrap items-center gap-2">
-              <span className="font-mono text-xs text-muted">UC-{u.number}</span>
+              <span className="font-mono text-xs text-muted">{useCaseLabel(u.number)}</span>
               <UseCaseStatusBadge status={u.status} version={u.resolution?.version} />
               <VisibilityBadge visibility={u.visibility} anonymous={u.anonymous} />
               <SourceBadge source={u.source} />
@@ -97,8 +98,13 @@ export function UseCaseDetailPage() {
                 </Button>
               )}
             </div>
+            {u.visibility === 'group' && u.can.changeVisibility && !['closed', 'archived', 'out-of-scope'].includes(u.status) && (
+              <p className="text-xs text-muted">Change requests are public. To draft changes from this use case, make it public first.</p>
+            )}
             <InlineError error={synth.error || start.error || archive.error} />
           </Card>
+          {u.can.withdraw && <WithdrawCard uc={u} onChange={set} />}
+          {u.withdrawnAt && <Card className="p-4 text-xs text-muted">You withdrew this use case on {formatDate(u.withdrawnAt)}. Only you can see it.</Card>}
           {(u.transcriptUrl || u.podUrl) && (
             <Card className="space-y-2 p-4 text-xs text-muted">
               <div className="flex items-center gap-1.5 font-medium text-fg">
@@ -125,6 +131,38 @@ export function UseCaseDetailPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------- withdrawal */
+
+/** The author takes a shared, public or anonymised use case back. */
+function WithdrawCard({ uc, onChange }: { uc: UseCaseDetail; onChange: (u: UseCaseDetail) => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const withdraw = useAction(async () => onChange(await api.withdrawUseCase(uc.id)));
+  return (
+    <Card className="space-y-2 p-4 text-xs">
+      {!confirming ? (
+        <Button size="sm" variant="ghost" icon={Undo2} onClick={() => setConfirming(true)}>
+          Withdraw this use case
+        </Button>
+      ) : (
+        <div className="space-y-2" role="group" aria-label="Withdraw this use case">
+          <p>
+            Withdrawing hides it from everyone but you: it leaves the use case lists, the activity feed, draft requirements documents and the public pages, and its questions leave validation results. Change requests that drew on it stay, without the link. Copies already in a release on GitHub can’t be recalled.
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" variant="danger" loading={withdraw.pending} onClick={() => void withdraw.run()}>
+              Withdraw
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      <InlineError error={withdraw.error} />
+    </Card>
   );
 }
 
@@ -323,7 +361,7 @@ function TraceCard({ uc, onChange }: { uc: UseCaseDetail; onChange: (u: UseCaseD
                   <span className="text-xs text-muted">{RELATION_LABEL[r.relation][r.direction]}</span>
                   <UseCaseRefLink ontologyId={id} r={r} />
                   {r.direction === 'out' && canLink && (
-                    <button className="text-muted hover:text-danger" aria-label={`Remove link to UC-${r.number}`} onClick={() => void remove.run(r.id)}>
+                    <button className="text-muted hover:text-danger" aria-label={`Remove link to ${useCaseLabel(r.number)}`} onClick={() => void remove.run(r.id)}>
                       <Trash2 className="size-3.5" />
                     </button>
                   )}
@@ -400,7 +438,7 @@ function AddLink({ uc, onDone }: { uc: UseCaseDetail; onDone: (u: UseCaseDetail)
                   .sort((a, b) => a.number - b.number)
                   .map((x) => (
                     <option key={x.id} value={x.id}>
-                      UC-{x.number} {x.sections.name || 'Untitled'}
+                      {useCaseLabel(x.number)} {x.sections.name || 'Untitled'}
                     </option>
                   ))
               : (meetings.data ?? []).map((m) => (

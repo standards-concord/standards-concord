@@ -277,7 +277,7 @@ export type UseCaseVisibility = 'private' | 'group' | 'public';
 export const VISIBILITY_INFO: Record<UseCaseVisibility, { label: string; description: string }> = {
   private: { label: 'Private', description: 'Only you can see it. You can publish an anonymised version with no name attached.' },
   group: { label: 'Working group', description: 'Members of the working group can see it. It is not published.' },
-  public: { label: 'Public', description: 'Anyone can see it, and it can appear in the published use cases and requirements.' },
+  public: { label: 'Public', description: 'Anyone can see it, and changes can be drafted from it. Once a release includes it, the copy in that release on GitHub can’t be recalled.' },
 };
 
 /**
@@ -319,11 +319,16 @@ export interface AnonymisedDraft {
   terms: ElicitedTerm[];
   /** What was changed to anonymise it, in plain words (shown to the author). */
   changes: string[];
+  /**
+   * Things that may still identify someone (names, organisations, numbers, dates),
+   * found by a check of every field. Shown to the author before they consent.
+   */
+  warnings?: string[];
 }
 
 export interface UseCase {
   id: string;
-  /** Per-ontology sequence number, shown as UC-3. */
+  /** Per-ontology sequence number, shown as UC-3. 0 while private: numbers are given on sharing, so gaps don't reveal private drafts. */
   number: number;
   ontologyId: string;
   /** Hidden from everyone but the author when `anonymous` is true. */
@@ -338,7 +343,9 @@ export interface UseCase {
   /** Published with no name attached (an anonymised synthetic version of a private use case). */
   anonymous?: boolean;
   /** Only on private use cases, only visible to the author: the anonymised version proposed or published. */
-  anonymisation?: { status: 'proposed' | 'published' | 'declined'; draft?: AnonymisedDraft; proposedAt: string; decidedAt?: string; publishedId?: string };
+  anonymisation?: { status: 'proposed' | 'published' | 'declined' | 'withdrawn'; draft?: AnonymisedDraft; proposedAt: string; decidedAt?: string; publishedId?: string };
+  /** Set when the author withdrew a shared or anonymised use case: only they can see it now. */
+  withdrawnAt?: string;
   sections: UseCaseSections;
   competencyQuestions: CompetencyQuestion[];
   terms: ElicitedTerm[];
@@ -358,6 +365,9 @@ export interface UseCase {
 }
 
 /** A short reference to a use case, used in links from other things. */
+/** "UC-3", or "Private draft" before a use case is shared and numbered. */
+export const useCaseLabel = (number: number) => (number ? `UC-${number}` : 'Private draft');
+
 export interface UseCaseRef {
   id: string;
   number: number;
@@ -386,7 +396,7 @@ export interface UseCaseTrace {
 export interface UseCaseDetail extends UseCase {
   trace: UseCaseTrace;
   /** What the viewer may do. */
-  can: { edit: boolean; triage: boolean; changeVisibility: boolean };
+  can: { edit: boolean; triage: boolean; changeVisibility: boolean; withdraw: boolean };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -645,7 +655,19 @@ export interface ReleaseDetail extends Release {
  * The public face of a use case. Only public use cases, and the anonymised
  * synthetic versions of private ones, ever become a PublicUseCase.
  */
-export interface PublicUseCase {
+/**
+ * A use case as anyone on the internet may see it. Built only by the guarded
+ * projection in the server (services/requirements.ts toPublic), which checks
+ * visibility and copies an allowlist of fields. An anonymised one never carries
+ * attribution or an identifying origin.
+ */
+export type PublicUseCase = PublicUseCaseBase &
+  (
+    | { anonymised: true; attribution?: never; origin?: { kind: 'synthetic'; label: string; date?: never; href?: never } }
+    | { anonymised: false; attribution?: string; origin?: { kind: 'meeting' | 'interview' | 'agent' | 'form'; label: string; date?: string; href?: string } }
+  );
+
+export interface PublicUseCaseBase {
   id: string;
   /** e.g. "UC-3" */
   ref: string;
@@ -659,11 +681,6 @@ export interface PublicUseCase {
   /** The version that covers it, once closed. */
   coveredIn?: string;
   sourceKind: UseCaseSource | 'synthetic';
-  /** An anonymised synthetic version of a private use case. */
-  anonymised: boolean;
-  /** Who described it; omitted when anonymous. */
-  attribution?: string;
-  origin?: { kind: 'meeting' | 'interview' | 'agent' | 'form' | 'synthetic'; label: string; date?: string; href?: string };
 }
 
 export interface RequirementItem {
@@ -697,10 +714,15 @@ export interface RequirementsDocument {
   sections: { id: string; heading: string; markdown: string; useCaseIds: string[] }[];
   requirements: RequirementItem[];
   useCases: PublicUseCase[];
-  /** Use cases that informed the work but are not public (counts only). */
-  unpublished: { group: number; private: number };
+  /**
+   * Working group use cases that informed the work but are not public (a count).
+   * Only working group members see it; private use cases are never counted.
+   */
+  unpublished?: { group: number };
   /** Coverage of the public use cases at this version. */
   coverage: { total: number; closed: number; addressed: number; open: number };
+  /** Set when serving a published document from which withdrawn use cases were removed. */
+  withdrawnNote?: string;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -835,6 +857,7 @@ export interface SessionInfo {
  *  GET  /api/use-cases/:id                           -> UseCaseDetail  (404 for private use cases of others)
  *  PATCH /api/use-cases/:id {sections?, competencyQuestions?, status?} -> UseCaseDetail
  *  POST /api/use-cases/:id/visibility {visibility}   -> UseCaseDetail  (author only)
+ *  POST /api/use-cases/:id/withdraw                  -> UseCaseDetail  (author only; hides it from everyone else, including an anonymised version)
  *  POST /api/use-cases/:id/submit                    -> UseCaseDetail  (draft -> triage)
  *  POST /api/use-cases/:id/triage {status, note?}    -> UseCaseDetail  (editors: accepted | deferred | out-of-scope | closed | triage)
  *  POST /api/use-cases/:id/links {type, id?, url?, relation, label?} -> UseCaseDetail
@@ -850,10 +873,10 @@ export interface SessionInfo {
  *  GET  /api/interviews/:id                          -> InterviewSession & { useCase: UseCase }
  *  POST /api/interviews/:id/messages {content}       -> { session: InterviewSession; useCase: UseCase }
  *  POST /api/interviews/:id/finish                   -> { useCase: UseCase }
- *  POST /api/ontologies/:id/synthesise {useCaseIds?} -> ChangeRequest  (draft CR proposing ontology changes from use cases)
+ *  POST /api/ontologies/:id/synthesise {useCaseIds?} -> ChangeRequest  (draft CR proposing ontology changes; public use cases only, since CRs are public)
  *
  * Meetings
- *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
+ *  GET  /api/ontologies/:id/meetings                 -> Meeting[]  (working group members and whoever recorded each; 404s for anyone else)
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
  *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl} -> Meeting   (invites the co-lead bot)
  *  POST /api/ontologies/:id/meetings/simulate {title} -> Meeting           (replays a scripted call live)

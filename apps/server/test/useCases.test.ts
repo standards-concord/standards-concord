@@ -146,8 +146,14 @@ describe('sharing modes', () => {
     expect(JSON.stringify(seen.body)).not.toMatch(/Jo Bloggs|jo\.bloggs/);
     // Publishing twice is refused.
     expect((await author.post(`/api/use-cases/${useCaseId}/anonymise/publish`).send({})).status).toBe(409);
-    // The anonymised version can't be made private again (it would orphan the public record).
-    expect((await author.post(`/api/use-cases/${publishedId}/visibility`).send({ visibility: 'private' })).status).toBe(409);
+    // It can't become group-only, but its author can withdraw it, which hides it from everyone else.
+    expect((await author.post(`/api/use-cases/${publishedId}/visibility`).send({ visibility: 'group' })).status).toBe(409);
+    const withdrawn = await author.post(`/api/use-cases/${publishedId}/withdraw`);
+    expect(withdrawn.status).toBe(200);
+    expect((await request(app).get(`/api/use-cases/${publishedId}`)).status).toBe(404);
+    expect((await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body.some((u: UC) => u.id === publishedId)).toBe(false);
+    expect((await request(app).get(`/api/ontologies/${demoId}/public-use-cases`)).body.some((u: { id: string }) => u.id === publishedId)).toBe(false);
+    expect((await author.get(`/api/use-cases/${useCaseId}`)).body.anonymisation.status).toBe('withdrawn');
   });
 
   it('submits a private use case for triage when its author shares it', async () => {
@@ -201,8 +207,9 @@ describe('links', () => {
     // A signed-out visitor sees the public use case but not the working group link.
     const anon = await request(app).get(`/api/use-cases/${uc.body.trace.related[0].id}`);
     expect(anon.body.trace.related).toHaveLength(0);
-    const anonCall = await request(app).get(`/api/meetings/${call.id}`);
-    expect(anonCall.body.useCases).toHaveLength(0);
+    // Calls are working group business: to anyone else they don't exist.
+    expect((await request(app).get(`/api/meetings/${call.id}`)).status).toBe(404);
+    expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).body).toHaveLength(0);
   });
 
   it('turns a call into use cases once, linked back to the call', async () => {
@@ -218,10 +225,8 @@ describe('links', () => {
     expect(p2.body.useCases.map((u: UC) => u.id).sort()).toEqual(p1.body.useCases.map((u: UC) => u.id).sort());
     const got = await steward.get(`/api/meetings/${m.body.id}`);
     expect(got.body.useCases).toHaveLength(n);
-    if (p1.body.changeRequest) {
-      const cr = await steward.get(`/api/change-requests/${p1.body.changeRequest.id}`);
-      expect(cr.body.useCases.length).toBe(n);
-    }
+    // No change request is drafted from group-only use cases: change requests are public.
+    expect(p1.body.changeRequest).toBeUndefined();
   });
 
   it('adds and removes related links, and rejects bad ones', async () => {
@@ -380,6 +385,6 @@ describe('offline anonymiser', () => {
     const text = JSON.stringify(out);
     expect(text).not.toMatch(/Bloggs|Riverside Youth Trust|0161|example\.org|Northvale|secret/);
     expect(out.terms[0].evidence).toBeUndefined();
-    expect(out.changes.join(' ')).toMatch(/fictional/);
+    expect(out.changes.join(' ')).toMatch(/Replaced/);
   });
 });

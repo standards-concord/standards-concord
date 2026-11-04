@@ -1,5 +1,5 @@
 import type { OntologyProject } from '@concord/shared';
-import { findDocument, publicUseCases, requirementsDocument } from '../services/requirements.js';
+import { publicUseCases, releasingDocument, requirementsDocument } from '../services/requirements.js';
 
 /**
  * What the public ontology page shows on its "Use cases and requirements" tab.
@@ -64,8 +64,6 @@ export interface RequirementsDocumentView {
   markdown?: string;
   sections?: { id: string; heading: string; markdown: string }[];
   requirements?: RequirementView[];
-  /** Use cases that informed the version but aren't public (counts only). */
-  unpublished?: { group: number; private: number };
 }
 
 export interface PublishedRequirements {
@@ -99,7 +97,6 @@ interface SourceDocument {
   sections?: { id: string; heading: string; markdown: string }[];
   requirements?: { id: string; text: string; useCaseIds: string[]; termIris?: string[]; status: string }[];
   useCases?: SourceUseCase[];
-  unpublished?: { group: number; private: number };
 }
 
 /**
@@ -115,7 +112,6 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
       intro: doc.intro,
       sections: doc.sections?.map((s) => ({ id: s.id, heading: s.heading, markdown: s.markdown })),
       requirements: doc.requirements?.map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds, termIris: r.termIris, status: r.status })),
-      unpublished: doc.unpublished,
     },
     useCases: useCases.map((u) => ({
       id: u.id,
@@ -144,6 +140,6 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
  * release include it.
  */
 export function publishedRequirements(project: OntologyProject, version?: string, opts: { releasing?: boolean } = {}): PublishedRequirements {
-  const doc = version ? (opts.releasing ? findDocument(project.id, version) : requirementsDocument(project.id, version)) : undefined;
+  const doc = version ? (opts.releasing ? releasingDocument(project.id, version) : requirementsDocument(project.id, version)) : undefined;
   return toPublishedRequirements(doc, doc?.useCases ?? publicUseCases(project.id));
 }

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { UseCase } from '@concord/shared';
-import { USE_CASE_STATUS_INFO } from '@concord/shared';
+import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
 import { ClipboardList, FileText, MessageSquarePlus, Sparkles } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
@@ -39,7 +39,8 @@ export function UseCasesTab() {
   // Picking use cases to draft changes from is a mode, so the list stays plain the rest of the time.
   // Private use cases are never drafted from directly, so they can't be picked.
   const [selecting, setSelecting] = useState(false);
-  const selectable = shown.filter((u) => u.visibility !== 'private');
+  // Change requests are public, so only public use cases can be picked.
+  const selectable = shown.filter((u) => u.visibility === 'public');
   const start = useStartInterview(id);
   const synth = useAction(async () => {
     const cr = await api.synthesise(id, selected.size ? [...selected] : undefined);
@@ -91,7 +92,7 @@ export function UseCasesTab() {
       <InlineError error={start.error || synth.error} />
       {selecting && list.data?.length ? (
         <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-accent-soft px-4 py-2 text-sm">
-          <span>Choose the use cases to draft changes from, or draft from all of them. Private use cases are left out.</span>
+          <span>Choose the use cases to draft changes from, or draft from all of them. Change requests are public, so only public use cases can be used.</span>
           <button className="font-medium text-accent hover:underline" onClick={() => setSelected(new Set(selectable.map((u) => u.id)))}>
             Select all
           </button>
@@ -149,14 +150,14 @@ export function UseCasesTab() {
             return (
               <Card key={uc.id} className={cx('flex items-start gap-3 p-4', selected.has(uc.id) && 'border-accent')}>
                 {selecting &&
-                  (isPrivate ? (
-                    <span className="mt-1 size-4 shrink-0" title="Private use cases are not used directly; publish an anonymised version first" />
+                  (uc.visibility !== 'public' ? (
+                    <span className="mt-1 size-4 shrink-0" title="Change requests are public, so only public use cases can be used. Make it public, or publish an anonymised version of a private one." />
                   ) : (
-                    <input type="checkbox" className="mt-1 size-4 accent-[var(--accent)]" checked={selected.has(uc.id)} onChange={() => toggle(uc.id)} aria-label={`Select UC-${uc.number} ${uc.sections.name || 'use case'}`} />
+                    <input type="checkbox" className="mt-1 size-4 accent-[var(--accent)]" checked={selected.has(uc.id)} onChange={() => toggle(uc.id)} aria-label={`Select ${useCaseLabel(uc.number)} ${uc.sections.name || 'use case'}`} />
                   ))}
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs text-muted">UC-{uc.number}</span>
+                    <span className="font-mono text-xs text-muted">{useCaseLabel(uc.number)}</span>
                     <Link to={`/o/${id}/use-cases/${uc.id}`} className="font-medium hover:text-accent">
                       {uc.sections.name || 'Untitled use case'}
                     </Link>

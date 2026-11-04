@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 import type { Meeting, UseCase } from '@concord/shared';
+import { useCaseLabel } from '@concord/shared';
 import { ArrowLeft, Bot, CircleHelp, ClipboardList, Gavel, Lightbulb, MessageSquareWarning, Sparkles, Wand2 } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
@@ -23,9 +24,8 @@ function fmtT(t?: number) {
 export function MeetingDetailPage() {
   const { meetingId = '' } = useParams();
   const { id } = useOntology();
-  const nav = useNavigate();
   const m = useAsync(() => api.meeting(meetingId), [meetingId]);
-  const [proposed, setProposed] = useState<{ useCases: UseCase[]; changeRequestId?: string }>();
+  const [proposed, setProposed] = useState<{ useCases: UseCase[] }>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const live = m.data?.status === 'live';
   const waitingBot = !!m.data?.bot && ['scheduled', 'joining', 'in-call'].includes(m.data.bot.status) && !live;
@@ -73,9 +73,8 @@ export function MeetingDetailPage() {
   const analyse = useAction(async () => m.setData(await api.analyseMeeting(meetingId)));
   const propose = useAction(async () => {
     const r = await api.proposeFromMeeting(meetingId);
-    setProposed({ useCases: r.useCases, changeRequestId: r.changeRequest?.id });
-    if (r.changeRequest) nav(`/o/${id}/changes/${r.changeRequest.id}`);
-    else void m.reload();
+    setProposed({ useCases: r.useCases });
+    void m.reload();
   });
   // Which use cases each transcript line fed into.
   const lineUseCases = useMemo(() => {
@@ -123,19 +122,18 @@ export function MeetingDetailPage() {
           )}
           {a && !mt.useCases?.length && (
             <Button variant="primary" icon={Sparkles} loading={propose.pending} onClick={() => void propose.run()}>
-              Turn into use cases and a change request
+              Turn into use cases
             </Button>
           )}
         </div>
       </div>
       <InlineError error={analyse.error || propose.error} />
-      {proposed && !proposed.changeRequestId && (
+      {proposed && (
         <Card className="mb-4 p-4 text-sm">
-          Created {proposed.useCases.length} use case{proposed.useCases.length === 1 ? '' : 's'}.{' '}
+          Created {proposed.useCases.length} use case{proposed.useCases.length === 1 ? '' : 's'}, shared with the working group. Change requests are public, so to draft changes from one, its author makes it public first.{' '}
           <Link to={`/o/${id}/use-cases`} className="text-accent hover:underline">
             Review them
           </Link>
-          .
         </Card>
       )}
 
@@ -159,7 +157,7 @@ export function MeetingDetailPage() {
                   <p className="text-sm leading-relaxed">{l.text}</p>
                   {lineUseCases.get(i)?.map((u) => (
                     <Link key={u.id} to={`/o/${id}/use-cases/${u.id}`} className="mt-1 mr-1 inline-block rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[0.65rem] text-accent hover:underline" title="This line fed into a use case">
-                      UC-{u.number}
+                      {useCaseLabel(u.number)}
                     </Link>
                   ))}
                 </div>

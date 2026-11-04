@@ -1,7 +1,7 @@
 import type { AgentReport, ChangeRequest, InterviewSession, Meeting, Release, ReleaseDetail, RequirementsDocument, UseCaseDetail, UseCaseRef, User } from '@concord/shared';
 import { get, list } from '../db.js';
 import { changeRequestsFor, useCaseIdsForCR } from './traceability.js';
-import { allUseCases, canSee, canTriage, getUseCaseFor, present, refOf, useCaseRefs } from './useCases.js';
+import { allUseCases, canSee, canSeeMeeting, canTriage, isGroupMember, getUseCaseFor, present, refOf, useCaseRefs } from './useCases.js';
 
 /**
  * Everything a use case is linked to, in both directions, as one viewer may see it:
@@ -18,7 +18,9 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
   if (raw.anonymous) source = { kind: 'anonymised', title: 'Anonymised from a use case described privately' };
   else if (raw.source === 'meeting' && raw.sourceRef) {
     const m = get<Meeting>('meetings', raw.sourceRef);
-    if (m)
+    // The call and its transcript are for the working group (and whoever recorded it).
+    if (!m || !canSeeMeeting(m, viewer)) source = { kind: 'meeting', title: 'A working group call' };
+    else
       source = {
         kind: 'meeting',
         id: m.id,
@@ -42,7 +44,7 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
   const all = allUseCases(raw.ontologyId);
   const byId = new Map(all.map((x) => [x.id, x]));
   const related: UseCaseDetail['trace']['related'] = [];
-  for (const l of raw.links ?? []) {
+  for (const l of u.links ?? []) {
     if (l.type !== 'use-case' || !l.id) continue;
     const t = byId.get(l.id);
     if (t && canSee(t, viewer)) related.push({ ...refOf(t), relation: l.relation, direction: 'out' });
@@ -52,10 +54,12 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
     const l = other.links?.find((x) => x.type === 'use-case' && x.id === raw.id);
     if (l && !related.some((r) => r.id === other.id)) related.push({ ...refOf(other), relation: l.relation, direction: 'in' });
   }
-  const other = (raw.links ?? []).filter((l) => l.type !== 'use-case');
+  // Raw links as this viewer may see them (present filters targets and strips who added them to anonymous ones).
+  const other = (u.links ?? []).filter((l) => l.type !== 'use-case');
 
+  const group = canTriage(raw.ontologyId, viewer) || isGroupMember(raw.ontologyId, viewer);
   const documents = list<RequirementsDocument>('requirementsDocs', raw.ontologyId)
-    .filter((d) => d.useCases.some((x) => x.id === raw.id))
+    .filter((d) => d.useCases.some((x) => x.id === raw.id) && (d.status === 'published' || group))
     .map((d) => ({ version: d.version, releaseId: d.releaseId, status: d.status }));
 
   return {
@@ -72,6 +76,7 @@ export function useCaseDetail(id: string, viewer?: User): UseCaseDetail {
       edit: own || canTriage(raw.ontologyId, viewer),
       triage: raw.visibility !== 'private' && canTriage(raw.ontologyId, viewer),
       changeVisibility: own && !raw.anonymous,
+      withdraw: own && !raw.withdrawnAt && (raw.anonymous || raw.visibility !== 'private'),
     },
   };
 }

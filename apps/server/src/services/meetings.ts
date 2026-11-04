@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { ChangeRequest, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
+import type { Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put } from '../db.js';
@@ -10,7 +10,7 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject } from './ontologies.js';
-import { allUseCases, canSee, createUseCase, getUseCase, refOf, synthesise } from './useCases.js';
+import { allUseCases, canSee, canSeeMeeting, createUseCase, getUseCase, refOf } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
@@ -183,7 +183,14 @@ export function useCasesFromMeeting(m: Meeting, viewer?: User): NonNullable<Meet
 /** A meeting with its linked use cases, for a viewer. */
 export const meetingFor = (m: Meeting, viewer?: User): Meeting => ({ ...m, useCases: useCasesFromMeeting(m, viewer) });
 
-export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[]; changeRequest?: ChangeRequest }> {
+/**
+ * Turn an analysed meeting into use cases shared with the working group, one per
+ * participant use case. No change request is drafted here: change requests are
+ * public, and a call's use cases are group-only until their author makes one
+ * public, after which anyone can draft changes from it.
+ */
+export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[] }> {
+  if (!canSeeMeeting(m, actor)) throw new HttpError(404, `meeting ${m.id} not found`);
   if (!m.analysis) m = await analyseMeeting(m);
   const a = m.analysis!;
   const project = getProject(m.ontologyId);
@@ -209,20 +216,9 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
         }),
       );
     });
-  let changeRequest: ChangeRequest | undefined;
-  const alreadyProposed = ucs.some((u) => u.changeRequestIds?.length);
-  if (!alreadyProposed) {
-    try {
-      changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
-      changeRequest.origin = { type: 'meeting', meetingId: m.id };
-      put('changeRequests', changeRequest, changeRequest.ontologyId);
-    } catch (err) {
-      console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
-    }
-  }
   if (!existing.length)
     logActivity({ ontologyId: m.ontologyId, actorId: actor.id, type: 'meeting.usecases', message: `turned the call “${m.title}” into ${ucs.length} use case${ucs.length === 1 ? '' : 's'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
-  return { useCases: ucs.map((u) => getUseCase(u.id)), changeRequest };
+  return { useCases: ucs.map((u) => getUseCase(u.id)) };
 }
 
 /* ------------------------------------------------------------------------ */

@@ -112,7 +112,7 @@ async function seedHistory() {
 
   // 1.0.0's use cases and requirements document, frozen with the release.
   try {
-    markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
+    await markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
   } catch (err) {
     console.warn(`[seed] requirements document: ${(err as Error).message}`);
   }

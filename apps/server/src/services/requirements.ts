@@ -1,8 +1,9 @@
 import { compactIRI, expandIRI, type OntologyGraph } from '@concord/core';
 import type { TermView } from '@concord/core/types';
-import type { Meeting, OntologyProject, PublicUseCase, Release, RequirementItem, RequirementsDocument, UseCase, User } from '@concord/shared';
+import type { OntologyProject, PublicUseCase, Release, RequirementItem, RequirementsDocument, UseCase, User } from '@concord/shared';
+import { useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, put } from '../db.js';
+import { get, HttpError, list, put, remove } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { REQUIREMENTS_WRITER } from '../llm/prompts.js';
@@ -11,7 +12,7 @@ import { RequirementsDraftSchema, type RequirementsDraft } from '../llm/schemas.
 import { getProject, mustFindProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { changeRequestsFor } from './traceability.js';
-import { allUseCases, canTriage, isGroupMember } from './useCases.js';
+import { allUseCases, canTriage, isGroupMember, onNoLongerPublic } from './useCases.js';
 import { getUser, logActivity } from './users.js';
 
 /**
@@ -22,14 +23,17 @@ import { getUser, logActivity } from './users.js';
  * committed to git (USE_CASES.md) when it is published.
  *
  * Only public use cases, and anonymised synthetic versions of private ones, are
- * ever included. Working group and private use cases appear as counts only.
+ * ever included. Working group members also see how many group-only use cases
+ * informed it; private use cases are never counted. If a cited use case stops
+ * being public (made private, withdrawn or archived), draft documents are
+ * written again from scratch, and published ones stop showing it.
  */
 
 /* ------------------------------------------------------------------------ */
 /* Public view of use cases                                                  */
 /* ------------------------------------------------------------------------ */
 
-const isPublishable = (u: UseCase) => u.visibility === 'public' && !['draft', 'archived'].includes(u.status);
+export const isPublishable = (u: UseCase) => u.visibility === 'public' && !u.withdrawnAt && !['draft', 'archived'].includes(u.status);
 
 /** What a use case's status will be once a given set of change requests is released. */
 function projectedStatus(u: UseCase, release?: { version: string; changeRequestIds: string[] }): { status: PublicUseCase['status']; coveredIn?: string } {
@@ -42,35 +46,40 @@ function projectedStatus(u: UseCase, release?: { version: string; changeRequestI
   return { status };
 }
 
+/**
+ * The only way to build a PublicUseCase. It refuses anything that is not public,
+ * and copies an allowlist of fields. Anonymised versions carry no attribution
+ * and no identifying origin. Meetings are working group business, so a meeting
+ * is described without its title or a link.
+ */
 export function toPublic(u: UseCase, release?: { version: string; changeRequestIds: string[] }): PublicUseCase {
+  if (!isPublishable(u)) throw new Error(`Use case ${u.id} is not public`);
   const s = u.sections;
   const { status, coveredIn } = projectedStatus(u, release);
-  const meeting = u.source === 'meeting' && u.sourceRef ? get<Meeting>('meetings', u.sourceRef) : undefined;
-  const origin: PublicUseCase['origin'] = u.anonymous
-    ? { kind: 'synthetic', label: 'Anonymised from a privately described use case' }
-    : meeting
-      ? { kind: 'meeting', label: `Raised in the working group call “${meeting.title}”`, date: meeting.createdAt.slice(0, 10), href: `/o/${u.ontologyId}/meetings/${meeting.id}` }
-      : u.source === 'agent'
-        ? { kind: 'agent', label: 'Reported by a coding agent' }
-        : u.source === 'chat'
-          ? { kind: 'interview', label: 'From a requirements interview', date: u.createdAt.slice(0, 10) }
-          : { kind: 'form', label: 'Submitted by a participant', date: u.createdAt.slice(0, 10) };
-  return {
+  const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x : undefined);
+  const base = {
     id: u.id,
-    ref: `UC-${u.number}`,
-    title: s.name || 'Untitled use case',
-    goal: s.goal,
-    description: s.description,
-    actors: s.actors,
-    scenarios: s.usageScenarios ?? [],
-    competencyQuestions: u.competencyQuestions.map((q) => ({ question: q.question, ...(q.exampleAnswer ? { exampleAnswer: q.exampleAnswer } : {}) })),
+    ref: useCaseLabel(u.number),
+    title: str(s.name) ?? 'Untitled use case',
+    goal: str(s.goal),
+    description: str(s.description),
+    actors: str(s.actors),
+    scenarios: (s.usageScenarios ?? []).filter((x): x is string => typeof x === 'string'),
+    competencyQuestions: u.competencyQuestions.map((q) => ({ question: String(q.question), ...(str(q.exampleAnswer) ? { exampleAnswer: q.exampleAnswer } : {}) })),
     status,
     ...(coveredIn ? { coveredIn } : {}),
-    sourceKind: u.anonymous ? 'synthetic' : u.source,
-    anonymised: !!u.anonymous,
-    ...(u.anonymous ? {} : { attribution: getUser(u.authorId)?.name }),
-    origin,
   };
+  if (u.anonymous) return { ...base, sourceKind: 'synthetic', anonymised: true, origin: { kind: 'synthetic', label: 'Anonymised from a privately described use case' } };
+  const day = u.createdAt.slice(0, 10);
+  const origin =
+    u.source === 'meeting'
+      ? ({ kind: 'meeting', label: 'Raised in a working group call', date: day } as const)
+      : u.source === 'agent'
+        ? ({ kind: 'agent', label: 'Reported by a coding agent' } as const)
+        : u.source === 'chat'
+          ? ({ kind: 'interview', label: 'From a requirements interview', date: day } as const)
+          : ({ kind: 'form', label: 'Submitted by a participant', date: day } as const);
+  return { ...base, sourceKind: u.source, anonymised: false, attribution: getUser(u.authorId)?.name, origin };
 }
 
 /** Public use cases of an ontology (public ones and anonymised versions only), oldest first. */
@@ -89,11 +98,37 @@ export function publicUseCases(ontologyId: string): PublicUseCase[] {
 const docs = (ontologyId: string) => list<RequirementsDocument>('requirementsDocs', ontologyId);
 export const findDocument = (ontologyId: string, version: string) => docs(ontologyId).find((d) => d.version === version.replace(/^v/, ''));
 
+/**
+ * A document as served. Published documents are frozen, but a use case its
+ * author withdrew afterwards is no longer shown (the copy committed to git can't
+ * be recalled, and the note says so). The group-only count is for the group.
+ */
+function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
+  const byId = new Map(allUseCases(d.ontologyId).map((u) => [u.id, u]));
+  const gone = new Set(d.useCases.filter((pu) => { const u = byId.get(pu.id); return !u || u.withdrawnAt || u.visibility !== 'public'; }).map((u) => u.id));
+  const out: RequirementsDocument = { ...d, useCases: d.useCases.filter((u) => !gone.has(u.id)), requirements: d.requirements.map((r) => ({ ...r, useCaseIds: r.useCaseIds.filter((id) => !gone.has(id)) })) };
+  if (gone.size) out.withdrawnNote = `${gone.size} use case${gone.size === 1 ? ' was' : 's were'} withdrawn by ${gone.size === 1 ? 'its author' : 'their authors'} after this version was published, so ${gone.size === 1 ? 'it is' : 'they are'} no longer shown. The story above may still draw on ${gone.size === 1 ? 'it' : 'them'}, and the copy in the released files on GitHub cannot be recalled.`;
+  if (!viewer || !isGroupMember(d.ontologyId, viewer)) delete out.unpublished;
+  return out;
+}
+
+/** True when a draft cites a use case that is no longer public: it must be written again, not patched. */
+const isStale = (d: RequirementsDocument) => {
+  const byId = new Map(allUseCases(d.ontologyId).map((u) => [u.id, u]));
+  return d.useCases.some((pu) => { const u = byId.get(pu.id); return !u || !isPublishable(u); });
+};
+
 /** For the public spec pages: the published document for a version, if there is one. */
 export function requirementsDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
   const p = mustFindProject(ontologyId);
   const d = findDocument(p.id, version);
-  return d?.status === 'published' ? d : undefined;
+  return d?.status === 'published' ? served(d) : undefined;
+}
+
+/** While a release is being published: its prepared (not yet frozen) document, as the public will see it. */
+export function releasingDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
+  const d = findDocument(ontologyId, version);
+  return d && !isStale(d) ? served(d) : undefined;
 }
 
 /** Documents a viewer may read: published ones for anyone, drafts for the working group. */
@@ -105,11 +140,25 @@ export function listDocuments(ontologyId: string, viewer?: User) {
     .map(({ id, version, status, generatedAt, title, releaseId, coverage }) => ({ id, version, status, generatedAt, title, releaseId, coverage }));
 }
 
-export function documentFor(ontologyId: string, version: string, viewer?: User): RequirementsDocument {
-  const d = findDocument(ontologyId, version);
+export async function documentFor(ontologyId: string, version: string, viewer?: User): Promise<RequirementsDocument> {
+  let d = findDocument(ontologyId, version);
   if (!d || (d.status !== 'published' && !isGroupMember(ontologyId, viewer))) throw new HttpError(404, `No use cases and requirements document for ${version}`);
-  return d;
+  // A draft that cites a use case which is no longer public is written again before anyone reads it.
+  if (d.status === 'draft' && isStale(d)) {
+    const release = d.releaseId ? get<Release>('releases', d.releaseId) : undefined;
+    d = await generateRequirements(getProject(ontologyId), { version: d.version, release });
+  }
+  return served(d, viewer);
 }
+
+/**
+ * When a use case stops being public: drop every draft document that cites it
+ * (they are written again on the next read, release draft or publish). Its
+ * questions also leave saved validation results; see onNoLongerPublic.
+ */
+onNoLongerPublic((u) => {
+  for (const d of docs(u.ontologyId)) if (d.status === 'draft' && d.useCases.some((x) => x.id === u.id)) remove('requirementsDocs', d.id);
+});
 
 const CAST = ['Sam', 'Priti', 'Jordan', 'Ada', 'Kofi', 'Morgan', 'Lena', 'Ravi'];
 const LOWERABLE = /^(A|An|The|This|That|These|Every|Each|Some|Many|Most|Our|We|They|People|Volunteers|Organisations|Let|Help|Make|Find|Publish|Record|Report|Show|Tell)\b/;
@@ -118,7 +167,7 @@ const lowerFirst = (s: string) => (LOWERABLE.test(s) ? s[0].toLowerCase() + s.sl
 const stripDot = (s: string) => s.trim().replace(/[.!]+$/, '');
 
 /** Offline stand-in: a simple running story with one fictional character per use case. */
-export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version: string, hidden: number, termLabels: Set<string>): RequirementsDraft {
+export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version: string, termLabels: Set<string>): RequirementsDraft {
   const requirements: RequirementsDraft['requirements'] = [];
   const seen = new Map<string, number>();
   const reqFor = (text: string, ref: string, terms: string[]) => {
@@ -135,12 +184,17 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
   };
   const cast = ucs.map((_, i) => CAST[i % CAST.length]);
   const sections = ucs.map((u, i) => {
-    const ref = `UC-${u.number}`;
+    const ref = useCaseLabel(u.number);
     const who = cast[i];
     const s = u.sections;
     const terms = u.terms.map((t) => t.label).filter((l) => termLabels.has(l.toLowerCase()));
+    // Terms a question mentions by name ("organisations" -> organisation), so a requirement can be checked against the graph.
+    const mentioned = (q: string) => {
+      const text = q.toLowerCase();
+      return [...termLabels].filter((l) => l.length >= 4 && /^[a-z][a-z ]+$/.test(l) && new RegExp(`\\b${l.replace(/y$/, '(y|ie)')}s?\\b`).test(text));
+    };
     const reqIds = [
-      ...u.competencyQuestions.map((q) => reqFor(`It must be possible to answer: “${stripDot(q.question)}${q.question.trim().endsWith('?') ? '' : '?'}”`, ref, terms)),
+      ...u.competencyQuestions.map((q) => reqFor(`It must be possible to answer: “${stripDot(q.question)}${q.question.trim().endsWith('?') ? '' : '?'}”`, ref, [...new Set([...terms, ...mentioned(q.question)])])),
       ...(s.requirements ? s.requirements.split(/\n+|;\s*/).filter((x) => x.trim().length > 8).map((x) => reqFor(stripDot(x.replace(/^[-*\d.)\s]+/, '')) + '.', ref, terms)) : []),
     ];
     const paras = [
@@ -162,7 +216,7 @@ export function heuristicDraft(project: OntologyProject, ucs: UseCase[], version
   return {
     title: `${project.title}: use cases and requirements for ${version}`,
     intro: [
-      `This note explains what **${project.title}** is for. It is drawn from the ${ucs.length} public use case${ucs.length === 1 ? '' : 's'} the working group has gathered${hidden ? `, and informed by ${hidden} more that are not published` : ''}.`,
+      `This note explains what **${project.title}** is for. It is drawn from the ${ucs.length} public use case${ucs.length === 1 ? '' : 's'} the working group has gathered.`,
       `Rather than list them one by one, it follows ${names.length === 1 ? 'one fictional person' : 'a few fictional people'}${names.length ? `, ${names.slice(0, -1).join(', ')}${names.length > 1 ? ' and ' : ''}${names.at(-1)},` : ''} through the situations the standard has to support. Each part of the story links to the use cases behind it, and the requirements at the end show how far version ${version} meets them.`,
     ].join(' '),
     sections,
@@ -198,18 +252,32 @@ function termIndex(graph: OntologyGraph) {
   return { resolve, labels: new Set([...byLabel.keys()]) };
 }
 
-/** Recompute statuses (use cases, requirements, coverage) without rewriting the story. */
-function refreshStatuses(doc: RequirementsDocument, release?: { version: string; changeRequestIds: string[] }) {
+/** The IRIs of every term in a graph. */
+const termIris = (graph: OntologyGraph) => {
+  const v = graph.view();
+  return new Set([...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals].map((t) => t.iri));
+};
+
+/**
+ * Recompute statuses (use cases, requirements, coverage) without rewriting the
+ * story. A requirement is met at a version only when its use cases are covered
+ * and every term that meets it is in that version's graph: a closed use case is
+ * history, not proof that a later version still supports it.
+ * Callers check isStale first: a use case that is no longer public is never kept.
+ */
+function refreshStatuses(doc: RequirementsDocument, inGraph: Set<string>, release?: { version: string; changeRequestIds: string[] }) {
   const byId = new Map(allUseCases(doc.ontologyId).map((u) => [u.id, u]));
-  doc.useCases = doc.useCases.map((pu) => {
+  doc.useCases = doc.useCases.flatMap((pu) => {
     const u = byId.get(pu.id);
-    return u && isPublishable(u) ? toPublic(u, release) : pu;
+    return u && isPublishable(u) ? [toPublic(u, release)] : [];
   });
   const status = new Map(doc.useCases.map((u) => [u.id, u.status]));
   doc.requirements = doc.requirements.map((r) => {
     const st = r.useCaseIds.map((id) => status.get(id));
-    const met = st.length > 0 && st.every((s) => s === 'closed');
-    const partial = st.some((s) => s === 'closed' || s === 'addressed');
+    const termsThere = r.termIris.filter((iri) => inGraph.has(iri));
+    const covered = st.length > 0 && st.every((s) => s === 'closed');
+    const met = covered && r.termIris.length > 0 && termsThere.length === r.termIris.length;
+    const partial = st.some((s) => s === 'closed' || s === 'addressed') || termsThere.length > 0;
     return { ...r, status: met ? 'met' : partial ? 'partial' : 'open' };
   });
   doc.coverage = {
@@ -228,15 +296,13 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
   if (existing?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
   const all = allUseCases(project.id);
   const ucs = all.filter((u) => isPublishable(u) && u.status !== 'out-of-scope').sort((a, b) => a.number - b.number);
-  const unpublished = {
-    group: all.filter((u) => u.visibility === 'group' && u.status !== 'archived').length,
-    private: all.filter((u) => u.visibility === 'private' && u.status !== 'archived' && u.anonymisation?.status !== 'published').length,
-  };
+  // Group members see how many group-only use cases informed it. Private ones are never counted.
+  const unpublished = { group: all.filter((u) => u.visibility === 'group' && !u.withdrawnAt && u.status !== 'archived').length };
   const graph = await ontologyStore.working(project);
   const terms = termIndex(graph);
   const releaseLike = opts.release ? { version: opts.version, changeRequestIds: opts.release.changeRequestIds } : undefined;
   const pub = ucs.map((u) => toPublic(u, releaseLike));
-  const refToId = new Map(ucs.map((u) => [`UC-${u.number}`, u.id]));
+  const refToId = new Map(ucs.map((u) => [useCaseLabel(u.number), u.id]));
 
   const { value, simulated } = ucs.length
     ? await llm.json<RequirementsDraft>({
@@ -253,12 +319,12 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
                 (u) =>
                   `### ${u.ref}: ${u.title} (status at ${opts.version}: ${u.status})\nGoal: ${u.goal ?? '—'}\nActors: ${u.actors ?? '—'}\n${u.description ? `Description: ${u.description}\n` : ''}${u.scenarios.length ? `Scenarios:\n${u.scenarios.map((x) => `- ${x}`).join('\n')}\n` : ''}${u.competencyQuestions.length ? `Competency questions:\n${u.competencyQuestions.map((q) => `- ${q.question}${q.exampleAnswer ? ` (e.g. ${q.exampleAnswer})` : ''}`).join('\n')}` : ''}`,
               )
-              .join('\n\n')}\n\n${unpublished.group + unpublished.private ? `${unpublished.group + unpublished.private} further use cases are not public; do not refer to their content.` : ''}`,
+              .join('\n\n')}\n\nUse only these use cases.`,
           },
         ],
-        fallback: () => heuristicDraft(project, ucs, opts.version, unpublished.group + unpublished.private, terms.labels),
+        fallback: () => heuristicDraft(project, ucs, opts.version, terms.labels),
       })
-    : { value: heuristicDraft(project, [], opts.version, unpublished.group + unpublished.private, terms.labels), simulated: true };
+    : { value: heuristicDraft(project, [], opts.version, terms.labels), simulated: true };
 
   const requirements: RequirementItem[] = value.requirements.map((r, i) => ({
     id: `R${i + 1}`,
@@ -289,20 +355,22 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
     unpublished,
     coverage: { total: 0, closed: 0, addressed: 0, open: 0 },
   };
-  refreshStatuses(doc, releaseLike);
+  refreshStatuses(doc, termIris(graph), releaseLike);
   put('requirementsDocs', doc, project.id);
   if (opts.actor)
     logActivity({ ontologyId: project.id, actorId: opts.actor.id, type: 'requirements.drafted', message: `drafted the use cases and requirements for ${opts.version}`, link: `/o/${project.id}/requirements/${opts.version}` });
   return doc;
 }
 
-/** Before a release is committed: make sure its document exists and reflects what the release closes. */
+/** Before a release is committed: make sure its document exists, is current, and reflects what the release closes. */
 export async function prepareForRelease(project: OntologyProject, r: Release): Promise<RequirementsDocument | undefined> {
   try {
     const existing = findDocument(project.id, r.version);
-    if (!existing || existing.status === 'published') return existing?.status === 'published' ? existing : await generateRequirements(project, { version: r.version, release: r });
+    if (existing?.status === 'published') return existing;
+    // Consent is checked again here: a draft citing anything no longer public is written again from scratch.
+    if (!existing || isStale(existing)) return await generateRequirements(project, { version: r.version, release: r });
     existing.releaseId = r.id;
-    refreshStatuses(existing, { version: r.version, changeRequestIds: r.changeRequestIds });
+    refreshStatuses(existing, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
     put('requirementsDocs', existing, project.id);
     return existing;
   } catch (err) {
@@ -312,10 +380,12 @@ export async function prepareForRelease(project: OntologyProject, r: Release): P
 }
 
 /** After publishing: freeze the document. */
-export function markPublished(doc: RequirementsDocument, r: Release) {
+export async function markPublished(doc: RequirementsDocument, r: Release) {
+  const project = getProject(doc.ontologyId);
+  if (isStale(doc)) doc = await generateRequirements(project, { version: r.version, release: r });
   doc.status = 'published';
   doc.releaseId = r.id;
-  refreshStatuses(doc, { version: r.version, changeRequestIds: r.changeRequestIds });
+  refreshStatuses(doc, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
   put('requirementsDocs', doc, doc.ontologyId);
   return doc;
 }
@@ -327,9 +397,9 @@ export function draftForRelease(r: Release) {
       const project = getProject(r.ontologyId);
       const d = findDocument(project.id, r.version);
       if (d?.status === 'published') return;
-      if (d) {
+      if (d && !isStale(d)) {
         d.releaseId = r.id;
-        refreshStatuses(d, { version: r.version, changeRequestIds: r.changeRequestIds });
+        refreshStatuses(d, termIris(await ontologyStore.working(project)), { version: r.version, changeRequestIds: r.changeRequestIds });
         put('requirementsDocs', d, project.id);
       } else await generateRequirements(project, { version: r.version, release: r });
     } catch (err) {
@@ -373,6 +443,5 @@ export function renderMarkdown(doc: RequirementsDocument): string {
       ...(u.scenarios.length ? ['**Scenarios.**', '', ...u.scenarios.map((x) => `- ${x}`), ''] : []),
       ...(u.competencyQuestions.length ? ['**Competency questions.**', '', ...u.competencyQuestions.map((q) => `- ${q.question}${q.exampleAnswer ? ` (e.g. ${q.exampleAnswer})` : ''}`), ''] : []),
     ]),
-    doc.unpublished.group + doc.unpublished.private ? `\n${doc.unpublished.group + doc.unpublished.private} further use cases informed this version but are not published.\n` : '',
   ].join('\n');
 }

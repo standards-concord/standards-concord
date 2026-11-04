@@ -35,7 +35,24 @@ export function changeRequestsFor(u: UseCase, overrides: ChangeRequest[] = []): 
   return [...byId.values()].filter((c) => linked.has(c.id) || useCaseIdsForCR(c).includes(u.id)).sort((a, b) => a.number - b.number);
 }
 
-const versionOf = (releaseId?: string) => (releaseId ? get<Release>('releases', releaseId)?.version : undefined);
+/** Compare dotted versions (1.10.0 > 1.9.0). */
+const cmpVersion = (a: string, b: string) => {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  return 0;
+};
+
+/**
+ * The release that completed a set of change requests: the latest published
+ * release among those that shipped them (by version, then publication time),
+ * not the one attached to the highest-numbered change request.
+ */
+export function completingRelease(crs: ChangeRequest[]): Release | undefined {
+  const releases = crs.map((c) => (c.releaseId ? get<Release>('releases', c.releaseId) : undefined));
+  if (releases.some((r) => !r || r.status !== 'published')) return undefined;
+  return (releases as Release[]).sort((a, b) => cmpVersion(a.version, b.version) || (a.publishedAt ?? '').localeCompare(b.publishedAt ?? '')).at(-1);
+}
 
 /** Work out the status a use case should have from its change requests. Returns undefined if unchanged. */
 export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick<UseCase, 'status' | 'resolution'> | undefined {
@@ -49,9 +66,15 @@ export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick
   let resolution = u.resolution;
   if (!live.length) status = 'accepted';
   else if (live.every((c) => c.status === 'released')) {
-    status = 'closed';
-    const last = live.map((c) => c.releaseId).filter(Boolean).at(-1);
-    resolution = { status: 'closed', at: clock.iso(), releaseId: last, version: versionOf(last), note: `Covered by ${live.map((c) => `#${c.number}`).join(', ')}` };
+    const rel = completingRelease(live);
+    if (rel) {
+      status = 'closed';
+      // Keep the original transition (and its timestamp) when nothing has really changed.
+      resolution =
+        u.status === 'closed' && u.resolution?.releaseId === rel.id
+          ? u.resolution
+          : { status: 'closed', at: rel.publishedAt ?? clock.iso(), releaseId: rel.id, version: rel.version, note: `Covered by ${live.map((c) => `#${c.number}`).join(', ')}` };
+    } else status = 'addressed';
   } else if (live.every((c) => c.status === 'released' || c.status === 'merged')) status = 'addressed';
   else if (live.some((c) => ACTIVE.includes(c.status))) status = 'in-progress';
   else status = u.status;

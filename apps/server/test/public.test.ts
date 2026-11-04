@@ -234,7 +234,6 @@ describe('mapping the use case data onto the page', () => {
         intro: 'Intro [UC-1](#uc-u1)',
         sections: [],
         requirements: [{ id: 'R1', text: 'Find shifts', useCaseIds: ['u1'], termIris: ['https://w3id.org/odi/volunteering#Session'], status: 'met' }],
-        unpublished: { group: 2, private: 1 },
       },
       [
         { id: 'u1', ref: 'UC-1', title: 'From a call', status: 'closed', coveredIn: '1.0.0', attribution: 'Aisha', origin: { kind: 'meeting', label: 'Working group call', href: '/o/x/meetings/y' } },
@@ -251,6 +250,6 @@ describe('mapping the use case data onto the page', () => {
     expect(html).not.toContain('/o/x/meetings/y');
     expect(html).toContain('Working group call');
     expect(html).toMatch(/Met by <a class="ref" href="#Session"/);
-    expect(html).toContain('2 working group use cases and 1 private use case also informed this version');
+    expect(html).not.toMatch(/private use case/);
   });
 });

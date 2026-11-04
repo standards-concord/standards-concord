@@ -221,7 +221,7 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
     // Use cases this change addressed are now closed by this version.
     syncUseCasesForCR(cr);
   }
-  if (requirements) markPublished(requirements, r);
+  if (requirements) await markPublished(requirements, r);
 
   project.currentVersion = r.version;
   project.stage = 'released';

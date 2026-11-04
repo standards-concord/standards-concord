@@ -198,6 +198,7 @@ export const api = {
     patch<UseCaseDetail>(`/api/use-cases/${e(id)}`, body),
   setUseCaseVisibility: (id: string, visibility: UseCaseVisibility) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/visibility`, { visibility }),
   submitUseCase: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/submit`),
+  withdrawUseCase: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/withdraw`),
   triageUseCase: (id: string, status: UseCaseStatus, note?: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/triage`, { status, note }),
   addUseCaseLink: (id: string, link: NewUseCaseLink) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/links`, link),
   removeUseCaseLink: (id: string, target: string) => del<UseCaseDetail>(`/api/use-cases/${e(id)}/links/${e(target)}`),
@@ -224,7 +225,7 @@ export const api = {
   simulateMeeting: (id: string, title: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title }),
   meeting: (id: string) => get<Meeting>(`/api/meetings/${e(id)}`),
   analyseMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/analyse`),
-  proposeFromMeeting: (id: string) => post<{ useCases: UseCase[]; changeRequest?: ChangeRequest }>(`/api/meetings/${e(id)}/propose`),
+  proposeFromMeeting: (id: string) => post<{ useCases: UseCase[] }>(`/api/meetings/${e(id)}/propose`),
 
   // Change requests
   changeRequests: (id: string, status?: ChangeRequestStatus) => get<ChangeRequest[]>(`/api/ontologies/${e(id)}/change-requests${qs({ status })}`),

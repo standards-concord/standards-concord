@@ -87,7 +87,7 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
 const project = (req: Request) => mustFindProject(String(req.params.id));
 
 /** Change request detail plus the use cases it addresses that the viewer may see. */
-const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...crs.detail(c), useCases: useCasesForCR(c, req.user) });
+const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...useCases.crForViewer(crs.detail(c), req.user), useCases: useCasesForCR(c, req.user) });
 /** Release detail plus the use cases it closes and its requirements document. */
 const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r), ...releaseTrace(r, req.user) });
 
@@ -135,9 +135,9 @@ export function apiRouter(): Router {
   });
 
   /* --------------------------- ontologies --------------------------- */
-  r.get('/ontologies', async (_req, res) => {
+  r.get('/ontologies', async (req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
-    res.json(await Promise.all(all.map((p) => summary(p))));
+    res.json(await Promise.all(all.map((p) => summary(p, true, req.user))));
   });
 
   r.post('/ontologies', async (req, res) => {
@@ -147,12 +147,12 @@ export function apiRouter(): Router {
       { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate },
       user,
     );
-    res.status(201).json(await summary(p));
+    res.status(201).json(await summary(p, true, req.user));
   });
 
   r.get('/ontologies/:id', async (req, res) => {
     const p = project(req);
-    res.json({ ...(await summary(p)), members: membersWithUsers(p.id), versions: ontologyStore.versions(p), history: ontologyStore.log(p, 30) });
+    res.json({ ...(await summary(p, true, req.user)), members: membersWithUsers(p.id), versions: ontologyStore.versions(p), history: ontologyStore.log(p, 30) });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
@@ -224,7 +224,7 @@ export function apiRouter(): Router {
     requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(setGovernance(p, policy, user)));
+    res.json(await summary(setGovernance(p, policy, user), true, user));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
@@ -262,6 +262,11 @@ export function apiRouter(): Router {
     const u = useCases.getUseCaseFor(String(req.params.id), user);
     useCases.setVisibility(u, user, req.body?.visibility);
     res.json(useCaseDetail(u.id, user));
+  });
+  r.post('/use-cases/:id/withdraw', (req, res) => {
+    const user = requireUser(req);
+    useCases.withdrawUseCase(useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(useCaseDetail(String(req.params.id), user));
   });
   r.post('/use-cases/:id/submit', (req, res) => {
     const user = requireUser(req);
@@ -302,9 +307,9 @@ export function apiRouter(): Router {
 
   /* ------------------------ requirements documents ------------------- */
   r.get('/ontologies/:id/requirements', (req, res) => res.json(requirements.listDocuments(project(req).id, req.user)));
-  r.get('/ontologies/:id/requirements/:version', (req, res) => res.json(requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user)));
-  r.get('/ontologies/:id/requirements/:version/markdown', (req, res) => {
-    const doc = requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user);
+  r.get('/ontologies/:id/requirements/:version', async (req, res) => res.json(await requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user)));
+  r.get('/ontologies/:id/requirements/:version/markdown', async (req, res) => {
+    const doc = await requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user);
     res.type('text/markdown; charset=utf-8').send(requirements.renderMarkdown(doc));
   });
   r.post('/releases/:id/requirements', async (req, res) => {
@@ -318,7 +323,7 @@ export function apiRouter(): Router {
   });
   r.get('/interviews/:id', (req, res) => {
     const s = useCases.getInterview(String(req.params.id));
-    if (s.userId !== req.user?.id) throw new HttpError(403, 'Interviews are private to the person interviewed');
+    if (s.userId !== req.user?.id) throw new HttpError(404, `interview ${s.id} not found`);
     res.json({ ...s, useCase: useCaseDetail(s.useCaseId, req.user) });
   });
   r.post('/interviews/:id/messages', async (req, res) => {
@@ -340,7 +345,20 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ meetings --------------------------- */
-  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id).map((m) => meetings.meetingFor(m, req.user))));
+  // Meetings are working group business: members (and whoever recorded one) see them; to anyone else they don't exist.
+  const meetingFor = (req: Request) => {
+    const m = meetings.getMeeting(String(req.params.id));
+    if (!useCases.canSeeMeeting(m, req.user)) throw new HttpError(404, `meeting ${m.id} not found`);
+    return m;
+  };
+  r.get('/ontologies/:id/meetings', (req, res) =>
+    res.json(
+      meetings
+        .listMeetings(project(req).id)
+        .filter((m) => useCases.canSeeMeeting(m, req.user))
+        .map((m) => meetings.meetingFor(m, req.user)),
+    ),
+  );
   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
@@ -351,24 +369,24 @@ export function apiRouter(): Router {
     const delay = Number(req.query.delayMs ?? req.body?.delayMs);
     res.status(201).json(await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', Number.isFinite(delay) ? { delayMs: delay } : {}));
   });
-  r.get('/meetings/:id', (req, res) => res.json(meetings.meetingFor(meetings.getMeeting(String(req.params.id)), req.user)));
+  r.get('/meetings/:id', (req, res) => res.json(meetings.meetingFor(meetingFor(req), req.user)));
   r.post('/meetings/:id/analyse', async (req, res) => {
     requireUser(req);
-    res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
+    res.json(meetings.meetingFor(await meetings.analyseMeeting(meetingFor(req)), req.user));
   });
   r.post('/meetings/:id/end', async (req, res) => {
     requireUser(req);
-    const m = meetings.getMeeting(String(req.params.id));
+    const m = meetingFor(req);
     meetings.stopSimulation(m.id);
     res.json(await meetings.endLiveMeeting(m));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
     const user = requireUser(req);
-    const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), user);
-    res.json({ useCases: out.useCases.map((u) => useCases.present(u, user)), changeRequest: out.changeRequest ? crOut(out.changeRequest, req) : undefined });
+    const out = await meetings.proposeFromMeeting(meetingFor(req), user);
+    res.json({ useCases: out.useCases.filter((u) => useCases.canSee(u, user)).map((u) => useCases.present(u, user)) });
   });
   r.get('/meetings/:id/stream', (req, res) => {
-    const m = meetings.getMeeting(String(req.params.id));
+    const m = meetingFor(req);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
@@ -392,7 +410,7 @@ export function apiRouter(): Router {
   /* ---------------------------- change requests ---------------------- */
   r.get('/ontologies/:id/change-requests', (req, res) => {
     const status = optStr(req.query.status);
-    res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status));
+    res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status).map((c) => useCases.crForViewer(c, req.user)));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {
@@ -404,7 +422,7 @@ export function apiRouter(): Router {
     // Check cited use cases before creating anything.
     for (const ucId of Array.isArray(b.useCaseIds) ? b.useCaseIds : []) {
       const u = useCases.getUseCaseFor(String(ucId), user);
-      if (u.visibility === 'private') throw new HttpError(409, 'A change request cannot cite a private use case. Publish an anonymised version and cite that.');
+      if (u.visibility !== 'public' || u.withdrawnAt) throw new HttpError(409, 'Change requests are public, so they can only cite public use cases. Make it public, or publish an anonymised version of a private one, and cite that.');
     }
     const cr = await crs.createChangeRequest(p, user, {
       title: optStr(b.title) ?? '',
@@ -513,7 +531,7 @@ export function apiRouter(): Router {
   /* ------------------------------ activity --------------------------- */
   r.get('/activity', (req, res) => {
     const id = optStr(req.query.ontologyId);
-    res.json(listActivity(id ? mustFindProject(id).id : undefined, 100));
+    res.json(useCases.visibleActivity(listActivity(id ? mustFindProject(id).id : undefined, 300), req.user).slice(0, 100));
   });
 
   /* ------------------------------ feedback --------------------------- */

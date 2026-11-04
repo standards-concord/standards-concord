@@ -18,6 +18,7 @@ import { get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import { template } from './governance.js';
 import { ontologyStore } from './ontologyStore.js';
+import { createHash } from 'node:crypto';
 import { getUser, logActivity } from './users.js';
 
 export const getProject = (id: string) => mustGet<OntologyProject>('ontologies', id);
@@ -32,6 +33,10 @@ export const mustFindProject = (idOrSlug: string) => {
 export const members = (ontologyId: string) => list<Membership>('memberships', ontologyId);
 export const rolesFor = (ontologyId: string, userId: string | undefined): Role[] =>
   userId ? (get<Membership>('memberships', `${ontologyId}:${userId}`)?.roles ?? []) : [];
+
+const GROUP_ROLES: Role[] = ['owner', 'steward', 'editor', 'reviewer', 'member', 'odi'];
+/** Working group members: anyone with a role beyond contributor or agent. */
+export const isGroupMember = (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || rolesFor(ontologyId, user.id).some((r) => GROUP_ROLES.includes(r)));
 
 export function setRoles(ontologyId: string, userId: string, roles: Role[]): Membership {
   const id = `${ontologyId}:${userId}`;
@@ -132,11 +137,15 @@ export function setGovernance(p: OntologyProject, policy: GovernancePolicy, acto
 
 const validationCache = new Map<string, Promise<ValidationReport>>();
 
-/** Competency questions from use cases that have SPARQL tests attached. */
+/**
+ * Competency questions from use cases that have SPARQL tests attached. Validation
+ * reports are public (and saved on change requests), so only public use cases'
+ * questions run in them; a use case that stops being public has its questions
+ * removed from saved reports too (services/useCases.ts).
+ */
 export function competencyTests(ontologyId: string) {
   return list<UseCase>('useCases', ontologyId)
-    // Private use cases stay private: their questions would surface in shared validation reports.
-    .filter((u) => u.status !== 'archived' && u.visibility !== 'private')
+    .filter((u) => u.status !== 'archived' && u.visibility === 'public' && !u.withdrawnAt)
     .flatMap((u) => u.competencyQuestions)
     .filter((q) => q.sparql)
     .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));
@@ -158,10 +167,12 @@ export async function validateGraph(key: string, graph: Graph, cqs: { question: 
 export async function workingValidation(p: OntologyProject) {
   const graph = await ontologyStore.working(p);
   const cqs = competencyTests(p.id);
-  return validateGraph(`${p.slug}@${ontologyStore.head(p)}:${cqs.length}`, graph, cqs);
+  // Keyed by the questions' content, so a change in which questions run (or what they say) never reuses an old report.
+  const digest = createHash('sha256').update(JSON.stringify(cqs)).digest('hex').slice(0, 16);
+  return validateGraph(`${p.slug}@${ontologyStore.head(p)}:${digest}`, graph, cqs);
 }
 
-export async function summary(p: OntologyProject, withHealth = true): Promise<OntologySummary> {
+export async function summary(p: OntologyProject, withHealth = true, viewer?: User): Promise<OntologySummary> {
   const graph = await ontologyStore.working(p);
   const view = graph.view();
   const crs = list<ChangeRequest>('changeRequests', p.id);
@@ -186,7 +197,8 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
       classes: view.classes.length,
       properties: view.objectProperties.length + view.datatypeProperties.length,
       individuals: view.individuals.length,
-      useCases: list<UseCase>('useCases', p.id).length,
+      // Only the use cases this viewer can see, so the count doesn't reveal private ones.
+      useCases: list<UseCase>('useCases', p.id).filter((u) => (viewer && u.authorId === viewer.id) || (!u.withdrawnAt && (u.visibility === 'public' || (u.visibility === 'group' && isGroupMember(p.id, viewer))))).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: list<Release>('releases', p.id).filter((r) => r.status === 'published').length,
       members: members(p.id).length,

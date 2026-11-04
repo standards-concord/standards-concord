@@ -39,7 +39,7 @@ export function RequirementsDocPage() {
   const d = doc.data;
   const byId = new Map(d.useCases.map((u) => [u.id, u]));
   const prefixes = view.data?.prefixes ?? {};
-  const hidden = d.unpublished.group + d.unpublished.private;
+  const hidden = d.unpublished?.group ?? 0;
 
   return (
     <div className="mx-auto max-w-4xl">
@@ -180,9 +180,10 @@ export function RequirementsDocPage() {
             ))}
             {!d.useCases.length && <p className="text-sm text-muted">No public use cases yet.</p>}
           </div>
+          {d.withdrawnNote && <p className="mt-4 text-xs text-muted">{d.withdrawnNote}</p>}
           {hidden > 0 && (
             <p className="mt-4 text-xs text-muted">
-              {hidden} more use case{hidden === 1 ? '' : 's'} informed this version but {hidden === 1 ? 'is' : 'are'} not published ({d.unpublished.group} shared with the working group only, {d.unpublished.private} private).
+              {hidden} more use case{hidden === 1 ? '' : 's'} shared with the working group only informed this version. Only working group members see this note.
             </p>
           )}
         </section>
