@@ -271,38 +271,61 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
 }
 
 /**
- * A registered (not metadata-document) client. Moves a secret stored by older code into a hash, so the
- * stored client never carries a usable secret; registeredClientAuth checks it instead of the SDK.
+ * A registered (not metadata-document) client. Upgrades a record older code wrote (see upgradeLegacy) as
+ * it is read, so the stored client never carries a usable secret; clientAuth checks the hash instead of the SDK.
  */
 function registeredClient(clientId: string): ClientDoc | undefined {
   const doc = get<ClientDoc>('oauthClients', clientId);
-  return doc?.info.client_secret ? hashSecret(doc) : doc;
+  if (!doc || !needsUpgrade(doc)) return doc;
+  return transaction(() => {
+    const fresh = get<ClientDoc>('oauthClients', clientId);
+    return fresh && needsUpgrade(fresh) ? upgradeLegacy(fresh) : fresh;
+  });
 }
-function hashSecret(doc: ClientDoc): ClientDoc {
+
+/** Records older versions wrote: a plain-text secret, or a confidential client with no method recorded (RFC 7591 default). */
+const needsUpgrade = (doc: ClientDoc) => doc.info.client_secret !== undefined || (doc.info.token_endpoint_auth_method === undefined && doc.secretHash !== undefined);
+
+/**
+ * Hash a plain-text secret, and record the method Concord actually checks (client_secret_post) for a
+ * confidential client that registered without one. Hashing marks the scrub of old copies as owed, in the
+ * same write, so it can't be skipped; the scrub itself is tried straight after. Call inside a transaction.
+ */
+function upgradeLegacy(doc: ClientDoc): ClientDoc {
   const { client_secret, ...info } = doc.info;
-  const migrated = { ...doc, info: info as OAuthClientInformationFull, secretHash: sha(client_secret!) };
-  put<ClientDoc>('oauthClients', migrated);
-  return migrated;
+  const secretHash = typeof client_secret === 'string' ? sha(client_secret) : doc.secretHash;
+  if (info.token_endpoint_auth_method === undefined && secretHash !== undefined) info.token_endpoint_auth_method = 'client_secret_post';
+  const upgraded = { ...doc, info: info as OAuthClientInformationFull, secretHash };
+  put<ClientDoc>('oauthClients', upgraded);
+  if (client_secret !== undefined) {
+    put('kv', { id: SCRUB, done: false });
+    setImmediate(() => void scrubIfOwed());
+  }
+  return upgraded;
 }
 
 const SCRUB = 'oauth-secret-scrub';
 
+/** Scrub old copies of secrets from the database files if that is owed (or has never been done). True once done. */
+export function scrubIfOwed(): boolean {
+  if (get<{ done: boolean }>('kv', SCRUB)?.done) return true;
+  if (!scrubFreeSpace()) return false;
+  put('kv', { id: SCRUB, done: true });
+  return true;
+}
+
 /**
- * Run at startup: hash every client secret older code stored in plain text, then scrub the database file
- * and its write-ahead log of old copies. The scrub runs once (and again whenever more secrets are hashed),
- * and only counts as done once SQLite confirms it; a blocked one is retried at the next start.
+ * Run at startup: upgrade every record older code wrote (hashing plain-text secrets), then scrub the
+ * database file and its write-ahead log of old copies. The scrub runs once, and again whenever more secrets
+ * are hashed, and only counts as done once SQLite confirms it; a blocked one is retried at the next start.
  */
 export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
   const hashed = transaction(() => {
-    const plain = list<ClientDoc>('oauthClients').filter((d) => d.info.client_secret);
-    for (const d of plain) hashSecret(d);
-    if (plain.length) put('kv', { id: SCRUB, done: false });
-    return plain.length;
+    const legacy = list<ClientDoc>('oauthClients').filter(needsUpgrade);
+    for (const d of legacy) upgradeLegacy(d);
+    return legacy.filter((d) => d.info.client_secret !== undefined).length;
   });
-  if (get<{ done: boolean }>('kv', SCRUB)?.done) return { hashed, scrubbed: true };
-  if (!scrubFreeSpace()) return { hashed, scrubbed: false };
-  put('kv', { id: SCRUB, done: true });
-  return { hashed, scrubbed: true };
+  return { hashed, scrubbed: scrubIfOwed() };
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -654,9 +677,11 @@ function routerFor(origin: string): Router {
     const given = body.client_secret;
     // Whether a secret is needed comes from the registered method, never from whether a hash happens to be
     // there: a confidential client whose stored hash is missing or damaged fails closed.
-    const confidential = doc !== undefined && doc.info.token_endpoint_auth_method !== 'none';
-    if (doc && confidential !== (doc.secretHash !== undefined && doc.secretHash !== null)) return refuse('This client’s registration is damaged. Register it again.');
-    if (confidential) {
+    const method = doc?.info.token_endpoint_auth_method;
+    const confidential = method === 'client_secret_post';
+    if (doc && (!AUTH_METHODS.includes(method as string) || confidential !== (doc.secretHash !== undefined && doc.secretHash !== null)))
+      return refuse('This client’s registration is damaged. Register it again.');
+    if (doc && confidential) {
       if (typeof given !== 'string' || !sameSecret(given, doc.secretHash)) return refuse('The client secret is missing or wrong.');
       const expires = doc.info.client_secret_expires_at;
       if (expires && expires < now()) return refuse('The client secret has expired. Register the client again.');
@@ -700,13 +725,16 @@ const CANONICAL_OAUTH_PATHS = new Set(['/.well-known/oauth-authorization-server'
  */
 function looseOAuthPath(path: string): boolean {
   let p = path;
-  try {
-    p = decodeURIComponent(p);
-  } catch {
-    // keep it as it is
+  // Decode a few times over, so double-encoded near-misses (/token%252f, /%2574oken) are caught too.
+  for (let i = 0; i < 3 && /%[0-9a-f]{2}/i.test(p); i++) {
+    try {
+      p = decodeURIComponent(p);
+    } catch {
+      break;
+    }
   }
   const segments: string[] = [];
-  for (const s of p.toLowerCase().split('/')) {
+  for (const s of p.toLowerCase().replace(/\\/g, '/').split('/')) {
     const seg = s.split(';')[0];
     if (!seg || seg === '.') continue;
     if (seg === '..') segments.pop();

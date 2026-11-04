@@ -719,8 +719,29 @@ describe('client metadata documents and redirect safety', () => {
     expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
   });
 
+  it('refuses a stored auth method it does not support, and upgrades a confidential client that never recorded one', async () => {
+    const c = await confidentialClient();
+    const doc = get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id)!;
+    const exchange = await c.newCode();
+    for (const method of [null, '', true, 1, [], {}, 'bogus', 'private_key_jwt', 'client_secret_basic', 'tls_client_auth']) {
+      put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: method } });
+      for (const body of [exchange, c.refresh]) {
+        const res = await token({ ...body, client_secret: c.client_secret });
+        expect(res.status, `${JSON.stringify(method)} ${body.grant_type}`).toBe(401);
+      }
+      expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id, client_secret: c.client_secret })).status).toBe(401);
+    }
+    // Older versions stored a secret-holding client with no method (RFC 7591's default): it is upgraded to
+    // the method Concord checks, client_secret_post, and the secret is still required.
+    const { token_endpoint_auth_method: _m, ...noMethod } = doc.info;
+    put('oauthClients', { ...doc, info: noMethod });
+    expect((await token(exchange)).status).toBe(401);
+    expect(get<{ info: Record<string, unknown> }>('oauthClients', c.client_id)!.info.token_endpoint_auth_method).toBe('client_secret_post');
+    expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
+  });
+
   it('answers only on the exact OAuth paths: near-misses are not found, never the web app', async () => {
-    const variants = ['/token/', '/token//', '/TOKEN', '/token%2f', '/token;x', '/./token', '//token', '/%2e/token', '/%2ftoken', '/x/../token', '/Revoke', '/register/', '/AUTHORIZE', '/.well-known/OAUTH-authorization-server', '//.well-known/oauth-protected-resource'];
+    const variants = ['/token/', '/token//', '/TOKEN', '/token%2f', '/token;x', '/./token', '//token', '/%2e/token', '/%2ftoken', '/x/../token', '/Revoke', '/register/', '/AUTHORIZE', '/.well-known/OAUTH-authorization-server', '//.well-known/oauth-protected-resource', '/token%252f', '/%2574oken', '/%5ctoken', '/token%5c'];
     for (const path of variants) {
       for (const method of ['get', 'post', 'head', 'options'] as const) {
         const res = await request(base)[method](path);
