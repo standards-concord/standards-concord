@@ -43,6 +43,9 @@ function brief(f: ForkSummary) {
   };
 }
 
+/** Hints connector directories require on every tool. */
+const WRITES = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
+
 const howToImport = (f: ForkSummary) =>
   `Import the fork instead of the released ontology while you develop: use a file URL such as ${f.urls.formats.turtle} (or ${f.urls.iri} with an Accept header for the RDF format you want; like the release IRIs, it gives HTML to browsers and */*). Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
 
@@ -73,6 +76,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
         name: z.string().max(80).describe('Short name, e.g. "Volunteer hours"'),
         purpose: z.string().optional().describe('What you are building and why you need new terms, e.g. "Logging volunteer hours in the Helping Hands app"'),
       },
+      annotations: WRITES,
     },
     ({ ontology, name, purpose }) =>
       guard(async () => {
@@ -120,6 +124,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
         terms: z.array(ProposedTermSchema).optional().describe('Structured terms (action add/update/deprecate, kind, localName, label, definition, superClasses, domain, range…); CURIEs resolve against the ontology'),
         message: z.string().optional().describe('A short summary of the edit, for the fork history'),
       },
+      annotations: WRITES,
     },
     ({ fork, description, terms, message }) =>
       withFork(fork, async (f) => {
@@ -144,6 +149,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
       description:
         'Ask the standard to adopt your fork\'s edits: opens one change request (or updates the open one) that is classified as patch/minor/major, validated and reviewed under the ontology\'s governance policy. Keep using the fork meanwhile.',
       inputSchema: { fork: forkArg, title: z.string().optional(), description: z.string().optional().describe('Why the standard needs these terms; defaults to the fork\'s purpose') },
+      annotations: WRITES,
     },
     ({ fork, title, description }) =>
       withFork(fork, async (f) => {
@@ -193,6 +199,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
       title: 'Sync a fork with upstream',
       description: 'Replay your fork\'s edits on the latest upstream draft, so the fork picks up everything the standard has changed since you forked. Edits that already landed are dropped. If upstream changed a term the fork also changes, or the combination would be inconsistent, nothing changes and the conflicts are returned: resolve them with discard_fork_changes.',
       inputSchema: { fork: forkArg },
+      annotations: WRITES,
     },
     ({ fork }) =>
       withFork(fork, async (f) => {
@@ -213,6 +220,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
         all: z.boolean().optional().describe('Drop every change in the fork'),
         includeRelated: z.boolean().optional().describe('Also drop changes to other terms made in the same edit (the error lists them when this is needed)'),
       },
+      annotations: { ...WRITES, destructiveHint: true },
     },
     ({ fork, terms, all, includeRelated }) =>
       withFork(fork, async (f) => {
@@ -224,7 +232,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
 
   server.registerTool(
     'close_fork',
-    { title: 'Close a fork', description: 'Close a fork you no longer use (after migrating to a release). It keeps resolving, so nothing breaks.', inputSchema: { fork: forkArg } },
+    { title: 'Close a fork', description: 'Close a fork you no longer use (after migrating to a release). It keeps resolving, so nothing breaks.', inputSchema: { fork: forkArg }, annotations: WRITES },
     ({ fork }) => withFork(fork, async (f) => json(brief(await closeFork(f, user)))),
   );
 }
