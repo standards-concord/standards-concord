@@ -53,6 +53,7 @@ let refreshToken = 'rt-1';
 let refreshes = 0;
 /** Authorization headers the pod documents were requested with. */
 let podAuth: string[] = [];
+let stored = Buffer.alloc(0);
 let guarded: string[] = [];
 const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
 const otherKeys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
@@ -109,6 +110,16 @@ beforeAll(async () => {
     if (url.pathname === '/pod/big.json') {
       podAuth.push(String(req.headers.authorization));
       return send('application/json', JSON.stringify({ id: 'x' }), behaviour.padPod, behaviour.stallPod);
+    }
+    // Keeps whatever bytes are PUT, and gives them back.
+    if (url.pathname === '/pod/bin') {
+      if (req.method === 'PUT') {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(c as Buffer);
+        stored = Buffer.concat(chunks);
+        return res.writeHead(201).end();
+      }
+      return res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(stored);
     }
     // Refuses the first access token (as if it had been revoked early); /pod/locked.json refuses every token.
     if (url.pathname === '/pod/revoked.json' || url.pathname === '/pod/locked.json') {
@@ -329,6 +340,18 @@ describe('reading a pod as the signed-in WebID', () => {
     expect(refreshes).toBe(1);
     expect(podAuth).toEqual(['DPoP at-1', 'DPoP at-1', 'DPoP at-1', 'DPoP at-1', 'DPoP at-r1']);
   }, 20_000);
+
+  it('sends and reads bytes exactly, not as text', async () => {
+    const { login } = await signIn();
+    const req = (await podRequester(login))!;
+    // Not valid UTF-8: decoding it as text would change it.
+    const bytes = new Uint8Array([0, 255, 128, 10, 13, 0xc3, 0x28]);
+    expect((await req('PUT', `${base}/pod/bin`, { headers: { 'content-type': 'application/octet-stream' }, body: bytes })).status).toBe(201);
+    expect([...stored]).toEqual([...bytes]);
+    expect([...new Uint8Array(await (await req('GET', `${base}/pod/bin`)).arrayBuffer())]).toEqual([...bytes]);
+    await req('PUT', `${base}/pod/bin`, { body: bytes.buffer });
+    expect([...stored]).toEqual([...bytes]);
+  });
 
   it('refreshes once and retries when the pod answers 401, and gives the 401 back if it persists', async () => {
     const { login } = await signIn();

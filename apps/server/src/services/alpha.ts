@@ -205,14 +205,10 @@ export function mirrorToPod(user: User): Promise<void> {
     try {
       const h = history(user.id);
       if (h.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
-      // The first time, a document already at the record's path (one this server didn't write) is kept, word for
-      // word, beside it rather than written over. If the pod can't say whether there is one, nothing is written.
-      if (!h.keptExisting) {
-        await solid.keepExisting(user.id, RECORD);
-        const marked = history(user.id);
-        marked.keptExisting = true;
-        put('kv', marked);
-      }
+      // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
+      // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
+      // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
+      const when = h.keptExisting ? {} : await solid.keepExisting(user.id, RECORD);
       const copied: string[] = [];
       for (const id of h.feedbackToCopy ?? []) {
         const fb = get<FeedbackSubmission>('feedback', id);
@@ -221,8 +217,9 @@ export function mirrorToPod(user: User): Promise<void> {
       }
       const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', versions: h.versions };
       // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
-      await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json');
+      await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json', when);
       const now = history(user.id);
+      now.keptExisting = true;
       now.mirroredRev = Math.max(now.mirroredRev, h.rev);
       now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
       put('kv', now);

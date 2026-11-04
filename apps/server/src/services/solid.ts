@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { User } from '@concord/shared';
@@ -89,6 +90,47 @@ async function ownerRequest(rec: PodRecord): Promise<PodRequest> {
   return (await podRequester(login))!;
 }
 
+/** A precondition for `writeExisting`: replace only this version (ETag), or only create (`*`). */
+export interface WriteCondition {
+  ifMatch?: string;
+  ifNoneMatch?: '*';
+}
+export class PreconditionFailed extends Error {}
+
+const localTag = (bytes: Buffer) => `"sha256-${createHash('sha256').update(bytes).digest('hex')}"`;
+
+/**
+ * Write a private file only if `when` holds, the way a pod's PUT would:
+ * `ifNoneMatch: '*'` creates it exclusively; `ifMatch` replaces it only if its
+ * bytes still hash to that tag, through a temporary file renamed into place (so
+ * a reader never sees half a file). This server is the only writer of these
+ * files, and the check and rename run without yielding, so nothing can slip in
+ * between them.
+ */
+function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (when.ifNoneMatch === '*') {
+    try {
+      fs.writeFileSync(file, bytes, { flag: 'wx' });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PreconditionFailed(`${file} already exists`);
+      throw err;
+    }
+  }
+  let current: Buffer;
+  try {
+    current = fs.readFileSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new PreconditionFailed(`${file} is gone`);
+    throw err;
+  }
+  if (localTag(current) !== when.ifMatch) throw new PreconditionFailed(`${file} changed`);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, bytes, { flag: 'wx' });
+  fs.renameSync(tmp, file);
+}
+
 export const solid = {
   get enabled() {
     return !!config.solid.serverUrl;
@@ -121,13 +163,13 @@ export const solid = {
   },
 
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
-  async write(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+  async write(userId: string, relPath: string, body: string | Buffer, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const req = await ownerRequest({ ...rec, id: userId });
         const url = `${rec.podUrl}concord/${relPath}`;
-        const res = await req('PUT', url, { headers: { 'content-type': contentType }, body });
+        const res = await req('PUT', url, { headers: { 'content-type': contentType }, body: typeof body === 'string' ? body : new Uint8Array(body) });
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
       } catch (err) {
@@ -189,38 +231,78 @@ export const solid = {
 
   /**
    * If something is already at `relPath` (in the pod, or this server's private
-   * files when there is no pod), keep a verbatim copy beside it
-   * (`<name>.previous-<time><ext>`) before it is written over. Throws if the pod
-   * can't say, so the caller writes nothing.
+   * files when there is no pod), keep a byte-for-byte copy beside it under a new
+   * name (`<name>.previous-<time>-<n><ext>`, never replacing another file).
+   * Returns the precondition the caller's write must carry so it only replaces
+   * exactly what was kept (or, if nothing was there, only creates). Throws if the
+   * pod can't say, so the caller writes nothing.
    */
-  async keepExisting(userId: string, relPath: string): Promise<void> {
+  async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
-    const aside = relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}${ext}`);
+    const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
     if (this.enabled && rec) {
       const req = await ownerRequest({ ...rec, id: userId });
       const url = `${rec.podUrl}concord/${relPath}`;
       const res = await req('GET', url);
-      if (res.status === 404 || res.status === 410) return;
+      if (res.status === 404 || res.status === 410) return { ifNoneMatch: '*' };
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+      const etag = res.headers.get('etag');
+      if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
       const type = res.headers.get('content-type') ?? 'application/octet-stream';
-      await this.writeExisting(userId, aside, await res.text(), type);
-      return;
+      const bytes = await res.arrayBuffer();
+      for (let n = 0; ; n++) {
+        if (n >= 5) throw new Error(`could not find a free name to keep ${url}`);
+        try {
+          await this.writeExisting(userId, asideName(n), bytes, type, { ifNoneMatch: '*' });
+          break;
+        } catch (err) {
+          if (!(err instanceof PreconditionFailed)) throw err;
+        }
+      }
+      return { ifMatch: etag };
     }
-    const file = path.join(config.dataDir, 'private', userId, relPath);
-    if (fs.existsSync(file)) fs.copyFileSync(file, path.join(config.dataDir, 'private', userId, aside));
+    // Locally the "ETag" is a hash of the file's bytes, and the copy is made from those same bytes.
+    const dir = path.join(config.dataDir, 'private', userId);
+    const file = path.join(dir, relPath);
+    let bytes: Buffer;
+    try {
+      bytes = fs.readFileSync(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ifNoneMatch: '*' };
+      throw err;
+    }
+    for (let n = 0; ; n++) {
+      if (n >= 5) throw new Error(`could not find a free name to keep ${file}`);
+      try {
+        fs.writeFileSync(path.join(dir, asideName(n)), bytes, { flag: 'wx' });
+        return { ifMatch: localTag(bytes) };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      }
+    }
   },
 
   /**
    * Like `write`, but when the user has a pod the write must reach it: no quiet
    * fallback to this server, which later reads of the pod wouldn't see. Throws
-   * if the pod refuses or can't be reached.
+   * if the pod refuses or can't be reached (`PreconditionFailed` when `when`
+   * doesn't hold: the resource changed, or already exists).
    */
-  async writeExisting(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+  async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
     const rec = get<PodRecord>('kv', `pod:${userId}`);
-    if (!(this.enabled && rec)) return this.write(userId, relPath, body, contentType);
+    if (!(this.enabled && rec)) {
+      const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
+      if (!when.ifMatch && !when.ifNoneMatch) return this.write(userId, relPath, bytes, contentType);
+      writeLocalIf(path.join(config.dataDir, 'private', userId, relPath), bytes, when);
+      return { kind: 'local', url: `${config.publicUrl}/people/${userId}/private/${relPath}` };
+    }
     const req = await ownerRequest({ ...rec, id: userId });
     const url = `${rec.podUrl}concord/${relPath}`;
-    const res = await req('PUT', url, { headers: { 'content-type': contentType }, body });
+    const headers: Record<string, string> = { 'content-type': contentType };
+    if (when.ifMatch) headers['if-match'] = when.ifMatch;
+    if (when.ifNoneMatch) headers['if-none-match'] = when.ifNoneMatch;
+    const res = await req('PUT', url, { headers, body });
+    if (res.status === 412) throw new PreconditionFailed(`PUT ${url} → 412`);
     if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
     return { kind: 'solid', url };
   },

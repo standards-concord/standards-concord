@@ -85,6 +85,11 @@ export function publicOnlyLookup(hostname: string, options: { all?: boolean; fam
 
 /** Read a stream into a string, failing as soon as it passes `maxBytes`. */
 export function readCapped(stream: Readable, maxBytes: number): Promise<string> {
+  return readCappedBytes(stream, maxBytes).then((b) => b.toString('utf8'));
+}
+
+/** readCapped, keeping the bytes as they came. */
+export function readCappedBytes(stream: Readable, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -97,7 +102,7 @@ export function readCapped(stream: Readable, maxBytes: number): Promise<string> 
       }
       chunks.push(chunk);
     });
-    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
     stream.on('error', (e) => reject(e));
     // Closed without 'end' (the connection was cut): never leave the caller waiting.
     stream.on('close', () => reject(new FetchError('unavailable', 'The connection closed before the response finished')));
@@ -181,7 +186,7 @@ export function ipLiteral(url: URL): string | undefined {
 export interface SafeRequestOptions extends SafeFetchOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'HEAD';
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Buffer;
   /** The connections this request waits for (default: one pool shared by every caller); 'held' when the caller already holds a slot (ConnectionPool.run). */
   pool?: ConnectionPool | 'held';
   /** Refuse a status before its body is read (the connection is dropped at once). */
@@ -191,7 +196,10 @@ export interface SafeRequestOptions extends SafeFetchOptions {
 export interface SafeResponse {
   status: number;
   headers: Record<string, string>;
+  /** The body as UTF-8 text. */
   body: string;
+  /** The body's bytes, exactly as received. */
+  bytes: Buffer;
 }
 
 /**
@@ -249,9 +257,9 @@ function connect(url: URL, opts: SafeRequestOptions, maxBytes: number, timeoutMs
         if (Number.isFinite(length) && length > maxBytes) return done(new FetchError('too-large', `Response is ${length} bytes`));
         const flat: Record<string, string> = {};
         for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) flat[k] = Array.isArray(v) ? v.join(', ') : v;
-        if (opts.method === 'HEAD') return done(undefined, { status, headers: flat, body: '' });
-        readCapped(res, maxBytes).then(
-          (body) => done(undefined, { status, headers: flat, body }),
+        if (opts.method === 'HEAD') return done(undefined, { status, headers: flat, body: '', bytes: Buffer.alloc(0) });
+        readCappedBytes(res, maxBytes).then(
+          (bytes) => done(undefined, { status, headers: flat, body: bytes.toString('utf8'), bytes }),
           (e: Error) => done(e),
         );
       },

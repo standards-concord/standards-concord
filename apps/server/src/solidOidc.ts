@@ -86,10 +86,13 @@ function guarded(maxBytes: number, check?: (url: URL) => void, pool?: Connection
     const trusted = isTrusted(url);
     const method = (init.method ?? 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'POST' && method !== 'PUT' && method !== 'HEAD') throw new FetchError('bad-response', `${method} is not allowed`);
-    let body: string | undefined;
+    let body: string | Buffer | undefined;
     if (init.body !== undefined && init.body !== null) {
       if (typeof init.body === 'string') body = init.body;
       else if (init.body instanceof URLSearchParams) body = init.body.toString();
+      // Bytes are sent exactly as given (a verbatim copy of a pod document).
+      else if (init.body instanceof Uint8Array) body = Buffer.from(init.body.buffer, init.body.byteOffset, init.body.byteLength);
+      else if (init.body instanceof ArrayBuffer) body = Buffer.from(init.body);
       else throw new FetchError('bad-response', 'Unsupported request body');
     }
     const headers = headerRecord(init.headers);
@@ -98,7 +101,8 @@ function guarded(maxBytes: number, check?: (url: URL) => void, pool?: Connection
     // Response refuses bodies on these statuses; a redirect comes back as itself and is never followed.
     const nullBody = [101, 204, 205, 304].includes(r.status) || method === 'HEAD';
     if (r.status < 200 || r.status > 599) throw new FetchError('bad-response', `HTTP ${r.status}`);
-    return new Response(nullBody ? null : r.body, { status: r.status, headers: r.headers });
+    // The body's own bytes: text() decodes them, arrayBuffer() gives them back unchanged.
+    return new Response(nullBody ? null : new Uint8Array(r.bytes), { status: r.status, headers: r.headers });
   };
 }
 
@@ -483,7 +487,7 @@ async function renew(login: SolidLogin): Promise<boolean> {
   }
 }
 
-export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { headers?: Record<string, string>; body?: string }) => Promise<Response>;
+export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { headers?: Record<string, string>; body?: string | Uint8Array | ArrayBuffer }) => Promise<Response>;
 
 /**
  * Requests that act as the login's WebID (a DPoP proof per request), on the

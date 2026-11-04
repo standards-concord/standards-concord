@@ -228,11 +228,12 @@ function fakePod(opts: { acp?: boolean; noEtag?: boolean; acpTypeOn?: string; ac
       return new Response(d.body, { status: 200, headers: { 'content-type': 'text/turtle', ...(opts.noEtag ? {} : { etag: etag(url) }) } });
     }
     beforePut?.(url);
-    puts.push({ url, headers, body: init.body ?? '' });
+    const text = typeof init.body === 'string' ? init.body : Buffer.from((init.body ?? new Uint8Array()) as Uint8Array).toString();
+    puts.push({ url, headers, body: text });
     if (containers.has(url)) return new Response('', { status: 205 });
     if (headers['if-none-match'] === '*' && docs.has(url)) return new Response('', { status: 412 });
     if (headers['if-match'] && (!docs.has(url) || headers['if-match'] !== etag(url))) return new Response('', { status: 412 });
-    set(url, init.body ?? '');
+    set(url, text);
     return new Response('', { status: 201 });
   };
   return { root, folder, acl: `${folder}.acl`, docs, set, status, puts, req, onPut: (fn: typeof beforePut) => (beforePut = fn) };

@@ -34,13 +34,63 @@ describe('the first copy in a tester’s pod', () => {
     await solid.write(u.id, 'alpha/testing.jsonld', theirs, 'text/turtle');
     await recordVersion(u, { version: '0.8.0' });
     const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
-    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+\.jsonld$/.test(f));
+    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+-\d+\.jsonld$/.test(f));
     expect(aside).toHaveLength(1);
     expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe(theirs);
     expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0']);
     // Only the first time: later copies are this server's own.
     await recordVersion(u, { version: '0.8.1' });
     expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-'))).toHaveLength(1);
+  });
+
+  it('never replaces a file already using the name it would keep a copy under', async () => {
+    const u = await tester('name-taken');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'theirs', 'text/plain');
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    fs.writeFileSync(path.join(dir, 'testing.previous-1234-0.jsonld'), 'already here');
+    vi.spyOn(Date, 'now').mockReturnValue(1234);
+    await recordVersion(u, { version: '0.8.0' });
+    expect(fs.readFileSync(path.join(dir, 'testing.previous-1234-0.jsonld'), 'utf8')).toBe('already here');
+    expect(fs.readFileSync(path.join(dir, 'testing.previous-1234-1.jsonld'), 'utf8')).toBe('theirs');
+  });
+
+  // Locally, the copy used to be written over unconditionally, even if the file changed (or appeared) after it was checked.
+  it('never writes over a local file that changed after it was kept', async () => {
+    const u = await tester('local-changed');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'first', 'text/plain');
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    const keep = solid.keepExisting.bind(solid);
+    const spy = vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (...args) => {
+      const when = await keep(...args);
+      fs.writeFileSync(file, 'changed meanwhile');
+      return when;
+    });
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('changed meanwhile');
+    spy.mockRestore();
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    const dir = path.dirname(file);
+    const kept = fs.readdirSync(dir).filter((f) => f.includes('.previous-')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).sort();
+    expect(kept).toEqual(['changed meanwhile', 'first']);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.1', '0.8.0']);
+  });
+
+  it('never writes over a local file that appeared after it found nothing there', async () => {
+    const u = await tester('local-appeared');
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    const keep = solid.keepExisting.bind(solid);
+    vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (...args) => {
+      const when = await keep(...args);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'appeared meanwhile');
+      return when;
+    });
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('appeared meanwhile');
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    const dir = path.dirname(file);
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8'))).toEqual(['appeared meanwhile']);
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
   });
 
   it('writes nothing while the pod can’t say whether something is there, and catches up later', async () => {
