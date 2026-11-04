@@ -632,13 +632,19 @@ async function verifyTriageComment(p: Publication, id: number) {
     throw new HttpError(503, 'GitHub asked us to wait; try again later');
   });
   let c: { issue_url?: string; user?: { login?: string }; body?: string } | null;
+  let me: string;
   try {
     c = (await github('GET', `/repos/${p.repo}/issues/comments/${id}`)) as typeof c;
+    me = await botLogin();
   } catch (err) {
     if (err instanceof GitHubError && err.status === 404) throw new HttpError(400, 'No comment with that id exists');
+    // A rate limit here pauses the whole queue, like any other request.
+    if (err instanceof GitHubError && err.rateLimited) {
+      rateLimited(p.repo, err.retryAt);
+      throw new HttpError(503, 'GitHub asked us to wait; try again later');
+    }
     throw new HttpError(502, safeError((err as Error).message));
   }
-  const me = await botLogin();
   if (!c?.issue_url?.endsWith(`/repos/${p.repo}/issues/${p.issue.number}`)) throw new HttpError(400, `That comment isn’t on issue #${p.issue.number}`);
   if (c.user?.login !== me || !c.body?.endsWith(TRIAGE_FOOTER)) throw new HttpError(400, 'That comment wasn’t posted by the triage step');
 }

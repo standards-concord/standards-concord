@@ -52,6 +52,8 @@ const comments: { id: number; repo: string; issue: number; body: string; user: s
 let failDeletes = 0;
 /** One-off behaviours for the next comment POST (same shapes as for issues). */
 const nextComment: Behaviour[] = [];
+/** One-off behaviours for the next single-comment GET. */
+const nextCommentGet: Behaviour[] = [];
 /** Label additions to refuse with a 502. */
 let failLabels = 0;
 /** Called as labels are added or removed, for interleaving other events. */
@@ -118,6 +120,8 @@ const stub = http.createServer((req, res) => {
     }
     const cd = url.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/issues\/comments\/(\d+)$/);
     if (cd && req.method === 'GET') {
+      const b = nextCommentGet.shift();
+      if (b && 'status' in b) return void res.writeHead(b.status, b.headers).end(b.body ?? '{}');
       const c = comments.find((x) => x.repo === cd[1] && x.id === Number(cd[2]));
       return c ? json(200, { id: c.id, body: c.body, user: { login: c.user }, issue_url: `https://api.github.com/repos/${c.repo}/issues/${c.issue}` }) : json(404, {});
     }
@@ -203,6 +207,7 @@ beforeEach(() => {
   onIssueGet = undefined;
   dropLabelDeletes = 0;
   nextComment.length = 0;
+  nextCommentGet.length = 0;
   next.length = 0;
   requests.length = 0;
   posts = 0;
@@ -1039,5 +1044,19 @@ describe('triage through the server', () => {
     };
     expect((await triage(1)).status).toBe(409);
     expect(publicationFor(res.body.id)?.triagedAt).toBeUndefined();
+  });
+
+  // Checking a comment id used to ignore a rate limit, so the next triage posted straight away.
+  it('pauses the queue when checking a recorded comment hits a rate limit', async () => {
+    const res = await submit('Rate limited check');
+    await submit('Another waiting');
+    nextComment.push({ cutOff: true });
+    expect((await triage(1)).status).toBe(502);
+    const real = comments[0].id;
+    nextCommentGet.push({ status: 429, headers: { 'retry-after': '3600' } });
+    await expect(resolve(res.body.id, { action: 'comment', comment: real })).rejects.toMatchObject({ status: 503 });
+    expect(get<{ value: { until: number } }>('kv', `feedback-issues:pause:${REPO}`)?.value.until).toBe(t + HOUR);
+    expect((await triage(2)).status).toBe(503);
+    expect(comments).toHaveLength(1);
   });
 });
