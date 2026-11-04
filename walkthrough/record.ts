@@ -30,6 +30,7 @@ import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName }
 import { actions, type Ctx } from './scenes.ts';
 import { vendorModule } from './lib/vendor.ts';
 import { serveFonts } from './lib/fonts.ts';
+import { startEgressProxy, type Egress } from './lib/egress.ts';
 
 const HERE = import.meta.dirname;
 const ALL_FEATURES = ['forks', 'jsClasses', 'shaclc', 'appChecks', 'connectPage'];
@@ -76,9 +77,10 @@ if (argv.publish) {
 }
 
 /**
- * Pages served through the network guard (route.fulfill) lose Chromium's record that
- * they came from localhost, so its local-network checks would then block the dev
- * server's own websocket. Everything here is local, so turn those checks off.
+ * Pages loaded through the egress proxy or fulfilled by a Playwright route lose
+ * Chromium's record that they came from localhost, so its local-network checks would
+ * then block the dev server's own websocket. Everything here is local (and the proxy
+ * enforces that), so turn those checks off.
  */
 const LOCAL_NETWORK_ARGS = ['--disable-features=LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights'];
 
@@ -109,9 +111,17 @@ async function main() {
   // 1. Boot Concord (unless recording an existing hub) and find out what it can do.
   const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev', epoch: EPOCH }));
   const hub = (argv.hub ?? concord!.web).replace(/\/$/, '');
+  let egress: Egress | undefined;
   const shownHub = argv['shown-hub']!.replace(/\/$/, '');
   try {
-    const browser = await chromium.launch({ headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars', ...LOCAL_NETWORK_ARGS] });
+    // Every connection the browser makes goes through the allowlisting proxy, loopback included.
+    const outside = new Set<string>();
+    egress = await startEgressProxy([hub, concord?.api].filter(Boolean) as string[], outside);
+    const browser = await chromium.launch({
+      headless: !argv.headed,
+      proxy: { server: egress.url, bypass: '<-loopback>' },
+      args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars', ...LOCAL_NETWORK_ARGS],
+    });
     const chromiumVersion = browser.version();
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
     // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
@@ -184,8 +194,7 @@ async function main() {
 
     const shown = (text: string) => local.reduce((t, l) => t.split(l).join(shownHub), text);
     const shims = new Set<string>();
-    const outside = new Set<string>();
-    await guardNetwork(context, { allowed: [hub, concord?.api, stat.url].filter(Boolean) as string[], outside });
+    egress.allow(stat.url);
     // Registered after the guard, so it answers font requests first (Playwright runs the newest route first).
     const fonts = { fetched: new Set<string>(), missing: new Set<string>() };
     await serveFonts(context, { dir: path.join(HERE, 'fonts'), offline: !!argv.publish, ...fonts });
@@ -304,6 +313,7 @@ async function main() {
     if (d.warnings.length) log(`\n${d.warnings.length} warning(s); see report.json.`);
   } finally {
     concord?.stop();
+    await egress?.close();
   }
 }
 
@@ -388,37 +398,6 @@ async function detectFeatures(hub: string, mcp: McpClient, ontologyId: string): 
  * web fonts are the one exception, so the video shows the real typography.
  */
 /**
- * Lets the browser reach only these exact origins (scheme, host and port); everything
- * else is blocked and reported. Allowed requests are made here with redirects off, so a
- * redirect is checked before it is followed: the browser then follows an allowed one as
- * a new request, which comes back through this guard.
- */
-async function guardNetwork(context: import('@playwright/test').BrowserContext, o: { allowed: string[]; outside: Set<string> }) {
-  const allowed = new Set(o.allowed.map((a) => new URL(a).origin));
-  await context.route(/^https?:\/\//, async (route) => {
-    const req = route.request();
-    const origin = new URL(req.url()).origin;
-    if (!allowed.has(origin)) {
-      o.outside.add(origin);
-      return route.abort('blockedbyclient');
-    }
-    // Event streams never end, so they can't be fetched whole; same-origin streams don't redirect.
-    if (req.resourceType() === 'eventsource') return route.fallback();
-    const res = await route.fetch({ maxRedirects: 0 }).catch(() => undefined);
-    if (!res) return route.abort('failed');
-    const location = res.headers()['location'];
-    if (res.status() >= 300 && res.status() < 400 && location) {
-      const to = new URL(location, req.url()).origin;
-      if (!allowed.has(to)) {
-        o.outside.add(to);
-        return route.abort('blockedbyclient');
-      }
-    }
-    return route.fulfill({ response: res });
-  });
-}
-
-/**
  * Network routing for the recording:
  * - CDN modules (n3, @rdfjs/wrapper) are served from local bundles, so recordings work
  *   offline and never change because a CDN did.
@@ -435,7 +414,8 @@ async function routeModules(page: import('@playwright/test').Page, o: { hub: str
     const u = new URL(route.request().url());
     for (const base of [o.hub, o.api].filter(Boolean) as string[]) {
       try {
-        const r = await route.fetch({ url: `${base}${u.pathname}${u.search}` });
+        // Redirects are not followed: this fetch runs outside the browser and its proxy.
+        const r = await route.fetch({ url: `${base}${u.pathname}${u.search}`, maxRedirects: 0 });
         if (r.ok() && /javascript/.test(r.headers()['content-type'] ?? '')) {
           const body = (await r.text()).split(o.hub).join(o.shownHub);
           return route.fulfill({ status: 200, contentType: 'text/javascript', body, headers: { 'access-control-allow-origin': '*' } });
