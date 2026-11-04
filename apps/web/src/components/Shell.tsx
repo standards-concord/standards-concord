@@ -4,7 +4,7 @@ import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shie
 import { api } from '../api';
 import { useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
-import { useWalkthrough } from '../lib/walkthrough';
+import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo } from './badges';
@@ -40,7 +40,8 @@ function OntologySwitcher() {
 }
 
 function UserMenu() {
-  const { session, setSession, refresh } = useSession();
+  const { session, setSession, refresh, isDemo } = useSession();
+  const w = useWalkthrough();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
@@ -51,6 +52,8 @@ function UserMenu() {
     return () => document.removeEventListener('mousedown', h);
   }, [open]);
   const user = session?.user;
+  // In the demo, say which tester role this persona plays, e.g. "Alpha tester (Voting member)".
+  const testerRole = isDemo && user && w.demo ? testerRoleFor(user, w.myRoles).title : undefined;
   if (!user)
     return (
       <Link to="/login">
@@ -74,12 +77,19 @@ function UserMenu() {
       <button onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
         <Avatar name={user.name} src={user.avatarUrl} size={30} />
         <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
+        {testerRole && <span className="app-header-muted hidden text-sm whitespace-nowrap text-muted lg:inline">({testerRole})</span>}
+        {/* Below lg only the avatar shows, so give the button its name for screen readers. */}
+        <span className="sr-only lg:hidden">
+          {user.name}
+          {testerRole && ` (${testerRole})`}
+        </span>
         <ChevronDown className="app-header-muted hidden size-3.5 text-muted lg:inline" />
       </button>
       {open && (
         <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
           <div className="border-b border-line px-4 py-3">
             <div className="truncate text-sm font-medium">{user.name}</div>
+            {testerRole && <div className="truncate text-xs text-muted">Trying Concord as: {testerRole}</div>}
             {user.email && <div className="truncate text-xs text-muted">{user.email}</div>}
             {user.organisation && <div className="truncate text-xs text-muted">{user.organisation}</div>}
           </div>

@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo } from 'react';
 import { Link, Outlet, useLocation, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
-import { useAsync, type AsyncState } from '../../lib/hooks';
+import { useAsync, useLocalStorage, type AsyncState } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
 import { ExternalLink } from 'lucide-react';
@@ -33,14 +33,19 @@ export function useOntology() {
  * The ontology's pages, grouped into five sections so the top-level navigation stays short.
  * URLs are unchanged; `also` lists extra path segments that belong to a section.
  */
-export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
+/**
+ * `roles` marks a section only some roles need: others don't see it in the nav, so each role sees what is relevant to it.
+ * Nothing is locked away: "All sections" shows it again, and a link or the address bar still opens it.
+ */
+export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[]; roles?: Role[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
   // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
   { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate'], ['connect', 'Connect an agent']] },
   // What agents report is requirements input, next to use cases and meetings.
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
-  { label: 'Governance', tabs: [['governance', 'Governance']] },
+  // Policy and membership are run by owners and stewards, with ODI oversight; everyone else meets the rules on each change request.
+  { label: 'Governance', tabs: [['governance', 'Governance']], roles: ['owner', 'steward', 'odi'] },
 ];
 
 function sectionOf(segment: string) {
@@ -60,10 +65,17 @@ function rememberedPath(id: string, section: string): string | undefined {
   }
 }
 
-function SectionNav({ id }: { id: string }) {
+const SHOW_ALL_KEY = 'concord.nav.showAll';
+
+function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boolean }) {
   const loc = useLocation();
   const segment = loc.pathname.split('/')[3] ?? '';
   const current = sectionOf(segment);
+  const [showAll, setShowAll] = useLocalStorage(SHOW_ALL_KEY, false);
+  // The section you're in always shows, even if it isn't one your role normally needs.
+  const hidden = SECTIONS.filter((s) => s.roles && !canSee(s.roles) && s !== current);
+  const shown = showAll ? SECTIONS : SECTIONS.filter((s) => !hidden.includes(s));
+  const canToggle = showAll ? SECTIONS.some((s) => s.roles && !canSee(s.roles)) : hidden.length > 0;
   const activeTab = TAB_ALIASES[segment] ?? segment;
   const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
   useEffect(() => {
@@ -79,7 +91,7 @@ function SectionNav({ id }: { id: string }) {
   return (
     <>
       <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
-        {SECTIONS.map((s) => {
+        {shown.map((s) => {
           const active = s === current;
           const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
           return (
@@ -93,6 +105,17 @@ function SectionNav({ id }: { id: string }) {
             </Link>
           );
         })}
+        {canToggle && (
+          <button
+            type="button"
+            aria-pressed={showAll}
+            title={showAll ? 'Show only the sections your role usually needs' : `Also show: ${hidden.map((s) => s.label).join(', ')}`}
+            onClick={() => setShowAll(!showAll)}
+            className="ml-auto self-center rounded-pill px-2.5 py-1 text-xs whitespace-nowrap text-muted hover:bg-surface-2 hover:text-fg"
+          >
+            {showAll ? 'Fewer sections' : 'All sections'}
+          </button>
+        )}
       </nav>
       {current.tabs.length > 1 && (
         <div className="border-t border-line">
@@ -181,7 +204,7 @@ export function OntologyLayout() {
               <HealthBubble o={o} detailsHref={`/o/${id}#health`} />
             </div>
           </div>
-          <SectionNav id={id} />
+          <SectionNav id={id} canSee={(roles) => ctx.hasRole(...roles)} />
         </div>
       </div>
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
