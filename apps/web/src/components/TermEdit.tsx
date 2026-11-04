@@ -70,7 +70,12 @@ function useOpenRequestsFor(ontologyId: string, iri: string) {
 }
 
 function ChangedMark({ on }: { on: boolean }) {
-  return on ? <span className="ml-2 text-xs font-normal text-accent">changed</span> : null;
+  return on ? (
+    <>
+      {' '}
+      <span className="ml-1 text-xs font-normal text-accent">changed</span>
+    </>
+  ) : null;
 }
 
 function ListEditor({ field, items, onChange, changed, multiline, noun }: { field: ListField; items: string[]; onChange: (v: string[]) => void; changed: boolean; multiline?: boolean; noun: string }) {
@@ -118,13 +123,21 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
   const [form, setForm] = useState<Values>(() => valuesFrom(term));
   const [reason, setReason] = useState('');
   const [intent, setIntent] = useState<Intent>();
-  const [refreshed, setRefreshed] = useState<{ field: TermEditField; now: string | string[] }[]>();
+  /** After loading the latest values: what someone else changed, and which of those you had also edited (to resolve before saving). */
+  const [refreshed, setRefreshed] = useState<{ theirs: { field: TermEditField; now: string | string[] }[]; unresolved: TermEditField[] }>();
   const others = useOpenRequestsFor(id, term.iri);
   const formRef = useRef<HTMLFormElement>(null);
   const intentName = useId();
 
+  // A save that finishes after this editor has closed (e.g. the reader moved to
+  // another term) must not touch whatever is on screen now.
+  const alive = useRef(true);
   useEffect(() => {
+    alive.current = true;
     formRef.current?.querySelector<HTMLInputElement>('input')?.focus();
+    return () => {
+      alive.current = false;
+    };
   }, []);
 
   const changed = TERM_EDIT_FIELDS.filter((f) => !same(f, form, baseline));
@@ -133,7 +146,8 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
   const rewordsDefinition = changed.includes('definition') && !!baseline.definition.trim() && !!form.definition.trim();
   const needsIntent = rewordsDefinition && !intent;
   const patchRule = ontology.governance?.changes?.patch;
-  const canSave = changed.length > 0 && !labelEmpty && !needsIntent;
+  const unresolved = refreshed?.unresolved ?? [];
+  const canSave = changed.length > 0 && !labelEmpty && !needsIntent && unresolved.length === 0;
 
   const save = useAction(async (submit: boolean) => {
     const set: TermEditValues = {};
@@ -143,18 +157,31 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
       (previous as Record<string, unknown>)[f] = baseline[f];
     }
     const cr = await api.proposeTermEdit(id, { termIri: term.iri, set, previous, reason: reason.trim() || undefined, definitionIntent: rewordsDefinition ? intent : undefined, submit });
-    onProposed(cr);
+    if (alive.current) onProposed(cr);
   });
   const conflict = save.error instanceof ApiError && save.error.status === 409;
 
-  // After a conflict: take the latest values as the new starting point, keep what
-  // the person typed, and show what someone else changed so they can reconcile.
+  // After a conflict: take the latest values as the new starting point. Fields
+  // you edited keep your text; fields you didn't touch take the latest value (so
+  // the edit never reverts someone else's change); fields both of you changed
+  // must be resolved, one way or the other, before saving.
   const loadLatest = useAction(async () => {
     const latest = valuesFrom(await api.term(id, term.iri));
-    setRefreshed(TERM_EDIT_FIELDS.filter((f) => !same(f, latest, baseline)).map((f) => ({ field: f, now: latest[f] })));
+    if (!alive.current) return;
+    const mine = TERM_EDIT_FIELDS.filter((f) => !same(f, form, baseline));
+    const theirs = TERM_EDIT_FIELDS.filter((f) => !same(f, latest, baseline));
+    const next = { ...latest };
+    for (const f of mine) (next as Record<string, unknown>)[f] = form[f];
+    setRefreshed({ theirs: theirs.map((f) => ({ field: f, now: latest[f] })), unresolved: theirs.filter((f) => mine.includes(f) && !same(f, form, latest)) });
     setBaseline(latest);
+    setForm(next);
     save.clearError();
   });
+  const resolve = (f: TermEditField, keep: 'mine' | 'theirs') => {
+    if (keep === 'theirs') setForm({ ...form, [f]: baseline[f] });
+    setRefreshed((r) => r && { ...r, unresolved: r.unresolved.filter((x) => x !== f) });
+  };
+  const show = (v: string | string[]) => (Array.isArray(v) ? (v.length ? v.join('; ') : '(none)') : v || '(empty)');
 
   const text = (f: TextField, rows: number, hint?: string) => (
     <Field
@@ -209,13 +236,24 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
 
       {refreshed && (
         <div role="status" className="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm">
-          {refreshed.length ? (
+          {refreshed.theirs.length ? (
             <>
-              <p className="font-medium">Loaded the latest values. Your text is kept; someone else changed:</p>
-              <ul className="mt-1 list-disc space-y-1 pl-5">
-                {refreshed.map(({ field, now }) => (
+              <p className="font-medium">Loaded the latest values. Your edits are kept, and fields you didn’t touch now show the latest. Someone else changed:</p>
+              <ul className="mt-1 list-disc space-y-1.5 pl-5">
+                {refreshed.theirs.map(({ field, now }) => (
                   <li key={field}>
-                    {FIELD_LABEL[field]}: <span className="text-muted">{Array.isArray(now) ? (now.length ? now.join('; ') : '(none)') : now || '(empty)'}</span>
+                    {FIELD_LABEL[field]}: <span className="text-muted">{show(now)}</span>
+                    {refreshed.unresolved.includes(field) && (
+                      <span className="mt-1 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-medium text-warn">You changed this too.</span>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => resolve(field, 'theirs')}>
+                          Use theirs
+                        </Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => resolve(field, 'mine')}>
+                          Keep mine
+                        </Button>
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -275,7 +313,11 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
 
       <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
         <span className="mr-auto text-xs text-muted">
-          {needsIntent ? 'Say whether the new definition keeps the meaning' : changed.length ? `Changing: ${changed.map((f) => FIELD_LABEL[f].toLowerCase()).join(', ')}` : 'No changes yet'}
+          {unresolved.length
+            ? `Choose yours or theirs for: ${unresolved.map((f) => FIELD_LABEL[f].toLowerCase()).join(', ')}`
+            : needsIntent
+              ? 'Say whether the new definition keeps the meaning'
+              : changed.length ? `Changing: ${changed.map((f) => FIELD_LABEL[f].toLowerCase()).join(', ')}` : 'No changes yet'}
         </span>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={save.pending}>
           Cancel

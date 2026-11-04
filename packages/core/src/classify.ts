@@ -63,6 +63,7 @@ export const CLASSIFICATION_RULES: ClassificationRule[] = [
   { id: 'import-removed', level: 'major', description: 'An owl:imports was removed or replaced.' },
   { id: 'individual-assertion-removed', level: 'major', description: 'A type or property assertion was removed from an existing individual.' },
   { id: 'mapping-removed', level: 'major', description: 'A mapping annotation was removed: integrations relying on it break.' },
+  { id: 'definition-reworded', level: 'patch', description: 'An existing definition was replaced with a new one. Patch only if it keeps the same referents (OBO principle 19), so governance asks someone other than the author to confirm that, even where patches need no approval.' },
   { id: 'meaning-changed', level: 'major', description: 'The person proposing a definition change said it changes what the term means. OBO principle 19 treats that as a different term, so it is reviewed as a breaking change.' },
   { id: 'label-or-definition-removed', level: 'major', description: 'The label or definition of an existing term was removed (also covers deprecated terms, OBO "M5").' },
 ];
@@ -248,6 +249,7 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
             emit('label-or-definition-removed', t.iri, `${f.field} of ${name} was removed`);
           } else {
             emit('annotation-changed', t.iri, `${f.field} of ${name} changed${f.field === 'definition' ? ' (reviewer: confirm the referents are unchanged, OBO principle 19)' : ''}`);
+            if (f.field === 'definition' && f.removed.length && f.added.length) emit('definition-reworded', t.iri, `the definition of ${name} was replaced; someone other than the author must confirm it means the same`);
           }
           break;
         case 'replacedBy': case 'deprecated':

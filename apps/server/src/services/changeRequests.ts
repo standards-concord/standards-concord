@@ -309,6 +309,9 @@ export function governanceFor(cr: ChangeRequest) {
     members: members(cr.ontologyId),
     validationOk: validationPassed(cr.validation),
     now: clock.now(),
+    independentConfirmation: cr.classification?.reasons.some((r) => r.rule === 'definition-reworded')
+      ? 'A definition was reworded, so someone other than the author must confirm it still means the same thing.'
+      : undefined,
   });
 }
 
@@ -404,8 +407,22 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
 }
 
 /** Merge into the working draft. Re-applies the edits on the current head (a rebase). */
-export async function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
+/** Merges into one ontology run one at a time, so each applies (and checks its preconditions) against the draft the previous one committed. */
+const mergeQueues = new Map<string, Promise<unknown>>();
+function oneAtATime<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const run = (mergeQueues.get(key) ?? Promise.resolve()).then(fn, fn);
+  mergeQueues.set(key, run.catch(() => undefined));
+  return run;
+}
+
+export function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
+  return oneAtATime(cr.ontologyId, () => mergeNow(cr, actor));
+}
+
+async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
   if (actor) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
+  // Another merge may have finished while this one waited: act on the stored state.
+  Object.assign(cr, getCR(cr.id));
   if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
@@ -414,8 +431,12 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
   try {
     after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
   } catch (err) {
-    setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-    return save(cr);
+    // The draft moved on underneath this request: approvals given for the old
+    // draft no longer count, and it needs revising before it can be approved again.
+    cr.opsUpdatedAt = clock.iso();
+    setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}. Earlier approvals no longer count`);
+    save(cr);
+    return triage(cr);
   }
   cr.mergedCommit = await ontologyStore.commitWorking(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, {
     name: author?.name ?? 'Concord',

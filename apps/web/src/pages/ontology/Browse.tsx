@@ -121,6 +121,8 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
             setEditing(false);
           }}
           onProposed={(cr) => {
+            // Only for the term on screen: a late response for another term is ignored.
+            if (cr.origin.type !== 'term-edit' || cr.origin.termIri !== t.iri) return;
             setEditing(false);
             setProposed(cr);
           }}

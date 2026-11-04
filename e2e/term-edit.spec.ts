@@ -32,10 +32,10 @@ test.describe('editing a term inline', () => {
 
     const form = editor(page);
     await expect(form.getByRole('heading', { name: 'Edit “skill”' })).toBeVisible();
-    await expect(form.getByLabel('Label')).toHaveValue('skill');
+    await expect(form.getByLabel(/^Label( changed)?$/)).toHaveValue('skill');
     await expect(form.getByLabel('Definition')).toHaveValue(ORIGINAL_DEFINITION);
     // Focus moves into the form.
-    await expect(form.getByLabel('Label')).toBeFocused();
+    await expect(form.getByLabel(/^Label( changed)?$/)).toBeFocused();
     for (const f of ['Comment', 'Editorial note']) await expect(form.getByLabel(f)).toHaveValue('');
     await expect(form.getByRole('group', { name: 'Also known as' }).getByRole('textbox')).toHaveCount(0);
     await expect(form.getByRole('group', { name: 'Examples' }).getByRole('textbox')).toHaveCount(0);
@@ -106,10 +106,10 @@ test.describe('editing a term inline', () => {
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     const form = editor(page);
 
-    await form.getByLabel('Label').fill('');
+    await form.getByLabel(/^Label( changed)?$/).fill('');
     await expect(form.getByText('A term needs a label.')).toBeVisible();
     await expect(form.getByRole('button', { name: 'Propose change' })).toBeDisabled();
-    await form.getByLabel('Label').fill('time commitment');
+    await form.getByLabel(/^Label( changed)?$/).fill('time commitment');
 
     await form.getByLabel('Definition').fill('');
     await expect(form.getByText(/Removing the definition of an existing term is a/)).toBeVisible();
@@ -162,33 +162,74 @@ test.describe('editing a term inline', () => {
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeEnabled();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     await expect(editor(page).getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();
-    await expect(editor(page).getByLabel('Label')).toHaveValue('time commitment');
+    await expect(editor(page).getByLabel(/^Label( changed)?$/)).toHaveValue('time commitment');
     expect(page.url()).toContain(`/o/${id}/browse`);
   });
 
-  test('a conflicting change is refused, and the latest values can be loaded without losing your text', async ({ page, consoleGuard }) => {
+  test('a conflicting change is refused; loading the latest keeps your edits, refreshes the rest and asks about overlaps', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 409/);
-    // Pretend someone else changed the comment after this page loaded the term:
-    // the first response the editor sees carries an out-of-date comment.
+    // Pretend someone else changed the label and comment after this page loaded
+    // the term: the first response the editor sees carries out-of-date values.
     let stale = true;
     await page.route('**/api/ontologies/*/terms/**', async (route) => {
       if (!stale) return route.continue();
       const res = await route.fetch();
       const body = await res.json();
-      await route.fulfill({ response: res, json: { ...body, comment: 'An older comment that has since been replaced.' } });
+      await route.fulfill({ response: res, json: { ...body, label: 'old session label', comment: 'An older comment that has since been replaced.' } });
     });
     await openTerm(page, 'Session');
     stale = false;
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     const form = editor(page);
+    await expect(form.getByLabel(/^Label( changed)?$/)).toHaveValue('old session label');
     await form.getByLabel('Comment').fill('Sessions can repeat weekly.');
     await form.getByRole('button', { name: 'Propose change' }).click();
     await expect(form.getByRole('alert')).toContainText('changed since you opened the editor');
     await form.getByRole('button', { name: 'Load the latest values (keeps your text)' }).click();
-    await expect(form.getByRole('status')).toContainText('someone else changed');
-    await expect(form.getByRole('status')).toContainText('Comment');
+
+    const status = form.getByRole('status');
+    await expect(status).toContainText('Someone else changed');
+    // The label, which you didn't touch, now shows the latest value rather than reverting it.
+    await expect(form.getByLabel(/^Label( changed)?$/)).toHaveValue('session');
+    // The comment was changed by both: keep yours or take theirs before saving.
     await expect(form.getByLabel('Comment')).toHaveValue('Sessions can repeat weekly.');
+    await expect(status).toContainText('You changed this too.');
+    await expect(form.getByText('Choose yours or theirs for: comment')).toBeVisible();
+    await expect(form.getByRole('button', { name: 'Propose change' })).toBeDisabled();
+    await status.getByRole('button', { name: 'Keep mine' }).click();
+    await expect(form.getByText('Changing: comment')).toBeVisible();
     await form.getByRole('button', { name: 'Propose change' }).click();
-    await expect(page.getByRole('status').filter({ hasText: 'Proposed as' })).toBeVisible();
+
+    const notice = page.getByRole('status').filter({ hasText: 'Proposed as' });
+    await expect(notice).toBeVisible();
+    const crId = (await notice.getByRole('link').getAttribute('href'))!.split('/').pop();
+    const cr = await (await page.request.get(`/api/change-requests/${crId}`)).json();
+    expect(cr.ops[0].set).toEqual({ comment: 'Sessions can repeat weekly.' });
+  });
+
+  test('a save that finishes after you moved to another term leaves that term’s editor alone', async ({ page }) => {
+    await openTerm(page, 'Skill');
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await editor(page).getByLabel('Comment').fill('A slow save for skill.');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let saved!: () => void;
+    const done = new Promise<void>((r) => (saved = r));
+    await page.route('**/api/ontologies/*/term-edits', async (route) => {
+      await held;
+      await route.continue();
+      saved();
+    });
+    await editor(page).getByRole('button', { name: 'Save as draft' }).click();
+    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    const form = editor(page);
+    await expect(form.getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();
+    await form.getByLabel('Comment').fill('Still typing here.');
+    release();
+    await done;
+    await page.waitForLoadState('networkidle');
+    await expect(form.getByLabel('Comment')).toHaveValue('Still typing here.');
+    await expect(page.getByRole('status').filter({ hasText: 'Saved as draft' })).toHaveCount(0);
   });
 });

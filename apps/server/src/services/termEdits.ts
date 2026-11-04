@@ -3,6 +3,7 @@ import type { ChangeOp, TermAnnotations } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, User } from '@concord/shared';
 import { TERM_EDIT_FIELDS, type TermEditField, type TermEditInput } from '@concord/shared';
 import { HttpError } from '../db.js';
+import { withTriageBudget } from './budget.js';
 import * as crs from './changeRequests.js';
 import { ontologyStore } from './ontologyStore.js';
 import { rolesFor, setRoles } from './ontologies.js';
@@ -22,8 +23,6 @@ type Value = string | string[];
 
 const MAX_TEXT = 4000;
 const MAX_ITEMS = 50;
-/** Each edit is validated (reasoner, lint, FAIR) and may be triaged by the LLM, so cap how often one person can make them. */
-export const termEditLimits = { windowMs: 10 * 60 * 1000, max: 20 };
 
 const FIELD_NAMES: Record<TermEditField, string> = {
   label: 'label',
@@ -64,21 +63,6 @@ function listFields(fields: TermEditField[]) {
   return names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
-const recent = new Map<string, number[]>();
-const inFlight = new Set<string>();
-
-function takeSlot(userId: string) {
-  const now = Date.now();
-  const { windowMs, max } = termEditLimits;
-  const times = (recent.get(userId) ?? []).filter((t) => now - t < windowMs);
-  if (inFlight.has(userId)) throw new HttpError(429, 'Your previous edit is still being checked. Try again in a moment.');
-  if (times.length >= max) throw new HttpError(429, `You can propose up to ${max} edits every ${windowMs / 60000} minutes. Try again shortly.`);
-  times.push(now);
-  recent.set(userId, times);
-  inFlight.add(userId);
-  return () => inFlight.delete(userId);
-}
-
 export async function proposeTermEdit(project: OntologyProject, user: User, input: TermEditInput): Promise<ChangeRequest> {
   if (!input || typeof input.termIri !== 'string' || !input.termIri) throw new HttpError(400, 'termIri is required');
   if (!input.set || typeof input.set !== 'object') throw new HttpError(400, 'set is required');
@@ -116,8 +100,7 @@ export async function proposeTermEdit(project: OntologyProject, user: User, inpu
   if (rewordsDefinition && !input.definitionIntent) throw new HttpError(400, 'Say whether the new definition keeps the term’s meaning (definitionIntent: same-meaning or new-meaning)');
   const intent = rewordsDefinition ? input.definitionIntent : undefined;
 
-  const release = takeSlot(user.id);
-  try {
+  return withTriageBudget(user.id, async () => {
     if (!rolesFor(project.id, user.id).length) setRoles(project.id, user.id, ['contributor']);
     const name = term.label ?? input.termIri;
     const reason = typeof input.reason === 'string' ? input.reason.trim().slice(0, MAX_TEXT) : '';
@@ -128,7 +111,7 @@ export async function proposeTermEdit(project: OntologyProject, user: User, inpu
           ? 'The author says the new definition **changes what the term means**, so this is reviewed as a major change. Consider adding a new term and deprecating this one instead.'
           : '';
     const op: ChangeOp = { op: 'updateAnnotations', iri: input.termIri, set, expect };
-    return await crs.createChangeRequest(project, user, {
+    return crs.createChangeRequest(project, user, {
       title: `Edit the ${listFields(changed)} of “${name}”`,
       description: [reason, intentNote, `Edited on the page for <${input.termIri}>.`].filter(Boolean).join('\n\n'),
       kind: 'editorial',
@@ -140,7 +123,5 @@ export async function proposeTermEdit(project: OntologyProject, user: User, inpu
           ? { level: 'major', rule: 'meaning-changed', iri: input.termIri, message: `the author says the new definition of ${name} changes what it means` }
           : undefined,
     });
-  } finally {
-    release();
-  }
+  });
 }

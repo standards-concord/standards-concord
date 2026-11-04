@@ -369,6 +369,56 @@ describe('inline term edits', () => {
     expect((await a.get(termPath(TC))).body.comment).toBe(merged[0].ops[0].set.comment);
   });
 
+  it('merges into one ontology one at a time, so concurrent merges cannot both overwrite the same field', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { put } = await import('../src/db.js');
+    const SESSION = `${VOL}Session`;
+    const a = await login('contributor', 'Contributor Race A');
+    const b = await login('contributor', 'Contributor Race B');
+    const original = (await a.get(termPath(SESSION))).body.editorialNote ?? '';
+    const one = await edit(a, { termIri: SESSION, set: { editorialNote: 'Race note A' }, previous: { editorialNote: original } });
+    const two = await edit(b, { termIri: SESSION, set: { editorialNote: 'Race note B' }, previous: { editorialNote: original } });
+    // Mark both approved directly, then merge them at the same time.
+    for (const id of [one.body.id, two.body.id]) put('changeRequests', { ...crsMod.getCR(id), status: 'approved' }, demoId);
+    const results = await Promise.all([crsMod.merge(crsMod.getCR(one.body.id), undefined), crsMod.merge(crsMod.getCR(two.body.id), undefined)]);
+    expect(results.map((r) => r.status).sort()).toEqual(['merged', 'needs-work']);
+    const loser = results.find((r) => r.status === 'needs-work')!;
+    expect(JSON.stringify(loser.timeline)).toMatch(/Earlier approvals no longer count/);
+    const winner = results.find((r) => r.status === 'merged')!;
+    expect((await a.get(termPath(SESSION))).body.editorialNote).toBe((winner.ops[0] as { set: { editorialNote?: string } }).set.editorialNote);
+  });
+
+  it('asks someone other than the author to confirm a reworded definition, even where patches need no approval', async () => {
+    const { evaluate, GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
+    const base = {
+      policy: GOVERNANCE_TEMPLATES['lazy-consensus'],
+      level: 'patch' as const,
+      kind: 'change' as const,
+      status: 'review' as const,
+      statusSince: '2026-01-01T00:00:00Z',
+      reviewStartedAt: '2026-01-01T00:00:00Z',
+      authorId: 'author',
+      reviews: [],
+      votes: [],
+      members: [{ ontologyId: 'o', userId: 'steward', roles: ['steward' as const], addedAt: '2026-01-01T00:00:00Z' }],
+      validationOk: true,
+      now: new Date('2026-02-01T00:00:00Z'),
+    };
+    expect(evaluate(base).outcome).toBe('approved');
+    const confirm = evaluate({ ...base, independentConfirmation: 'A definition was reworded.' });
+    expect(confirm.requiredApprovals).toBe(1);
+    expect(confirm.outcome).toBe('review');
+    expect(confirm.unmet.join(' ')).toMatch(/A definition was reworded/);
+    const confirmed = evaluate({ ...base, independentConfirmation: 'x', reviews: [{ id: 'r', changeRequestId: 'c', userId: 'steward', roles: ['steward'], decision: 'approve', at: '2026-01-02T00:00:00Z' }] });
+    expect(confirmed.outcome).toBe('approved');
+
+    // Every entry point is classified the same way: here a plain change request with no intent answer.
+    const editor = await login('editor', 'Editor Reword');
+    const current = (await editor.get(termPath())).body.definition;
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Reword skill', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: SKILL, set: { definition: `${current} Reworded.` } }], submit: true });
+    expect(res.body.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('definition-reworded');
+  });
+
   it('keeps a draft when not submitted, and classifies removing a definition or changing its meaning as major', async () => {
     const contributor = await login('contributor', 'Contributor Lou');
     const res = await edit(contributor, { termIri: SKILL, set: { definition: '' } });
@@ -401,20 +451,22 @@ describe('inline term edits', () => {
     expect((await edit(contributor, { termIri: LOC, set: { comment: 'y'.repeat(4001) } })).status).toBe(400);
   });
 
-  it('limits how many edits one person can propose', async () => {
-    const { termEditLimits } = await import('../src/services/termEdits.js');
-    const saved = { ...termEditLimits };
-    termEditLimits.max = 2;
+  it('limits how much validation and triage one person can trigger, across term edits and re-triage', async () => {
+    const { triageBudget } = await import('../src/services/budget.js');
+    const saved = { ...triageBudget };
+    triageBudget.max = 2;
     try {
       const contributor = await login('contributor', 'Contributor Busy');
-      for (const [i, expected] of [[1, 201], [2, 201], [3, 429]] as const) {
-        const r = await edit(contributor, { termIri: SKILL, set: { examples: [`example ${i}`] } });
-        expect(r.status, `edit ${i}`).toBe(expected);
-      }
+      const first = await edit(contributor, { termIri: SKILL, set: { examples: ['example 1'] } });
+      expect(first.status).toBe(201);
+      expect((await contributor.post(`/api/change-requests/${first.body.id}/retriage`)).status).toBe(200);
+      const third = await edit(contributor, { termIri: SKILL, set: { examples: ['example 3'] } });
+      expect(third.status).toBe(429);
+      expect((await contributor.post(`/api/change-requests/${first.body.id}/retriage`)).status).toBe(429);
       // Someone else is unaffected.
       expect((await edit(await login('contributor', 'Contributor Calm'), { termIri: SKILL, set: { examples: ['calm'] } })).status).toBe(201);
     } finally {
-      Object.assign(termEditLimits, saved);
+      Object.assign(triageBudget, saved);
     }
   });
 
