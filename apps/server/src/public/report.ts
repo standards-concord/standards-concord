@@ -266,28 +266,30 @@ function siteOrigin(req: Request) {
   return process.env.PUBLIC_URL ? config.publicUrl : `${req.protocol}://${req.host}`;
 }
 
+/**
+ * The term a report is about, in the version it was sent from, read as the
+ * public reads it. A version that's named must be published (not waiting for
+ * approval) and have the term: a report is never quietly moved to another
+ * version. Only when no version is named is it the working draft.
+ */
 async function findTerm(project: OntologyProject, version: string | undefined, iri: string): Promise<{ term: TermView; version: string } | undefined> {
-  const v = version && version !== 'draft' && ontologyStore.versions(project).includes(version) ? version : 'draft';
-  for (const ref of [v, 'draft']) {
-    // Read as the public reads it: a version waiting for a steward's approval publishes nothing, its terms included.
-    if (isHeld(project, ref)) continue;
-    try {
-      const term = (await readOntology(project, ref, undefined)).term(iri);
-      if (term) return { term, version: ref };
-    } catch {
-      /* try the draft */
-    }
+  const ref = version ?? 'draft';
+  if (ref !== 'draft' && !ontologyStore.versions(project).includes(ref)) return undefined;
+  if (isHeld(project, ref)) return undefined;
+  try {
+    const term = (await readOntology(project, ref, undefined)).term(iri);
+    return term ? { term, version: ref } : undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
 /** An identifier (a term IRI, a version) exactly as sent: IRIs are compared code point for code point, so nothing is normalised. */
 const exact = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : '');
-/** Free text a person wrote: normalised, without control characters, trimmed. */
-const clean = (v: unknown, max: number) =>
+/** Text a person wrote, without control characters, trimmed. The description is also NFKC-normalised (see submit). */
+const clean = (v: unknown, max: number, nfkc = false) =>
   typeof v === 'string'
-    ? v
-        .normalize('NFKC')
+    ? (nfkc ? v.normalize('NFKC') : v)
         // Control characters other than newlines and tabs, and bidi overrides.
         .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F‪-‮⁦-⁩]/g, '')
         .trim()
@@ -312,21 +314,21 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   const b = (req.body ?? {}) as Record<string, unknown>;
   const iri = exact(b.term, 2000);
   const found = iri ? await findTerm(project, exact(b.version, 40) || undefined, iri) : undefined;
-  if (!found) throw new ReportError(400, 'That term isn’t in this ontology.');
+  if (!found) throw new ReportError(400, 'That term isn’t in this version of the ontology, or that version isn’t published.');
   const session = browserSession(req, res);
   const scope = { slug: project.slug, term: found.term.iri, version: found.version, session };
-  const fields = { title: clean(b.title, REPORT_LIMITS.title), description: clean(b.description, REPORT_LIMITS.description + 1) };
+  const fields = { title: clean(b.title, REPORT_LIMITS.title), description: clean(b.description, REPORT_LIMITS.description + 1, true) };
   const fail = (status: number, error: string, field?: 'description') => ({ found, fields, status, error, field, token: reportToken(scope) });
   const tokenError = tokenProblem(scope, b.token);
   if (tokenError) return fail(400, tokenError);
   // Bots fill every field; people never see this one.
-  if (clean(b.website, 200)) return { found, fields, status: 201, reference: `r-${crypto.randomBytes(6).toString('base64url')}` };
+  if (typeof b.website === 'string' && b.website.trim()) return { found, fields, status: 201, reference: `r-${crypto.randomBytes(6).toString('base64url')}` };
   if (fields.description.length < REPORT_LIMITS.minDescription) return fail(400, 'Please describe the problem in a sentence or two.', 'description');
   if (fields.description.length > REPORT_LIMITS.description) return fail(400, `Please keep the description under ${REPORT_LIMITS.description} characters.`, 'description');
   if ((`${fields.title} ${fields.description}`.match(/https?:\/\/|www\./gi) ?? []).length > REPORT_LIMITS.links) return fail(400, `Please include at most ${REPORT_LIMITS.links} links.`, 'description');
   if (visitorLimited(who, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
   // The same report twice from this browser: answered as the first time, and only ever about this browser's own reports.
-  const fingerprint = crypto.createHmac('sha256', keyFor('duplicate')!).update([session, project.id, found.term.iri, fields.description.toLowerCase().replace(/\s+/g, ' ')].join('\n')).digest('base64url');
+  const fingerprint = crypto.createHmac('sha256', keyFor('duplicate')!).update([session, project.id, found.version, found.term.iri, fields.description.toLowerCase().replace(/\s+/g, ' ')].join('\n')).digest('base64url');
   const before = sent.get(fingerprint);
   if (before) return { found, fields, status: 201, reference: before.reference };
   if (dailyLimited(project.id, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
@@ -371,7 +373,7 @@ export function reportRouter(): Router {
       res.set('Cache-Control', 'no-store');
       if (!publicReportsEnabled()) return void res.status(503).json({ error: UNAVAILABLE });
       const found = await term(req, p);
-      if (!found) return void res.status(404).json({ error: 'That term isn’t in this ontology.' });
+      if (!found) return void res.status(404).json({ error: 'That term isn’t in this version of the ontology, or that version isn’t published.' });
       res.json({ token: reportToken({ slug: p.slug, term: found.term.iri, version: found.version, session: browserSession(req, res) }), version: found.version });
     } catch (err) {
       next(err);

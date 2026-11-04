@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
-import { closeDb, get, list, openDb, put } from '../src/db.js';
+import { closeDb, get, list, openDb, put, remove } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { reportMemory, reportToken, resetReportLimits, sweepReportMemory } from '../src/public/report.js';
 import { renderOntologyPage } from '../src/public/render.js';
@@ -507,6 +507,60 @@ describe('public reports: fourth review', () => {
     const stored = queued().find((r) => r.id === ok.body.reference)!;
     expect(stored.termIri).toBe(TERM);
     expect(stored.description).toContain('Fullwidth letters');
+  });
+});
+
+describe('public reports: fifth review', () => {
+  const tokenFor = (version?: string) => request(app).get(`${URL}/token?term=${encodeURIComponent(TERM)}${version === undefined ? '' : `&version=${encodeURIComponent(version)}`}`);
+
+  it('keeps the version a report was sent from: one that is held, missing or without the term is refused, never swapped for the draft', async () => {
+    // Used to: fall back to the draft, handing out a draft token and storing the report as "draft".
+    const project = findProject('volunteering')!;
+    const v = await visitor('192.0.2.95');
+    put('kv', { id: `public-hold:${project.id}`, ontologyId: project.id, versions: ['1.0.0'], since: new Date().toISOString() });
+    try {
+      const held = await tokenFor('1.0.0');
+      expect(held.status).toBe(404);
+      expect(held.body.token).toBeUndefined();
+      const before = queued().length;
+      expect((await v.send({ version: '1.0.0', token: v.token({ version: '1.0.0' }) })).status).toBe(400);
+      expect(queued()).toHaveLength(before);
+      // The draft is approved here, so it still takes reports sent from it.
+      expect((await tokenFor('draft')).body.version).toBe('draft');
+    } finally {
+      remove('kv', `public-hold:${project.id}`);
+    }
+    for (const missing of ['\uFF11.0.0', '9.9.9', 'latest']) expect((await tokenFor(missing)).status, missing).toBe(404);
+    // A release without the term: refused, not looked up in the draft instead.
+    const graph = await ontologyStore.working(project);
+    const draftOnly = `${NS}FifthReviewDraftOnly`;
+    await ontologyStore.commitWorking(project, await (await import('@concord/core')).OntologyGraph.fromTurtle(`${await graph.toTurtle()}\n<${draftOnly}> a <http://www.w3.org/2002/07/owl#Class> .\n`), 'Draft-only term', { name: 'Concord' });
+    expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(draftOnly)}&version=1.0.0`)).status).toBe(404);
+    expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(draftOnly)}&version=draft`)).status).toBe(200);
+    // No version at all means the working draft.
+    expect((await tokenFor()).body.version).toBe('draft');
+  });
+
+  it('treats the same words about the same term in two versions as two reports', async () => {
+    // Used to: answer the second with the first one's reference, so the draft report was lost.
+    const v = await visitor('192.0.2.96');
+    const description = 'The same words, sent from two versions of the page.';
+    const onRelease = await v.send({ description, version: '1.0.0', token: v.token({ version: '1.0.0' }) });
+    const onDraft = await v.send({ description, version: 'draft', token: v.token({ version: 'draft' }) });
+    expect(onRelease.status).toBe(201);
+    expect(onDraft.status).toBe(201);
+    expect(onDraft.body.reference).not.toBe(onRelease.body.reference);
+    expect(queued().find((r) => r.id === onDraft.body.reference)!.version).toBe('draft');
+    // The same version twice is still one report.
+    expect((await v.send({ description, version: 'draft', token: v.token({ version: 'draft' }) })).body.reference).toBe(onDraft.body.reference);
+  });
+
+  it('normalises only the description: the title is kept as written', async () => {
+    const v = await visitor('192.0.2.97');
+    const ok = await v.send({ title: '\uFF26ullwidth title', description: 'A \uFF26ullwidth description that is long enough.' });
+    const stored = queued().find((r) => r.id === ok.body.reference)!;
+    expect(stored.title).toBe('\uFF26ullwidth title');
+    expect(stored.description).toContain('Fullwidth description');
   });
 });
 
