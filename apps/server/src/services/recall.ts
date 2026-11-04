@@ -10,6 +10,10 @@ import { config } from '../config.js';
 export const MEET_CHAT_MAX = 500;
 
 const base = () => config.meetBot.recallApiBase ?? `https://${config.meetBot.recallRegion}.recall.ai/api/v1`;
+/** Deadlines, so one stalled request can't hold up everything queued behind it. */
+const REQUEST_MS = 10_000;
+const BOOKING_MS = 30_000;
+const deadline = (ms = REQUEST_MS) => AbortSignal.timeout(ms);
 const headers = () => ({
   Authorization: `Token ${config.meetBot.recallApiKey}`,
   'Content-Type': 'application/json',
@@ -62,6 +66,7 @@ export const recall = {
       res = await fetch(`${base()}/bot/`, {
         method: 'POST',
         headers: headers(),
+        signal: deadline(BOOKING_MS),
         body: JSON.stringify({
           meeting_url: opts.meetingUrl,
           bot_name: config.meetBot.botName,
@@ -104,7 +109,7 @@ export const recall = {
     const found: { id: string; booking?: string }[] = [];
     let url: string | null = `${base()}/bot/?meeting_url=${encodeURIComponent(meetingUrl)}`;
     for (let page = 0; url && page < 10; page++) {
-      const res: Response = await fetch(url, { headers: headers() });
+      const res: Response = await fetch(url, { headers: headers(), signal: deadline() });
       if (!res.ok) throw new Error(await failure(res));
       const body = (await res.json()) as { next?: string | null; results?: RecallBot[] };
       for (const b of body.results ?? []) if (b.metadata?.concord_meeting === meetingId && !ended(b)) found.push({ id: b.id, booking: b.metadata?.concord_booking });
@@ -117,6 +122,7 @@ export const recall = {
   async hasEnded(botId: string): Promise<boolean> {
     const res = await fetch(`${base()}/bot/${botId}/`, {
       headers: headers(),
+      signal: deadline(),
     }).catch(() => undefined);
     if (res?.status === 404) return true;
     if (!res?.ok) return false;
@@ -133,11 +139,13 @@ export const recall = {
       const del = await fetch(`${base()}/bot/${botId}/`, {
         method: 'DELETE',
         headers: headers(),
+        signal: deadline(),
       });
       if (del.ok || del.status === 404) return { ok: true };
       const leave = await fetch(`${base()}/bot/${botId}/leave_call/`, {
         method: 'POST',
         headers: headers(),
+        signal: deadline(),
       });
       if (leave.ok) return { ok: true };
       return {
@@ -157,6 +165,7 @@ export const recall = {
       const res = await fetch(`${base()}/bot/${botId}/send_chat_message/`, {
         method: 'POST',
         headers: headers(),
+        signal: deadline(),
         body: JSON.stringify({ to: 'everyone', message: chatText(message) }),
       });
       return res.ok ? { ok: true } : { ok: false, error: await failure(res) };
@@ -171,6 +180,7 @@ export const recall = {
       const res = await fetch(`${base()}/bot/${botId}/leave_call/`, {
         method: 'POST',
         headers: headers(),
+        signal: deadline(),
       });
       if (res.ok || (await this.hasEnded(botId))) return { ok: true };
       return {

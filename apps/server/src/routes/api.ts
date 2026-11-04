@@ -556,7 +556,9 @@ export function apiRouter(): Router {
       if (!req.user) return true;
       const mid = /\/meetings\/(mtg_[\w-]+)/.exec(a.link ?? '')?.[1];
       const m = mid ? get<Meeting>('meetings', mid) : undefined;
-      return !!m && !meetings.visibleMeeting(m, req.user);
+      if (m) return !meetings.visibleMeeting(m, req.user);
+      // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened to it.
+      return !!mid && !meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
     };
     res.json(all.filter((a) => !hidden(a)));
   });

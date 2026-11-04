@@ -15,6 +15,7 @@ import {
   emit,
   endLiveMeeting,
   findLostBooking,
+  bookingsInFlight,
   lastLineTime,
   meetingLock,
   NO_BOT_PROVIDER,
@@ -23,7 +24,7 @@ import {
   seriesApproved,
 } from './meetings.js';
 import { recall } from './recall.js';
-import { retireDue, retiringCount } from './retiring.js';
+import { retireDue, retiringCount, watchBooking } from './retiring.js';
 import { allUsers, logActivity } from './users.js';
 
 /**
@@ -303,9 +304,12 @@ async function reconcile(
             : 'The invite’s organiser changed since it was approved.'
           : undefined;
       if (m.status !== 'scheduled') {
-        // Changed under a call the bot is already in: the bot leaves (once this loop is done) and the call needs approving again.
+        // Changed under a call the bot is already in: the bot leaves (once this loop is done, refusing
+        // anything it sends meanwhile) and what it heard is analysed. Later weeks with the new details
+        // need approving again, since the series approval no longer matches them.
         if (reapprove && botActive(m) && !m.bot?.leaving) {
-          m.calendar = { ...cal, organizer: occ.organizer, sentBy: occ.sentBy, approval: 'pending', approvedBy: undefined, approvalNote: reapprove };
+          m.calendar = { ...cal, organizer: occ.organizer, sentBy: occ.sentBy, approvalNote: `${reapprove} The bot left the call; calls with the new details need approving again.` };
+          m.bot = { ...m.bot!, leaving: true };
           saveMeeting(m);
           logActivity({
             ontologyId: m.ontologyId,
@@ -498,14 +502,21 @@ async function dispatchOne(meetingId: string, now: Date) {
       const lost = await findLostBooking(m);
       if (!lost) return;
       if (lost.botId) {
-        m.bot = { provider: 'recall', botId: lost.botId, status: t >= start ? 'joining' : 'scheduled' };
+        m.bot = { provider: 'recall', botId: lost.botId, status: t >= start ? 'joining' : 'scheduled', bookingId: m.bot.bookingId, bookedUrl: m.bot.bookedUrl };
         if (t >= start) m.status = 'live';
         m.chatModeAnnounced = !!m.postPromptsToChat;
         changed();
         return;
       }
+      // Not listed (yet): a slow create could still land, so that booking is watched for (and cancelled if it turns up) while a new one is made.
+      watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
     }
-    const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined);
+    // The attempt is recorded before it is sent (as unconfirmed until Recall.ai answers), so a restart
+    // mid-booking looks for this bot instead of booking another.
+    const bookingId = newId('bk');
+    m.bot = { provider: 'recall', status: 'scheduled', bookingId, bookedUrl: m.meetingUrl, uncertain: true, error: m.bot?.error, cancelError: m.bot?.cancelError };
+    saveMeeting(m);
+    const bot = await dispatchBot(m, start - t > 60_000 ? new Date(start).toISOString() : undefined, bookingId);
     // A failed booking is retried on the next tick until the call ends.
     // An unconfirmed booking keeps its booking id and Meet link, so the bot can still be found (or cancelled) later.
     if (bot.status === 'error')
@@ -530,21 +541,26 @@ async function dispatchOne(meetingId: string, now: Date) {
 async function settleLostBooking(meetingId: string) {
   return meetingLock(meetingId, async () => {
     const m = get<Meeting>('meetings', meetingId);
-    if (!m?.bot?.uncertain) return;
+    // Still being booked by this process: the reply will settle it.
+    if (!m?.bot?.uncertain || bookingsInFlight.has(meetingId)) return;
     const lost = await findLostBooking(m);
     if (!lost) return;
-    m.bot = lost.botId
-      ? { provider: 'recall', botId: lost.botId, status: m.bot.status === 'in-call' ? 'in-call' : 'joining' }
-      : { provider: 'recall', status: 'error', error: 'Booking the bot failed. Send it again.' };
+    if (lost.botId) m.bot = { ...m.bot, botId: lost.botId, status: m.bot.status === 'in-call' ? 'in-call' : 'joining', uncertain: undefined, error: undefined };
+    // Already heard in the call: keep looking rather than call it failed.
+    else if (m.bot.status === 'in-call') return;
+    else {
+      watchBooking(m.id, m.bot.bookingId, m.bot.bookedUrl ?? m.meetingUrl);
+      m.bot = { provider: 'recall', status: 'error', error: 'Booking the bot failed. Send it again.' };
+    }
     saveMeeting(m);
     emit(m, { type: 'meeting', meeting: m });
   });
 }
 
 /** Books bots for calls starting soon, closes out calls that have finished, and retries anything that failed. */
-export async function dispatchDue(now = new Date()) {
+/** sweep: also retry the cancellation ledger, after the bookings (the clock loop runs it in its own lane instead). */
+export async function dispatchDue(now = new Date(), opts: { sweep?: boolean } = {}) {
   const t = now.getTime();
-  await retireDue();
   for (const m of calendarMeetings()) {
     await dispatchOne(m.id, now);
     const fresh = get<Meeting>('meetings', m.id);
@@ -559,6 +575,17 @@ export async function dispatchDue(now = new Date()) {
     if (m.bot?.leaving) await endLiveMeeting(m.id).catch(() => undefined);
     else if (m.bot?.uncertain && m.source === 'google-meet-bot') await settleLostBooking(m.id);
   }
+  if (opts.sweep !== false) await retireDue(now);
+}
+
+let sweeping = false;
+/** Cancellation retries run beside the bookings, so a stalled one never holds up a call that's due. */
+function sweepLedger(now: Date) {
+  if (sweeping) return;
+  sweeping = true;
+  void retireDue(now)
+    .catch((err) => console.warn(`[meet-bot] cancellation retries: ${(err as Error).message}`))
+    .finally(() => (sweeping = false));
 }
 
 let lastSyncAt = 0;
@@ -573,7 +600,8 @@ export async function meetBotTick(now = new Date()) {
       lastSyncAt = now.getTime();
       await syncCalendar(now);
     }
-    await dispatchDue(now);
+    sweepLedger(now);
+    await dispatchDue(now, { sweep: false });
   } finally {
     ticking = false;
   }
