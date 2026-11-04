@@ -41,15 +41,37 @@ export const XSD: Record<string, string> = Object.fromEntries(
  * Anything else from editable metadata is refused or ignored, so it can't
  * change what a serialisation means or make JSON-LD processing load a context.
  */
-export const isSafePrefix = (p: string): boolean => /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p);
+export const isSafePrefix = (p: string): boolean =>
+  /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p) &&
+  // A term named like an Object method (hasOwnProperty, constructor) breaks the JSON-LD processor.
+  !(p in Object.prototype);
 
 const nodeRequire = createRequire(import.meta.url);
-let oxigraph: { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> } | undefined;
+type Oxigraph = { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> };
+let oxigraph: Oxigraph | undefined;
+let loadOxigraph = (): Oxigraph => nodeRequire('oxigraph');
+let loadFailureReported = false;
+
+/** For tests: how many namespace verdicts are cached, and their total length. */
+export function namespaceCacheForTests(): { entries: number; chars: number } {
+  return { entries: verdicts.size, chars: verdictChars };
+}
+
+/** For tests: replaces how Oxigraph is loaded, and forgets the loaded copy (cached verdicts are kept). */
+export function setOxigraphLoaderForTests(load: () => Oxigraph): void {
+  loadOxigraph = load;
+  oxigraph = undefined;
+}
 
 /** Characters that could break out of the IRI in the Turtle check itself, or that JSON-LD refuses (any Unicode space). */
 const PRE_FILTER = /[\s\u0000-\u001f\u007f-\u009f<>"{}|\\^`]/u;
 
+/** Longest namespace checked; longer ones are refused without being parsed or cached. */
+const MAX_NAMESPACE = 4096;
 const verdicts = new Map<string, boolean>();
+let verdictChars = 0;
+/** The cache is emptied when it would hold more than this many characters of namespaces in all. */
+const MAX_CACHED_CHARS = 1_000_000;
 
 /**
  * A namespace IRI safe to write as a Turtle prefix and a JSON-LD context
@@ -60,25 +82,51 @@ const verdicts = new Map<string, boolean>();
  * A cheap filter first refuses spaces (Unicode ones too, which JSON-LD
  * refuses), controls and the characters that end an IRI in Turtle. Starting
  * with a scheme, it can never be a JSON-LD keyword such as `@import`.
- * Verdicts are cached.
+ *
+ * Verdicts are cached, within a bound on the characters held; namespaces over
+ * 4,096 characters are refused before the cache. If Oxigraph can't be loaded
+ * the namespace is refused (failing closed) but not cached, and the failure
+ * is reported once, so a later call can succeed.
  */
 export function isSafeNamespace(iri: string): boolean {
+  if (iri.length > MAX_NAMESPACE) return false;
   const known = verdicts.get(iri);
   if (known !== undefined) return known;
-  const ok = iri.length <= 4096 && /^[A-Za-z][A-Za-z0-9+.-]*:./s.test(iri) && !PRE_FILTER.test(iri) && parsersAgree(iri);
-  if (verdicts.size >= 10_000) verdicts.clear();
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:./s.test(iri) || PRE_FILTER.test(iri)) return remember(iri, false);
+  const verdict = parsersAgree(iri);
+  return verdict === 'unavailable' ? false : remember(iri, verdict);
+}
+
+function remember(iri: string, ok: boolean): boolean {
+  if (verdicts.size >= 10_000 || verdictChars + iri.length > MAX_CACHED_CHARS) {
+    verdicts.clear();
+    verdictChars = 0;
+  }
   verdicts.set(iri, ok);
+  verdictChars += iri.length;
   return ok;
 }
 
-function parsersAgree(iri: string): boolean {
+function parsersAgree(iri: string): boolean | 'unavailable' {
   const doc = `@prefix ns: <${iri}> .\nns:Thing <urn:concord:check> <${iri}> .\n`;
   const same = (quads: Array<{ subject: { value: string }; object: { value: string } }>) =>
     quads.length === 1 && quads[0].subject.value === iri + 'Thing' && quads[0].object.value === iri;
   try {
     if (!same(new Parser({ format: 'text/turtle' }).parse(doc))) return false;
-    oxigraph ??= nodeRequire('oxigraph');
-    return same(oxigraph!.parse(doc, { format: 'text/turtle' }));
+  } catch {
+    return false;
+  }
+  if (!oxigraph) {
+    try {
+      oxigraph = loadOxigraph();
+    } catch (err) {
+      if (!loadFailureReported) console.error(`Namespace checks are refusing every namespace: Oxigraph could not be loaded (${(err as Error).message}).`);
+      loadFailureReported = true;
+      return 'unavailable';
+    }
+  }
+  try {
+    return same(oxigraph.parse(doc, { format: 'text/turtle' }));
   } catch {
     return false;
   }

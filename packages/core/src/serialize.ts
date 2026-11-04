@@ -64,12 +64,21 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
     // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
     if (p && isSafePrefix(p) && isSafeNamespace(ns) && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
   }
-  // A JSON-LD processor reads an IRI that starts with "p:" as a compact IRI using the term p: a prefix urn
-  // with the namespace urn:example:vol:, or e with the IRI e:/Thing, would loop or be refused. Such a term
-  // is left out, and the IRIs it would have shortened are written in full.
-  const clashes = (p: string) => Object.values(context).some((ns) => ns.startsWith(`${p}:`)) || [...used].some((u) => u.startsWith(`${p}:`));
-  for (const p of Object.keys(context)) if (clashes(p)) delete context[p];
-  return JSON.stringify(sortKeys(await compactJsonLd(expanded, context)), null, 2) + '\n';
+  // In a context, a namespace "p:rest" is read as a compact IRI using the term p unless rest starts with "//":
+  // a prefix urn with the namespace urn:example:vol:, or zz with zz:foo, would loop. Such a term is left out.
+  const readAsCompact = (iri: string, p: string) => iri.startsWith(`${p}:`) && !iri.startsWith(`${p}://`);
+  for (const p of Object.keys(context)) if (Object.values(context).some((ns) => readAsCompact(ns, p))) delete context[p];
+  // The compactor also refuses to write a full IRI that starts with "p:" when it can't shorten it (a prefix
+  // https, or e with an IRI e:Thing). Exactly the terms it names are left out, and those IRIs written in full.
+  for (let attempts = Object.keys(context).length; ; attempts--) {
+    try {
+      return JSON.stringify(sortKeys(await compactJsonLd(expanded, context)), null, 2) + '\n';
+    } catch (err) {
+      const term = /confused with prefix "([^"]*)"/.exec(String((err as Error)?.message))?.[1];
+      if (term === undefined || !Object.hasOwn(context, term) || attempts <= 0) throw err;
+      delete context[term];
+    }
+  }
 }
 
 /**

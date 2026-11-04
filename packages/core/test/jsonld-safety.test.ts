@@ -1,12 +1,17 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { OntologyGraph, applyChangeOps, serialize } from '../src/index.js';
 import { setMetadata } from '../src/changes.js';
 import { compactJsonLd } from '../src/serialize.js';
-import { isSafeNamespace, isSafePrefix } from '../src/ns.js';
+import { isSafeNamespace, isSafePrefix, namespaceCacheForTests, setOxigraphLoaderForTests } from '../src/ns.js';
+import { createRequire } from 'node:module';
 
 const EX = 'https://example.org/e#';
+
+/** A graph's triples as sorted strings, for comparing what two readers produced (no blank nodes in these tests). */
+const triples = (quads: Iterable<any>) =>
+  [...quads].map((q) => [q.subject, q.predicate, q.object].map((t) => `${t.termType}|${t.value}|${t.datatype?.value ?? ''}|${t.language ?? ''}`).join(' ')).sort();
 
 /** A local server that counts requests, standing in for any URL a document might point at. */
 async function trap<T>(run: (base: string) => Promise<T>): Promise<{ hits: number; result: PromiseSettledResult<T> }> {
@@ -100,7 +105,7 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
     const alphabet = [...'aZ09-._~:/?#[]@!$&\'()*+,;=%41|{}<>"\\^` vV', 'é', '語', '\u{1F600}', '\u0001', ' ', '﷐', '', '￰', '%EF%B7%90', '%zz'];
     const authorities = ['example.org', '[::1]', '[V1.fe]', '[bad]', '[::::]', 'host:80', 'host:foo:80', 'u@host', 'a@b@host', '例え.jp', ''];
     const heads = () => pick([`https://${pick(authorities)}/`, `http://${pick(authorities)}/`, 'urn:example:', 'tag:x,2026:', 'zz:', 'e:']);
-    const prefixes = ['zz', 'e', 'urn', 'tag', 'http', 'https', 'vol', 'a.b'];
+    const prefixes = ['zz', 'e', 'urn', 'tag', 'http', 'https', 'vol', 'a.b', 'hasOwnProperty', 'constructor', 'toString', 'valueOf'];
     const candidates: Array<[string, string]> = [
       ['zz', 'http://[bad]/ns#'], ['zz', 'http://[::::]/ns#'], ['zz', 'http://host:foo:80/ns#'], ['zz', 'urn:x#'], ['zz', 'urn:x￰#'],
       ['zz', 'http://[V1.fe]/ns#'], ['zz', 'https://example.org/%EF%B7%90/'], ['urn', 'urn:example:vol:'], ['zz', 'zz:foo/'],
@@ -117,21 +122,67 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
       accepted++;
       const label = `${prefix} ${JSON.stringify(ns)}`;
       const g = await OntologyGraph.fromTurtle(ONT('e', EX));
-      const r = applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix: prefix, preferredNamespace: ns } }] as any);
-      const graph = await OntologyGraph.fromTurtle(`${await r.graph.toTurtle()}\n<${ns}Thing> a <http://www.w3.org/2002/07/owl#Class> .`);
-      const size = graph.store.size;
+      // Through setMetadata when the prefix is one it accepts; otherwise stored as found in imported data.
+      const set = isSafePrefix(prefix)
+        ? applyChangeOps(g, [{ op: 'setMetadata', set: { preferredPrefix: prefix, preferredNamespace: ns } }] as any).graph
+        : await OntologyGraph.fromTurtle(ONT(prefix, ns));
+      const graph = await OntologyGraph.fromTurtle(`${await set.toTurtle()}\n<${ns}Thing> a <http://www.w3.org/2002/07/owl#Class> ; <http://www.w3.org/2000/01/rdf-schema#comment> "${prefix}:Thing" .`);
+      const want = triples(graph.store.getQuads(null, null, null, null));
       const turtle = await serialize(graph, 'turtle');
-      const back = await OntologyGraph.fromTurtle(turtle);
-      expect(back.store.size, label).toBe(size);
-      expect(back.metadata().preferredNamespace, label).toBe(ns);
-      expect(back.store.getQuads(ns + 'Thing', null, null, null).length, label).toBe(1);
-      expect(oxigraph.parse(turtle, { format: 'text/turtle' }).length, label).toBe(size);
-      const jsonld = await serialize(back, 'jsonld');
-      const fromJson = await OntologyGraph.parse(jsonld, 'jsonld');
-      expect(fromJson.store.size, label).toBe(size);
-      expect(fromJson.store.getQuads(ns + 'Thing', null, null, null).length, label).toBe(1);
+      expect(triples((await OntologyGraph.fromTurtle(turtle)).store.getQuads(null, null, null, null)), label).toEqual(want);
+      expect(triples(oxigraph.parse(turtle, { format: 'text/turtle' })), label).toEqual(want);
+      const jsonld = await serialize(graph, 'jsonld');
+      expect(triples((await OntologyGraph.parse(jsonld, 'jsonld')).store.getQuads(null, null, null, null)), label).toEqual(want);
     }
     expect(accepted).toBeGreaterThan(40);
+  });
+
+  it('never caches namespaces over the length limit, and bounds what it caches', () => {
+    // Rejected namespaces of any size used to be cached in full: 32 distinct 1 MiB strings stayed in memory.
+    const before = namespaceCacheForTests();
+    for (let i = 0; i < 32; i++) expect(isSafeNamespace(`https://example.org/${'x'.repeat(1 << 20)}${i}#`)).toBe(false);
+    expect(namespaceCacheForTests().entries).toBe(before.entries);
+    for (let i = 0; i < 600; i++) isSafeNamespace(`https://example.org/${'y'.repeat(4000)}${i}#`);
+    expect(namespaceCacheForTests().chars).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it('fails closed without caching when Oxigraph can’t be loaded', () => {
+    // A load failure used to be cached as an invalid namespace, so the namespace stayed refused after recovery.
+    const ns = `https://example.org/load-failure-${Date.now()}#`;
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      setOxigraphLoaderForTests(() => { throw new Error('simulated load failure'); });
+      expect(isSafeNamespace(ns)).toBe(false);
+      expect(isSafeNamespace(ns)).toBe(false);
+      expect(errors).toHaveBeenCalledTimes(1);
+      setOxigraphLoaderForTests(() => createRequire(import.meta.url)('oxigraph'));
+      expect(isSafeNamespace(ns)).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('keeps JSON-LD terms that only look like they clash', async () => {
+    // Literal text such as "e:Thing" in a comment, and http: IRIs under a prefix named http, used to drop the term.
+    const g = await OntologyGraph.fromTurtle(`${ONT('e', EX)}\n<${EX}Thing> <http://www.w3.org/2000/01/rdf-schema#comment> "e:Thing and owl:Class" .`);
+    const doc = JSON.parse(await serialize(g, 'jsonld'));
+    expect(doc['@context'].e).toBe(EX);
+    expect(doc['@context'].owl).toBe('http://www.w3.org/2002/07/owl#');
+    expect(JSON.stringify(doc)).toContain('"e:Thing"');
+    const h = await OntologyGraph.fromTurtle(`${ONT('http', 'http://example.org/')}\n<http://example.org/Thing> a <http://www.w3.org/2002/07/owl#Class> .`);
+    const hdoc = JSON.parse(await serialize(h, 'jsonld'));
+    expect(hdoc['@context'].http).toBe('http://example.org/');
+    expect((await OntologyGraph.parse(JSON.stringify(hdoc), 'jsonld')).store.getQuads('http://example.org/Thing', null, null, null).length).toBe(1);
+  });
+
+  it('writes JSON-LD when a stored prefix is named like an Object method', async () => {
+    // A context term named hasOwnProperty used to make the JSON-LD processor throw.
+    for (const p of ['hasOwnProperty', 'constructor', 'toString', 'valueOf']) {
+      expect(isSafePrefix(p), p).toBe(false);
+      const g = await OntologyGraph.fromTurtle(`${ONT(p, 'https://example.org/m#')}\n<https://example.org/m#Thing> a <http://www.w3.org/2002/07/owl#Class> .`);
+      const doc = JSON.parse(await serialize(g, 'jsonld'));
+      expect(Object.keys(doc['@context']), p).not.toContain(p);
+    }
   });
 
   it('keeps a stored URN or Unicode namespace usable, as on main', async () => {
