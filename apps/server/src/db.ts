@@ -192,12 +192,18 @@ export class HttpError extends Error {
  * SQLite's write lock from the first read, so separate connections or
  * processes can't both take the last one.
  */
-export function reserveCounters(counters: { id: string; max: number }[], parent?: string): boolean {
-  const c = conn();
+export function reserveCounters(
+  counters: { id: string; max: number }[],
+  parent?: string,
+  /** Tests only: another connection, and hooks between the steps, to prove the steps can't interleave or half-apply. */
+  test?: { db?: DatabaseSync; afterRead?: () => void; beforeWrite?: (index: number) => void },
+): boolean {
+  const c = test?.db ?? conn();
   c.exec('BEGIN IMMEDIATE');
   try {
     const read = c.prepare("SELECT json_extract(data, '$.count') AS n FROM docs WHERE collection = 'kv' AND id = ?");
     const used = counters.map((k) => Number((read.get(k.id) as { n: number } | undefined)?.n ?? 0));
+    test?.afterRead?.();
     if (counters.some((k, i) => used[i] >= k.max)) {
       c.exec('ROLLBACK');
       return false;
@@ -206,7 +212,10 @@ export function reserveCounters(counters: { id: string; max: number }[], parent?
       `INSERT INTO docs (collection, id, parent, data, created_at) VALUES ('kv', ?, ?, ?, ?)
        ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data`,
     );
-    counters.forEach((k, i) => write.run(k.id, parent ?? null, JSON.stringify({ id: k.id, count: used[i] + 1 }), new Date().toISOString()));
+    counters.forEach((k, i) => {
+      test?.beforeWrite?.(i);
+      write.run(k.id, parent ?? null, JSON.stringify({ id: k.id, count: used[i] + 1 }), new Date().toISOString());
+    });
     c.exec('COMMIT');
     return true;
   } catch (e) {

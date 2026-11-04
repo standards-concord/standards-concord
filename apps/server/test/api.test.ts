@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -327,6 +327,71 @@ describe('query assistant (offline helper)', () => {
     }
   });
 
+  it('reserves allowances atomically: two connections can’t both take the last one, and a failed write leaves nothing taken', async () => {
+    const { reserveCounters, get } = await import('../src/db.js');
+    const { config } = await import('../src/config.js');
+    const ids = ['atomic:user', 'atomic:ontology', 'atomic:all'];
+    const limits = ids.map((id) => ({ id, max: 1 }));
+    const count = (id: string) => get<{ count: number }>('kv', id)?.count ?? 0;
+    // A second connection tries to reserve in the gap between this one's read and its write
+    // (another backend process would do this). It used to get the same last allowance.
+    const second = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
+    second.exec('PRAGMA busy_timeout = 0');
+    let rival: boolean | 'blocked' | undefined;
+    const first = reserveCounters(limits, 'atomic', {
+      afterRead: () => {
+        try {
+          rival = reserveCounters(limits, 'atomic', { db: second });
+        } catch {
+          rival = 'blocked';
+        }
+      },
+    });
+    second.close();
+    expect(first).toBe(true);
+    expect(rival).toBe('blocked');
+    expect(ids.map(count)).toEqual([1, 1, 1]);
+    expect(reserveCounters(limits, 'atomic')).toBe(false);
+
+    // A failure part-way through the writes rolls all of them back, and the next attempt works.
+    const fresh = ['atomic2:user', 'atomic2:ontology', 'atomic2:all'].map((id) => ({ id, max: 1 }));
+    expect(() =>
+      reserveCounters(fresh, 'atomic', {
+        beforeWrite: (i) => {
+          if (i === 1) throw new Error('disk full');
+        },
+      }),
+    ).toThrow('disk full');
+    expect(fresh.map((k) => count(k.id))).toEqual([0, 0, 0]);
+    expect(reserveCounters(fresh, 'atomic')).toBe(true);
+  });
+
+  it('a request that fails before Claude is called gives its allowance back and frees the person', async () => {
+    const { config } = await import('../src/config.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Refund through the API');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = () => get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`)?.count ?? 0;
+    const provider = config.llm.provider;
+    const spy = vi.spyOn(ontologyStore, 'at').mockRejectedValueOnce(new Error('the ontology failed to load'));
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me };
+      const failed = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(failed.status).toBe(500);
+      expect(used()).toBe(0);
+      // Not stuck as "still answering": the next request is admitted.
+      (config.llm as { provider: string }).provider = provider;
+      const next = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(next.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
   it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
     const { admitQueryChat } = await import('../src/services/queryChat.js');
     const { config } = await import('../src/config.js');
@@ -350,21 +415,15 @@ describe('query assistant (offline helper)', () => {
       second.done();
       expect(used('user:refund-a')).toBe(1);
 
-      // Another connection holding the write lock: the reservation can't read and then write around it,
-      // and when admission fails the person isn't left "busy".
+      // When admission throws (here: the database is locked by another connection), the person isn't left "busy".
       const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
       other.exec('BEGIN IMMEDIATE');
       expect(() => withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).toThrow(/locked|busy/i);
-      // Meanwhile the other connection takes the last ontology allowance.
-      other
-        .prepare(`INSERT INTO docs (collection, id, parent, data, created_at) VALUES ('kv', ?, NULL, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data`)
-        .run(`query-assistant:${day}:ontology:ont-refund-b`, JSON.stringify({ id: `query-assistant:${day}:ontology:ont-refund-b`, count: 1 }), new Date().toISOString());
-      other.exec('COMMIT');
+      other.exec('ROLLBACK');
       other.close();
       const after = admitQueryChat('refund-b', 'ont-refund-b', true);
+      expect(after.useClaude).toBe(true);
       after.done();
-      expect(after).toMatchObject({ useClaude: false, offlineReason: 'limit' });
-      expect(used('user:refund-b')).toBe(0);
     } finally {
       (config.llm as { provider: string }).provider = provider;
       Object.assign(config.llm.queryAssistant, limits);
@@ -475,6 +534,34 @@ describe('query assistant (offline helper)', () => {
     const [, part] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by Northvale');
     expect(part.unchanged).toBe(true);
     expect(part.query).not.toContain('minimumAge < 15');
+    // Two conditions on one property used to overwrite each other, and stray words used to be ignored.
+    for (const message of [
+      'Only those with minimum age over 10 and minimum age under 15',
+      'Only those called "Park" and called "Garden"',
+      'Only those with minimum age under 15 offered by Northvale',
+      'Only those with minimum age under 15 in London',
+    ]) {
+      const [list, r] = await converse(agent, 'List every volunteering opportunity with its minimum age', message);
+      expect(r.unchanged, message).toBe(true);
+      expect(r.query, message).toBe(list.query);
+    }
+  });
+
+  it('treats quoted words as values, never as instructions', async () => {
+    const agent = await login('contributor');
+    // "count" used to turn the list into a count, and "all rows" used to lift the limit.
+    const [, count] = await converse(agent, 'List every volunteering opportunity', 'Only those called "count"');
+    expect(count.query).not.toContain('COUNT(');
+    expect(count.query).toContain('"count"');
+    const [, rows] = await converse(agent, 'List every volunteering opportunity', 'Only those called "all rows"');
+    expect(rows.query).toContain('LIMIT 100');
+    expect(rows.query).toContain('"all rows"');
+    const [, remove] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those called "remove the minimum age"');
+    expect(remove.query).toContain('?minimumAge');
+    // An apostrophe isn't a quote.
+    const [, apostrophe] = await converse(agent, 'List every volunteering opportunity with its minimum age', "Don't show the minimum age column, it's");
+    expect(apostrophe.unchanged).toBeUndefined();
+    expect(apostrophe.query).not.toContain('minimumAge');
   });
 
   it('removes only the filter it names, declines an unknown one, and lifts the limit on request', async () => {
@@ -483,6 +570,12 @@ describe('query assistant (offline helper)', () => {
     const [, filtered, postcode] = await converse(agent, ...said, 'Remove the postcode filter');
     expect(postcode.unchanged).toBe(true);
     expect(postcode.query).toBe(filtered.query);
+    // The plural used to count as "all of them".
+    const [, , postcodes] = await converse(agent, ...said, 'Remove the postcode filters');
+    expect(postcodes.unchanged).toBe(true);
+    expect(postcodes.query).toBe(filtered.query);
+    const [, , plain] = await converse(agent, ...said, 'Remove the filters');
+    expect(plain.unchanged).toBe(true);
     const [, , every] = await converse(agent, ...said, 'Remove all the filters');
     expect(every.query).not.toContain('FILTER');
     expect(every.query).toContain('?minimumAge');

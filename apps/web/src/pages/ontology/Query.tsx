@@ -16,7 +16,7 @@ import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Selec
 import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
 import { ChatView } from '../../components/ChatView';
-import { currentAccount, useSession } from '../../lib/session';
+import { accountToken, stillCurrent, useSession } from '../../lib/session';
 import { useOntology } from './Layout';
 
 /**
@@ -30,7 +30,8 @@ import { useOntology } from './Layout';
 
 const sparqModule = () => import('@sparq-org/sparq');
 
-type Result = (RunResult & { kind: 'ask' | 'graph' }) | (Extract<RunResult, { kind: 'rows' }> & { labels?: Record<string, string> });
+/** A result as shown: rows get the assistant's readable headings, by column position. */
+type Result = (RunResult & { kind: 'ask' | 'graph' }) | (Extract<RunResult, { kind: 'rows' }> & { headings?: (string | undefined)[] });
 
 type Target = QueryTarget;
 type Columns = { variable: string; label: string }[];
@@ -318,8 +319,8 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
       const { result: r, ms } = await runner().run({ source: t === 'data' ? `${turtle.data}\n${data}` : turtle.data, query: q, form: queryForm(q) });
       if (r.kind === 'rows') {
         // The assistant's readable headings, for the columns this query still has.
-        const labels = Object.fromEntries(cols.filter((c) => r.vars.includes(c.variable)).map((c) => [c.variable, c.label]));
-        setResult({ ...r, labels: Object.keys(labels).length ? labels : undefined });
+        const headings = r.vars.map((v) => cols.find((c) => c.variable === v)?.label);
+        setResult({ ...r, headings: headings.some((h) => h !== undefined) ? headings : undefined });
       } else setResult(r);
       setQueryMs(ms);
     } catch (e) {
@@ -337,6 +338,8 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     const mine: ChatMessage = { id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() };
     const history = [...chat, mine];
     setChat(history);
+    // Whose conversation this is, as of now: the answer is kept only if that is still so when it arrives.
+    const token = accountToken();
     setAsking(true);
     setChatError(undefined);
     try {
@@ -355,8 +358,8 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         offlineState: offlineState ?? undefined,
         account,
       });
-      // Signed out, or into another account, while waiting: this answer belongs to nobody here now.
-      if (currentAccount() !== account) return;
+      // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
+      if (!stillCurrent(token, account)) return;
       setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
       // The editor is read-only while the assistant works, so its answer never replaces newer edits.
       // It isn't run until the person has looked at it and pressed Run.
@@ -368,7 +371,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         setWroteKey(keyFor(r.query, r.target));
       }
     } catch (e) {
-      if (currentAccount() === account) setChatError(e);
+      if (stillCurrent(token, account)) setChatError(e);
     } finally {
       setAsking(false);
     }
@@ -645,16 +648,16 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                         {result.cut ? ' · very long values are shortened' : ''}
                         {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                       </span>
-                      <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.labels))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
+                      <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.headings))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
                         <Download className="size-3" /> CSV
                       </a>
                     </div>
                     <table className="w-full text-left text-xs">
                       <thead>
                         <tr>
-                          {result.vars.map((v) => (
-                            <th key={v} className={cx('px-3 py-1.5 font-medium', !result.labels?.[v] && 'font-mono text-[var(--syn-variable)]')} title={`?${v}`}>
-                              {result.labels?.[v] ?? `?${v}`}
+                          {result.vars.map((v, c) => (
+                            <th key={c} className={cx('px-3 py-1.5 font-medium', !result.headings?.[c] && 'font-mono text-[var(--syn-variable)]')} title={`?${v}`}>
+                              {result.headings?.[c] ?? `?${v}`}
                             </th>
                           ))}
                         </tr>
@@ -662,10 +665,10 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                       <tbody>
                         {result.rows.slice(rowPage * ROWS_PER_PAGE, (rowPage + 1) * ROWS_PER_PAGE).map((r, i) => (
                           <tr key={i} className="border-t border-line align-top">
-                            {result.vars.map((v) => (
-                              <td key={v} className="px-3 py-1.5 font-mono" title={r[v] ?? 'No value'}>
-                                {r[v] !== undefined ? (
-                                  short(r[v], prefixes)
+                            {result.vars.map((_, c) => (
+                              <td key={c} className="px-3 py-1.5 font-mono" title={r[c] ?? 'No value'}>
+                                {r[c] != null ? (
+                                  short(r[c], prefixes)
                                 ) : (
                                   <span className="text-subtle" aria-label="No value">
                                     —

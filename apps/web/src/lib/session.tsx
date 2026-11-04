@@ -22,8 +22,36 @@ const Ctx = createContext<SessionCtx | null>(null);
  * answer never lands in another account's drafts or after they were cleared.
  */
 let activeAccount: string | undefined;
-export function currentAccount() {
-  return activeAccount;
+
+/**
+ * Counts sign-outs across every tab of this browser (in localStorage, so it is
+ * shared and read synchronously). Work started before a sign-out anywhere
+ * compares it before saving: a tab that hasn't heard about another tab's
+ * sign-out yet still can't write the signed-out account's drafts back.
+ */
+const SIGN_OUTS = 'concord.signOuts';
+function signOuts(): string {
+  try {
+    return localStorage.getItem(SIGN_OUTS) ?? '0';
+  } catch {
+    return '0';
+  }
+}
+
+/** A token for "this account, as of now": still current while the tab is on that account and nobody has signed out since. */
+export function accountToken(): { account: string | undefined; signOuts: string } {
+  return { account: activeAccount, signOuts: signOuts() };
+}
+export function stillCurrent(token: { account: string | undefined; signOuts: string }, account: string) {
+  return token.account === account && activeAccount === account && signOuts() === token.signOuts;
+}
+
+function clearDrafts(userId: string) {
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith(`concord.query.${userId}.`)) localStorage.removeItem(k);
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
@@ -61,6 +89,22 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // so pages holding one account's drafts never carry on under another account.
   const sessionRef = useRef(session);
   sessionRef.current = session;
+  // Another tab signed out: forget this tab's account too (and anything of it written in the meantime), then re-check.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== SIGN_OUTS) return;
+      const was = sessionRef.current?.user?.id;
+      activeAccount = undefined;
+      if (was) clearDrafts(was);
+      void api
+        .session()
+        .then(setSession)
+        .catch(() => {});
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [setSession]);
+
   useEffect(() => {
     const check = () => {
       if (document.visibilityState !== 'visible') return;
@@ -100,11 +144,12 @@ export function useSession() {
 
 /** Drafts this browser keeps for an account (query drafts and query-assistant chats): removed on sign-out. */
 export function forgetAccountDrafts(userId: string) {
-  // First, so a reply still on its way for this account is dropped rather than saved after the clear-out.
+  // First, so a reply still on its way for this account, in this tab or another, is dropped rather than saved after the clear-out.
   activeAccount = undefined;
   try {
-    for (const k of Object.keys(localStorage)) if (k.startsWith(`concord.query.${userId}.`)) localStorage.removeItem(k);
+    localStorage.setItem(SIGN_OUTS, String(Number(signOuts()) + 1));
   } catch {
     /* storage unavailable */
   }
+  clearDrafts(userId);
 }

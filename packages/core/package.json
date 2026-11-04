@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./types": "./src/types.ts"
+    "./types": "./src/types.ts",
+    "./sparql-guard": "./src/sparqlGuard.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -20,7 +21,8 @@
     "rdfxml-streaming-parser": "^3.3.0",
     "shaclc-parse": "2.0.0",
     "shaclc-write": "1.6.3",
-    "yaml": "^2.9.1"
+    "yaml": "^2.9.1",
+    "sparqljs": "3.7.4"
   },
   "devDependencies": {
     "@rdfjs/types": "^2",
@@ -30,6 +32,7 @@
     "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.4"
+    "vitest": "^5.0.4",
+    "@types/sparqljs": "^3.1.12"
   }
 }

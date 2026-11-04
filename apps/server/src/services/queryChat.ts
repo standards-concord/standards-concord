@@ -377,101 +377,157 @@ function stepFor(p: PropertyView): PathStep {
   return step;
 }
 
+/**
+ * A message with each quoted phrase replaced by a placeholder (`\0N\0`), so a
+ * quoted value is only ever a value: "called "count"" filters on the word, it
+ * doesn't count. Straight single quotes only count as quotes around words
+ * (not the apostrophe in "don't").
+ */
+interface Said {
+  plain: string;
+  phrases: string[];
+}
+const QUOTED = /["“]([^"”]{1,200})["”]|‘([^’]{1,200})’|(?<=^|[\s(:,])'([^']{1,200})'(?=$|[\s.,;:!?)])/g;
+const PLACEHOLDER = /\u0000(\d+)\u0000/;
+const PLACEHOLDERS = /\u0000(\d+)\u0000/g;
+function said(text: string): Said {
+  const phrases: string[] = [];
+  const plain = text.replace(QUOTED, (_, a?: string, b?: string, c?: string) => `\u0000${phrases.push((a ?? b ?? c ?? '').trim()) - 1}\u0000`);
+  return { plain, phrases };
+}
+const unquote = (text: string, s: Said) => text.replace(PLACEHOLDERS, (_, i: string) => `“${s.phrases[Number(i)]}”`).trim();
+
 /** The message split into what to show (before any condition) and the condition itself. */
 function split(text: string): { show: string; condition?: string } {
   const m = CONDITION.exec(text);
   return m ? { show: text.slice(0, m.index), condition: text.slice(m.index) } : { show: text };
 }
 
+/** Words that carry no meaning of their own in a condition. */
+const FILLER = new Set([...STOP, 'those', 'ones', 'one', 'that', 'are', 'was', 'were', 'be', 'their', 'than', 'whose', 'where', 'value', 'values', 'years', 'year', 'old', 'aged', 'only', 'just', 'records', 'items', 'please', 'than']);
+
+/** Words of the text not accounted for by the given phrases, numbers or filler: if any are left, part of the request would be ignored. */
+function leftover(text: string, used: string[]): string[] {
+  const usedStems = new Set(used.flatMap((u) => normalise(u).trim().split(' ')).filter(Boolean).map(stem));
+  return normalise(text.replace(PLACEHOLDERS, ' '))
+    .trim()
+    .split(' ')
+    .filter((w) => w.length > 1 && !FILLER.has(w) && !usedStems.has(stem(w)) && !/^-?\d+(\.\d+)?$/.test(w));
+}
+
+const QUOTE_LEADS = ['called', 'named', 'titled', 'containing', 'contains', 'contain', 'name', 'title', 'mention', 'mentions', 'mentioning', 'include', 'includes', 'including'];
+
 /**
  * Every clause of a condition as a filter, or why one can't be: a number
  * comparison on a number property (named, or the only one shown), or a quoted
  * phrase in a named property, in a linked thing's label, or in the name.
- * Clauses are joined with "and"; anything else is declined, never guessed.
+ * Clauses are joined with "and", one per property. Anything not understood,
+ * including stray words in a clause, declines the whole message: never guessed,
+ * never quietly dropped.
  */
-function conditionFilters(ctx: Ctx, state: RecordsState, condition: string): { apply: () => void } | { declined: string } {
+function conditionFilters(ctx: Ctx, state: RecordsState, condition: string, s: Said): { apply: () => void } | { declined: string } {
   const { all, nameProp } = propsFor(ctx.view, state.cls);
   const model = state.model;
-  const propOf = (s: PathStep) => all.find((p) => p.iri === s.property);
-  // Quoted phrases out of the way first, so their words don't split clauses or name properties.
-  const phrases: string[] = [];
-  const masked = condition.replace(/["“'‘]([^"”'’]{1,200})["”'’]/g, (_, q: string) => `\u0000${phrases.push(q) - 1}\u0000`);
-  if (/\bor\b|\bnot\b|\bisn['’]?t\b|\bexcept\b/i.test(masked)) return { declined: `I can’t combine conditions with “or” or “not” offline. ${FILTER_HELP}` };
-  const clauses = masked
+  const propOf = (st: PathStep) => all.find((p) => p.iri === st.property);
+  if (/\bor\b|\bnot\b|\bisn['’]?t\b|\bexcept\b|\bnor\b/i.test(condition)) return { declined: `I can’t combine conditions with “or” or “not” offline. ${FILTER_HELP}` };
+  const clauses = condition
     .replace(CONDITION, ' ')
-    .split(/,|\band\b|\bbut\b|(?=\b(?:called|named|titled|containing|contains)\b)/i)
+    .split(/,|;|\band\b|\bbut\b|\balso\b|(?=\b(?:called|named|titled|containing|contains)\b)/i)
     .map((c) => c.trim())
-    .filter((c) => c && !/^(those|the ones|ones|records|items|with|that|which|if)$/i.test(c));
+    .filter((c) => c && leftover(c, []).length + (PLACEHOLDER.test(c) ? 1 : 0) + (/\d/.test(c.replace(PLACEHOLDERS, '')) ? 1 : 0) > 0);
   if (!clauses.length) return { declined: `I couldn’t find a condition in that. ${FILTER_HELP}` };
   const actions: (() => void)[] = [];
+  const targets = new Map<string, string>();
+  const once = (key: string, what: string): string | undefined => {
+    if (targets.has(key)) return `I can apply only one condition to ${what} offline, and that asks for two. Edit the query to combine them.`;
+    targets.set(key, what);
+    return undefined;
+  };
   for (const clause of clauses) {
-    const named = all.filter((p) => mentions(clause.replace(/\u0000\d+\u0000/g, ' '), labelOf(p)));
-    const quoted = /\u0000(\d+)\u0000/.exec(clause);
-    const num = /(-?\d+(?:\.\d+)?)/.exec(clause.replace(/\u0000\d+\u0000/g, ' '));
-    const op = NUMBER_OPS.find(([re]) => re.test(clause))?.[1];
-    if (quoted && !op) {
-      const value = phrases[Number(quoted[1])].trim();
+    const shown = unquote(clause, s);
+    const words = clause.replace(PLACEHOLDERS, ' ');
+    const named = all.filter((p) => mentions(words, labelOf(p)));
+    const quoted = [...clause.matchAll(PLACEHOLDERS)];
+    const num = [...words.matchAll(/(-?\d+(?:\.\d+)?)/g)];
+    const opHit = NUMBER_OPS.filter(([re]) => re.test(clause));
+    if (quoted.length > 1 || num.length > 1 || opHit.length > 1) return { declined: `I couldn’t turn “${shown}” into one filter. Join separate conditions with “and”. ${FILTER_HELP}` };
+    const op = opHit[0]?.[1];
+    if (quoted.length === 1 && !op && !num.length) {
+      const value = s.phrases[Number(quoted[0][1])];
       if (named.length > 1) return { declined: `I couldn’t tell which property “${value}” is about. ${FILTER_HELP}` };
       const p = named[0] ?? nameProp;
-      if (!named[0] && !/\b(called|named|titled|containing|contains|with (the )?(name|title))\b/i.test(clause) && clause.replace(/\u0000\d+\u0000/, '').trim())
-        return { declined: `I couldn’t tell what “${value}” should match. ${FILTER_HELP}` };
+      const extra = leftover(clause, [...(named[0] ? [labelOf(named[0])] : []), ...QUOTE_LEADS]);
+      if (extra.length || (!named[0] && !new RegExp(`\\b(${QUOTE_LEADS.join('|')})\\b`, 'i').test(clause)))
+        return { declined: `I couldn’t tell what “${value}” should match in “${shown}”. ${FILTER_HELP}` };
       if (p && valueTypeOf(p) === 'number') return { declined: `${labelOf(p)} is a number, so compare it with “over”, “under” or “at least”. ${FILTER_HELP}` };
+      const twice = once(p?.iri ?? RDFS_LABEL, p ? labelOf(p) : 'the name');
+      if (twice) return { declined: twice };
       actions.push(() => {
-        let step = p ? model.steps.find((s) => s.property === p.iri) : model.steps.find((s) => s.property === RDFS_LABEL);
-        if (!step) model.steps.push((step = p ? stepFor(p) : newStep(RDFS_LABEL)));
+        let st = p ? model.steps.find((x) => x.property === p.iri) : model.steps.find((x) => x.property === RDFS_LABEL);
+        if (!st) model.steps.push((st = p ? stepFor(p) : newStep(RDFS_LABEL)));
         // A linked thing matches on its label.
-        const target = step.children.find((c) => c.property === RDFS_LABEL) ?? step;
+        const target = st.children.find((c) => c.property === RDFS_LABEL) ?? st;
         target.filter = { op: 'contains', value };
       });
-    } else if (num && op && !quoted) {
+    } else if (num.length === 1 && op && !quoted.length) {
       const numberNamed = named.filter((p) => valueTypeOf(p) === 'number');
-      const shown = model.steps.filter((s) => s.valueType === 'number');
-      const p = numberNamed.length === 1 ? numberNamed[0] : named.length === 0 && shown.length === 1 ? propOf(shown[0]) : undefined;
-      if (!p) return { declined: `I couldn’t tell which number “${clause.trim()}” is about. ${FILTER_HELP}` };
+      if (named.length > numberNamed.length) return { declined: `“${shown}” mentions ${named.filter((p) => valueTypeOf(p) !== 'number').map(labelOf).join(' and ')}, which isn’t a number. Give each condition its own clause, joined with “and”. ${FILTER_HELP}` };
+      const shownNumbers = model.steps.filter((x) => x.valueType === 'number');
+      const p = numberNamed.length === 1 ? numberNamed[0] : named.length === 0 && shownNumbers.length === 1 ? propOf(shownNumbers[0]) : undefined;
+      if (!p) return { declined: `I couldn’t tell which number “${shown}” is about. ${FILTER_HELP}` };
+      const opWords = (NUMBER_OPS.find(([, o]) => o === op)![0].exec(clause) ?? [''])[0];
+      const extra = leftover(clause, [labelOf(p), opWords]);
+      if (extra.length) return { declined: `I couldn’t tell what “${extra.join(' ')}” means in “${shown}”, so I haven’t changed the query. ${FILTER_HELP}` };
+      const twice = once(p.iri, labelOf(p));
+      if (twice) return { declined: twice };
       actions.push(() => {
-        let step = model.steps.find((s) => s.property === p.iri);
-        if (!step) model.steps.push((step = stepFor(p)));
-        step.filter = { op, value: num[1] };
+        let st = model.steps.find((x) => x.property === p.iri);
+        if (!st) model.steps.push((st = stepFor(p)));
+        st.filter = { op, value: num[0][1] };
       });
-    } else return { declined: `I couldn’t turn “${clause.replace(/\u0000(\d+)\u0000/g, (_, i: string) => `“${phrases[Number(i)]}”`).trim()}” into a filter, so I haven’t changed the query. ${FILTER_HELP}` };
+    } else return { declined: `I couldn’t turn “${shown}” into a filter, so I haven’t changed the query. ${FILTER_HELP}` };
   }
   return { apply: () => actions.forEach((a) => a()) };
 }
 
-/** Counting, sorting and the row limit, from one message. Returns whether anything changed. */
+/** Counting, sorting and the row limit, from one message (quoted phrases already out of the way). Returns whether anything changed. */
 function applyShape(ctx: Ctx, state: RecordsState, text: string): boolean {
   const { model, cls } = state;
   const { all } = propsFor(ctx.view, cls);
-  const propOf = (s: PathStep) => all.find((p) => p.iri === s.property);
+  const propOf = (st: PathStep) => all.find((p) => p.iri === st.property);
+  const plain = text.replace(PLACEHOLDERS, ' ');
   let changed = false;
-  if (/\bhow many\b|\bcount\b|\bnumber of\b/i.test(text)) (model.countOnly = true), (changed = true);
-  else if (model.countOnly && /\b(list|show|which)\b/i.test(text)) (model.countOnly = false), (changed = true);
-  if (NO_LIMIT.test(text)) (model.limit = undefined), (changed = true);
-  const limit = /\b(?:first|top|limit(?: to)?)\s+(\d{1,5})\b/i.exec(text);
+  if (/\bhow many\b|\bcount\b|\bnumber of\b/i.test(plain)) (model.countOnly = true), (changed = true);
+  else if (model.countOnly && /\b(list|show|which)\b/i.test(plain)) (model.countOnly = false), (changed = true);
+  if (NO_LIMIT.test(plain)) (model.limit = undefined), (changed = true);
+  const limit = /\b(?:first|top|limit(?: to)?)\s+(\d{1,5})\b/i.exec(plain);
   if (limit) (model.limit = Math.max(1, Number(limit[1]))), (changed = true);
-  const sort = /\b(?:sort|order)(?:ed)? by (?:the |its )?([\w ’'-]+?)(?:\s+(descending|ascending|highest first|lowest first|newest first|oldest first))?[.?!]?$/i.exec(text.trim());
+  const sort = /\b(?:sort|order)(?:ed)? by (?:the |its )?([\w ’'-]+?)(?:\s+(descending|ascending|highest first|lowest first|newest first|oldest first))?[.?!]?$/i.exec(plain.trim());
   if (sort) {
-    const step = model.steps.find((s) => mentions(sort[1], s.property === RDFS_LABEL ? 'label' : labelOf(propOf(s) ?? { iri: s.property })));
-    if (step) (model.orderBy = step.id), (changed = true);
+    const st = model.steps.find((x) => mentions(sort[1], x.property === RDFS_LABEL ? 'label' : labelOf(propOf(x) ?? { iri: x.property })));
+    if (st) (model.orderBy = st.id), (changed = true);
     if (sort[2]) (model.descending = /descending|highest|newest/i.test(sort[2])), (changed = true);
   }
   return changed;
 }
 
+/** A condition without "only"/"where": a quoted phrase or a comparison still reads as one ("called 'park'", "under 15"). */
+const looksLikeCondition = (text: string) => PLACEHOLDER.test(text) || NUMBER_OPS.some(([re]) => re.test(text));
+
 /** A new list of records, from a message that names the class (or none, for the class with the most records). */
-function startRecords(ctx: Ctx, cls: ClassView, text: string): RecordsState | { declined: string } {
+function startRecords(ctx: Ctx, cls: ClassView, text: string, s: Said): RecordsState | { declined: string } {
   const { all, nameProp } = propsFor(ctx.view, cls);
   const { show, condition } = split(text);
-  const mentioned = all.filter((p) => mentions(show, labelOf(p)));
+  const showWords = show.replace(PLACEHOLDERS, ' ');
+  const mentioned = all.filter((p) => mentions(showWords, labelOf(p)));
   const chosen = [...new Set([...(nameProp ? [nameProp] : []), ...mentioned])];
   const steps = chosen.map(stepFor);
   if (!nameProp) steps.unshift(newStep(RDFS_LABEL));
   const model: BuilderModel = { rootClass: cls.iri, includeSubclasses: true, steps, distinct: true, countOnly: false, descending: false, orderBy: steps[0]?.id, limit: 100 };
   const state: RecordsState = { kind: 'records', cls, model };
-  // "called 'park'" without "only": a name filter too.
-  const cond = condition ?? (/["“'‘][^"”'’]{1,200}["”'’]/.test(show) || NUMBER_OPS.some(([re]) => re.test(show)) ? show.replace(new RegExp(`\\b${labelOf(cls)}\\w*\\b`, 'i'), ' ') : undefined);
+  const cond = condition ?? (looksLikeCondition(show) ? show.replace(new RegExp(`^.*?\\b${labelOf(cls).split(' ').at(-1)!.replace(/y$/, '')}\\w*\\b`, 'i'), ' ') : undefined);
   if (cond) {
-    const f = conditionFilters(ctx, state, cond);
+    const f = conditionFilters(ctx, state, cond, s);
     if ('declined' in f) return f;
     f.apply();
   }
@@ -484,63 +540,75 @@ type Step = { state: OfflineState } | { declined: string };
 const NOT_MINE = 'The offline helper can only change queries it wrote itself, and it didn’t write the one in the editor (or it has been changed since). Edit it directly, or ask a new question such as “List every …”.';
 
 /** Applies one message to the previous state: a new question starts afresh; a refinement changes it, or is declined whole. */
-function step(ctx: Ctx, prev: OfflineState | undefined, text: string): Step {
-  const cls = mentionedClass(ctx, text);
-  if (REFINE.test(text)) {
+function step(ctx: Ctx, prev: OfflineState | undefined, s: Said): Step {
+  const text = s.plain;
+  const words = text.replace(PLACEHOLDERS, ' ');
+  const cls = mentionedClass(ctx, words);
+  if (REFINE.test(words)) {
     if (!prev) return { declined: NOT_MINE };
     if (prev.kind === 'ontology') return { declined: 'That last question was about the model itself, so there’s no list of records to change. Ask for records first, for example “List every …”.' };
     if (cls && cls.iri !== prev.cls.iri) return { declined: `That mentions ${labelOf(cls)} records, but the query lists ${labelOf(prev.cls)} records. To start a new list, ask without “also” or “only”, for example “List every ${labelOf(cls)}”.` };
-    return refine(ctx, prev, text);
+    return refine(ctx, prev, s);
   }
-  const ontology = ontologyQuestion(normalise(text));
+  const ontology = ontologyQuestion(normalise(words));
   if (ontology && !cls) return { state: { kind: 'ontology', question: ontology } };
   if (cls) {
-    const r = startRecords(ctx, cls, text);
+    const r = startRecords(ctx, cls, text, s);
     return 'declined' in r ? r : { state: r };
   }
   // No class named: "how many are there?" refines the list; otherwise start from the class with the most records.
-  if (prev?.kind === 'records') return refine(ctx, prev, text);
+  if (prev?.kind === 'records') return refine(ctx, prev, s);
   const top = [...ctx.classes].sort((a, b) => (ctx.counts.get(b.iri) ?? 0) - (ctx.counts.get(a.iri) ?? 0))[0];
-  const r = startRecords(ctx, top, text);
+  const r = startRecords(ctx, top, text, s);
   return 'declined' in r ? r : { state: r };
 }
 
-function refine(ctx: Ctx, prev: RecordsState, text: string): Step {
+const FILTER_WORDS = /\b(filters?|conditions?|restrictions?)\b/i;
+
+function refine(ctx: Ctx, prev: RecordsState, s: Said): Step {
+  const text = s.plain;
+  const words = text.replace(PLACEHOLDERS, ' ');
   const state = structuredClone(prev) as RecordsState;
   state.cls = prev.cls;
   const { all } = propsFor(ctx.view, state.cls);
   let changed = false;
-  if (REMOVE.test(text) && !NO_LIMIT.test(text)) {
-    const after = text.slice(REMOVE.exec(text)!.index);
+  if (REMOVE.test(words) && !NO_LIMIT.test(words)) {
+    const after = words.slice(REMOVE.exec(words)!.index);
+    if (CONDITION.test(after) || PLACEHOLDER.test(text.slice(REMOVE.exec(text)?.index ?? 0))) return { declined: `I can remove things or add conditions, but not both in one message. ${FILTER_HELP}` };
     const named = all.filter((p) => mentions(after, labelOf(p)));
-    if (/\b(filters?|conditions?|restrictions?)\b/i.test(after)) {
-      // "remove the minimum age filter": that one only; "remove all the filters": every one. Columns stay.
+    const verb = REMOVE.exec(after)![0];
+    if (FILTER_WORDS.test(after)) {
+      // Only an explicit "all" removes every filter; anything named must be a filter that is there, and nothing may be left unexplained.
+      const every = /\b(all|every|each)\b/i.test(after);
+      const extra = leftover(after, [verb, ...named.map(labelOf), 'filter', 'filters', 'condition', 'conditions', 'restriction', 'restrictions', 'all', 'every', 'each', 'remove', 'drop', 'clear']);
+      if (extra.length) return { declined: `There’s no “${extra.join(' ')}” filter here, so I haven’t changed the query. Name a filter that’s there, for example “remove the minimum age filter”, or say “remove all the filters”.` };
+      if (named.length && every) return { declined: 'Did you mean all the filters, or just the ones you named? Say “remove all the filters”, or name them without “all”.' };
       if (named.length) {
         for (const p of named) {
-          const s = state.model.steps.find((x) => x.property === p.iri);
-          const target = s && (s.filter ? s : s.children.find((c) => c.filter));
+          const st = state.model.steps.find((x) => x.property === p.iri);
+          const target = st && (st.filter ? st : st.children.find((c) => c.filter));
           if (!target) return { declined: `There’s no ${labelOf(p)} filter to remove.` };
           delete target.filter;
         }
-      } else if (/\b(all|every|filters|conditions|restrictions)\b/i.test(after)) {
-        for (const s of state.model.steps) for (const x of [s, ...s.children]) delete x.filter;
+      } else if (every) {
+        for (const st of state.model.steps) for (const x of [st, ...st.children]) delete x.filter;
       } else return { declined: 'I couldn’t tell which filter to remove. Name it, for example “remove the minimum age filter”, or say “remove all the filters”.' };
       changed = true;
     } else {
-      if (!named.length) return { declined: 'I couldn’t tell which column to remove. Name it, for example “remove the minimum age”.' };
-      state.model.steps = state.model.steps.filter((s) => !named.some((p) => p.iri === s.property));
+      const extra = leftover(after, [verb, ...named.map(labelOf), 'column', 'columns', 'show', 'showing', 'remove', 'drop', 'hide', 'out', 'leave', 'take']);
+      if (!named.length || extra.length) return { declined: `I couldn’t tell which column to remove${extra.length ? ` (“${extra.join(' ')}”)` : ''}. Name it, for example “remove the minimum age”.` };
+      state.model.steps = state.model.steps.filter((x) => !named.some((p) => p.iri === x.property));
       if (!state.model.steps.length) state.model.steps = [newStep(RDFS_LABEL)];
-      if (!state.model.steps.some((s) => s.id === state.model.orderBy)) state.model.orderBy = state.model.steps[0].id;
+      if (!state.model.steps.some((x) => x.id === state.model.orderBy)) state.model.orderBy = state.model.steps[0].id;
       changed = true;
     }
-    if (CONDITION.test(after)) return { declined: `I can remove things or add conditions, but not both in one message. ${FILTER_HELP}` };
   } else {
     const { show, condition } = split(text);
-    for (const p of all.filter((p) => mentions(show, labelOf(p)))) if (!state.model.steps.some((s) => s.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
-    // A quoted phrase or a comparison without "only" still reads as a condition ("those called 'park'").
-    const cond = condition ?? (/["“'‘][^"”'’]{1,200}["”'’]/.test(show) || NUMBER_OPS.some(([re]) => re.test(show)) ? show : undefined);
+    const showWords = show.replace(PLACEHOLDERS, ' ');
+    for (const p of all.filter((p) => mentions(showWords, labelOf(p)))) if (!state.model.steps.some((x) => x.property === p.iri)) state.model.steps.push(stepFor(p)), (changed = true);
+    const cond = condition ?? (looksLikeCondition(show) ? show : undefined);
     if (cond) {
-      const f = conditionFilters(ctx, state, cond);
+      const f = conditionFilters(ctx, state, cond, s);
       if ('declined' in f) return f;
       f.apply();
       changed = true;
@@ -595,7 +663,7 @@ export function offlineQuery(view: OntologyView, req: QueryChatRequest): Draft {
   const sent = fromWire(ctx, req.offlineState);
   // The record only counts while the editor still holds the query it describes.
   const prev = sent && render(ctx, sent).query.trim() === req.query.trim() ? sent : undefined;
-  const next = step(ctx, prev, latest);
+  const next = step(ctx, prev, said(latest));
   if ('declined' in next) return unchanged(req, next.declined);
   return render(ctx, next.state);
 }

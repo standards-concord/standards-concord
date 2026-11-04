@@ -21,7 +21,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id` overview | Lifecycle bubble, health chip, lint, FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
-| `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
+| `/o/:id/query` | Chat-to-query assistant (writes and refines, runs only on a click, offline helper declines what it can't express), SPARQL editor, examples, every query form, sample data and SHACL check, pagination, per-account drafts (cleared on sign-out in any tab), background runs with Cancel, time limit, memory cap and result budgets, LIMIT banner | ✅ | query |
 | `/o/:id/connect` | Connect an agent to this ontology | ✅ | connect |
 | `/o/:id/use-cases` | List, describe a use case (starts an interview), draft changes from a selection | ✅ | requirements, ia; 🔜 #15 (sharing modes, anonymised versions) |
 | `/o/:id/use-cases/:id` | Read the document, continue, mark ready, draft changes, archive | ✅ | requirements, ia |

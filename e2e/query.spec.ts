@@ -225,6 +225,9 @@ test.describe('Query tab', () => {
   test('queries run in the background: Cancel stops one, and one that runs too long is stopped', async ({ page }) => {
     // The worker reads the time limit when it is first used.
     await page.evaluate(() => ((window as unknown as { __concordQueryTimeLimitMs: number }).__concordQueryTimeLimitMs = 1500));
+    // A three-way join of everything: slow, and big enough that it would reach the memory cap first, so this test
+    // raises the cap (the next test covers it).
+    await page.evaluate(() => ((window as unknown as { __concordQueryMemoryMiB: number }).__concordQueryMemoryMiB = 2048));
     const slow = 'SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i FILTER(STR(?c) = CONCAT(STR(?f), STR(?i), "x")) }';
     await setEditor(page, 'sparql-editor', slow);
     await run(page);
@@ -303,6 +306,35 @@ test.describe('Query tab', () => {
     await page.waitForTimeout(1000);
     const left = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
     expect(left).toEqual([]);
+  });
+
+  test('a reply that arrives after signing out in another tab is dropped, not saved', async ({ page, context }) => {
+    // Used to come back: the other tab cleared the drafts, then this tab's held reply wrote chat, query and state again.
+    await ask(page, 'List every volunteering opportunity');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let arrived = false;
+    await page.route(/\/query-chat$/, async (r) => {
+      const answer = await r.fetch();
+      await held;
+      await r.fulfill({ response: answer });
+      arrived = true;
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('editor-locked')).toBeVisible();
+    const other = await context.newPage();
+    await other.goto('/');
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(other).toHaveURL(/\/login/);
+    const mine = (p: Page) => p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(await mine(other)).toEqual([]);
+    release();
+    await expect.poll(() => arrived).toBe(true);
+    await page.waitForTimeout(500);
+    expect(await mine(page)).toEqual([]);
+    await other.close();
   });
 
   test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
@@ -520,6 +552,38 @@ test.describe('Query tab', () => {
     const cell = await results(page).locator('tbody td').first().getAttribute('title');
     expect(cell!.length).toBeLessThanOrEqual(10_001);
     expect(cell!.endsWith('…')).toBe(true);
+  });
+
+  test('a query that would build enormous values is refused before it runs', async ({ page }) => {
+    // Used to be accepted: about 840 characters of doubling CONCATs built a 64 MiB value and 500 MB of engine memory.
+    const steps = Array.from({ length: 26 }, (_, i) => `BIND(CONCAT(?v${i}, ?v${i}) AS ?v${i + 1})`).join(' ');
+    await setEditor(page, 'sparql-editor', `SELECT ?v26 WHERE { BIND("x" AS ?v0) ${steps} }`);
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('could build values of 67,108,864 characters');
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('a query that needs more memory than allowed is stopped, and the next one runs', async ({ page }) => {
+    // The engine's memory used to be able to grow towards 4 GB. Lower the cap so a plain cross join reaches it.
+    await page.evaluate(() => ((window as unknown as { __concordQueryMemoryMiB: number }).__concordQueryMemoryMiB = 24));
+    await setEditor(page, 'sparql-editor', 'SELECT * WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i }');
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('needed more memory than a query here may use (24 MB)', { timeout: 20_000 });
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('variables named like JavaScript built-ins show their values', async ({ page }) => {
+    // ?__proto__ used to lose its value and crash the page.
+    await setEditor(page, 'sparql-editor', 'SELECT ("ok" AS ?__proto__) ("fine" AS ?constructor) WHERE {}');
+    await run(page);
+    await expect(results(page).locator('th')).toHaveText(['?__proto__', '?constructor']);
+    await expect(results(page).locator('tbody td')).toHaveText(['ok', 'fine']);
+    const csv = await results(page).getByRole('link', { name: 'CSV' }).getAttribute('href');
+    expect(decodeURIComponent(csv!.split(',').slice(1).join(','))).toBe('__proto__,constructor\nok,fine');
   });
 
   test('long results are paginated', async ({ page }) => {

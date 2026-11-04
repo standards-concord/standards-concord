@@ -59,9 +59,6 @@ importers:
       marked:
         specifier: ^18.1.1
         version: 18.1.1
-      sparqljs:
-        specifier: 3.7.4
-        version: 3.7.4
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -78,9 +75,6 @@ importers:
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
-      '@types/sparqljs':
-        specifier: ^3.1.12
-        version: 3.1.12
       '@types/supertest':
         specifier: ^7.2.1
         version: 7.2.1
@@ -220,6 +214,9 @@ importers:
       shaclc-write:
         specifier: 1.6.3
         version: 1.6.3
+      sparqljs:
+        specifier: 3.7.4
+        version: 3.7.4
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -239,6 +236,9 @@ importers:
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
+      '@types/sparqljs':
+        specifier: ^3.1.12
+        version: 3.1.12
       tsx:
         specifier: ^4.23.15
         version: 4.23.15

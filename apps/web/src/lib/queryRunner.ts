@@ -7,28 +7,36 @@ export interface QueryRun {
   query: string;
   form: QueryForm;
   maxRows: number;
+  /** The most memory the engine may use, in MiB. */
+  memoryMiB: number;
 }
 
 /**
  * A result as the page gets it. `total` (rows) and `count` (triples) are exact
  * when `complete`, and otherwise a lower bound: the worker stopped reading.
  * `cut` means at least one value was longer than a cell may be and was shortened.
+ * Each row holds its values by position in `vars` (null when unbound), never
+ * keyed by variable name, so a variable called __proto__ is just a name.
  */
 export type RunResult =
-  | { kind: 'rows'; vars: string[]; rows: Record<string, string>[]; total: number; complete: boolean; cut: boolean }
+  | { kind: 'rows'; vars: string[]; rows: (string | null)[][]; total: number; complete: boolean; cut: boolean }
   | { kind: 'ask'; answer: boolean }
   | { kind: 'graph'; text: string; shown: number; count: number; complete: boolean; cut: boolean };
 
-export type QueryRunResult = { id: number; ok: true; result: RunResult; ms: number } | { id: number; ok: false; error: string };
+/** `fatal`: the engine trapped (for example on reaching its memory cap) and the worker must be replaced. */
+export type QueryRunResult = { id: number; ok: true; result: RunResult; ms: number } | { id: number; ok: false; error: string; fatal?: boolean };
 
 /** Results beyond this many rows are counted but not shown. */
 export const MAX_ROWS = 5000;
 /**
  * What the worker keeps while results stream in: rows stop being kept past
  * `keptChars` of values (about 16 MB of memory), any value is cut to
- * `cellChars`, and reading stops altogether after `readChars` of results.
+ * `cellChars`, reading stops altogether after `readChars` of results, and a
+ * single row over `chunkChars` is refused rather than decoded.
  */
-export const RESULT_BUDGET = { keptChars: 8 * 1024 * 1024, cellChars: 10_000, readChars: 64 * 1024 * 1024 };
+export const RESULT_BUDGET = { keptChars: 8 * 1024 * 1024, cellChars: 10_000, readChars: 64 * 1024 * 1024, chunkChars: 16 * 1024 * 1024 };
+/** The most memory the query engine may use. Loading the ontology and sample data takes a few MB. */
+export const MEMORY_LIMIT_MIB = 256;
 /** A query still running after this long is stopped. */
 export const TIME_LIMIT_MS = 20_000;
 
@@ -49,8 +57,11 @@ export class QueryRunner {
   private pending?: { id: number; resolve: (r: { result: RunResult; ms: number }) => void; reject: (e: unknown) => void; timer: ReturnType<typeof setTimeout> };
   private nextId = 1;
 
-  // Tests can shorten the limit with window.__concordQueryTimeLimitMs.
-  constructor(private readonly timeLimitMs = (globalThis as { __concordQueryTimeLimitMs?: number }).__concordQueryTimeLimitMs ?? TIME_LIMIT_MS) {}
+  // Tests can lower the limits with window.__concordQueryTimeLimitMs and window.__concordQueryMemoryMiB.
+  constructor(
+    private readonly timeLimitMs = (globalThis as { __concordQueryTimeLimitMs?: number }).__concordQueryTimeLimitMs ?? TIME_LIMIT_MS,
+    private readonly memoryMiB = (globalThis as { __concordQueryMemoryMiB?: number }).__concordQueryMemoryMiB ?? MEMORY_LIMIT_MIB,
+  ) {}
 
   private ensure(): Worker {
     if (!this.worker) {
@@ -61,7 +72,10 @@ export class QueryRunner {
         clearTimeout(p.timer);
         this.pending = undefined;
         if (e.data.ok) p.resolve({ result: e.data.result, ms: e.data.ms });
-        else p.reject(new Error(e.data.error));
+        else {
+          if (e.data.fatal) this.stop();
+          p.reject(new Error(e.data.error));
+        }
       };
       this.worker.onerror = (e) => {
         const p = this.pending;
@@ -84,7 +98,7 @@ export class QueryRunner {
     return !!this.pending;
   }
 
-  run(req: Omit<QueryRun, 'id' | 'maxRows'>): Promise<{ result: RunResult; ms: number }> {
+  run(req: Omit<QueryRun, 'id' | 'maxRows' | 'memoryMiB'>): Promise<{ result: RunResult; ms: number }> {
     if (this.pending) this.cancel();
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -94,7 +108,7 @@ export class QueryRunner {
         p?.reject(new QueryStopped('timeout'));
       }, this.timeLimitMs);
       this.pending = { id, resolve, reject, timer };
-      this.ensure().postMessage({ ...req, id, maxRows: MAX_ROWS } satisfies QueryRun);
+      this.ensure().postMessage({ ...req, id, maxRows: MAX_ROWS, memoryMiB: this.memoryMiB } satisfies QueryRun);
     });
   }
 
