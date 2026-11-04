@@ -66,6 +66,8 @@ export function normalise(m: Meeting) {
   if (b.status === 'done') b.phase = 'done';
   else if (b.botId && b.leaving) Object.assign(b, { phase: 'releasing', release: 'leave', after: 'done' });
   else if (b.botId) b.phase = 'booked';
+  // An unanswered booking someone already asked to remove (End call) stays on its way out.
+  else if (b.bookingId && b.uncertain && b.leaving) Object.assign(b, { phase: 'releasing', release: 'leave', after: 'done' });
   else if (b.bookingId && b.uncertain) b.phase = 'booking';
   else b.phase = 'idle';
 }
@@ -327,8 +329,9 @@ async function work(id: string, now?: number) {
     else if (b.phase === 'releasing') progressed = await releaseBot(m, now);
     if (!progressed) break;
   }
-  await lookForDismissed(id, now);
-  if (!waiting) await cancelStrays(id, now);
+  // A bot found for a dismissed booking is cancelled now, whatever the current booking's backoff.
+  const foundStrays = await lookForDismissed(id, now);
+  if (!waiting || foundStrays) await cancelStrays(id, now);
   // A withdrawn meeting goes once nothing is outstanding.
   await transition(
     id,
@@ -520,9 +523,10 @@ async function cancelStrays(id: string, now?: number) {
  */
 async function lookForDismissed(id: string, now?: number) {
   const m = get<Meeting>('meetings', id);
-  if (!tracked(m) || !m.bot.dismissed?.length) return;
+  if (!tracked(m) || !m.bot.dismissed?.length) return false;
   const t = now ?? Date.now();
-  if (m.bot.lookAgainAt !== undefined && m.bot.lookAgainAt > t) return;
+  if (m.bot.lookAgainAt !== undefined && m.bot.lookAgainAt > t) return false;
+  let added = false;
   const results: { bookingId: string; found?: { id: string; ended: boolean }[] }[] = [];
   for (const d of m.bot.dismissed) {
     try {
@@ -538,10 +542,11 @@ async function lookForDismissed(id: string, now?: number) {
       const b = x.bot;
       for (const r of results) {
         if (!r.found?.length) continue;
-        addStrays(
-          x,
-          r.found.filter((f) => !f.ended).map((f) => f.id),
-        );
+        added =
+          addStrays(
+            x,
+            r.found.filter((f) => !f.ended).map((f) => f.id),
+          ) || added;
         b.released = [...(b.released ?? []), ...r.found.filter((f) => f.ended && !b.released?.includes(f.id)).map((f) => f.id)].slice(-RELEASED_KEEP);
         b.dismissed = b.dismissed?.filter((d) => d.bookingId !== r.bookingId);
       }
@@ -549,6 +554,7 @@ async function lookForDismissed(id: string, now?: number) {
       else Object.assign(b, { dismissed: undefined, lookAgainAt: undefined });
     },
   );
+  return added;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -588,7 +594,8 @@ export async function dismissUnconfirmed(id: string) {
     (x) => (x.bot.phase === 'booking' || x.bot.phase === 'releasing') && !x.bot.botId && !!x.bot.bookingId && !!x.bot.unconfirmed,
     (x) => {
       const b = x.bot;
-      b.dismissed = [...(b.dismissed ?? []), { bookingId: b.bookingId!, url: b.bookedUrl ?? x.meetingUrl! }].slice(-RELEASED_KEEP);
+      // Never capped: each entry is a bot that may still exist, kept until a lookup settles it.
+      b.dismissed = [...(b.dismissed ?? []), { bookingId: b.bookingId!, url: b.bookedUrl ?? x.meetingUrl! }];
       b.lookAgainAt = undefined;
       if (b.phase === 'releasing') finishRelease(x);
       else x.bot = { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', ...carry(b) };

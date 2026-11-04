@@ -2109,6 +2109,82 @@ describe('invite-by-email', () => {
     expect(getMeeting(m.id).bot).toMatchObject({ phase: 'releasing', botId: 'bot-other' });
   });
 
+  /* ----- Fixes from the tenth review ----- */
+
+  it('10.1: an old-format record that was leaving with an unanswered booking keeps leaving, and isn’t analysed first', async () => {
+    // Used to read as a plain booking: found by lookup, it became booked, no removal was sent, and its lines were heard after End.
+    stubMode.nullCreate = true;
+    const { m, s } = await joinNow('Old leaving');
+    stubMode.nullCreate = false;
+    const lost = `bot-${nextBot}`;
+    await line(m.id, 'Said before End.');
+    const b = getMeeting(m.id).bot!;
+    saveMeeting({ ...getMeeting(m.id), bot: { provider: 'recall', status: 'scheduled', bookingId: b.bookingId, bookedUrl: b.bookedUrl, bookedAt: b.bookedAt, uncertain: true, leaving: true } });
+    // Before any sweep has touched it, Analyse refuses.
+    expect((await s.post(`/api/meetings/${m.id}/analyse`)).status).toBe(409);
+    await dispatchDue(new Date(Date.now() + 2 * 60_000));
+    await meetBotIdle();
+    expect(calls.some((c) => c.method !== 'GET' && c.url.startsWith(`/bot/${lost}/`))).toBe(true);
+    await line(m.id, 'Said after End.', lost);
+    expect(getMeeting(m.id).transcript.map((l) => l.text)).not.toContain('Said after End.');
+    expect(getMeeting(m.id)).toMatchObject({ status: 'analysed', bot: { phase: 'done', botId: lost } });
+  });
+
+  it('10.2: a dismissed booking’s bot found while the next booking is backing off is cancelled straight away', async () => {
+    // Used to be recorded as a stray but left alone until the other booking's retry came round.
+    const { m, lost } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const s = await steward('Steward Backoff');
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    // The call books again (Recall.ai is down), and that booking backs off for a long while.
+    await dispatchDue(at('2026-11-10T15:51:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booking' });
+    // The dismissed booking's next lookup comes round at 15:53, with the new booking's retry not until 16:20.
+    const lookAgain = at('2026-11-10T15:53:00Z').getTime();
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, lookAgainAt: lookAgain, nextAt: lookAgain + 27 * 60_000 };
+    });
+    stubMode.listHides = false;
+    calls.length = 0;
+    await dispatchDue(new Date(lookAgain + 60_000));
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${lost}/` }));
+    expect(getMeeting(m.id).bot!.strays).toBeUndefined();
+    // The other booking's backoff is left as it was.
+    expect(calls.filter((c) => c.method === 'POST' && c.url === '/bot/')).toHaveLength(0);
+  });
+
+  it('10.3: however many bookings are dismissed, none stops being looked for before it is settled', async () => {
+    // Used to keep only the last twenty, silently dropping the oldest bot that might still exist.
+    const { m, lost, bookingId } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const s = await steward('Steward Many');
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, dismissed: [...x.bot!.dismissed!, ...Array.from({ length: 19 }, (_, i) => ({ bookingId: `bk-earlier-${i}`, url: x.meetingUrl! }))] };
+    });
+    // A twenty-first booking goes unconfirmed, and is dismissed too.
+    await dispatchDue(at('2026-11-10T15:51:00Z'));
+    await dispatchDue(at('2026-11-10T16:50:00Z'));
+    expect(getMeeting(m.id).bot).toMatchObject({ unconfirmed: true });
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    const dismissed = getMeeting(m.id).bot!.dismissed!.map((d) => d.bookingId);
+    expect(dismissed).toHaveLength(21);
+    expect(dismissed[0]).toBe(bookingId);
+    stubMode.listHides = false;
+    await dispatchDue(new Date(Date.now() + 7 * 3600e3));
+    await dispatchDue(new Date(Date.now() + 14 * 3600e3));
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${lost}/` }));
+    expect(getMeeting(m.id).bot!.dismissed!.map((d) => d.bookingId)).not.toContain(bookingId);
+  });
+
   it('the calendar reader agrees with the cancellation reader', () => {
     // A cancelled week with no start time of its own.
     const bare = calendar(

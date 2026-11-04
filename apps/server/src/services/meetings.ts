@@ -60,10 +60,11 @@ export function requireAnalyst(m: Meeting, user: User | undefined) {
 
 /** Whether a bot is still in (or on its way into) the call. */
 export const botActive = (m: Meeting) =>
-  tracked(m) ? (m.bot.phase === 'booking' || m.bot.phase === 'booked') && m.status !== 'scheduled' : !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
+  // Records from before the state machine are read as one here too (normalise is idempotent).
+  (normalise(m), tracked(m)) ? (m.bot.phase === 'booking' || m.bot.phase === 'booked') && m.status !== 'scheduled' : !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
 
 /** Whether a Recall.ai bot may still be around: booked, unanswered, or not yet confirmed gone. */
-export const botOutstanding = (m: Meeting) => tracked(m) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing' || !!m.bot.strays?.length);
+export const botOutstanding = (m: Meeting) => (normalise(m), tracked(m)) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing' || !!m.bot.strays?.length);
 
 /**
  * What a signed-in person may see of a meeting. Invites waiting for approval, and
