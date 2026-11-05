@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
+import { bumpVersion, DATA_MEDIA_TYPES, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -9,9 +9,11 @@ import { config } from '../config.js';
 import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
+import { holdLegacy, isHeld, readOntology } from './holds.js';
+import { publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
-import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
+import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
 import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
@@ -30,8 +32,12 @@ export { PUBLIC_BASE };
  *   /def/<slug>/<version>.shaclc  standard SHACL compact syntax (?syntax=extended keeps shape names)
  *
  * Browsers get the HTML page; anything asking for RDF (or JavaScript, or
- * SHACLC) gets that (Vary: Accept). Responses allow any origin, so an app on
- * another site can fetch the ontology or import its classes.
+ * SHACLC) gets that (Vary: Accept). Asking for the SHACL profile
+ * (Accept-Profile: <http://www.w3.org/ns/shacl#>,
+ * text/turtle;profile="http://www.w3.org/ns/shacl#", or ?_profile=shacl) gets
+ * the SHACL shapes. POST validates data against them: see validate.ts.
+ * Responses allow any origin, so an app on another site can fetch the
+ * ontology or import its classes.
  * Persistent IRIs (w3id.org) redirect here, see w3id.ts.
  */
 
@@ -83,15 +89,85 @@ const EXTENSIONS: [string, PublicFormat][] = [
   ['nt', 'ntriples'],
 ];
 
+export const SHACL_PROFILE = 'http://www.w3.org/ns/shacl#';
+const SHACL_PROFILE_RE = /^<?http:\/\/www\.w3\.org\/ns\/shacl#?>?$/;
+
+/**
+ * Whether the request asks for the SHACL profile of the ontology (W3C Content
+ * Negotiation by Profile): an Accept-Profile header, a profile parameter on an
+ * Accept media type, or the _profile query parameter. q=0 means "not this".
+ */
+export function wantsShaclProfile(req: Request): boolean {
+  const named = (token: string) => SHACL_PROFILE_RE.test(token.trim()) || token.trim().toLowerCase() === 'shacl';
+  const query = req.query._profile;
+  if (typeof query === 'string' && query.split(',').some(named)) return true;
+  const listed = (header: string | undefined, pick: (part: string) => string | undefined) =>
+    (header ?? '').split(',').some((part) => {
+      const token = pick(part);
+      return token !== undefined && named(token) && !/;\s*q\s*=\s*0(\.0*)?\s*(;|$)/i.test(part);
+    });
+  if (listed(req.get('Accept-Profile'), (part) => part.split(';')[0])) return true;
+  return listed(req.get('Accept'), (part) => /;\s*profile\s*=\s*"?([^";,]+)"?/i.exec(part)?.[1]);
+}
+
+/**
+ * Whether Accept allows a representation: a media type with parameters, such
+ * as text/turtle with profile="http://www.w3.org/ns/shacl#". A range matches
+ * when its type matches and each of its parameters (other than q) equals the
+ * representation's; profile values match by IRI, with or without <>. The most
+ * specific matching range decides (RFC 9110 12.5.1): the exact type beats
+ * type/*, which beats *\/*, and among ranges of one type, more parameters win. So
+ * "text/turtle;q=0, *\/*" refuses Turtle, and
+ * 'text/turtle;profile="…shacl#";q=0, text/turtle' refuses the SHACL profile.
+ */
+export function acceptsRepresentation(header: string | undefined, type: string, params: Record<string, string> = {}): boolean {
+  return acceptMatch(header, type, params).q > 0;
+}
+
+/**
+ * How Accept rates a representation: the quality of the most specific range
+ * that matches it, and where that range is in the header (for ties). No
+ * header accepts everything at q=1.
+ */
+export function acceptMatch(header: string | undefined, type: string, params: Record<string, string> = {}): { q: number; position: number } {
+  if (!header?.trim()) return { q: 1, position: 0 };
+  const want = type.toLowerCase();
+  const [major] = want.split('/');
+  const norm = (k: string, v: string) => (k === 'profile' ? v.replace(/^<|>$/g, '') : v.toLowerCase());
+  let best: { specificity: number; q: number; position: number } | undefined;
+  header.split(',').forEach((part, position) => {
+    const [rangeRaw, ...paramParts] = part.split(';');
+    const range = rangeRaw.trim().toLowerCase();
+    let q = 1;
+    const rangeParams: [string, string][] = [];
+    for (const p of paramParts) {
+      const eq = p.indexOf('=');
+      if (eq < 0) continue;
+      const key = p.slice(0, eq).trim().toLowerCase();
+      const value = p.slice(eq + 1).trim().replace(/^"|"$/g, '');
+      if (key === 'q') q = Number(value);
+      else rangeParams.push([key, value]);
+    }
+    // RFC 9110 12.5.1: the type and subtype decide first (exact over type/* over *\/*), then parameters.
+    let specificity = range === want ? 300 : range === `${major}/*` ? 200 : range === '*/*' ? 100 : 0;
+    if (!specificity) return;
+    if (rangeParams.length) {
+      const matches = rangeParams.every(([k, v]) => params[k] !== undefined && norm(k, params[k]) === norm(k, v));
+      if (!matches) return;
+      specificity += rangeParams.length;
+    }
+    if (!Number.isFinite(q)) q = 0;
+    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q, position };
+  });
+  return best ? { q: best.q, position: best.position } : { q: 0, position: Infinity };
+}
+
 function splitExtension(segment: string): { base: string; format?: PublicFormat } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
   return { base: segment };
 }
 
-export const publishedReleases = (ontologyId: string) =>
-  list<Release>('releases', ontologyId)
-    .filter((r) => r.status === 'published')
-    .sort((a, b) => (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt));
+export { publishedReleases } from './published.js';
 
 /** The latest released version, if any, that exists in the repository. */
 export function latestVersion(project: OntologyProject): string | undefined {
@@ -150,7 +226,7 @@ export async function pageInput(
     latestVersion: latest,
     downloads,
     pageUrl: `${root}/${version}`,
-    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root },
+    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
     requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
@@ -159,14 +235,23 @@ export async function pageInput(
 
 export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 
-/** The public use cases and requirements stored with a release, if it has a readable copy. */
-function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
+type SnapshotRead = { state: 'ok'; data: PublishedRequirements } | { state: 'absent' } | { state: 'corrupt' };
+
+/** The public use cases and requirements stored with a release: present and valid, absent, or unreadable. */
+function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
   const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
+  if (!fs.existsSync(file)) return { state: 'absent' };
   try {
-    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as PublishedRequirements) : undefined;
+    const data = validSnapshot(JSON.parse(fs.readFileSync(file, 'utf8')));
+    return data ? { state: 'ok', data } : { state: 'corrupt' };
   } catch {
-    return undefined;
+    return { state: 'corrupt' };
   }
+}
+
+function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
+  const read = readSnapshot(project, version);
+  return read.state === 'ok' ? read.data : undefined;
 }
 
 /**
@@ -188,38 +273,83 @@ export async function releasePageFiles(
 export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version);
 export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
 
+/** Which renderer last wrote each ontology's release pages. Kept in the data directory, never in anything served. */
+const pageStateFile = () => path.join(config.dataDir, 'public-pages.json');
+function readPageState(): Record<string, string> {
+  try {
+    return JSON.parse(fs.readFileSync(pageStateFile(), 'utf8')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
 /**
- * Brings every published release's stored page up to date with the current
- * renderer, once per renderer version (PAGE_VERSION). Security and privacy
- * fixes to the page then reach copies written before them, and releases from
- * before snapshots existed get one, so their pages stop following live data.
- * An existing readable snapshot is kept as it is. Changes are committed to the
- * ontology's repository, so they go out with its next push to GitHub.
+ * Brings every ontology's published release pages up to date with the current
+ * renderer, and holds what older versions published without approval.
+ *
+ * Runs at startup. An ontology whose pages weren't written by this renderer
+ * (PAGE_GENERATOR, tracked in the data directory, so page content can't fake
+ * it) has every release page regenerated. Each release is handled on its own,
+ * so one bad release can't block the others. Snapshots: a valid one is kept
+ * as it is; an unreadable one is kept untouched and the page says the use
+ * cases weren't recorded; a missing one is backfilled only for the demo (its
+ * use cases are fixed content), and otherwise recorded as not available.
+ *
+ * Changes are committed to the ontology's repository and go out with its next
+ * push to GitHub. Tags still point at the original commits.
  */
 export async function refreshReleasePages(): Promise<void> {
+  const state = readPageState();
   for (const project of list<OntologyProject>('ontologies')) {
+    // What older versions published without anyone approving it is held until a steward does (holds.ts).
     try {
-      const versions = new Set(ontologyStore.versions(project));
-      const changed: Record<string, Record<string, string>> = {};
-      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
-        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
-        const page = path.join(dir, 'index.html');
-        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
-        const snapshot = requirementsSnapshot(project, release.version);
-        if (current && snapshot) continue;
-        const requirements = snapshot && Array.isArray(snapshot.useCases) ? snapshot : releaseRequirements(project, release.version);
+      holdLegacy(project);
+    } catch (err) {
+      console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
+    }
+    const versions = new Set(ontologyStore.versions(project));
+    const releases = publishedReleases(project.id).filter((r) => versions.has(r.version));
+    const pending = releases.filter((r) => state[project.slug] !== PAGE_GENERATOR || readSnapshot(project, r.version).state === 'absent' || !fs.existsSync(path.join(ontologyStore.dir(project), 'releases', r.version, 'index.html')));
+    if (!pending.length) {
+      state[project.slug] = PAGE_GENERATOR;
+      continue;
+    }
+    const changed: Record<string, Record<string, string>> = {};
+    let failed = 0;
+    for (const release of pending) {
+      try {
+        const snapshot = readSnapshot(project, release.version);
+        let requirements: PublishedRequirements;
+        let writeSnapshot = false;
+        if (snapshot.state === 'ok') requirements = snapshot.data;
+        else if (snapshot.state === 'corrupt') requirements = { useCases: [], snapshotMissing: true };
+        else {
+          requirements = project.demo ? releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
+          writeSnapshot = true;
+        }
         const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
-        // Never rewrite a readable snapshot, only the page rendered from it.
-        if (snapshot) delete files[REQUIREMENTS_SNAPSHOT];
+        if (!writeSnapshot) delete files[REQUIREMENTS_SNAPSHOT];
         changed[release.version] = files;
+      } catch (err) {
+        failed++;
+        console.warn(`[public] could not refresh ${project.slug} ${release.version}: ${(err as Error).message}`);
       }
+    }
+    try {
       if (Object.keys(changed).length) {
         ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
+      if (!failed) state[project.slug] = PAGE_GENERATOR;
     } catch (err) {
-      console.warn(`[public] could not refresh ${project.slug} release pages: ${(err as Error).message}`);
+      console.warn(`[public] could not save ${project.slug} release pages: ${(err as Error).message}`);
     }
+  }
+  try {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(pageStateFile(), `${JSON.stringify(state, null, 2)}\n`);
+  } catch (err) {
+    console.warn(`[public] could not record page state: ${(err as Error).message}`);
   }
 }
 
@@ -242,6 +372,19 @@ function notFound(res: Response, message: string, home?: string) {
     );
 }
 
+/** A version waiting for a steward to approve what it publishes (holds.ts): it says so, and serves none of it. */
+function held(res: Response, project: OntologyProject, version: string, format: PublicFormat) {
+  const what = version === 'draft' ? 'The working draft' : `Version ${version}`;
+  const message = `${what} of ${project.title} is being reviewed before it is published again.`;
+  res.status(503).set('Cache-Control', 'no-store').set('Retry-After', '86400');
+  if (format !== 'html') return void res.type('text/plain').send(`${message}\n`);
+  res
+    .type('html')
+    .send(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Being reviewed</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}}</style></head><body><h1>Being reviewed</h1><p>${escapeHtml(message)}</p><p>Older versions of this site published changes without anyone approving them first, so a steward is checking it.</p></body></html>`,
+    );
+}
+
 async function serve(req: Request, res: Response) {
   const slugSeg = String(req.params.slug);
   const versionSeg = req.params.version === undefined ? undefined : String(req.params.version);
@@ -249,6 +392,9 @@ async function serve(req: Request, res: Response) {
   const last = splitExtension(versionSeg ?? slugSeg);
   const slug = versionSeg === undefined ? last.base : slugSeg;
   const requested = versionSeg === undefined ? undefined : last.base;
+  // Public data: any site may read it (no credentials), including the headers that describe it.
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
 
   const project = findProject(slug);
   if (!project) return notFound(res, `There is no ontology called “${slug}”.`);
@@ -263,22 +409,41 @@ async function serve(req: Request, res: Response) {
   else {
     // Slash namespaces put terms under the ontology IRI (…/volunteering/Volunteer):
     // send those to the term's anchor on the latest page.
-    const graph = await ontologyStore.at(project, latest ?? 'working');
+    // Not from a version waiting for approval: even a redirect would say which names it has.
+    if (isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
+    const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
     const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
     if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 
-  const format = last.format ?? negotiate(req, res);
+  let format = last.format;
+  let profiled = false;
+  // Data can be POSTed here to validate it (validate.ts).
+  res.set('Accept-Post', DATA_MEDIA_TYPES.join(', '));
+  if (!last.format) res.vary('Accept-Profile');
+  if (!format && wantsShaclProfile(req)) {
+    res.vary('Accept');
+    if (!acceptsRepresentation(req.get('Accept'), 'text/turtle', { profile: SHACL_PROFILE, charset: 'utf-8' })) {
+      res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
+      return;
+    }
+    res.set('Content-Profile', `<${SHACL_PROFILE}>`);
+    profiled = true;
+    format = 'shacl';
+  }
+  format ??= negotiate(req, res);
   if (!format) return;
+  // Published before anyone approved what goes public: nothing of it is served until a steward does.
+  if (isHeld(project, version)) return held(res, project, version, format);
+  const graph = await readOntology(project, version, undefined);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');
-    const input = await pageInput(project, version, base);
+    const input = await pageInput(project, version, base, { graph });
     res.type('html').send(renderOntologyPage(input));
     return;
   }
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
   await sendFormat(req, res, {
     project,
     graph,
@@ -286,6 +451,7 @@ async function serve(req: Request, res: Response) {
     version,
     self: `${root}/${version}`,
     mutable: version === 'draft',
+    profiled,
     // The draft is ahead of the latest release: 1.0.0 → 1.1.0-draft.
     packageVersion: version === 'draft' ? `${latest ? bumpVersion(latest, 'minor') : '0.1.0'}-draft` : version,
   });
@@ -307,18 +473,20 @@ export function negotiate(req: Request, res: Response): PublicFormat | undefined
   return NEGOTIABLE[best];
 }
 
-function publicHeaders(res: Response, self: string, mutable: boolean) {
+function publicHeaders(res: Response, self: string, mutable: boolean, profiled = false) {
   res.vary('Accept');
-  // Public data: any site may fetch it, or import the generated classes from it.
+  // Public data: any site may fetch it, or import the generated classes from it, including the headers that describe it.
   res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Expose-Headers', 'Link, Content-Disposition');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
   res.set('Cache-Control', mutable ? 'no-cache' : 'public, max-age=300');
   res.set(
     'Link',
     [
       `<${self}.html>; rel="alternate"; type="text/html"`,
-      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"`),
+      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"${f === 'shacl' ? `; profile="${SHACL_PROFILE}"` : ''}`),
       `<${self}>; rel="canonical"`,
+      // Content Negotiation by Profile: name the profile this response conforms to.
+      ...(profiled ? [`<${SHACL_PROFILE}>; rel="profile"`] : []),
     ].join(', '),
   );
 }
@@ -337,6 +505,8 @@ export interface SendFormatOptions {
   mutable: boolean;
   /** Semver version for the npm package (falls back to owl:versionInfo, then 0.0.0). */
   packageVersion?: string;
+  /** Sent as the SHACL profile (Content Negotiation by Profile): the Link header names it. */
+  profiled?: boolean;
 }
 
 /**
@@ -346,7 +516,7 @@ export interface SendFormatOptions {
  * the draft and forks) so each offers the same formats.
  */
 export async function sendFormat(req: Request, res: Response, o: SendFormatOptions): Promise<void> {
-  publicHeaders(res, o.self, o.mutable);
+  publicHeaders(res, o.self, o.mutable, o.profiled);
   const fileBase = `${o.project.slug}-${o.version.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
   if (o.format === 'javascript' || o.format === 'typescript' || o.format === 'dts' || o.format === 'npm') {
     const mod = await toWrapperClasses(o.graph, { name: o.project.slug, sourceUrl: o.self });

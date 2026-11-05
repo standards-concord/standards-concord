@@ -37,7 +37,7 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 ## Adding keys later
 
-Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh NAME` adds or changes one; the server applies it within five minutes.
+Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh NAME` adds or changes one; the server applies it within five minutes. To run it from any folder without a checkout (needs `gh` and `az` signed in): `setkey() { local r=standards-concord/standards-concord; bash <(gh api -H 'Accept: application/vnd.github.raw' "repos/$r/contents/deploy/azure/set-key.sh") "$@"; }`, then `setkey NAME`. It asks for the value without showing it (or reads it from a pipe, e.g. `pbpaste | ./deploy/azure/set-key.sh NAME`) and never puts it in a command line: `az` reads it from a private temporary file that is deleted afterwards. `deploy/azure/set-key.test.sh` checks this in CI.
 
 | Key | What it turns on |
 | --- | --- |
@@ -46,11 +46,16 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `PUBLIC_ORIGINS` | Comma-separated extra origins, such as a domain pointed straight at the backend, that may appear in OAuth metadata and MCP URLs when reached directly. Vercel domains don't need listing when `CONCORD_PROXY_SECRET` is set. |
 | `TRUST_PROXY` | Which proxies' `X-Forwarded-*` headers to believe, in [Express's syntax](https://expressjs.com/en/guide/behind-proxies.html). The default, `loopback, linklocal, uniquelocal`, covers Caddy on the same Docker network. OAuth URLs never come from these headers. |
 | `OPENAI_APPS_CHALLENGE` | The domain verification token from OpenAI's plugin submission, served at `/.well-known/openai-apps-challenge`. |
-| `ADMIN_EMAILS` | Comma-separated emails that can reset the demo and read every tester's feedback once signed in with Google or GitHub. |
+| `ADMIN_WEBIDS` | WebIDs of the deployment's administrators, who can reset the demo and read every tester's feedback. Use your own WebID and sign in with it ("Sign in with your WebID"), or sign in with Google or GitHub and copy the WebID from Settings; then `./deploy/azure/set-key.sh ADMIN_WEBIDS`. Demo accounts and personas never count. Each tester's `concord/feedback/` folder in their pod is shared read-only with these WebIDs (re-applied at every start, so removing one takes its access away), testers are shown them on the feedback page, and an admin signed in with their WebID can read the folders straight from the pods under Admin → Feedback. |
+| `SOLID_OIDC` | Signing in with your own WebID (Solid-OIDC with DPoP). On by default; `off` hides it. Providers fetch the Client ID Document at `<vercel-url>/auth/solid/client.jsonld`; the redirect URI is `<vercel-url>/auth/solid/callback`. |
+| `SOLID_TRUSTED_ISSUERS` | Only for development and tests: Solid providers that may be on a private address or plain http (such as a local Community Solid Server). Everyone else's provider must be public https. |
+| `ADMIN_EMAILS` | The older alternative: verified emails of Google or GitHub accounts. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google. Create an OAuth client (Web application) in Google Cloud with redirect URI `<vercel-url>/auth/google/callback`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Sign in with GitHub. Create an OAuth app with callback URL `<vercel-url>/auth/github/callback`. |
 | `GITHUB_PUBLISH_TOKEN`, `GITHUB_PUBLISH_OWNER` | Push each ontology's git history and release tags to a GitHub repository on release. |
+| `FEEDBACK_GITHUB_TOKEN` | Lets testers opt in to posting a short summary of their feedback as a GitHub issue (see [public feedback summaries](feedback-issues.md)). A fine-grained token for this one repository with **Issues: Read and write**. Optional: `FEEDBACK_GITHUB_REPO` (default `standards-concord/standards-concord`), `FEEDBACK_ISSUES_PER_HOUR` (default 10, rolling, shared by all server processes), `FEEDBACK_TRIAGE_TOKEN` (a long random secret the triage routine sends to the server's triage endpoints; without it they're off). |
 | `RECALL_API_KEY` | The live Google Meet co-facilitator bot (Recall.ai). Its webhook comes in through Vercel. |
+| `MEET_BOT_EMAIL`, `MEET_BOT_ICS_URL` | Invite the bot by email: its Google account's address, and that calendar's secret iCal address. See [meet-bot.md](meet-bot.md). |
 | `OPENAI_API_KEY` with `STT_PROVIDER=openai` | Voice feedback in browsers without built-in speech recognition (Firefox). |
 | `DEMO_MODE`, `ALLOW_PUBLIC_RESET` | Demo sign-in and the simulated working group (on by default); whether any tester can reset the shared demo (off). |
 | `GHCR_USER`, `GHCR_TOKEN` | Only if the image is made private again: a token with `read:packages`. |

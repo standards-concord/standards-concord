@@ -12,6 +12,7 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | Push to `main` | all of the above, then `image` (backend deploy) | 25 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
+| `deploy/azure/set-key*` changed | `Deploy scripts` (checks the key never reaches a command line) | under 1 min |
 
 Before this, every push to a PR branch ran the whole suite twice (once for the push, once for the PR) and built a branch image, about 50 billed minutes a push.
 

@@ -10,6 +10,10 @@
  *   The paragraph that is spoken. One paragraph is one narration clip.
  *
  *   [pause: 1.5]                    a silent hold, in seconds
+ *   [if: jsClasses,!forks]          keeps the paragraph below only when the hub has (or,
+ *                                   with !, lacks) those features
+ *
+ * "{minutes}" in a paragraph becomes the estimated length of the recording, in words.
  *
  * Paragraphs with no [do:] keep the screen as it is. A [do:] with no paragraph after it
  * runs on its own, silently. HTML comments are notes for editors and are ignored.
@@ -29,6 +33,8 @@ export interface Step {
   after: Action[];
   /** Extra silent hold at the end of the step, in seconds. */
   pause: number;
+  /** Features this step needs ("x") or must not have ("!x"). */
+  when?: string[];
 }
 
 export interface Scene {
@@ -47,7 +53,7 @@ export interface Narration {
 }
 
 const HEADING = /^##\s+(.+?)\s*(?:\{([^}]*)\})?\s*$/;
-const DIRECTIVE = /^\[(do|then|pause):\s*(.*?)\]\s*$/;
+const DIRECTIVE = /^\[(do|then|pause|if):\s*(.*?)\]\s*$/;
 
 function slug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -88,7 +94,7 @@ export function parseNarration(source: string): Narration {
 
   const scenes: Scene[] = [];
   let scene: Scene | undefined;
-  let pending: { actions: Action[]; after: Action[] } = { actions: [], after: [] };
+  let pending: { actions: Action[]; after: Action[]; when?: string[] } = { actions: [], after: [] };
   let para: string[] = [];
 
   const flushPara = () => {
@@ -99,7 +105,7 @@ export function parseNarration(source: string): Narration {
     const text = para.join(' ').replace(/\s+/g, ' ').trim();
     para = [];
     if (!text && !pending.actions.length && !pending.after.length) return;
-    scene.steps.push({ text, actions: pending.actions, after: pending.after, pause: 0 });
+    scene.steps.push({ text, actions: pending.actions, after: pending.after, pause: 0, ...(pending.when ? { when: pending.when } : {}) });
     pending = { actions: [], after: [] };
   };
 
@@ -127,6 +133,10 @@ export function parseNarration(source: string): Narration {
         const last = scene.steps.at(-1);
         if (last) last.pause += secs;
         else scene.steps.push({ text: '', actions: [], after: [], pause: secs });
+      } else if (d[1] === 'if') {
+        const when = d[2].split(',').map((x) => x.trim()).filter(Boolean);
+        if (!when.length) throw new Error('Empty [if:] directive');
+        pending.when = [...(pending.when ?? []), ...when];
       } else if (d[1] === 'do') {
         pending.actions.push(parseAction(d[2]));
       } else {
@@ -171,6 +181,75 @@ export function forSpeech(text: string, lexicon: Record<string, string>): string
   return out;
 }
 
+/**
+ * The text sent to the voice, built word by word from the caption text so that each
+ * caption word's position in the spoken text is known (for timing captions from the
+ * voice's character timestamps).
+ */
+export function speechMap(text: string, lexicon: Record<string, string>): { speech: string; words: string[]; starts: number[] } {
+  const words = plain(text).split(/\s+/).filter(Boolean);
+  const starts: number[] = [];
+  let speech = '';
+  for (const w of words) {
+    if (speech) speech += ' ';
+    starts.push(speech.length);
+    speech += forSpeech(w, lexicon);
+  }
+  return { speech, words, starts };
+}
+
+/**
+ * Readable caption phrases: one per sentence, and a long sentence split into balanced
+ * pieces under `max` characters, at a comma near the middle where there is one.
+ */
+export function phrases(text: string, max = 84): { text: string; firstWord: number }[] {
+  const words = plain(text).split(/\s+/).filter(Boolean);
+  const out: { text: string; firstWord: number }[] = [];
+  const len = (from: number, to: number) => words.slice(from, to).join(' ').length;
+  const split = (from: number, to: number) => {
+    if (len(from, to) <= max || to - from < 2) {
+      out.push({ text: words.slice(from, to).join(' '), firstWord: from });
+      return;
+    }
+    // Break where the two halves are closest in length; a comma break wins if it's not too lopsided.
+    let best = from + 1;
+    let bestScore = Infinity;
+    for (let k = from + 1; k < to; k++) {
+      const imbalance = Math.abs(len(from, k) - len(k, to));
+      const score = /[,;:]$/.test(words[k - 1]) ? imbalance - max / 3 : imbalance;
+      if (score < bestScore) {
+        bestScore = score;
+        best = k;
+      }
+    }
+    split(from, best);
+    split(best, to);
+  };
+  let start = 0;
+  words.forEach((w, i) => {
+    if (/[.!?]["')\]]*$/.test(w)) {
+      split(start, i + 1);
+      start = i + 1;
+    }
+  });
+  if (start < words.length) split(start, words.length);
+  return out;
+}
+
+/** Caption cues for one clip, in seconds from the clip's start. */
+export function cuesFor(text: string, lexicon: Record<string, string>, duration: number, charStarts?: number[]) {
+  const map = speechMap(text, lexicon);
+  const ps = phrases(text);
+  const totalChars = map.speech.length || 1;
+  const at = (wordIndex: number) => {
+    if (wordIndex >= map.words.length) return duration;
+    const c = map.starts[wordIndex];
+    // Use the voice's own timing when it reported one; otherwise share time by length.
+    return charStarts?.[c] ?? (c / totalChars) * duration;
+  };
+  return ps.map((p, i) => ({ start: at(p.firstWord), end: i + 1 < ps.length ? at(ps[i + 1].firstWord) : duration, text: p.text }));
+}
+
 /** Splits a paragraph into sentences for caption cues. */
 export function sentences(text: string): string[] {
   const parts = plain(text).match(/[^.!?]+(?:[.!?]+["')\]]*|$)/g) ?? [];
@@ -186,7 +265,22 @@ export function selectScenes(n: Narration, features: Set<string>, only?: string[
     const present = s.unless.filter((f) => features.has(f));
     if (missing.length) skipped.push({ id: s.id, reason: `needs ${missing.join(', ')}` });
     else if (present.length) skipped.push({ id: s.id, reason: `fallback not needed (${present.join(', ')} available)` });
-    else kept.push(s);
+    else kept.push({ ...s, steps: s.steps.filter((st) => (st.when ?? []).every((w) => (w.startsWith('!') ? !features.has(w.slice(1)) : features.has(w)))) });
   }
   return { kept, skipped };
+}
+
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+
+/**
+ * Fills "{minutes}" in the selected scenes with the expected length of the video, as a
+ * word ("nine"), so the intro states the length of what is actually recorded. The
+ * estimate is speech at 155 words a minute plus 10% for actions that outlast it, which
+ * matched a measured recording to within ten seconds.
+ */
+export function fillMinutes(scenes: Scene[]): number {
+  const words = scenes.flatMap((s) => s.steps).reduce((n, st) => n + st.text.split(/\s+/).filter(Boolean).length, 0);
+  const minutes = Math.max(1, Math.round((words / 155) * 1.1));
+  for (const st of scenes.flatMap((s) => s.steps)) st.text = st.text.replace(/\{minutes\}/g, NUMBER_WORDS[minutes] ?? String(minutes));
+  return minutes;
 }

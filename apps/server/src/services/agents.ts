@@ -1,6 +1,4 @@
-import { compactIRI, NS, OntologyGraph, runCompetencyQuestions } from '@concord/core';
-import { reasonInWorker } from '../reasoner/pool.js';
-import type { ReasonerResult } from '@concord/core/types';
+import { compactIRI, runCompetencyQuestions } from '@concord/core';
 import type { AgentReport, AiAnalysis, OntologyProject, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { list, mustGet, put } from '../db.js';
@@ -12,6 +10,7 @@ import { GapAnalysisSchema } from '../llm/schemas.js';
 import { createChangeRequest } from './changeRequests.js';
 import { rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { readOntology } from '../public/holds.js';
 import { proposalToOps } from './proposals.js';
 import { logActivity } from './users.js';
 
@@ -100,57 +99,12 @@ export async function reportGap(
   return report;
 }
 
-const WELL_KNOWN = [NS.rdf, NS.rdfs, NS.owl, NS.xsd, NS.skos, NS.dcterms, NS.schema, NS.foaf, NS.prov];
-
-/** Check instance data against the ontology: unknown terms, and logical consistency of data + ontology. */
-export async function validateData(project: OntologyProject, turtle: string, reason: (graph: OntologyGraph) => Promise<ReasonerResult> = reasonInWorker) {
-  const graph = await ontologyStore.working(project);
-  const data = await OntologyGraph.fromTurtle(turtle);
-  const known = new Set<string>();
-  for (const q of graph.store.getQuads(null, null, null, null)) known.add(q.subject.value);
-  const issues: { severity: 'error' | 'warning'; message: string }[] = [];
-  const c = (iri: string) => compactIRI(iri, { ...graph.prefixes, ...data.prefixes });
-  const check = (iri: string, what: string) => {
-    if (known.has(iri) || WELL_KNOWN.some((ns) => iri.startsWith(ns))) return;
-    if (iri.startsWith(graph.namespace)) {
-      const t = graph.search(iri.slice(graph.namespace.length), 3);
-      issues.push({ severity: 'error', message: `${c(iri)} is used as a ${what} but is not defined in the ontology.${t.length ? ` Did you mean ${t.map((x) => c(x.iri)).join(' or ')}?` : ''}` });
-    }
-  };
-  const RDF_TYPE = `${NS.rdf}type`;
-  for (const q of data.store.getQuads(null, null, null, null)) {
-    check(q.predicate.value, 'property');
-    if (q.predicate.value === RDF_TYPE && q.object.termType === 'NamedNode') check(q.object.value, 'class');
-    const term = graph.term(q.predicate.value);
-    if (term && term.deprecated) issues.push({ severity: 'warning', message: `${c(q.predicate.value)} is deprecated${term.replacedBy ? `; use ${c(term.replacedBy)} instead` : ''}.` });
-  }
-  for (const q of data.store.getQuads(null, RDF_TYPE, null, null)) {
-    const term = graph.term(q.object.value);
-    if (term?.deprecated) issues.push({ severity: 'warning', message: `${c(q.object.value)} is deprecated${term.replacedBy ? `; use ${c(term.replacedBy)} instead` : ''}.` });
-  }
-  const merged = graph.clone();
-  merged.store.addQuads(data.store.getQuads(null, null, null, null));
-  // Complete OWL 2 DL check of ontology + data (sparq); falls back to the structural checks.
-  const r = await reason(merged);
-  // Data is valid when ontology + data is consistent, so that is the verdict that has to be
-  // decided. Fail closed: data the OWL reasoner could not decide is not reported as valid.
-  const decided = r.checked === 'complete' || r.checked === 'consistency' || (r.checked === undefined && r.available);
-  if (!decided) issues.push({ severity: 'error', message: `The OWL reasoner could not check the data against the ontology, so it is not known to be valid: ${r.error ?? 'no verdict'}` });
-  else if (!r.consistent) issues.push({ severity: 'error', message: `The data contradicts the ontology: ${r.explanation ?? 'inconsistent'}` });
-  // Proven consistent, but the reasoner stopped before classifying every class. That doesn't
-  // change whether this data is valid (an instance of an unsatisfiable class would have made
-  // the whole thing inconsistent), so it is a warning rather than an error.
-  else if (r.checked === 'consistency') issues.push({ severity: 'warning', message: `The OWL reasoner showed this data is consistent with the ontology, but couldn't finish checking every class in the ontology: ${r.error ?? 'unknown reason'}` });
-  return { valid: !issues.some((i) => i.severity === 'error'), triples: data.size, issues: dedupe(issues) };
-}
-
-const dedupe = <T extends { message: string }>(xs: T[]) => [...new Map(xs.map((x) => [x.message, x])).values()];
-
-export async function sparql(project: OntologyProject, query: string, ref?: string) {
+/** Anyone may query; someone not signed in reads only what's published (see readOntology). */
+export async function sparql(project: OntologyProject, query: string, ref: string | undefined, viewer: User | undefined) {
   if (!/^\s*(PREFIX[^\n]*\n\s*)*(SELECT|ASK|CONSTRUCT|DESCRIBE)\b/i.test(query.replace(/#[^\n]*/g, ''))) {
     return { head: { vars: [] as string[] }, rows: [] as Record<string, string>[], error: 'Only read-only queries (SELECT, ASK, CONSTRUCT, DESCRIBE) are allowed' };
   }
-  const graph = await ontologyStore.at(project, ref);
+  const graph = await readOntology(project, ref, viewer);
   const [res] = await runCompetencyQuestions(graph, [{ question: 'query', sparql: query }]);
   const vars = res.rows.length ? Object.keys(res.rows[0]) : [];
   return { head: { vars }, rows: res.rows, error: res.error };

@@ -36,7 +36,8 @@ export function useOntology() {
 export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
   // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
-  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query & validate'], ['connect', 'Connect an agent']] },
+  // Query holds a scratch check of sample data; Validate data is the full validator (upload, any release, the API).
+  { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query'], ['validate', 'Validate data'], ['connect', 'Connect an agent']] },
   // What agents report is requirements input, next to use cases and meetings.
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
@@ -184,7 +185,7 @@ export function OntologyLayout() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {o.stats.openChangeRequests > 0 && (
+              {(o.stats.openChangeRequests ?? 0) > 0 && (
                 <Link to={`/o/${id}/changes`} className="text-xs font-medium text-accent hover:underline">
                   {o.stats.openChangeRequests} open {o.stats.openChangeRequests === 1 ? 'change' : 'changes'}
                 </Link>

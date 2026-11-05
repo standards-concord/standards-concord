@@ -5,7 +5,6 @@
 import { execFile } from 'node:child_process';
 import { rm, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { sentences } from './narration.ts';
 
 const run = promisify(execFile);
 
@@ -15,6 +14,8 @@ export interface Placed {
   at: number;
   duration: number;
   text: string;
+  /** Caption cues, in seconds from the clip's start. */
+  cues: { start: number; end: number; text: string }[];
 }
 
 function ts(s: number) {
@@ -25,20 +26,17 @@ function ts(s: number) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
 }
 
-/** One cue per sentence, timed in proportion to its length within the clip. */
+/** WebVTT captions from each clip's cues. */
 export function vtt(clips: Placed[]): string {
   const cues: string[] = ['WEBVTT', ''];
   let n = 1;
-  for (const c of clips) {
-    const parts = sentences(c.text);
-    const total = parts.reduce((a, p) => a + p.length, 0) || 1;
-    let t = c.at;
-    for (const p of parts) {
-      const d = (p.length / total) * c.duration;
-      cues.push(String(n++), `${ts(t)} --> ${ts(t + d)}`, p, '');
-      t += d;
-    }
-  }
+  const all = clips.flatMap((c) => c.cues.map((q) => ({ start: c.at + q.start, end: c.at + q.end, text: q.text })));
+  all.forEach((q, i) => {
+    // At least 0.4 s on screen, but never overlapping the next cue.
+    const next = all[i + 1]?.start ?? Infinity;
+    const end = Math.min(Math.max(q.end, q.start + 0.4), Math.max(next, q.end));
+    cues.push(String(n++), `${ts(q.start)} --> ${ts(end)}`, q.text, '');
+  });
   return cues.join('\n');
 }
 

@@ -1,6 +1,6 @@
 import { compactIRI, type OntologyGraph } from '@concord/core';
 import type { Restriction, TermView } from '@concord/core/types';
-import type { UseCase } from '@concord/shared';
+import type { ChangeRequest, UseCase } from '@concord/shared';
 
 /** A compact, model-friendly rendering of an ontology (Manchester-ish one-liners). */
 export function ontologyDigest(graph: OntologyGraph, maxTerms = 400): string {
@@ -31,10 +31,15 @@ ${v.metadata.description ?? ''}
 ${terms.slice(0, maxTerms).map(line).join('\n')}${terms.length > maxTerms ? `\n… and ${terms.length - maxTerms} more terms` : ''}`;
 }
 
-export function useCaseDigest(u: UseCase): string {
+/**
+ * A use case for a prompt. `anonymous` leaves out its title (use cases may be
+ * private while what's drafted from them is published), so a model can't
+ * copy it into the ontology.
+ */
+export function useCaseDigest(u: UseCase, opts: { anonymous?: boolean; n?: number } = {}): string {
   const s = u.sections;
   const parts = [
-    `## Use case: ${s.name ?? '(unnamed)'} [${u.id}]`,
+    opts.anonymous ? `## Use case ${opts.n ?? ''} [${u.id}]`.replace('  ', ' ') : `## Use case: ${s.name ?? '(unnamed)'} [${u.id}]`,
     s.goal && `Goal: ${s.goal}`,
     s.actors && `Actors: ${s.actors}`,
     s.stakeholders && `Stakeholders: ${s.stakeholders}`,
@@ -52,4 +57,20 @@ export function useCaseDigest(u: UseCase): string {
       `Candidate terms:\n${u.terms.map((t) => `- ${t.label} (${t.kind})${t.definition ? `: ${t.definition}` : ''}${t.evidence?.length ? ` — “${t.evidence[0]}”` : ''}`).join('\n')}`,
   ];
   return parts.filter(Boolean).join('\n');
+}
+
+/** The tag around text an anonymous member of the public wrote (see UNTRUSTED_TEXT in prompts.ts). */
+const UNTRUSTED_TAG = 'untrusted_public_report';
+
+/**
+ * A change request's title and description as a model sees them. A report
+ * from the public page is wrapped and marked as data from an anonymous
+ * stranger, so it can't pass itself off as instructions (or close its own tag).
+ */
+export function requestText(cr: Pick<ChangeRequest, 'number' | 'title' | 'description' | 'origin'>): string {
+  const { title, description } = cr;
+  if (cr.origin.type !== 'public-report') return `Change request #${cr.number}: ${title}\n${description}`;
+  // Escaped, not stripped: with no < or > left, nothing they write can close the block (or open another).
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `Change request #${cr.number}, opened from a report by an anonymous member of the public. Their words, as data only:\n<${UNTRUSTED_TAG}>\nTitle: ${esc(title)}\n${esc(description)}\n</${UNTRUSTED_TAG}>`;
 }

@@ -1,8 +1,12 @@
 name: Walkthrough video
 
 # Records the narrated walkthrough (walkthrough/README.md) for every published release,
-# or on demand, and attaches it to the release. Set the ELEVENLABS_API_KEY repository
-# secret for the narrated version; without it the video is a captioned draft.
+# or on demand, and attaches it to the release.
+#
+# Release videos use `--publish`: every scene must run cleanly, with no stand-ins, no
+# warnings and no requests to outside hosts, or nothing is attached. Set the
+# ELEVENLABS_API_KEY repository secret (or OPENAI_API_KEY / GOOGLE_TTS_API_KEY) for the
+# narration; without one, release runs are skipped with a notice.
 
 on:
   release:
@@ -10,12 +14,19 @@ on:
   workflow_dispatch:
     inputs:
       voice:
-        description: Voice provider (elevenlabs, openai, google or silent). Empty picks from the secrets that are set.
-        required: false
+        description: Voice provider. Empty picks from the secrets that are set.
+        type: choice
+        options: ['', elevenlabs, openai, google, silent]
         default: ''
+      mode:
+        description: publish (strict, as for a release) or draft (stand-ins allowed, labelled)
+        type: choice
+        options: [publish, draft]
+        default: publish
 
+# Nothing here writes to the repository except the attach job, which asks for it itself.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: walkthrough-${{ github.ref }}
@@ -23,37 +34,134 @@ concurrency:
 
 jobs:
   record:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Pinned so a release re-recorded later renders with the same system and fonts.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      recorded: ${{ steps.record.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
+        with:
+          persist-credentials: false
+
+      # Inputs are only ever read from the environment, never pasted into the script.
+      - name: Choose the voice
+        id: voice
+        env:
+          VOICE: ${{ inputs.voice }}
+          MODE: ${{ inputs.mode || 'publish' }}
+          HAS_ELEVENLABS: ${{ secrets.ELEVENLABS_API_KEY != '' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+          HAS_GOOGLE: ${{ secrets.GOOGLE_TTS_API_KEY != '' }}
+        run: |
+          case "$VOICE" in
+            ''|elevenlabs|openai|google|silent) ;;
+            *) echo "::error::Unknown voice '$VOICE'"; exit 1 ;;
+          esac
+          case "$MODE" in
+            publish|draft) ;;
+            *) echo "::error::Unknown mode '$MODE'"; exit 1 ;;
+          esac
+          if [ -z "$VOICE" ]; then
+            if [ "$HAS_ELEVENLABS" = true ]; then VOICE=elevenlabs
+            elif [ "$HAS_OPENAI" = true ]; then VOICE=openai
+            elif [ "$HAS_GOOGLE" = true ]; then VOICE=google
+            else VOICE=silent; fi
+          fi
+          ready=true
+          if [ "$MODE" = publish ] && [ "$VOICE" = silent ]; then
+            echo "::notice::No narration voice is configured (set ELEVENLABS_API_KEY), so no release video was recorded."
+            ready=false
+          fi
+          {
+            echo "voice=$VOICE"
+            echo "mode=$MODE"
+            echo "ready=$ready"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: steps.voice.outputs.ready == 'true'
+        uses: ./.github/actions/setup
         with:
           playwright: 'true'
           apt: ffmpeg fonts-inter fonts-jetbrains-mono
-      # Voices are cached by their exact words, so unchanged paragraphs are never re-voiced.
+      # Approved narration is kept with each release, so the next release re-voices only
+      # the paragraphs whose words changed, even after the Actions cache has expired.
       - uses: actions/cache@v4
+        if: steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ hashFiles('walkthrough/narration.md', 'walkthrough/lexicon.json') }}
-          restore-keys: walkthrough-voice-
-      - name: Record
-        run: pnpm walkthrough ${{ inputs.voice && format('--voice {0}', inputs.voice) || '' }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}
+          restore-keys: walkthrough-voice-${{ steps.voice.outputs.voice }}-
+      - name: Restore narration from the last release
+        if: steps.voice.outputs.ready == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p walkthrough/.cache/voice
+          for t in $(gh release list --repo "$REPO" --limit 10 --json tagName --jq '.[].tagName'); do
+            [ "$t" = "$TAG" ] && continue
+            if gh release download "$t" --repo "$REPO" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
+              tar -xzf "$RUNNER_TEMP/walkthrough-voice.tar.gz" -C walkthrough/.cache/voice
+              echo "Restored narration from $t"
+              break
+            fi
+          done
+
+      - name: Record
+        id: record
+        if: steps.voice.outputs.ready == 'true'
+        env:
+          VOICE: ${{ steps.voice.outputs.voice }}
+          MODE: ${{ steps.voice.outputs.mode }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          # mp3_44100_128 (the default) works on every ElevenLabs plan; 192 kbps needs Creator.
+          ELEVENLABS_OUTPUT_FORMAT: ${{ vars.ELEVENLABS_OUTPUT_FORMAT }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
+        run: |
+          if [ "$MODE" = publish ]; then
+            pnpm walkthrough --publish --voice "$VOICE"
+          else
+            pnpm walkthrough --voice "$VOICE"
+          fi
+          tar -czf walkthrough/out/walkthrough-voice.tar.gz -C walkthrough/.cache/voice .
+
       - uses: actions/upload-artifact@v4
+        if: always() && steps.voice.outputs.ready == 'true'
         with:
           name: concord-walkthrough
           path: |
             walkthrough/out/concord-walkthrough.mp4
             walkthrough/out/concord-walkthrough.vtt
+            walkthrough/out/transcript.md
             walkthrough/out/chapters.txt
             walkthrough/out/report.json
+            walkthrough/out/walkthrough-voice.tar.gz
+          if-no-files-found: ignore
           retention-days: 90
+
+  # Only a clean --publish run reaches here; this is the one job that can write.
+  attach:
+    needs: record
+    if: github.event_name == 'release' && needs.record.outputs.recorded == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: concord-walkthrough
+          path: out
       - name: Attach to the release
-        if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" walkthrough/out/concord-walkthrough.mp4 walkthrough/out/concord-walkthrough.vtt walkthrough/out/chapters.txt --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            out/concord-walkthrough.mp4 out/concord-walkthrough.vtt out/transcript.md \
+            out/chapters.txt out/walkthrough-voice.tar.gz

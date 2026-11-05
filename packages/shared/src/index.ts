@@ -13,6 +13,8 @@ import type {
   ValidationReport,
 } from '@concord/core/types';
 
+export * from './appReleases.js';
+
 export type {
   ChangeClassification,
   ChangeLevel,
@@ -28,14 +30,17 @@ export type {
 /* People, identity, roles                                                   */
 /* ------------------------------------------------------------------------ */
 
-export type AuthProvider = 'google' | 'github' | 'demo';
+export type AuthProvider = 'google' | 'github' | 'solid' | 'demo';
 
 export interface User {
   id: string;
   name: string;
   email?: string;
   avatarUrl?: string;
-  /** Auto-provisioned WebID; users never need to know about it. */
+  /**
+   * Auto-provisioned WebID (users never need to know about it), or, for someone who
+   * signed in with Solid, their own WebID.
+   */
   webId: string;
   podUrl?: string;
   providers: { provider: AuthProvider; subject: string }[];
@@ -171,17 +176,20 @@ export interface OntologyProject {
   domain?: string;
   /** Example demo project for alpha testers. */
   demo?: boolean;
+  /** Everything this ontology publishes was approved as it was merged (older ones are checked once: see PublicHold). */
+  publishedWithApproval?: boolean;
 }
 
 export interface OntologySummary extends OntologyProject {
+  /** Counts a caller may not see are left out: activity for signed-out callers, and the graph's while its working draft waits for approval. */
   stats: {
-    classes: number;
-    properties: number;
-    individuals: number;
-    useCases: number;
-    openChangeRequests: number;
+    classes?: number;
+    properties?: number;
+    individuals?: number;
+    useCases?: number;
+    openChangeRequests?: number;
     releases: number;
-    members: number;
+    members?: number;
   };
   health?: {
     passed: boolean;
@@ -295,6 +303,8 @@ export interface UseCase {
   completeness: number;
   /** Where the private interview transcript lives (Solid pod resource URL). */
   transcriptUrl?: string;
+  /** Titles it had before, still kept out of anything published. */
+  formerTitles?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -346,21 +356,141 @@ export interface MeetingAnalysis {
   decisions: string[];
 }
 
+export interface FacilitatorPrompt {
+  at: string;
+  /** seconds from the start of the call */
+  t?: number;
+  text: string;
+  /** True once the prompt has been posted in the meeting's own chat. */
+  posted: boolean;
+  postedAt?: string;
+  /** Why posting to the meeting chat failed, if it did. */
+  postError?: string;
+}
+
+/** Where a calendar-invited call came from: the bot's calendar feed or an uploaded .ics invite. */
+export interface MeetingCalendarInfo {
+  /** Stable key of this occurrence (event UID plus its start), used to avoid joining twice. */
+  key: string;
+  /** The calendar event's UID (shared by every week of a series). */
+  uid?: string;
+  feed: 'calendar' | 'upload';
+  start: string;
+  end: string;
+  organizer?: string;
+  /** ORGANIZER;SENT-BY: someone who sent the invite on the organiser's behalf. */
+  sentBy?: string;
+  /** True for one occurrence of a recurring series. */
+  recurring: boolean;
+  /** Set when someone told the bot to stay out of this occurrence. */
+  skip?: boolean;
+  /**
+   * No bot is booked until a facilitator of the ontology approves the call. Approval
+   * covers a whole series, for as long as its organiser and Meet link stay the same;
+   * if either changes, the call needs approving again.
+   */
+  approval?: 'approved' | 'pending';
+  approvedBy?: string;
+  /** Why the call needs approving again, when it was approved before. */
+  approvalNote?: string;
+  /** The call left the calendar but cancelling its booked bot failed; retried every minute. */
+  cancelPending?: boolean;
+}
+
 export interface Meeting {
   id: string;
   ontologyId: string;
   title: string;
-  source: 'upload' | 'google-meet-bot' | 'simulation' | 'google-drive';
+  source: 'upload' | 'google-meet-bot' | 'calendar-invite' | 'simulation' | 'google-drive';
   /** Google Meet URL when a bot was invited. */
   meetingUrl?: string;
-  bot?: { provider: 'recall' | 'simulated'; botId?: string; status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error'; error?: string };
+  bot?: {
+    provider: 'recall' | 'simulated';
+    /**
+     * A Recall.ai bot's state machine (one record per meeting): idle (nothing booked),
+     * booking (a booking recorded and sent, not yet answered), booked (Recall.ai named
+     * the bot), releasing (getting rid of it, until Recall.ai confirms) and done.
+     */
+    phase?: 'idle' | 'booking' | 'booked' | 'releasing' | 'done';
+    /** Bumped by every change of the record: a change decided from an older copy is refused. */
+    gen?: number;
+    botId?: string;
+    /** Shown instead of botId to people who can't see it: a bot is booked. */
+    booked?: boolean;
+    /** For the page; follows from the phase. */
+    status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error';
+    error?: string;
+    /** The booking hasn't been answered: Recall.ai may or may not have made the bot. */
+    uncertain?: boolean;
+    /** The current booking's id: also its idempotency key, and the metadata a bot from it carries. */
+    bookingId?: string;
+    /** The Meet link the current booking was made for. */
+    bookedUrl?: string;
+    /** When the current booking was first sent (its idempotency key is only honoured for an hour). */
+    bookedAt?: string;
+    /** When the booking asks the bot to join, and whether its greeting says it will post in the chat: resent unchanged. */
+    joinAt?: string;
+    chat?: boolean;
+    /** Releasing: take the bot out of the call (leave) or cancel its booking (cancel) first. */
+    release?: 'cancel' | 'leave';
+    /** Releasing: what follows once Recall.ai confirms. done for End call; idle when the call may book again. */
+    after?: 'idle' | 'done';
+    /** Failed tries of the current step, and when the next is due (ms, by the bot clock's time). */
+    attempts?: number;
+    nextAt?: number;
+    /** The last failure of the current step (shown as error or cancelError). */
+    fault?: string;
+    /** Heard from the call. */
+    inCall?: boolean;
+    /** Other bots of this meeting's that turned up (they shouldn't exist): cancelled until confirmed. */
+    strays?: string[];
+    /** Bots Recall.ai confirmed gone: anything they still send is dropped. */
+    released?: string[];
+    /** Bookings a facilitator dismissed: still looked for (with the Meet link each was booked for, and when next, bot clock ms), and their bot cancelled if it turns up. */
+    dismissed?: { bookingId: string; url: string; nextAt?: number }[];
+    /** Failed attempts at removing strays, and when they're next tried (bot clock, ms): their own schedule, apart from the booking's. */
+    strayAttempts?: number;
+    strayNextAt?: number;
+    /** A booking that can no longer be resent safely and hasn't turned up: a facilitator can dismiss it. */
+    unconfirmed?: boolean;
+    /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */
+    cancelError?: string;
+    /** Someone ended the call but the bot hasn't been removed yet; Concord keeps trying. */
+    leaving?: boolean;
+  };
+  /** Cancelled, or no longer on the calendar: kept (for facilitators only) until its bot is confirmed gone. */
+  withdrawn?: boolean;
+  /** Set for calls the bot was invited to through its calendar address. */
+  calendar?: MeetingCalendarInfo;
+  /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */
+  postPromptsToChat?: boolean;
+  /** What the bot last told the call about posting in its chat (its join message, or a later notice). */
+  chatModeAnnounced?: boolean;
+  /** The last notice about chat posting couldn't be sent; it is retried as the call goes on. */
+  chatNoticeError?: string;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
-  facilitatorPrompts: { at: string; t?: number; text: string; posted: boolean }[];
+  facilitatorPrompts: FacilitatorPrompt[];
   analysis?: MeetingAnalysis;
-  status: 'live' | 'processing' | 'analysed' | 'error';
+  /** 'scheduled': a calendar invite the bot will join when the call starts. */
+  status: 'scheduled' | 'live' | 'processing' | 'analysed' | 'error';
   createdAt: string;
   createdBy: string;
+}
+
+/** What the co-lead bot can do on this server, for the Meetings page. */
+export interface MeetBotInfo {
+  provider: 'recall' | 'simulated';
+  /** The address people add to a calendar invite to bring the bot into a call. */
+  inviteEmail?: string;
+  /** True when the server reads the bot's calendar, so invites to inviteEmail are picked up. */
+  calendarConnected: boolean;
+  /** Default for "post prompts into the Meet chat" on calls that arrive by invite. */
+  postToChatDefault: boolean;
+  /** The latest read of the bot's calendar. The error never contains the feed's secret address. */
+  lastSync?: { at: string; ok: boolean; events: number; error?: string };
+  /** Bots Concord is still trying to cancel (Recall.ai hasn't confirmed yet). */
+  cancelling?: number;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -375,7 +505,88 @@ export type ChangeRequestOrigin =
   | { type: 'agent'; agentName?: string; reportId?: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
-  | { type: 'synthesis'; useCaseIds: string[] };
+  | { type: 'synthesis'; useCaseIds: string[] }
+  /** Reported anonymously from the public ontology page. */
+  | { type: 'public-report'; termIri: string; version: string; /** The queued report it was opened from: approving twice finds this request. */ reportId?: string };
+
+/**
+ * A problem reported from the public ontology page by someone without an
+ * account. Held for review: only editors, stewards and owners see it, and
+ * nothing is done with it (no change request, activity or AI triage) until
+ * one of them opens it as a bug report.
+ */
+export interface PublicReport {
+  id: string;
+  ontologyId: string;
+  termIri: string;
+  termName: string;
+  /** The version of the page it was sent from ("draft" for the working draft). */
+  version: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  /** Set while a moderator is opening it as a change request (ms since the epoch). */
+  claimedAt?: number;
+  /** Server only: which request holds the claim. Never sent to the browser. */
+  claimToken?: string;
+}
+
+/**
+ * Versions of an ontology published before a person approved what goes
+ * public, held (their pages and downloads say they're being reviewed) until
+ * an owner or steward approves exactly what each publishes.
+ */
+export interface PublicHold {
+  id: string;
+  ontologyId: string;
+  /** 'draft' or a released version. */
+  versions: string[];
+  since: string;
+  approved?: { version: string; by: string; at: string; fingerprint: string }[];
+}
+/** What a steward reviews before approving a held version. */
+export interface PublicHoldReview {
+  version: string;
+  /** Approving sends this back: it changes whenever what the version publishes does. */
+  fingerprint: string;
+  statements: number;
+  /** Statements and lines that look like they name a use case or a person (hints, not verdicts). Full IRIs. */
+  hints: { subject: string; predicate: string; object: string; kind: 'use case title' | 'name' }[];
+  /** Everything the fingerprint covers, in full: what approving publishes. */
+  turtle: string;
+  notes: string;
+  snapshot: string;
+  /** Set when the version couldn't be read: nothing is highlighted, but it can still be read and approved. */
+  error?: string;
+}
+
+export interface PublicationStatement {
+  /** Full IRIs (or a blank node), never shortened: a private name can sit anywhere in one. */
+  subject: string;
+  predicate: string;
+  /** A literal's text, or the full IRI. */
+  object: string;
+  /** The statement exactly as it is published (N-Triples), with any language or datatype. */
+  nt: string;
+  /** Looks like it names a private use case or a person (a hint, not a verdict). */
+  hint?: 'use case title' | 'name';
+}
+/** Exactly what merging a request drafted from use cases would publish, for an editor to approve. */
+export interface Publication {
+  /** Approving sends this back: it changes whenever what would be published does. */
+  fingerprint: string;
+  title: string;
+  kgcl: string[];
+  statements: PublicationStatement[];
+  /** The title or edit list looks like it names something private. */
+  hints: { where: string; kind: 'use case title' | 'name' }[];
+}
+
+export interface PrivacyFinding {
+  /** e.g. "definition of :PilotRecord", "title". */
+  where: string;
+  kind: 'use case title' | 'name';
+}
 
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
@@ -489,6 +700,16 @@ export interface ChangeRequest {
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
   mergedCommit?: string;
+  /**
+   * Where what a merge would publish looks like it names a private use case
+   * or a person (where, and what kind: never the text itself). A hint for
+   * the editor approving it, set when a merge is held back.
+   */
+  privacyFindings?: PrivacyFinding[];
+  /** An editor approved exactly what merging this request publishes (see needsPublicationApproval). */
+  privacyCleared?: { by: string; at: string; fingerprint: string; title: string; kgcl: string[] };
+  /** Merging stopped until an editor approves what it publishes. */
+  heldForPublication?: boolean;
   releaseId?: string;
   timeline: TimelineEvent[];
   createdAt: string;
@@ -522,6 +743,8 @@ export interface Release {
   status: 'draft' | 'voting' | 'published' | 'rejected';
   changeRequestIds: string[];
   notes: string;
+  /** Who wrote the notes, when a steward did; drafted notes have none. */
+  notesBy?: string;
   versionIRI: string;
   commit?: string;
   githubUrl?: string;
@@ -618,7 +841,16 @@ export interface FeedbackSubmission {
   name?: string;
   email?: string;
   role?: Role | string;
-  pathway: 'structured' | 'general';
+  /** structured: the full questionnaire; changes: questions about what changed since `sinceVersion`; general: free-form. */
+  pathway: 'structured' | 'changes' | 'general';
+  /** App version the tester was using (APP_VERSION of the web build). */
+  appVersion?: string;
+  /** Web build commit, when known. */
+  appCommit?: string;
+  /** The version the tester last tested before this one, if they said or we knew. */
+  sinceVersion?: string;
+  /** The tester's own account, when they were playing a persona at the time. */
+  testerId?: string;
   answers: Record<string, string | number | string[]>;
   /** Chat transcript of the feedback conversation. */
   transcript: ChatMessage[];
@@ -626,7 +858,72 @@ export interface FeedbackSubmission {
   usedVoice: boolean;
   /** AI-extracted themes for the general pathway */
   themes?: string[];
+  /**
+   * Opt-in public summary, filed as a GitHub issue. Sent by the tester on submit
+   * (`summary`, already passed through publicSummary, so it is exactly what they saw);
+   * returned by the server as `publication`.
+   */
+  publish?: { summary: string };
+  publication?: FeedbackPublicationStatus;
   createdAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Public feedback summaries (GitHub issues)                                 */
+/* ------------------------------------------------------------------------ */
+
+/** Bumped whenever the wording testers agree to changes, and stored with each consent. */
+export const PUBLIC_NOTICE_VERSION = 1;
+export const PUBLIC_NOTICE =
+  'Only the summary below is posted, exactly as shown, as a GitHub issue on the Concord repository, which may be public. Your answers, name, email, role and the conversation are not posted. Don’t include names, organisations or other details that identify anyone. Links and email addresses are removed.';
+export const PUBLIC_SUMMARY_MAX = 500;
+
+/**
+ * queued → sending → filed; a send whose outcome is unknown → unknown (searched for, never re-posted
+ * automatically) → filed or needs-admin. Withdrawal: → withdrawing (if it may be posted) → withdrawn,
+ * which is terminal.
+ */
+export type FeedbackPublicationState = 'queued' | 'sending' | 'unknown' | 'filed' | 'needs-admin' | 'withdrawing' | 'withdrawn';
+
+export interface FeedbackPublicationStatus {
+  state: FeedbackPublicationState;
+  issue?: { number: number; url: string };
+  /** Only in the response to the submission: lets the tester withdraw the summary later. */
+  withdrawToken?: string;
+  /** A withdrawal that can't find its issue and needs an administrator to confirm. Administrators only. */
+  adminNeeded?: boolean;
+  /** Administrators only. */
+  id?: string;
+  summary?: string;
+  lastError?: string;
+  /** The hidden marker to look for on GitHub before posting again (needs-admin only). */
+  marker?: string;
+}
+
+/**
+ * The text of a public summary, as posted. The tester's preview and the server
+ * both use this, so what they see is what is posted. It removes links (with or
+ * without a scheme), email addresses and @handles, and normalises Unicode so
+ * look-alike characters can't slip past. It can't recognise names: the tester
+ * writes the summary and is asked not to include any.
+ */
+export function publicSummary(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, ' ')
+    .replace(/[^\s@]+@[^\s@]+/g, '[email removed]')
+    .replace(/\S+\s*[[(]\s*at\s*[\])]\s*\S+/gi, '[email removed]')
+    .replace(/@[\p{L}\p{N}_-]+/gu, '[handle removed]')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, '[link removed]')
+    .replace(/(^|[\s(\[<"'])\/\/\S+/g, '$1[link removed]')
+    .replace(/\b(?:www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}\/)\S*/gu, '[link removed]')
+    .replace(/(?:^|\s)\/(?:people|pods?|webid|u|profile)\/\S*/gi, ' [link removed]')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+    .slice(0, PUBLIC_SUMMARY_MAX)
+    .trim();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -649,12 +946,41 @@ export interface ActivityItem {
 /* API contract (all JSON, prefix /api)                                     */
 /* ------------------------------------------------------------------------ */
 
+/** One tester's feedback folder in their pod, as an administrator's WebID can read it. */
+export interface PodFeedbackFolder {
+  testerId: string;
+  testerName: string;
+  url: string;
+  /** forbidden: the pod refused the admin's WebID; missing: no feedback saved there; partial: some documents couldn't be read. */
+  status: 'ok' | 'partial' | 'forbidden' | 'missing' | 'error';
+  items: FeedbackSubmission[];
+  /** Documents the folder lists that weren't read: they failed, or were beyond the first 100 (status partial). */
+  unread?: number;
+  /** Why Concord couldn't share this folder with the admins, the last time it tried. */
+  sharingError?: string;
+}
+
+export interface PodFeedbackReport {
+  /** The WebID the folders were read as (the admin's own, from their Solid sign-in). */
+  readAs: string;
+  /** WebIDs the folders are shared with (ADMIN_WEBIDS). */
+  readers: string[];
+  folders: PodFeedbackFolder[];
+}
+
 export interface SessionInfo {
   user?: User;
-  providers: { google: boolean; github: boolean; demo: boolean };
+  providers: { google: boolean; github: boolean; solid: boolean; demo: boolean };
+  /**
+   * WebIDs that can read testers' feedback: the deployment's administrators. Testers are
+   * told this, and their pod's feedback folder is shared read-only with these WebIDs.
+   */
+  feedbackReaders: string[];
+  /** Who turns recorded speech into text when the browser can't (the server-side fallback), if anyone. */
+  serverTranscription: 'openai' | null;
   llm: { provider: 'anthropic' | 'simulated'; model: string };
   solid: { enabled: boolean; serverUrl?: string };
-  meetBot: { provider: 'recall' | 'simulated' };
+  meetBot: MeetBotInfo;
   /** Simulated clock offset in ms (demo mode lets testers fast-forward time). */
   clockOffsetMs: number;
   now: string;
@@ -666,6 +992,7 @@ export interface SessionInfo {
  * Auth
  *  GET  /api/session                              -> SessionInfo
  *  GET  /auth/google, /auth/github                -> OAuth redirect
+ *  GET  /auth/solid?webId=<WebID or provider URL>  -> Solid-OIDC redirect (DPoP); /auth/solid/client.jsonld is the Client ID Document
  *  POST /api/auth/demo {userId? , name?, role?}   -> SessionInfo   (log in as a persona or create a demo user)
  *  POST /api/auth/logout                           -> {}
  *  GET  /api/personas                              -> User[] (simulated personas available for demo login)
@@ -701,9 +1028,14 @@ export interface SessionInfo {
  * Meetings
  *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
- *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl, postPromptsToChat?} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> {meetings: Meeting[]; cancelled: number; cancelRetrying: number}   (imports a calendar invite or its cancellation)
+ *  GET  /api/meet-bot                                -> MeetBotInfo
+ *  POST /api/meet-bot/sync                           -> MeetBotInfo   (re-read the bot's calendar now)
+ *  PATCH /api/meetings/:id {postPromptsToChat?, skip?, approve?} -> Meeting   (owners, stewards and editors)
+ *  POST /api/meetings/:id/prompts/:index/post        -> Meeting   (post one prompt into the meeting chat)
  *  POST /api/ontologies/:id/meetings/simulate {title} -> Meeting           (replays a scripted call live)
- *  GET  /api/meetings/:id                            -> Meeting
+ *  GET  /api/meetings/:id                            -> Meeting   (signed in; Meet link and organiser only for facilitators)
  *  POST /api/meetings/:id/analyse                    -> Meeting
  *  POST /api/meetings/:id/propose                    -> { useCases: UseCase[]; changeRequest?: ChangeRequest }
  *  GET  /api/meetings/:id/stream                     -> text/event-stream of {type:'line'|'prompt'|'status', ...}
@@ -750,11 +1082,16 @@ export interface SessionInfo {
  *  GET  /api/activity?ontologyId=                    -> ActivityItem[]
  *
  * Feedback
- *  GET  /api/feedback/questions                      -> FeedbackQuestion[]
- *  POST /api/feedback/chat {pathway, messages: ChatMessage[], answers} -> { reply: string; answers: Record<string, ...>; done: boolean; nextQuestionId?: string }
+ *  GET  /api/feedback/questions?pathway=&since=&role= -> FeedbackQuestion[] (pathway=changes asks about what changed since `since`)
+ *  POST /api/feedback/chat {pathway, messages: ChatMessage[], answers, since?, role?} -> { reply: string; answers: Record<string, ...>; done: boolean; nextQuestionId?: string }
  *  POST /api/feedback {FeedbackSubmission minus id/createdAt} -> FeedbackSubmission
  *  GET  /api/feedback                                -> FeedbackSubmission[] (admin)
  *  GET  /api/feedback/summary                        -> { summary: string; themes: {theme:string; count:number}[] } (admin)
+ *  GET  /api/feedback/pods                           -> PodFeedbackReport (admin: testers' feedback read from their pods as the admin's own WebID)
+ *
+ * Alpha testing (the tester's own account, even while playing a persona)
+ *  GET  /api/alpha/me                                -> AlphaMe (versions tested, read from the tester's pod)
+ *  POST /api/alpha/visit {version, commit?, role?}   -> AlphaMe (records a version in the tester's pod)
  *  POST /api/transcribe (audio/webm body)            -> { text: string } (server-side STT fallback; 501 if not configured)
  */
 export const API_PREFIX = '/api';
