@@ -4,6 +4,7 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  Publication,
   ActivityItem,
   FeedbackPublicationStatus,
   AgentReport,
@@ -27,6 +28,7 @@ import type {
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicHoldReview,
   Release,
   ReleaseDetail,
   Role,
@@ -149,7 +151,7 @@ export type NewOntologyInput = {
   namespace?: string;
   domain?: string;
   governanceTemplate?: GovernanceTemplateId;
-  /** List me as the ontology's creator (public). Defaults to true. */
+  /** List me as the ontology's creator (public). Off unless set. */
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
@@ -256,6 +258,10 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
+  approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
+  publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
+  approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),

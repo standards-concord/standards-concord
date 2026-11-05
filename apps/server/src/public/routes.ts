@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN } from '@concord/core';
+import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -10,9 +10,11 @@ import { list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { releaseForViewer } from '../services/releases.js';
+import { holdLegacy, isHeld, readOntology } from './holds.js';
+import { publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
-import { publishedRequirements, requirementsFor, type PublishedRequirements } from './requirements.js';
+import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
 import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
@@ -89,10 +91,7 @@ function splitExtension(segment: string): { base: string; format?: PublicFormat 
   return { base: segment };
 }
 
-export const publishedReleases = (ontologyId: string) =>
-  list<Release>('releases', ontologyId)
-    .filter((r) => r.status === 'published')
-    .sort((a, b) => (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt));
+export { publishedReleases } from './published.js';
 
 /** The latest released version, if any, that exists in the repository. */
 export function latestVersion(project: OntologyProject): string | undefined {
@@ -160,14 +159,23 @@ export async function pageInput(
 
 export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 
-/** The public use cases and requirements stored with a release, if it has a readable copy. */
-function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
+type SnapshotRead = { state: 'ok'; data: PublishedRequirements } | { state: 'absent' } | { state: 'corrupt' };
+
+/** The public use cases and requirements stored with a release: present and valid, absent, or unreadable. */
+function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
   const file = path.join(ontologyStore.dir(project), 'releases', version, REQUIREMENTS_SNAPSHOT);
+  if (!fs.existsSync(file)) return { state: 'absent' };
   try {
-    return fs.existsSync(file) ? (JSON.parse(fs.readFileSync(file, 'utf8')) as PublishedRequirements) : undefined;
+    const data = validSnapshot(JSON.parse(fs.readFileSync(file, 'utf8')));
+    return data ? { state: 'ok', data } : { state: 'corrupt' };
   } catch {
-    return undefined;
+    return { state: 'corrupt' };
   }
+}
+
+function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
+  const read = readSnapshot(project, version);
+  return read.state === 'ok' ? read.data : undefined;
 }
 
 /**
@@ -190,39 +198,84 @@ export async function releasePageFiles(
 export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version, { releasing: true });
 export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
 
+/** Which renderer last wrote each ontology's release pages. Kept in the data directory, never in anything served. */
+const pageStateFile = () => path.join(config.dataDir, 'public-pages.json');
+function readPageState(): Record<string, string> {
+  try {
+    return JSON.parse(fs.readFileSync(pageStateFile(), 'utf8')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
 /**
- * Brings every published release's stored page up to date with the current
- * renderer, once per renderer version (PAGE_VERSION). Security and privacy
- * fixes to the page then reach copies written before them, and releases from
- * before snapshots existed get one, so their pages stop following live data.
- * An existing readable snapshot is kept as it is. Changes are committed to the
- * ontology's repository, so they go out with its next push to GitHub.
+ * Brings every ontology's published release pages up to date with the current
+ * renderer, and holds what older versions published without approval.
+ *
+ * Runs at startup. An ontology whose pages weren't written by this renderer
+ * (PAGE_GENERATOR, tracked in the data directory, so page content can't fake
+ * it) has every release page regenerated. Each release is handled on its own,
+ * so one bad release can't block the others. Snapshots: a valid one is kept
+ * as it is; an unreadable one is kept untouched and the page says the use
+ * cases weren't recorded; a missing one is backfilled only for the demo (its
+ * use cases are fixed content), and otherwise recorded as not available.
+ *
+ * Changes are committed to the ontology's repository and go out with its next
+ * push to GitHub. Tags still point at the original commits.
  */
 export async function refreshReleasePages(): Promise<void> {
+  const state = readPageState();
   for (const project of list<OntologyProject>('ontologies')) {
+    // What older versions published without anyone approving it is held until a steward does (holds.ts).
     try {
-      const versions = new Set(ontologyStore.versions(project));
-      const changed: Record<string, Record<string, string>> = {};
-      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
-        const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
-        const page = path.join(dir, 'index.html');
-        const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
-        const snapshot = requirementsSnapshot(project, release.version);
-        if (current && snapshot) continue;
+      holdLegacy(project);
+    } catch (err) {
+      console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
+    }
+    const versions = new Set(ontologyStore.versions(project));
+    const releases = publishedReleases(project.id).filter((r) => versions.has(r.version));
+    const pending = releases.filter((r) => state[project.slug] !== PAGE_GENERATOR || readSnapshot(project, r.version).state === 'absent' || !fs.existsSync(path.join(ontologyStore.dir(project), 'releases', r.version, 'index.html')));
+    if (!pending.length) {
+      state[project.slug] = PAGE_GENERATOR;
+      continue;
+    }
+    const changed: Record<string, Record<string, string>> = {};
+    let failed = 0;
+    for (const release of pending) {
+      try {
+        const snapshot = readSnapshot(project, release.version);
+        let requirements: PublishedRequirements;
+        let writeSnapshot = false;
         // Rendered as served: without anything withdrawn since the snapshot was taken.
-        const requirements = snapshot && Array.isArray(snapshot.useCases) ? requirementsFor(project, snapshot) : releaseRequirements(project, release.version);
+        if (snapshot.state === 'ok') requirements = requirementsFor(project, snapshot.data);
+        else if (snapshot.state === 'corrupt') requirements = { useCases: [], snapshotMissing: true };
+        else {
+          requirements = project.demo ? releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
+          writeSnapshot = true;
+        }
         const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
-        // Never rewrite a readable snapshot, only the page rendered from it.
-        if (snapshot) delete files[REQUIREMENTS_SNAPSHOT];
+        if (!writeSnapshot) delete files[REQUIREMENTS_SNAPSHOT];
         changed[release.version] = files;
+      } catch (err) {
+        failed++;
+        console.warn(`[public] could not refresh ${project.slug} ${release.version}: ${(err as Error).message}`);
       }
+    }
+    try {
       if (Object.keys(changed).length) {
         ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
+      if (!failed) state[project.slug] = PAGE_GENERATOR;
     } catch (err) {
-      console.warn(`[public] could not refresh ${project.slug} release pages: ${(err as Error).message}`);
+      console.warn(`[public] could not save ${project.slug} release pages: ${(err as Error).message}`);
     }
+  }
+  try {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    fs.writeFileSync(pageStateFile(), `${JSON.stringify(state, null, 2)}\n`);
+  } catch (err) {
+    console.warn(`[public] could not record page state: ${(err as Error).message}`);
   }
 }
 
@@ -242,6 +295,19 @@ function notFound(res: Response, message: string, home?: string) {
     .type('html')
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Not found</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}a{color:#aab6ff}}</style></head><body><h1>Not found</h1><p>${escapeHtml(message)}</p>${home ? `<p><a href="${escapeHtml(home)}">Go to the latest version</a></p>` : ''}</body></html>`,
+    );
+}
+
+/** A version waiting for a steward to approve what it publishes (holds.ts): it says so, and serves none of it. */
+function held(res: Response, project: OntologyProject, version: string, format: PublicFormat) {
+  const what = version === 'draft' ? 'The working draft' : `Version ${version}`;
+  const message = `${what} of ${project.title} is being reviewed before it is published again.`;
+  res.status(503).set('Cache-Control', 'no-store').set('Retry-After', '86400');
+  if (format !== 'html') return void res.type('text/plain').send(`${message}\n`);
+  res
+    .type('html')
+    .send(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Being reviewed</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}}</style></head><body><h1>Being reviewed</h1><p>${escapeHtml(message)}</p><p>Older versions of this site published changes without anyone approving them first, so a steward is checking it.</p></body></html>`,
     );
 }
 
@@ -266,7 +332,9 @@ async function serve(req: Request, res: Response) {
   else {
     // Slash namespaces put terms under the ontology IRI (…/volunteering/Volunteer):
     // send those to the term's anchor on the latest page.
-    const graph = await ontologyStore.at(project, latest ?? 'working');
+    // Not from a version waiting for approval: even a redirect would say which names it has.
+    if (isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
+    const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
     const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
     if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
@@ -275,15 +343,17 @@ async function serve(req: Request, res: Response) {
 
   const format = last.format ?? negotiate(req, res);
   if (!format) return;
+  // Published before anyone approved what goes public: nothing of it is served until a steward does.
+  if (isHeld(project, version)) return held(res, project, version, format);
+  const graph = await readOntology(project, version, undefined);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');
     // The page quotes use cases: revalidated on every request (the ETag keeps that cheap), so a withdrawn one never outlives withdrawal in a cache.
     res.set('Cache-Control', 'no-cache');
-    const input = await pageInput(project, version, base);
+    const input = await pageInput(project, version, base, { graph });
     res.type('html').send(renderOntologyPage(input));
     return;
   }
-  const graph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
   await sendFormat(req, res, {
     project,
     graph,

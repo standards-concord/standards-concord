@@ -977,6 +977,9 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     const { id, agent } = await publicCase('Merge Race Author', 'Merge race case');
     const editor = await login('editor', 'Merge Race Editor');
     const cr = derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
+    // Drafted from a use case, so an editor approves exactly what it publishes before it can merge.
+    const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
+    await approvePublication(get<ChangeRequest>('changeRequests', cr.id)!, userNamed('Merge Race Editor'), (await publicationPreview(get<ChangeRequest>('changeRequests', cr.id)!)).fingerprint);
     const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
@@ -1016,6 +1019,8 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
       ops: [{ ...addClass('Meridian berth'), source: ['Dock "Meridian" plan, said by the harbour master'], restrictions: [{ type: 'hasValue', property: 'https://x/p', literal: 'Meridian literal' }] } as unknown as ChangeRequest['ops'][number]],
       tests: [{ question: 'Which Meridian berths?', sparql: 'SELECT * WHERE { ?s ?p ?o }', exampleData: '<urn:MERIDIAN> a <urn:x> .' }],
       analysis: { summary: 'Meridian summary', rationale: 'Meridian rationale' },
+      // An editor approved what it publishes, so its title went into the release notes.
+      privacyCleared: { by: 'someone', at: clock.iso(), fingerprint: 'approved', title: 'Support Dock "Meridian" plan', kgcl: ['create class :MeridianBerth'] },
     });
     put('reviews', { id: `rv_${cr.id}`, changeRequestId: cr.id, userId: userNamed('Withheld Steward').id, roles: ['steward'], decision: 'comment', comment: 'Meridian review', at: clock.iso() }, cr.id);
     put('votes', { id: `vt_${cr.id}`, subjectType: 'change-request', subjectId: cr.id, userId: userNamed('Withheld Steward').id, roles: ['steward'], choice: 'yes', comment: 'Meridian vote', at: clock.iso() }, cr.id);

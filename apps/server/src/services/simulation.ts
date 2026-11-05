@@ -225,7 +225,7 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
   put('releases', r, project.id);
   await beforeWrite?.(r);
   Object.assign(files, await releasePageFiles(project, r, stamped));
-  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
+  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
   put('releases', r, project.id);
   project.currentVersion = version;
   updateProject(project);

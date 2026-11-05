@@ -64,7 +64,7 @@ export async function createProject(
     namespace?: string;
     domain?: string;
     governanceTemplate?: GovernanceTemplateId;
-    /** List the owner as dct:creator, which is public on the ontology's page. Default true. */
+    /** List the owner as dct:creator, which is public on the ontology's page. Only when they ask. */
     creditCreator?: boolean;
     seedTurtle?: string;
     demo?: boolean;
@@ -84,7 +84,7 @@ export async function createProject(
       prefix,
       title: input.title,
       description: input.description,
-      creators: input.creditCreator === false ? [] : [owner.name],
+      creators: input.creditCreator === true ? [owner.name] : [],
       license: 'https://creativecommons.org/licenses/by/4.0/',
     });
   }
@@ -98,6 +98,8 @@ export async function createProject(
     prefix,
     ontologyIRI: graph.ontologyIRI,
     stage: input.seedTurtle ? 'drafting' : 'discovery',
+    // Made under the approval rules: nothing it publishes predates them.
+    publishedWithApproval: true,
     currentVersion: '0.0.0',
     ownerIds: [owner.id],
     governance: template(input.governanceTemplate),
@@ -174,12 +176,17 @@ export async function workingValidation(p: OntologyProject) {
   return validateGraph(`${p.slug}@${ontologyStore.head(p)}:${digest}`, graph, cqs);
 }
 
-export async function summary(p: OntologyProject, withHealth = true, viewer?: User): Promise<OntologySummary> {
-  const graph = await ontologyStore.working(p);
-  const view = graph.view();
+/**
+ * An ontology with its counts and health. `withGraph: false` leaves out
+ * everything read from the working draft (its counts and health) without
+ * reading it: for callers who mustn't see a draft that waits for approval.
+ * Use cases are counted as `viewer` may see them.
+ */
+export async function summary(p: OntologyProject, { withHealth = true, withGraph = true, viewer }: { withHealth?: boolean; withGraph?: boolean; viewer?: User } = {}): Promise<OntologySummary> {
+  const view = withGraph ? (await ontologyStore.working(p)).view() : undefined;
   const crs = list<ChangeRequest>('changeRequests', p.id);
   let health: OntologySummary['health'];
-  if (withHealth) {
+  if (withGraph && withHealth) {
     try {
       const v = await workingValidation(p);
       health = {
@@ -199,9 +206,11 @@ export async function summary(p: OntologyProject, withHealth = true, viewer?: Us
   return {
     ...p,
     stats: {
-      classes: view.classes.length,
-      properties: view.objectProperties.length + view.datatypeProperties.length,
-      individuals: view.individuals.length,
+      ...(view && {
+        classes: view.classes.length,
+        properties: view.objectProperties.length + view.datatypeProperties.length,
+        individuals: view.individuals.length,
+      }),
       // Only the use cases this viewer can see, so the count doesn't reveal private ones.
       useCases: list<UseCase>('useCases', p.id).filter((u) => {
         // The same rule as canSee in services/useCases.ts.

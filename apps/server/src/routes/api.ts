@@ -53,6 +53,7 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
+import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -193,42 +194,55 @@ export function apiRouter(): Router {
   });
 
   /* --------------------------- ontologies --------------------------- */
+  /**
+   * The summary a caller may see. For someone signed out, whether the working draft is held is decided before it is
+   * read: a summary read first and checked after could count a draft that was replaced and approved meanwhile.
+   */
+  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => forCaller(req, await summary(p, { withGraph: !!req.user || !isHeld(p, 'draft'), viewer: req.user }));
   /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
   const forCaller = (req: Request, s: OntologySummary) => {
     if (req.user) return s;
     const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
+    // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
+    // (summaryFor doesn't read it then; this also covers a hold that began while the summary was being made.)
+    if (isHeld(s, 'draft')) {
+      const { classes: _cl, properties: _p, individuals: _i, ...rest } = stats;
+      return { ...s, ownerIds: [], stats: rest, health: undefined };
+    }
     return { ...s, ownerIds: [], stats };
   };
 
   r.get('/ontologies', async (req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
-    res.json((await Promise.all(all.map((p) => summary(p, true, req.user)))).map((s) => forCaller(req, s)));
+    res.json(await Promise.all(all.map((p) => summaryFor(req, p))));
   });
 
   r.post('/ontologies', async (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};
     const p = await createProject(
-      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator !== false },
+      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
       user,
     );
-    res.status(201).json(await summary(p, true, req.user));
+    // Without its health: validating a new ontology (the OWL reasoner's first run) can take a while, and nothing
+    // waits on it here; the ontology's own page asks for it.
+    res.status(201).json(await summary(p, { withHealth: false, viewer: req.user }));
   });
 
   r.get('/ontologies/:id', async (req, res) => {
     const p = project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...forCaller(req, await summary(p, true, req.user)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? ontologyStore.log(p, 30) : [] });
+    res.json({ ...(await summaryFor(req, p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
-    res.json((await ontologyStore.at(project(req), optStr(req.query.ref))).view());
+    res.json((await readOntology(project(req), optStr(req.query.ref), req.user)).view());
   });
 
   r.get('/ontologies/:id/terms/:iri', async (req, res) => {
     const p = project(req);
-    const g = await ontologyStore.at(p, optStr(req.query.ref));
+    const g = await readOntology(p, optStr(req.query.ref), req.user);
     const iri = expandIRI(String(req.params.iri), g.prefixes);
     const t = g.term(iri);
     if (!t) throw new HttpError(404, `No term ${req.params.iri}`);
@@ -238,14 +252,14 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id/search', async (req, res) => {
-    res.json((await ontologyStore.working(project(req))).search(String(req.query.q ?? ''), 30));
+    res.json((await readOntology(project(req), 'working', req.user)).search(String(req.query.q ?? ''), 30));
   });
 
   r.get('/ontologies/:id/source', async (req, res) => {
     const p = project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await ontologyStore.at(p, ref), format, { name: p.slug });
+    const text = await serialize(await readOntology(p, ref, req.user), format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -263,7 +277,7 @@ export function apiRouter(): Router {
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
-    const out = await sparql(project(req), str(req.body?.query, 'query'), optStr(req.body?.ref));
+    const out = await sparql(project(req), str(req.body?.query, 'query'), optStr(req.body?.ref), req.user);
     if (out.error) throw new HttpError(400, out.error);
     res.json(out);
   });
@@ -293,7 +307,7 @@ export function apiRouter(): Router {
     requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(setGovernance(p, policy, user), true, user));
+    res.json(await summary(setGovernance(p, policy, user), { viewer: user }));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
@@ -469,10 +483,41 @@ export function apiRouter(): Router {
     res.json({ ok: true });
   });
 
+  /* --------------- versions waiting for publication approval ------------- */
+  // Published before anyone approved what goes public: owners and stewards review each and approve exactly what it publishes.
+  const steward = (req: Request) => {
+    const p = project(req);
+    const user = requireUser(req);
+    requireRole(p.id, user, ['owner', 'steward'], 'review versions waiting for approval');
+    return { p, user };
+  };
+  r.get('/ontologies/:id/public-holds', async (req, res) => {
+    res.set('Cache-Control', 'no-store').json(await listHolds(steward(req).p));
+  });
+
+  r.post('/ontologies/:id/public-holds/:version/approve', (req, res) => {
+    const { p, user } = steward(req);
+    approveHold(p, user, String(req.params.version), req.body?.fingerprint);
+    res.json({ ok: true });
+  });
+
   /* ---------------------------- change requests ---------------------- */
   r.get('/ontologies/:id/change-requests', (req, res) => {
     const status = optStr(req.query.status);
     res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status).map((c) => useCases.crForViewer(c, req.user)));
+  });
+
+  // A request drafted from use cases is published only as an editor approved it: what it would publish, then the approval of exactly that.
+  r.get('/change-requests/:id/publication', async (req, res) => {
+    const cr = crs.getCR(String(req.params.id));
+    // Withheld from this viewer (a use case it came from isn't shared with them): so is what it would publish.
+    if (useCases.crWithheld(cr, requireUser(req))) throw new HttpError(404, 'No such change request');
+    if (!crs.needsPublicationApproval(cr)) throw new HttpError(404, 'This request doesn’t need its publication approved');
+    res.set('Cache-Control', 'no-store').json(await crs.publicationPreview(cr));
+  });
+  r.post('/change-requests/:id/approve-publication', async (req, res) => {
+    const cr = await crs.approvePublication(crs.getCR(String(req.params.id)), requireUser(req), req.body?.fingerprint);
+    res.json(crOut(cr, req));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {
