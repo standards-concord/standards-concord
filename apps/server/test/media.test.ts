@@ -146,7 +146,8 @@ describe('which release', () => {
 
   it('reads every page of releases to find one with the videos', async () => {
     const empty = (n: number) => ({ id: 1000 + n, tag_name: `v0.0.${n}`, html_url: 'https://github.com/x/y', assets: [] });
-    stubGitHub([...Array.from({ length: 250 }, (_, i) => empty(i)), release(501, 'v-old', 5001, 'https://dl.example/old')], {});
+    // It used to stop after 50 pages (5,000 releases).
+    stubGitHub([...Array.from({ length: 5_050 }, (_, i) => empty(i)), release(501, 'v-old', 5001, 'https://dl.example/old')], {});
     expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v-old');
   });
 

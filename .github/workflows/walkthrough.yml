@@ -189,6 +189,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: walkthrough/attach-release.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: concord-walkthrough
@@ -199,29 +204,4 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || inputs.release }}
           SHA: ${{ github.sha }}
-        run: |
-          # --target only applies to a new tag, so a tag that already exists must be the
-          # commit the videos were recorded from.
-          # (matching-refs is a prefix match, so look for the exact ref; an API error fails the step.)
-          tagged=""
-          if [ -n "$(gh api "repos/$REPO/git/matching-refs/tags/$TAG" --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .ref")" ]; then
-            tagged=$(gh api "repos/$REPO/commits/refs/tags/$TAG" --jq .sha)
-            [ "$tagged" = "$SHA" ] || { echo "::error::$TAG is $tagged, but the videos were recorded from $SHA"; exit 1; }
-          fi
-          # A tag named by hand that has no release yet gets one, from the commit recorded.
-          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$TAG' isn't a version tag like v0.17.0"; exit 1; }
-            if [ -n "$tagged" ]; then
-              gh release create "$TAG" --repo "$REPO" --verify-tag --title "Concord ${TAG#v}" --generate-notes
-            else
-              gh release create "$TAG" --repo "$REPO" --target "$SHA" --title "Concord ${TAG#v}" --generate-notes
-            fi
-          fi
-          files=()
-          for v in concord-walkthrough concord-feedback; do
-            for ext in mp4 vtt transcript.md chapters.txt; do
-              [ -f "out/$v.$ext" ] || { echo "::error::out/$v.$ext is missing"; exit 1; }
-              files+=("out/$v.$ext")
-            done
-          done
-          gh release upload "$TAG" --repo "$REPO" --clobber "${files[@]}" out/walkthrough-voice.tar.gz
+        run: bash walkthrough/attach-release.sh

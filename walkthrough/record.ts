@@ -264,7 +264,7 @@ async function main() {
       // And the account itself must have that many characters left.
       const quota = await voice.checkQuota(cost);
       if (quota) log(`ElevenLabs usage: ${quota.used.toLocaleString('en')} of ${quota.limit.toLocaleString('en')} characters this period${quota.resetsAt ? ` (resets ${quota.resetsAt.slice(0, 10)})` : ''}`);
-      else if (cost && provider === 'elevenlabs') log('ElevenLabs usage: not readable with this key; the run budget still applies');
+      else if (cost && provider === 'elevenlabs') log(`ElevenLabs usage: NOT CHECKED, this key isn't allowed to read it; ${voice.budget ? `only the run budget of ${voice.budget.toLocaleString('en')} characters limits this run` : 'this run has no budget either'}`);
       log(`Voicing ${spoken.length} paragraphs${voice.paid ? ` (${cost.toLocaleString('en')} new characters${voice.budget ? ` of a ${voice.budget.toLocaleString('en')} budget${voice.spent ? `, ${voice.spent.toLocaleString('en')} already sent` : ''}` : ''})` : ''}…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
@@ -275,7 +275,8 @@ async function main() {
       const speech = [...clips.values()].reduce((a, c) => a + c.duration, 0);
       log(`  ${fresh} new, ${spoken.length - fresh} cached, ${fmt(speech)} of speech`);
       if (fresh && provider === 'elevenlabs') {
-        const after = await voice.quota();
+        // Only for the log: the narration is already paid for, so a failed read doesn't fail the run.
+        const after = await voice.quota().catch((e: Error) => (log(`  ${e.message.replace(' Nothing was sent.', '')}`), undefined));
         if (after) log(`  ElevenLabs usage now: ${after.used.toLocaleString('en')} of ${after.limit.toLocaleString('en')} characters`);
       }
     }

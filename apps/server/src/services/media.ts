@@ -74,7 +74,7 @@ const complete = (r: GitHubRelease) => !r.draft && REQUIRED.every((f) => (r.asse
  */
 async function fromGitHub(): Promise<{ index: MediaIndex; assets: Map<string, Asset> }> {
   let r: GitHubRelease | undefined;
-  for (let page = 1; page <= 50 && !r; page++) {
+  for (let page = 1; !r; page++) {
     const res = await fetch(`https://api.github.com/repos/${repo()}/releases?per_page=100&page=${page}`, {
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'concord-media' },
       signal: AbortSignal.timeout(8000),

@@ -155,4 +155,26 @@ describe('voice cache and budget', () => {
     vi.stubGlobal('fetch', async () => new Response('{"detail":"missing_permissions"}', { status: 401 }));
     await expect(elevenlabs(2500).checkQuota(2000)).resolves.toBeUndefined();
   });
+
+  // An outage used to look like a key without permission, so the run went on unchecked.
+  it('refuses when usage can’t be read for any other reason than the key’s permissions', async () => {
+    let sends = 0;
+    const replies: (() => Promise<Response>)[] = [
+      async () => new Response('busy', { status: 503 }),
+      async () => new Response('{"tier":"starter"}'),
+      async () => new Response('<html>', { status: 200 }),
+      async () => {
+        throw new TypeError('fetch failed');
+      },
+    ];
+    for (const reply of replies) {
+      vi.stubGlobal('fetch', async (url: string) => {
+        if (url.endsWith('/v1/user/subscription')) return reply();
+        sends++;
+        return new Response('', { status: 500 });
+      });
+      await expect(elevenlabs(2500).checkQuota(2000)).rejects.toThrow(/Couldn't read ElevenLabs usage.*Nothing was sent/);
+    }
+    expect(sends).toBe(0);
+  });
 });

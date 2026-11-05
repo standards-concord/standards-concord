@@ -130,6 +130,9 @@ export function estimateSeconds(text: string) {
 }
 
 /** A send that would pass the run's character budget; nothing was sent. */
+/** The account's usage couldn't be read for a reason other than the key's permissions. */
+export class QuotaUnknown extends Error {}
+
 export class BudgetExceeded extends Error {}
 
 export interface SynthRequest {
@@ -238,20 +241,24 @@ export class Voice {
 
   /**
    * The ElevenLabs account's characters used and allowed this billing period, or
-   * undefined when the key can't read them (a key restricted to text to speech).
-   * Reading it costs nothing.
+   * undefined when the key isn't allowed to read them (a key restricted to text to
+   * speech). Any other failure (an outage, a timeout, an odd reply) throws, because
+   * then nobody knows whether the run fits. Reading it costs nothing.
    */
   async quota(): Promise<{ used: number; limit: number; resetsAt?: string } | undefined> {
     if (this.opts.provider !== 'elevenlabs') return undefined;
+    const unchecked = (why: string) => new QuotaUnknown(`Couldn't read ElevenLabs usage (${why}), so it isn't known whether this run fits. Nothing was sent.`);
+    let res: Response;
     try {
-      const res = await fetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY') }, signal: AbortSignal.timeout(15_000) });
-      if (!res.ok) return undefined;
-      const j = (await res.json()) as { character_count?: number; character_limit?: number; next_character_count_reset_unix?: number };
-      if (typeof j.character_count !== 'number' || typeof j.character_limit !== 'number') return undefined;
-      return { used: j.character_count, limit: j.character_limit, resetsAt: j.next_character_count_reset_unix ? new Date(j.next_character_count_reset_unix * 1000).toISOString() : undefined };
-    } catch {
-      return undefined;
+      res = await fetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY') }, signal: AbortSignal.timeout(15_000) });
+    } catch (e) {
+      throw unchecked((e as Error).name === 'TimeoutError' ? 'no reply in 15 s' : (e as Error).message);
     }
+    if (res.status === 401 || res.status === 403) return undefined;
+    if (!res.ok) throw unchecked(`HTTP ${res.status}`);
+    const j = (await res.json().catch(() => ({}))) as { character_count?: number; character_limit?: number; next_character_count_reset_unix?: number };
+    if (typeof j.character_count !== 'number' || typeof j.character_limit !== 'number') throw unchecked('the reply had no character counts');
+    return { used: j.character_count, limit: j.character_limit, resetsAt: j.next_character_count_reset_unix ? new Date(j.next_character_count_reset_unix * 1000).toISOString() : undefined };
   }
 
   /**

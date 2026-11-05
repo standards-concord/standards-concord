@@ -35,14 +35,14 @@ export interface RunVideos {
 /**
  * Records several videos under one budget. With a paid voice, every video is planned
  * first and the run refuses before recording (and so before sending) anything if their
- * total is over; the videos then share one ledger, so each send counts against the same
- * budget.
+ * total is over the run's budget or what the account has left; the videos then share one
+ * ledger, so each send counts against the same budget.
  */
 export async function recordVideos(o: RunVideos) {
   const log = o.log ?? (() => {});
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'walkthrough-voice-'));
   const ledger = path.join(tmp, 'ledger.json');
-  if (o.paid && o.budget) {
+  if (o.paid) {
     let total = 0;
     for (const v of o.videos) {
       log(`\n━━ ${v}: what needs voicing ━━`);
@@ -50,11 +50,12 @@ export async function recordVideos(o: RunVideos) {
       await o.plan(v, file);
       total += (JSON.parse(await readFile(file, 'utf8')) as { cost: number }).cost;
     }
-    if (total > o.budget)
+    if (o.budget && total > o.budget)
       throw new Error(
         `These videos need ${total.toLocaleString('en')} new characters of narration, over this run's budget of ${o.budget.toLocaleString('en')}. Nothing was sent. Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`,
       );
-    log(`\nNarration to voice: ${total.toLocaleString('en')} new characters of a ${o.budget.toLocaleString('en')} budget`);
+    log(`\nNarration to voice: ${total.toLocaleString('en')} new characters${o.budget ? ` of a ${o.budget.toLocaleString('en')} budget` : ''}`);
+    // The account's own allowance applies even when the run has no budget of its own.
     await o.quota?.(total);
   }
   for (const v of o.videos) {

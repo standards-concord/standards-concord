@@ -88,12 +88,33 @@ describe('the run budget', () => {
     expect(recorded).toEqual([]);
   });
 
-  it('does not plan for free voices or an unlimited budget', async () => {
+  it('does not plan for free voices', async () => {
     const planned: string[] = [];
     const recorded: string[] = [];
-    for (const o of [{ paid: false, budget: 2500 }, { paid: true, budget: undefined }])
-      await recordVideos({ videos: ['tour'], ...o, plan: async (v) => void planned.push(v), record: async (v) => void recorded.push(v) });
+    await recordVideos({ videos: ['tour'], paid: false, budget: 2500, plan: async (v) => void planned.push(v), record: async (v) => void recorded.push(v) });
     expect(planned).toEqual([]);
-    expect(recorded).toEqual(['tour', 'tour']);
+    expect(recorded).toEqual(['tour']);
+  });
+
+  // With no run budget (0), the account check used to be skipped too, so the first video
+  // could spend what was left before the second found it wasn't enough.
+  it('still checks the account covers every video when the run has no budget', async () => {
+    const recorded: string[] = [];
+    let asked = 0;
+    await expect(
+      recordVideos({
+        videos: ['tour', 'feedback'],
+        paid: true,
+        budget: undefined,
+        plan: async (_v, file) => writeFileSync(file, JSON.stringify({ cost: 20_000 })),
+        quota: async (total) => {
+          asked = total;
+          throw new Error('not enough left');
+        },
+        record: async (v) => void recorded.push(v),
+      }),
+    ).rejects.toThrow(/not enough left/);
+    expect(asked).toBe(40_000);
+    expect(recorded).toEqual([]);
   });
 });
