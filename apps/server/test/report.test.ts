@@ -541,6 +541,21 @@ describe('public reports: fifth review', () => {
     expect((await tokenFor()).body.version).toBe('draft');
   });
 
+  it('refuses a version that was sent but isn’t a single valid version, instead of treating it as no version', async () => {
+    // Used to: turn an over-long, repeated or list-valued version into "none", so the report went to the draft.
+    const long = `9.9.9-${'a'.repeat(40)}`;
+    for (const query of [`version=${long}`, 'version=1.0.0&version=9.9.9', 'version=']) {
+      const res = await request(app).get(`${URL}/token?term=${encodeURIComponent(TERM)}&${query}`);
+      expect(res.status, query).toBe(404);
+      expect(res.body.token, query).toBeUndefined();
+      expect((await request(app).get(`${URL}?term=${encodeURIComponent(TERM)}&${query}`)).status, query).toBe(404);
+    }
+    const v = await visitor('192.0.2.98');
+    const before = queued().length;
+    for (const version of [long, ['1.0.0', '9.9.9'], '', 1]) expect((await v.send({ version, token: v.token({ version: 'draft' }) })).status, JSON.stringify(version)).toBe(400);
+    expect(queued()).toHaveLength(before);
+  });
+
   it('treats the same words about the same term in two versions as two reports', async () => {
     // Used to: answer the second with the first one's reference, so the draft report was lost.
     const v = await visitor('192.0.2.96');

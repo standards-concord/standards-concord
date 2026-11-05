@@ -284,6 +284,15 @@ async function findTerm(project: OntologyProject, version: string | undefined, i
   }
 }
 
+/**
+ * The version a report names. Absent means the working draft; anything sent
+ * that isn't a single plausible version string (too long, repeated, a list,
+ * empty) is invalid rather than "no version", so it's refused, never the draft.
+ */
+const versionParam = (v: unknown): { version?: string } | undefined => {
+  if (v === undefined) return {};
+  return typeof v === 'string' && v.length > 0 && v.length <= 40 ? { version: v } : undefined;
+};
 /** An identifier (a term IRI, a version) exactly as sent: IRIs are compared code point for code point, so nothing is normalised. */
 const exact = (v: unknown, max: number) => (typeof v === 'string' && v.length <= max ? v : '');
 /** Text a person wrote, without control characters, trimmed. The description is also NFKC-normalised (see submit). */
@@ -313,7 +322,8 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   if (attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
   const b = (req.body ?? {}) as Record<string, unknown>;
   const iri = exact(b.term, 2000);
-  const found = iri ? await findTerm(project, exact(b.version, 40) || undefined, iri) : undefined;
+  const v = versionParam(b.version);
+  const found = iri && v ? await findTerm(project, v.version, iri) : undefined;
   if (!found) throw new ReportError(400, 'That term isn’t in this version of the ontology, or that version isn’t published.');
   const session = browserSession(req, res);
   const scope = { slug: project.slug, term: found.term.iri, version: found.version, session };
@@ -363,7 +373,8 @@ export function reportRouter(): Router {
   };
   const term = async (req: Request, p: OntologyProject) => {
     const iri = exact(req.query.term, 2000);
-    return iri ? await findTerm(p, exact(req.query.version, 40) || undefined, iri) : undefined;
+    const v = versionParam(req.query.version);
+    return iri && v ? await findTerm(p, v.version, iri) : undefined;
   };
 
   r.get(`${base}/token`, async (req, res, next) => {
