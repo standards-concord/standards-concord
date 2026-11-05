@@ -88,6 +88,15 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
   const { id, label, view } = useOntology();
   const term = useAsync(() => api.term(id, iri), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
+  // Members arriving from "Report a problem" on the public page (?report=1) land with the form open.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (params.get('report') !== '1') return;
+    setBugOpen(true);
+    const next = new URLSearchParams(params);
+    next.delete('report');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   if (term.error && !term.data) return <ErrorCard error={term.error} onRetry={term.reload} />;
   if (!term.data) return <Loading />;
   const t: TermDetail = term.data;

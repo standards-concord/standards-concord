@@ -405,7 +405,12 @@ export function ChangeRequestPage() {
             <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" className="space-y-6">
             {cr.description && (
               <Card className="p-5">
-                <Markdown text={cr.description} />
+                {cr.origin.type === 'public-report' ? (
+                  // Written by someone without an account: shown as it was typed, never rendered.
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{cr.description}</p>
+                ) : (
+                  <Markdown text={cr.description} />
+                )}
               </Card>
             )}
 

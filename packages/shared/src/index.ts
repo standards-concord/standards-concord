@@ -345,21 +345,141 @@ export interface MeetingAnalysis {
   decisions: string[];
 }
 
+export interface FacilitatorPrompt {
+  at: string;
+  /** seconds from the start of the call */
+  t?: number;
+  text: string;
+  /** True once the prompt has been posted in the meeting's own chat. */
+  posted: boolean;
+  postedAt?: string;
+  /** Why posting to the meeting chat failed, if it did. */
+  postError?: string;
+}
+
+/** Where a calendar-invited call came from: the bot's calendar feed or an uploaded .ics invite. */
+export interface MeetingCalendarInfo {
+  /** Stable key of this occurrence (event UID plus its start), used to avoid joining twice. */
+  key: string;
+  /** The calendar event's UID (shared by every week of a series). */
+  uid?: string;
+  feed: 'calendar' | 'upload';
+  start: string;
+  end: string;
+  organizer?: string;
+  /** ORGANIZER;SENT-BY: someone who sent the invite on the organiser's behalf. */
+  sentBy?: string;
+  /** True for one occurrence of a recurring series. */
+  recurring: boolean;
+  /** Set when someone told the bot to stay out of this occurrence. */
+  skip?: boolean;
+  /**
+   * No bot is booked until a facilitator of the ontology approves the call. Approval
+   * covers a whole series, for as long as its organiser and Meet link stay the same;
+   * if either changes, the call needs approving again.
+   */
+  approval?: 'approved' | 'pending';
+  approvedBy?: string;
+  /** Why the call needs approving again, when it was approved before. */
+  approvalNote?: string;
+  /** The call left the calendar but cancelling its booked bot failed; retried every minute. */
+  cancelPending?: boolean;
+}
+
 export interface Meeting {
   id: string;
   ontologyId: string;
   title: string;
-  source: 'upload' | 'google-meet-bot' | 'simulation' | 'google-drive';
+  source: 'upload' | 'google-meet-bot' | 'calendar-invite' | 'simulation' | 'google-drive';
   /** Google Meet URL when a bot was invited. */
   meetingUrl?: string;
-  bot?: { provider: 'recall' | 'simulated'; botId?: string; status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error'; error?: string };
+  bot?: {
+    provider: 'recall' | 'simulated';
+    /**
+     * A Recall.ai bot's state machine (one record per meeting): idle (nothing booked),
+     * booking (a booking recorded and sent, not yet answered), booked (Recall.ai named
+     * the bot), releasing (getting rid of it, until Recall.ai confirms) and done.
+     */
+    phase?: 'idle' | 'booking' | 'booked' | 'releasing' | 'done';
+    /** Bumped by every change of the record: a change decided from an older copy is refused. */
+    gen?: number;
+    botId?: string;
+    /** Shown instead of botId to people who can't see it: a bot is booked. */
+    booked?: boolean;
+    /** For the page; follows from the phase. */
+    status: 'scheduled' | 'joining' | 'in-call' | 'done' | 'error';
+    error?: string;
+    /** The booking hasn't been answered: Recall.ai may or may not have made the bot. */
+    uncertain?: boolean;
+    /** The current booking's id: also its idempotency key, and the metadata a bot from it carries. */
+    bookingId?: string;
+    /** The Meet link the current booking was made for. */
+    bookedUrl?: string;
+    /** When the current booking was first sent (its idempotency key is only honoured for an hour). */
+    bookedAt?: string;
+    /** When the booking asks the bot to join, and whether its greeting says it will post in the chat: resent unchanged. */
+    joinAt?: string;
+    chat?: boolean;
+    /** Releasing: take the bot out of the call (leave) or cancel its booking (cancel) first. */
+    release?: 'cancel' | 'leave';
+    /** Releasing: what follows once Recall.ai confirms. done for End call; idle when the call may book again. */
+    after?: 'idle' | 'done';
+    /** Failed tries of the current step, and when the next is due (ms, by the bot clock's time). */
+    attempts?: number;
+    nextAt?: number;
+    /** The last failure of the current step (shown as error or cancelError). */
+    fault?: string;
+    /** Heard from the call. */
+    inCall?: boolean;
+    /** Other bots of this meeting's that turned up (they shouldn't exist): cancelled until confirmed. */
+    strays?: string[];
+    /** Bots Recall.ai confirmed gone: anything they still send is dropped. */
+    released?: string[];
+    /** Bookings a facilitator dismissed: still looked for (with the Meet link each was booked for, and when next, bot clock ms), and their bot cancelled if it turns up. */
+    dismissed?: { bookingId: string; url: string; nextAt?: number }[];
+    /** Failed attempts at removing strays, and when they're next tried (bot clock, ms): their own schedule, apart from the booking's. */
+    strayAttempts?: number;
+    strayNextAt?: number;
+    /** A booking that can no longer be resent safely and hasn't turned up: a facilitator can dismiss it. */
+    unconfirmed?: boolean;
+    /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */
+    cancelError?: string;
+    /** Someone ended the call but the bot hasn't been removed yet; Concord keeps trying. */
+    leaving?: boolean;
+  };
+  /** Cancelled, or no longer on the calendar: kept (for facilitators only) until its bot is confirmed gone. */
+  withdrawn?: boolean;
+  /** Set for calls the bot was invited to through its calendar address. */
+  calendar?: MeetingCalendarInfo;
+  /** When true, the co-lead bot posts its prompts into the meeting's chat as well as showing them here. */
+  postPromptsToChat?: boolean;
+  /** What the bot last told the call about posting in its chat (its join message, or a later notice). */
+  chatModeAnnounced?: boolean;
+  /** The last notice about chat posting couldn't be sent; it is retried as the call goes on. */
+  chatNoticeError?: string;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
-  facilitatorPrompts: { at: string; t?: number; text: string; posted: boolean }[];
+  facilitatorPrompts: FacilitatorPrompt[];
   analysis?: MeetingAnalysis;
-  status: 'live' | 'processing' | 'analysed' | 'error';
+  /** 'scheduled': a calendar invite the bot will join when the call starts. */
+  status: 'scheduled' | 'live' | 'processing' | 'analysed' | 'error';
   createdAt: string;
   createdBy: string;
+}
+
+/** What the co-lead bot can do on this server, for the Meetings page. */
+export interface MeetBotInfo {
+  provider: 'recall' | 'simulated';
+  /** The address people add to a calendar invite to bring the bot into a call. */
+  inviteEmail?: string;
+  /** True when the server reads the bot's calendar, so invites to inviteEmail are picked up. */
+  calendarConnected: boolean;
+  /** Default for "post prompts into the Meet chat" on calls that arrive by invite. */
+  postToChatDefault: boolean;
+  /** The latest read of the bot's calendar. The error never contains the feed's secret address. */
+  lastSync?: { at: string; ok: boolean; events: number; error?: string };
+  /** Bots Concord is still trying to cancel (Recall.ai hasn't confirmed yet). */
+  cancelling?: number;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -375,7 +495,31 @@ export type ChangeRequestOrigin =
   | { type: 'bug-report' }
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] }
-  | { type: 'fork'; forkId: string; forkSlug: string };
+  | { type: 'fork'; forkId: string; forkSlug: string }
+  /** Reported anonymously from the public ontology page. */
+  | { type: 'public-report'; termIri: string; version: string; /** The queued report it was opened from: approving twice finds this request. */ reportId?: string };
+
+/**
+ * A problem reported from the public ontology page by someone without an
+ * account. Held for review: only editors, stewards and owners see it, and
+ * nothing is done with it (no change request, activity or AI triage) until
+ * one of them opens it as a bug report.
+ */
+export interface PublicReport {
+  id: string;
+  ontologyId: string;
+  termIri: string;
+  termName: string;
+  /** The version of the page it was sent from ("draft" for the working draft). */
+  version: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  /** Set while a moderator is opening it as a change request (ms since the epoch). */
+  claimedAt?: number;
+  /** Server only: which request holds the claim. Never sent to the browser. */
+  claimToken?: string;
+}
 
 /**
  * Versions of an ontology published before a person approved what goes
@@ -915,7 +1059,7 @@ export interface SessionInfo {
   providers: { google: boolean; github: boolean; demo: boolean };
   llm: { provider: 'anthropic' | 'simulated'; model: string };
   solid: { enabled: boolean; serverUrl?: string };
-  meetBot: { provider: 'recall' | 'simulated' };
+  meetBot: MeetBotInfo;
   /** Simulated clock offset in ms (demo mode lets testers fast-forward time). */
   clockOffsetMs: number;
   now: string;
@@ -962,9 +1106,14 @@ export interface SessionInfo {
  * Meetings
  *  GET  /api/ontologies/:id/meetings                 -> Meeting[]
  *  POST /api/ontologies/:id/meetings/upload {title, transcript (raw text: Google Meet/Gemini doc text, .vtt, .srt, or "Speaker: text" lines)} -> Meeting
- *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/bot {title, meetingUrl, postPromptsToChat?} -> Meeting   (invites the co-lead bot)
+ *  POST /api/ontologies/:id/meetings/calendar {ics, postPromptsToChat?} -> {meetings: Meeting[]; cancelled: number; cancelRetrying: number}   (imports a calendar invite or its cancellation)
+ *  GET  /api/meet-bot                                -> MeetBotInfo
+ *  POST /api/meet-bot/sync                           -> MeetBotInfo   (re-read the bot's calendar now)
+ *  PATCH /api/meetings/:id {postPromptsToChat?, skip?, approve?} -> Meeting   (owners, stewards and editors)
+ *  POST /api/meetings/:id/prompts/:index/post        -> Meeting   (post one prompt into the meeting chat)
  *  POST /api/ontologies/:id/meetings/simulate {title} -> Meeting           (replays a scripted call live)
- *  GET  /api/meetings/:id                            -> Meeting
+ *  GET  /api/meetings/:id                            -> Meeting   (signed in; Meet link and organiser only for facilitators)
  *  POST /api/meetings/:id/analyse                    -> Meeting
  *  POST /api/meetings/:id/propose                    -> { useCases: UseCase[]; changeRequest?: ChangeRequest }
  *  GET  /api/meetings/:id/stream                     -> text/event-stream of {type:'line'|'prompt'|'status', ...}
