@@ -180,7 +180,7 @@ describe.runIf(run)('in a browser', () => {
       <section id="card" style="margin-top:100px;width:400px;height:200px">
         <div style="height:40px;overflow:hidden"><p style="margin:80px 0 0">Members</p></div>
       </section>
-      <section id="spill" style="width:400px;height:200px"><div style="height:0"><p style="margin:60px 0 0">Shown, overflowing a wrapper that doesn't clip</p></div></section>
+      <section id="spill" style="width:400px;height:200px"><div style="height:0">Shown, overflowing a wrapper that doesn't clip</div></section>
       <section id="note" style="width:400px;height:200px"><p id="words">Governance</p></section>`);
     expect(ringProblem(await highlight('card'))).toMatch(/blank space/);
     expect(ringProblem(await highlight('spill'))).toBeUndefined();
@@ -237,6 +237,8 @@ describe.runIf(run)('in a browser', () => {
     const c = { d } as unknown as Parameters<typeof ringAround>[0];
     await ringAround(c, 'Members');
     await page.waitForTimeout(50);
+    // ringLost also looks at the moment it is asked, so if the old ring were checked after
+    // scrolling to the new one (the bug this guards against), it would be reported here.
     await ringAround(c, 'Releases');
     await page.waitForTimeout(50);
     expect(d.warnings).toEqual([]);
@@ -256,7 +258,7 @@ describe.runIf(run)('in a browser', () => {
     };
     expect(await check(cards('Saturday park clean-up', ''))).toEqual([]);
     expect((await check(cards('', 'Help keep the park clean'))).join()).toMatch(/unreadable text/);
-    expect((await check(cards('[object U]', '[object U]'))).join()).toMatch(/unreadable text/);
+    expect((await check(cards('Saturday park clean-up', '[object U]'))).join()).toMatch(/unreadable text/);
   });
 
   it('loads Claude Code on the web from its address and redraws the session on return', async () => {

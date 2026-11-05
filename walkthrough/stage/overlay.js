@@ -242,6 +242,7 @@
       if (!target) {
         ring.classList.remove('on');
         state.target = null;
+        state.lost = '';
         return null;
       }
       state.target = target;
@@ -253,6 +254,7 @@
       const pad = 8;
       const seen = describe(target);
       const valid = seen.visible && seen.onScreen && !!(seen.text || seen.media);
+      state.valid = valid;
       let frame = 0;
       let blank = false;
       const draw = () => {
@@ -287,6 +289,13 @@
     },
     /** What happened to the current ring after it was drawn ('' if it stayed in view). */
     ringLost() {
+      // Look now as well, so a loss since the last frame isn't missed.
+      const target = state.target;
+      if (target && state.valid && !state.lost) {
+        const f = follow(target);
+        const c = f.rect && visibleContent(target, f.rect);
+        state.lost = f.why || (c && !c.text && !c.media ? 'went blank' : '');
+      }
       return state.lost || '';
     },
     cursorVisible(on) {
