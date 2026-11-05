@@ -10,7 +10,7 @@
 export const SERVER_NAME = 'concord';
 export const DISPLAY_NAME = 'Concord';
 /** The GitHub repo that doubles as a Claude Code and Codex plugin marketplace. */
-export const MARKETPLACE_REPO = 'jeswr/standards-concord';
+export const MARKETPLACE_REPO = 'standards-concord/standards-concord';
 
 export const mcpUrl = (origin: string) => `${origin.replace(/\/$/, '')}/mcp`;
 
