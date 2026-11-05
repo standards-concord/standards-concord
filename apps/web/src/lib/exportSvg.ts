@@ -6,8 +6,8 @@
  * own @font-face rules, so a browser draws it as the page does. Text is fitted to its boxes by
  * measuring and wrapping on the page; nothing stretches it. A viewer that ignores embedded fonts
  * substitutes its own and may draw text wider (librsvg and Inkscape do). Characters Inter lacks
- * (CJK, Arabic, emoji) use the viewer's fonts. The PNG draws the same shapes, and the text with
- * the page's own loaded fonts, so it matches the screen and looks the same wherever it is opened.
+ * (CJK, Arabic, emoji) use the viewer's fonts. The PNG is that SVG drawn here once its fonts have
+ * loaded, so it looks the same wherever it is opened.
  */
 
 /** "U+0000-00FF,U+0131,U+04??" as [from, to] pairs. */
@@ -102,8 +102,18 @@ export async function embeddedFonts(text: string, fonts: string[], family = 'Int
       return `@font-face{font-family:${family};font-weight:${f.weight};font-style:${f.style};unicode-range:${f.range};src:url(${src})}`;
     }),
   );
-  return rules.join('');
+  // For each face, a letter of the text that it draws (to check, later, that it has loaded).
+  const probes = needed.flatMap((f) => {
+    const ranges = parseUnicodeRange(f.range);
+    const inFace = points.filter((c) => ranges.some(([a, b]) => c >= a && c <= b));
+    // A letter if there is one; otherwise whatever visible character (an accent, say) it draws.
+    const p = inFace.find((c) => /[\p{L}\p{N}]/u.test(String.fromCodePoint(c))) ?? inFace.find((c) => /[\p{M}\p{S}\p{P}]/u.test(String.fromCodePoint(c)));
+    return p === undefined ? [] : [{ family, weight: f.weight, style: f.style, text: String.fromCodePoint(p) }];
+  });
+  return { css: rules.join(''), probes };
 }
+
+export type Probe = Awaited<ReturnType<typeof embeddedFonts>>['probes'][number];
 
 const frame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
@@ -122,10 +132,9 @@ export async function exportableSvg(live: SVGSVGElement, bg: string, fonts: stri
   await frame();
 
   const clone = live.cloneNode(true) as SVGSVGElement;
-  const text = textRuns(live);
-  const css = await embeddedFonts(clone.textContent ?? '', fonts).catch((err) => {
+  const { css, probes } = await embeddedFonts(clone.textContent ?? '', fonts).catch((err) => {
     console.warn('Could not embed the diagram font', err);
-    return '';
+    return { css: '', probes: [] as Probe[] };
   });
   if (css) {
     const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
@@ -141,81 +150,57 @@ export async function exportableSvg(live: SVGSVGElement, bg: string, fonts: stri
   clone.setAttribute('viewBox', `-20 -20 ${w + 40} ${h + 40}`);
   clone.removeAttribute('class');
   clone.style.background = bg;
-  const svg = new XMLSerializer().serializeToString(clone);
-  // The same drawing without its text, for the PNG to draw the text over.
-  for (const t of clone.querySelectorAll('text, style')) t.remove();
-  return { svg, shapes: new XMLSerializer().serializeToString(clone), width: w + 40, height: h + 40, text };
+  return { svg: new XMLSerializer().serializeToString(clone), clone, probes, width: w + 40, height: h + 40 };
 }
 
-/** Letters of right-to-left scripts, whose first character isn't at the run's left edge. */
-const RTL = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
+const PROBE_CELL = 70;
+const PROBE_ROW = 60;
 
 /**
- * Each run of text as the page draws it: the characters (after SVG's whitespace collapsing),
- * font, colour, and where its left end sits on the baseline, in its own coordinates, with the
- * matrix to the exported file's coordinates (with its margin).
+ * The SVG with a strip below the drawing showing one large letter in each embedded face, black
+ * on white, in that face alone. An SVG image draws text in a face that hasn't loaded yet as
+ * blank, so once every letter has ink, every face the labels use has loaded.
  */
-function textRuns(live: SVGSVGElement) {
-  const vp = live.querySelector<SVGGElement>('[data-viewport]');
-  const inv = vp?.getScreenCTM()?.inverse();
-  if (!inv) return [];
-  const out: { text: string; font: string; size: number; fill: string; alpha: number; strike: boolean; m: DOMMatrix; x: number; y: number }[] = [];
-  for (const t of live.querySelectorAll('text')) {
-    const ctm = t.getScreenCTM();
-    if (!ctm) continue;
-    const m = DOMMatrix.fromMatrix(inv.multiply(ctm)).preMultiplySelf(new DOMMatrix().translateSelf(20, 20));
-    const struck = getComputedStyle(t).textDecorationLine.includes('line-through');
-    for (const run of t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]) {
-      const n = run.getNumberOfChars();
-      if (!n) continue;
-      const cs = getComputedStyle(run);
-      if (cs.fill === 'none' || cs.visibility !== 'visible' || cs.display === 'none') continue;
-      let text = (run.textContent ?? '').replace(/[\t\n\r ]+/g, ' ');
-      if (text.length > n) text = text.trimStart();
-      if (text.length > n) text = text.trimEnd();
-      const start = run.getStartPositionOfChar(0);
-      let x = start.x;
-      // A right-to-left run's first character is drawn at its right; find its left edge.
-      if (RTL.test(text)) for (let i = 0; i < n; i++) x = Math.min(x, run.getExtentOfChar(i).x);
-      out.push({
-        text,
-        font: `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`,
-        size: parseFloat(cs.fontSize),
-        fill: cs.fill,
-        alpha: Number(cs.fillOpacity) * Number(cs.opacity),
-        strike: struck || cs.textDecorationLine.includes('line-through'),
-        m,
-        x,
-        y: start.y,
-      });
-    }
-  }
-  return out;
+function withProbes(clone: SVGSVGElement, probes: Probe[], width: number, height: number) {
+  const perRow = Math.max(1, Math.floor(width / PROBE_CELL));
+  const rows = Math.ceil(probes.length / perRow);
+  const svg = clone.cloneNode(true) as SVGSVGElement;
+  const ns = 'http://www.w3.org/2000/svg';
+  const strip = document.createElementNS(ns, 'g');
+  const band = document.createElementNS(ns, 'rect');
+  Object.entries({ x: -20, y: height - 20, width, height: rows * PROBE_ROW, fill: '#fff' }).forEach(([k, v]) => band.setAttribute(k, String(v)));
+  strip.append(band);
+  probes.forEach((p, i) => {
+    const t = document.createElementNS(ns, 'text');
+    const attrs = { x: -20 + 15 + (i % perRow) * PROBE_CELL, y: height - 20 + Math.floor(i / perRow) * PROBE_ROW + 45, fill: '#000', 'font-size': 36, 'font-family': p.family, 'font-weight': p.weight, 'font-style': p.style };
+    Object.entries(attrs).forEach(([k, v]) => t.setAttribute(k, String(v)));
+    t.textContent = p.text;
+    strip.append(t);
+  });
+  svg.append(strip);
+  svg.setAttribute('height', String(height + rows * PROBE_ROW));
+  svg.setAttribute('viewBox', `-20 -20 ${width} ${height + rows * PROBE_ROW}`);
+  return { markup: new XMLSerializer().serializeToString(svg), perRow, rows };
 }
 
-type TextRun = ReturnType<typeof textRuns>[number];
-
-/** Draws runs of text with the page's own (loaded) fonts, scaled by `k`. */
-function drawText(ctx: CanvasRenderingContext2D, runs: TextRun[], k: number) {
-  ctx.save();
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  ctx.direction = 'ltr';
-  for (const r of runs) {
-    ctx.setTransform(new DOMMatrix().scaleSelf(k, k).multiplySelf(r.m));
-    ctx.font = r.font;
-    ctx.fillStyle = r.fill;
-    ctx.globalAlpha = r.alpha;
-    ctx.fillText(r.text, r.x, r.y);
-    if (r.strike) {
-      // Where Chromium draws a line-through in Inter: centred on the font's strikeout position
-      // (671/2048 em above the baseline), a tenth of the font size thick.
-      const th = r.size / 10;
-      ctx.fillRect(r.x, r.y - r.size * (671 / 2048) - th / 2, ctx.measureText(r.text).width, th);
-    }
+/** Whether every probe letter in the strip has been drawn. */
+function probesDrawn(img: HTMLImageElement, count: number, perRow: number, rows: number, width: number, height: number) {
+  const c = document.createElement('canvas');
+  c.width = width;
+  c.height = rows * PROBE_ROW;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return true;
+  ctx.drawImage(img, 0, height, width, c.height, 0, 0, width, c.height);
+  for (let i = 0; i < count; i++) {
+    const px = ctx.getImageData((i % perRow) * PROBE_CELL, Math.floor(i / perRow) * PROBE_ROW, PROBE_CELL, PROBE_ROW).data;
+    let ink = 0;
+    for (let j = 0; j < px.length; j += 4) if (px[j] + px[j + 1] + px[j + 2] < 300) ink++;
+    if (ink < 20) return false;
   }
-  ctx.restore();
+  return true;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function save(blob: Blob, filename: string) {
   const a = document.createElement('a');
@@ -242,20 +227,26 @@ export function pngScale(width: number, height: number) {
 }
 
 /**
- * The same drawing as a PNG. An SVG image loads its embedded fonts some time after it has
- * decoded, drawing its text blank until then, and nothing reports when they arrive. So the PNG
- * draws the shapes from the SVG without its text (complete once decoded), then the text itself
- * with the page's fonts, which have loaded. If the browser can't allocate or encode a canvas
- * that large, it tries again at half the scale, a few times, and then throws.
+ * The same drawing as a PNG, drawn from the SVG. An SVG image loads its embedded fonts some time
+ * after it has decoded, drawing their text blank until then, and nothing reports when they
+ * arrive, so the image carries a probe letter for each face (see `withProbes`), and the PNG is
+ * drawn once they all show. If the browser can't allocate or encode a canvas that large, it
+ * tries again at half the scale, a few times, and then throws.
  */
 export async function downloadPng(live: SVGSVGElement | null, filename: string, bg: string, fonts: string[] = []) {
   if (!live) return;
-  const { shapes, width, height, text } = await exportableSvg(live, bg, fonts);
+  const { clone, probes, width, height } = await exportableSvg(live, bg, fonts);
+  const { markup, perRow, rows } = withProbes(clone, probes, width, height);
   const img = new Image();
-  const url = URL.createObjectURL(new Blob([shapes], { type: 'image/svg+xml' }));
+  const url = URL.createObjectURL(new Blob([markup], { type: 'image/svg+xml' }));
   try {
     img.src = url;
     await img.decode();
+    const until = performance.now() + 5000;
+    while (!probesDrawn(img, probes.length, perRow, rows, width, height)) {
+      if (performance.now() > until) throw new Error("The diagram's fonts didn't load in time. Try again, or save it as SVG.");
+      await sleep(30);
+    }
     let scale = pngScale(width, height);
     for (let attempt = 0; attempt < 4; attempt++, scale /= 2) {
       const canvas = document.createElement('canvas');
@@ -265,8 +256,8 @@ export async function downloadPng(live: SVGSVGElement | null, filename: string, 
       if (ctx) {
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        drawText(ctx, text, canvas.width / width);
+        // The drawing only, not the probe strip below it.
+        ctx.drawImage(img, 0, 0, width, height, 0, 0, canvas.width, canvas.height);
         const png = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
         if (png) return save(png, filename);
       }

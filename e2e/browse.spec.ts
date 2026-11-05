@@ -615,36 +615,55 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await viewer.close();
   });
 
-  test('a PNG matches the SVG drawn in a browser, for every kind of label', async ({ page }) => {
-    // Kerning and arrows, italics, an inherited attribute (a coloured arrow), a relationship,
-    // other scripts, right-to-left text, emoji (including a white circle, which has little
-    // contrast), a blank Hangul filler and a deprecated (struck through) class. (Not CJK: an SVG
-    // image can pick a different system font for it than the page, which the PNG follows.)
+  test('a PNG matches the SVG drawn in a browser, label by label, however the view is zoomed', async ({ page }) => {
+    // Kerning and arrows, an italic "+ 1 more" row, an inherited attribute (a coloured arrow), a
+    // CJK relationship, Greek, Cyrillic and Vietnamese, right-to-left text (with directional
+    // overrides), emoji (including a white circle, which has little contrast), a blank Hangul
+    // filler and a deprecated (struck through) class.
     const attrs = [
       { ...prop('AVATAR -> WAVE => Tokyo', { domain: [NS + 'Base'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' },
-      ...Array.from({ length: 12 }, (_, i) => ({ ...prop(`extra${i}`, { domain: [NS + 'Kid'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' })),
+      ...Array.from({ length: 12 }, (_, i) => ({ ...prop(`extra${i}`, { domain: [NS + 'Base'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' })),
+      { ...prop('own', { domain: [NS + 'Kid'], range: ['http://www.w3.org/2001/XMLSchema#string'] }), kind: 'datatypeProperty' },
     ];
     await stub(
       page,
       [
         { ...cls('Base', [], [{ property: NS + 'knows', kind: 'some', filler: NS + 'Kid' }]), label: 'Οργανισμός Организация Tổ chức' },
         { ...cls('Kid', ['Base']), label: `مرحبا ${'i'.repeat(20)} ⚪ 👨‍👩‍👧 🇬🇧 \u3164 Café` },
-        { ...cls('Old'), label: 'Retired class', deprecated: true },
+        { ...cls('Old'), label: '\u202Ereversed\u202C Retired class', deprecated: true },
       ],
-      [{ ...prop('knows'), label: 'knows' }],
+      [{ ...prop('knows'), label: '协调 knows' }],
       attrs,
     );
     await page.goto(`${base}?view=diagram&hops=0`);
     const d = page.getByTestId('class-diagram');
     await expect(d.locator('[data-node]')).toHaveCount(3);
-    const [svgText, pngFile] = [await exportSvg(page, d), await (async () => {
-      const download = page.waitForEvent('download');
-      await d.getByRole('button', { name: 'Download as PNG' }).click();
-      return readFileSync(await (await download).path()).toString('base64');
-    })()];
+    await page.getByRole('button', { name: 'Inherited attributes' }).click();
+    await expect(d.locator('[data-node] tspan', { hasText: '↑' }).first()).toBeVisible();
+    await expect(d.locator('[data-node] text', { hasText: /^\+ \d+ more/ }).first()).toHaveAttribute('font-style', 'italic');
+    // Zoomed well in, so most of the drawing is out of view.
+    for (let i = 0; i < 8; i++) await d.getByRole('button', { name: 'Zoom in' }).click();
+    const svgText = await exportSvg(page, d);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    const png = readFileSync(await (await download).path()).toString('base64');
+    // Where each run of text is drawn, in the file's coordinates (with its 20 px margin).
+    const areas = await d.locator('svg[data-width]').evaluate((svg) => {
+      const m = (svg.querySelector('[data-viewport]') as SVGGElement).getScreenCTM()!.inverse();
+      return [...svg.querySelectorAll('text')]
+        .flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]))
+        .filter((t) => t.textContent?.trim())
+        .map((t) => {
+          const r = t.getBoundingClientRect();
+          const a = new DOMPoint(r.left, r.top).matrixTransform(m);
+          const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
+          return { text: t.textContent!.slice(0, 30), x: a.x + 20, y: a.y + 20, w: b.x - a.x, h: b.y - a.y };
+        });
+    });
+    expect(areas.length).toBeGreaterThan(15);
     const viewer = await page.context().newPage();
-    const result = await viewer.evaluate(
-      async ({ svgText, png }) => {
+    const results = await viewer.evaluate(
+      async ({ svgText, png, areas }) => {
         const load = async (src: string) => {
           const img = new Image();
           img.src = src;
@@ -655,6 +674,7 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         const svg = await load(URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml' })));
         // The SVG image's embedded fonts load after it decodes; give them time.
         await new Promise((r) => setTimeout(r, 1500));
+        const k = out.naturalWidth / svg.naturalWidth;
         const pixels = (img: HTMLImageElement) => {
           const c = document.createElement('canvas');
           c.width = out.naturalWidth;
@@ -665,22 +685,35 @@ test.describe('large and unusual ontologies (stubbed)', () => {
         };
         const a = pixels(out);
         const b = pixels(svg);
-        let ink = 0;
-        let differ = 0;
-        for (let i = 0; i < a.length; i += 4) {
-          const da = Math.abs(a[i] - a[0]) + Math.abs(a[i + 1] - a[1]) + Math.abs(a[i + 2] - a[2]);
-          const db = Math.abs(b[i] - a[0]) + Math.abs(b[i + 1] - a[1]) + Math.abs(b[i + 2] - a[2]);
-          if (da > 60 || db > 60) ink++;
-          if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 120) differ++;
-        }
-        return { ink, differ, ratio: differ / ink };
+        const width = out.naturalWidth;
+        // Each label on its own, so one missing or misplaced label can't hide in the total.
+        return areas.map((r) => {
+          const x0 = Math.max(0, Math.floor(r.x * k) - 2);
+          const y0 = Math.max(0, Math.floor(r.y * k) - 2);
+          const x1 = Math.min(width, Math.ceil((r.x + r.w) * k) + 2);
+          const y1 = Math.min(out.naturalHeight, Math.ceil((r.y + r.h) * k) + 2);
+          const bg = (y0 * width + x0) * 4;
+          let inkA = 0;
+          let inkB = 0;
+          let differ = 0;
+          for (let y = y0; y < y1; y++)
+            for (let x = x0; x < x1; x++) {
+              const i = (y * width + x) * 4;
+              const da = Math.abs(a[i] - b[bg]) + Math.abs(a[i + 1] - b[bg + 1]) + Math.abs(a[i + 2] - b[bg + 2]);
+              const db = Math.abs(b[i] - b[bg]) + Math.abs(b[i + 1] - b[bg + 1]) + Math.abs(b[i + 2] - b[bg + 2]);
+              if (da > 60) inkA++;
+              if (db > 60) inkB++;
+              if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 120) differ++;
+            }
+          return { text: r.text, inkA, inkB, ratio: differ / Math.max(1, inkA, inkB) };
+        });
       },
-      { svgText, png: pngFile },
+      { svgText, png, areas },
     );
-    // About 1.5% of ink pixels differ, from glyphs placed a fraction of a pixel apart. A PNG
-    // drawn before the fonts load differs on most of them.
-    expect(result.ink).toBeGreaterThan(5000);
-    expect(result.ratio, JSON.stringify(result)).toBeLessThan(0.03);
+    for (const r of results) {
+      expect(r.inkB, `${r.text} drawn in the SVG`).toBeGreaterThan(10);
+      expect(r.ratio, `${r.text}: ${JSON.stringify(r)}`).toBeLessThan(0.05);
+    }
     await viewer.close();
   });
 
