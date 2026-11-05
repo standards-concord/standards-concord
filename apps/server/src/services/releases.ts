@@ -9,6 +9,7 @@ import {
 } from '@concord/core';
 import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, GovernanceEvaluation, OntologyProject, Release, ReleaseApprovalSource, ReleaseDetail, User, Vote } from '@concord/shared';
+import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, mustGet, put } from '../db.js';
@@ -158,7 +159,7 @@ export async function voteOnRelease(r: Release, actor: User, choice: Vote['choic
   if (r.status !== 'voting') throw new HttpError(409, 'There is no open vote on this release');
   const g = await releaseGovernance(r);
   const roles = await rolesFor(r.ontologyId, actor.id);
-  if (!roles.some((role) => g.rule.vote?.voterRoles.includes(role))) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
+  if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles)) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
   const vote: Vote = { id: newId('vote'), subjectType: 'release', subjectId: r.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
   await put('votes', vote, r.id);
   await logActivity({ ontologyId: r.ontologyId, actorId: actor.id, type: 'release.voted', message: `voted ${choice} on release ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });

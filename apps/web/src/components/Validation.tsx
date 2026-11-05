@@ -80,13 +80,13 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
         // Suggestions stay one click away when there are errors or warnings to deal with first.
         if (sev === 'info' && serious)
           return (
-            <Disclosure key={sev} tone="muted" heading={4} title={<span className={cx('inline-flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}><Icon className="size-3.5" /> {l} ({items.length})</span>}>
+            <Disclosure key={sev} tone="muted" heading={4} title={<span className={cx('inline-flex items-center gap-1.5 text-sm font-semibold', cls)}><Icon className="size-3.5" /> {l} ({items.length})</span>}>
               {list}
             </Disclosure>
           );
         return (
           <div key={sev}>
-            <h4 className={cx('mb-1.5 flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase', cls)}>
+            <h4 className={cx('mb-1.5 flex items-center gap-1.5 text-sm font-semibold', cls)}>
               <Icon className="size-3.5" /> {l} ({items.length})
             </h4>
             {list}
@@ -276,7 +276,21 @@ export function CqResults({ report }: { report: ValidationReport }) {
 /** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
 const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
 
-export function ValidationDetails({ report, label, openLintKey, lintNote }: { report: ValidationReport; label: Labeler; /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */ openLintKey?: unknown; lintNote?: ReactNode }) {
+export function ValidationDetails({
+  report,
+  label,
+  openLintKey,
+  lintNote,
+  headingLevel = 4,
+}: {
+  report: ValidationReport;
+  label: Labeler;
+  /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */
+  openLintKey?: unknown;
+  lintNote?: ReactNode;
+  /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
+  headingLevel?: 3 | 4;
+}) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
   const infos = report.lint.length - errors - warnings;
@@ -290,16 +304,16 @@ export function ValidationDetails({ report, label, openLintKey, lintNote }: { re
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={4} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" heading={4} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
           <FairChecks report={report} showAll />
         </Disclosure>
         <Disclosure
           className="px-4 py-3"
-          heading={4}
+          heading={headingLevel}
           title="Competency questions"
           summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
           defaultOpen={cqOk < report.competencyQuestions.length}

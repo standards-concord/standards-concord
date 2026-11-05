@@ -10,6 +10,7 @@ import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, Input, Loading, Select, Toggle, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 import { alwaysRules, RuleList, ruleSummary } from '../../components/PolicyRules';
+import { scrollBehavior } from '../../lib/motion';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const ALL_ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -245,7 +246,7 @@ function PolicySummary({ policy, preview }: { policy: GovernancePolicy; preview?
   return (
     <Card className="p-5">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="text-xs font-semibold tracking-wide text-muted uppercase">In short</div>
+        <div className="text-sm font-semibold">In short</div>
         {preview && <Badge tone="warn">Preview of unsaved changes</Badge>}
       </div>
       <p className="mt-1 text-sm">
@@ -446,7 +447,7 @@ export function GovernanceTab() {
     if (window.location.hash !== '#roles') return;
     // Move focus as well as the view, so keyboard and screen-reader users land on the members list too.
     const section = document.getElementById('roles');
-    section?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    section?.scrollIntoView({ behavior: scrollBehavior() });
     section?.querySelector<HTMLElement>('button[aria-expanded]')?.focus({ preventScroll: true });
   }, []);
 

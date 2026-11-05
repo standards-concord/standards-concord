@@ -138,7 +138,7 @@ export function GovernancePanel({
       )}
       {g.unmet.length > 0 && (
         <div>
-          <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Still needed</div>
+          <div className="mb-1 text-sm font-semibold">Still needed</div>
           <ul className="space-y-1">
             {g.unmet.map((u, i) => (
               <li key={i} className="flex items-start gap-2 text-sm">
@@ -154,7 +154,7 @@ export function GovernancePanel({
 
       {actions && (
         <div className="border-t border-line pt-4" role="group" aria-label="Your actions">
-          <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Your actions</div>
+          <div className="mb-2 text-sm font-semibold">Your actions</div>
           {actions}
         </div>
       )}

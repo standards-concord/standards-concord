@@ -181,9 +181,11 @@ test.describe('role-based views', () => {
     await signIn(page, { name: 'Policy finder', role: 'contributor' });
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const line = page.getByTestId('policy-link');
+    // The summary sentence under the description names the policy, outside any disclosure.
+    const line = page.getByTestId('overview-summary');
     await expect(line).toBeVisible();
-    await line.getByRole('link').click();
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { governance: { name: string } };
+    await line.getByRole('link', { name: o.governance.name }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
   });
 
