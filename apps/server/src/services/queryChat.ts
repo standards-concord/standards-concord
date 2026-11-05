@@ -439,7 +439,9 @@ function conditionFilters(ctx: Ctx, state: RecordsState, condition: string, s: S
   const actions: (() => void)[] = [];
   const targets = new Map<string, string>();
   // A property already filtered by an earlier message keeps its condition unless this one says to replace it.
-  const replacing = /\b(instead|change|replace|rather|now)\b/i.test(s.plain.replace(PLACEHOLDERS, ' '));
+  // Only explicit wording replaces ("instead", "replace", "change … to"); "now" doesn't, and additive wording ("also", "as well") never does.
+  const words = s.plain.replace(PLACEHOLDERS, ' ');
+  const replacing = /\b(instead|replace|replacing|rather than|change (?:it|that|the \w+(?: \w+)? (?:condition|filter))? ?to)\b/i.test(words) && !/\b(also|as well|too|plus|in addition|additionally)\b/i.test(words);
   const describe = (f: NonNullable<PathStep['filter']>) => (f.op === 'contains' ? `contains “${f.value}”` : `${OP_WORDS[f.op] ?? f.op} ${f.value}`);
   const once = (key: string, what: string, existing?: PathStep): string | undefined => {
     if (targets.has(key)) return `I can apply only one condition to ${what} offline, and that asks for two. Edit the query to combine them.`;

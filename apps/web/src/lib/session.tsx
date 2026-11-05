@@ -67,10 +67,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setError(undefined);
   }, []);
 
+  /**
+   * The session from the server, or undefined if a sign-out happened while asking:
+   * a signed-in answer sent before the sign-out must not sign this tab back in.
+   */
+  const fetchSession = useCallback(async () => {
+    const before = signOuts();
+    const s = await api.session();
+    return s.user && signOuts() !== before ? undefined : s;
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const s = await api.session();
+      const s = await fetchSession();
+      if (!s) return undefined;
       setSession(s);
       return s;
     } catch (e) {
@@ -79,7 +90,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [setSession]);
+  }, [setSession, fetchSession]);
 
   useEffect(() => {
     void refresh();
@@ -99,22 +110,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (was) clearDrafts(was);
       if (current) setSession({ ...current, user: undefined });
       activeAccount = undefined;
-      void api
-        .session()
-        .then(setSession)
+      void fetchSession()
+        .then((s) => s && setSession(s))
         .catch(() => {});
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [setSession]);
+  }, [setSession, fetchSession]);
 
   useEffect(() => {
     const check = () => {
       if (document.visibilityState !== 'visible') return;
-      void api
-        .session()
+      void fetchSession()
         .then((s) => {
-          if (s.user?.id !== sessionRef.current?.user?.id) setSession(s);
+          if (s && s.user?.id !== sessionRef.current?.user?.id) setSession(s);
         })
         .catch(() => {});
     };
@@ -124,7 +133,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', check);
       document.removeEventListener('visibilitychange', check);
     };
-  }, [setSession]);
+  }, [setSession, fetchSession]);
 
   const now = useCallback(() => {
     if (!session) return Date.now();

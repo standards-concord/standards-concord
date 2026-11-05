@@ -557,6 +557,17 @@ describe('query assistant (offline helper)', () => {
     const [, park, garden] = await converse(agent, 'List every volunteering opportunity', 'Only those called "Park"', 'Also only those called "Garden"');
     expect(garden.unchanged).toBe(true);
     expect(garden.query).toBe(park.query);
+    // "Now also" adds; it used to count as permission to replace.
+    for (const [first, second] of [
+      ['Only those with minimum age under 15', 'Now also only those with minimum age over 10'],
+      ['Only those called "Park"', 'Now also only those called "Garden"'],
+      ['Only those with minimum age under 15', 'Now only those with minimum age over 10'],
+      ['Only those with minimum age under 15', 'Also only those with minimum age over 10 instead'],
+    ]) {
+      const [, before, after] = await converse(agent, 'List every volunteering opportunity with its minimum age', first, second);
+      expect(after.unchanged, second).toBe(true);
+      expect(after.query, second).toBe(before.query);
+    }
     // Saying so replaces it.
     const [, , instead] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Only those with minimum age under 15 instead');
     expect(instead.query).toContain('FILTER(?minimumAge < 15)');

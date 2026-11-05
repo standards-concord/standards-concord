@@ -108,8 +108,12 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
     return out;
   };
 
-  /** Binds a variable; one already bound joins with the new value, so it can only be as long as the shorter. */
-  const bind = (env: Env, name: string, chars: number) => env.set(name, env.has(name) ? Math.min(env.get(name)!, chars) : chars);
+  /**
+   * Binds a variable. One already bound keeps the longer estimate: a join would make the values equal, but a
+   * variable can be unbound on some rows (VALUES … UNDEF, OPTIONAL, one branch of a UNION), where the new value
+   * goes through unchanged, so the shorter estimate is not a bound.
+   */
+  const bind = (env: Env, name: string, chars: number) => env.set(name, Math.max(env.get(name) ?? 0, chars));
   const fromData = (env: Env, t: unknown) => {
     const n = t as Node | undefined;
     if (n?.termType === 'Variable') bind(env, n.value as string, DATA_CHARS);
@@ -117,6 +121,8 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
 
   /** Evaluates patterns in order into env, the variables of this query level. */
   function patterns(list: unknown[], env: Env) {
+    // A FILTER applies to its whole group, wherever it is written: judge it with all of the group's bindings.
+    const filters: unknown[] = [];
     for (const item of list) {
       const p = item as Node;
       switch (p.type) {
@@ -135,7 +141,7 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
             bind(env, k.replace(/^\?/, ''), Math.max(0, ...(p.values as Record<string, unknown>[]).map((r) => est(r[k], env))));
           break;
         case 'filter':
-          est(p.expression, env);
+          filters.push(p.expression);
           break;
         case 'query':
           // A subquery has its own variables and passes out only its projections.
@@ -159,13 +165,14 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
           if (p.type === 'graph' || p.type === 'service') fromData(env, p.name);
           const inner = new Map(env);
           patterns(p.patterns as unknown[], inner);
-          if (p.type !== 'minus') for (const [k, v] of inner) if (!env.has(k) || p.type !== 'optional') env.set(k, v);
+          if (p.type !== 'minus') for (const [k, v] of inner) bind(env, k, v);
           break;
         }
         default:
           break;
       }
     }
+    for (const f of filters) est(f, env);
   }
 
   /** One query level: WHERE in order, then GROUP BY and projections in order. Returns what it projects. */

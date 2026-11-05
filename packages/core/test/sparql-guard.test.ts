@@ -29,6 +29,11 @@ describe('resource checks', () => {
     expect(resourceProblem(tree(`SELECT * WHERE { { ?s ?p ?o } UNION { ${inner} } }`))).toMatch(/characters/);
     expect(resourceProblem(tree(`SELECT * WHERE { ?s ?p ?o OPTIONAL { ${inner} } }`))).toMatch(/characters/);
     expect(resourceProblem(tree(`SELECT * WHERE { ?s ?p ?o FILTER EXISTS { ${inner} } }`))).toMatch(/characters/);
+    // A variable that may be unbound on some rows (UNDEF, OPTIONAL, one branch of a UNION) lets a long value through
+    // a join unchanged: the shorter estimate used to win, and this built 131,072 characters.
+    const long = `{ SELECT ?x WHERE { ${doubling(16).replace(/^SELECT \?v16 WHERE \{|\}$/g, '')} BIND(?v16 AS ?x) } }`;
+    for (const maybe of ['VALUES ?x { UNDEF }', 'OPTIONAL { BIND("a" AS ?x) }', '{ BIND("a" AS ?x) } UNION { BIND(1 AS ?y) }'])
+      expect(resourceProblem(tree(`SELECT ?big WHERE { ${maybe} ${long} BIND(CONCAT(?x, ?x) AS ?big) }`)), maybe).toMatch(/characters/);
     // Growth built on GROUP_CONCAT (whose own size depends on the data) still counts.
     expect(resourceProblem(tree(`SELECT ?big WHERE { { SELECT (GROUP_CONCAT(?o) AS ?g) WHERE { ?s ?p ?o } } BIND(CONCAT(?g, ?g, ?g) AS ?big) }`))).toMatch(/characters/);
   });
@@ -41,6 +46,9 @@ describe('resource checks', () => {
       `SELECT (CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) WHERE { BIND("x" AS ?x) }`,
       `SELECT ?y WHERE { BIND("x" AS ?x) BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
       'SELECT ?y WHERE { { BIND("ab" AS ?x) } UNION { BIND("cd" AS ?x) } BIND(CONCAT(?x, ?x, ?x) AS ?y) }',
+      // A FILTER is judged with its whole group's bindings, wherever it is written (it used to be refused when written first).
+      `SELECT ?x WHERE { FILTER(STRLEN(CONCAT(${Array(11).fill('?x').join(',')})) > 0) VALUES ?x { "x" } }`,
+      `SELECT ?x WHERE { VALUES ?x { "x" } FILTER(STRLEN(CONCAT(${Array(11).fill('?x').join(',')})) > 0) }`,
       doubling(10),
       'SELECT ?s (CONCAT(?label, " – ", ?definition) AS ?text) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label ; <http://www.w3.org/2004/02/skos/core#definition> ?definition }',
       'SELECT (REPLACE(STR(?s), "#", "/") AS ?path) WHERE { ?s ?p ?o }',

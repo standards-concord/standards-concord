@@ -238,6 +238,8 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   // Where the offline helper's last query came from, so it can keep refining it however long the chat gets.
   const [offlineState, setOfflineState] = useLocalStorage<unknown>(`${storageKey}.offlineState`, null);
   const [asking, setAsking] = useState(false);
+  // The message being sent, before it is saved.
+  const [pending, setPending] = useState<ChatMessage>();
   const [chatError, setChatError] = useState<unknown>();
 
   // Autocomplete: every term as a prefixed name, findable by its label too. Accepting
@@ -340,17 +342,21 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     // Whose conversation this is, as of now: nothing is saved unless it still is, now and when the answer arrives.
     const token = accountToken();
     if (!stillCurrent(token, account)) return;
-    setChat(history);
+    // Shown at once, but saved only after the server confirms the account.
+    setPending(mine);
     setAsking(true);
     setChatError(undefined);
     try {
       // This conversation belongs to one account: never send it on under another one signed in from another tab.
       // The server refuses it too if the session changes after this check.
       const now = await api.session();
-      if ((now.user?.id ?? 'guest') !== account) {
-        setSession(now);
+      if ((now.user?.id ?? 'guest') !== account || !stillCurrent(token, account)) {
+        setPending(undefined);
+        if (stillCurrent(token, account)) setSession(now);
         throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
       }
+      setChat(history);
+      setPending(undefined);
       const r = await api.queryChat(id, {
         messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
         query,
@@ -372,6 +378,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         setWroteKey(keyFor(r.query, r.target));
       }
     } catch (e) {
+      setPending(undefined);
       if (stillCurrent(token, account)) setChatError(e);
     } finally {
       setAsking(false);
@@ -476,7 +483,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 />
                 <ChatView
                   className="h-[440px] px-4 pb-4"
-                  messages={[greeting, ...chat]}
+                  messages={[greeting, ...chat, ...(pending ? [pending] : [])]}
                   pending={asking}
                   onSend={(text) => ask(text)}
                   disabled={!ready}

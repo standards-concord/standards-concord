@@ -367,6 +367,41 @@ test.describe('Query tab', () => {
     await other.close();
   });
 
+  test('a session answer from before another tab signed out can’t sign this tab back in', async ({ page, context }) => {
+    // Used to happen: a slow "still signed in" answer arrived after the sign-out and restored the account here,
+    // and the next message saved its chat again.
+    await ask(page, 'List every volunteering opportunity');
+    let releaseOld!: () => void;
+    const old = new Promise<void>((r) => (releaseOld = r));
+    let held = false;
+    let oldDone = false;
+    await page.route(/\/api\/session$/, async (r) => {
+      if (held) return r.continue();
+      held = true;
+      const answer = await r.fetch();
+      await old;
+      await r.fulfill({ response: answer });
+      oldDone = true;
+    });
+    // A routine session check starts here and is held, still signed in.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect.poll(() => held).toBe(true);
+    const other = await context.newPage();
+    await other.goto('/');
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(other).toHaveURL(/\/login/);
+    // This tab has signed out too.
+    await expect(page.locator('.app-user-button')).toHaveCount(0);
+    releaseOld();
+    await expect.poll(() => oldDone).toBe(true);
+    await page.waitForTimeout(500);
+    await expect(page.locator('.app-user-button')).toHaveCount(0);
+    const mine = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(mine).toEqual([]);
+    await other.close();
+  });
+
   test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
     await ask(page, 'List every volunteering opportunity');
     // Another tab signs in as someone else (the session cookie is shared).
@@ -383,6 +418,9 @@ test.describe('Query tab', () => {
     // The page notices, drops to the new account's own (empty) workspace, and nothing was sent.
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
     expect(sent).toBe(0);
+    // Nor was it saved to the first account's conversation before the check (it used to be).
+    const saved = await page.evaluate(() => Object.entries(localStorage).filter(([k, v]) => k.endsWith('.chat') && v.includes('Also show the minimum age')));
+    expect(saved).toEqual([]);
   });
 
   test('changing the question marks the old answer as stale', async ({ page }) => {
