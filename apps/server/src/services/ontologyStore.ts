@@ -21,11 +21,13 @@ import { get, HttpError, list, put, remove, transaction } from '../db.js';
  * change request is still exactly as it checked it.
  *
  * The database is the only source of truth; git is a projection of it.
- * Every commit is pinned by a ref of its own (refs/concord/commits/<sha>-<writer>)
- * before the pointer can name it, so git gc never removes it. A pin is dropped
- * by the writer that made it if its advance is refused, and otherwise only once
- * it is provably unneeded: its commit is an ancestor of the draft the database
- * names (whose own pin is kept). `sync` (idempotent; run at start-up, after
+ * Every new commit is pinned by a ref of its writer's own
+ * (refs/concord/commits/<sha>-<time>-<writer>) before the pointer can name it,
+ * so git gc never removes it. The draft itself is held by refs/concord/draft,
+ * which only ever moves forward to the draft the database names; a pin is
+ * dropped once that ref holds its commit, by its writer if its advance is
+ * refused, or, if its writer never finished, once it is reclaimed (see
+ * prunePins). So pins never pile up. `sync` (idempotent; run at start-up, after
  * every advance, and by every read that finds git out of line) brings the
  * branch, the release tags (from the published releases' records) and the
  * checked-out files in line with the database. Reads of content go to git
@@ -64,6 +66,11 @@ function git(dir: string, args: string[], env: Record<string, string> = {}, opts
 const graphCache = new Map<string, OntologyGraph>();
 const headKey = (project: Pick<OntologyProject, 'slug'>) => `draft-head:${project.slug}`;
 const PIN = 'refs/concord/commits/';
+/** Holds the working draft (and so all its history) for git: moved only forward, to the database's draft. */
+const DRAFT_REF = 'refs/concord/draft';
+/** A pin this old whose commit never became the draft belongs to a writer that died or stalled; it is reclaimed. */
+export const PIN_GRACE_MS = 10 * 60 * 1000;
+const revokedKey = (writer: string) => `pin-revoked:${writer}`;
 const syncKey = (project: Pick<OntologyProject, 'slug'>) => `git-sync:${project.slug}`;
 /** A sync that hasn't shown it is alive for this long is presumed dead, and its lease can be taken over. */
 export const SYNC_LEASE_MS = 30_000;
@@ -209,8 +216,9 @@ export const ontologyStore = {
   /**
    * Makes `commit` the working draft if it is still `base`, together with
    * `record` (synchronous database writes, which can throw to refuse), in one
-   * transaction. Throws 409 if the draft has moved. With commit === base it
-   * still checks and records.
+   * transaction. Throws 409 if the draft has moved, or if this writer took so
+   * long that its pin was reclaimed. With commit === base it still checks and
+   * records.
    */
   advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => void): void {
     const dir = repoDir(project);
@@ -222,20 +230,24 @@ export const ontologyStore = {
         throw new Error(`${commit} does not build on ${base}`);
       }
     }
-    // Pinned (by a ref only this writer uses) before the database can point at it; unpinned again if it doesn't.
-    const pin = `${PIN}${commit}-${randomUUID()}`;
-    git(dir, ['update-ref', pin, commit]);
+    // A new commit is pinned (by a ref only this writer uses) before the database can point at it, and
+    // unpinned again if it doesn't. The draft (commit === base) is already held.
+    const writer = randomUUID();
+    const pin = commit === base ? undefined : `${PIN}${commit}-${Date.now()}-${writer}`;
+    if (pin) git(dir, ['update-ref', pin, commit]);
     try {
       transaction(() => {
         if (this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
+        // Reclaiming a pin is recorded in the database first (see prunePins), so either this sees it, or the reclaimer sees this.
+        if (pin && get('kv', revokedKey(writer))) throw new HttpError(409, 'This change took too long to record, so nothing was committed. Try again.');
         record?.(commit);
         put('kv', { id: headKey(project), sha: commit });
       });
     } catch (err) {
       try {
-        git(dir, ['update-ref', '-d', pin]);
+        if (pin) git(dir, ['update-ref', '-d', pin]);
       } catch {
-        /* left over: harmless */
+        /* reclaimed later */
       }
       throw err;
     }
@@ -316,19 +328,55 @@ export const ontologyStore = {
   },
 
   /**
-   * Drops the pins that are provably unneeded: those on strict ancestors of the
-   * draft the database names now. The draft's own pins are kept, so it (and
-   * through it every ancestor) stays reachable whatever any branch says. The
-   * database's draft only ever moves to descendants, so this holds however
-   * stale the caller is. Pins of commits that never became the draft are left
-   * to the writer that made them, which may still be about to use them.
+   * Moves refs/concord/draft forward to the database's draft, then drops every
+   * pin it now holds, and reclaims pins whose writer never finished.
+   *
+   * The ref only moves forward (to a descendant, compare-and-swapped), so
+   * however stale the caller, it holds only commits the draft has held, and
+   * dropping their pins is safe. A pin outside it that is older than
+   * PIN_GRACE_MS is reclaimed in a database transaction that first checks the
+   * draft still doesn't include its commit and records the reclaim, which its
+   * writer checks in its own transaction: so either the writer recorded its
+   * commit first (and it is kept), or it never will.
    */
   prunePins(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
+    const has = (ancestor: string, of: string) => {
+      try {
+        git(dir, ['merge-base', '--is-ancestor', ancestor, of]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const head = this.head(project);
-    for (const line of git(dir, ['for-each-ref', `--merged=${head}`, '--format=%(objectname) %(refname)', PIN]).split('\n').filter(Boolean)) {
+    let draft = '';
+    try {
+      draft = git(dir, ['rev-parse', '-q', '--verify', `${DRAFT_REF}^{commit}`]);
+    } catch {
+      /* not set yet */
+    }
+    if (draft !== head && (!draft || has(draft, head))) {
+      git(dir, ['update-ref', '-m', 'concord: working draft', DRAFT_REF, head, draft]);
+      draft = head;
+    }
+    if (!draft) return;
+    const held = new Set(git(dir, ['for-each-ref', `--merged=${draft}`, '--format=%(refname)', PIN]).split('\n').filter(Boolean));
+    for (const line of git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', PIN]).split('\n').filter(Boolean)) {
       const [sha, ref] = line.split(' ');
-      if (sha !== head) git(dir, ['update-ref', '-d', ref, sha]);
+      if (!held.has(ref)) {
+        // <sha>-<time>-<writer>; pins from before had no time, and no writer still running can own one.
+        const [, at, writer] = /^[0-9a-f]+-(\d+)-(.+)$/.exec(ref.slice(PIN.length)) ?? [];
+        if (at && Date.now() - Number(at) < PIN_GRACE_MS) continue;
+        const reclaimed = transaction(() => {
+          const now = this.head(project);
+          if (now === sha || has(sha, now)) return false;
+          if (writer) put('kv', { id: revokedKey(writer), at: new Date().toISOString() });
+          return true;
+        });
+        if (!reclaimed) continue;
+      }
+      git(dir, ['update-ref', '-d', ref, sha]);
     }
   },
 
