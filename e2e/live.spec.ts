@@ -46,7 +46,7 @@ test.describe('with the backend', () => {
     }
   });
 
-  test('the Query tab loads sparq (WebAssembly) and the Formats tab is highlighted', async ({ page }) => {
+  test('the Query tab loads sparq (WebAssembly), the query assistant answers, and Source is highlighted', async ({ page }) => {
     await page.goto('/login');
     await page.getByRole('button', { name: 'Try the demo' }).click();
     await expect(page).toHaveURL(/\/alpha$/);
@@ -57,6 +57,13 @@ test.describe('with the backend', () => {
     expect((await wasm).headers()['content-type']).toContain('application/wasm');
     await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Run', exact: true }).click();
+    await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
+    // The query assistant answers through the backend, and its query runs here when asked.
+    await page.getByTestId('query-suggestions').getByRole('button').first().click();
+    await expect(page.getByTestId('query-chat').getByTestId('chat-message-assistant')).toHaveCount(2, { timeout: 60_000 });
+    await expect(page.getByLabel('Run against')).toHaveValue(/data|ontology/);
+    // It runs only once the person presses Run.
+    await page.getByTestId('query-run-prompt').getByRole('button', { name: 'Run this query' }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
     await page.goto(`/o/${demo.id}/source?format=turtle`);
     await expect(page.getByTestId('source-code').locator('.tok-iri').first()).toBeVisible();

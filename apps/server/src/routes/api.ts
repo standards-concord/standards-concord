@@ -52,6 +52,7 @@ import {
   workingValidation,
 } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
+import { admitQueryChat, boundedQueryChatRequest, queryChat } from '../services/queryChat.js';
 import { PERSONAS } from '../services/personas.js';
 import * as releases from '../services/releases.js';
 import * as requirements from '../services/requirements.js';
@@ -263,6 +264,23 @@ export function apiRouter(): Router {
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
     res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
+  });
+
+  // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.
+  r.post('/ontologies/:id/query-chat', async (req, res) => {
+    const user = requireUser(req);
+    // The page says whose conversation this is; another account signed in meanwhile never receives it.
+    if (typeof req.body?.account === 'string' && req.body.account !== user.id) throw new HttpError(409, 'You’re signed in as someone else now, so this conversation wasn’t sent. Reload the page.');
+    const p = await project(req);
+    const body = boundedQueryChatRequest(req.body);
+    const gate = await admitQueryChat(user.id, p.id, !!user.isPlatformAdmin || (await rolesFor(p.id, user.id)).length > 0);
+    try {
+      const graph = await ontologyStore.at(p, undefined);
+      const answer = await queryChat(graph, body, { useClaude: gate.useClaude, onClaude: gate.spend });
+      res.json({ ...answer, ...(answer.simulated ? { offlineReason: gate.offlineReason ?? 'unavailable' } : {}) });
+    } finally {
+      await gate.done();
+    }
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {

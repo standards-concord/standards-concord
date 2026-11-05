@@ -23,6 +23,8 @@ export interface JsonCall<T> {
   fallback: () => T | Promise<T>;
   maxTokens?: number;
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Called just before the request goes to the model: after the spending limit admitted it, never when the fallback answers without one. */
+  onDispatch?: () => void;
 }
 
 export interface TextCall {
@@ -62,6 +64,7 @@ export const llm = {
     if (!budget) return { value: await call.fallback(), simulated: true };
     let cost: number | undefined;
     try {
+      call.onDispatch?.();
       const response = await anthropic().messages.parse({
         model: config.llm.model,
         max_tokens: maxTokens,
