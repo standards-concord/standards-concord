@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -86,11 +86,19 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
         if (req.method === 'POST' && path === '/git/commits')
           return send(201, { sha: git(['commit-tree', body.tree, ...body.parents.flatMap((p: string) => ['-p', p]), '-F', '-'], body.message, { ...personEnv('AUTHOR', body.author), ...personEnv('COMMITTER', body.committer) }) });
         if (req.method === 'POST' && path === '/git/tags') {
-          // git tag makes the object and a ref; GitHub makes only the object (the ref is a separate update).
-          git(['tag', '-a', body.tag, '-m', body.message, body.object], undefined, { GIT_COMMITTER_NAME: body.tagger.name, GIT_COMMITTER_EMAIL: body.tagger.email, GIT_COMMITTER_DATE: body.tagger.date });
-          const made = sha(`refs/tags/${body.tag}`)!;
-          git(['update-ref', '-d', `refs/tags/${body.tag}`]);
-          return send(201, { sha: made });
+          // git tag makes the object and a ref; GitHub makes only the object (the ref is a separate update). So git
+          // makes it in a scratch repository borrowing this one's objects, and the object is copied back.
+          const scratch = mkdtempSync(join(tmpdir(), 'standin-tag-'));
+          try {
+            execFileSync('git', ['init', '-q', '--bare', scratch], { stdio: 'pipe' });
+            writeFileSync(join(scratch, 'objects/info/alternates'), `${join(bare, 'objects')}\n`);
+            const env = { ...process.env, GIT_COMMITTER_NAME: body.tagger.name, GIT_COMMITTER_EMAIL: body.tagger.email, GIT_COMMITTER_DATE: body.tagger.date };
+            execFileSync('git', ['--git-dir', scratch, 'tag', '-a', body.tag, '-m', body.message, body.object], { env, stdio: 'pipe' });
+            const raw = execFileSync('git', ['--git-dir', scratch, 'cat-file', 'tag', `refs/tags/${body.tag}`], { stdio: 'pipe' });
+            return send(201, { sha: git(['hash-object', '-t', 'tag', '-w', '--stdin'], raw) });
+          } finally {
+            rmSync(scratch, { recursive: true, force: true });
+          }
         }
         if (req.method === 'POST' && path === '/git/refs') {
           if (opts.refsDown?.()) return send(503, { message: 'Service unavailable' });
@@ -140,6 +148,11 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
 let n = 0;
 const uniqueSuffix = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const unlimited = { spend: async () => true, checkpoint: async () => undefined };
+/** An hour's writes, as the outbox counts them: a grant fails if it would leave fewer than `keep`. */
+const allowance = (n: number) => {
+  const a = { left: n, spend: async (keep: number) => (a.left - keep > 0 ? (a.left--, true) : false) };
+  return a;
+};
 
 /** A history in the database: drafts, two releases, and a fork merged back in. */
 async function history(start = 1_762_300_000) {
@@ -189,8 +202,8 @@ describe('GitHub publisher', () => {
     const { r2, releases, firstLine } = await history();
     const gh = gitHubStandIn();
     const api = await gh.listen();
-    let budget = 12;
-    const hooks = { ...unlimited, api, spend: async () => budget-- > 0 };
+    const budget = allowance(12);
+    const hooks = { ...unlimited, api, spend: budget.spend };
     try {
       await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, hooks)).rejects.toBeInstanceOf(PublishPaused);
       const partial = gh.sha('refs/heads/main');
@@ -199,7 +212,7 @@ describe('GitHub publisher', () => {
       expect(partial).not.toBe(r2);
       expect(gh.sha('refs/tags/v2.0.0')).toBeUndefined();
       for (let i = 0; i < 10 && gh.sha('refs/tags/v2.0.0') === undefined; i++) {
-        budget = 12;
+        budget.left = 12;
         await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, hooks).catch((err) => {
           if (!(err instanceof PublishPaused)) throw err;
         });
@@ -344,9 +357,8 @@ describe('GitHub publisher, when refs move under it', () => {
     let racing: ReturnType<typeof gitHubStandIn> | undefined;
     const { gh, api } = await copyOf(first.gh, { beforeRefUpdate: () => racing!.git(['update-ref', 'refs/heads/main', removed]) });
     racing = gh;
-    let budget = 8;
     try {
-      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: async () => budget-- > 0 })).rejects.toBeInstanceOf(PublishRefused);
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(8).spend })).rejects.toBeInstanceOf(PublishRefused);
       expect(gh.sha('refs/heads/main')).toBe(removed);
     } finally {
       gh.close();
@@ -434,6 +446,55 @@ describe('GitHub publisher, when refs move under it', () => {
     }
   });
 
+  it('checks publishing is allowed before the very first upload', async () => {
+    // r2 review of #83: the first upload went before any checkpoint, after the reads and the walk through history.
+    const { r2, releases } = await history();
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    try {
+      const stop = async () => {
+        throw new Error('withdrawn meanwhile');
+      };
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, checkpoint: stop })).rejects.toThrow('withdrawn meanwhile');
+      expect(gh.calls.filter((c) => c.startsWith('POST'))).toEqual([]);
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('never moves main forward again after someone moved it back behind where Concord confirmed it', async () => {
+    // r2/r3 review of #83: between runs (a pause at the tags, say) an ancestor looks like history not yet sent.
+    const { r1, r2, releases } = await history();
+    const gh = gitHubStandIn({ refsDown: () => true });
+    const api = await gh.listen();
+    let confirmed: string | undefined;
+    const confirm = async (main: string) => void (confirmed = main);
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, confirm })).rejects.toBeInstanceOf(PublishPaused);
+      expect(confirmed).toBe(r2);
+      gh.git(['update-ref', 'refs/heads/main', r1]); // someone moves main back
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases, confirmedMain: confirmed }, { ...unlimited, api, confirm })).rejects.toThrow(/was moved back .* publishing again would undo that/);
+      expect(gh.sha('refs/heads/main')).toBe(r1);
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('creates each tag’s ref straight after its object, so a small allowance still makes progress', async () => {
+    // r3 review of #83: every tag object went first, so an allowance that ran out before the refs made none.
+    const { r2, releases } = await history();
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    try {
+      await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases: [] }, { ...unlimited, api });
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(2).spend })).rejects.toBeInstanceOf(PublishPaused);
+      expect(gh.sha('refs/tags/v1.0.0')).toBe(releaseTag(releases[0]).sha);
+      expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(2).spend })).toEqual({ commits: 0, tags: 1 });
+    } finally {
+      gh.close();
+    }
+  });
+
   it('keeps its progress when the writes run out at the tags, so the next run only makes the tags', async () => {
     // r1 review of #83: the pause came after the commits but before main moved, so every run sent them all again.
     const { r2, releases } = await history();
@@ -444,10 +505,9 @@ describe('GitHub publisher, when refs move under it', () => {
     count.close();
     const gh = gitHubStandIn();
     const api = await gh.listen();
-    // Every object, plus the write held for the ref update: none left for a tag.
-    let budget = objects + 1;
+    // Every object, plus the write uploads leave for moving main: none left for a tag.
     try {
-      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: async () => budget-- > 0 })).rejects.toBeInstanceOf(PublishPaused);
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(objects + 1).spend })).rejects.toBeInstanceOf(PublishPaused);
       expect(gh.sha('refs/heads/main')).toBe(r2);
       gh.calls.length = 0;
       expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).toEqual({ commits: 0, tags: 2 });
@@ -589,6 +649,33 @@ describe('GitHub publishing outbox', () => {
     }
   });
 
+  it('lets withdrawing a use case that was never public block nothing', async () => {
+    // r2 review of #83: withdrawing a private draft blocked publishing for good.
+    const { project } = await setUp();
+    const author = await createUser({ name: `Outbox author ${uniqueSuffix()}`, provider: 'github', subject: `outbox-${uniqueSuffix()}` });
+    const draft = await createUseCase(project, author, { source: 'form', visibility: 'private', status: 'draft', sections: { name: 'Never shared' } });
+    await withdrawUseCase(draft, author);
+    expect(await get('kv', `github-publish-block:${project.id}`)).toBeUndefined();
+  });
+
+  it('quarantines the next release when main was moved back on GitHub after it was published', async () => {
+    const { project, releases } = await setUp();
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[0]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect(await githubPublishJob(project.id)).toMatchObject({ status: 'done', githubMain: releases[0].commit });
+      gh.git(['update-ref', 'refs/heads/main', (await readCommit(releases[0].commit!)).parents[0]]);
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect(await githubPublishJob(project.id)).toMatchObject({ status: 'quarantined', reason: expect.stringMatching(/moved back/) });
+      expect(gh.sha('refs/tags/v2.0.0')).toBeUndefined();
+    } finally {
+      gh.close();
+    }
+  });
+
   it('gives the releases no link, and leaves the job alone, when its lease passed to another worker before it finished', async () => {
     // r1 review of #83: the links were written before the lease was checked, by a worker that might have lost it.
     const { project, releases } = await setUp();
@@ -628,10 +715,10 @@ describe('GitHub publishing outbox', () => {
       await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
       await withToken(() => runGitHubPublish(project.id, { api }));
       expect((await githubPublishJob(project.id))!.status).toBe('done');
-      // The first write also took one for moving main, which then used it.
+      // Moving main, near the end, counts in the hour it was made in too (r2 review of #83).
       const posts = gh.calls.filter((c) => c.startsWith('POST')).length;
-      expect(await used('2031-03-01T10')).toBe(4 + 1);
-      expect(await used('2031-03-01T11')).toBe(posts - 4 - 1);
+      expect(await used('2031-03-01T10')).toBe(4);
+      expect(await used('2031-03-01T11')).toBe(posts - 4);
     } finally {
       vi.useRealTimers();
       gh.close();

@@ -20,12 +20,13 @@ import { onNoLongerPublic } from './useCases.js';
  *   to the same repository, the token is still set, nothing is held for a steward's approval, the history was made
  *   under the approval rules, and no use case stopped being public while some of its history wasn't on GitHub yet.
  *   If not, the job is cancelled.
- * - A use case withdrawn (or made non-public) while a published release isn't on GitHub yet blocks publishing that
- *   ontology for good: the release's files (its use cases, its notes) were written with the use case's consent then,
- *   and history can't change. The block is recorded in the withdrawal's own transaction; a write already on its way
- *   to GitHub then is the only one that still goes (each write is checked first). Once a job is done every release
- *   is on GitHub, and a release made later is prepared under the consent lock without the use case, so a
- *   withdrawal then blocks nothing (as with the git store, what was already on GitHub can't be recalled).
+ * - A use case that was public, withdrawn (or made non-public) while a published release isn't on GitHub yet,
+ *   blocks publishing that ontology for good: the release's files (its use cases, its notes) were written with the
+ *   use case's consent then, and history can't change. The block is recorded in the withdrawal's own transaction; a
+ *   write already on its way to GitHub then is the only one that still goes (each write is checked first). Once a
+ *   job is done every release is on GitHub, and a release made later is prepared under the consent lock without the
+ *   use case, so a withdrawal then blocks nothing (as with the git store, what was already on GitHub can't be
+ *   recalled).
  * - Writes are counted against an hourly budget shared by every worker and ontology (one token), and GitHub's own
  *   rate limits set when to try again. Something publishing again won't fix quarantines the job, with its reason,
  *   until a newer release (or an operator) starts it again; other ontologies carry on.
@@ -47,6 +48,8 @@ export interface GitHubPublishJob {
   reason?: string;
   notBefore?: number;
   lease?: { token: string; until: number };
+  /** Where main was last confirmed on GitHub (in `repo`): found behind it, someone moved it back. */
+  githubMain?: string;
   updatedAt: string;
 }
 
@@ -79,6 +82,7 @@ export async function enqueueGitHubPublish(project: OntologyProject, release: Pi
       // finishes only the older target (seq), so the job stays pending for this one.
       status: 'pending',
       lease: job?.lease,
+      githubMain: sameRepo ? job.githubMain : undefined,
       updatedAt: now,
     },
     OUTBOX,
@@ -94,6 +98,9 @@ interface PublishBlock {
 
 // Runs in the transaction that makes the use case non-public, so the block exists exactly when the withdrawal does.
 onNoLongerPublic(async (u: UseCase) => {
+  // Only a use case that was public can be in a release (its public number is kept once given): withdrawing one
+  // that was only ever private or group-only blocks nothing.
+  if (!u.number) return;
   const [job, project] = await Promise.all([get<GitHubPublishJob>('kv', jobId(u.ontologyId)), get<OntologyProject>('ontologies', u.ontologyId)]);
   const allSent = job?.status === 'done' && job.repo === project?.github?.repo;
   if (allSent || (await get<PublishBlock>('kv', blockId(u.ontologyId)))) return;
@@ -175,8 +182,14 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
       if (r.status === 'published' && r.commit && r.publishedAt && (r.commit === job.commit || (await isAncestor(r.commit, job.commit)))) releases.push(r);
     releases.sort((a, b) => a.version.localeCompare(b.version));
     // Each write counts against the hour it is made in.
-    const spend = async () => await reserveCounters([{ id: `github-writes:${new Date().toISOString().slice(0, 13)}`, max: WRITES_PER_HOUR }], OUTBOX);
-    await publishToGitHub({ repo: job.repo, token: config.github.publishToken!, commit: job.commit, releases }, { api: opts.api ?? config.github.publishApi, every: opts.every, checkpoint, spend });
+    const spend = async (keep: number) => await reserveCounters([{ id: `github-writes:${new Date().toISOString().slice(0, 13)}`, max: WRITES_PER_HOUR - keep }], OUTBOX);
+    const confirm = async (main: string) => {
+      if (!(await whileHeld(id, token, (j) => ({ ...j, githubMain: main })))) throw new LeaseLost('another worker took over this job');
+    };
+    await publishToGitHub(
+      { repo: job.repo, token: config.github.publishToken!, commit: job.commit, confirmedMain: job.githubMain, releases },
+      { api: opts.api ?? config.github.publishApi, every: opts.every, checkpoint, spend, confirm },
+    );
     // Done: in one transaction, and only while this worker still holds the job, give each release its link (on the
     // release as it is now) and close the job, unless a newer target came.
     const closed = await whileHeld(id, token, async (j) => {
@@ -184,7 +197,8 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
         const r = await get<Release>('releases', releaseId);
         if (r?.status === 'published' && !r.githubUrl) await put('releases', { ...r, githubUrl: `https://github.com/${job.repo}/releases/tag/v${r.version}` }, r.ontologyId);
       }
-      return j.seq === job.seq ? { ...j, status: 'done', reason: undefined, notBefore: undefined, lease: undefined, releaseIds: [] } : { ...j, releaseIds: j.releaseIds.filter((r) => !job.releaseIds.includes(r)), lease: undefined };
+      const confirmed = { ...j, githubMain: job.commit };
+      return j.seq === job.seq ? { ...confirmed, status: 'done', reason: undefined, notBefore: undefined, lease: undefined, releaseIds: [] } : { ...confirmed, releaseIds: confirmed.releaseIds.filter((r) => !job.releaseIds.includes(r)), lease: undefined };
     });
     if (!closed) throw new LeaseLost('another worker took over this job');
   } catch (err) {
