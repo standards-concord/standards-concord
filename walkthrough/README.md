@@ -1,31 +1,39 @@
-# Narrated walkthrough video
+# Narrated walkthrough videos
 
-Records a narrated tour of Concord as an MP4, from an editable script: about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
+Records two narrated videos of Concord as MP4s, each from an editable script:
+
+- **The tour** ([narration.md](narration.md), `concord-walkthrough.*`): what Concord is for, how a standard grows into a release, and building an app on it with a coding agent.
+- **How to take part** ([feedback.md](feedback.md), `concord-feedback.*`): for alpha testers. The welcome page, the guided walkthrough, simulating the others, and how to give feedback. About three minutes.
+
+Both are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)).
+
+The tour is about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
-pnpm walkthrough                        # voice from the environment (see below)
+pnpm walkthrough                        # both videos, voice from the environment (see below)
+pnpm walkthrough --video feedback       # one video: tour or feedback
 pnpm walkthrough --voice elevenlabs     # asks for ELEVENLABS_API_KEY without echoing it, if unset
 pnpm walkthrough --draft                # no voice: captions only, for checking pacing and visuals
-pnpm walkthrough --only intro,goals     # some scenes only
+pnpm walkthrough --only intro,goals     # some scenes only (of the video that has them)
 pnpm walkthrough --strict               # fail on any warning: UI drift, a narrated outcome not shown, a page or request error
 pnpm walkthrough --publish              # a release video: strict, no stand-ins, no outside requests, a real voice
 ```
 
-It boots its own offline Concord (fresh demo data, simulated AI, no FAIR lookups on the internet, a clock fixed to start at 23 November 2026, seeded ids) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Output lands in `walkthrough/out/`:
+It boots its own offline Concord (fresh demo data, simulated AI, no FAIR lookups on the internet, a clock fixed to start at 23 November 2026, seeded ids) on ports 8798 and 5184, so it doesn't touch a running `pnpm dev`. Each video is recorded in its own run, one after the other. That Concord serves `walkthrough/out/` as its videos (`MEDIA_DIR`), so the feedback video's shot of the welcome page shows the tour just recorded. Output lands in `walkthrough/out/`, once per video (`concord-walkthrough` and `concord-feedback`):
 
 | File | What |
 | --- | --- |
-| `concord-walkthrough.mp4` | 1920×1080, 30 fps H.264, AAC narration, soft English captions, a chapter per scene |
-| `concord-walkthrough.vtt` | The captions, for YouTube or a web player |
-| `transcript.md` | The narration as text, one section per chapter, for accessibility and review |
-| `chapters.txt` | Chapter timestamps in YouTube's description format |
-| `report.json` | Voice, scenes recorded and skipped, platform features found, stand-ins used, blocked outside requests, caption timing source, warnings |
+| `<name>.mp4` | 1920×1080, 30 fps H.264, AAC narration, soft English captions, a chapter per scene |
+| `<name>.vtt` | The captions, for YouTube or a web player |
+| `<name>.transcript.md` | The narration as text, one section per chapter, for accessibility and review |
+| `<name>.chapters.txt` | Chapter timestamps in YouTube's description format |
+| `<name>.report.json` | Voice, scenes recorded and skipped, platform features found, stand-ins used, blocked outside requests, caption timing source, warnings |
 
 Needs Node 22.13+, pnpm, ffmpeg, and Playwright's Chromium (`pnpm exec playwright install chromium`). For the reasoner to show as passing, run `./toolkit/setup.sh` first (HermiT needs Java).
 
 ## Changing the script
 
-The words are in [narration.md](narration.md); what happens on screen is in [scenes.ts](scenes.ts).
+The words are in [narration.md](narration.md) and [feedback.md](feedback.md); what happens on screen is in [scenes.ts](scenes.ts).
 
 ```md
 ## Exploring a standard {#explore}
@@ -36,9 +44,12 @@ Let's look inside. The Browse page shows the classes and their relationships…
 
 - `## Title {#id}` starts a scene and a video chapter. `requires=forks,jsClasses` records the scene only when the hub has those features; `unless=forks` marks a fallback.
 - Each paragraph is one narration clip. `[do: action args]` above a paragraph runs as it starts, while it's spoken; `[then: action]` above a paragraph runs after it's spoken; `[pause: 1.5]` holds in silence.
+- To time an action to a word, put `{@action args}` just before the word in the paragraph: it runs when the voice reaches that word (from ElevenLabs' character timestamps; other voices use an estimate from text length), after the paragraph's `[do:]` actions. Marks are neither spoken nor captioned, so adding or moving one never re-voices anything. A mark whose action starts more than 0.75 s after its word is a warning (so `--publish` fails); `report.json` lists every mark's lateness under `sync`.
+- Each paragraph is voiced and placed on its own, at the moment its step starts, so timing never drifts across a video. Frames are placed at the time Chromium painted them, not when they reached the recorder, so the picture doesn't lag the voice on a busy machine (`report.json` → `frameLatency`).
 - `[if: jsClasses]` above a paragraph keeps it only when the hub has that feature, and `[if: !jsClasses]` only when it doesn't. The intro and outro use it so they promise only what the recorded scenes show. `{minutes}` becomes the estimated length of the recorded scenes, in words.
 - The next paragraph starts once both the narration and the actions have finished, so timing takes care of itself: rewrite a sentence and the video re-times around it.
-- Voices are cached in `walkthrough/.cache/voice/` by their exact words, so after an edit only the changed paragraphs are sent to the voice service.
+- Voices are cached in `walkthrough/.cache/voice/` by their exact words (not their neighbours'), so after an edit only the changed paragraphs are sent to the voice service. Release runs restore the narration kept with the last release, so a release re-voices only what changed.
+- Voice characters are limited, and ElevenLabs flags bursts of use. A run with a paid voice may send at most `VOICE_CHAR_BUDGET` characters (or `--voice-budget`; default 2,500, 0 means no limit), across all the videos it records and counting every retry. It works out first what each video would send and refuses before sending anything if the total is over; a send that would still pass the budget (a retry, or a cached clip that went missing) is refused before it goes. With ElevenLabs it also reads the account's usage first (even with no run budget) and refuses unless what's left covers the total plus 10%. If the usage can't be read because of an outage or an odd reply, it refuses. Only a key that isn't allowed to read usage goes ahead, under the run budget alone, and says so in the log. Re-record sparingly, and keep script edits for a release small. For a first or full recording (both scripts are about 8,000 characters), run the workflow by hand with a larger budget and the release tag to attach to.
 - Words the voice might say wrongly (SHACL, SPARQL, ODI…) go in [lexicon.json](lexicon.json). Captions keep the written spelling.
 - Captions are split into short phrases (at most 84 characters, broken at commas where possible). With ElevenLabs they are timed from the voice's own character timestamps; other voices, or an ElevenLabs reply whose timestamps are missing or don't match the text, fall back to an estimate from text length (`report.json` says which).
 - `pnpm walkthrough --list-actions` lists the actions. To add one, add a function to `actions` in scenes.ts. Use the `Director` helpers (`click`, `type`, `highlight`, `chapter`…): they move a visible pointer and fail softly, so a renamed button gives a warning, not a ruined recording.
@@ -52,7 +63,7 @@ The script is written to be listened to, so the voice matters. In order of prefe
 
 | `--voice` | Service | Key | Notes |
 | --- | --- | --- | --- |
-| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording is about 8,000 characters, within the Starter plan. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
+| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording of both videos is about 8,000 characters, so re-voice only what changed. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
 | `openai` | OpenAI `gpt-4o-mini-tts` | `OPENAI_API_KEY` | Very good, and steerable with a style brief (`DEFAULT_STYLE` in lib/tts.ts). Default voice `sage`. |
 | `google` | Google Cloud Chirp 3 HD | `GOOGLE_TTS_API_KEY`, or `GOOGLE_TTS_USE_GCLOUD=1` | Good, and cheapest. Default voice `en-GB-Chirp3-HD-Charon`. |
 | `say` | macOS `say` | none | Quick local drafts only. |
@@ -86,7 +97,9 @@ Video frames are counted against the clock, so a slow encoder never shifts the t
 
 ## Releases
 
-[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records the video when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches the MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request and nothing is uploaded.
+[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records both videos when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in either video and nothing is uploaded.
+
+- The welcome page (`/welcome`) plays the videos of the newest release that has them. The API server reads that release from GitHub (`MEDIA_REPO`, default `standards-concord/standards-concord`), downloads each file once per release into its data directory, and serves it from `/api/media/`, so captions and seeking work from Concord's own origin. Set `MEDIA_DIR` to serve a local folder instead, such as `walkthrough/out/` after a recording. Until a release has the videos, the page says they're on their way.
 
 - Add `ELEVENLABS_API_KEY` as a repository secret for the narration. Without a voice key, release runs are skipped with a notice. Set the repository variable `ELEVENLABS_OUTPUT_FORMAT` to change the audio format.
 - The recording job has read-only access and doesn't keep the checkout's credentials; a separate job with write access only attaches the files.

@@ -98,8 +98,8 @@ export function LoginPage() {
           </Card>
         )}
 
-        <button onClick={() => nav('/alpha')} className="mt-5 inline-flex items-center gap-1.5 text-sm text-accent hover:underline">
-          <Compass className="size-4" /> Alpha tester? Start the guided walkthrough
+        <button onClick={() => nav('/welcome')} className="mt-5 inline-flex items-center gap-1.5 text-sm text-accent hover:underline">
+          <Compass className="size-4" /> Alpha tester? Start here
         </button>
       </div>
     </div>

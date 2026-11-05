@@ -1,0 +1,120 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { applyRunBudget, DEFAULT_VOICE_BUDGET, parseBudget, recordVideos, videoEnv } from '../lib/budget.ts';
+import { Voice } from '../lib/tts.ts';
+
+describe('the run budget', () => {
+  beforeEach(() => {
+    process.env.ELEVENLABS_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    delete process.env.ELEVENLABS_API_KEY;
+  });
+
+  // Local runs used to have no limit unless one was set.
+  it('defaults to 2,500 characters, with 0 for no limit', () => {
+    expect(DEFAULT_VOICE_BUDGET).toBe(2500);
+    expect(parseBudget(undefined)).toBe(2500);
+    expect(parseBudget('')).toBe(2500);
+    expect(parseBudget('4000')).toBe(4000);
+    expect(parseBudget('0')).toBeUndefined();
+    expect(() => parseBudget('lots')).toThrow(/whole number/);
+    expect(() => parseBudget('-1')).toThrow(/whole number/);
+  });
+
+  // Each video used to start with a fresh budget, and the second video's refusal came
+  // after the first had already sent its narration.
+  it('plans every video and refuses before recording any if the total is over', async () => {
+    const recorded: string[] = [];
+    const costs: Record<string, number> = { tour: 2000, feedback: 1000 };
+    await expect(
+      recordVideos({
+        videos: ['tour', 'feedback'],
+        paid: true,
+        budget: 2500,
+        plan: async (v, file) => writeFileSync(file, JSON.stringify({ cost: costs[v] })),
+        record: async (v) => void recorded.push(v),
+      }),
+    ).rejects.toThrow(/need 3,000 new characters.*budget of 2,500\. Nothing was sent/);
+    expect(recorded).toEqual([]);
+  });
+
+  it('records every video against one shared ledger', async () => {
+    const cache = mkdtempSync(path.join(os.tmpdir(), 'voice-'));
+    const seen: { video: string; spentBefore: number }[] = [];
+    await recordVideos({
+      videos: ['tour', 'feedback'],
+      paid: true,
+      budget: 2500,
+      plan: async (_v, file) => writeFileSync(file, JSON.stringify({ cost: 1000 })),
+      // What a video's process does: its voice, under the run's budget, then a send.
+      record: async (video, ledger) => {
+        const voice = applyRunBudget(new Voice({ provider: 'elevenlabs' }, cache), videoEnv({}, ledger), 2500);
+        seen.push({ video, spentBefore: voice.spent });
+        (voice as any).charge(1000);
+      },
+    });
+    expect(seen).toEqual([
+      { video: 'tour', spentBefore: 0 },
+      { video: 'feedback', spentBefore: 1000 },
+    ]);
+  });
+
+  it('puts each video’s voice under the run’s budget', () => {
+    const voice = applyRunBudget(new Voice({ provider: 'elevenlabs' }, mkdtempSync(path.join(os.tmpdir(), 'voice-'))), {}, 1000);
+    expect(voice.budget).toBe(1000);
+    expect(() => voice.checkBudget([{ text: 'x'.repeat(1500) }])).toThrow(/budget of 1,000/);
+  });
+
+  it('checks the account has enough characters left before recording any video', async () => {
+    const recorded: string[] = [];
+    let asked = 0;
+    await expect(
+      recordVideos({
+        videos: ['tour', 'feedback'],
+        paid: true,
+        budget: 9000,
+        plan: async (_v, file) => writeFileSync(file, JSON.stringify({ cost: 4000 })),
+        quota: async (total) => {
+          asked = total;
+          throw new Error('not enough left');
+        },
+        record: async (v) => void recorded.push(v),
+      }),
+    ).rejects.toThrow(/not enough left/);
+    expect(asked).toBe(8000);
+    expect(recorded).toEqual([]);
+  });
+
+  it('does not plan for free voices', async () => {
+    const planned: string[] = [];
+    const recorded: string[] = [];
+    await recordVideos({ videos: ['tour'], paid: false, budget: 2500, plan: async (v) => void planned.push(v), record: async (v) => void recorded.push(v) });
+    expect(planned).toEqual([]);
+    expect(recorded).toEqual(['tour']);
+  });
+
+  // With no run budget (0), the account check used to be skipped too, so the first video
+  // could spend what was left before the second found it wasn't enough.
+  it('still checks the account covers every video when the run has no budget', async () => {
+    const recorded: string[] = [];
+    let asked = 0;
+    await expect(
+      recordVideos({
+        videos: ['tour', 'feedback'],
+        paid: true,
+        budget: undefined,
+        plan: async (_v, file) => writeFileSync(file, JSON.stringify({ cost: 20_000 })),
+        quota: async (total) => {
+          asked = total;
+          throw new Error('not enough left');
+        },
+        record: async (v) => void recorded.push(v),
+      }),
+    ).rejects.toThrow(/not enough left/);
+    expect(asked).toBe(40_000);
+    expect(recorded).toEqual([]);
+  });
+});
