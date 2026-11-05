@@ -42,6 +42,7 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | Key | What it turns on |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Claude for the interviewer, triage, meeting analysis, persona simulation and feedback chat. Without it these use an offline stand-in. |
+| `LLM_DAILY_BUDGET_USD`, `LLM_MONTHLY_BUDGET_USD` | The most Concord spends on Claude per UTC day and month, in dollars (default 5 and 40). Past either, AI features use the offline stand-in until the limit resets. Totals survive restarts and demo resets. |
 | `CONCORD_PROXY_SECRET` | Must equal the Vercel variable of the same name (step 5). Lets the backend trust the domain and visitor IP the Vercel middleware forwards. |
 | `PUBLIC_ORIGINS` | Comma-separated extra origins, such as a domain pointed straight at the backend, that may appear in OAuth metadata and MCP URLs when reached directly. Vercel domains don't need listing when `CONCORD_PROXY_SECRET` is set. |
 | `TRUST_PROXY` | Which proxies' `X-Forwarded-*` headers to believe, in [Express's syntax](https://expressjs.com/en/guide/behind-proxies.html). The default, `loopback, linklocal, uniquelocal`, covers Caddy on the same Docker network. OAuth URLs never come from these headers. |

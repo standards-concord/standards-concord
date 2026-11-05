@@ -45,6 +45,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/mcp` with a personal token: every tool, refusal without a token, revoked token | ✅ | agents |
 | WebID profile (`/people/:id`) | ✅ | account |
 | Google and GitHub sign-in callbacks | 🟡 | security (refuses a missing state). The full round trip needs real OAuth apps: not testable offline |
+| Daily and monthly spending limit on Claude calls (falls back to the offline stand-in when reached; concurrent calls can't overshoot; failed calls refunded; survives the demo clock and demo resets) | 🟡 | Not reachable from the browser: the suite runs with the offline LLM only, and a model can't be switched on per spec. Covered by `apps/server/test/llmBudget.test.ts` against a stand-in Messages API |
 
 ## Roles
 
