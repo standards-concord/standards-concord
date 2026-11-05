@@ -17,6 +17,8 @@ export type Collection =
   | 'interviews'
   | 'meetings'
   | 'changeRequests'
+  | 'publicReports'
+  | 'reportNonces'
   | 'reviews'
   | 'votes'
   | 'releases'
@@ -153,6 +155,20 @@ export function claim<T>(collection: Collection, id: string, field: string, valu
   const doc = JSON.parse(row.data) as Record<string, unknown>;
   delete doc[field];
   return doc as T;
+}
+
+/** Insert a document only if none has its id, in one statement: true if this call inserted it. */
+export function insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): boolean {
+  const r = conn()
+    .prepare('INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(collection, id) DO NOTHING')
+    .run(collection, doc.id, parent ?? null, JSON.stringify(doc), new Date().toISOString());
+  return Number(r.changes) > 0;
+}
+
+/** Delete the documents in a collection whose numeric `field` is at or below `max`. */
+export function removeWhereAtMost(collection: Collection, field: string, max: number): number {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
+  return Number(conn().prepare(`DELETE FROM docs WHERE collection = ? AND json_extract(data, '$.${field}') <= ?`).run(collection, max).changes);
 }
 
 export function clearAll() {
