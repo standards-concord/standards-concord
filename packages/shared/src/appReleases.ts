@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.22.0',
+    date: '2026-11-05',
+    title: 'A new Concord logo',
+    pr: 52,
+    changes: [
+      {
+        id: 'concorde-logo',
+        type: 'feat',
+        title: 'A new Concord logo',
+        detail:
+          'Concord’s mark is now a supersonic plane in two halves that meet, climbing with a slipstream behind it. It sits beside the ODI logo in the ODI look, on its own in the other looks, and (without the slipstream) in the browser tab.',
+        roles: [],
+        ask: 'Does the new logo feel right for Concord? Is it clear at the size it appears in the header?',
+      },
+    ],
+  },
+  {
     version: '0.21.0',
     date: '2026-11-05',
     title: 'OWL reasoning with sparq, also in your browser',
