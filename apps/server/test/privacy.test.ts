@@ -990,7 +990,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('a withdrawal waits while a merge is committing, and a merge waits for a withdrawal (finding 2)', async () => {
     const { id, agent } = await publicCase('Merge Race Author', 'Merge race case');
     const editor = await login('editor', 'Merge Race Editor');
-    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
+    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true }, ops: [addClass('Merge race thing')] });
     // Drafted from a use case, so an editor approves exactly what it publishes before it can merge.
     const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
     await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Merge Race Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
