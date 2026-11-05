@@ -7,6 +7,8 @@ import type { Director } from './director.ts';
 
 type Op = { fn: string; args: unknown[] };
 
+export const SCRIPTED = 'Scripted demonstration: real Concord tool calls; prepared agent responses and code';
+
 const ANIMATED: Record<string, number> = { shell: 1, ask: 1, say: 1 };
 
 export interface DiffRow {
@@ -40,6 +42,8 @@ export class Terminal {
     }
     // Keyboard only in the terminal: hide the pointer.
     await this.d.page.evaluate(() => (window as any).__wt?.cursorVisible(false));
+    // Viewers of the video alone never see the README, so say it on screen.
+    await this.d.label(SCRIPTED);
   }
 
   title(t: string) {

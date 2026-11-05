@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { acquireProcessLock } from './processLock.js';
+import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
 import { processOutstanding } from './services/feedbackIssues.js';
 import { runTick, seedDemo } from './services/simulation.js';
@@ -28,6 +29,12 @@ setInterval(() => {
   runTick().catch((err) => console.warn('[tick]', (err as Error).message));
 }, 60_000).unref();
 void runTick();
+
+// The co-lead bot's calendar: pick up invites to its address, book bots before calls start.
+setInterval(() => {
+  meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+}, 60_000).unref();
+void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
 
 // Public feedback summaries that couldn't be posted straight away (GitHub down, hourly cap, rate limit) are retried.
 setInterval(() => {

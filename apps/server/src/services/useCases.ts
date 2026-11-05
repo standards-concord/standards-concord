@@ -480,7 +480,12 @@ export function visibleActivity(items: ActivityItem[], viewer?: User): ActivityI
     const mtg = a.link?.match(/\/meetings\/([^/?#]+)/)?.[1];
     if (mtg) {
       const m = get<{ ontologyId: string; createdBy?: string }>('meetings', mtg);
-      if (!m || !canSeeMeeting(m, viewer)) return [];
+      if (m && !canSeeMeeting(m, viewer)) return [];
+      // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened
+      // to it (the same rule as meetings.canFacilitate).
+      const facilitates = (u?: User) =>
+        !!u && (!!u.isPlatformAdmin || config.adminEmails.includes(u.email?.toLowerCase() ?? '') || rolesFor(a.ontologyId ?? '', u.id).some((r) => ['owner', 'steward', 'editor'].includes(r)));
+      if (!m && !facilitates(viewer)) return [];
     }
     return [a];
   });

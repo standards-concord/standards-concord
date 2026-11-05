@@ -29,6 +29,11 @@ export class Capture {
   private timer?: NodeJS.Timeout;
   private done?: Promise<void>;
   private stderr = '';
+  /** The most frames' worth of bytes ever queued for ffmpeg at once (it fell behind). */
+  peakBacklogBytes = 0;
+  /** Past this much queued video, give up rather than run the machine out of memory. */
+  static maxBacklogBytes = 1024 * 1024 * 1024;
+  private overrun?: Error;
 
   constructor(
     private readonly page: Page,
@@ -45,7 +50,7 @@ export class Capture {
     const { fps, width, height, quality, crf } = this.opts;
     this.ffmpeg = spawn(
       'ffmpeg',
-      ['-v', 'error', '-y', '-f', 'image2pipe', '-c:v', 'mjpeg', '-framerate', String(fps), '-i', '-', '-vf', `scale=${width}:${height}:flags=lanczos,format=yuv420p`, '-c:v', 'libx264', '-preset', 'medium', '-tune', 'stillimage', '-crf', String(crf), '-r', String(fps), this.out],
+      ['-v', 'error', '-y', '-f', 'image2pipe', '-c:v', 'mjpeg', '-framerate', String(fps), '-i', '-', '-vf', `scale=${width}:${height}:flags=lanczos,format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'stillimage', '-crf', String(crf), '-r', String(fps), this.out],
       { stdio: ['pipe', 'ignore', 'pipe'] },
     );
     this.ffmpeg.stderr!.on('data', (d) => (this.stderr += d));
@@ -72,18 +77,38 @@ export class Capture {
   }
 
   private pump() {
-    if (!this.last || !this.ffmpeg?.stdin?.writable) return;
+    if (this.overrun || !this.last || !this.ffmpeg?.stdin?.writable) return;
+    const stdin = this.ffmpeg.stdin;
     const due = Math.floor(this.now() * this.opts.fps);
     while (this.written < due) {
-      this.ffmpeg.stdin.write(this.last);
+      // Frames are counted, not timed by ffmpeg, so a slow encoder never shifts the timeline;
+      // it only queues bytes in memory (Node's back-pressure signal). That queue is capped
+      // here, before every write: past the cap the recording stops instead of growing.
+      if (stdin.writableLength + this.last.length > Capture.maxBacklogBytes) {
+        this.overrun = new Error(`The video encoder fell more than ${Math.round(Capture.maxBacklogBytes / 1048576)} MB behind; record on a faster machine`);
+        clearInterval(this.timer);
+        stdin.destroy();
+        return;
+      }
+      stdin.write(this.last);
       this.written++;
+      this.peakBacklogBytes = Math.max(this.peakBacklogBytes, stdin.writableLength);
     }
+  }
+
+  /** Throws if capture had to stop early; scenes call this between steps so a run fails fast. */
+  check() {
+    if (this.overrun) throw this.overrun;
   }
 
   async stop() {
     if (this.timer) clearInterval(this.timer);
     this.pump();
     await this.cdp?.send('Page.stopScreencast').catch(() => {});
+    if (this.overrun) {
+      await this.done?.catch(() => {});
+      throw this.overrun;
+    }
     this.ffmpeg?.stdin?.end();
     await this.done;
     return this.written / this.opts.fps;
