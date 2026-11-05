@@ -180,6 +180,34 @@ test.describe('change requests', () => {
     await expect(page.getByText('Bug', { exact: true }).first()).toBeVisible();
   });
 
+  test('typing in a dialog stays in the field you are typing in when the page behind it reloads', async ({ page, request }) => {
+    // Used to go wrong: the dialog moved focus back to its first field whenever the page behind it re-rendered
+    // (its onClose prop is a new function each render), so text typed into "Describe the change" landed in
+    // Title once the change request list finished loading. Slow backends made the governance e2e flaky.
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    let release!: () => void;
+    const listHeld = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/change-requests(\?|$)/, async (route) => {
+      await listHeld;
+      await route.continue();
+    });
+    await page.goto(`/o/${demo.id}/changes`);
+    await page.getByRole('button', { name: 'New change request' }).click();
+    const d = page.getByRole('dialog', { name: 'New change request' });
+    await expect(d.getByLabel('Title')).toBeFocused();
+    const describe = d.getByLabel('Describe the change in plain language');
+    await describe.click();
+    await page.keyboard.type('Add a class ');
+    await expect(page.getByText('Loading…')).toBeVisible(); // The list behind the dialog is still loading.
+    release();
+    await expect(page.getByText('Loading…')).toHaveCount(0);
+    await page.keyboard.type('Shift.');
+    await expect(describe).toBeFocused();
+    await expect(describe).toHaveValue('Add a class Shift.');
+    await expect(d.getByLabel('Title')).toHaveValue('');
+  });
+
   test('the dialogs can be cancelled and closed with Escape', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Tom Okafor');

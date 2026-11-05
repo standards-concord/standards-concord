@@ -122,6 +122,7 @@ Each fix has a test that fails without it.
 | A reviewer's comment showed twice in the Discussion tab | Timeline copies of comments are skipped | change-requests: "a contributor can comment…" |
 | Policy switches (auto-merge, vote, lazy consensus) and the new-owner picker had no names | Named per level, e.g. "Auto-merge (minor)" | governance-flow |
 | Role and filter chips only showed "on" with colour and a tick | Chips expose `aria-pressed` | governance-flow |
+| Typing in a dialog jumped back to its first field whenever the page behind it re-rendered (e.g. a list finishing loading), so a change description landed in Title | Dialog focuses its first field only when it opens | change-requests: "typing in a dialog stays in the field…" |
 | The chat box was named by its placeholder, so its name changed to "Listening…" while dictating | Stable `aria-label` | requirements: "answers can be spoken" |
 | Feedback answer fields had no names | Named after their question | feedback: "guided feedback…" |
 | Section tabs could open the wrong page after a quick click (stale remembered page; the ia.spec flake) | The target is looked up at click time | ia: "each section remembers the page you were last on" |
