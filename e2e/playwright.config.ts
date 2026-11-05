@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
@@ -19,6 +21,10 @@ const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5183);
 export const GITHUB_STUB_PORT = Number(process.env.E2E_GITHUB_STUB_PORT ?? 8799);
 const dataDir = process.env.E2E_DATA_DIR ?? path.join(os.tmpdir(), `concord-e2e-${process.pid}`);
 const root = path.resolve(import.meta.dirname, '..');
+// The co-lead bot's calendar feed: meetings.spec.ts writes invites here and asks the server to re-read it.
+const botCalendar = (process.env.E2E_BOT_ICS ??= path.join(dataDir, 'bot-calendar.ics'));
+fs.mkdirSync(path.dirname(botCalendar), { recursive: true });
+fs.writeFileSync(botCalendar, 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Concord e2e//EN\r\nEND:VCALENDAR\r\n');
 const live = process.env.LIVE_URL ?? 'https://standards-concord.vercel.app';
 const runningLive = process.argv.some((a) => a === '--project=live' || a === 'live');
 
@@ -82,6 +88,10 @@ export default defineConfig({
             SOLID_SERVER_URL: '',
             GOOGLE_CLIENT_ID: '',
             GITHUB_CLIENT_ID: '',
+            // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
+            MEET_BOT_EMAIL: 'concord.bot@example.org',
+            MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,
+            RECALL_API_KEY: '',
             // Feedback is filed as GitHub issues, to the local stand-in.
             FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
             FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,

@@ -6,7 +6,7 @@ import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, put } from '../db.js';
+import { get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
@@ -29,6 +29,7 @@ import {
   type AdminAction,
 } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
+import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
   competencyTests,
@@ -70,7 +71,7 @@ function sessionInfo(user?: User): SessionInfo {
     providers: providers(),
     llm: { provider: llm.provider, model: llm.model },
     solid: { enabled: !!config.solid.serverUrl, serverUrl: config.solid.serverUrl },
-    meetBot: { provider: config.meetBot.recallApiKey ? 'recall' : 'simulated' },
+    meetBot: meetBot.meetBotInfo(),
     clockOffsetMs: clock.offsetMs,
     now: clock.iso(),
   };
@@ -341,41 +342,99 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ meetings --------------------------- */
-  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id)));
+  // Meetings are for signed-in people; pending invites, Meet links and organisers for facilitators only.
+  r.get('/ontologies/:id/meetings', (req, res) => {
+    if (!req.user) return void res.json([]);
+    res.json(meetings.listMeetings(project(req).id).flatMap((m) => meetings.visibleMeeting(m, req.user) ?? []));
+  });
   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
     res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
   r.post('/ontologies/:id/meetings/bot', async (req, res) => {
-    res.status(201).json(await meetings.inviteBot(project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300)));
+    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'send the co-lead bot into a call');
+    res
+      .status(201)
+      .json(
+        await meetings.inviteBot(project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300), {
+          postPromptsToChat: req.body?.postPromptsToChat === true,
+        }),
+      );
+  });
+  r.post('/ontologies/:id/meetings/calendar', async (req, res) => {
+    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'schedule the co-lead bot');
+    res.status(201).json(await meetBot.scheduleFromInvite(project(req), requireUser(req), str(req.body?.ics, 'ics', 2_000_000), { postPromptsToChat: req.body?.postPromptsToChat === true }));
+  });
+  r.get('/meet-bot', (_req, res) => res.json(meetBot.meetBotInfo()));
+  r.post('/meet-bot/sync', async (req, res) => {
+    const user = requireUser(req);
+    const anywhere = user.isPlatformAdmin || list<{ ontologyId: string; userId: string; roles: Role[] }>('memberships').some((ms) => ms.userId === user.id && ms.roles.some((x) => meetings.FACILITATOR_ROLES.includes(x)));
+    if (!anywhere) throw new HttpError(403, 'Only owners, stewards and editors can re-read the bot’s calendar');
+    await meetBot.syncCalendar();
+    await meetBot.dispatchDue();
+    res.json(meetBot.meetBotInfo());
   });
   r.post('/ontologies/:id/meetings/simulate', async (req, res) => {
     const delay = Number(req.query.delayMs ?? req.body?.delayMs);
-    res.status(201).json(await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', Number.isFinite(delay) ? { delayMs: delay } : {}));
+    res.status(201).json(
+      await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', {
+        ...(Number.isFinite(delay) ? { delayMs: delay } : {}),
+        postPromptsToChat: req.body?.postPromptsToChat === true,
+      }),
+    );
   });
-  r.get('/meetings/:id', (req, res) => res.json(meetings.getMeeting(String(req.params.id))));
+  const visible = (req: Request) => {
+    const user = requireUser(req);
+    const m = meetings.visibleMeeting(meetings.getMeeting(String(req.params.id)), user);
+    if (!m) throw new HttpError(404, 'No such meeting');
+    return m;
+  };
+  r.get('/meetings/:id', (req, res) => res.json(visible(req)));
+  r.patch('/meetings/:id', async (req, res) => {
+    const b = req.body ?? {};
+    const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
+    res.json(await meetings.updateMeeting(String(req.params.id), requireUser(req), { postPromptsToChat: bool(b.postPromptsToChat), skip: bool(b.skip), approve: bool(b.approve) }));
+  });
+  r.post('/meetings/:id/bot/dismiss', async (req, res) => {
+    res.json(await meetings.dismissBooking(String(req.params.id), requireUser(req)));
+  });
+  r.post('/meetings/:id/prompts/:index/post', async (req, res) => {
+    const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireFacilitator(m, requireUser(req), 'post in the call’s chat');
+    res.json(await meetings.postPrompt(m.id, Number(req.params.index)));
+  });
   r.post('/meetings/:id/analyse', async (req, res) => {
-    requireUser(req);
-    res.json(await meetings.analyseMeeting(meetings.getMeeting(String(req.params.id))));
+    const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireAnalyst(m, requireUser(req));
+    res.json(await meetings.analyseMeeting(m));
   });
   r.post('/meetings/:id/end', async (req, res) => {
-    requireUser(req);
     const m = meetings.getMeeting(String(req.params.id));
+    meetings.requireFacilitator(m, requireUser(req), 'end this call');
     meetings.stopSimulation(m.id);
-    res.json(await meetings.endLiveMeeting(m));
+    res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
-    const out = await meetings.proposeFromMeeting(meetings.getMeeting(String(req.params.id)), requireUser(req));
+    const user = requireUser(req);
+    const m = meetings.getMeeting(String(req.params.id));
+    if (!meetings.visibleMeeting(m, user)) throw new HttpError(404, 'No such meeting');
+    // Analysing first is only for those who may analyse it.
+    if (!m.analysis) meetings.requireAnalyst(m, user);
+    const out = await meetings.proposeFromMeeting(m, user);
     res.json({ useCases: out.useCases, changeRequest: out.changeRequest ? crs.detail(out.changeRequest) : undefined });
   });
   r.get('/meetings/:id/stream', (req, res) => {
-    const m = meetings.getMeeting(String(req.params.id));
+    const user = requireUser(req);
+    const m = visible(req);
+    const show = (x: Meeting) => meetings.visibleMeeting(x, user);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
     const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'prompt') send('prompt', { type: 'prompt', prompt: { at: clock.iso(), t: e.t, text: e.text, posted: false } });
-      else if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: meetings.getMeeting(m.id) as Meeting });
-      else send(e.type, e);
+      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: show(meetings.getMeeting(m.id)) });
+      else if (e.type === 'meeting') {
+        const x = show(e.meeting as Meeting);
+        if (x) send('meeting', { type: 'meeting', meeting: x });
+      } else send(e.type, e);
     };
     meetings.meetingEvents.on(m.id, onEvent);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
@@ -555,7 +614,19 @@ export function apiRouter(): Router {
   /* ------------------------------ activity --------------------------- */
   r.get('/activity', (req, res) => {
     const id = optStr(req.query.ontologyId);
-    res.json(listActivity(id ? mustFindProject(id).id : undefined, 100));
+    const all = listActivity(id ? mustFindProject(id).id : undefined, 100);
+    // Meetings are for signed-in people, and so is what happens to them; a call waiting for
+    // approval (and what's been said about it) is for facilitators only.
+    const hidden = (a: (typeof all)[number]) => {
+      if (!a.type.startsWith('meeting.')) return false;
+      if (!req.user) return true;
+      const mid = /\/meetings\/(mtg_[\w-]+)/.exec(a.link ?? '')?.[1];
+      const m = mid ? get<Meeting>('meetings', mid) : undefined;
+      if (m) return !meetings.visibleMeeting(m, req.user);
+      // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened to it.
+      return !!mid && !meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
+    };
+    res.json(all.filter((a) => !hidden(a)));
   });
 
   /* ------------------------------ feedback --------------------------- */
