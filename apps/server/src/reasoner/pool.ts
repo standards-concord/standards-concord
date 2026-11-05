@@ -19,11 +19,11 @@ const STRUCTURAL_TIMEOUT_MS = Number(process.env.REASONER_STRUCTURAL_TIMEOUT_MS 
 type Outcome = { result: ReasonerResult } | { error: string };
 /** Tests only: make a job never answer, have its worker exit, or have it report a failure. */
 export type TestFault = 'hang' | 'exit' | 'throw';
-/** Tests only: how workers are created, and how many have been. */
-export const poolTesting = {
-  createWorker: (url: URL): Worker => new Worker(url),
-  spawned: 0,
-};
+const createWorker = (url: URL): Worker => new Worker(url);
+/** Under the test runner only (VITEST is set); elsewhere faults and the factory below are ignored. */
+const testing = () => process.env.VITEST !== undefined;
+/** Tests only: how workers are created (honoured only under the test runner), and how many have been. */
+export const poolTesting = { createWorker, spawned: 0 };
 type Pending = { resolve: (o: Outcome) => void; worker: Worker };
 let worker: Worker | undefined;
 const pending = new Map<number, Pending>();
@@ -36,7 +36,7 @@ function failJobsOn(w: Worker, error: string) {
 }
 
 function spawn(): Worker {
-  const w = poolTesting.createWorker(new URL('./worker.boot.mjs', import.meta.url));
+  const w = (testing() ? poolTesting.createWorker : createWorker)(new URL('./worker.boot.mjs', import.meta.url));
   poolTesting.spawned++;
   w.on('message', ({ id, result, error }: { id: number; result?: ReasonerResult; error?: string }) => {
     const p = pending.get(id);
@@ -77,8 +77,10 @@ function runIn(turtle: string, mode: 'owl' | 'structural', timeoutMs: number, fa
     try {
       w.postMessage({ id, turtle, mode, fault });
     } catch (e) {
-      pending.get(id)?.resolve({ error: `could not be sent the job: ${(e as Error).message ?? String(e)}` });
+      // Remove the job before settling it, so the "nothing pending" check lets the worker go.
+      const p = pending.get(id);
       pending.delete(id);
+      p?.resolve({ error: `could not be sent the job: ${(e as Error).message ?? String(e)}` });
     }
   });
 }
@@ -115,7 +117,7 @@ export function reasonInWorker(
   opts: {
     timeoutMs?: number;
     structuralTimeoutMs?: number;
-    /** Tests only: faults to inject into the OWL job and the structural fallback, so each failure is certain rather than a race. */
+    /** Tests only (ignored unless VITEST is set): faults to inject into the OWL job and the structural fallback, so each failure is certain rather than a race. */
     faults?: Faults;
   } = {},
 ): Promise<ReasonerResult> {
@@ -124,7 +126,7 @@ export function reasonInWorker(
     const elapsed = () => Math.round(performance.now() - started);
     try {
       const turtle = await graph.toTurtle();
-      return await run(turtle, opts.timeoutMs ?? TIMEOUT_MS, opts.structuralTimeoutMs ?? STRUCTURAL_TIMEOUT_MS, opts.faults ?? {}, elapsed);
+      return await run(turtle, opts.timeoutMs ?? TIMEOUT_MS, opts.structuralTimeoutMs ?? STRUCTURAL_TIMEOUT_MS, testing() ? (opts.faults ?? {}) : {}, elapsed);
     } catch (e) {
       // Nothing above should throw, but if it does the answer is still "nothing was checked", never a rejection a caller might paper over.
       return nothingChecked(`the reasoner could not run: ${(e as Error).message ?? String(e)}`, elapsed());

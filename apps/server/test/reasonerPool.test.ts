@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { Worker } from 'node:worker_threads';
 import { describe, expect, it } from 'vitest';
 import { OntologyGraph } from '@concord/core';
 import { poolTesting, reasonInWorker } from '../src/reasoner/pool.js';
@@ -116,4 +117,36 @@ describe('reasoner worker pool', () => {
     const next = await reasonInWorker(g);
     expect(next).toMatchObject({ engine: 'sparq', checked: 'complete', consistent: true });
   });
+
+  // Used to go wrong: when a job couldn't be sent, the job was settled before it was removed from
+  // the pending list, so the "nothing pending" check never let the worker go and it kept the
+  // process alive.
+  it('lets the worker go when a job cannot be sent to it', async () => {
+    const g = await OntologyGraph.fromTurtle(fixture);
+    await reasonInWorker(g, { faults: { owl: 'exit', structural: 'exit' } }); // no live worker, so the next job spawns one
+    const create = poolTesting.createWorker;
+    const calls: string[] = [];
+    let w: Worker | undefined;
+    poolTesting.createWorker = (url) => {
+      const made = new Worker(url);
+      const ref = made.ref.bind(made), unref = made.unref.bind(made);
+      made.ref = () => { calls.push('ref'); ref(); };
+      made.unref = () => { calls.push('unref'); unref(); };
+      made.postMessage = () => { throw new Error('could not clone'); };
+      return (w = made);
+    };
+    let r;
+    try {
+      r = await reasonInWorker(g);
+    } finally {
+      poolTesting.createWorker = create;
+    }
+    expect(r).toMatchObject({ engine: 'none', consistent: false });
+    expect(r.error).toMatch(/OWL reasoner could not be sent the job: could not clone/);
+    expect(calls).toContain('ref');
+    expect(calls.at(-1)).toBe('unref');
+    await w!.terminate(); // its exit clears it from the pool, so the next job gets a working worker
+    expect(await reasonInWorker(g)).toMatchObject({ checked: 'complete' });
+  });
 });
+
