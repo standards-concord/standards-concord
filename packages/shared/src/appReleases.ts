@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.16.1',
     date: '2026-11-05',
     title: 'Every app on the Connect page has its logo',
+    pr: 65,
     changes: [
       {
         id: 'connect-agent-logos',
