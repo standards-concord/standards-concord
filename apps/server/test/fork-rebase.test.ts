@@ -15,7 +15,7 @@ import { createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from 
 import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
-import { ontologyStore } from '../src/services/ontologyStore.js';
+import { checkoutTestHooks, ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
 
 /**
@@ -1093,6 +1093,35 @@ describe('ninth review', () => {
       ontologyStore.syncCheckout(p());
       expect(fs.existsSync(lock())).toBe(false);
       expect(current()).toBe(true);
+    });
+
+    it('a holder taken over just before it writes does not leave its older checkout behind', async () => {
+      // Used to: the displaced holder checked the lock, was taken over, then wrote the checkout for
+      // the HEAD it had read, over the new holder's newer one, and stopped there.
+      await behind();
+      const project = p();
+      const read = ontologyStore.head(project);
+      const g = applyChangeOps(await ontologyStore.working(project), [addClass(`Newer${Date.now()}`, 'newer')], { date: '2026-11-05' }).graph;
+      const newer = await ontologyStore.prepareWorkingCommit(project, g, 'Newer draft', { name: 'Steward' }, read);
+      let fired = false;
+      checkoutTestHooks.beforeWrite = () => {
+        if (fired) return;
+        fired = true;
+        // Another process takes the lock over, moves main on, writes the newer checkout and lets go.
+        fs.writeFileSync(nodePath.join(lock(), 'owner'), 'another-host.example:1:new-holder');
+        git('update-ref', 'refs/heads/main', newer, read);
+        git('read-tree', '-u', '--reset', newer);
+        fs.rmSync(lock(), { recursive: true, force: true });
+      };
+      try {
+        ontologyStore.syncCheckout(project);
+      } finally {
+        delete checkoutTestHooks.beforeWrite;
+      }
+      expect(fired).toBe(true);
+      expect(ontologyStore.head(project)).toBe(newer);
+      expect(current()).toBe(true);
+      expect(fs.existsSync(lock())).toBe(false);
     });
   });
 });

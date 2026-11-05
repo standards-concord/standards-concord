@@ -155,15 +155,36 @@ function withCheckoutLock(dir: string, fn: (stillHeld: () => boolean) => void): 
   }
 }
 
-/** Make the checkout (files and index) match whatever HEAD is now. Best effort: see above. */
-function syncCheckout(dir: string) {
+/** For tests: runs just before the checkout is written, to reproduce a takeover at that moment. */
+export const checkoutTestHooks: { beforeWrite?: () => void } = {};
+
+/**
+ * Make the checkout (files and index) match whatever HEAD is now. Best
+ * effort: see above. Checking the lock and writing are two steps, so a
+ * holder that was taken over in between may write an older checkout over
+ * the new holder's. So every write is checked afterwards: a holder carries
+ * on until the index matches HEAD's tree (which also undoes a displaced
+ * holder's late write while it still holds the lock), and a holder that
+ * finds it was displaced takes the lock again and repairs the checkout.
+ */
+function syncCheckout(dir: string, attempt = 0): void {
+  const inSync = () => {
+    try {
+      return git(dir, ['write-tree']) === git(dir, ['rev-parse', 'HEAD^{tree}']);
+    } catch {
+      return false;
+    }
+  };
+  let displaced = false;
   try {
     const done = withCheckoutLock(dir, (stillHeld) => {
       for (let i = 0; i < 5; i++) {
         const head = git(dir, ['rev-parse', 'HEAD']);
-        if (!stillHeld()) return; // Taken over: the new holder writes the checkout.
+        if (!stillHeld()) return void (displaced = true);
+        checkoutTestHooks.beforeWrite?.();
         git(dir, ['read-tree', '-u', '--reset', head]);
-        if (git(dir, ['rev-parse', 'HEAD']) === head) return;
+        if (!stillHeld()) return void (displaced = true); // Our write may have landed after the new holder's.
+        if (inSync()) return;
       }
     });
     // Busy for longer than a request should wait: the holder, the next update or the next start catches it up.
@@ -171,6 +192,7 @@ function syncCheckout(dir: string) {
   } catch (err) {
     console.warn(`[ontology] could not update the checkout in ${dir}: ${(err as Error).message}`);
   }
+  if (displaced && attempt < 3) syncCheckout(dir, attempt + 1);
 }
 
 const graphCache = new Map<string, OntologyGraph>();
