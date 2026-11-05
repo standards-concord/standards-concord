@@ -696,7 +696,8 @@ export const gitStore = {
       .filter(Boolean)
       .map((l) => {
         const [sha, author, date, subject] = l.split('\x1f');
-        return { sha, author, date, subject };
+        // Newer git writes UTC as Z; keep +00:00, as older git (and the database store) write it.
+        return { sha, author, date: date.replace(/Z$/, '+00:00'), subject };
       });
   },
 
@@ -874,7 +875,8 @@ export const gitStore = {
       .filter(Boolean)
       .map((l) => {
         const [sha, author, date, subject] = l.split('\x1f');
-        return { sha, author, date, subject };
+        // Newer git writes UTC as Z; keep +00:00, as older git (and the database store) write it.
+        return { sha, author, date: date.replace(/Z$/, '+00:00'), subject };
       });
   },
 

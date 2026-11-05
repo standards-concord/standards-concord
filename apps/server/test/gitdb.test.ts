@@ -10,6 +10,7 @@ import {
   firstParentLog,
   getRef,
   hashObject,
+  ident,
   isAncestor,
   listDir,
   listRefs,
@@ -17,6 +18,7 @@ import {
   peel,
   readCommit,
   readFile,
+  serialiseTag,
   setRef,
   subject,
   writeCommit,
@@ -105,8 +107,38 @@ describe('gitdb', () => {
     git(['update-ref', 'refs/heads/main', child]);
     const tag = await writeTag({ object: child, tag: 'v1.0.0', tagger: who, message: 'Release 1.0.0' });
     git(['tag', '-a', 'v1.0.0', '-m', 'Release 1.0.0', child]);
+    // Byte for byte first, so a difference shows what differs (r1 review: a signing config gave another id).
+    expect(git(['cat-file', 'tag', 'v1.0.0'])).toBe(serialiseTag({ object: child, type: 'commit', tag: 'v1.0.0', tagger: who, message: 'Release 1.0.0' }).trim());
     expect(tag).toBe(git(['rev-parse', 'refs/tags/v1.0.0']));
     expect(await peel(tag)).toBe(child);
+  });
+
+  it('cleans names and emails exactly as git does, so the ids still match', async () => {
+    // r1 review: JavaScript's \s also trimmed Unicode spaces and inner CRs, which git keeps.
+    const tree = await writeTree(undefined, { f: '1' });
+    const cases: [string, string][] = [
+      ['\u00a0Ana\u00a0', 'ana@example.org'],
+      ['Ana\rBell', 'ana@example.org'],
+      ['  "Ana" <Bell>, ', ' <ana@example.org>. '],
+      ['.Ana. Bell;', "'ana\n@example.org'"],
+      ['\tAna\n\nBell\t', 'a<b>c@example.org'],
+      ['Zoë Ångström', 'zoë@exämple.org'],
+    ];
+    for (const [name, email] of cases) {
+      const p = { ...ident(name, email), time: who.time };
+      const ours = await writeCommit({ tree, parents: [], author: p, committer: p, message: 'm' });
+      const env = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+      const theirs = execFileSync('git', ['-C', dir, 'commit-tree', gitTree({ f: '1' }), '-m', 'm'], { env: { ...process.env, ...env, GIT_AUTHOR_DATE: `${who.time} +0000`, GIT_COMMITTER_DATE: `${who.time} +0000` } })
+        .toString()
+        .trim();
+      expect(ours, JSON.stringify([name, email])).toBe(theirs);
+    }
+  });
+
+  it('keeps an empty commit message empty, as git commit-tree -m "" does', async () => {
+    // r1 review: an empty message gained a newline, which changes the id.
+    const tree = await writeTree(undefined, { f: '1' });
+    expect(await writeCommit({ tree, parents: [], author: who, committer: who, message: '' })).toBe(git(['commit-tree', gitTree({ f: '1' }), '-m', '']));
   });
 
   it('lists a directory at a commit', async () => {

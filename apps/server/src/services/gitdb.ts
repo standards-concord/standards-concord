@@ -151,19 +151,27 @@ export async function listDir(commit: string, path: string): Promise<TreeEntry[]
 
 // --- people -----------------------------------------------------------------------------------------------------
 
-/** Characters git trims from either end of a name or email ("crud"). */
-const CRUD = /^[\s.,:;<>"'\\]+|[\s.,:;<>"'\\]+$/g;
+/**
+ * Characters git trims from either end of a name or email ("crud", ident.c): every byte up to and including space
+ * (so tabs, CR and LF too, but not Unicode spaces such as U+00A0, whose UTF-8 bytes are all above 127), and
+ * , : ; < > " \ ' (not a full stop).
+ */
+const CRUD_ENDS = /^[\x00-\x20,:;<>"\\']+|[\x00-\x20,:;<>"\\']+$/g;
 
 /**
- * Someone as git records them: git drops <, > and newlines from names and emails and trims punctuation from their
- * ends, and so does GitHub when it recreates a commit, so a name is cleaned the same way before it is hashed.
+ * Someone as git records them. git trims crud from both ends of a name and an email, then drops only LF, < and >
+ * from what is left (a CR inside stays), and so does GitHub when it recreates a commit. An empty name, which git
+ * refuses, becomes Concord.
  */
 export function ident(name: string, email: string, at = new Date()): Person {
-  const clean = (s: string) => s.replace(/[<>\n\r]/g, '').replace(CRUD, '');
+  const clean = (s: string) => s.replace(CRUD_ENDS, '').replace(/[\n<>]/g, '');
   return { name: clean(name) || 'Concord', email: clean(email), time: Math.floor(at.getTime() / 1000), tz: '+0000' };
 }
 
-/** When, as git log's %aI shows it (strict ISO 8601, in the person's own offset). */
+/**
+ * When, as git log's %aI shows it: strict ISO 8601 in the person's own offset, always as ±hh:mm. (Newer versions
+ * of git write UTC as Z; the git store normalises that to +00:00 so neither store's answers depend on git's version.)
+ */
 export function isoDate(p: Person): string {
   const sign = p.tz.startsWith('-') ? -1 : 1;
   const offsetMin = sign * (Number(p.tz.slice(1, 3)) * 60 + Number(p.tz.slice(3, 5)));
@@ -180,7 +188,8 @@ const parsePerson = (s: string): Person => {
   return { name: m[1], email: m[2], time: Number(m[3]), tz: m[4] };
 };
 /** git commit-tree -m (and tag -m) end the message with one newline. */
-const withNewline = (message: string) => (message.endsWith('\n') ? message : `${message}\n`);
+// (As git's strbuf_complete_line: an empty message stays empty.)
+const withNewline = (message: string) => (message === '' || message.endsWith('\n') ? message : `${message}\n`);
 
 export function serialiseCommit(c: Omit<Commit, 'sha'>): string {
   return [`tree ${c.tree}`, ...c.parents.map((p) => `parent ${p}`), `author ${person(c.author)}`, `committer ${person(c.committer)}`, '', withNewline(c.message)].join('\n');
