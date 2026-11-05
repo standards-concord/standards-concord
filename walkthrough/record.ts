@@ -1,10 +1,10 @@
 /**
  * Records the narrated Concord videos: the platform tour (narration.md), for alpha
- * testers how to take part and give feedback (feedback.md), and a closer look at the
- * features the tour skips (features.md).
+ * testers how to take part and give feedback (feedback.md), a closer look at the
+ * features the tour skips (features.md), and short clips of one feature each (clips.md).
  *
  *   pnpm walkthrough                       voice from the environment, records all three videos
- *   pnpm walkthrough --video feedback      just some of them (tour, feedback, features; comma-separated)
+ *   pnpm walkthrough --video feedback      just some of them (tour, feedback, features, clips; comma-separated)
  *   pnpm walkthrough --voice elevenlabs    pick a voice provider (asks for the key if unset)
  *   pnpm walkthrough --draft               silent narration (captions only), fast
  *   pnpm walkthrough --only intro,goals    just some scenes
@@ -16,7 +16,9 @@
  *
  * Output goes to walkthrough/out/, per video (concord-walkthrough, concord-feedback, concord-features):
  * <name>.mp4 (1080p, AAC, soft captions), .vtt captions, .transcript.md, .chapters.txt
- * (YouTube-style) and .report.json.
+ * (YouTube-style) and .report.json. The clips are one recording cut into a file set per
+ * scene (concord-clip-<scene id>.mp4, .vtt, .transcript.md, .chapters.txt), listed in
+ * concord-clips.json for the /welcome page's playlist.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -29,15 +31,16 @@ import { Director, sleep } from './lib/director.ts';
 import { guardContext, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, wordTime, type Action, type Scene } from './lib/narration.ts';
+import { clipSummary, cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, wordTime, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
+import { clipActions } from './clips.ts';
 import { featureActions } from './features.ts';
 import { actions, type Ctx } from './scenes.ts';
 
-// The features video's actions (features.ts) sit beside the tour's and the feedback video's.
-Object.assign(actions, featureActions);
+// The features video's actions (features.ts) and the clips' (clips.ts) sit beside the tour's and the feedback video's.
+Object.assign(actions, featureActions, clipActions);
 import { vendorModule } from './lib/vendor.ts';
 import { serveFonts } from './lib/fonts.ts';
 import { startEgressProxy, type Egress } from './lib/egress.ts';
@@ -106,9 +109,15 @@ const EPOCH = '2026-11-23T10:00:00Z';
 const log = (s: string) => console.log(s);
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
-/** The videos this script makes, recorded in this order (the feedback video's landing page shows the tour). */
-const VIDEOS: Record<string, { script: string; name: string }> = {
+/** The videos this script makes, recorded in this order (the feedback video's landing page shows the tour and the clips). */
+/**
+ * A video with `clips` is recorded in one go but written as one file set per scene,
+ * named <name>-<scene id>, and listed in the `clips` manifest.
+ */
+const VIDEOS: Record<string, { script: string; name: string; clips?: string }> = {
   tour: { script: 'narration.md', name: 'concord-walkthrough' },
+  // Before the feedback video, whose shot of the welcome page shows the playlist.
+  clips: { script: 'clips.md', name: 'concord-clip', clips: 'concord-clips.json' },
   feedback: { script: 'feedback.md', name: 'concord-feedback' },
   features: { script: 'features.md', name: 'concord-features' },
 };
@@ -181,7 +190,7 @@ async function recordEach(videos: string[]) {
 async function main() {
   const videos = await pickVideos();
   if (videos.length > 1) return recordEach(videos);
-  const video = videos[0] === 'custom' ? { script: argv.narration!, name: 'concord-walkthrough' } : VIDEOS[videos[0]];
+  const video: (typeof VIDEOS)[string] = videos[0] === 'custom' ? { script: argv.narration!, name: 'concord-walkthrough' } : VIDEOS[videos[0]];
   const name = video.name;
   const outFile = (suffix: string) => path.join(argv.out!, `${name}${suffix}`);
   const narration = parseNarration(await readFile(path.resolve(HERE, video.script), 'utf8'));
@@ -338,12 +347,11 @@ async function main() {
     // 4. Record: each paragraph starts its actions and its narration together, and the
     //    next paragraph waits for both. The narration is laid on afterwards at the same times.
     await page.goto(`${stat.url}/__stage/blank.html`);
-    const raw = outFile('.raw.mp4');
-    const cap = new Capture(page, raw, { fps: 30, width: 1920, height: 1080, quality: 92, crf: 18 });
     if (argv.check) {
       // Run every step back to back, without recording or waiting for narration.
       for (const scene of kept) {
         log(`▶ ${scene.id}`);
+        ctx.scene = scene;
         for (const step of scene.steps) {
           await run(ctx, scene, step.actions);
           await run(ctx, scene, step.marks.map((m) => m.action));
@@ -360,64 +368,87 @@ async function main() {
       if (d.warnings.length || (argv.strict && outside.size)) process.exitCode = 1;
       return;
     }
-    await cap.start();
-    const placed: Placed[] = [];
-    const chapters: { at: number; title: string }[] = [];
+    // A take is one capture: the whole video, or for clips, each scene on its own.
+    const takes = video.clips ? kept.map((sc) => ({ base: `${name}-${sc.id}`, title: sc.title, scenes: [sc] })) : [{ base: name, title: narration.meta.title, scenes: kept }];
     const LEAD = 0.35;
     const GAP = 0.45;
     /** How late a timed mark may run before the recording counts it as out of sync. */
     const MAX_LATE = 0.75;
     const sync: { scene: string; action: string; word: string; at: number; late: number }[] = [];
-    for (const scene of kept) {
-      log(`▶ ${scene.id}`);
-      chapters.push({ at: cap.now(), title: scene.title });
-      for (const step of scene.steps) {
-        cap.check();
-        const clip = clips.get(step);
-        const start = cap.now();
-        if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
-        const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
-        const opening = run(ctx, scene, step.actions);
-        // Timed marks wait for the step's opening actions, then for their word.
-        const marked = (async () => {
-          await opening;
-          for (const m of step.marks) {
-            const due = clip ? start + LEAD + wordTime(step.text, lexicon, clip.duration, m.word, clip.charStarts) : cap.now();
-            if (due > cap.now()) await sleep((due - cap.now()) * 1000);
-            const late = cap.now() - due;
-            sync.push({ scene: scene.id, action: m.action.name, word: plain(step.text).split(/\s+/)[m.word], at: Number(due.toFixed(2)), late: Number(late.toFixed(2)) });
-            if (late > MAX_LATE) d.warnings.push(`${scene.id} / {@${m.action.name}} ran ${late.toFixed(1)}s after its word; move the mark later or shorten what runs before it`);
-            await run(ctx, scene, [m.action]);
-          }
-        })();
-        await Promise.all([opening, marked, speaking]);
-        await run(ctx, scene, step.after);
-        await sleep((GAP + step.pause) * 1000);
+    const recorded: { base: string; title?: string; scenes: Scene[]; raw: string; seconds: number; placed: Placed[]; chapters: { at: number; title: string }[]; frameLatency: ReturnType<Capture['latency']> }[] = [];
+    for (const take of takes) {
+      // Each clip starts from a blank page, not from where the last one ended.
+      if (recorded.length) await page.goto(`${stat.url}/__stage/blank.html`);
+      const raw = path.join(argv.out!, `${take.base}.raw.mp4`);
+      const cap = new Capture(page, raw, { fps: 30, width: 1920, height: 1080, quality: 92, crf: 18 });
+      await cap.start();
+      const placed: Placed[] = [];
+      const chapters: { at: number; title: string }[] = [];
+      for (const scene of take.scenes) {
+        log(`▶ ${scene.id}`);
+        ctx.scene = scene;
+        chapters.push({ at: cap.now(), title: scene.title });
+        for (const step of scene.steps) {
+          cap.check();
+          const clip = clips.get(step);
+          const start = cap.now();
+          if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
+          const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
+          const opening = run(ctx, scene, step.actions);
+          // Timed marks wait for the step's opening actions, then for their word.
+          const marked = (async () => {
+            await opening;
+            for (const m of step.marks) {
+              const due = clip ? start + LEAD + wordTime(step.text, lexicon, clip.duration, m.word, clip.charStarts) : cap.now();
+              if (due > cap.now()) await sleep((due - cap.now()) * 1000);
+              const late = cap.now() - due;
+              sync.push({ scene: scene.id, action: m.action.name, word: plain(step.text).split(/\s+/)[m.word], at: Number(due.toFixed(2)), late: Number(late.toFixed(2)) });
+              if (late > MAX_LATE) d.warnings.push(`${scene.id} / {@${m.action.name}} ran ${late.toFixed(1)}s after its word; move the mark later or shorten what runs before it`);
+              await run(ctx, scene, [m.action]);
+            }
+          })();
+          await Promise.all([opening, marked, speaking]);
+          await run(ctx, scene, step.after);
+          await sleep((GAP + step.pause) * 1000);
+        }
       }
+      await sleep(video.clips ? 900 : 1500);
+      await d.checkRing(); // a ring still shown at the end must have stayed in view too
+      const seconds = await cap.stop();
+      // A big backlog means the encoder couldn't keep up. Timing stays right (frames are counted),
+      // but the machine is close to running out of memory, so it's worth knowing.
+      if (cap.peakBacklogBytes > 256 * 1024 * 1024) d.warnings.push(`video encoder fell behind (peak backlog ${Math.round(cap.peakBacklogBytes / 1048576)} MB); use a faster machine`);
+      recorded.push({ ...take, raw, seconds, placed, chapters, frameLatency: cap.latency() });
     }
-    await sleep(1500);
-    await d.checkRing(); // a ring still shown at the end must have stayed in view too
-    const seconds = await cap.stop();
+    const seconds = recorded.reduce((a, t) => a + t.seconds, 0);
     // The intro says how long the video is; check it said the truth.
     if (promisesLength && Math.abs(seconds / 60 - promisedMinutes) > 1.5)
       d.note(`The intro promises about ${promisedMinutes} minutes, but the video is ${fmt(seconds)}`);
-    // A big backlog means the encoder couldn't keep up. Timing stays right (frames are counted),
-    // but the machine is close to running out of memory, so it's worth knowing.
-    if (cap.peakBacklogBytes > 256 * 1024 * 1024) d.warnings.push(`video encoder fell behind (peak backlog ${Math.round(cap.peakBacklogBytes / 1048576)} MB); use a faster machine`);
     stat.close();
     await browser.close();
 
     // 5. Mix the narration in, with captions and chapters.
     log('Mixing…');
-    const out = outFile('.mp4');
-    await mux({ video: raw, videoSeconds: seconds, clips: placed, out, captions: outFile('.vtt'), chapters, title: narration.meta.title });
-    await rm(raw, { force: true });
-    await writeFile(outFile('.chapters.txt'), chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
-    // A clean transcript of exactly the scenes in this video.
-    await writeFile(
-      outFile('.transcript.md'),
-      `# ${narration.meta.title ?? 'Concord walkthrough'}\n\n` + kept.map((s, i) => `## ${s.title} (${fmt(chapters[i].at)})\n\n${s.steps.filter((st) => st.text).map((st) => plain(st.text)).join('\n\n')}`).join('\n\n') + '\n',
-    );
+    const file = (base: string, suffix: string) => path.join(argv.out!, `${base}${suffix}`);
+    for (const t of recorded) {
+      await mux({ video: t.raw, videoSeconds: t.seconds, clips: t.placed, out: file(t.base, '.mp4'), captions: file(t.base, '.vtt'), chapters: t.chapters, title: t.title });
+      await rm(t.raw, { force: true });
+      await writeFile(file(t.base, '.chapters.txt'), t.chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
+      // A clean transcript of exactly the scenes in this file.
+      const words = (sc: Scene) => sc.steps.filter((st) => st.text).map((st) => plain(st.text)).join('\n\n');
+      await writeFile(
+        file(t.base, '.transcript.md'),
+        video.clips
+          ? `# ${t.title}\n\n${words(t.scenes[0])}\n`
+          : `# ${t.title ?? 'Concord walkthrough'}\n\n` + t.scenes.map((sc, i) => `## ${sc.title} (${fmt(t.chapters[i].at)})\n\n${words(sc)}`).join('\n\n') + '\n',
+      );
+    }
+    // The playlist: each clip's title, length, and its first sentence as a summary.
+    if (video.clips) {
+      const list = recorded.map((t) => ({ id: t.scenes[0].id, file: t.base, title: t.title, summary: clipSummary(t.scenes[0]), duration: Math.round(t.seconds) }));
+      await writeFile(path.join(argv.out!, video.clips), JSON.stringify({ title: narration.meta.title, clips: list }, null, 2) + '\n');
+    }
+    const out = recorded.length === 1 ? file(recorded[0].base, '.mp4') : `${recorded.length} clips in ${argv.out}`;
     const report = {
       recordedAt: new Date().toISOString(),
       duration: Math.round(seconds),
@@ -434,7 +465,8 @@ async function main() {
       toolchain: await toolchain(chromiumVersion),
       // Timed marks: when each was due in the video, and how late its action started.
       sync,
-      frameLatency: cap.latency(),
+      frameLatency: recorded.length === 1 ? recorded[0].frameLatency : undefined,
+      takes: recorded.length > 1 ? recorded.map((t) => ({ file: t.base, seconds: Math.round(t.seconds), frameLatency: t.frameLatency })) : undefined,
       warnings: d.warnings,
       captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };

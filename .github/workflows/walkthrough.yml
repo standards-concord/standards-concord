@@ -1,11 +1,12 @@
 name: Walkthrough video
 
-# Records the two narrated videos (walkthrough/README.md) for every published release, or
-# on demand, and attaches them to the release: the tour (concord-walkthrough.*) and how
-# alpha testers take part (concord-feedback.*). The /welcome page plays the copies from
-# the newest release that has them. A third video, a closer look at the features
-# (concord-features.*), is recorded only when asked for with the `video` input; it lands in
-# the run's artifact rather than on a release.
+# Records the narrated videos (walkthrough/README.md) for every published release, or on
+# demand, and attaches them to the release: the tour (concord-walkthrough.*), how alpha
+# testers take part (concord-feedback.*), and the short feature clips (concord-clip-*.*,
+# listed in concord-clips.json). The /welcome page plays the copies from the newest
+# release that has them. A closer look at the features (concord-features.*) is recorded
+# only when asked for with the `video` input; it lands in the run's artifact rather than
+# on a release.
 #
 # Release videos use `--publish`: every scene must run cleanly, with no stand-ins, no
 # warnings and no requests to outside hosts, or nothing is attached. Set the
@@ -15,7 +16,7 @@ name: Walkthrough video
 # Voice characters are limited (and ElevenLabs flags bursts of use), so narration is
 # cached per paragraph and kept with each release: a release re-voices only the paragraphs
 # whose words changed. A run may send at most VOICE_CHAR_BUDGET new characters (repository
-# variable, default 2500; both scripts in full are about 8,000) and refuses before
+# variable, default 2500; the tour and feedback scripts in full are about 8,000, the clips about 2,100) and refuses before
 # sending anything if it would need more. For a first or full recording, run this
 # workflow by hand with a larger budget (0 for no limit) and the release tag to attach to.
 
@@ -39,10 +40,10 @@ on:
         type: string
         default: ''
       video:
-        description: Which videos to record. Only tour,feedback (the pair /welcome plays) can be attached to a release.
+        description: Which videos to record. Only tour,feedback,clips (everything /welcome plays) can be attached to a release.
         type: choice
-        options: ['tour,feedback', tour, feedback, features]
-        default: 'tour,feedback'
+        options: ['tour,feedback,clips', tour, feedback, clips, features]
+        default: 'tour,feedback,clips'
       release:
         description: Release tag to attach the videos to, such as v0.17.0 (publish mode only; created from this commit if it doesn't exist; empty attaches nothing)
         type: string
@@ -118,9 +119,9 @@ jobs:
         if: steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/clips.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-
+            walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/clips.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-
             walkthrough-voice-${{ steps.voice.outputs.voice }}-
       - name: Restore narration from the last release
         if: steps.voice.outputs.ready == 'true'
@@ -150,10 +151,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
           VOICE_CHAR_BUDGET: ${{ inputs.voice_budget || vars.VOICE_CHAR_BUDGET || '2500' }}
-          VIDEO: ${{ inputs.video || 'tour,feedback' }}
+          VIDEO: ${{ inputs.video || 'tour,feedback,clips' }}
         run: |
           case "$VIDEO" in
-            tour,feedback|tour|feedback|features) ;;
+            tour,feedback,clips|tour|feedback|clips|features) ;;
             *) echo "::error::Unknown video '$VIDEO'"; exit 1 ;;
           esac
           if [ "$MODE" = publish ]; then
@@ -170,7 +171,7 @@ jobs:
         if: always() && steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/clips.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v4
         if: always() && steps.voice.outputs.ready == 'true'
@@ -182,6 +183,7 @@ jobs:
             walkthrough/out/concord-*.transcript.md
             walkthrough/out/concord-*.chapters.txt
             walkthrough/out/concord-*.report.json
+            walkthrough/out/concord-clips.json
             walkthrough/out/walkthrough-voice.tar.gz
           if-no-files-found: ignore
           retention-days: 90
@@ -189,8 +191,8 @@ jobs:
   # Only a clean --publish run reaches here; this is the one job that can write.
   attach:
     needs: record
-    # A release gets the pair the welcome page plays, so only a run that recorded both is attached.
-    if: needs.record.outputs.recorded == 'true' && (github.event_name == 'release' || (inputs.release != '' && inputs.mode == 'publish' && inputs.video == 'tour,feedback'))
+    # A release gets everything the welcome page plays, so only a run that recorded all of it is attached.
+    if: needs.record.outputs.recorded == 'true' && (github.event_name == 'release' || (inputs.release != '' && inputs.mode == 'publish' && inputs.video == 'tour,feedback,clips'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write

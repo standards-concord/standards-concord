@@ -1,0 +1,8 @@
+{
+  "title": "Concord, one feature at a time",
+  "clips": [
+    { "id": "validate", "file": "concord-clip-validate", "title": "Validate your data", "summary": "Validate data checks a whole file against any release of the standard.", "duration": 2 },
+    { "id": "missing", "file": "concord-clip-missing", "title": "A clip this release doesn't have", "summary": "Never listed: there is no video for it.", "duration": 30 },
+    { "id": "vote", "file": "concord-clip-vote", "title": "Voting on a breaking change", "summary": "A breaking change goes to a vote.", "duration": 2 }
+  ]
+}

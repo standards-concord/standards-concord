@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
+import { test, expect, signIn, uniq } from './fixtures';
 
 /**
  * The alpha landing page at /welcome: the link we send testers. It has to make sense on
@@ -95,11 +96,96 @@ test('fits a phone screen', async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(0);
 });
 
+test.describe('feature clips playlist', () => {
+  const playlist = (page: Page) => page.getByRole('region', { name: 'More features, one at a time' });
+
+  test('lists the clips the release has in a drop-down, and plays the one picked', async ({ page }) => {
+    await page.goto('/welcome');
+    const section = playlist(page);
+    const picker = section.getByRole('combobox', { name: 'Choose a feature' });
+    // "missing" is in the playlist file but has no video in this release, so it isn't offered.
+    await expect(picker.getByRole('option')).toHaveText(['1. Validate your data (0:02)', '2. Voting on a breaking change (0:02)']);
+    await expect(picker).toHaveValue('validate');
+
+    const video = section.getByTestId('clip-video');
+    await expect(video.locator('source')).toHaveAttribute('src', '/api/media/concord-clip-validate.mp4');
+    await expect(video.locator('track[kind="captions"]')).toHaveAttribute('src', '/api/media/concord-clip-validate.vtt');
+    await expect(section.getByRole('heading', { name: 'Validate your data' })).toBeVisible();
+    await expect(section.getByText('Validate data checks a whole file against any release of the standard.')).toBeVisible();
+    await expect(section.getByRole('link', { name: 'Read the transcript' })).toHaveAttribute('href', '/api/media/concord-clip-validate.transcript.md');
+    // The browser can read the clip.
+    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.readyState)).toBeGreaterThan(0);
+
+    await picker.selectOption({ label: '2. Voting on a breaking change (0:02)' });
+    await expect(video.locator('source')).toHaveAttribute('src', '/api/media/concord-clip-vote.mp4');
+    await expect(section.getByRole('heading', { name: 'Voting on a breaking change' })).toBeVisible();
+    // This clip has no captions or transcript in the release: nothing points at missing files.
+    await expect(video.locator('track')).toHaveCount(0);
+    await expect(section.getByRole('link', { name: 'Read the transcript' })).toHaveCount(0);
+    // The last clip has no "next".
+    await expect(section.getByRole('button', { name: /^Next:/ })).toHaveCount(0);
+    // The address names the clip, so it can be shared.
+    await expect(page).toHaveURL(/\/welcome#clip-vote$/);
+  });
+
+  test('plays the next clip when one ends, or on request', async ({ page }) => {
+    await page.goto('/welcome');
+    const section = playlist(page);
+    const video = section.getByTestId('clip-video');
+    await expect(video.locator('source')).toHaveAttribute('src', '/api/media/concord-clip-validate.mp4');
+    await video.evaluate((v: HTMLVideoElement) => v.dispatchEvent(new Event('ended')));
+    await expect(section.getByRole('combobox', { name: 'Choose a feature' })).toHaveValue('vote');
+    await expect(video.locator('source')).toHaveAttribute('src', '/api/media/concord-clip-vote.mp4');
+    await expect(video).toHaveJSProperty('autoplay', true);
+
+    await page.goto('/welcome#clip-validate');
+    await section.getByRole('button', { name: 'Next: Voting on a breaking change' }).click();
+    await expect(section.getByRole('combobox', { name: 'Choose a feature' })).toHaveValue('vote');
+  });
+
+  test('a link to one clip opens it', async ({ page }) => {
+    await page.goto('/welcome#clip-vote');
+    await expect(playlist(page).getByRole('combobox', { name: 'Choose a feature' })).toHaveValue('vote');
+    await expect(playlist(page)).toBeInViewport();
+  });
+
+  test('signed-in testers see the same playlist', async ({ page }) => {
+    await signIn(page, { name: `Clip watcher ${uniq()}`, role: 'contributor' });
+    await page.goto('/welcome');
+    await expect(playlist(page).getByRole('combobox', { name: 'Choose a feature' }).getByRole('option')).toHaveCount(2);
+  });
+
+  test('says the clips are on their way when the release has none', async ({ page }) => {
+    await page.route('**/api/media/index.json', async (route) => {
+      const res = await route.fetch();
+      const index = await res.json();
+      index.files = index.files.filter((f: { name: string }) => !f.name.startsWith('concord-clip'));
+      await route.fulfill({ response: res, json: index });
+    });
+    await page.goto('/welcome');
+    await expect(playlist(page).getByTestId('clips-pending')).toContainText('being recorded for the next release');
+    await expect(playlist(page).getByRole('combobox')).toHaveCount(0);
+  });
+});
+
 test.describe('media API', () => {
   test('lists and serves only the walkthrough files', async ({ request }) => {
     const index = await (await request.get('/api/media/index.json')).json();
     expect(index.release).toBeNull();
-    expect(index.files.map((f: { name: string }) => f.name).sort()).toEqual(['concord-walkthrough.mp4', 'concord-walkthrough.transcript.md', 'concord-walkthrough.vtt']);
+    expect(index.files.map((f: { name: string }) => f.name).sort()).toEqual([
+      'concord-clip-validate.mp4',
+      'concord-clip-validate.transcript.md',
+      'concord-clip-validate.vtt',
+      'concord-clip-vote.mp4',
+      'concord-clips.json',
+      'concord-walkthrough.mp4',
+      'concord-walkthrough.transcript.md',
+      'concord-walkthrough.vtt',
+    ]);
+    const clips = await request.get('/api/media/concord-clips.json');
+    expect(clips.headers()['content-type']).toMatch(/^application\/json/);
+    expect((await clips.json()).clips.map((c: { id: string }) => c.id)).toEqual(['validate', 'missing', 'vote']);
+    expect((await request.get('/api/media/concord-clip-missing.mp4')).status()).toBe(404);
 
     const vtt = await request.get('/api/media/concord-walkthrough.vtt');
     expect(vtt.status()).toBe(200);

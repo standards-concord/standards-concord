@@ -323,3 +323,11 @@ export function fillMinutes(scenes: Scene[]): number {
   for (const st of scenes.flatMap((s) => s.steps)) st.text = st.text.replace(/\{minutes\}/g, NUMBER_WORDS[minutes] ?? String(minutes));
   return minutes;
 }
+
+/** A clip's summary for the /welcome playlist: the first sentence it speaks. */
+export function clipSummary(scene: Scene): string {
+  const first = scene.steps.find((st) => st.text);
+  if (!first) return '';
+  const words = plain(first.text);
+  return words.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? words;
+}

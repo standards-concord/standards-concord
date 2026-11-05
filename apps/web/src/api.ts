@@ -228,6 +228,12 @@ export interface MediaIndex {
   files: { name: string; size: number; url: string }[];
 }
 
+/** The feature clips' playlist (concord-clips.json, written by walkthrough/record.ts). */
+export interface ClipManifest {
+  title?: string;
+  clips: { id: string; file: string; title: string; summary?: string; duration?: number }[];
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
@@ -235,6 +241,8 @@ export const api = {
   logout: () => post<Record<string, never>>('/api/auth/logout'),
   /** The walkthrough videos for the latest release (see /welcome). */
   mediaIndex: () => get<MediaIndex>('/api/media/index.json'),
+  /** The feature clips' playlist, when the release has one. */
+  mediaClips: () => get<ClipManifest>('/api/media/concord-clips.json'),
   personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
   /** Sign in with a WebID (or the address of a Solid provider). */
