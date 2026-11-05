@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.20.0',
+    version: '0.21.0',
     date: '2026-11-05',
     title: 'Edit a term where you read it',
     pr: 28,
@@ -76,6 +76,34 @@ export const APP_RELEASES: AppRelease[] = [
           'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
         roles: ['steward'],
         to: '{o}/changes',
+      },
+    ],
+  },
+  {
+    version: '0.20.0',
+    date: '2026-11-05',
+    title: 'The ODI look, and an overview that reads like a report',
+    pr: 42,
+    changes: [
+      {
+        id: 'odi-look',
+        type: 'feat',
+        title: 'Concord now looks like the ODI',
+        detail:
+          'The default look follows the ODI brand: Helvetica, black on white, ODI blue and the ODI logo, with no all-caps labels. Settings, Appearance still lets you switch to the other looks.',
+        roles: [],
+        to: '/settings#appearance',
+        ask: 'Does Concord feel like an ODI tool now? Is anything harder to read or find?',
+      },
+      {
+        id: 'overview-report',
+        type: 'feat',
+        title: 'The ontology overview shows what’s waiting for you',
+        detail:
+          'Each ontology’s front page opens with one plain sentence of counts, a panel listing the changes waiting for you (review, vote, approve, merge or revise), a table of changes in progress and the draft’s health.',
+        roles: ['steward', 'member', 'odi'],
+        to: '{o}',
+        ask: 'When you open an ontology, can you tell straight away what needs you?',
       },
     ],
   },

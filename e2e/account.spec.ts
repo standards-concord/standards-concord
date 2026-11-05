@@ -74,7 +74,8 @@ test.describe('account and hub', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Ontologies' })).toBeVisible();
     const card = page.getByRole('link', { name: new RegExp(`^${demo.title}`) });
     await expect(card).toBeVisible();
-    await expect(card).toContainText(/\d+\s*Classes/);
+    // The card's counts read as one sentence, e.g. "16 classes, 24 properties, 2 use cases and 9 members."
+    await expect(card).toContainText(/\d+ class(es)?, \d+ propert(y|ies), \d+ use cases? and \d+ members?\./);
     const feed = page.getByRole('complementary').filter({ has: page.getByRole('heading', { name: 'Recent activity' }) });
     const first = feed.getByRole('link').first();
     await expect(first).toBeVisible();

@@ -9,6 +9,7 @@ import {
 } from '@concord/core';
 import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
+import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
@@ -169,7 +170,7 @@ export async function voteOnRelease(stale: Release, actor: User, choice: Vote['c
     const now = await mustGet<Release>('releases', stale.id);
     if (now.status !== 'voting') throw new HttpError(409, 'There is no open vote on this release');
     const g = await releaseGovernance(now);
-    if (!roles.some((role) => g.rule.vote?.voterRoles.includes(role))) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
+    if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles)) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
     await put('votes', { id: newId('vote'), subjectType: 'release', subjectId: now.id, userId: actor.id, roles, choice, comment, at: clock.iso() } satisfies Vote, now.id);
     return now;
   });

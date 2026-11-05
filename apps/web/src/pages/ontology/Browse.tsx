@@ -363,7 +363,7 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
   if (!items.length) return null;
   return (
     <div className="mt-3">
-      <button className="mb-1 flex w-full items-center gap-1 rounded text-xs font-semibold tracking-wide text-muted uppercase hover:text-fg" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+      <button className="mb-1 flex w-full items-center gap-1 rounded text-sm font-semibold hover:text-fg" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />} {title} ({items.length})
       </button>
       {open && (
@@ -630,7 +630,7 @@ export function BrowseTab() {
     <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
       {debounced ? (
         <div>
-          <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Search results</div>
+          <div className="mb-2 text-sm font-semibold">Search results</div>
           {results.loading && !results.data ? (
             <Loading />
           ) : results.error ? (
