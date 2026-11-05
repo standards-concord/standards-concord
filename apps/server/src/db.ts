@@ -29,6 +29,7 @@ export type Collection =
   | 'oauthTokens'
   | 'feedback'
   | 'requirementsDocs'
+  | 'feedbackPublications'
   | 'activity'
   | 'kv';
 
