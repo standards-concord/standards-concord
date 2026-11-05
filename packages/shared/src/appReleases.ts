@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.19.0',
+    version: '0.18.0',
     date: '2026-11-05',
     title: 'OWL reasoning with sparq, also in your browser',
     pr: 51,
