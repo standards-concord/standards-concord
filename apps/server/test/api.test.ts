@@ -942,7 +942,7 @@ describe('inline term edits', () => {
     const steward = await userOf(await login('steward', 'Steward Fenced'));
     const editorId = (await userOf(editor)).id;
     // What another process does after this merger's lease lapsed: it only touches the database.
-    const meddle: Record<string, (id: string) => void> = {
+    const meddle: Record<string, (id: string) => Promise<unknown>> = {
       withdraw: async (id) => (await put('changeRequests', { ...await crsMod.getCR(id), status: 'withdrawn', rev: ((await crsMod.getCR(id)).rev ?? 0) + 1 }, demoId)),
       'request changes': async (id) => {
         await put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorId, roles: ['editor'], decision: 'request-changes', at: new Date().toISOString() }, id);
@@ -956,7 +956,7 @@ describe('inline term edits', () => {
       const head = await ontologyStore.head((await getProject(demoId)));
       const original = ontologyStore.commitWorking;
       const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async function (this: typeof ontologyStore, ...args) {
-        fn(created.body.id); // lands just before the merge's commit
+        await fn(created.body.id); // lands just before the merge's commit
         return original.apply(ontologyStore, args);
       });
       try {
@@ -1060,7 +1060,9 @@ describe('inline term edits', () => {
     const project = (await getProject(demoId));
     // The repository as it is on disk, without the repair that reads through ontologyStore do first.
     const raw = path.join(config.dataDir, 'ontologies', project.slug);
-    const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8' }).trim();
+    // CI runners have no git identity, so commits made here name one (as the store does).
+    const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@localhost', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@localhost' };
+    const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
     const rawFile = (name: string) => fs.readFileSync(path.join(raw, name), 'utf8');
     return { ontologyStore, project, rawGit, rawFile, raw };
   };
