@@ -9,8 +9,8 @@ Where Concord's MCP server can be listed, what each listing needs, and who does 
 | Where | How people install | Status | Survives a domain change? |
 | --- | --- | --- | --- |
 | Concord's own `/connect` page | *Add to Claude* button, steps for ChatGPT (custom MCP server), one-line commands for Claude Code and Codex, Cursor and VS Code links | Done | Yes: it always shows its own address |
-| Claude Code plugin marketplace (this repo) | `/plugin marketplace add jeswr/standards-concord`, then `/plugin install concord@concord` | Done | Partly: run the script and merge; installs move when they update (Claude Code leaves auto-update off for third-party marketplaces, so people run `/plugin marketplace update concord` or turn it on), then sign in again |
-| Codex plugin marketplace (this repo) | `codex plugin marketplace add jeswr/standards-concord`, then install from Plugins in the Codex app | Done | Partly, as above |
+| Claude Code plugin marketplace (this repo) | `/plugin marketplace add standards-concord/standards-concord`, then `/plugin install concord@concord` | Done | Partly: run the script and merge; installs move when they update (Claude Code leaves auto-update off for third-party marketplaces, so people run `/plugin marketplace update concord` or turn it on), then sign in again |
+| Codex plugin marketplace (this repo) | `codex plugin marketplace add standards-concord/standards-concord`, then install from Plugins in the Codex app | Done | Partly, as above |
 | Official MCP Registry | Discovered by MCP clients and directories that read the registry | Publishes from CI on merge | Yes: CI publishes a new version |
 | GitHub MCP Registry (github.com/mcp) | One click into VS Code and other GitHub-connected clients | Needs an email from Jesse after the registry entry is live | Syncs from the official registry |
 | Anthropic Connectors Directory (claude.ai) | Listed in Claude's connector directory | Needs Jesse to submit; needs a privacy policy and a reviewer account | No: email Anthropic to change the URL |
@@ -21,19 +21,19 @@ Where Concord's MCP server can be listed, what each listing needs, and who does 
 
 ## Official MCP Registry
 
-- Entry: [server.json](../server.json), name `io.github.jeswr/concord`, remote-only (no `packages`), schema `2025-12-11`.
-- Publishing: [.github/workflows/mcp-registry.yml](../.github/workflows/mcp-registry.yml) runs `mcp-publisher login github-oidc` and `mcp-publisher publish` when `server.json` changes on `main` (or by hand from the Actions tab). GitHub's OIDC token proves the repo belongs to `jeswr`, so no secret is needed.
-- Moving domain: `node scripts/public-url.mjs https://<new-origin>` bumps the version (registry versions are immutable) and updates the plugins too. To retire an old version: `mcp-publisher status --status deprecated --message "Moved to <new URL>" io.github.jeswr/concord <old version>`.
-- Moving to the ODI's GitHub: an `org.theodi/...` or `io.github.theodi/...` name needs an org owner to publish; until then `io.github.jeswr/concord` is fine.
+- Entry: [server.json](../server.json), name `io.github.standards-concord/concord`, remote-only (no `packages`), schema `2025-12-11`.
+- Publishing: [.github/workflows/mcp-registry.yml](../.github/workflows/mcp-registry.yml) runs `mcp-publisher login github-oidc` and `mcp-publisher publish` when `server.json` changes on `main` (or by hand from the Actions tab). GitHub's OIDC token proves the repo belongs to `standards-concord`, so no secret is needed.
+- Moving domain: `node scripts/public-url.mjs https://<new-origin>` bumps the version (registry versions are immutable) and updates the plugins too. To retire an old version: `mcp-publisher status --status deprecated --message "Moved to <new URL>" io.github.standards-concord/concord <old version>`.
+- Moving to the ODI's GitHub: an `org.theodi/...` or `io.github.theodi/...` name needs an org owner to publish; until then `io.github.standards-concord/concord` is fine.
 - The registry is in preview, so its data may be reset.
 
 ## GitHub MCP Registry
 
-Curated from the official registry. Once the official entry is live, email partnerships@github.com asking for `io.github.jeswr/concord` to be included. Draft:
+Curated from the official registry. Once the official entry is live, email partnerships@github.com asking for `io.github.standards-concord/concord` to be included. Draft:
 
 > Subject: MCP Registry listing: Concord (Open Data Institute)
 >
-> Hi, Concord is the Open Data Institute's platform for designing open data ontologies together. Its remote MCP server lets agents read the hub's OWL and LinkML ontologies, query them, check data against them and report gaps to the maintainers. It is published in the official MCP Registry as io.github.jeswr/concord (https://standards-concord.vercel.app/mcp, OAuth with dynamic client registration). Could it be included in the GitHub MCP Registry? Thanks, Jesse
+> Hi, Concord is the Open Data Institute's platform for designing open data ontologies together. Its remote MCP server lets agents read the hub's OWL and LinkML ontologies, query them, check data against them and report gaps to the maintainers. It is published in the official MCP Registry as io.github.standards-concord/concord (https://standards-concord.vercel.app/mcp, OAuth with dynamic client registration). Could it be included in the GitHub MCP Registry? Thanks, Jesse
 
 ## Anthropic Connectors Directory
 
