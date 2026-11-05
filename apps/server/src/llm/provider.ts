@@ -41,7 +41,9 @@ export interface LlmResult<T> {
 
 let client: Anthropic | undefined;
 function anthropic() {
-  client ??= new Anthropic();
+  // No automatic retries: every attempt can be billed, and the spending limit reserves for one. A failed call
+  // uses its fallback instead.
+  client ??= new Anthropic({ maxRetries: 0 });
   return client;
 }
 
@@ -120,8 +122,9 @@ export const llm = {
  * is recorded; a request the API answered with an error status is refunded. When it's unclear whether the model
  * ran (a timeout, a dropped connection, a failure while reading the response), the worst case stays counted.
  */
-async function withinBudget(call: { task: string; system: string; messages: Anthropic.MessageParam[] }, maxTokens: number) {
-  const r = await reserve(worstCaseCost(config.llm.model, { system: call.system, messages: call.messages }, maxTokens));
+async function withinBudget(call: { task: string; system: string; messages: Anthropic.MessageParam[]; schema?: z.ZodType<unknown> }, maxTokens: number) {
+  const schema = call.schema ? zodOutputFormat(call.schema as z.ZodType<unknown> & z.ZodObject<z.ZodRawShape>) : undefined;
+  const r = await reserve(worstCaseCost(config.llm.model, { system: call.system, messages: call.messages, schema }, maxTokens));
   if (!r) console.warn(`[llm:${call.task}] spending limit reached, using fallback`);
   return r;
 }

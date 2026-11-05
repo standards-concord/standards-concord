@@ -60,13 +60,18 @@ export function costOf(
   );
 }
 
+/** Tokens the API may add around the prompt (message framing, the structured-output instructions), on top of the prompt's own. */
+const OVERHEAD_TOKENS = 4096;
+
 /**
- * The most a request can cost: its prompt priced as a cache write (the dearest way to read input), counting a
- * token for every 3 characters (real text averages about 4), plus every output token allowed.
+ * The most a request can cost: its whole prompt (system, messages and any output schema) counted at one token per
+ * UTF-8 byte, which no tokenizer that works on bytes can exceed (a token is at least one byte, and real text
+ * averages about four characters a token), plus a fixed allowance for what the API adds, all priced as a cache
+ * write (the dearest way to read input), plus every output token allowed (thinking included).
  */
 export function worstCaseCost(model: string, prompt: unknown, maxTokens: number): number {
   const p = priceOf(model);
-  const inputTokens = Math.ceil(JSON.stringify(prompt).length / 3);
+  const inputTokens = Buffer.byteLength(JSON.stringify(prompt) ?? '', 'utf8') + OVERHEAD_TOKENS;
   return (inputTokens * p.cacheWrite + maxTokens * p.output) / 1e6;
 }
 
@@ -109,6 +114,9 @@ export async function reserve(usd: number): Promise<Reservation | undefined> {
     async settle(actualUsd: number) {
       if (settled) return;
       settled = true;
+      // The reservation is an upper bound, so the real cost should never be more. If it somehow is, record the real
+      // cost anyway (later calls are then refused sooner) and say so.
+      if (actualUsd > usd) console.warn(`[llm] a call cost ${actualUsd.toFixed(4)} USD, more than the ${usd.toFixed(4)} reserved for it`);
       const delta = actualUsd - usd;
       try {
         await transaction(async () => {

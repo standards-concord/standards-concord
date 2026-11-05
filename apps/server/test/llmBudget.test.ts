@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 import { clock, DAY_MS } from '../src/clock.js';
 import { config } from '../src/config.js';
@@ -132,11 +133,12 @@ describe('AI spending limit', () => {
 
   it('counts a response it then rejects, because it was still billed', async () => {
     reply = { status: 200, body: message('not json') };
+    const schema = z.object({ answer: z.string() });
     const r = await llm.json({
       task: 'test',
       system: 'Answer in JSON.',
       messages: [{ role: 'user', content: 'Hello' }],
-      schema: z.object({ answer: z.string() }),
+      schema,
       maxTokens: 1000,
       fallback: () => ({ answer: 'fallback' }),
     });
@@ -144,9 +146,42 @@ describe('AI spending limit', () => {
     expect(requests).toBe(1);
     // Either the usage was read (the tokens' cost) or the SDK threw before we saw it (the worst case reserved for
     // the call stays counted). Never a refund.
-    const worst = worstCaseCost('claude-opus-5-5', { system: 'Answer in JSON.', messages: [{ role: 'user', content: 'Hello' }] }, 1000);
+    const worst = worstCaseCost('claude-opus-5-5', { system: 'Answer in JSON.', messages: [{ role: 'user', content: 'Hello' }], schema: zodOutputFormat(schema) }, 1000);
     const usd = (await spending()).today.usd;
     expect([worst, costOf('claude-opus-5-5', USAGE)].some((v) => Math.abs(usd - v) < 1e-9)).toBe(true);
+  });
+
+  // The SDK used to retry an overloaded or failed request twice on its own. Each attempt can be billed, but the
+  // limit had reserved for one, so retries could spend past it unseen.
+  it('a failed request is not retried behind the limit’s back', async () => {
+    reply = { status: 529, body: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } } };
+    expect(await ask()).toEqual({ value: 'From the fallback', simulated: true });
+    expect(requests).toBe(1);
+  });
+
+  // The reservation used to count a token per 3 characters, which dense scripts (CJK, emoji) can exceed, so a big
+  // prompt could be reserved for far less than it costs and pass a limit it should not.
+  it('a prompt in a dense script is reserved for what it can really cost', async () => {
+    const content = '漢'.repeat(30_000); // 30,000 characters, 90,000 bytes
+    const prompt = { system: 'Be brief.', messages: [{ role: 'user' as const, content }] };
+    const worst = worstCaseCost('claude-opus-5-5', prompt, 1000);
+    // A cache write of 90,000 tokens alone costs 0.45 USD.
+    expect(worst).toBeGreaterThan(0.45);
+    config.llm.dailyBudgetUsd = 0.3;
+    const r = await llm.text({ task: 'test', ...prompt, maxTokens: 1000, fallback: () => 'From the fallback' });
+    expect(r.simulated).toBe(true);
+    expect(requests).toBe(0);
+  });
+
+  it('counts the output schema in what a structured request may cost', async () => {
+    const schema = z.object({ answer: z.string().describe('x'.repeat(50_000)) });
+    const bare = worstCaseCost('claude-opus-5-5', { system: 'S', messages: [] }, 1000);
+    const withSchema = worstCaseCost('claude-opus-5-5', { system: 'S', messages: [], schema: zodOutputFormat(schema) }, 1000);
+    expect(withSchema - bare).toBeGreaterThan((50_000 * 5) / 1e6);
+    config.llm.dailyBudgetUsd = (bare + withSchema) / 2;
+    const r = await llm.json({ task: 'test', system: 'S', messages: [], schema, maxTokens: 1000, fallback: () => ({ answer: 'f' }) });
+    expect(r.simulated).toBe(true);
+    expect(requests).toBe(0);
   });
 
   // The demo clock only moves governance dates; the budget runs on real time.
