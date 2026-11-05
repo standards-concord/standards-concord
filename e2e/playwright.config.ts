@@ -90,6 +90,11 @@ export default defineConfig({
             SOLID_SERVER_URL: '',
             GOOGLE_CLIENT_ID: '',
             GITHUB_CLIENT_ID: '',
+            // Every test validates from the same address.
+            VALIDATE_RATE_LIMIT: '1000',
+            VALIDATE_PER_CLIENT: '100',
+            VALIDATE_QUEUE: '32',
+            VALIDATE_JSONLD_QUEUE: '32',
             // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
             MEET_BOT_EMAIL: 'concord.bot@example.org',
             MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,

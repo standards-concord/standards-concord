@@ -134,6 +134,19 @@ export type OntologyDetail = OntologySummary & { members: MemberWithUser[] };
 export type UsedBy = { iri: string; label?: string; via: string };
 export type TermDetail = TermView & { usedBy: UsedBy[] };
 export type InterviewDetail = InterviewSession & { useCase: UseCase };
+export type DataValidation = {
+  ontology: string;
+  version: string;
+  shapes?: string;
+  conforms: boolean;
+  valid: boolean;
+  triples: number;
+  summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
+  results: { focusNode: string; path?: string; value?: string; severity: 'Violation' | 'Warning' | 'Info'; constraint: string; shape?: string; message?: string }[];
+  terms: { severity: 'error' | 'warning'; message: string; term?: string }[];
+  /** More results or term issues than the report lists (1,000 of each); the summary counts them all. */
+  truncated?: true;
+};
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
 /** Which questionnaire: `pathway: 'changes'` asks about what changed since `since`, for a tester in `role`. */
@@ -261,6 +274,11 @@ export const api = {
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),
 
   // Releases
+  /** POST data to the ontology's public IRI to validate it (see apps/server/src/public/validate.ts). */
+  validateData: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<DataValidation>('POST', `/def/${e(slug)}/${e(version)}`, data, { headers: mediaType ? { 'Content-Type': mediaType } : { 'Content-Type': 'text/plain' } }),
+  validationReportTurtle: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<string>('POST', `/def/${e(slug)}/${e(version)}`, data, { raw: true, headers: { Accept: 'text/turtle', 'Content-Type': mediaType ?? 'text/plain' } }),
   releases: (id: string) => get<Release[]>(`/api/ontologies/${e(id)}/releases`),
   draftRelease: (id: string, notes?: string) => post<ReleaseDetail>(`/api/ontologies/${e(id)}/releases`, { notes }),
   release: (id: string) => get<ReleaseDetail>(`/api/releases/${e(id)}`),

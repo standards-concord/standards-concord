@@ -224,7 +224,8 @@ export function writeTurtle(store: Store, prefixes: Record<string, string>, opts
   // Root blank nodes (e.g. owl:AllDisjointClasses) and labeled blank nodes.
   const general = [
     ...rootBnodes.filter((b) => !labeled.has(b)),
-    ...labeled,
+    // A labeled blank node with no triples of its own is only ever an object.
+    ...[...labeled].filter((b) => store.countQuads(blankNode(b), null, null, null) > 0),
   ].map((b) => {
     const t = bnodeTerm(b);
     return [canonical(store, t), block(t)] as const;

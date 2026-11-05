@@ -72,12 +72,18 @@ importers:
       '@types/express':
         specifier: ^5.0.6
         version: 5.0.6
+      '@types/n3':
+        specifier: ^1.26.4
+        version: 1.26.4
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
       '@types/supertest':
         specifier: ^7.2.1
         version: 7.2.1
+      n3:
+        specifier: ^2.13.12
+        version: 2.13.12
       supertest:
         specifier: ^7.3.1
         version: 7.3.1
@@ -187,6 +193,9 @@ importers:
       '@rdfjs/wrapper':
         specifier: 0.34.0
         version: 0.34.0
+      '@sparq-org/sparq':
+        specifier: 0.1.5
+        version: 0.1.5
       '@theodi/shacl-converter':
         specifier: 1.0.5
         version: 1.0.5
@@ -218,9 +227,6 @@ importers:
       '@rdfjs/types':
         specifier: ^2
         version: 2.0.1
-      '@sparq-org/sparq':
-        specifier: 0.1.5
-        version: 0.1.5
       '@types/jsonld':
         specifier: ^1.5.15
         version: 1.5.15
