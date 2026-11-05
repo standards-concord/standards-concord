@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { CircleAlert, CircleX, Info, ShieldCheck, TriangleAlert, WandSparkles } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { Completion } from '@codemirror/autocomplete';
@@ -374,6 +375,13 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
               {formatNote}
             </span>
           )}
+        </p>
+        <p className="text-sm text-muted" data-testid="validate-link">
+          To upload a file in any RDF format, check against a release, or get a full report (with the terms check and a SHACL report to download), use{' '}
+          <Link to="../validate" relative="path" className="text-accent hover:underline">
+            Validate data
+          </Link>
+          .
         </p>
         {live.length > 0 && (
           <div className="space-y-1" data-testid="data-lint">
