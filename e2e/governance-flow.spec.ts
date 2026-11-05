@@ -63,7 +63,8 @@ test('the steward changes a rule, saves the policy, and it sticks', async ({ pag
   await asSteward(page);
   await page.goto(`/o/${ontologyId}/governance`);
   await settle(page);
-  await expect(page.getByRole('button', { name: /Policy template/ })).toContainText('Steward-led');
+  // The summary sits outside the button and describes it.
+  await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAccessibleDescription(/Steward-led/);
   await page.getByRole('button', { name: 'Edit policy' }).click();
   await page.getByRole('button', { name: /Change request rules/ }).click();
   const levels = page.getByRole('group', { name: 'Level to edit' }).first();
@@ -92,8 +93,8 @@ test('the steward changes a rule, saves the policy, and it sticks', async ({ pag
   const minor = page.getByRole('list', { name: 'What each kind of change needs' }).getByRole('listitem').nth(1);
   await expect(minor).toContainText('1 sign-off');
   await expect(minor).not.toContainText('merged automatically');
-  await expect(page.getByRole('button', { name: /Policy template/ })).toContainText('customised');
-  await expect(page.getByRole('button', { name: /Ownership, ODI and automation/ })).toContainText('3 of 4 automations on');
+  await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAccessibleDescription(/customised/);
+  await expect(page.getByRole('button', { name: /Ownership, ODI and automation/ })).toHaveAccessibleDescription(/3 of 4 automations on/);
 });
 
 test('the steward adds people, gives them roles and removes one', async ({ page }) => {
@@ -131,7 +132,7 @@ test('the steward adds people, gives them roles and removes one', async ({ page 
   await page.goto(`/o/${ontologyId}/governance`);
   await settle(page);
   await page.getByRole('button', { name: /Members and roles/ }).click();
-  await expect(page.getByText('You can view the policy; only owners and stewards can change it.')).toBeVisible();
+  await expect(page.getByText('You can read the policy; only the ontology’s owners can change it.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit policy' })).toHaveCount(0);
   await expect(page.locator('#roles').getByRole('button', { name: 'Edit roles' })).toHaveCount(0);
   await page.locator('#roles').getByRole('button', { name: 'Transfer ownership' }).click();

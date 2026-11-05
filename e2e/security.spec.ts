@@ -13,9 +13,9 @@ test.describe('Sign-in and feedback access', () => {
     }
     await page.goto('/');
     await page.locator('.app-user-button').click();
-    await expect(page.getByRole('menu')).toBeVisible();
-    await expect(page.getByRole('menu').getByText('Alpha walkthrough')).toBeVisible();
-    await expect(page.getByRole('menu').getByText('Feedback admin')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Account' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Account' }).getByText('Alpha walkthrough')).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Account' }).getByText('Feedback admin')).toHaveCount(0);
   });
 
   test('a playable persona with owner or ODI roles cannot read feedback either', async ({ page, request }) => {

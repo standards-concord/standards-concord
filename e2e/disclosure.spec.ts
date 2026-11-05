@@ -27,10 +27,79 @@ test.describe('summaries, popups and disclosures', () => {
       await expect(chip).toContainText(o.health!.errors ? 'Needs fixing' : 'Checks incomplete');
       await expect(reasonerRow).toContainText(/No verdict|not every class checked/);
       await expect(panel.getByRole('note')).toContainText('Not every check could run');
+      // The popup's overall verdict says what the pass covers, too.
+      await expect(panel.getByRole('listitem').filter({ hasText: 'Overall validation' })).not.toContainText(/Passed$/);
     } else {
       await expect(chip).not.toContainText('Checks incomplete');
       await expect(reasonerRow).not.toContainText('No verdict');
     }
+  });
+
+  test('following a link to #health focuses the section straight away, even while the report is still loading', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/validation/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.goto(`/o/${demo.id}#health`);
+    const health = page.locator('#health');
+    await expect(health.getByText('Validating…')).toBeVisible();
+    await expect(health).toBeFocused();
+    // Move on before the report arrives: when it lands, focus stays where the reader put it.
+    await page.getByRole('button', { name: /Ontology details/ }).focus();
+    release();
+    await expect(health.getByRole('button', { name: /Lint findings/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Ontology details/ })).toBeFocused();
+  });
+
+  test('on a very short screen a popup uses the whole height rather than going off screen', async ({ page }) => {
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const bubble = page.getByRole('button', { name: /^Lifecycle stage: / });
+    const panel = page.getByRole('dialog', { name: /^Lifecycle stage/ });
+    const inView = async (vh: number) => {
+      const box = (await panel.boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height).toBeLessThanOrEqual(vh);
+    };
+    for (const vh of [100, 60]) {
+      await page.setViewportSize({ width: 1000, height: vh });
+      // The sticky header covers most of a screen this short, so use the keyboard rather than a click.
+      await bubble.focus();
+      await bubble.press('Enter');
+      await expect(panel).toBeVisible();
+      await inView(vh);
+      // Neither side of the trigger has room for the panel, so it takes the whole height instead.
+      await expect(panel).toHaveAttribute('data-placement', 'screen');
+      // Scrolling past the end of the panel doesn't move the page behind it or carry the panel away.
+      const scrollY = await page.evaluate(() => window.scrollY);
+      await panel.hover({ force: true });
+      for (let i = 0; i < 5; i++) await page.mouse.wheel(0, 400);
+      await page.waitForTimeout(200);
+      expect(await page.evaluate(() => window.scrollY)).toBe(scrollY);
+      await inView(vh);
+      await page.keyboard.press('Escape');
+      await expect(panel).toHaveCount(0);
+      // Closing it gives the page its scrolling back.
+      expect(await page.evaluate(() => document.documentElement.style.overflow)).toBe('');
+    }
+    // Back at a normal height, it sits next to its trigger again.
+    await bubble.press('Enter');
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await expect(panel).not.toHaveAttribute('data-placement', 'screen');
+    await inView(800);
+  });
+
+  test('detailed validation never says a plain “Passed” when the reasoner did not run', async ({ page }) => {
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health?: { errors: number; incomplete?: string[] } };
+    test.skip(!o.health?.incomplete?.length, 'the reasoner ran here, so a plain pass is honest');
+    await page.goto(`/o/${demo.id}#health`);
+    await settle(page);
+    const health = page.locator('#health');
+    await expect(health).toBeFocused();
+    await expect(health.getByText(/^(Not run|Partly checked)$/)).toBeVisible();
+    await expect(health.getByText('Passed', { exact: true })).toHaveCount(0);
   });
 
   test('popups take focus, return it on Escape, and close when tabbing away', async ({ page }) => {

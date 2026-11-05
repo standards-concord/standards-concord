@@ -1035,7 +1035,18 @@ export interface Release {
   createdAt: string;
   publishedAt?: string;
   statusSince: string;
+  /** The approval evaluation recorded when the release was published or rejected, so later policy or membership changes don't rewrite its history. */
+  approval?: GovernanceEvaluation;
 }
+
+/**
+ * Where a release's `governance` comes from:
+ * - `live`: it's still open, evaluated against today's policy and members;
+ * - `recorded`: the evaluation saved when it was published or rejected;
+ * - `bootstrap`: the first release, published when the ontology was set up, before any approval rules applied;
+ * - `current-policy`: decided before Concord kept a record, so it's re-evaluated against today's policy and members.
+ */
+export type ReleaseApprovalSource = 'live' | 'recorded' | 'bootstrap' | 'current-policy';
 
 export interface ReleaseDetail extends Release {
   /** Use cases this release closes (visible to the viewer). */
@@ -1044,6 +1055,7 @@ export interface ReleaseDetail extends Release {
   requirements?: Pick<RequirementsDocument, 'id' | 'version' | 'status' | 'generatedAt' | 'title'>;
   votes: Vote[];
   governance: GovernanceEvaluation;
+  approvalSource: ReleaseApprovalSource;
   changeRequests: Pick<ChangeRequest, 'id' | 'number' | 'title' | 'classification'>[];
 }
 
@@ -1156,7 +1168,7 @@ export interface OAuthRequestInfo {
   resource?: string;
 }
 
-/** An app the person has connected with OAuth (Settings → Connected agents). */
+/** An app the person has connected with OAuth (Connect an agent → Connected agents). */
 export interface OAuthConnection {
   id: string;
   clientName: string;

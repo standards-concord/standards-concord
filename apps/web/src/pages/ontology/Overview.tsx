@@ -25,7 +25,7 @@ const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs
  * waiting for you, what is changing, and how healthy the draft is. People and activity sit beside it.
  */
 export function OverviewTab() {
-  const { id, ontology: o, label, myRoles } = useOntology();
+  const { id, ontology: o, label, myRoles, hasRole } = useOntology();
   const { session, now } = useSession();
   const me = session?.user?.id;
   const validation = useAsync(() => api.validation(id, 'working'), [id]);
@@ -36,10 +36,20 @@ export function OverviewTab() {
   const [moreActivity, setMoreActivity] = useState(false);
   // loc.key changes on every navigation, so following the report link again (already on #health) still scrolls and reopens lint.
   const healthKey = wantsHealth ? loc.key : undefined;
+  const scrollToHealth = () => healthRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
   useEffect(() => {
-    if (!healthKey || !validation.data) return;
-    healthRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-  }, [healthKey, validation.data]);
+    // The section is there straight away (it shows "Validating…" while loading), so focus moves on arrival,
+    // not later when the report settles. Focus as well as the view, so keyboard and screen-reader users land there too.
+    if (!healthKey) return;
+    scrollToHealth();
+    healthRef.current?.focus({ preventScroll: true });
+  }, [healthKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const settled = Boolean(validation.data || validation.error);
+  useEffect(() => {
+    // When the report arrives the page above may have changed height: keep the section in view, but only if
+    // focus is still on it. Never pull focus back from somewhere the reader has since moved to.
+    if (healthKey && settled && document.activeElement === healthRef.current) scrollToHealth();
+  }, [healthKey, settled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const members = o.members ?? [];
   const inProgress = (changes.data ?? [])
@@ -219,7 +229,7 @@ export function OverviewTab() {
           )}
         </section>
 
-        <section id="health" ref={healthRef} className="scroll-mt-20" aria-labelledby="health-title">
+        <section id="health" ref={healthRef} tabIndex={-1} className="scroll-mt-20 outline-none" aria-labelledby="health-title">
           <h2 id="health-title" className="text-xl font-bold">
             Health of the working draft
           </h2>
@@ -258,7 +268,7 @@ export function OverviewTab() {
               Members ({members.length})
             </h2>
             <Link to={`/o/${id}/governance#roles`} className="text-sm text-accent hover:underline">
-              Manage
+              {hasRole('owner', 'steward') ? 'Manage' : 'View members'}
             </Link>
           </div>
           {members.length ? (

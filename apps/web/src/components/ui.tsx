@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
@@ -54,14 +54,15 @@ export function Card({ className, children, as: As = 'div' }: { className?: stri
   return <As className={cx('ui-card rounded-xl border border-line bg-surface', className)}>{children}</As>;
 }
 
-export function CardHeader({ title, subtitle, actions, icon: Icon }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon }) {
+export function CardHeader({ title, subtitle, actions, icon: Icon, level = 3 }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon; level?: 2 | 3 | 4 }) {
+  const H = `h${level}` as const;
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
       <div className="min-w-0">
-        <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
+        <H className="ui-card-title flex items-center gap-2 text-sm font-semibold">
           {Icon && <Icon className="size-4 text-muted" />}
           {title}
-        </h3>
+        </H>
         {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -198,7 +199,7 @@ export function ProgressBar({ value, tone = 'accent', className, marker }: { val
 const inputCls =
   'w-full rounded-lg border border-control bg-surface px-3 py-2 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60';
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
+export function Input(props: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   return <input {...props} className={cx(inputCls, 'h-9', props.className)} />;
 }
 export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
