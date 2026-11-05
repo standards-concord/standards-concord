@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
 import { Bot, Bug, CircleCheck, CircleAlert, Combine, FileText, GitFork, GitMerge, Globe, IdCard, MessageSquareText, Pencil, Users, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
@@ -180,12 +181,45 @@ export function WebIdIcon({ className = 'size-4' }: { className?: string }) {
   return <IdCard className={className} aria-hidden />;
 }
 
+/**
+ * Concord's mark: the top view of a delta-winged supersonic airliner (a nod to Concorde, whose
+ * name it shares), split down the middle into two halves that meet, as parties do in concord.
+ * It climbs at 45° with a slipstream behind it. Drawn nose-up on a 64-unit grid; index.html's
+ * favicon uses the same plane without the slipstream, which turns to noise at 16px.
+ */
+export const LOGO_LEFT =
+  'M31 5.5C30.3 8.5 29.7 12 29.6 16L29.4 21C28.8 31 25.5 38 18 45C14 48.6 10.6 50.5 8 52.6L8 55.2L29 55.6L29.8 59L31 60.2Z';
+export const LOGO_RIGHT =
+  'M33 5.5C33.7 8.5 34.3 12 34.4 16L34.6 21C35.2 31 38.5 38 46 45C50 48.6 53.4 50.5 56 52.6L56 55.2L35 55.6L34.2 59L33 60.2Z';
+/** Streaks trailing behind the wing, longest behind the tail; the tile clips their ends. */
+const LOGO_SLIPSTREAM = 'M13 52V66M22 57V78M32 62V92M42 57V78M51 52V66';
+
 export function Logo({ className }: { className?: string }) {
+  const clip = `concord-logo-${useId().replace(/[^\w-]/g, '')}`;
   return (
-    <svg className={cx('size-7', className)} viewBox="0 0 32 32" aria-hidden>
-      <rect className="app-logo-bg" width="32" height="32" rx="8" fill="var(--accent)" />
-      <circle cx="12" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" />
-      <circle cx="20" cy="16" r="5" fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" strokeOpacity=".7" />
+    <svg className={cx('size-7', className)} viewBox="0 0 64 64" aria-hidden data-logo="concord">
+      <defs>
+        <clipPath id={clip}>
+          <rect className="app-logo-bg" width="64" height="64" rx="16" />
+        </clipPath>
+      </defs>
+      <rect className="app-logo-bg" width="64" height="64" rx="16" fill="var(--accent)" />
+      <g clipPath={`url(#${clip})`}>
+        <g transform="rotate(45 32 32)">
+          <path d={LOGO_SLIPSTREAM} fill="none" stroke="var(--accent-fg)" strokeWidth="2.4" strokeLinecap="round" strokeOpacity=".5" />
+          <g transform="translate(32 25) scale(.9) translate(-32 -32)">
+            {/* A halo in the tile colour, so the slipstream stops short of the plane. */}
+            <g fill="var(--accent)" stroke="var(--accent)" strokeWidth="5" strokeLinejoin="round">
+              <path d={LOGO_LEFT} />
+              <path d={LOGO_RIGHT} />
+            </g>
+            <g fill="var(--accent-fg)">
+              <path d={LOGO_LEFT} />
+              <path d={LOGO_RIGHT} fillOpacity=".62" />
+            </g>
+          </g>
+        </g>
+      </g>
     </svg>
   );
 }

@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.22.0',
+    version: '0.23.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,
@@ -67,6 +67,23 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'agent'],
         to: '{o}/forks',
         ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
+      },
+    ],
+  },
+  {
+    version: '0.22.0',
+    date: '2026-11-05',
+    title: 'A new Concord logo',
+    pr: 52,
+    changes: [
+      {
+        id: 'concorde-logo',
+        type: 'feat',
+        title: 'A new Concord logo',
+        detail:
+          'Concord’s mark is now a supersonic plane in two halves that meet, climbing with a slipstream behind it. It sits beside the ODI logo in the ODI look, on its own in the other looks, and (without the slipstream) in the browser tab.',
+        roles: [],
+        ask: 'Does the new logo feel right for Concord? Is it clear at the size it appears in the header?',
       },
     ],
   },
