@@ -18,7 +18,7 @@
  * (YouTube-style) and .report.json.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
@@ -36,6 +36,7 @@ import { actions, type Ctx } from './scenes.ts';
 import { vendorModule } from './lib/vendor.ts';
 import { serveFonts } from './lib/fonts.ts';
 import { startEgressProxy, type Egress } from './lib/egress.ts';
+import { applyRunBudget, parseBudget, recordVideos, videoEnv } from './lib/budget.ts';
 
 const HERE = import.meta.dirname;
 const ALL_FEATURES = ['forks', 'jsClasses', 'shaclc', 'appChecks', 'connectPage'];
@@ -77,17 +78,8 @@ if (argv['list-actions']) {
   process.exit(0);
 }
 
-/**
- * Most characters a paid voice may be sent in this run, across all its videos: 2,500
- * unless VOICE_CHAR_BUDGET or --voice-budget says otherwise (0 means no limit).
- */
-const VOICE_BUDGET = (() => {
-  const raw = argv['voice-budget'] ?? process.env.VOICE_CHAR_BUDGET;
-  if (raw === undefined || raw === '') return 2500;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) throw new Error(`The voice budget must be a whole number of characters (got "${raw}")`);
-  return n || undefined;
-})();
+/** Most characters a paid voice may be sent in this run, across all its videos (lib/budget.ts). */
+const VOICE_BUDGET = parseBudget(argv['voice-budget'] ?? process.env.VOICE_CHAR_BUDGET);
 
 // A release video must be exactly what the script claims, or nothing at all.
 if (argv.publish) {
@@ -159,28 +151,18 @@ async function recordEach(videos: string[]) {
     await portsFree([8798, 5184, 4417]);
     return new Promise<number>((r) => spawn(process.execPath, [...process.execArgv, process.argv[1], ...passOn, ...extra, '--video', v], { stdio: 'inherit', env }).on('exit', (c) => r(c ?? 1)));
   };
-  // One budget covers every video in the run. A paid voice first works out what each
-  // video would send, and refuses before sending anything if the total is over.
-  const tmp = await mkdtemp(path.join(os.tmpdir(), 'walkthrough-voice-'));
-  const ledger = path.join(tmp, 'ledger.json');
-  const paid = ['elevenlabs', 'openai', 'google'].includes(provider);
-  if (paid && VOICE_BUDGET) {
-    let total = 0;
-    for (const v of videos) {
-      log(`\n━━ ${v}: what needs voicing ━━`);
-      const plan = path.join(tmp, `${v}.plan.json`);
-      if ((await child(v, ['--voice-plan', plan], process.env)) !== 0) throw new Error(`Planning the ${v} video failed`);
-      total += (JSON.parse(await readFile(plan, 'utf8')) as { cost: number }).cost;
-    }
-    if (total > VOICE_BUDGET)
-      throw new Error(`These videos need ${total.toLocaleString('en')} new characters of narration, over this run's budget of ${VOICE_BUDGET.toLocaleString('en')}. Nothing was sent. Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`);
-    log(`\nNarration to voice: ${total.toLocaleString('en')} new characters of a ${VOICE_BUDGET.toLocaleString('en')} budget`);
-  }
-  for (const v of videos) {
-    log(`\n━━ ${v} ━━`);
-    const code = await child(v, [], { ...process.env, VOICE_LEDGER: ledger });
-    if (code !== 0) throw new Error(`Recording the ${v} video failed`);
-  }
+  await recordVideos({
+    videos,
+    paid: ['elevenlabs', 'openai', 'google'].includes(provider),
+    budget: VOICE_BUDGET,
+    log,
+    plan: async (v, file) => {
+      if ((await child(v, ['--voice-plan', file], process.env)) !== 0) throw new Error(`Planning the ${v} video failed`);
+    },
+    record: async (v, ledger) => {
+      if ((await child(v, [], videoEnv(process.env, ledger))) !== 0) throw new Error(`Recording the ${v} video failed`);
+    },
+  });
 }
 
 async function main() {
@@ -202,9 +184,8 @@ async function main() {
   const key = needsKey(provider);
   if (key && !process.env[key]) process.env[key] = await askHidden(`${key} (input hidden): `);
   const voice = new Voice({ provider, voice: argv['voice-id'], model: argv.model, rate: argv.rate ? Number(argv.rate) : undefined }, path.join(HERE, '.cache', 'voice'));
-  voice.budget = VOICE_BUDGET;
   // Recording several videos: what the others sent counts against the same budget.
-  if (process.env.VOICE_LEDGER) voice.useLedger(process.env.VOICE_LEDGER);
+  applyRunBudget(voice, process.env, VOICE_BUDGET);
   log(`Voice: ${voice.label}`);
 
   await mkdir(argv.out!, { recursive: true });

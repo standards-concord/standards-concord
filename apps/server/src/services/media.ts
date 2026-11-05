@@ -78,15 +78,18 @@ function cacheKey(r: { id?: number; tag_name: string }, a: { id?: number; name: 
 }
 
 /**
- * The file `name` in `dir`, only if it is a regular file that really is in that folder:
- * never a symlink, a folder, or anything that resolves somewhere else.
+ * The file `name` in `dir`, only if it is a regular file that really is there: never a
+ * symlink, a folder, or anything that resolves outside `root`, the folder we trust (the
+ * media folder itself, or the cache root). Its resolved path must be exactly where it
+ * would be with no links at all, so a linked folder on the way doesn't pass either.
  */
-function regularFileIn(dir: string, name: string): string | undefined {
+function regularFileIn(dir: string, name: string, root = dir): string | undefined {
   const p = path.join(dir, name);
   try {
     if (!fs.lstatSync(p).isFile()) return undefined;
     const real = fs.realpathSync(p);
-    return path.dirname(real) === fs.realpathSync(dir) ? real : undefined;
+    const expected = path.join(fs.realpathSync(root), path.relative(root, p));
+    return real === expected ? real : undefined;
   } catch {
     return undefined;
   }
@@ -131,19 +134,22 @@ export async function mediaFile(name: string): Promise<string | undefined> {
   if (!index.release || !asset) return undefined;
   const folder = path.join(cacheRoot(), asset.key);
   const target = path.join(folder, name);
-  const have = regularFileIn(folder, name);
+  const have = regularFileIn(folder, name, cacheRoot());
   if (have) return have;
   const url = asset.url;
   let job = downloads.get(target);
   if (!job) {
     job = (async () => {
+      // A link (or file) where the asset's folder belongs is removed, never written through.
+      const st = fs.lstatSync(folder, { throwIfNoEntry: false });
+      if (st && !st.isDirectory()) fs.rmSync(folder, { force: true });
       fs.mkdirSync(folder, { recursive: true });
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
       if (!res.ok || !res.body) throw new Error(`Downloading ${name}: HTTP ${res.status}`);
       const tmp = `${target}.part`;
       await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), fs.createWriteStream(tmp));
       fs.renameSync(tmp, target);
-      const ok = regularFileIn(folder, name);
+      const ok = regularFileIn(folder, name, cacheRoot());
       if (!ok) throw new Error(`Downloading ${name}: the cached copy isn't a plain file`);
       return ok;
     })().finally(() => downloads.delete(target));

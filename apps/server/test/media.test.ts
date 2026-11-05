@@ -13,12 +13,14 @@ const fresh = async () => {
   return import('../src/services/media.js');
 };
 
-const release = (id: number, tag: string, assetId: number, url: string) => ({
+const release = (id: number | undefined, tag: string, assetId: number | undefined, url: string) => ({
   id,
   tag_name: tag,
   html_url: `https://github.com/x/y/releases/tag/${tag}`,
   assets: [{ id: assetId, name: 'concord-walkthrough.vtt', size: 1, browser_download_url: url }],
 });
+
+const cacheDir = async () => path.join((await import('../src/config.js')).config.dataDir, 'media');
 
 function stubGitHub(latest: object, files: Record<string, string>) {
   vi.stubGlobal('fetch', async (url: string) => {
@@ -59,6 +61,48 @@ describe('media release cache', () => {
     const served = await media.mediaFile('concord-walkthrough.vtt');
     expect(fs.readFileSync(served!, 'utf8')).toBe('WEBVTT c');
     expect(fs.lstatSync(served!).isSymbolicLink()).toBe(false);
+  });
+});
+
+describe('media release cache, continued', () => {
+  // The folder check used the folder's own resolved path, so an asset folder that was a
+  // link to somewhere else passed: only the resolved path under the cache root counts now.
+  it('never serves through an asset folder that links outside the cache', async () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'elsewhere-'));
+    fs.writeFileSync(path.join(elsewhere, 'concord-walkthrough.vtt'), 'do not serve');
+    stubGitHub(release(104, 'v4', 1004, 'https://dl.example/d'), { 'https://dl.example/d': 'WEBVTT d' });
+    const media = await fresh();
+    const cache = await cacheDir();
+    fs.mkdirSync(cache, { recursive: true });
+    fs.symlinkSync(elsewhere, path.join(cache, 'release-104-asset-1004'));
+    const served = await media.mediaFile('concord-walkthrough.vtt');
+    expect(fs.readFileSync(served!, 'utf8')).toBe('WEBVTT d');
+    expect(served!.startsWith(fs.realpathSync(cache) + path.sep)).toBe(true);
+    // The link was replaced by a real folder, and nothing was written through it.
+    expect(fs.lstatSync(path.join(cache, 'release-104-asset-1004')).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(elsewhere, 'concord-walkthrough.vtt'), 'utf8')).toBe('do not serve');
+  });
+
+  it('fetches a replaced asset again, even under the same release', async () => {
+    stubGitHub(release(105, 'v5', 1005, 'https://dl.example/e1'), { 'https://dl.example/e1': 'WEBVTT first' });
+    const first = await (await fresh()).mediaFile('concord-walkthrough.vtt');
+    stubGitHub(release(105, 'v5', 1006, 'https://dl.example/e2'), { 'https://dl.example/e2': 'WEBVTT replaced' });
+    const second = await (await fresh()).mediaFile('concord-walkthrough.vtt');
+    expect(fs.readFileSync(first!, 'utf8')).toBe('WEBVTT first');
+    expect(fs.readFileSync(second!, 'utf8')).toBe('WEBVTT replaced');
+  });
+
+  it('keys releases without ids by a hash, still one folder per release', async () => {
+    stubGitHub(release(undefined, 'release/9', undefined, 'https://dl.example/f'), { 'https://dl.example/f': 'WEBVTT f' });
+    const first = await (await fresh()).mediaFile('concord-walkthrough.vtt');
+    stubGitHub(release(undefined, 'release_9', undefined, 'https://dl.example/g'), { 'https://dl.example/g': 'WEBVTT g' });
+    const second = await (await fresh()).mediaFile('concord-walkthrough.vtt');
+    expect(path.basename(path.dirname(first!))).toMatch(/^sha256-[0-9a-f]{64}$/);
+    expect(path.dirname(second!)).not.toBe(path.dirname(first!));
+    expect(fs.readFileSync(second!, 'utf8')).toBe('WEBVTT g');
+    // The same release keys to the same folder next time.
+    stubGitHub(release(undefined, 'release_9', undefined, 'https://dl.example/g'), {});
+    expect(await (await fresh()).mediaFile('concord-walkthrough.vtt')).toBe(second);
   });
 });
 
