@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.23.0',
+    version: '0.24.0',
     date: '2026-11-05',
     title: 'Edit a term where you read it',
     pr: 28,
@@ -76,6 +76,45 @@ export const APP_RELEASES: AppRelease[] = [
           'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
         roles: ['steward'],
         to: '{o}/changes',
+      },
+    ],
+  },
+  {
+    version: '0.23.0',
+    date: '2026-11-05',
+    title: 'Choose who sees your use cases',
+    pr: 15,
+    changes: [
+      {
+        id: 'use-case-sharing',
+        type: 'feat',
+        title: 'Private, working group or public use cases',
+        detail:
+          'Each use case says who can see it. Interviews start private, calls are shared with the working group, and only public ones can be drafted into changes. You can withdraw one at any time, and whatever came from it is hidden again.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/use-cases',
+        tasks: ['interview', 'synthesise'],
+        ask: 'Was it clear who could see your use case, and how to change that?',
+      },
+      {
+        id: 'use-case-anonymised',
+        type: 'feat',
+        title: 'Publish an anonymised version of a private use case',
+        detail: 'For a private use case, Concord can draft a version without names or details that identify anyone. It is only published if you approve it.',
+        roles: ['contributor'],
+        to: '{o}/use-cases',
+        tasks: ['interview'],
+      },
+      {
+        id: 'use-case-traceability',
+        type: 'feat',
+        title: 'Follow a use case from a call to a release',
+        detail:
+          'Calls, use cases, change requests and releases link to each other. A use case moves from triage to closed as the changes made from it ship, and each release has a use cases and requirements document.',
+        roles: ['member', 'steward', 'odi'],
+        to: '{o}/use-cases',
+        tasks: ['meeting', 'merge'],
+        ask: 'Could you tell which release addressed a use case, and why?',
       },
     ],
   },

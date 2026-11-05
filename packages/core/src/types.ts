@@ -369,6 +369,8 @@ export interface CompetencyQuestionResult {
   error?: string;
   /** Satisfied = query ran and returned at least one row (or matched expected). */
   satisfied: boolean;
+  /** The use case the question came from, if any. Results are shown only to people who may see it. */
+  source?: string;
 }
 
 export interface ValidationReport {

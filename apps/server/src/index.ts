@@ -2,6 +2,7 @@ import { createApp } from './app.js';
 import { config } from './config.js';
 import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
+import { acquireProcessLock } from './processLock.js';
 import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
 import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
@@ -10,6 +11,7 @@ import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 import { syncFeedbackSharing } from './services/feedback.js';
 
+acquireProcessLock(config.dataDir);
 await openDb();
 // One server at a time changes the repositories (upgrades are exclusive; see docs/deploy.md). It exits if it ever loses them.
 const store = await claimGitStore();

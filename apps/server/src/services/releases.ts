@@ -16,11 +16,15 @@ import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { anyHeld, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
-import { markReleased } from './changeRequests.js';
+import { markReleased, withOntologyLocks } from './changeRequests.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
+import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
+import { someAsync } from '../asyncList.js';
+import { syncUseCasesForCR } from './traceability.js';
 import { logActivity } from './users.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
@@ -75,10 +79,21 @@ export async function releaseGovernance(r: Release) {
   });
 }
 
-export async function releaseDetail(r: Release): Promise<ReleaseDetail> {
-  const crs = (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
+/**
+ * A release as a viewer may see it. Its notes list its change requests by title, so when one of
+ * them is withheld from the viewer (a use case it came from is no longer shared with them), the
+ * notes they see are written again from the requests as they may see them. Stored notes are kept.
+ */
+export async function releaseForViewer(r: Release, viewer?: User): Promise<Release> {
+  const crs = (await Promise.all(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)))).filter((c): c is ChangeRequest => !!c);
+  if (!await someAsync(crs, (c) => crWithheld(c, viewer))) return r;
+  return { ...r, notes: draftNotes(await getProject(r.ontologyId), await Promise.all(crs.map((c) => crForViewer(c, viewer))), r.level, r.version, 'the previous release') };
+}
+
+export async function releaseDetail(r: Release, viewer?: User): Promise<ReleaseDetail> {
+  const crs = (await Promise.all(r.changeRequestIds.map(async (id) => await crForViewer(await mustGet<ChangeRequest>('changeRequests', id), viewer))));
   return {
-    ...r,
+    ...await releaseForViewer(r, viewer),
     votes: await list<Vote>('votes', r.id),
     governance: await releaseGovernance(r),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
@@ -95,14 +110,14 @@ const published = (c: ChangeRequest, text: string) => (!needsPublicationApproval
 const publishedEdits = (c: ChangeRequest) => (!needsPublicationApproval(c) ? (c.kgcl ?? []) : (c.privacyCleared?.kgcl ?? []));
 
 /** Release notes grouped by level, from the merged change requests. */
-function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
+function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string, prior: string = project.currentVersion) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
     items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${publishedEdits(c).length ? `\n${publishedEdits(c).slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
-      ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
-      : `${version} is backward compatible with ${project.currentVersion}.`;
+      ? `**Breaking release.** ${version} is not backward compatible with ${prior}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
+      : `${version} is backward compatible with ${prior}.`;
   return [header, section('Breaking changes', by('major')), section('New terms and features', by('minor')), section('Fixes and clarifications', by('patch'))]
     .filter(Boolean)
     .join('\n');
@@ -147,6 +162,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   if (!existing) {
     await logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
+  // Keep the release's use cases and requirements document in step (in the background).
+  draftForRelease(r);
   return await openVoteIfNeeded(r);
 }); }
 
@@ -208,7 +225,8 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   if (actor) await requireRole(r.ontologyId, actor, ['steward', 'owner'], 'publish releases');
   // Holding the working-draft lock from reading the draft to committing the
   // release, so no merge can land in between (and be erased by the release).
-  return withWorkingDraftLock(await getProject(r.ontologyId), () => publishNow(r, actor));
+  // The consent lock is taken first (withOntologyLocks): no use case can be withdrawn while it is published.
+  return withOntologyLocks(r.ontologyId, () => publishNow(r, actor));
 }
 
 async function publishNow(stale: Release, actor: User | undefined): Promise<Release> {
@@ -248,13 +266,18 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
   // never reaches the page); notes a steward wrote are published as they wrote them.
   if (!r.notesBy) r.notes = draftNotes(project, (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id)))), r.level, r.version);
-  files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
+  // What goes into the public files is what anyone may see: nothing from a use case withdrawn since. The
+  // consent lock is held for all of this (publishRelease), so nothing can be withdrawn before the commit.
+  const publicNotes = (await releaseForViewer(r, undefined)).notes;
+  files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${publicNotes}\n`;
+  const doc = await prepareForRelease(project, r);
+  if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
   // The use case snapshot always goes in, so the release never shows live data;
   // a rendering failure only costs the stored page (served pages render on request).
-  const requirements = releaseRequirements(project, r.version);
+  const requirements = await releaseRequirements(project, r.version);
   files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
   try {
-    Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
+    Object.assign(files, await releasePageFiles(project, { ...r, notes: publicNotes, publishedAt: clock.iso() }, stamped, requirements));
   } catch (err) {
     console.warn(`[release] public page: ${(err as Error).message}`);
   }
@@ -268,7 +291,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // overwritten) and the release is still unpublished (see
   // ontologyStore.advanceTo). The tag follows from the database. Published
   // commits carry no names.
-  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, base, async (commit) => {
+  await ontologyStore.writeRelease(project, r.version, stamped, files, publicNotes, { name: 'Concord' }, base, async (commit) => {
     // Still exactly the release these files were made from, and still approved (a vote may have changed meanwhile).
     const latest = await mustGet<Release>('releases', r.id);
     if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
@@ -280,6 +303,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     await holdReleaseIfDraftHeld(project, r.version);
     Object.assign(r, latest, { notes: publishedNotes, commit, status: 'published', publishedAt, statusSince: publishedAt });
     await save(r);
+    // Also closes the use cases each change addressed (markReleased syncs them).
     for (const id of r.changeRequestIds) await markReleased(id, r.id, r.version, publishedAt);
     const p = await getProject(r.ontologyId);
     p.currentVersion = r.version;
@@ -287,6 +311,8 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     await updateProject(p);
   });
   Object.assign(project, await getProject(r.ontologyId));
+  // The requirements document is published with the version (it may need the model, so not in the transaction).
+  if (doc) await markPublished(doc, r);
 
   // Public ontologies are persisted to GitHub on release, when configured.
   // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for

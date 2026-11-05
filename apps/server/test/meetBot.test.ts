@@ -620,7 +620,7 @@ describe('invite-by-email', () => {
     const m = await liveCall();
     expect(m.bot?.status).toBe('in-call');
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Cy', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Cy', role: 'reviewer' });
     expect((await contributor.post(`/api/meetings/${m.id}/analyse`)).status).toBe(403);
     expect((await contributor.post(`/api/meetings/${m.id}/propose`)).status).toBe(403);
     const s = await steward('Steward Eve');
@@ -689,14 +689,16 @@ describe('invite-by-email', () => {
     expect(after.facilitatorPrompts.at(-1)?.posted).toBe(true);
   });
 
-  it('shows meetings to signed-in people only, and invites awaiting approval, Meet links and organisers to facilitators only', async () => {
+  // Calls are working group business (services/useCases.ts canSeeMeeting): these checks use a reviewer, who is in the
+  // group but isn't a facilitator. A contributor, outside the group, doesn't see calls at all.
+  it('shows meetings to the working group only, and invites awaiting approval, Meet links and organisers to facilitators only', async () => {
     writeFeed(oneOff({ uid: 'private-call', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await syncCalendar(at('2026-11-09T09:00:00Z'));
     const [m] = await calendarMeetings();
     expect((await request(app).get('/api/ontologies/volunteering/meetings')).status).toBe(401);
     expect((await request(app).get(`/api/meetings/${m.id}`)).status).toBe(401);
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Dee', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Dee', role: 'reviewer' });
     expect(((await contributor.get('/api/ontologies/volunteering/meetings')).body as Meeting[]).some((x) => x.id === m.id)).toBe(false);
     expect((await contributor.get(`/api/meetings/${m.id}`)).status).toBe(404);
 
@@ -708,6 +710,10 @@ describe('invite-by-email', () => {
     expect(seen.meetingUrl).toBeUndefined();
     expect(seen.calendar?.organizer).toBeUndefined();
     expect((await contributor.post('/api/meet-bot/sync')).status).toBe(403);
+    const outsider = request.agent(app);
+    await outsider.post('/api/auth/demo').send({ name: 'Contributor Dee Outside', role: 'contributor' });
+    expect((await outsider.get(`/api/meetings/${m.id}`)).status).toBe(404);
+    expect(((await outsider.get('/api/ontologies/volunteering/meetings')).body as Meeting[]).some((x) => x.id === m.id)).toBe(false);
   });
 
   it('“Join a call now” keeps transcript lines that arrive before Recall.ai answers', async () => {
@@ -1025,7 +1031,7 @@ describe('invite-by-email', () => {
     await syncCalendar(at('2026-11-10T14:10:00Z'));
     await s.patch(`/api/meetings/${m.id}`).send({ skip: true });
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Eli', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Eli', role: 'reviewer' });
     const theirs = (await contributor.get(`/api/activity?ontologyId=${m.ontologyId}`)).body as { message: string; link?: string }[];
     expect(theirs.filter((a) => a.link?.includes(m.id) || a.message.includes('Board restructure'))).toEqual([]);
     const stewards = (await s.get(`/api/activity?ontologyId=${m.ontologyId}`)).body as { message: string; link?: string }[];
@@ -1048,7 +1054,7 @@ describe('invite-by-email', () => {
     const [m] = await calendarMeetings();
     expect((await getMeeting(m.id)).bot).toMatchObject({ botId: expect.any(String), bookedUrl: 'https://meet.google.com/xyz-abcd-efg' });
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Gus', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Gus', role: 'reviewer' });
     const detail = await contributor.get(`/api/meetings/${m.id}`);
     const listed = await contributor.get(`/api/ontologies/${m.ontologyId}/meetings`);
     expect(detail.status).toBe(200);
@@ -1390,7 +1396,7 @@ describe('invite-by-email', () => {
     expect(err).not.toContain('meet.google.com');
     expect(err).not.toContain('xyz-abcd-efg');
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Oz', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Oz', role: 'reviewer' });
     const detail = await contributor.get(`/api/meetings/${m.id}`);
     const listed = await contributor.get(`/api/ontologies/${m.ontologyId}/meetings`);
     for (const body of [detail.text, listed.text]) {
@@ -2436,7 +2442,7 @@ END:VEVENT`,
     await dispatchDue(at('2026-11-10T14:46:00Z'));
     const [m] = await calendarMeetings();
     const contributor = request.agent(app);
-    await contributor.post('/api/auth/demo').send({ name: 'Contributor Flo', role: 'contributor' });
+    await contributor.post('/api/auth/demo').send({ name: 'Contributor Flo', role: 'reviewer' });
     const seen = (await contributor.get(`/api/meetings/${m.id}`)).body as Meeting;
     expect(seen.bot).toMatchObject({ booked: true });
     expect(seen.bot?.botId).toBeUndefined();

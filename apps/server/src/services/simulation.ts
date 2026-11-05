@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
-import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
+import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
 import { clearAll, list, put } from '../db.js';
@@ -21,7 +21,9 @@ import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseGovernance, releaseTick, voteOnRelease } from './releases.js';
-import { createUseCase } from './useCases.js';
+import { sourceLinesFor } from './meetings.js';
+import { generateRequirements, markPublished } from './requirements.js';
+import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
 import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
 
@@ -38,6 +40,11 @@ async function ensurePersonas(): Promise<Map<string, User>> {
     byKey.set(p.key, u);
   }
   return byKey;
+}
+
+/** Records a demo use case's seeded content as the only version public pages show. */
+async function freezeDemoSeed(u: UseCase) {
+  await put('useCases', { ...u, demoSeed: structuredClone({ sections: u.sections, competencyQuestions: u.competencyQuestions }) }, u.ontologyId);
 }
 
 export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name === u?.name);
@@ -78,29 +85,39 @@ async function seedHistory() {
   );
   for (const p of PERSONAS) await setRoles(project.id, people.get(p.key)!.id, p.roles);
 
-  // Version 1.0.0 is already out: that makes the semver story concrete.
-  await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.');
-
   const aisha = people.get('aisha')!;
   const mei = people.get('mei')!;
   const tom = people.get('tom')!;
   const gareth = people.get('gareth')!;
 
-  // The use case behind 1.0.0, with executable competency questions run on every change.
-  const cqs = aggregationCompetencyQuestions();
-  if (cqs.length) {
-    const exampleData = aggregationExampleData();
-    await createUseCase(project, tom, {
-      source: 'form',
-      status: 'synthesised',
-      sections: structuredClone(AGGREGATION_USE_CASE),
-      competencyQuestions: cqs.map((q) => ({ id: newId('cq'), question: q.question, sparql: q.sparql, exampleData, status: 'answerable' as const })),
-    });
-  }
+  // Version 1.0.0 is already out: that makes the semver story concrete. Its use case,
+  // and its use cases and requirements document, exist before its files are written,
+  // so the release's public page and snapshot include them.
+  await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.', async (first) => {
+    // The use case behind 1.0.0, with executable competency questions run on every change.
+    const cqs = aggregationCompetencyQuestions();
+    if (cqs.length) {
+      const exampleData = aggregationExampleData();
+      await freezeDemoSeed(await createUseCase(project, tom, {
+        source: 'form',
+        status: 'closed',
+        visibility: 'public',
+        resolution: { status: 'closed', at: clock.iso(), by: priya.id, releaseId: first.id, version: '1.0.0', note: 'The first release was designed around this use case.' },
+        sections: structuredClone(AGGREGATION_USE_CASE),
+        competencyQuestions: cqs.map((q) => ({ id: newId('cq'), question: q.question, sparql: q.sparql, exampleData, status: 'answerable' as const })),
+      }));
+    }
+    try {
+      await markPublished(await generateRequirements(project, { version: '1.0.0', release: first }), first);
+    } catch (err) {
+      console.warn(`[seed] requirements document: ${(err as Error).message}`);
+    }
+  });
 
-  await createUseCase(project, aisha, {
+  const shifts = await createUseCase(project, aisha, {
     source: 'chat',
-    status: 'ready',
+    status: 'accepted',
+    visibility: 'public',
     sections: structuredClone(WEEKLY_SHIFTS_USE_CASE),
     competencyQuestions: WEEKLY_SHIFTS_QUESTIONS.map((q) => ({ id: newId('cq'), ...q, status: 'untested' as const })),
     terms: structuredClone(WEEKLY_SHIFTS_TERMS),
@@ -133,7 +150,7 @@ async function seedHistory() {
     title: 'Say whether an opportunity reimburses expenses',
     description: 'Many volunteers can only take part if travel and other out-of-pocket costs are reimbursed. People want to filter on this before applying.',
     kind: 'feature',
-    origin: { type: 'chat' },
+    origin: { type: 'chat', useCaseId: shifts.id },
     ops: [
       {
         op: 'addDatatypeProperty',
@@ -172,11 +189,15 @@ async function seedHistory() {
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
   });
 
+  await seedTraceability(project, { priya, aisha, mei, gareth }, shifts.id);
+  // What the public pages may show of the personas' use cases, from now on.
+  for (const u of await list<UseCase>('useCases', project.id)) if (u.visibility === 'public') await freezeDemoSeed(u);
+
   await updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
   return (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
 }
 
-async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string) {
+async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
   const working = await ontologyStore.working(project);
   const stamped = stampRelease(working, { version, level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
   const files: Record<string, string> = {};
@@ -203,11 +224,95 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     publishedAt: now,
     statusSince: now,
   };
+  await put('releases', r, project.id);
+  await beforeWrite?.(r);
   Object.assign(files, await releasePageFiles(project, r, stamped));
   r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
   await put('releases', r, project.id);
   project.currentVersion = version;
   await updateProject(project);
+  return r;
+}
+
+/**
+ * Shows the sharing modes and links: a working group call with the use case it produced
+ * (linked both ways, with the transcript lines it came from), and a private use case
+ * whose author published an anonymised synthetic version with no name attached.
+ */
+async function seedTraceability(project: OntologyProject, p: Record<'priya' | 'aisha' | 'mei' | 'gareth', User>, shiftsId: string) {
+  const transcript: TranscriptLine[] = [
+    { speaker: p.priya.name, text: 'Thanks for joining. Today I would like to hear how people publish recurring shifts.', t: 4 },
+    { speaker: p.gareth.name, text: 'Our charity runs the same Saturday shift every week. Today our export lists every single occurrence, so a year of shifts is fifty-two separate sessions.', t: 15 },
+    { speaker: p.gareth.name, text: 'We store the rota as a weekly recurrence rule. It would be far simpler to publish the recurrence once and let aggregators expand it.', t: 31 },
+    { speaker: p.aisha.name, text: 'Same for the council. Volunteers want to see “every Saturday morning”, not a list of dates.', t: 48 },
+    { speaker: p.mei.name, text: 'For impact reporting we still need to count the sessions that actually happened, so cancellations matter.', t: 63 },
+    { speaker: p.gareth.name, text: 'Which recurring shifts run every week, and which dates are cancelled? That is the question our volunteers ask.', t: 80 },
+    { speaker: p.priya.name, text: 'Let us capture that as a use case and look at how other vocabularies model recurrence.', t: 96 },
+  ];
+  const now = clock.iso();
+  const meeting: Meeting = {
+    id: newId('mtg'),
+    ontologyId: project.id,
+    title: 'Working group call: recurring shifts',
+    source: 'upload',
+    transcript,
+    facilitatorPrompts: [{ at: now, t: 70, text: 'Mei mentioned cancellations. Should a cancelled occurrence be recorded on the session, or as an exception to the recurrence?', posted: false }],
+    analysis: {
+      summary: 'Publishers want to describe a recurring shift once, with cancellations as exceptions, instead of listing every occurrence. Impact reporting still needs to count sessions that took place.',
+      useCases: [
+        {
+          title: 'Publish recurring shifts once',
+          speaker: p.gareth.name,
+          sections: {
+            name: 'Publish recurring shifts once',
+            goal: 'Publish a weekly shift as a single recurring session rather than one record per date.',
+            actors: 'Charity publishing a rota; aggregators; volunteers.',
+            usageScenarios: ['A charity runs the same Saturday 9am–1pm shift every week and publishes it once with a weekly recurrence, plus the dates it is cancelled.'],
+          },
+        },
+      ],
+      terms: [{ label: 'recurrence rule', kind: 'datatypeProperty', definition: 'How often a session repeats, e.g. weekly on Saturdays.', evidence: ['We store the rota as a weekly recurrence rule.'] }],
+      competencyQuestions: [{ question: 'Which recurring shifts run every week, and which dates are cancelled?', askedBy: p.gareth.name }],
+      disagreements: [],
+      openQuestions: ['Should cancellations be exceptions to the recurrence or properties of a session?'],
+      decisions: ['Capture recurring shifts as a use case.'],
+    },
+    status: 'analysed',
+    createdAt: now,
+    createdBy: p.priya.id,
+  };
+  await put('meetings', meeting, project.id);
+  const g = meeting.analysis!.useCases[0];
+  const recurring = await createUseCase(project, p.priya, {
+    source: 'meeting',
+    sourceRef: meeting.id,
+    sourceLines: sourceLinesFor(meeting, g),
+    visibility: 'group',
+    status: 'triage',
+    sections: { ...g.sections, notes: `From the call “${meeting.title}”, described by ${g.speaker}.` },
+    competencyQuestions: [{ id: newId('cq'), question: meeting.analysis!.competencyQuestions[0].question, status: 'untested' }],
+    terms: meeting.analysis!.terms,
+  });
+  await addLink(recurring, p.priya, { type: 'use-case', id: shiftsId, relation: 'related' });
+
+  // Mei described this privately; only the anonymised version is public.
+  const impact = await createUseCase(project, p.mei, {
+    source: 'chat',
+    visibility: 'private',
+    status: 'draft',
+    sections: {
+      name: 'Report volunteering hours to our funders',
+      goal: 'Tell the Lottery Community Fund how many hours our volunteers gave at St Anne’s Hospice each quarter, broken down by cause.',
+      actors: 'Impact officer at St Anne’s Hospice; funders; volunteering platforms.',
+      usageScenarios: ['Every quarter Mei Chen exports hours from Better Impact and emails mei.chen@stannes.example to the Lottery Community Fund.'],
+    },
+    competencyQuestions: [
+      { id: newId('cq'), question: 'How many volunteer hours were given last quarter, by cause?', exampleAnswer: 'Environment 320 hours; health 210 hours', status: 'untested' },
+      { id: newId('cq'), question: 'Which opportunities count towards a funder’s outcome?', status: 'untested' },
+    ],
+  });
+  await proposeAnonymised(impact, p.mei);
+  await publishAnonymised(await getUseCase(impact.id), p.mei);
 }
 
 /* ------------------------------------------------------------------------ */

@@ -61,10 +61,9 @@ test.describe('meetings', () => {
     await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
     await expect(page.getByText('6 lines')).toBeVisible();
     await expect(page.getByText(/every Tuesday from 10 to 2/)).toBeVisible();
-    await page.getByRole('button', { name: 'Turn into use cases and a change request' }).click();
-    // With proposed changes it opens the new change request; otherwise it says which use cases it made.
-    await expect(page.getByRole('button', { name: /^Status: / }).or(page.getByText(/^Created \d+ use cases?\./))).toBeVisible({ timeout: 30_000 });
-    if (/\/changes\//.test(page.url())) await expect(page.getByRole('link', { name: 'view meeting' })).toBeVisible();
+    // A call's use cases are shared with the working group. Change requests are public, so none is drafted from them here.
+    await page.getByRole('button', { name: 'Turn into use cases' }).click();
+    await expect(page.getByText(/^Created \d+ use cases?, shared with the working group\./)).toBeVisible({ timeout: 30_000 });
 
     // The meeting is listed, with its source.
     await page.goto(`/o/${demo.id}/meetings`);

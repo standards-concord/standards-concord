@@ -14,7 +14,7 @@ import { ontologyStore } from '../src/services/ontologyStore.js';
 import { config } from '../src/config.js';
 import { OntologyGraph } from '@concord/core';
 import { seedDemo } from '../src/services/simulation.js';
-import { createUseCase, listUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
+import { createUseCase, getUseCase, listUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
 import { redactText, revealing, secretsFor } from '../src/services/redact.js';
 import { approvePublication, getCR, merge, publicationPreview, revise, updateOps } from '../src/services/changeRequests.js';
 import { draftRelease, getRelease, publishRelease } from '../src/services/releases.js';
@@ -154,9 +154,26 @@ describe('use cases on the public page', () => {
   it('never shows use cases written by real people on the public page', async () => {
     const project = (await findProject('volunteering'))!;
     const tester = await createUser({ name: 'Real Tester', provider: 'demo', subject: 'real-tester' });
-    await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'My confidential charity workflow' } });
+    await createUseCase(project, tester, { source: 'chat', status: 'triage', sections: { name: 'My confidential charity workflow' } });
     const res = await request(app).get('/def/volunteering');
     expect(res.text).not.toContain('My confidential charity workflow');
+  });
+
+  it('leaves out working group use cases and private originals, but shows the anonymised version', async () => {
+    const project = (await findProject('volunteering'))!;
+    const tester = await createUser({ name: 'Group Tester', provider: 'demo', subject: 'group-tester' });
+    await createUseCase(project, tester, { source: 'meeting', visibility: 'group', status: 'triage', sections: { name: 'Internal partner pipeline' } });
+    const res = await request(app).get('/def/volunteering/draft');
+    expect(res.text).not.toContain('Internal partner pipeline');
+    expect(res.text).not.toContain('St Anne');
+    expect(res.text).not.toContain('Publish recurring shifts once');
+    expect(res.text).toContain('Anonymised');
+  });
+
+  it('a released page shows the frozen document for that version', async () => {
+    const res = await request(app).get('/def/volunteering/1.0.0');
+    expect(res.text).toContain('id="req-R1"');
+    expect(res.text).toMatch(/<a href="#uc-[^"]+">UC-\d+<\/a>/);
   });
 
   it('renders a requirements document with links to its use cases, and escapes contributed text', async () => {
@@ -245,7 +262,6 @@ describe('mapping the use case data onto the page', () => {
         intro: 'Intro [UC-1](#uc-u1)',
         sections: [],
         requirements: [{ id: 'R1', text: 'Find shifts', useCaseIds: ['u1'], termIris: ['https://w3id.org/odi/volunteering#Session'], status: 'met' }],
-        unpublished: { group: 2, private: 1 },
       },
       [
         { id: 'u1', ref: 'UC-1', title: 'From a call', status: 'closed', coveredIn: '1.0.0', attribution: 'Aisha', origin: { kind: 'meeting', label: 'Working group call', href: '/o/x/meetings/y' } },
@@ -262,7 +278,7 @@ describe('mapping the use case data onto the page', () => {
     expect(html).not.toContain('/o/x/meetings/y');
     expect(html).toContain('Working group call');
     expect(html).toMatch(/Met by <a class="ref" href="#Session"/);
-    expect(html).toContain('2 working group use cases and 1 private use case also informed this version');
+    expect(html).not.toMatch(/private use case/);
   });
 });
 
@@ -279,16 +295,27 @@ describe('review fixes', () => {
 
   it('never publishes a demo use case that someone edited, even as a simulated persona', async () => {
     const project = (await findProject('volunteering'))!;
-    const seeded = (await listUseCases(project.id)).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
-    const author = (await getUser(seeded.authorId))!;
-    expect(author.simulated).toBe(true);
-    await updateUseCase(seeded.id, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
-    for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
-      const res = await request(app).get(url);
-      expect(res.text, url).not.toContain('07700 900123');
-      expect(res.text, url).not.toContain('Renamed by a tester');
-      expect(res.text, url).toContain('Find weekly shifts that need volunteers');
+    // Tom's use case was closed by 1.0.0, so every page shows it; Aisha's came later, so only the draft does.
+    const pages = {
+      'Aggregate volunteering opportunities across platforms': ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0'],
+      'Find weekly shifts that need volunteers': ['/def/volunteering/draft'],
+    };
+    for (const [name, urls] of Object.entries(pages)) {
+      const seeded = (await listUseCases(project.id)).find((u) => u.sections.name === name)!;
+      const author = (await getUser(seeded.authorId))!;
+      expect(author.simulated).toBe(true);
+      await updateUseCase(await getUseCase(seeded.id), author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: `Renamed by a tester` } });
+      for (const url of urls) {
+        const res = await request(app).get(url);
+        expect(res.text, url).not.toContain('07700 900123');
+        expect(res.text, url).not.toContain('Renamed by a tester');
+        expect(res.text, url).toContain(name);
+      }
     }
+    // A use case a tester creates as a persona is never published at all.
+    const tom = (await getUser((await listUseCases(project.id)).find((u) => u.sections.name === 'Renamed by a tester')!.authorId))!;
+    await createUseCase(project, tom, { source: 'form', visibility: 'public', status: 'accepted', sections: { name: 'Typed in by a tester as Tom' } });
+    expect((await request(app).get('/def/volunteering/draft')).text).not.toContain('Typed in by a tester as Tom');
   });
 
   it('negotiates only the types it produces, and refuses the rest', async () => {
@@ -583,7 +610,7 @@ describe('sixth review fixes', () => {
     for (const t of ['an apple', 'Xylophone', 'TaxRecord', 'A plan for an index']) expect(findSecrets(t, x), t).toEqual([]);
     // Through synthesis and merge: nothing reaches the draft.
     const project = (await findProject('volunteering'))!;
-    const uc = await createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilot' } });
+    const uc = await createUseCase(project, mac, { source: 'chat', status: 'accepted', visibility: 'public', sections: { name: 'SecretPilot' } });
     const cr = await synthesise(project, mac, [uc.id]);
     await put(
       'changeRequests',
@@ -599,7 +626,11 @@ describe('sixth review fixes', () => {
       project.id,
     );
     expect((await merge(await getCR(cr.id), undefined)).status).toBe('needs-work');
-    expect(await everyFormat('draft')).not.toMatch(/SECRETPILOT|MacDonald|MACDONALD|SixSafe/i);
+    // Only public use cases can be drafted from, and the page lists a public one under its title and its author's
+    // name, as they chose. Nothing the request would add reaches the draft: not in any serialisation, nor the page.
+    const formats = await Promise.all(['.ttl', '.nt', '.owl', '.jsonld', '.omn', '.yaml'].map(async (ext) => (await request(app).get(`/def/volunteering/draft${ext}`)).text));
+    expect(formats.join('\n')).not.toMatch(/SECRETPILOT|MacDonald|MACDONALD|SixSafe/i);
+    expect((await request(app).get('/def/volunteering/draft')).text).not.toMatch(/SECRETPILOTRECORD|MACDONALDRECORD|MacDonalds|SixSafe/i);
   });
 
   it('never changes what unrelated text means', async () => {
@@ -626,10 +657,12 @@ describe('seventh review: a person approves exactly what is published', () => {
     const { body } = await agent.post('/api/auth/demo').send({ name, role: 'editor' });
     return { agent, user: (await getUser(body.user.id))! };
   };
-  const drafted = async (title: string, ops: unknown[]) => {
+  // Only public use cases can be drafted from, and a public one is published under its own title and its
+  // author's name (they chose that), so a test about what the request itself publishes can name them apart.
+  const drafted = async (title: string, ops: unknown[], caseName?: string) => {
     const project = (await findProject('volunteering'))!;
-    const tester = await createUser({ name: `Tester ${title}`, provider: 'github', subject: `seventh-${title}` });
-    const uc = await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: `Use case ${title}` } });
+    const tester = await createUser({ name: caseName ? `Tester of ${caseName}` : `Tester ${title}`, provider: 'github', subject: `seventh-${title}` });
+    const uc = await createUseCase(project, tester, { source: 'chat', status: 'accepted', visibility: 'public', sections: { name: caseName ?? `Use case ${title}` } });
     const cr = await synthesise(project, tester, [uc.id]);
     await put('changeRequests', { ...await getCR(cr.id), title, ops, ...APPROVED }, project.id);
     return { project, tester, cr: await getCR(cr.id) };
@@ -690,7 +723,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     const approved = await approvePublication(await getCR(cr.id), user, (await publicationPreview(await getCR(cr.id))).fingerprint);
     expect(approved.status).toBe('merged');
     // A request merged before approvals existed: no clearance, so neither its title nor its edits reach the notes.
-    const legacy = await drafted('LEGACY_UNAPPROVED_TITLE', []);
+    const legacy = await drafted('LEGACY_UNAPPROVED_TITLE', [], 'Legacy drafting case');
     await put('changeRequests', { ...legacy.cr, status: 'merged', kgcl: ['create class :LegacyUnapproved'] }, project.id);
     const steward = await createUser({ name: 'Seventh steward', provider: 'github', subject: 'seventh-steward' });
     await (await import('../src/services/ontologies.js')).setRoles(project.id, steward.id, ['steward']);
@@ -781,7 +814,7 @@ describe('seventh review: a person approves exactly what is published', () => {
   it('highlights what looks private for the editor, without deciding anything', async () => {
     const mac = await createUser({ name: 'MacDonald Seven', provider: 'github', subject: 'seventh-mac' });
     const project = (await findProject('volunteering'))!;
-    const uc = await createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilotSeven' } });
+    const uc = await createUseCase(project, mac, { source: 'chat', status: 'accepted', visibility: 'public', sections: { name: 'SecretPilotSeven' } });
     const cr = await synthesise(project, mac, [uc.id]);
     await put('changeRequests', { ...await getCR(cr.id), title: 'For SecretPilotSeven', ops: [{ op: 'addClass', localName: 'SECRETPILOTSEVENRECORD', label: 'record', definition: 'Asked for by MacDonald Seven.' }] }, project.id);
     const preview = await publicationPreview(await getCR(cr.id));
@@ -806,7 +839,7 @@ describe('versions published before approval existed', () => {
     const dirty = await OntologyGraph.fromTurtle(`${await working.toTurtle()}\n<${NS}LegacyRecord> a <http://www.w3.org/2002/07/owl#Class> ; <http://www.w3.org/2004/02/skos/core#definition> "Raised by Legacy Hold Person in the LEGACY_HOLD_PILOT." .\n`);
     await ontologyStore.commitWorking(project, dirty, 'Older merge', { name: 'Concord' });
     const tester = await createUser({ name: 'Legacy Hold Person', provider: 'github', subject: 'legacy-hold' });
-    await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'LEGACY_HOLD_PILOT' } });
+    await createUseCase(project, tester, { source: 'chat', status: 'accepted', visibility: 'public', sections: { name: 'LEGACY_HOLD_PILOT' } });
     const { updateProject } = await import('../src/services/ontologies.js');
     await updateProject({ ...project, publishedWithApproval: undefined });
     const { remove } = await import('../src/db.js');
