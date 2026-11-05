@@ -29,7 +29,7 @@
     "@jeswr/pod-auth": "workspace:*",
     "@jeswr/suite-ui": "workspace:*",
     "@lezer/highlight": "^1.2.5",
-    "@sparq-org/sparq": "0.1.5",
+    "@sparq-org/sparq": "0.1.8",
     "cytoscape": "^3.34.3",
     "lucide-react": "^1.57.0",
     "marked": "^18.1.1",

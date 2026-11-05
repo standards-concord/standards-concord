@@ -53,6 +53,33 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.21.0',
+    date: '2026-11-05',
+    title: 'OWL reasoning with sparq, also in your browser',
+    pr: 51,
+    changes: [
+      {
+        id: 'sparq-reasoning',
+        type: 'perf',
+        title: 'Faster, stricter OWL reasoning',
+        detail:
+          'Consistency and class checks now use sparq’s OWL 2 DL reasoner instead of HermiT, and take milliseconds rather than about a second. When the reasoner can’t finish a check, validation says so and doesn’t pass.',
+        roles: [],
+        to: '{o}#health',
+      },
+      {
+        id: 'reasoner-in-browser',
+        type: 'feat',
+        title: 'Check the draft again in your own browser',
+        detail:
+          'The health panel on an ontology’s overview has a “Check again in this browser” button. It runs the same reasoner on your device and tells you whether it agrees with the server.',
+        roles: [],
+        to: '{o}#health',
+        ask: 'Did the in-browser check agree with the server, and was it clear what it did?',
+      },
+    ],
+  },
+  {
     version: '0.20.0',
     date: '2026-11-05',
     title: 'The ODI look, and an overview that reads like a report',

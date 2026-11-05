@@ -1,7 +1,6 @@
 /**
  * Namespaces, well-known vocabularies and IRI helpers.
  */
-import { createRequire } from 'node:module';
 import { Parser } from 'n3';
 
 export const NS = {
@@ -46,10 +45,17 @@ export const isSafePrefix = (p: string): boolean =>
   // A term named like an Object method (hasOwnProperty, constructor) breaks the JSON-LD processor.
   !(p in Object.prototype);
 
-const nodeRequire = createRequire(import.meta.url);
+// Node's require, looked up only when Oxigraph is first needed. No static import of node:module,
+// so the module also loads in a browser (the in-browser reasoner imports it through graph.ts).
+type NodeModule = { createRequire(url: string): (id: string) => unknown };
+const nodeRequire = (id: string): unknown => {
+  const mod = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule?.('node:module') as NodeModule | undefined;
+  if (!mod) throw new Error('Oxigraph is only available in Node');
+  return mod.createRequire(import.meta.url)(id);
+};
 type Oxigraph = { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> };
 let oxigraph: Oxigraph | undefined;
-let loadOxigraph = (): Oxigraph => nodeRequire('oxigraph');
+let loadOxigraph = (): Oxigraph => nodeRequire('oxigraph') as Oxigraph;
 let loadFailureReported = false;
 
 /** For tests: how many namespace verdicts are cached, and their total length. */
@@ -166,8 +172,8 @@ export function isBuiltinDatatype(iri: string): boolean {
 
 /**
  * The OWL 2 datatype map (OWL 2 Structural Specification §4). Other XSD types such as
- * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL and are rejected
- * by reasoners like HermiT.
+ * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL, so DL reasoners
+ * (sparq included) do not decide them.
  */
 export const OWL2_DATATYPES = new Set<string>([
   NS.rdf + 'PlainLiteral', NS.rdf + 'XMLLiteral', NS.rdf + 'langString', NS.rdfs + 'Literal', NS.owl + 'real', NS.owl + 'rational',
