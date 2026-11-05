@@ -635,7 +635,7 @@ export const actions: Record<string, Action> = {
   // Timed to "Press Go" and "tick each task off" in feedback.md.
   async 'alpha-point-go'(c) {
     const next = c.d.page.getByRole('group', { name: 'Suggested next task' });
-    await c.d.pointAt(next.getByRole('button', { name: 'Go' }), 'the Go button');
+    await c.d.pointAt(next.getByRole('link', { name: 'Go' }), 'the Go button');
   },
   async 'alpha-tick-task'(c) {
     const next = c.d.page.getByRole('group', { name: 'Suggested next task' });
@@ -706,7 +706,7 @@ export const actions: Record<string, Action> = {
     await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Thank you!' }), 'the feedback is submitted');
   },
   async 'highlight-header-feedback'(c) {
-    await c.d.click(c.d.page.getByRole('button', { name: 'Back to the hub' }), 'Back to the hub');
+    await c.d.click(c.d.page.getByRole('link', { name: 'Back to the hub' }), 'Back to the hub');
     const header = c.d.page.locator('header a[href="/feedback"]');
     await c.d.claimVisible(header, 'Give feedback is in the header');
     await c.d.pointAt(header, 'the Give feedback button in the header');
