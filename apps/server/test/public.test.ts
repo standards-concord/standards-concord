@@ -1138,6 +1138,49 @@ describe('versions published before approval existed', () => {
     for (const s of await anonymous()) expect(s.stats.classes).toBeGreaterThan(0);
   });
 
+  it('decides on a held draft before reading it for a signed-out summary, so a draft replaced meanwhile isn’t counted (tenth review)', async () => {
+    // Used to: read held draft A, wait for validation, then check the hold after B had been approved, and show A's counts.
+    const project = await legacy();
+    const { vi } = await import('vitest');
+    // B: the draft with the private class taken out, so its counts differ from A's.
+    const a = await OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project));
+    const repaired = await OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project));
+    repaired.store.removeQuads(repaired.store.getQuads(null, null, null, null).filter((q) => q.subject.value.endsWith('#LegacyRecord')));
+    const repairedTurtle = await repaired.toTurtle();
+    const countB = repaired.view().classes.length;
+    expect(countB).toBe(a.view().classes.length - 1);
+    for (const url of [`/api/ontologies/${project.id}`, '/api/ontologies']) {
+      const fresh = await legacy();
+      // The summary's first read of the draft (A, for its counts) goes through; its next one (for validation)
+      // waits until the repair B is approved.
+      const real = ontologyStore.working.bind(ontologyStore);
+      let letGo!: () => void;
+      const gate = new Promise<void>((r) => (letGo = r));
+      let reads = 0;
+      const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+        if (reads++ > 0) await gate;
+        return real(p);
+      });
+      try {
+        const pending = request(app).get(url).then((r) => r);
+        await new Promise((r) => setTimeout(r, 50));
+        await ontologyStore.commitWorking(fresh, await OntologyGraph.fromTurtle(repairedTurtle), 'Repair', { name: 'Concord' });
+        const { agent } = await steward(`Tenth summary steward ${url.length}`);
+        const b = ((await agent.get(`/api/ontologies/${fresh.id}/public-holds`)).body as PublicHoldReview[]).find((h) => h.version === 'draft')!;
+        expect((await agent.post(`/api/ontologies/${fresh.id}/public-holds/draft/approve`).send({ fingerprint: b.fingerprint })).status).toBe(200);
+        letGo();
+        const body = (await pending).body as OntologySummary | OntologySummary[];
+        const s = Array.isArray(body) ? body.find((o) => o.id === fresh.id)! : body;
+        // Either nothing from the draft (it was held when asked), or B's counts: never A's.
+        if (s.stats.classes !== undefined) expect(s.stats.classes, url).toBe(countB);
+        expect(s.stats.classes, url).toBeUndefined();
+      } finally {
+        letGo();
+        spy.mockRestore();
+      }
+    }
+  });
+
   it('shows names on WebID profiles only to signed-in users', async () => {
     const tester = await createUser({ name: 'WebID Person', provider: 'github', subject: 'webid-names' });
     const anon = (await request(app).get(`/people/${tester.id}`)).text;

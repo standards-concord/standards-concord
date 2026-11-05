@@ -157,11 +157,17 @@ export function apiRouter(): Router {
   });
 
   /* --------------------------- ontologies --------------------------- */
+  /**
+   * The summary a caller may see. For someone signed out, whether the working draft is held is decided before it is
+   * read: a summary read first and checked after could count a draft that was replaced and approved meanwhile.
+   */
+  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => forCaller(req, await summary(p, { withGraph: !!req.user || !isHeld(p, 'draft') }));
   /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
   const forCaller = (req: Request, s: OntologySummary) => {
     if (req.user) return s;
     const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
     // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
+    // (summaryFor doesn't read it then; this also covers a hold that began while the summary was being made.)
     if (isHeld(s, 'draft')) {
       const { classes: _cl, properties: _p, individuals: _i, ...rest } = stats;
       return { ...s, ownerIds: [], stats: rest, health: undefined };
@@ -171,7 +177,7 @@ export function apiRouter(): Router {
 
   r.get('/ontologies', async (req, res) => {
     const all = list<import('@concord/shared').OntologyProject>('ontologies');
-    res.json((await Promise.all(all.map((p) => summary(p)))).map((s) => forCaller(req, s)));
+    res.json(await Promise.all(all.map((p) => summaryFor(req, p))));
   });
 
   r.post('/ontologies', async (req, res) => {
@@ -188,7 +194,7 @@ export function apiRouter(): Router {
     const p = project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...forCaller(req, await summary(p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
+    res.json({ ...(await summaryFor(req, p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
