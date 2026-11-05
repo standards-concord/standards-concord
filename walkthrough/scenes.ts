@@ -244,11 +244,20 @@ export const actions: Record<string, Action> = {
   async 'open-query'(c) {
     await c.d.goto(o(c, '/query'));
   },
-  async 'run-query'(c) {
-    await c.d.click(c.d.page.getByRole('button', { name: /^Run$/ }), 'the Run button');
-    // "The results come straight back."
+  async 'ask-query'(c) {
+    // Describe the query in the chat: the first suggestion lists the main records.
+    const chip = c.d.page.getByTestId('query-suggestions').getByRole('button');
+    if (!(await c.d.click(chip, 'a suggested question', { settle: false }))) return;
+    // The assistant's query runs only when the person presses Run, after reading it.
+    const prompt = c.d.page.getByTestId('query-run-prompt');
+    await prompt.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => c.d.warn('The query assistant wrote no query'));
+    await sleep(600);
+    await c.d.highlight(c.d.page.getByTestId('sparql-editor'), 'the SPARQL it wrote');
+    await sleep(900);
+    await c.d.clearHighlight();
+    if (!(await c.d.click(prompt.getByRole('button', { name: 'Run this query' }), 'Run this query', { settle: false }))) return;
     await c.d.claimVisible(c.d.page.locator('[data-testid="query-results"] tbody tr'), 'the query returns rows', 20_000);
-    await sleep(800);
+    await sleep(600);
     await c.d.scroll(380, 1500);
   },
   async 'open-use-cases'(c) {

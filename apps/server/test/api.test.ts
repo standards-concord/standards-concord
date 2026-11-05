@@ -2,7 +2,7 @@ import request from 'supertest';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb, put } from '../src/db.js';
 import { getProject, members, updateProject } from '../src/services/ontologies.js';
@@ -321,6 +321,463 @@ describe('agents over MCP', () => {
   it('refuses requests without a token', async () => {
     const res = await request(app).post('/mcp').send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('query assistant (offline helper)', () => {
+  type Reply = { reply: string; query: string; target: string; columns: { variable: string; label: string }[]; simulated: boolean; unchanged?: boolean; offlineReason?: string; offlineState?: unknown };
+  type Turn = { role: 'user' | 'assistant'; content: string };
+  beforeEach(async () => (await import('../src/services/queryChat.js')).resetQueryChatLimits());
+
+  const ask = async (agent: Agent, messages: Turn[], query = '', offlineState?: unknown) => {
+    const res = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages, query, target: 'ontology', offlineState });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body as Reply;
+  };
+  /** Runs a conversation the way the page does: each answer's query goes back with the next message. */
+  const converse = async (agent: Agent, ...said: string[]) => {
+    const history: Turn[] = [];
+    let query = '';
+    let state: unknown;
+    const replies: Reply[] = [];
+    for (const text of said) {
+      history.push({ role: 'user', content: text });
+      const r = await ask(agent, history, query, state);
+      replies.push(r);
+      history.push({ role: 'assistant', content: r.reply });
+      if (!r.unchanged) (query = r.query), (state = r.offlineState);
+    }
+    return replies;
+  };
+
+  it('needs a signed-in person and a message, and bounds what it is sent', async () => {
+    expect((await request(app).post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(401);
+    const agent = await login('contributor');
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [] })).status).toBe(400);
+    const long = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: 'x'.repeat(8001) });
+    expect(long.status).toBe(400);
+    const { boundedQueryChatRequest } = await import('../src/services/queryChat.js');
+    const b = boundedQueryChatRequest({
+      messages: Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `${i} ${'w'.repeat(3000)}` })).concat([{ role: 'user', content: 'latest' }]),
+      dataSummary: [{ classIri: 'x'.repeat(301), count: 1 }, { classIri: 'https://e.org/A', count: 2 }, { classIri: 'https://e.org/B', count: -1 }],
+    });
+    expect(b.messages.at(-1)).toEqual({ role: 'user', content: 'latest' });
+    expect(b.messages.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(8000);
+    expect(b.dataSummary).toEqual([{ classIri: 'https://e.org/A', count: 2 }]);
+  });
+
+  it('limits each person to one question at a time and a number per ten minutes', async () => {
+    const { QUERY_CHAT_LIMITS } = await import('../src/services/queryChat.js');
+    const agent = await login('contributor', 'Rate limited');
+    const one = [{ role: 'user' as const, content: 'Which classes have no definition?' }];
+    for (let i = 0; i < QUERY_CHAT_LIMITS.perUser; i++) await ask(agent, one);
+    const over = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: one, query: '', target: 'ontology' });
+    expect(over.status).toBe(429);
+  });
+
+  it('refuses a conversation sent on under another account', async () => {
+    const agent = await login('contributor', 'Account check');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data' };
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: 'someone-else' })).status).toBe(409);
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: me })).status).toBe(200);
+  });
+
+  it('says why the offline helper answered', async () => {
+    const member = await login('contributor');
+    expect((await ask(member, [{ role: 'user', content: 'List every organisation' }])).offlineReason).toBe('unavailable');
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const provider = config.llm.provider;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const outsider = await admitQueryChat('someone-else', demoId, false);
+      await outsider.done();
+      expect(outsider).toMatchObject({ useClaude: false, offlineReason: 'not-member' });
+      // Today's allowances are per person, per ontology and for the deployment, and kept in the database.
+      const limits = { ...config.llm.queryAssistant };
+      Object.assign(config.llm.queryAssistant, { perUserPerDay: 2, perOntologyPerDay: 3, perDay: 100 });
+      const take = async (user: string, ontology = 'ont-quota') => {
+        const g = await admitQueryChat(user, ontology, true);
+        if (g.useClaude) g.spend();
+        await g.done();
+        return g.useClaude;
+      };
+      expect([await take('quota-a'), await take('quota-a'), await take('quota-a')]).toEqual([true, true, false]);
+      const over = await admitQueryChat('quota-a', 'ont-quota', true);
+      await over.done();
+      expect(over.offlineReason).toBe('limit');
+      // One person can't use up everyone's allowance, but the ontology's is shared.
+      expect([await take('quota-b'), await take('quota-c')]).toEqual([true, false]);
+      expect(await take('quota-c', 'another-ontology')).toBe(true);
+      const { get } = await import('../src/db.js');
+      const day = new Date().toISOString().slice(0, 10);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:user:quota-a`))?.count).toBe(2);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:ontology:ont-quota`))?.count).toBe(3);
+      Object.assign(config.llm.queryAssistant, limits);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('reserves allowances atomically: a rival can’t take the last one in the gap, and a failed write leaves nothing taken', async () => {
+    const { reserveCounters, get, detached } = await import('../src/db.js');
+    const ids = ['atomic:user', 'atomic:ontology', 'atomic:all'];
+    const limits = ids.map((id) => ({ id, max: 1 }));
+    const count = async (id: string) => (await get<{ count: number }>('kv', id))?.count ?? 0;
+    // A rival (another request, or another backend process) tries to reserve in the gap between this one's read
+    // and its write. It used to get the same last allowance; now it waits its turn and finds none left.
+    let rival: Promise<boolean> | undefined;
+    const first = await reserveCounters(limits, 'atomic', {
+      afterRead: () => {
+        rival = detached(() => reserveCounters(limits, 'atomic'));
+      },
+    });
+    expect(first).toBe(true);
+    expect(await rival).toBe(false);
+    expect(await Promise.all(ids.map(count))).toEqual([1, 1, 1]);
+    expect(await reserveCounters(limits, 'atomic')).toBe(false);
+
+    // A failure part-way through the writes rolls all of them back, and the next attempt works.
+    const fresh = ['atomic2:user', 'atomic2:ontology', 'atomic2:all'].map((id) => ({ id, max: 1 }));
+    await expect(
+      reserveCounters(fresh, 'atomic', {
+        beforeWrite: (i) => {
+          if (i === 1) throw new Error('disk full');
+        },
+      }),
+    ).rejects.toThrow('disk full');
+    expect(await Promise.all(fresh.map((k) => count(k.id)))).toEqual([0, 0, 0]);
+    expect(await reserveCounters(fresh, 'atomic')).toBe(true);
+  });
+
+  it('a request that fails before Claude is called gives its allowance back and frees the person', async () => {
+    const { config } = await import('../src/config.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Refund through the API');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const spy = vi.spyOn(ontologyStore, 'at').mockRejectedValueOnce(new Error('the ontology failed to load'));
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me };
+      const failed = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(failed.status).toBe(500);
+      expect(await used()).toBe(0);
+      // Not stuck as "still answering": the next request is admitted.
+      (config.llm as { provider: string }).provider = provider;
+      const next = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(next.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('a call the spending limit refuses gives the chat allowance back', async () => {
+    // The allowance was marked spent before the model call, but the deployment's dollar budget can refuse a call
+    // before anything is sent to Claude: all three counters stayed taken though no request was made.
+    const { config } = await import('../src/config.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Budget refusal');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const budget = config.llm.dailyBudgetUsd;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = 0;
+      const r = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me });
+      expect(r.status).toBe(200);
+      expect(r.body.simulated).toBe(true);
+      expect(await used()).toBe(0);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = budget;
+    }
+  });
+
+  it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const { get, put, transaction, detached, withoutWaiting } = await import('../src/db.js');
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async (id: string) => (await get<{ count: number }>('kv', `query-assistant:${day}:${id}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const limits = { ...config.llm.queryAssistant };
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      Object.assign(config.llm.queryAssistant, { perUserPerDay: 1, perOntologyPerDay: 1, perDay: 1000 });
+      // Something fails before the provider is called: the reservation is refunded, so the last allowance is still there.
+      const failed = await admitQueryChat('refund-a', 'ont-refund', true);
+      expect(failed.useClaude).toBe(true);
+      expect(await used('user:refund-a')).toBe(1);
+      await failed.done();
+      expect([await used('user:refund-a'), await used('ontology:ont-refund')]).toEqual([0, 0]);
+      const second = await admitQueryChat('refund-a', 'ont-refund', true);
+      expect(second.useClaude).toBe(true);
+      second.spend();
+      await second.done();
+      expect(await used('user:refund-a')).toBe(1);
+
+      // When admission throws (here: another writer holds the lock), the person isn't left "busy".
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let holding!: () => void;
+      const locked = new Promise<void>((r) => (holding = r));
+      const holder = detached(() =>
+        transaction(async () => {
+          await put('kv', { id: 'refund-lock' });
+          holding();
+          await held;
+        }),
+      );
+      await locked;
+      await expect(withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).rejects.toThrow(/busy/i);
+      release();
+      await holder;
+      const after = await admitQueryChat('refund-b', 'ont-refund-b', true);
+      expect(after.useClaude).toBe(true);
+      await after.done();
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      Object.assign(config.llm.queryAssistant, limits);
+    }
+  });
+
+  it('writes, refines step by step and counts, keeping earlier filters', async () => {
+    const agent = await login('contributor');
+    const [first, more, under, title, count] = await converse(
+      agent,
+      'List every volunteering opportunity',
+      'Also show the minimum age and who it is offered by',
+      'Only those with a minimum age under 15',
+      'Also show the title',
+      'How many are there?',
+    );
+    expect(first).toMatchObject({ simulated: true, target: 'data' });
+    expect(first.query).toContain('vol:VolunteeringOpportunity');
+    expect(first.columns.map((c) => c.label)).toContain('title');
+    expect(first.query).toContain('LIMIT 100');
+    expect(first.reply).toContain('up to 100 rows');
+    expect(more.query).toContain('vol:minimumAge');
+    expect(more.query).toContain('vol:offeredBy');
+    expect(under.query).toContain('FILTER(?minimumAge < 15)');
+    expect(under.query).toContain('vol:offeredBy');
+    // A later refinement keeps the filter.
+    expect(title.query).toContain('FILTER(?minimumAge < 15)');
+    expect(count.query).toContain('COUNT(DISTINCT');
+    expect(count.query).toContain('FILTER(?minimumAge < 15)');
+    expect(count.columns[0].label).toMatch(/Number of volunteering opportunity/i);
+  });
+
+  it('"at least" includes the boundary, "remove" removes and "all of them" lifts the limit', async () => {
+    const agent = await login('contributor');
+    const [, atLeast, removed, all] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with a minimum age of at least 16', 'Remove the minimum age', 'Show all of them');
+    expect(atLeast.query).toContain('FILTER(?minimumAge >= 16)');
+    expect(atLeast.reply).toContain('at least 16');
+    expect(removed.query).not.toContain('minimumAge');
+    expect(all.query).not.toContain('LIMIT');
+  });
+
+  it('a new question starts afresh, and questions about the model run against the ontology', async () => {
+    const agent = await login('contributor');
+    const [, model, orgs] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Which classes have no definition?', 'How many organisations are there?');
+    expect(model.target).toBe('ontology');
+    expect(model.query).toContain('FILTER NOT EXISTS');
+    expect(orgs.query).toContain('vol:Organisation');
+    expect(orgs.query).not.toContain('minimumAge');
+  });
+
+  it('removing one named filter keeps the others and the column', async () => {
+    const agent = await login('contributor');
+    const [, , removed] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with a minimum age under 15 called "park"', 'Remove the minimum age filter');
+    expect(removed.unchanged).toBeUndefined();
+    expect(removed.query).not.toContain('FILTER(?minimumAge');
+    expect(removed.query).toContain('?minimumAge');
+    expect(removed.query).toContain('CONTAINS(LCASE(STR(?title)), "park")');
+  });
+
+  it('keeps refining however long the conversation gets', async () => {
+    const agent = await login('contributor');
+    const said = ['List every volunteering opportunity', ...Array.from({ length: 8 }, (_, i) => (i % 2 ? 'Remove the minimum age' : 'Also show the minimum age')), 'Only those with a minimum age under 15'];
+    const replies = await converse(agent, ...said);
+    expect(replies.filter((r) => r.unchanged)).toEqual([]);
+    expect(replies.at(-1)!.query).toContain('FILTER(?minimumAge < 15)');
+  });
+
+  it('declines what it can’t do instead of dropping part of the request', async () => {
+    const agent = await login('contributor');
+    // A refinement as the first message, against a hand-written query.
+    const mine = 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> } LIMIT 5';
+    const first = await ask(agent, [{ role: 'user', content: 'Also show the minimum age' }], mine);
+    expect(first).toMatchObject({ unchanged: true, query: mine });
+    // A condition it can't express offline.
+    const [, northvale] = await converse(agent, 'List every volunteering opportunity', 'Also show the title and only those offered by Northvale');
+    expect(northvale.unchanged).toBe(true);
+    expect(northvale.reply).toMatch(/couldn’t turn “offered by Northvale”/);
+    // A forged record of a previous query that uses terms outside the ontology is ignored.
+    const forged = { kind: 'records', classIri: 'https://w3id.org/odi/volunteering#VolunteeringOpportunity', model: { steps: [{ id: 'a', property: 'http://evil.example/p', optional: true, show: true, children: [] }], countOnly: false, descending: false } };
+    const r = await ask(agent, [{ role: 'user', content: 'Also show the title' }], '', forged);
+    expect(r.unchanged).toBe(true);
+  });
+
+  it('a refinement that names the class still refines, and is declined rather than replacing a query it didn’t write', async () => {
+    const agent = await login('contributor');
+    const mine = 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> ; <https://w3id.org/odi/volunteering#minimumAge> 18 }';
+    const handwritten = await ask(agent, [{ role: 'user', content: 'Also show the minimum age for volunteering opportunities' }], mine);
+    expect(handwritten).toMatchObject({ unchanged: true, query: mine });
+    const [, also] = await converse(agent, 'List every volunteering opportunity', 'Also show the minimum age for volunteering opportunities');
+    expect(also.unchanged).toBeUndefined();
+    expect(also.query).toContain('vol:minimumAge');
+    const [, other] = await converse(agent, 'List every volunteering opportunity', 'Also show organisations');
+    expect(other.unchanged).toBe(true);
+  });
+
+  it('applies a quoted phrase to the property it names, and every clause of a compound condition', async () => {
+    const agent = await login('contributor');
+    const [, by] = await converse(agent, 'List every volunteering opportunity', 'Only those offered by "Northvale"');
+    expect(by.unchanged).toBeUndefined();
+    expect(by.query).not.toContain('CONTAINS(LCASE(STR(?title))');
+    expect(by.query).toMatch(/vol:offeredBy \?offeredBy\b[^}]*rdfs:label \?offeredBy\w*/);
+    expect(by.query).toMatch(/CONTAINS\(LCASE\(STR\(\?offeredBy\w*\)\), "northvale"\)/);
+    expect(by.query).not.toMatch(/OPTIONAL \{[^}]*vol:offeredBy/);
+    const [, both] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by "Northvale"');
+    expect(both.query).toContain('FILTER(?minimumAge < 15)');
+    expect(both.query).toMatch(/"northvale"/);
+    // One clause it can't express declines the whole message.
+    const [, part] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by Northvale');
+    expect(part.unchanged).toBe(true);
+    expect(part.query).not.toContain('minimumAge < 15');
+    // Two conditions on one property used to overwrite each other, and stray words used to be ignored.
+    for (const message of [
+      'Only those with minimum age over 10 and minimum age under 15',
+      'Only those called "Park" and called "Garden"',
+      'Only those with minimum age under 15 offered by Northvale',
+      'Only those with minimum age under 15 in London',
+    ]) {
+      const [list, r] = await converse(agent, 'List every volunteering opportunity with its minimum age', message);
+      expect(r.unchanged, message).toBe(true);
+      expect(r.query, message).toBe(list.query);
+    }
+  });
+
+  it('keeps a condition from an earlier message unless told to replace it', async () => {
+    const agent = await login('contributor');
+    // The second condition used to silently replace the first.
+    const [, over, under] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those with minimum age under 15');
+    expect(under.unchanged).toBe(true);
+    expect(under.query).toBe(over.query);
+    expect(under.reply).toContain('already a condition on minimum age (over 10)');
+    const [, park, garden] = await converse(agent, 'List every volunteering opportunity', 'Only those called "Park"', 'Also only those called "Garden"');
+    expect(garden.unchanged).toBe(true);
+    expect(garden.query).toBe(park.query);
+    // "Now also" adds; it used to count as permission to replace.
+    for (const [first, second] of [
+      ['Only those with minimum age under 15', 'Now also only those with minimum age over 10'],
+      ['Only those called "Park"', 'Now also only those called "Garden"'],
+      ['Only those with minimum age under 15', 'Now only those with minimum age over 10'],
+      ['Only those with minimum age under 15', 'Also only those with minimum age over 10 instead'],
+    ]) {
+      const [, before, after] = await converse(agent, 'List every volunteering opportunity with its minimum age', first, second);
+      expect(after.unchanged, second).toBe(true);
+      expect(after.query, second).toBe(before.query);
+    }
+    // Saying so replaces it.
+    const [, , instead] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Only those with minimum age under 15 instead');
+    expect(instead.query).toContain('FILTER(?minimumAge < 15)');
+    expect(instead.query).not.toContain('?minimumAge > 10');
+    // A condition on another property adds to it.
+    const [, , both] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those called "Park"');
+    expect(both.query).toContain('FILTER(?minimumAge > 10)');
+    expect(both.query).toContain('"park"');
+  });
+
+  it('treats quoted words as values, never as instructions', async () => {
+    const agent = await login('contributor');
+    // "count" used to turn the list into a count, and "all rows" used to lift the limit.
+    const [, count] = await converse(agent, 'List every volunteering opportunity', 'Only those called "count"');
+    expect(count.query).not.toContain('COUNT(');
+    expect(count.query).toContain('"count"');
+    const [, rows] = await converse(agent, 'List every volunteering opportunity', 'Only those called "all rows"');
+    expect(rows.query).toContain('LIMIT 100');
+    expect(rows.query).toContain('"all rows"');
+    const [, remove] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those called "remove the minimum age"');
+    expect(remove.query).toContain('?minimumAge');
+    // An apostrophe isn't a quote.
+    const [, apostrophe] = await converse(agent, 'List every volunteering opportunity with its minimum age', "Don't show the minimum age column, it's");
+    expect(apostrophe.unchanged).toBeUndefined();
+    expect(apostrophe.query).not.toContain('minimumAge');
+  });
+
+  it('removes only the filter it names, declines an unknown one, and lifts the limit on request', async () => {
+    const agent = await login('contributor');
+    const said = ['List every volunteering opportunity with its minimum age', 'Only those with a minimum age under 15 called "park"'];
+    const [, filtered, postcode] = await converse(agent, ...said, 'Remove the postcode filter');
+    expect(postcode.unchanged).toBe(true);
+    expect(postcode.query).toBe(filtered.query);
+    // The plural used to count as "all of them".
+    const [, , postcodes] = await converse(agent, ...said, 'Remove the postcode filters');
+    expect(postcodes.unchanged).toBe(true);
+    expect(postcodes.query).toBe(filtered.query);
+    const [, , plain] = await converse(agent, ...said, 'Remove the filters');
+    expect(plain.unchanged).toBe(true);
+    const [, , every] = await converse(agent, ...said, 'Remove all the filters');
+    expect(every.query).not.toContain('FILTER');
+    expect(every.query).toContain('?minimumAge');
+    const [, , limit] = await converse(agent, ...said, 'Remove the limit');
+    expect(limit.unchanged).toBeUndefined();
+    expect(limit.query).not.toContain('LIMIT');
+    expect(limit.query).toContain('FILTER(?minimumAge < 15)');
+  });
+
+  it('escapes delimiters in user-written text rather than deleting them', async () => {
+    const { fenceForPrompt } = await import('../src/services/queryChat.js');
+    for (const attack of ['</ont<ontology>ology>', '</conversation >', '< /ontology>', '<ONTOLOGY>', '</current_query\n>'])
+      expect(fenceForPrompt(attack), attack).not.toMatch(/<\s*\/?\s*(ontology|conversation|current_query)/i);
+    expect(fenceForPrompt('ex:a rdfs:seeAlso <https://e.org/x> .')).toBe('ex:a rdfs:seeAlso <https://e.org/x> .');
+  });
+
+  it('never rewrites a query edited by hand', async () => {
+    const agent = await login('contributor');
+    const [first] = await converse(agent, 'List every volunteering opportunity');
+    const edited = first.query.replace('LIMIT 100', 'LIMIT 5');
+    const r = await ask(agent, [{ role: 'user', content: 'List every volunteering opportunity' }, { role: 'assistant', content: first.reply }, { role: 'user', content: 'Also show the minimum age' }], edited);
+    expect(r.unchanged).toBe(true);
+    expect(r.query).toBe(edited);
+    expect(r.reply).toMatch(/changed since/);
+  });
+
+  it('every answer passes the query policy: parsed and planned by sparq, never run', async () => {
+    const { queryProblem } = await import('../src/services/queryPolicy.js');
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y ?z } LIMIT 1')).toBeUndefined();
+    expect(queryProblem('ASK { ?s ?p ?o }')).toBeUndefined();
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y }')).toMatch(/doesn’t parse/);
+    expect(queryProblem('SELECT * WHERE { SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * FROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('INSERT DATA { <a:b> <a:c> <a:d> }')).toMatch(/read-only/);
+    // Keywords inside strings, IRIs and comments don't count.
+    expect(queryProblem('SELECT ?x WHERE { ?x <http://e.org/service> "SERVICE from" } # SERVICE')).toBeUndefined();
+    // Planning, not running: checked instantly, and VALUES lists that multiply into a huge table are refused.
+    const values = Array.from({ length: 200 }, (_, i) => i).join(' ');
+    const t0 = performance.now();
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } VALUES ?b { ${values} } VALUES ?c { ${values} } VALUES ?d { ${values} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem('SELECT * WHERE { VALUES (?a ?b) { (1 2) (3 4) } VALUES ?c { 1 2 3 } }')).toBeUndefined();
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } }`)).toBeUndefined();
+    // However the terms or names are written: signed numbers without spaces, Unicode variable names.
+    const packed = Array.from({ length: 200 }, (_, i) => i).join('+');
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${packed} } VALUES ?b { ${packed} } VALUES ?c { ${packed} } VALUES ?d { ${packed} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { VALUES ?ä { ${values} } VALUES ?ö { ${values} } VALUES ?ü { ${values} } VALUES ?é { ${values} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { ?s ?p ?o } VALUES ?a { ${values} }`)).toBeUndefined();
+    expect(performance.now() - t0).toBeLessThan(1000);
+    // A comment ended by a carriage return can't hide what follows it.
+    expect(queryProblem('SELECT * WHERE { # note\r SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * # note\rFROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('SELECT * WHERE { { SELECT * FROM NAMED <http://example.org/g> WHERE { ?s ?p ?o } } }')).toMatch(/doesn’t parse|FROM/);
   });
 });
 

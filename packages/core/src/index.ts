@@ -30,6 +30,22 @@ export type { OwlReasonerOptions } from './reasoner.js';
 export { runCompetencyQuestions, validate } from './cq.js';
 export type { CompetencyQuestion, ValidateOptions } from './cq.js';
 
+// Queries
+export {
+  buildSparql,
+  newStep,
+  pathLabels,
+  activeFilter,
+  isRequired,
+  fitsControl,
+  updateStep,
+  findStep,
+  allSteps,
+  varNameFor,
+  FILTER_LABELS,
+} from './sparql-builder.js';
+export type { BuilderModel, PathStep, FilterOp, ValueType, BuiltQuery, BuilderContext } from './sparql-builder.js';
+
 // Formats
 export { toLinkML, fromLinkML } from './linkml.js';
 export { toManchester } from './manchester.js';
