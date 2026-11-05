@@ -43,6 +43,7 @@ import { getUser, logActivity, publicUser } from './users.js';
 import { syncUseCasesForCR } from './traceability.js';
 import { createHash } from 'node:crypto';
 import { findSecrets, secretsOf } from './redact.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -223,7 +224,7 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const classification = classifyChange(diff, before, after);
   // The request's own tests are marked as such, so readers can tell them from use cases' questions.
   const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
-  const validation = await validate(after, { cqs, reasoner: 'owl', fair: await fairContext(after.ontologyIRI) });
+  const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI) });
   return { before, after, diff, classification, validation, warnings };
 }
 

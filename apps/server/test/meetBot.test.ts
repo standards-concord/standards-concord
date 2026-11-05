@@ -28,7 +28,19 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0 };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
+/** Called when a booking request whose reply is held (holdDroppedReply) reaches the stub. */
+let createArrived: (() => void) | undefined;
+/**
+ * Holds the next dropped booking reply until the test releases it, so a test can act while the
+ * booking is sent and unanswered without relying on timers. `arrived` resolves once Recall.ai has the request.
+ */
+function holdDroppedReply() {
+  let release!: () => void;
+  stubMode.holdCreate = new Promise<void>((r) => (release = r));
+  const arrived = new Promise<void>((r) => (createArrived = r));
+  return { arrived, release };
+}
 /** Bots the stand-in has created, for listing and status. */
 const idempotent = new Map<string, string>();
 const bots = new Map<string, { id: string; meeting_url: string; metadata?: Record<string, string>; status_changes: { code: string }[] }>();
@@ -67,6 +79,10 @@ beforeAll(async () => {
         // Booked, but the reply's body is JSON null.
         if (stubMode.nullCreate) return reply(201, 'null');
         // Recall.ai took the booking, but the answer never arrives.
+        if (stubMode.dropCreate && stubMode.holdCreate) {
+          createArrived?.();
+          return void stubMode.holdCreate.then(() => res.destroy());
+        }
         if (stubMode.dropCreate) return void setTimeout(() => res.destroy(), stubMode.botDelayMs);
         // Or the headers arrive and the body is cut off.
         if (stubMode.truncateCreate) {
@@ -109,7 +125,8 @@ afterAll(() => {
 
 beforeEach(async () => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0 });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0, holdCreate: null });
+  createArrived = undefined;
   for (const m of await list<Meeting>('meetings')) if (m.source === 'calendar-invite') await remove('meetings', m.id);
   for (const k of await list<{ id: string }>('kv')) if (/^meet-bot:(approval|retire|retired):/.test(k.id)) await remove('kv', k.id);
 });
@@ -873,15 +890,20 @@ describe('invite-by-email', () => {
   /* ----- Fixes from the fourth review ----- */
 
   it('“Join a call now”: a bot already heard from survives a lost booking reply, and the call can’t be analysed under it', async () => {
+    // Used to sleep 60 ms and hope the booking had reached Recall.ai and not yet lost its reply (150 ms later). Under
+    // CI load the line could go first and name an earlier test's bot, so the booking's bot was never heard from.
     const s = await steward('Steward Ada');
     stubMode.dropCreate = true;
-    stubMode.botDelayMs = 150;
-    const sending = s.post('/api/ontologies/volunteering/meetings/bot').send({ title: 'Lost reply race', meetingUrl: 'https://meet.google.com/abc-defg-hij' });
-    const req = sending.then((r) => r);
-    await new Promise((r) => setTimeout(r, 60));
+    const reply = holdDroppedReply();
+    const req = s
+      .post('/api/ontologies/volunteering/meetings/bot')
+      .send({ title: 'Lost reply race', meetingUrl: 'https://meet.google.com/abc-defg-hij' })
+      .then((r) => r);
+    await reply.arrived;
     const m = (await list<Meeting>('meetings')).find((x) => x.title === 'Lost reply race')!;
     const booked = `bot-${nextBot}`;
     await line(m.id, 'We’ve started.', booked);
+    reply.release();
     await req;
     stubMode.dropCreate = false;
     expect((await getMeeting(m.id)).bot).toMatchObject({ botId: booked, status: 'in-call' });
@@ -889,16 +911,18 @@ describe('invite-by-email', () => {
   });
 
   it('“Join a call now”: a line with no bot id before a lost reply leaves the booking to be looked up, not forgotten', async () => {
+    // Same timing as above: the line has to arrive while the booking is sent and unanswered, so the reply is held, not timed.
     const s = await steward('Steward Bo');
     stubMode.dropCreate = true;
-    stubMode.botDelayMs = 150;
+    const reply = holdDroppedReply();
     const req = s
       .post('/api/ontologies/volunteering/meetings/bot')
       .send({ title: 'Anonymous line race', meetingUrl: 'https://meet.google.com/abc-defg-hij' })
       .then((r) => r);
-    await new Promise((r) => setTimeout(r, 60));
+    await reply.arrived;
     const m = (await list<Meeting>('meetings')).find((x) => x.title === 'Anonymous line race')!;
     await line(m.id, 'Hello?');
+    reply.release();
     await req;
     stubMode.dropCreate = false;
     expect((await getMeeting(m.id)).bot).toMatchObject({ status: 'in-call', uncertain: true, bookingId: expect.any(String) });
@@ -1742,7 +1766,9 @@ describe('invite-by-email', () => {
     await dispatchDue(new Date(Date.now() + 60_000));
     expect((await getMeeting(m.id)).bot).toMatchObject({ phase: 'booked', botId: lost, bookingId: first.bookingId, bookedAt: first.bookedAt });
     expect(`bot-${nextBot}`).toBe(lost);
-    expect(new Set(bookings().map((c) => (c.body.metadata as { concord_booking: string }).concord_booking))).toEqual(new Set([first.bookingId]));
+    // This call's bookings only: the clock also retries other tests' unanswered bookings, depending on which tests ran first.
+    const mine = bookings().filter((c) => (c.body.metadata as { concord_meeting: string }).concord_meeting === m.id);
+    expect(new Set(mine.map((c) => (c.body.metadata as { concord_booking: string }).concord_booking))).toEqual(new Set([first.bookingId]));
     void s;
   });
 

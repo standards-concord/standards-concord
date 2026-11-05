@@ -9,7 +9,7 @@ IMAGE=__IMAGE__
 PUBLIC_URL=__PUBLIC_URL__
 EOT
 
-# 4 GB swap: the smallest VM has 1 GB of RAM, shared by Node, the Solid server and HermiT (Java).
+# 4 GB swap: the smallest VM has 1 GB of RAM, shared by Node and the Solid server.
 if [ ! -f /swapfile ]; then
   fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile
   echo '/swapfile none swap defaults 0 0' >> /etc/fstab

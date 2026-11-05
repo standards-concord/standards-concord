@@ -1119,26 +1119,10 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     const question = 'Which inflight berths are secret?';
     await put('useCases', { ...u, competencyQuestions: [{ id: 'cq_inflight', question, status: 'answerable', sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }] }, demoId);
     const outsider = await login('contributor', 'Inflight Outsider');
-    // The report has captured the questions (it is keyed by them) when the withdrawal lands. The store is
-    // async now, so the withdrawal starts there and the report is read through the viewer's projection
-    // once it has landed: what a request still running at that moment would send.
-    const realHead = ontologyStore.head.bind(ontologyStore);
-    let landing: Promise<unknown> | undefined;
-    const spy = vi.spyOn(ontologyStore, 'head').mockImplementation((p) => {
-      // The call that keys the report, after the questions were read (not the one inside the graph read).
-      if (!landing && new Error().stack?.includes('workingValidation') && !new Error().stack?.includes('.working (')) {
-        landing = (async () => withdrawUseCase(await getUseCase(id), await userNamed('Inflight Author')))();
-      }
-      return realHead(p);
-    });
-    let report: Awaited<ReturnType<typeof workingValidation>>;
-    try {
-      report = await workingValidation((await findProject(demoId))!);
-    } finally {
-      spy.mockRestore();
-    }
-    expect(landing).toBeDefined();
-    await landing;
+    // A report computed while the use case was public (as a validation still running when the withdrawal
+    // lands has done) holds its question: what anyone is sent is decided when it is read.
+    const report = await workingValidation((await findProject(demoId))!);
+    await withdrawUseCase(await getUseCase(id), await userNamed('Inflight Author'));
     expect(report.competencyQuestions.map((q) => q.question)).toContain(question);
     expect(JSON.stringify(await validationForViewer(report, await userNamed('Inflight Outsider')))).not.toContain(question);
     for (const url of [`/api/ontologies/${demoId}/validation`, `/api/ontologies/${demoId}/validation?ref=1.0.0`]) expect((await outsider.get(url)).text).not.toContain(question);

@@ -63,6 +63,7 @@ import { approveRequest, denyRequest, describeRequest, disconnect, listConnectio
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -286,7 +287,17 @@ export function apiRouter(): Router {
     const p = await project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
-    const text = await serialize(await readOntology(p, ref, req.user), format, { name: p.slug });
+    // Signed-in viewers get the working draft's revision, so the in-browser reasoner check
+    // compares with the server's report for the same revision (a commit can land while it loads).
+    const working = !!req.user && (!ref || ref === 'working');
+    let revision = working ? ontologyStore.head(p) : undefined;
+    let graph = await readOntology(p, ref, req.user);
+    while (working && ontologyStore.head(p) !== revision) {
+      revision = ontologyStore.head(p);
+      graph = await readOntology(p, ref, req.user);
+    }
+    if (revision) res.set('X-Concord-Revision', revision);
+    const text = await serialize(graph, format, { name: p.slug });
     const info = FORMAT_INFO[format];
     res.type(`${info.mediaType}; charset=utf-8`);
     if (req.query.download) res.attachment(`${p.slug}-${ref && ref !== 'working' ? ref : 'working'}.${info.extension}`);
@@ -300,7 +311,7 @@ export function apiRouter(): Router {
     // viewer may see that use case now: a report that was running when one was withdrawn drops it.
     if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }), req.user));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {

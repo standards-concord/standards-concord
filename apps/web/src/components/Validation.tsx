@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
-import type { IssueSeverity } from '@concord/core/types';
-import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
+import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/core/types';
+import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Cpu, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
+import { checkedOf, compareWithServer } from '../lib/reasonerCompare';
 import { Badge, ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { Disclosure } from './Disclosure';
@@ -22,7 +23,12 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       <SummaryTile ok={report.passed} title={report.passed ? 'Passed' : 'Failing'} sub="Overall validation" />
-      <SummaryTile ok={r.consistent && !r.unsatisfiable.length} title={!r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'} sub={`Reasoner (${r.engine})`} warn={!r.available} />
+      <SummaryTile
+        ok={checkedOf(r) === 'complete' && r.consistent && !r.unsatisfiable.length}
+        title={checkedOf(r) === 'consistency' && r.consistent ? 'Partly checked' : !r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'}
+        sub={`Reasoner (${r.engine})`}
+        warn={checkedOf(r) !== 'complete' && !(r.available && !r.consistent)}
+      />
       <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
       <div className="rounded-lg border border-line p-3">
         <div className="text-lg font-semibold tabular-nums">{pct(report.fair.score)}</div>
@@ -90,12 +96,82 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
   );
 }
 
-export function ReasonerResult({ report, label }: { report: ValidationReport; label: Labeler }) {
+/** "sparq · reasoning 1.2 ms (14 ms in all)", or "structural · 3 ms". */
+function timing(r: ReasonerReport) {
+  return r.checkMs !== undefined ? `${r.engine} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${r.engine} · ${r.durationMs} ms`;
+}
+
+/** The working draft's Turtle and the revision it is. */
+export type DraftLoader = () => Promise<{ turtle: string; revision?: string }>;
+
+/**
+ * Runs the same OWL reasoner (sparq, WebAssembly) on this device, in a Web Worker, over the
+ * draft's Turtle, and compares the result with the server's when both are for the same revision.
+ */
+function BrowserCheck({ server, revision, load, label }: { server: ReasonerReport; revision?: string; load: DraftLoader; label: Labeler }) {
+  // The revision the browser checked is kept, not a "same revision" flag, so the comparison
+  // stays right when the server's report is reloaded for a newer revision.
+  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; checkedRevision?: string; error?: string }>({ status: 'idle' });
+  const run = async () => {
+    setState({ status: 'running' });
+    try {
+      const draft = await load();
+      const { reasonInBrowser } = await import('../lib/reasonInBrowser');
+      const r = await reasonInBrowser(draft.turtle);
+      setState({ status: 'done', r, checkedRevision: draft.revision });
+    } catch (e) {
+      setState({ status: 'error', error: (e as Error).message });
+    }
+  };
+  const r = state.r;
+  const comparison = r && compareWithServer(r, state.checkedRevision, server, revision);
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <button type="button" onClick={run} disabled={state.status === 'running'} className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-surface-2 disabled:opacity-60">
+        <Cpu className="size-3.5" aria-hidden /> {state.status === 'running' ? 'Checking in this browser…' : 'Check again in this browser'}
+      </button>
+      <span role="status" className="text-muted">
+        {state.status === 'error' && <span className="text-danger">The in-browser check failed: {state.error}</span>}
+        {state.status === 'done' && r && (
+          <>
+            This browser:{' '}
+            <strong className={checkedOf(r) !== 'complete' ? 'text-warn' : r.consistent && !r.unsatisfiable.length ? 'text-ok' : 'text-danger'}>
+              {checkedOf(r) === 'none'
+                ? 'no verdict'
+                : !r.consistent
+                  ? 'inconsistent'
+                  : checkedOf(r) === 'consistency'
+                    ? 'consistent, but not every class could be checked'
+                    : r.unsatisfiable.length
+                      ? `unsatisfiable: ${r.unsatisfiable.map(label).join(', ')}`
+                      : 'consistent, all classes satisfiable'}
+            </strong>{' '}
+            ({timing(r)}).{' '}
+            {comparison === 'other-revision' ? (
+              <span className="text-warn">This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.</span>
+            ) : comparison === 'same' ? (
+              'Same result as the server.'
+            ) : (
+              <span className="text-warn">The server's result for the same revision differs.</span>
+            )}
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
+export function ReasonerResult({ report, label, checkInBrowser }: { report: ValidationReport; label: Labeler; /** Loads the working draft, to re-run the reasoner in this browser. */ checkInBrowser?: DraftLoader }) {
   const r = report.reasoner;
+  const checked = checkedOf(r);
   const problem = !r.consistent || r.unsatisfiable.length > 0;
-  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0;
-  const verdict = !r.available ? (
-    <span className="text-warn">The {r.engine === 'structural' ? 'OWL' : r.engine} reasoner did not run; only structural checks ran.</span>
+  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0 || !!r.profile?.length;
+  const verdict = checked === 'consistency' && r.consistent ? (
+    <span>
+      <strong className="text-warn">Consistent, but not every class could be checked.</strong> Validation doesn't pass until the reasoner can check them all.
+    </span>
+  ) : !r.available ? (
+    <span className="text-warn">The OWL reasoner gave no verdict, so validation can't pass.</span>
   ) : r.consistent ? (
     <span>
       <strong className="text-ok">Consistent.</strong> {r.unsatisfiable.length ? `${plural(r.unsatisfiable.length, 'unsatisfiable class', 'unsatisfiable classes')}.` : 'All classes are satisfiable.'}
@@ -105,9 +181,19 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
   );
   const detail = (
     <div className="space-y-2">
-      {!r.available && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
+      {checked !== 'complete' && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
       {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
       {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
+      {!!r.profile?.length && (
+        <div>
+          <p className="text-xs text-muted">OWL 2 DL profile notes (reasoning still ran):</p>
+          <ul className="mt-1 text-xs">
+            {r.profile.map((n, i) => (
+              <li key={i}>{n.detail}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {r.inferredSubClassOf.length > 0 && (
         <div>
           <p className="text-xs text-muted">Inferred (not asserted) subclass relations:</p>
@@ -127,11 +213,9 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
       <p className="flex flex-wrap items-center gap-2">
         <Brain className="size-4 text-muted" />
         {verdict}
-        <span className="text-xs text-subtle">
-          {r.engine} · {r.durationMs} ms
-        </span>
+        <span className="text-xs text-subtle">{timing(r)}</span>
       </p>
-      {(hasDetail || (!r.available && r.error)) &&
+      {(hasDetail || (checked !== 'complete' && r.error)) &&
         (problem ? (
           detail
         ) : (
@@ -139,6 +223,7 @@ export function ReasonerResult({ report, label }: { report: ValidationReport; la
             {detail}
           </Disclosure>
         ))}
+      {checkInBrowser && <BrowserCheck server={r} revision={report.revision} load={checkInBrowser} label={label} />}
     </div>
   );
 }
@@ -272,6 +357,7 @@ export function ValidationDetails({
   openLintKey,
   lintNote,
   headingLevel = 4,
+  checkInBrowser,
 }: {
   report: ValidationReport;
   label: Labeler;
@@ -280,6 +366,8 @@ export function ValidationDetails({
   lintNote?: ReactNode;
   /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
   headingLevel?: 3 | 4;
+  /** Loads the working draft, to re-run the reasoner in this browser. */
+  checkInBrowser?: DraftLoader;
 }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
@@ -292,7 +380,7 @@ export function ValidationDetails({
   return (
     <div className="space-y-5">
       <ValidationSummary report={report} />
-      <ReasonerResult report={report} label={label} />
+      <ReasonerResult report={report} label={label} checkInBrowser={checkInBrowser} />
       <div className="divide-y divide-line rounded-lg border border-line">
         <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
           <LintIssues report={report} label={label} />
