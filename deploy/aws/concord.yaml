@@ -39,7 +39,7 @@ Parameters:
     Description: GitHub username that owns GhcrToken.
   Image:
     Type: String
-    Default: ghcr.io/jeswr/standards-concord:latest
+    Default: ghcr.io/standards-concord/standards-concord:latest
     Description: Container image built by the GitHub Actions workflow. The server checks for a new image every five minutes.
   AnthropicApiKey:
     Type: String
