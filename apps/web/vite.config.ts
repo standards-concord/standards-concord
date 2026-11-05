@@ -22,7 +22,8 @@ export default defineConfig({
     // re-optimised and reloaded the page mid-check (a cold dev server's first in-browser check).
     entries: ['index.html', 'src/lib/reasonWorker.ts'],
   },
-  // The in-browser reasoner runs in a module Web Worker (src/lib/reasonWorker.ts), which code-splits.
+  // The in-browser reasoner (src/lib/reasonWorker.ts) and the query worker run as module Web Workers: they
+  // code-split, and the query worker loads sparq with a dynamic import.
   worker: { format: 'es' },
   server: {
     port: 5173,

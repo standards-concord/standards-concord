@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
 import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shield, UserRound, Compass, Palette } from 'lucide-react';
 import { api } from '../api';
-import { useSession } from '../lib/session';
+import { beginSignOut, finishSignOut, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
 import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
@@ -83,11 +83,14 @@ function UserMenu() {
       </LinkButton>
     );
   const logout = async () => {
+    // Signing out leaves nothing of this account's query drafts or chats behind on a shared browser, in any tab.
+    beginSignOut(user.id);
     try {
       await api.logout();
     } catch {
       /* ignore */
     }
+    finishSignOut(user.id);
     const s = await refresh();
     if (s) setSession(s);
     nav('/login');

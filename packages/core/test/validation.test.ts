@@ -1,5 +1,5 @@
 import { Parser, Store } from 'n3';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { checkTerms, classHierarchy, DataError, dataFormatForFile, dataFormatForMediaType, parseData, ShapesValidator, sniffDataFormat, toShacl } from '../src/index.js';
 import { loadFixture } from './helpers.js';
 
@@ -121,38 +121,46 @@ describe('reading data', () => {
     expect((await parseData(nested, 'jsonld', { maxTriples: 2 }).catch((e) => e)).status).toBe(413);
   });
 
-  it('refuses data whose triples would hold too much text, as the triples are made, in every format', async () => {
-    const refused = async (text: string, format: Parameters<typeof parseData>[1], why: RegExp) => {
-      const t = performance.now();
+  // This used to time each refusal (under 2 s), which failed under a loaded CPU (the full
+  // parallel `pnpm test`): converting JSON-LD takes about a second on its own. What matters is
+  // how far parsing got, not how long it took, so it counts the triples kept before the refusal.
+  it('refuses data whose triples would hold too much text, as the triples are made, in every format', { timeout: 30_000 }, async () => {
+    const kept = vi.spyOn(Store.prototype, 'addQuad');
+    const refused = async (text: string, format: Parameters<typeof parseData>[1], why: RegExp, triples: number) => {
+      kept.mockClear();
       const err = await parseData(text, format, { maxTriples: 25_000 }).catch((e) => e);
       expect(err, format).toBeInstanceOf(DataError);
       expect([err.status, err.message]).toEqual([413, expect.stringMatching(why)]);
-      expect(performance.now() - t).toBeLessThan(2000);
+      // Stopped at the first triple past the limit: an IRI that is too long before any triple is kept,
+      // too much text after about 8M / 4,000 ≈ 2,100 of them, never after all of them.
+      const limit = why === tooLong ? 0 : 2_200;
+      expect(kept.mock.calls.length, format).toBeLessThanOrEqual(Math.min(limit, triples - 1));
     };
     const tooLong = /longer than 4,096 characters/;
     const tooMuch = /more than 8 million characters of IRIs and literals/;
     const nodes = (n: number) => Array.from({ length: n }, (_, i) => ({ '@id': `https://e/s${i}`, p: 1 }));
     // A 100,000-character property IRI used on 5,000 nodes: about 140 KB that would expand to 500 MB.
-    await refused(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(100_000)}` }, '@graph': nodes(5000) }), 'jsonld', tooLong);
+    await refused(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(100_000)}` }, '@graph': nodes(5000) }), 'jsonld', tooLong, 5000);
     // Under the IRI limit, but used so often that the triples would still hold too much.
-    await refused(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(4000)}` }, '@graph': nodes(5000) }), 'jsonld', tooMuch);
+    await refused(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(4000)}` }, '@graph': nodes(5000) }), 'jsonld', tooMuch, 5000);
     // The same through a Turtle prefix, or a relative @vocab, or prefixes chained through other terms.
-    await refused(`@prefix e: <https://e/${'x'.repeat(4000)}> .\n${Array.from({ length: 5000 }, (_, i) => `<https://s/${i}> e:p ${i} .`).join('\n')}`, 'turtle', tooMuch);
+    await refused(`@prefix e: <https://e/${'x'.repeat(4000)}> .\n${Array.from({ length: 5000 }, (_, i) => `<https://s/${i}> e:p ${i} .`).join('\n')}`, 'turtle', tooMuch, 5000);
     // (A review's 152 KB document: 100 relative @vocabs of 1,000 characters each make a 100,000-character property.)
     const vocabs = [{ '@vocab': 'https://e/' }, ...Array.from({ length: 100 }, () => ({ '@vocab': `${'x'.repeat(1000)}/` }))];
-    await refused(JSON.stringify({ '@context': vocabs, '@graph': nodes(2000) }), 'jsonld', tooLong);
+    await refused(JSON.stringify({ '@context': vocabs, '@graph': nodes(2000) }), 'jsonld', tooLong, 2000);
     const chain: Record<string, string> = { t0: `https://e/${'x'.repeat(3000)}/` };
     for (let i = 1; i < 10; i++) chain[`t${i}`] = `t${i - 1}:${'y'.repeat(3000)}/`;
-    await refused(JSON.stringify({ '@context': { ...chain, p: 't9:z' }, '@id': 'https://e/a', p: 1 }), 'jsonld', tooLong);
+    await refused(JSON.stringify({ '@context': { ...chain, p: 't9:z' }, '@id': 'https://e/a', p: 1 }), 'jsonld', tooLong, 1);
     // A long IRI written out in full is refused too, in any format.
-    await refused(JSON.stringify({ '@id': `https://e/${'x'.repeat(5000)}`, 'https://e/p': 1 }), 'jsonld', tooLong);
-    await refused(`<https://e/${'x'.repeat(5000)}> <https://e/p> "1" .`, 'ntriples', tooLong);
+    await refused(JSON.stringify({ '@id': `https://e/${'x'.repeat(5000)}`, 'https://e/p': 1 }), 'jsonld', tooLong, 1);
+    await refused(`<https://e/${'x'.repeat(5000)}> <https://e/p> "1" .`, 'ntriples', tooLong, 1);
     // Literals count too.
     const err = await parseData(`<https://e/a> <https://e/p> "${'x'.repeat(200)}" .`, 'ntriples', { maxChars: 100 }).catch((e) => e);
     expect([err.status, err.message]).toEqual([413, expect.stringMatching(/characters of IRIs and literals/)]);
     // Ordinary data with a context, or many long-ish IRIs, passes.
     expect(await parseData(JSON.stringify({ '@context': { p: 'https://e/p' }, '@graph': nodes(5000) }), 'jsonld', { maxTriples: 25_000 })).toHaveLength(5000);
     expect(await parseData(JSON.stringify({ '@context': { p: `https://e/${'x'.repeat(1000)}` }, '@graph': nodes(5000) }), 'jsonld', { maxTriples: 25_000 })).toHaveLength(5000);
+    kept.mockRestore();
   });
 
   it('checks datatype IRIs and language tags like any other term, in every format', async () => {
