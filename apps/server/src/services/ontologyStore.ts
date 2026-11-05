@@ -66,8 +66,63 @@ const DRAFT_REF = 'refs/concord/draft';
 /** A pin this old whose commit never became the draft belongs to a writer that died or stalled; it is reclaimed. */
 export const PIN_GRACE_MS = 10 * 60 * 1000;
 const revokedKey = (writer: string) => `pin-revoked:${writer}`;
-/** When a pin from an earlier version (with no writer or time in its name) was first seen. */
-const seenKey = (project: Pick<OntologyProject, 'slug'>, ref: string) => `pin-seen:${project.slug}:${ref.slice(PIN.length)}`;
+
+/**
+ * The version of how repositories are kept (pins, the draft ref, reclaiming).
+ * Processes running different versions must never write at the same time: an
+ * older one doesn't know how a newer one names or reclaims pins. So upgrades
+ * are exclusive (docs/deploy.md): each process claims the store for its
+ * version at start-up and keeps the claim alive; one won't start while a
+ * live process of another version holds it, and won't move a working draft
+ * if one has taken it over.
+ */
+export const STORE_VERSION = 2;
+const STORE_KEY = 'git-store';
+const STORE_CLAIM_MS = 30_000;
+type StoreClaim = { id: string; version: number; until: number };
+const storeTakenBy = (): StoreClaim | undefined => {
+  const claim = get<StoreClaim>('kv', STORE_KEY);
+  return claim && claim.version !== STORE_VERSION && claim.until > Date.now() ? claim : undefined;
+};
+
+/**
+ * Claims the repositories for this version (at start-up), waiting up to
+ * `waitMs` for a process of another version to let go (a stopped one's claim
+ * lapses within STORE_CLAIM_MS); throws if it doesn't. Returns `renew`, to
+ * call every few seconds (it stops renewing, and this process stops
+ * committing, if another version ever takes over), and `release`, for
+ * shutting down.
+ */
+export async function claimGitStore(waitMs = STORE_CLAIM_MS + 5_000): Promise<{ renew: () => void; release: () => void }> {
+  const claim = () =>
+    transaction(() => {
+      const other = storeTakenBy();
+      if (other) throw new Error(`A Concord process running another version (store v${other.version}) is still using these repositories. Stop it before starting this one.`);
+      put('kv', { id: STORE_KEY, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+    });
+  for (const giveUp = Date.now() + waitMs; ; ) {
+    try {
+      claim();
+      break;
+    } catch (err) {
+      if (Date.now() >= giveUp) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
+  return {
+    renew: () => {
+      try {
+        claim();
+      } catch (err) {
+        console.error(`[git] ${(err as Error).message}`);
+      }
+    },
+    release: () =>
+      transaction(() => {
+        if (get<StoreClaim>('kv', STORE_KEY)?.version === STORE_VERSION) remove('kv', STORE_KEY);
+      }),
+  };
+}
 /** Pins are looked at by ordinary reads at most this often per repository (a throttle only: correctness never depends on it). */
 const PRUNE_EVERY_MS = 60_000;
 const lastPruned = new Map<string, number>();
@@ -252,6 +307,8 @@ export const ontologyStore = {
     try {
       transaction(() => {
         if (this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
+        const other = storeTakenBy();
+        if (other) throw new HttpError(503, `Concord is being upgraded (store v${other.version}), so nothing was committed. Try again in a minute.`);
         // Reclaiming a pin is recorded in the database first (see prunePins), so either this sees it, or the reclaimer sees this.
         if (pin && get('kv', revokedKey(writer))) throw new HttpError(409, 'This change took too long to record, so nothing was committed. Try again.');
         record?.(commit);
@@ -389,29 +446,20 @@ export const ontologyStore = {
     const held = new Set(git(dir, ['for-each-ref', `--merged=${draft}`, '--format=%(refname)', PIN]).split('\n').filter(Boolean));
     for (const line of git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', PIN]).split('\n').filter(Boolean)) {
       const [sha, ref] = line.split(' ');
-      // <sha>-t<time>-<writer>. A pin from an earlier version has neither, and its writer (which may still be
-      // running, e.g. during a deploy) doesn't check for reclaims: its grace period runs from when it was first seen.
+      // <sha>-t<time>-<writer>. A pin named any other way was made by a writer that doesn't check for
+      // reclaims, so it is never reclaimed: it is only dropped once the draft holds its commit.
       const [, at, writer] = /^[0-9a-f]+-t(\d+)-(.+)$/.exec(ref.slice(PIN.length)) ?? [];
       if (!held.has(ref)) {
-        const since = writer
-          ? Number(at)
-          : transaction(() => {
-              const seen = get<{ at: number }>('kv', seenKey(project, ref));
-              if (seen) return seen.at;
-              put('kv', { id: seenKey(project, ref), at: Date.now() });
-              return Date.now();
-            });
-        if (Date.now() - since < PIN_GRACE_MS) continue;
+        if (!writer || Date.now() - Number(at) < PIN_GRACE_MS) continue;
         const reclaimed = transaction(() => {
           const now = this.head(project);
           if (now === sha || has(sha, now)) return false;
-          if (writer) put('kv', { id: revokedKey(writer), at: new Date().toISOString() });
+          put('kv', { id: revokedKey(writer), at: new Date().toISOString() });
           return true;
         });
         if (!reclaimed) continue;
       }
       git(dir, ['update-ref', '-d', ref, sha]);
-      if (!writer) remove('kv', seenKey(project, ref));
     }
   },
 

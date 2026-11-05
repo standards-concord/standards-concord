@@ -3,11 +3,19 @@ import { config } from './config.js';
 import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { refreshReleasePages } from './public/routes.js';
-import { ontologyStore } from './services/ontologyStore.js';
+import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 
 openDb();
+// One version at a time writes the repositories (upgrades are exclusive; see docs/deploy.md).
+const store = await claimGitStore();
+setInterval(store.renew, 10_000).unref();
+for (const signal of ['SIGTERM', 'SIGINT'] as const)
+  process.once(signal, () => {
+    store.release();
+    process.exit(0);
+  });
 // Git is a projection of the database: repair anything a crash left half-done.
 for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 const secrets = migrateClientSecrets();

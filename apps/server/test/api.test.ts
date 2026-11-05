@@ -1513,11 +1513,11 @@ describe('inline term edits', () => {
     try {
       ontologyStore.log(project);
       await ontologyStore.working(project);
+      expect(sync).not.toHaveBeenCalled();
     } finally {
       now.mockRestore();
       sync.mockRestore();
     }
-    expect(sync).not.toHaveBeenCalled();
     collectGarbage(rawGit);
     for (const sha of abandoned) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
     const head = ontologyStore.head(project);
@@ -1539,34 +1539,54 @@ describe('inline term edits', () => {
     onlyDraftPins(rawGit, ontologyStore.head(project));
   });
 
-  it('gives pins from an earlier version a grace period, since their writers may still be running during a deploy', async () => {
+  it('never reclaims pins named by an earlier version, whose writers do not check for reclaims, until the draft holds them', async () => {
     const { ontologyStore, project, rawGit } = await repo();
-    const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
     const head = ontologyStore.head(project);
-    // Commits only pins hold, named as the two earlier versions named them (<time>-<sha> and <sha>-<writer>).
+    // Commits only pins hold, named as earlier versions named them (<time>-<sha> and <sha>-<writer>).
     const tree = rawGit('rev-parse', `${head}^{tree}`);
     const oldStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by an earlier version');
     const newerStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by the previous version');
+    const held = rawGit('rev-parse', `${head}~1`);
     rawGit('update-ref', `refs/concord/commits/${Date.now() - 3600_000}-${oldStyle}`, oldStyle);
     rawGit('update-ref', `refs/concord/commits/${newerStyle}-12345678-1234-4123-8123-123456789abc`, newerStyle);
-    const now = vi.spyOn(Date, 'now');
+    rawGit('update-ref', `refs/concord/commits/${held}-87654321-1234-4123-8123-123456789abc`, held);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 365 * 24 * 3600_000);
     try {
-      // First seen now: kept, however old their names look.
-      ontologyStore.prunePins(project);
-      collectGarbage(rawGit);
-      expect(pinnedCommits(rawGit).sort()).toEqual([oldStyle, newerStyle].sort());
-      now.mockReturnValue(Date.now() + PIN_GRACE_MS - 60_000);
-      ontologyStore.prunePins(project);
-      expect(pinnedCommits(rawGit)).toHaveLength(2);
-      // A grace period after they were first seen, they are reclaimed.
-      now.mockReturnValue(Date.now() + 2 * PIN_GRACE_MS);
       ontologyStore.prunePins(project);
     } finally {
       now.mockRestore();
     }
-    expect(pinnedCommits(rawGit)).toEqual([]);
     collectGarbage(rawGit);
-    for (const sha of [oldStyle, newerStyle]) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
+    // A year on, the ones the draft doesn't hold are still there (and so are their commits); the one it holds is gone.
+    expect(pinnedCommits(rawGit).sort()).toEqual([oldStyle, newerStyle].sort());
+    for (const sha of [oldStyle, newerStyle]) expect(rawGit('cat-file', '-t', sha)).toBe('commit');
+    for (const ref of rawGit('for-each-ref', '--format=%(refname)', 'refs/concord/commits/').split('\n')) rawGit('update-ref', '-d', ref);
+  });
+
+  it('runs one version at a time: a server waits for, or refuses to start beside, another version, and stops committing if one takes over', async () => {
+    const { ontologyStore, project, rawGit, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+    const { get, put, remove } = await import('../src/db.js');
+    const { OntologyGraph } = await import('@concord/core');
+    // A live server of another version holds the repositories: this one won't start...
+    put('kv', { id: 'git-store', version: STORE_VERSION + 1, until: Date.now() + 60_000 });
+    try {
+      await expect(claimGitStore(1_500)).rejects.toThrow('another version');
+      // ...and nothing is committed, leaving no pin behind.
+      const head = ontologyStore.head(project);
+      const graph = await OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:upgrade> <http://www.w3.org/2000/01/rdf-schema#label> "upgrade" .\n`);
+      await expect(ontologyStore.commitWorking(project, graph, 'during an upgrade', { name: 'Old' })).rejects.toMatchObject({ status: 503 });
+      expect(ontologyStore.head(project)).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+    } finally {
+      remove('kv', 'git-store');
+    }
+    // Once the other version stops (its claim lapses), this one starts, and gives its claim up when it shuts down.
+    put('kv', { id: 'git-store', version: STORE_VERSION + 1, until: Date.now() + 1_000 });
+    const store = await claimGitStore(5_000);
+    expect(get<{ version: number }>('kv', 'git-store')?.version).toBe(STORE_VERSION);
+    store.renew();
+    store.release();
+    expect(get('kv', 'git-store')).toBeUndefined();
   });
 
   it('never moves the draft ref back when two cleanups race', async () => {
