@@ -6,7 +6,7 @@ import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate } from '../../lib/format';
 import { GitHubIcon, LevelBadge } from '../../components/badges';
-import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Loading, Textarea } from '../../components/ui';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Loading, Textarea, AnchorButton } from '../../components/ui';
 import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { useOntology } from './Layout';
@@ -142,11 +142,9 @@ function ReleaseCard({ r, ontologyId, notes = 'preview' }: { r: Release; ontolog
           </p>
         </div>
         {r.githubUrl && (
-          <a href={r.githubUrl} target="_blank" rel="noreferrer">
-            <Button size="sm">
+          <AnchorButton href={r.githubUrl} target="_blank" rel="noreferrer" size="sm">
               <GitHubIcon className="size-3.5" /> GitHub <ExternalLink className="size-3" />
-            </Button>
-          </a>
+            </AnchorButton>
         )}
       </div>
       {notes === 'preview' && r.notes && <Markdown text={r.notes} className="mt-3 line-clamp-4 text-muted" />}

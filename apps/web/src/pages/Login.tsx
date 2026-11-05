@@ -6,7 +6,7 @@ import { useSession } from '../lib/session';
 import { useAction } from '../lib/hooks';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
 import { SolidSignIn } from '../components/SolidSignIn';
-import { Button, Card, ErrorCard, InlineError, Loading } from '../components/ui';
+import { AnchorButton, Button, Card, ErrorCard, InlineError, Loading } from '../components/ui';
 
 export function LoginPage() {
   const { session, loading, error, refresh, setSession } = useSession();
@@ -48,18 +48,14 @@ export function LoginPage() {
           <Card className="p-6">
             <div className="space-y-3">
               {session.providers.google && (
-                <a href={api.oauthUrl('google', next)} className="block">
-                  <Button size="lg" className="w-full">
-                    <GoogleIcon /> Sign in with Google
-                  </Button>
-                </a>
+                <AnchorButton href={api.oauthUrl('google', next)} size="lg" className="flex w-full">
+                  <GoogleIcon /> Sign in with Google
+                </AnchorButton>
               )}
               {session.providers.github && (
-                <a href={api.oauthUrl('github', next)} className="block">
-                  <Button size="lg" className="w-full">
-                    <GitHubIcon /> Sign in with GitHub
-                  </Button>
-                </a>
+                <AnchorButton href={api.oauthUrl('github', next)} size="lg" className="flex w-full">
+                  <GitHubIcon /> Sign in with GitHub
+                </AnchorButton>
               )}
               {session.providers.solid && <SolidSignIn next={next} error={solidError} />}
               {(session.providers.google || session.providers.github || session.providers.solid) && session.providers.demo && (

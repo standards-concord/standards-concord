@@ -3,7 +3,7 @@ import type { OutputFormat } from '@concord/shared';
 import { Download, Info } from 'lucide-react';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { Button, Card, ErrorCard, Loading, Select } from '../../components/ui';
+import { Card, ErrorCard, Loading, Select, AnchorButton } from '../../components/ui';
 import { CodeView } from '../../components/code/CodeView';
 import { FORMAT_LANGUAGE } from '../../components/code/languages';
 import { useOntology } from './Layout';
@@ -114,9 +114,7 @@ export function SourceTab() {
               ))}
             </Select>
           </label>
-          <a href={api.sourceUrl(id, format, ref, true)} download={`${ontology.prefix}-${ref}.${meta.ext}`}>
-            <Button icon={Download}>Download</Button>
-          </a>
+          <AnchorButton href={api.sourceUrl(id, format, ref, true)} download={`${ontology.prefix}-${ref}.${meta.ext}`} icon={Download}>Download</AnchorButton>
         </div>
       </div>
       <details className="text-sm text-muted" data-testid="format-about">
