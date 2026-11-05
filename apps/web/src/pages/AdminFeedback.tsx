@@ -239,7 +239,7 @@ function PodFeedback() {
       <div className="space-y-3 px-5 pb-5">
         {!viaSolid && (
           <p className="text-sm text-muted">
-            To read feedback straight from the pods, <Link to="/login?next=/admin/feedback" className="text-accent hover:underline">sign in with your WebID</Link>. The pods check their sharing against your WebID themselves.
+            To read feedback straight from the pods, <Link to="/login?next=/admin/feedback" className="text-accent hover:underline">sign in with Solid</Link>. The pods check their sharing against your WebID themselves.
           </p>
         )}
         <InlineError error={read.error} />

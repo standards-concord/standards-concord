@@ -11,6 +11,7 @@ import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
 import { SettingsPage } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
+import { PrivacyPage } from './pages/Privacy';
 import { OntologyLayout } from './pages/ontology/Layout';
 import { OverviewTab } from './pages/ontology/Overview';
 import { BrowseTab } from './pages/ontology/Browse';
@@ -82,6 +83,7 @@ function Routed() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/connect" element={<ConnectPage />} />
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />

@@ -1184,7 +1184,9 @@ describe('saves that race a slow step', () => {
   it('a simulated member reacting while someone else comments still has their say, and keeps the comment', async () => {
     // Used to: the member's reaction (an LLM call) took a while, and the review was then saved on the
     // copy read before it, so a comment saved meanwhile made the whole simulation step fail with a 409.
-    await proposeFork('Commented during a reaction', 'CommentedDuringReaction');
+    const { crId } = await proposeFork('Commented during a reaction', 'CommentedDuringReaction');
+    // Its own request is open for members to react to, whatever earlier tests left behind.
+    expect(getCR(crId).status).toBe('review');
     const open = () => list<ChangeRequest>('changeRequests', p().id).filter((x) => ['review', 'voting'].includes(x.status));
     const reactions = (ids: string[]) => ids.reduce((n, id) => n + list('reviews', id).length + list('votes', id).length, 0);
     const ids = open().map((c) => c.id);
@@ -1205,7 +1207,7 @@ describe('saves that race a slow step', () => {
     } finally {
       llm.json = original;
     }
-    expect(commented.length).toBeGreaterThan(0);
+    expect(commented).toContain(crId);
     for (const id of commented) expect(getCR(id).timeline.some((e) => e.message.includes('while a member was reacting'))).toBe(true);
     // Members still reacted, on top of the comments.
     expect(reactions(ids)).toBeGreaterThan(before + commented.length);
