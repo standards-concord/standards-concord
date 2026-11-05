@@ -270,7 +270,17 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
     cr.validation = {
       lint: [{ severity: 'error', code: 'change-not-applicable', message }],
       fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
-      reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
+      // Nothing was checked, so nothing is claimed: a "consistent" here was read as a real verdict.
+      reasoner: {
+        engine: 'none',
+        available: false,
+        checked: 'none',
+        consistent: false,
+        unsatisfiable: [],
+        inferredSubClassOf: [],
+        explanation: 'The change could not be validated, so the ontology was not checked.',
+        durationMs: 0,
+      },
       competencyQuestions: [],
       passed: false,
     };
@@ -301,7 +311,7 @@ async function analyse(project: OntologyProject, cr: ChangeRequest, after: Ontol
     messages: [
       {
         role: 'user',
-        content: `${requestText(cr)}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nRule-based classification: ${cr.classification?.level}\n${cr.classification?.reasons.map((r) => `- [${r.level}] ${r.rule}: ${r.message}`).join('\n')}\n\nValidation: ${v.passed ? 'passed' : 'FAILED'}; reasoner consistent=${v.reasoner.consistent}, unsatisfiable=${v.reasoner.unsatisfiable.map(c).join(', ') || 'none'}; lint errors: ${lintErrors.map((i) => i.message).join('; ') || 'none'}; FAIR ${Math.round(v.fair.score * 100)}%.\n\nOntology after the change:\n${ontologyDigest(after, 250)}`,
+        content: `${requestText(cr)}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nRule-based classification: ${cr.classification?.level}\n${cr.classification?.reasons.map((r) => `- [${r.level}] ${r.rule}: ${r.message}`).join('\n')}\n\nValidation: ${v.passed ? 'passed' : 'FAILED'}; reasoner consistent=${v.reasoner.engine === 'none' ? 'unknown (nothing could be checked)' : v.reasoner.consistent}${v.reasoner.available ? '' : ' (no OWL verdict)'}, unsatisfiable=${v.reasoner.unsatisfiable.map(c).join(', ') || 'none'}; lint errors: ${lintErrors.map((i) => i.message).join('; ') || 'none'}; FAIR ${Math.round(v.fair.score * 100)}%.\n\nOntology after the change:\n${ontologyDigest(after, 250)}`,
       },
     ],
     fallback: () => fallbackAnalysis(cr, c),
@@ -314,7 +324,8 @@ function fallbackAnalysis(cr: ChangeRequest, c: (iri: string) => string) {
   const v = cr.validation;
   const risks: string[] = [];
   if (level === 'major') risks.push('This is a breaking change: existing data or queries may stop working or give different answers. Consider deprecating instead, and ship migration notes.');
-  if (v && !v.reasoner.consistent) risks.push('The ontology would become logically inconsistent.');
+  if (v?.reasoner.engine === 'none') risks.push('No consistency check could finish, so it is not known whether the ontology stays consistent.');
+  else if (v && !v.reasoner.consistent) risks.push('The ontology would become logically inconsistent.');
   if (v?.reasoner.unsatisfiable.length) risks.push(`Unsatisfiable classes: ${v.reasoner.unsatisfiable.map(c).join(', ')}.`);
   for (const i of v?.lint.filter((x) => x.severity === 'error').slice(0, 3) ?? []) risks.push(i.message);
   return {
