@@ -333,7 +333,8 @@ export interface ReasonerResult {
    * sparq: complete OWL 2 DL reasoning (WebAssembly). structural: the fast, incomplete checks.
    * hermit and pellet only appear in reports stored before Concord moved to sparq.
    */
-  engine: 'sparq' | 'structural' | 'hermit' | 'pellet';
+  /** 'none': nothing could be checked (the OWL reasoner and the structural fallback both failed). */
+  engine: 'sparq' | 'structural' | 'none' | 'hermit' | 'pellet';
   /** false when the OWL reasoner did not finish, so the structural checks filled in (see `error` and `checked`). */
   available: boolean;
   /**
