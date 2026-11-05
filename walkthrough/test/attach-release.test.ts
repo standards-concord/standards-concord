@@ -19,12 +19,21 @@ interface Gh {
   release?: boolean;
 }
 
-function run(gh: Gh, env: { TAG?: string; SHA?: string } = {}) {
+/** The recording's feature clips: the playlist, and which files to leave out. */
+interface Clips {
+  manifest?: string;
+  skip?: string[];
+}
+
+function run(gh: Gh, env: { TAG?: string; SHA?: string } = {}, clips: Clips = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'attach-'));
   mkdirSync(path.join(dir, 'bin'));
   mkdirSync(path.join(dir, 'out'));
-  for (const v of ['concord-walkthrough', 'concord-feedback'])
-    for (const ext of ['mp4', 'vtt', 'transcript.md', 'chapters.txt']) writeFileSync(path.join(dir, 'out', `${v}.${ext}`), '');
+  for (const v of ['concord-walkthrough', 'concord-feedback', 'concord-clip-validate', 'concord-clip-vote'])
+    for (const ext of ['mp4', 'vtt', 'transcript.md', 'chapters.txt'])
+      if (!clips.skip?.includes(`${v}.${ext}`)) writeFileSync(path.join(dir, 'out', `${v}.${ext}`), '');
+  if (!clips.skip?.includes('concord-clips.json'))
+    writeFileSync(path.join(dir, 'out', 'concord-clips.json'), clips.manifest ?? JSON.stringify({ clips: [{ id: 'validate', file: 'concord-clip-validate' }, { id: 'vote', file: 'concord-clip-vote' }] }));
   writeFileSync(path.join(dir, 'out', 'walkthrough-voice.tar.gz'), '');
   const out = (v: string | undefined) => (v === 'fail' ? 'echo "HTTP 502" >&2; exit 1' : `echo '${v ?? ''}'`);
   writeFileSync(
@@ -76,6 +85,31 @@ describe('attaching a recording to a release', () => {
       expect(r.status).toBe(1);
       expect(r.out).toMatch(/::error::Couldn't/);
       expect(r.writes).toEqual([]);
+    }
+  });
+
+  it('uploads the clips’ playlist and every clip it lists with the videos', () => {
+    const r = run({ refs: '' });
+    expect(r.status).toBe(0);
+    const upload = r.writes.find((w) => w.startsWith('release upload'))!;
+    for (const f of ['concord-clips.json', 'concord-clip-validate.mp4', 'concord-clip-validate.vtt', 'concord-clip-vote.transcript.md', 'concord-clip-vote.chapters.txt', 'concord-walkthrough.mp4'])
+      expect(upload).toContain(`out/${f}`);
+  });
+
+  // /welcome uses the newest release with the two videos, so a release attached without its
+  // clips (or with some missing) would hide the previous release's clips.
+  it('writes nothing unless every clip the playlist lists is complete', () => {
+    for (const clips of [
+      { skip: ['concord-clips.json'] },
+      { skip: ['concord-clip-vote.vtt'] },
+      { manifest: '{"clips":[]}' },
+      { manifest: 'not json' },
+      { manifest: JSON.stringify({ clips: [{ id: 'x', file: '../concord-walkthrough' }] }) },
+    ] as Clips[]) {
+      const r = run({ refs: '' }, {}, clips);
+      expect(r.status, JSON.stringify(clips)).toBe(1);
+      expect(r.out).toMatch(/::error::/);
+      expect(r.calls.filter((c) => c)).toEqual([]);
     }
   });
 

@@ -22,8 +22,15 @@ export class Director {
     // A script error, a console error or a failed request is a broken shot, even if every
     // click landed: the page may be showing an error state the narration doesn't mention.
     page.context().on('weberror', (e) => this.note(`Page error on ${e.page()?.url() ?? '?'}: ${e.error().message.split('\n')[0]}`));
-    page.context().on('console', (m) => {
-      if (m.type() === 'error' && !/ERR_BLOCKED_BY_CLIENT/.test(m.text())) this.note(`Console error on ${m.page()?.url() ?? '?'}: ${m.text().split('\n')[0].slice(0, 200)}`);
+    page.context().on('console', async (m) => {
+      if (m.type() !== 'error' || /ERR_BLOCKED_BY_CLIENT/.test(m.text())) return;
+      let text = m.text();
+      // A format string ("%o") says nothing on its own: show what was logged with it.
+      if (/%[osdifcO]/.test(text)) {
+        const args = await Promise.all(m.args().slice(1).map((a) => a.evaluate((x) => (x instanceof Error ? x.message : typeof x === 'object' ? JSON.stringify(x) : String(x))).catch(() => '?')));
+        if (args.length) text = `${text} ${args.join(' ')}`;
+      }
+      this.note(`Console error on ${m.page()?.url() ?? '?'}: ${text.split('\n')[0].slice(0, 200)}`);
     });
     page.context().on('requestfailed', (r) => {
       const why = r.failure()?.errorText ?? '';

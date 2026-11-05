@@ -1,5 +1,5 @@
 /**
- * The walkthrough videos for the alpha landing page. They are recorded by CI for each
+ * The walkthrough videos (and the short feature clips) for the alpha landing page. They are recorded by CI for each
  * GitHub release (walkthrough/) and attached to it as release assets; this serves the
  * latest release's copies from our own origin, so the page can embed them with captions
  * (cross-origin caption tracks need CORS, which GitHub doesn't send) and seek within them.
@@ -17,7 +17,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { config } from '../config.js';
 
-/** The only files we serve: the two videos with their captions and transcripts. */
+/** The two main videos with their captions and transcripts. */
 export const MEDIA_FILES = [
   'concord-walkthrough.mp4',
   'concord-walkthrough.vtt',
@@ -26,6 +26,18 @@ export const MEDIA_FILES = [
   'concord-feedback.vtt',
   'concord-feedback.transcript.md',
 ] as const;
+
+/**
+ * The feature clips (walkthrough/clips.md): one recording cut into a file set per
+ * feature, concord-clip-<id>.mp4, .vtt and .transcript.md, listed in this manifest for
+ * the /welcome playlist. A release may have them or not; the main videos alone decide
+ * which release is used.
+ */
+export const CLIP_MANIFEST = 'concord-clips.json';
+const CLIP_FILE = /^concord-clip-[a-z0-9]+(?:-[a-z0-9]+)*\.(?:mp4|vtt|transcript\.md)$/;
+
+/** Every name we serve, and nothing else: the main videos' files, the clips' files and their manifest. */
+export const isMediaName = (name: string) => (MEDIA_FILES as readonly string[]).includes(name) || name === CLIP_MANIFEST || CLIP_FILE.test(name);
 
 export interface MediaIndex {
   /** The release the videos were recorded for; null when serving a local folder or none exists. */
@@ -46,8 +58,6 @@ interface Asset {
 
 let cached: { at: number; index: Promise<MediaIndex>; assets: Map<string, Asset> } | undefined;
 
-const isMediaFile = (name: string): name is (typeof MEDIA_FILES)[number] => (MEDIA_FILES as readonly string[]).includes(name);
-
 /** A GitHub release, as the releases API lists it. */
 interface GitHubRelease {
   id?: number;
@@ -63,7 +73,7 @@ interface GitHubRelease {
 const REQUIRED = MEDIA_FILES.filter((f) => /\.(mp4|vtt)$/.test(f));
 
 /** A release asset GitHub has finished receiving (one still uploading is in state "open"). */
-const uploaded = (a: NonNullable<GitHubRelease['assets']>[number]) => isMediaFile(a.name) && (a.state === undefined || a.state === 'uploaded');
+const uploaded = (a: NonNullable<GitHubRelease['assets']>[number]) => isMediaName(a.name) && (a.state === undefined || a.state === 'uploaded');
 
 const complete = (r: GitHubRelease) => !r.draft && REQUIRED.every((f) => (r.assets ?? []).some((a) => a.name === f && uploaded(a)));
 
@@ -125,7 +135,13 @@ function regularFileIn(dir: string, name: string, root = dir): string | undefine
 }
 
 function fromFolder(dir: string): MediaIndex {
-  const files = MEDIA_FILES.flatMap((f) => {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter(isMediaName).sort();
+  } catch {
+    names = [];
+  }
+  const files = names.flatMap((f) => {
     const p = regularFileIn(dir, f);
     return p ? [{ name: f, size: fs.statSync(p).size, url: `/api/media/${f}` }] : [];
   });
@@ -155,7 +171,7 @@ const downloads = new Map<string, Promise<string>>();
 
 /** A local path for one of the media files, downloading it once per release if needed. */
 export async function mediaFile(name: string): Promise<string | undefined> {
-  if (!isMediaFile(name)) return undefined;
+  if (!isMediaName(name)) return undefined;
   const dir = localDir();
   if (dir) return regularFileIn(dir, name);
   const index = await mediaIndex();
@@ -187,4 +203,4 @@ export async function mediaFile(name: string): Promise<string | undefined> {
   return job;
 }
 
-export const MEDIA_TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.vtt': 'text/vtt; charset=utf-8', '.md': 'text/markdown; charset=utf-8' };
+export const MEDIA_TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.vtt': 'text/vtt; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8' };

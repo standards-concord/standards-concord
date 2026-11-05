@@ -11,6 +11,7 @@
   },
   "devDependencies": {
     "@rdfjs/wrapper": "0.34.0",
+    "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
     "n3": "^2.13.12",

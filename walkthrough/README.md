@@ -1,18 +1,19 @@
 # Narrated walkthrough videos
 
-Records three narrated videos of Concord as MP4s, each from an editable script:
+Records narrated videos of Concord as MP4s, each from an editable script:
 
 - **The tour** ([narration.md](narration.md), `concord-walkthrough.*`): what Concord is for, how a standard grows into a release, and building an app on it with a coding agent.
 - **How to take part** ([feedback.md](feedback.md), `concord-feedback.*`): for alpha testers. The welcome page, the guided walkthrough, simulating the others, and how to give feedback. About three minutes.
 - **A closer look** ([features.md](features.md), `concord-features.*`): one change followed from a term's page through review, a git commit, a release tag and the standard's public address, then checking data against its SHACL shapes. About five minutes. Its actions are in [features.ts](features.ts); the git and `curl` shots are real, read-only commands run on the recorded hub's own repository and address, captioned as such, so those scenes need a hub the recorder started itself (`gitRepo`).
+- **Feature clips** ([clips.md](clips.md), `concord-clip-<id>.*` and `concord-clips.json`): short clips of one feature each, for things the other videos don't show: validating data against a release, the use-case interview, a meeting turned into requirements, reports from coding agents, voting on a breaking change, and setting the governance rules. 20 to 40 seconds each, about 2,000 narration characters in all. They are recorded in one run and written as one file set per scene, with a playlist (`concord-clips.json`: each clip's id, title, length, and its first sentence as a summary). Their actions are in [clips.ts](clips.ts); each clip opens with `c-card`, which signs in as Priya Shah and opens the clip's page, so no clip depends on the one before it.
 
-The tour and the feedback video are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)). The features video isn't on the page yet: record it with `--video features` (or the workflow's `video` input), and it lands in the run's artifact.
+The tour and the feedback video are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)), and the feature clips are its drop-down playlist ("More features, one at a time"; `/welcome#clip-<id>` opens one). The features video isn't on the page yet: record it with `--video features` (or the workflow's `video` input), and it lands in the run's artifact.
 
 The tour is about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
-pnpm walkthrough                        # all three videos, voice from the environment (see below)
-pnpm walkthrough --video feedback       # some videos: tour, feedback or features, comma-separated
+pnpm walkthrough                        # every video, voice from the environment (see below)
+pnpm walkthrough --video feedback       # some videos: tour, feedback, features or clips, comma-separated
 pnpm walkthrough --voice elevenlabs     # asks for ELEVENLABS_API_KEY without echoing it, if unset
 pnpm walkthrough --draft                # no voice: captions only, for checking pacing and visuals
 pnpm walkthrough --only intro,goals     # some scenes only (of the video that has them)
@@ -64,7 +65,7 @@ The script is written to be listened to, so the voice matters. In order of prefe
 
 | `--voice` | Service | Key | Notes |
 | --- | --- | --- | --- |
-| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording of the tour and feedback videos is about 8,000 characters, and the features video about 4,000 more, so re-voice only what changed. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
+| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording of the tour and feedback videos is about 8,000 characters, the features video about 4,000 more and the clips about 2,000, so re-voice only what changed. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
 | `openai` | OpenAI `gpt-4o-mini-tts` | `OPENAI_API_KEY` | Very good, and steerable with a style brief (`DEFAULT_STYLE` in lib/tts.ts). Default voice `sage`. |
 | `google` | Google Cloud Chirp 3 HD | `GOOGLE_TTS_API_KEY`, or `GOOGLE_TTS_USE_GCLOUD=1` | Good, and cheapest. Default voice `en-GB-Chirp3-HD-Charon`. |
 | `say` | macOS `say` | none | Quick local drafts only. |
@@ -98,9 +99,9 @@ Video frames are counted against the clock, so a slow encoder never shifts the t
 
 ## Releases
 
-[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records the tour and the feedback video when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in either video and nothing is uploaded. Pick `features` for the workflow's `video` input to record the features video instead; it is kept in the run's artifact and never attached.
+[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records the tour, the feedback video and the feature clips when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters, and the clips' playlist, to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in any of them and nothing is uploaded, and [attach-release.sh](attach-release.sh) checks that every clip the playlist lists is complete before it writes anything. Pick `features` for the workflow's `video` input to record the features video instead; it is kept in the run's artifact and never attached.
 
-- The welcome page (`/welcome`) plays the videos of the newest release that has them. The API server reads that release from GitHub (`MEDIA_REPO`, default `standards-concord/standards-concord`), downloads each file once per release into its data directory, and serves it from `/api/media/`, so captions and seeking work from Concord's own origin. Set `MEDIA_DIR` to serve a local folder instead, such as `walkthrough/out/` after a recording. Until a release has the videos, the page says they're on their way.
+- The welcome page (`/welcome`) plays the videos of the newest release that has them. The API server reads that release from GitHub (`MEDIA_REPO`, default `standards-concord/standards-concord`), downloads each file once per release into its data directory, and serves it from `/api/media/`, so captions and seeking work from Concord's own origin. Set `MEDIA_DIR` to serve a local folder instead, such as `walkthrough/out/` after a recording. Until a release has the videos, the page says they're on their way. The two videos decide which release is used; that release's clips (if it has any) fill the playlist, which lists only clips whose video is there.
 
 - Add `ELEVENLABS_API_KEY` as a repository secret for the narration. Without a voice key, release runs are skipped with a notice. Set the repository variable `ELEVENLABS_OUTPUT_FORMAT` to change the audio format.
 - The recording job has read-only access and doesn't keep the checkout's credentials; a separate job with write access only attaches the files.

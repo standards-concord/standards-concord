@@ -33,16 +33,22 @@ describe('the recording workflow', () => {
     expect(steps.some((s) => /uses: actions\/cache@/.test(s) && /\.cache\/voice/.test(s))).toBe(false);
   });
 
-  // The features video (features.md) isn't on /welcome, and attach-release.sh needs both of the
-  // pair it plays, so release runs record only that pair, and only that pair is ever attached.
-  it('records and attaches only the tour and feedback videos for a release', () => {
-    expect(step(/name: Record\b/)).toMatch(/VIDEO: \$\{\{ inputs\.video \|\| 'tour,feedback' \}\}/);
+  // The features video (features.md) isn't on /welcome, and attach-release.sh needs everything
+  // the page plays (the two videos and the clips), so release runs record exactly that, and
+  // only a run that recorded all of it is ever attached.
+  it('records and attaches the tour, the feedback video and the clips for a release', () => {
+    expect(step(/name: Record\b/)).toMatch(/VIDEO: \$\{\{ inputs\.video \|\| 'tour,feedback,clips' \}\}/);
     expect(step(/name: Record\b/)).toMatch(/--video "\$VIDEO"/);
     const attach = yml.slice(yml.indexOf('\n  attach:'));
-    expect(attach).toMatch(/inputs\.video == 'tour,feedback'/);
+    expect(attach).toMatch(/inputs\.video == 'tour,feedback,clips'/);
+    expect(attach).not.toMatch(/inputs\.video == 'tour,feedback'\)/);
   });
 
-  it('keys the narration cache on every script, the features video’s included', () => {
-    for (const s of [step(/actions\/cache\/restore@/), step(/actions\/cache\/save@/)]) expect(s).toMatch(/walkthrough\/features\.md/);
+  it('keeps the clips’ playlist in the artifact the attach job uploads', () => {
+    expect(step(/actions\/upload-artifact@/)).toMatch(/walkthrough\/out\/concord-clips\.json/);
+  });
+
+  it('keys the narration cache on every script, the features video’s and the clips’ included', () => {
+    for (const s of [step(/actions\/cache\/restore@/), step(/actions\/cache\/save@/)]) for (const f of [/walkthrough\/features\.md/, /walkthrough\/clips\.md/]) expect(s).toMatch(f);
   });
 });
