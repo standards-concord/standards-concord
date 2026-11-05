@@ -33,7 +33,7 @@ export interface MediaIndex {
   files: { name: string; size: number; url: string }[];
 }
 
-const repo = () => process.env.MEDIA_REPO ?? 'jeswr/standards-concord';
+const repo = () => process.env.MEDIA_REPO ?? 'standards-concord/standards-concord';
 const localDir = () => (process.env.MEDIA_DIR ? path.resolve(process.env.MEDIA_DIR) : undefined);
 const cacheRoot = () => path.join(config.dataDir, 'media');
 const INDEX_TTL_MS = 10 * 60 * 1000;
