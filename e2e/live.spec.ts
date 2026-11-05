@@ -72,4 +72,17 @@ test.describe('with the backend', () => {
     expect(ttl.headers()['content-type']).toContain('text/turtle');
     expect(await ttl.text()).toContain('owl:Ontology');
   });
+
+  test('POST to the ontology IRI validates data through Vercel, and the SHACL profile returns the shapes', async ({ request }) => {
+    const res = await request.post('/def/volunteering', {
+      headers: { 'Content-Type': 'text/turtle' },
+      data: '<https://example.org/o> a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> .',
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const report = await res.json();
+    expect(report.conforms).toBe(false);
+    expect(report.results.length).toBeGreaterThan(0);
+    const shapes = await request.get('/def/volunteering', { headers: { 'Accept-Profile': '<http://www.w3.org/ns/shacl#>' } });
+    expect(await shapes.text()).toContain('sh:NodeShape');
+  });
 });

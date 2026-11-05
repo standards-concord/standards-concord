@@ -23,6 +23,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
+| `/o/:id/validate` | Paste or upload data, pick the version, read the report (shapes and terms, cut short at 1,000), download JSON and Turtle reports, see how to call the API | ✅ | validate |
 | `/o/:id/query?view=check` | Check data: problems as sentences in the data's own prefixes, underlined in the editor with hover popups, click to jump; live syntax and misspelt-term underlines; Format; any member can check, signed out goes to sign in | ✅ | check-data, query |
 | `/o/:id/connect` | Connect an agent to this ontology | ✅ | connect |
 | `/o/:id/use-cases` | List, describe a use case (starts an interview), draft changes from a selection | ✅ | requirements, ia; 🔜 #15 (sharing modes, anonymised versions) |
@@ -42,8 +43,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | Status | Specs |
 | --- | --- | --- |
-| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI) |
-| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side |
+| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live, validate (POST validation at the IRI, SHACL profile) |
+| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side and `apps/server/test/validate.test.ts` for POST validation at a held version |
 | `/mcp` with OAuth (discovery, registration, consent, tools) | ✅ | oauth |
 | `/mcp` with a personal token: every tool, refusal without a token, revoked token | ✅ | agents |
 | WebID profile (`/people/:id`) | ✅ | account |
@@ -103,7 +104,6 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #18 | SHACL compact syntax and JavaScript classes at the ontology URI | classes.spec.ts |
 | #19 | Development forks | forks.spec.ts |
 | #28 | Inline term editing in Browse | term-edit.spec.ts |
-| #32 | Data validator page, POST validation at the ontology IRI | validate.spec.ts |
 | #34 | OAuth client-auth downgrade refusal, unverified app label | oauth.spec.ts, connect.spec.ts |
 | #35 | Privacy redaction in everything published | public-page.spec.ts |
 | #38 | Chat-to-query beside the SPARQL editor | query.spec.ts |

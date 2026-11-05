@@ -53,6 +53,24 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.14.0',
+    date: '2026-11-05',
+    title: 'Check data explains what’s wrong and where',
+    pr: 50,
+    changes: [
+      {
+        id: 'check-data-explained',
+        type: 'feat',
+        title: 'Check data explains problems and shows where they are',
+        detail:
+          'Problems read as plain sentences using your own prefixes, are underlined in the editor (hover to read), and clicking one jumps to it. Typos and syntax errors are underlined as you type, and Format tidies the Turtle.',
+        roles: [],
+        to: '{o}/query?view=check',
+        ask: 'When Check data finds a problem, can you tell what’s wrong and where to fix it?',
+      },
+    ],
+  },
+  {
     version: '0.13.0',
     date: '2026-11-04',
     title: 'Returning testers see what changed',
