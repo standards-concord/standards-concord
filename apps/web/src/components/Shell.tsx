@@ -228,10 +228,10 @@ export function Shell({ children }: { children: ReactNode }) {
       <header className="app-header sticky top-0 z-30 border-b border-line backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex min-w-0 items-center gap-2.5" aria-label="Concord: home">
-            {/* The ODI look shows the ODI logo; the unbranded looks show Concord's own mark (index.css). */}
+            {/* The ODI look puts the ODI logo ahead of Concord's own mark; the unbranded looks show only Concord's (index.css). */}
             <OdiLogo className="brand-odi h-6 shrink-0" />
             <span className="brand-odi h-6 w-px shrink-0 bg-line-strong" aria-hidden />
-            <Logo className="brand-generic" />
+            <Logo className="shrink-0" />
             <span className="truncate text-sm font-semibold tracking-tight">
               Concord<span className="app-brand-sub hidden sm:inline"></span>
             </span>

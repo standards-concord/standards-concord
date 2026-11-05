@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.22.0',
+    version: '0.23.0',
     date: '2026-11-05',
     title: 'Each role sees what it needs, and agents live in one place',
     pr: 37,
@@ -85,6 +85,23 @@ export const APP_RELEASES: AppRelease[] = [
           'A published or rejected release shows the rules, approvals and vote as they stood when it was decided, and says why a rejected one failed. Changing the policy later no longer rewrites that history.',
         roles: ['steward', 'member', 'odi'],
         to: '{o}/releases',
+      },
+    ],
+  },
+  {
+    version: '0.22.0',
+    date: '2026-11-05',
+    title: 'A new Concord logo',
+    pr: 52,
+    changes: [
+      {
+        id: 'concorde-logo',
+        type: 'feat',
+        title: 'A new Concord logo',
+        detail:
+          'Concord’s mark is now a supersonic plane in two halves that meet, climbing with a slipstream behind it. It sits beside the ODI logo in the ODI look, on its own in the other looks, and (without the slipstream) in the browser tab.',
+        roles: [],
+        ask: 'Does the new logo feel right for Concord? Is it clear at the size it appears in the header?',
       },
     ],
   },
