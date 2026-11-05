@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.14.0',
+    version: '0.16.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,
@@ -67,6 +67,52 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'agent'],
         to: '{o}/forks',
         ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
+      },
+    ],
+  },
+  {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'Sign in with your WebID',
+    pr: 46,
+    changes: [
+      {
+        id: 'solid-signin',
+        type: 'feat',
+        title: 'Sign in with your own WebID (Solid)',
+        detail:
+          'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
+        roles: [],
+        to: '/login',
+        ask: 'If you have a WebID, how easy was it to sign in with it?',
+      },
+      {
+        id: 'feedback-readers',
+        type: 'feat',
+        title: 'See who can read your feedback',
+        detail:
+          'The feedback page says who can read what you send: the alpha team. The copy saved in your pod is shared read-only with the team’s WebID, and they read it there as that WebID.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Is it clear who can read your feedback?',
+      },
+    ],
+  },
+  {
+    version: '0.14.0',
+    date: '2026-11-05',
+    title: 'Check data explains what’s wrong and where',
+    pr: 50,
+    changes: [
+      {
+        id: 'check-data-explained',
+        type: 'feat',
+        title: 'Check data explains problems and shows where they are',
+        detail:
+          'Problems read as plain sentences using your own prefixes, are underlined in the editor (hover to read), and clicking one jumps to it. Typos and syntax errors are underlined as you type, and Format tidies the Turtle.',
+        roles: [],
+        to: '{o}/query?view=check',
+        ask: 'When Check data finds a problem, can you tell what’s wrong and where to fix it?',
       },
     ],
   },

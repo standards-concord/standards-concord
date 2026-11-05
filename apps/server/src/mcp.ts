@@ -1,4 +1,4 @@
-import { compactIRI, expandIRI, FORMAT_INFO, serialize } from '@concord/core';
+import { compactIRI, DATA_FORMATS, expandIRI, FORMAT_INFO, serialize, type DataFormat } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, User } from '@concord/shared';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,7 +7,11 @@ import type { Request, Response } from 'express';
 import * as z from 'zod';
 import { config } from './config.js';
 import { list } from './db.js';
-import { reportGap, sparql, validateData } from './services/agents.js';
+import { reportGap, sparql } from './services/agents.js';
+import { admit } from './services/validationPool.js';
+import { validateDataAgainst } from './services/dataValidation.js';
+import { latestVersion } from './public/routes.js';
+import { PUBLIC_BASE } from './public/w3id.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
@@ -125,11 +129,33 @@ function buildServer(user: User, agentName: string) {
     'validate_data',
     {
       title: 'Validate instance data',
-      description: 'Check Turtle instance data against the ontology: undefined or deprecated terms, and logical contradictions (e.g. disjoint types, wrong ranges).',
-      inputSchema: { ontology: ontologyArg, turtle: z.string().describe('Instance data in Turtle, with prefixes') },
+      description:
+        'Check instance data against the ontology: the SHACL shapes derived from it (missing required properties, wrong value types, too many values), terms it does not define or has deprecated, and logical contradictions. The same check runs for POST <ontology IRI> on the website.',
+      inputSchema: {
+        ontology: ontologyArg,
+        data: z.string().optional().describe('The instance data, in the given format'),
+        turtle: z.string().optional().describe('Older name for data, as Turtle'),
+        format: z.enum(Object.keys(DATA_FORMATS) as [DataFormat, ...DataFormat[]]).default('turtle'),
+        version: z.string().optional().describe('Released version such as 1.2.0, "draft" for the working draft, or "latest"; default is the latest release, as for POST to the ontology IRI'),
+      },
       annotations: { readOnlyHint: true },
     },
-    ({ ontology, turtle }) => withProject(ontology, async (p) => json(await validateData(p, turtle))),
+    ({ ontology, data, turtle, format, version }) =>
+      withProject(ontology, async (p) => {
+        const text = data ?? turtle;
+        if (!text) return fail('Pass the data to validate as data.');
+        const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
+        if (v !== 'draft' && !ontologyStore.versions(p).includes(v)) return fail(`${p.title} has no version "${version}".`);
+        // Shares the validator's places with POSTs to the ontology IRI (validationPool.ts).
+        const place = admit(`user:${user.id}`, data ? format : 'turtle');
+        if (!place.ok) return fail(place.message);
+        try {
+          const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });
+          return json(body);
+        } finally {
+          place.release();
+        }
+      }),
   );
 
   server.registerTool(

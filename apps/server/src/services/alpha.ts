@@ -16,7 +16,7 @@ import { solid } from './solid.js';
 export const TESTER_COOKIE = 'concord_tester';
 
 /** Signed in with a provider they can sign in with again from anywhere. */
-export const isLasting = (u: User) => u.providers.some((p) => p.provider === 'google' || p.provider === 'github');
+export const isLasting = (u: User) => u.providers.some((p) => p.provider === 'google' || p.provider === 'github' || p.provider === 'solid');
 
 /** The tester's own account: the one remembered when they switched to a persona or another demo member, else whoever is signed in. */
 export function testerFor(req: Request): User | undefined {

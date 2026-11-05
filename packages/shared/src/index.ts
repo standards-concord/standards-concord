@@ -30,14 +30,17 @@ export type {
 /* People, identity, roles                                                   */
 /* ------------------------------------------------------------------------ */
 
-export type AuthProvider = 'google' | 'github' | 'demo';
+export type AuthProvider = 'google' | 'github' | 'solid' | 'demo';
 
 export interface User {
   id: string;
   name: string;
   email?: string;
   avatarUrl?: string;
-  /** Auto-provisioned WebID; users never need to know about it. */
+  /**
+   * Auto-provisioned WebID (users never need to know about it), or, for someone who
+   * signed in with Solid, their own WebID.
+   */
   webId: string;
   podUrl?: string;
   providers: { provider: AuthProvider; subject: string }[];
@@ -1065,9 +1068,38 @@ export interface ActivityItem {
 /* API contract (all JSON, prefix /api)                                     */
 /* ------------------------------------------------------------------------ */
 
+/** One tester's feedback folder in their pod, as an administrator's WebID can read it. */
+export interface PodFeedbackFolder {
+  testerId: string;
+  testerName: string;
+  url: string;
+  /** forbidden: the pod refused the admin's WebID; missing: no feedback saved there; partial: some documents couldn't be read. */
+  status: 'ok' | 'partial' | 'forbidden' | 'missing' | 'error';
+  items: FeedbackSubmission[];
+  /** Documents the folder lists that weren't read: they failed, or were beyond the first 100 (status partial). */
+  unread?: number;
+  /** Why Concord couldn't share this folder with the admins, the last time it tried. */
+  sharingError?: string;
+}
+
+export interface PodFeedbackReport {
+  /** The WebID the folders were read as (the admin's own, from their Solid sign-in). */
+  readAs: string;
+  /** WebIDs the folders are shared with (ADMIN_WEBIDS). */
+  readers: string[];
+  folders: PodFeedbackFolder[];
+}
+
 export interface SessionInfo {
   user?: User;
-  providers: { google: boolean; github: boolean; demo: boolean };
+  providers: { google: boolean; github: boolean; solid: boolean; demo: boolean };
+  /**
+   * WebIDs that can read testers' feedback: the deployment's administrators. Testers are
+   * told this, and their pod's feedback folder is shared read-only with these WebIDs.
+   */
+  feedbackReaders: string[];
+  /** Who turns recorded speech into text when the browser can't (the server-side fallback), if anyone. */
+  serverTranscription: 'openai' | null;
   llm: { provider: 'anthropic' | 'simulated'; model: string };
   solid: { enabled: boolean; serverUrl?: string };
   meetBot: MeetBotInfo;
@@ -1082,6 +1114,7 @@ export interface SessionInfo {
  * Auth
  *  GET  /api/session                              -> SessionInfo
  *  GET  /auth/google, /auth/github                -> OAuth redirect
+ *  GET  /auth/solid?webId=<WebID or provider URL>  -> Solid-OIDC redirect (DPoP); /auth/solid/client.jsonld is the Client ID Document
  *  POST /api/auth/demo {userId? , name?, role?}   -> SessionInfo   (log in as a persona or create a demo user)
  *  POST /api/auth/logout                           -> {}
  *  GET  /api/personas                              -> User[] (simulated personas available for demo login)
@@ -1176,6 +1209,7 @@ export interface SessionInfo {
  *  POST /api/feedback {FeedbackSubmission minus id/createdAt} -> FeedbackSubmission
  *  GET  /api/feedback                                -> FeedbackSubmission[] (admin)
  *  GET  /api/feedback/summary                        -> { summary: string; themes: {theme:string; count:number}[] } (admin)
+ *  GET  /api/feedback/pods                           -> PodFeedbackReport (admin: testers' feedback read from their pods as the admin's own WebID)
  *
  * Alpha testing (the tester's own account, even while playing a persona)
  *  GET  /api/alpha/me                                -> AlphaMe (versions tested, read from the tester's pod)

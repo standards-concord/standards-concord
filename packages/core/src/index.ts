@@ -35,6 +35,10 @@ export { toLinkML, fromLinkML } from './linkml.js';
 export { toManchester } from './manchester.js';
 export { toShacl } from './shacl.js';
 
+// Validating instance data
+export { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, MAX_DATA_CHARS, MAX_IRI_LENGTH, ShapesValidator, checkTerms, classHierarchy, dataFormatForFile, dataFormatForMediaType, parseData, sniffDataFormat } from './validation.js';
+export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, TermIssue, ValidatedReport } from './validation.js';
+
 // Helpers
 export { compactIRI, expandIRI, localName, isValidLocalName, XSD, NS } from './ns.js';
 export { toShaclc, deriveShapes } from './shacl.js';

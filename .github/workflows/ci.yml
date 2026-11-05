@@ -21,6 +21,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -32,6 +33,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   workflow_dispatch:
 
 permissions:
@@ -129,6 +131,31 @@ jobs:
             test-results
           retention-days: 7
 
+  # Signing in with a WebID and admins reading testers' feedback in their pods, against a
+  # real Community Solid Server (the same major version and WAC setup the deployment runs).
+  e2e-solid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Playwright (with a Solid server)
+        run: pnpm test:e2e:solid
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-solid
+          path: |
+            playwright-report-solid
+            test-results/solid
+          retention-days: 14
+
   # The narrated walkthrough video: every step of its script must still work against
   # this commit's app, so a renamed button fails here rather than in the next recording.
   walkthrough:
@@ -160,7 +187,7 @@ jobs:
   # minutes, so merging to main is the deploy. Only main builds an image (and a manual
   # run, which tags the image with its branch).
   image:
-    needs: [test, e2e]
+    needs: [test, e2e, e2e-solid]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20

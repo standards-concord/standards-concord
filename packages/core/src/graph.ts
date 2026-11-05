@@ -360,12 +360,18 @@ export class OntologyGraph {
     const superClasses: IRI[] = [];
     const restrictions: Restriction[] = [];
     const superExprs: string[] = [];
+    const conjuncts: NonNullable<ClassView['superClassConjuncts']> = [];
     for (const o of objects(s, iri, P.subClassOf)) {
       if (o.termType === 'NamedNode') superClasses.push(o.value);
       else if (o.termType === 'BlankNode') {
         const r = this.restrictionOf(o);
         if (r) restrictions.push(r);
-        else superExprs.push(manchesterExpr(s, o, this.prefixes));
+        else {
+          const expression = manchesterExpr(s, o, this.prefixes);
+          superExprs.push(expression);
+          const parts = this.conjunctsOf(o);
+          if (parts) conjuncts.push({ expression, ...parts });
+        }
       }
     }
     const eq = [...objects(s, iri, P.equivalentClass), ...subjects(s, P.equivalentClass, iri)];
@@ -386,8 +392,36 @@ export class OntologyGraph {
       disjointWith: [...disjoint].sort(),
       restrictions: restrictions.sort((a, b) => restrictionKey(a).localeCompare(restrictionKey(b))),
       superClassExpressions: superExprs.length ? superExprs.sort() : undefined,
+      superClassConjuncts: conjuncts.length ? conjuncts.sort((a, b) => a.expression.localeCompare(b.expression)) : undefined,
       equivalentExpressions: nonEmpty(eq.filter((t) => t.termType === 'BlankNode').map((t) => manchesterExpr(s, t, this.prefixes)).sort()),
     }) as ClassView;
+  }
+
+  /**
+   * The parts of an anonymous intersection (`A and (p min 2)`), when every part is a named
+   * class, a simple restriction or another such intersection. A subclass of an intersection
+   * is a subclass of each part, so these can be summarised like ordinary axioms.
+   */
+  conjunctsOf(node: Term): { classes: IRI[]; restrictions: Restriction[] } | undefined {
+    const head = firstObject(this.store, node, NS.owl + 'intersectionOf');
+    const members = head && readList(this.store, head);
+    if (!members?.length) return undefined;
+    const out = { classes: [] as IRI[], restrictions: [] as Restriction[] };
+    for (const m of members) {
+      if (m.termType === 'NamedNode') out.classes.push(m.value);
+      else if (m.termType === 'BlankNode') {
+        const r = this.restrictionOf(m);
+        if (r) {
+          out.restrictions.push(r);
+          continue;
+        }
+        const inner = this.conjunctsOf(m);
+        if (!inner) return undefined;
+        out.classes.push(...inner.classes);
+        out.restrictions.push(...inner.restrictions);
+      } else return undefined;
+    }
+    return out;
   }
 
   /** Parses an owl:Restriction blank node into the simple `Restriction` form. */

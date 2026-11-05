@@ -9,6 +9,7 @@ import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
 import { reportRouter } from './public/report.js';
 import { publicRouter } from './public/routes.js';
+import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
 import { forkResolver } from './routes/forkResolver.js';
 import { solid } from './services/solid.js';
@@ -48,8 +49,10 @@ export function createApp(): express.Express {
   app.use('/api', apiRouter());
   // Development forks, dereferenceable so applications can import them (/def/<ontology>/forks/<fork>).
   app.use(forkResolver());
-  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation),
+  // POST to them to validate data against their SHACL shapes, and public problem reports.
   app.use(reportRouter());
+  app.use(validationRouter());
   app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.

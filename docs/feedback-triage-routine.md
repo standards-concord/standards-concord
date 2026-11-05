@@ -1,16 +1,20 @@
 # Feedback triage routine
 
-This is the prompt of the hourly scheduled task "Triage Concord feedback issues". The scheduled task holds its own copy and never reads this file, so changing this file changes nothing until someone updates the task. It is kept here so it can be reviewed with the code.
+Every hour at five past, a scheduled task wakes the Claude project thread that built [public feedback summaries](feedback-issues.md), and that thread triages new summaries. Jesse chose this on 2026-11-05 over a separate, locked-down scheduled session. GitHub has no way to wake a Claude session when an issue is opened, so it polls. The task holds its own short prompt that points here for the rules, so the rules below are what it follows. Change them here, then tell that thread.
 
-## Before switching it on
+## What has to be in place
 
-The prompt is not a security boundary on its own. The routine writes to GitHub only through Concord's server, which enforces the label list, the comment rules and one comment per issue. Before enabling the task at claude.ai:
+The prompt is not a security boundary on its own. The thread writes to GitHub only through Concord's server, which enforces the label list, the comment rules, one comment per issue and ten decisions an hour.
 
-1. **Server key:** generate a token with `openssl rand -hex 32` (the server ignores one shorter than 32 characters) and set it as `FEEDBACK_TRIAGE_TOKEN` on the server (`./deploy/azure/set-key.sh FEEDBACK_TRIAGE_TOKEN`), and the same value as the secret `CONCORD_TRIAGE_TOKEN` in the routine's environment. Set `CONCORD_API` there too (the backend's URL, for example `https://74.152.52.138.sslip.io`), and allow that host in the environment's network access.
-2. **Tools:** an explicit allowlist with file reading and search for the source, and shell limited to `curl` against `$CONCORD_API/api/feedback/triage/`. Turn off file editing, web fetch and search, subagents and skills, the session and scheduled-task management tools, and every GitHub write tool. It needs no GitHub access at all.
+1. **Server keys:** `FEEDBACK_GITHUB_TOKEN` and `FEEDBACK_TRIAGE_TOKEN` on the backend (see [Turning it on](feedback-issues.md#turning-it-on) and the rotation note there). The triage token is at least 32 random characters. The server ignores a shorter one.
+2. **Claude environment:** a network secret for the backend's host that sends `Authorization: Bearer <FEEDBACK_TRIAGE_TOKEN>`, so the token never enters the conversation, and that host in the environment's allowed domains. Today the host is the Azure VM's (`74.152.52.138.sslip.io`). It changes when the backend moves to Vercel.
 3. **Labels:** none to create by hand. GitHub creates a label the first time the server adds it.
 
-## Prompt
+The thread keeps its usual tools while it reads summaries, which are text from the public. The summaries are already stripped of links, email addresses and handles before they're filed, and the rules below forbid acting on them in any way except the two triage endpoints.
+
+## Rules
+
+The block below is the full set of rules. It was written as a stand-alone prompt, so it names `$CONCORD_API` and `$CONCORD_TRIAGE_TOKEN`. In the thread, the API is the backend's origin, and the network secret supplies the header.
 
 ```text
 Hourly triage of public feedback summaries for Concord, whose owner is Jesse. You classify and write one short comment per summary. You never change code and never write to GitHub yourself: the Concord server does that for you.

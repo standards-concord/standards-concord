@@ -45,11 +45,15 @@ export default defineConfig({
     video: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1400, height: 950 },
+    // Hint fonts fully, as GitHub's Linux runners do, wherever the tests run. Hinted glyph widths
+    // round to whole pixels at each zoom level, which once made zoomed and saved diagrams draw
+    // text wider or narrower than its box; with this, a local run catches that too.
+    launchOptions: { args: ['--font-render-hinting=full'] },
   },
   projects: [
     {
       name: 'local',
-      testIgnore: /live\.spec\.ts/,
+      testIgnore: [/live\.spec\.ts/, /solid-.*\.spec\.ts/],
       use: { baseURL: `http://localhost:${WEB_PORT}` },
     },
     {
@@ -90,6 +94,11 @@ export default defineConfig({
             SOLID_SERVER_URL: '',
             GOOGLE_CLIENT_ID: '',
             GITHUB_CLIENT_ID: '',
+            // Every test validates from the same address.
+            VALIDATE_RATE_LIMIT: '1000',
+            VALIDATE_PER_CLIENT: '100',
+            VALIDATE_QUEUE: '32',
+            VALIDATE_JSONLD_QUEUE: '32',
             // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
             MEET_BOT_EMAIL: 'concord.bot@example.org',
             MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,

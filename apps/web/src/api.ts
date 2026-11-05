@@ -24,6 +24,7 @@ import type {
   ForkSummary,
   ForkSyncResult,
   FeedbackSubmission,
+  PodFeedbackReport,
   GovernancePolicy,
   GovernanceTemplateId,
   InterviewSession,
@@ -137,6 +138,19 @@ export type OntologyDetail = OntologySummary & { members: MemberWithUser[] };
 export type UsedBy = { iri: string; label?: string; via: string };
 export type TermDetail = TermView & { usedBy: UsedBy[] };
 export type InterviewDetail = InterviewSession & { useCase: UseCase };
+export type DataValidation = {
+  ontology: string;
+  version: string;
+  shapes?: string;
+  conforms: boolean;
+  valid: boolean;
+  triples: number;
+  summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
+  results: { focusNode: string; path?: string; value?: string; severity: 'Violation' | 'Warning' | 'Info'; constraint: string; shape?: string; message?: string }[];
+  terms: { severity: 'error' | 'warning'; message: string; term?: string }[];
+  /** More results or term issues than the report lists (1,000 of each); the summary counts them all. */
+  truncated?: true;
+};
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
 /** Which questionnaire: `pathway: 'changes'` asks about what changed since `since`, for a tester in `role`. */
@@ -199,6 +213,8 @@ export const api = {
   logout: () => post<Record<string, never>>('/api/auth/logout'),
   personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
+  /** Sign in with a WebID (or the address of a Solid provider). */
+  solidLoginUrl: (webId: string, returnTo?: string) => `/auth/solid${qs({ webId, returnTo })}`,
 
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
@@ -288,6 +304,11 @@ export const api = {
   closeFork: (id: string, fork: string) => post<ForkSummary>(`/api/ontologies/${e(id)}/forks/${e(fork)}/close`),
 
   // Releases
+  /** POST data to the ontology's public IRI to validate it (see apps/server/src/public/validate.ts). */
+  validateData: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<DataValidation>('POST', `/def/${e(slug)}/${e(version)}`, data, { headers: mediaType ? { 'Content-Type': mediaType } : { 'Content-Type': 'text/plain' } }),
+  validationReportTurtle: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<string>('POST', `/def/${e(slug)}/${e(version)}`, data, { raw: true, headers: { Accept: 'text/turtle', 'Content-Type': mediaType ?? 'text/plain' } }),
   releases: (id: string) => get<Release[]>(`/api/ontologies/${e(id)}/releases`),
   draftRelease: (id: string, notes?: string) => post<ReleaseDetail>(`/api/ontologies/${e(id)}/releases`, { notes }),
   release: (id: string) => get<ReleaseDetail>(`/api/releases/${e(id)}`),
@@ -331,6 +352,7 @@ export const api = {
   publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
+  podFeedback: () => get<PodFeedbackReport>('/api/feedback/pods'),
   // Alpha testing: the tester's own account and the app versions they've tested
   alphaMe: () => get<AlphaMe>('/api/alpha/me'),
   alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),
