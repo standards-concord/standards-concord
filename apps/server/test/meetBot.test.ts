@@ -2195,6 +2195,8 @@ describe('invite-by-email', () => {
     const t0 = at('2026-11-10T14:46:00Z').getTime() + SLOW_LOOKUP_AFTER_MS;
     await dispatchDue(new Date(t0 + 60_000));
     await dispatchDue(new Date(t0 + 2 * 60_000));
+    const bookingWait = getMeeting(m.id).bot!.nextAt!;
+    expect(bookingWait).toBe(t0 + 2 * 60_000 + 6 * 3600e3);
     bots.set('bot-781', { id: 'bot-781', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
     stubMode.refuseIds = ['bot-781'];
     await line(m.id, 'An uninvited bot.', 'bot-781');
@@ -2203,8 +2205,8 @@ describe('invite-by-email', () => {
     await dispatchDue(new Date(t2));
     const b = getMeeting(m.id).bot!;
     expect(b.strays).toEqual(['bot-781']);
-    // The booking looks again in six hours; the stray is tried again within the half hour.
-    expect(b.nextAt).toBe(t2 + 6 * 3600e3);
+    // The booking looks again in six hours (as it was); the stray is tried again within the half hour.
+    expect(b.nextAt).toBe(bookingWait);
     expect(b.strayNextAt).toBeGreaterThan(t2);
     expect(b.strayNextAt).toBeLessThanOrEqual(t2 + 30 * 60_000);
     stubMode.refuseIds = [];
@@ -2214,7 +2216,7 @@ describe('invite-by-email', () => {
     expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: '/bot/bot-781/' }));
     expect(getMeeting(m.id).bot!.strays).toBeUndefined();
     // The booking's own wait is untouched.
-    expect(getMeeting(m.id).bot!.nextAt).toBe(t2 + 6 * 3600e3);
+    expect(getMeeting(m.id).bot!.nextAt).toBe(bookingWait);
   });
 
   it('11.1: a stray that refused removal is tried again when it speaks, without waiting for a sweep', async () => {
@@ -2291,6 +2293,58 @@ describe('invite-by-email', () => {
     expect(res.body.error ?? res.text).toMatch(/50 dismissed bookings/);
     expect(getMeeting(m.id).bot).toMatchObject({ bookingId, unconfirmed: true });
     expect(getMeeting(m.id).bot!.dismissed).toHaveLength(50);
+  });
+
+  /* ----- Fixes from the twelfth review ----- */
+
+  it('12.1: a duplicate bot the booking’s lookup has just found is cancelled straight away, whatever an older stray’s backoff', async () => {
+    // Used to wait for the older stray's retry time before the new duplicate's first removal attempt.
+    const { m, lost, bookingId } = await lostBooking();
+    stubMode.failList = true;
+    stubMode.failCreate = true;
+    bots.set('bot-783', { id: 'bot-783', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-783'];
+    await line(m.id, 'An older stray.', 'bot-783');
+    await meetBotIdle();
+    // The older stray is backing off for half an hour; the booking itself is due now.
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, strays: ['bot-783'], strayAttempts: 6, strayNextAt: at('2026-11-10T15:20:00Z').getTime(), nextAt: undefined };
+    });
+    // Recall.ai made two bots from the one booking.
+    bots.set('bot-784', { id: 'bot-784', meeting_url: m.meetingUrl!, metadata: { ...bots.get(lost)!.metadata!, concord_booking: bookingId }, status_changes: [{ code: 'ready' }] });
+    stubMode.failList = false;
+    calls.length = 0;
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    await meetBotIdle();
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booked' });
+    const kept = getMeeting(m.id).bot!.botId!;
+    const duplicate = kept === lost ? 'bot-784' : lost;
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${duplicate}/` }));
+    expect(getMeeting(m.id).bot!.strays ?? []).not.toContain(duplicate);
+  });
+
+  it('12.2: a stray that keeps speaking gets only its own removal retried, never the booking’s lookups', async () => {
+    // Used to run the whole lifecycle without the clock: each stray line forced a booking lookup and cleared its backoff.
+    const { m } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    bots.set('bot-785', { id: 'bot-785', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-785'];
+    await line(m.id, 'First words.', 'bot-785');
+    await meetBotIdle();
+    const wait = at('2026-11-10T20:46:00Z').getTime();
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, attempts: 8, nextAt: wait };
+    });
+    calls.length = 0;
+    await line(m.id, 'Still talking.', 'bot-785');
+    await meetBotIdle();
+    expect(calls.some((c) => c.url.startsWith('/bot/bot-785/') && c.method !== 'GET')).toBe(true);
+    expect(calls.filter((c) => c.method === 'GET' && c.url.startsWith('/bot/?'))).toHaveLength(0);
+    expect(calls.filter((c) => c.method === 'POST' && c.url === '/bot/')).toHaveLength(0);
+    expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booking', attempts: 8, nextAt: wait });
   });
 
   it('the calendar reader agrees with the cancellation reader', () => {

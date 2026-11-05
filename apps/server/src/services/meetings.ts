@@ -11,7 +11,7 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
-import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
+import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
 import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
@@ -609,6 +609,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   const words = evt.data.data.words;
   let joined = false;
   let kick = false;
+  let strayKick = false;
   let strayLine = false;
   // Decided on the latest copy under the meeting's lock, by the bot's identity: only the
   // meeting's own bot, while it is wanted, is heard. A bot of this meeting's that isn't
@@ -638,7 +639,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
               return false;
             }
           } else {
-            kick = noteStray(x, fromBot) || kick;
+            strayKick = noteStray(x, fromBot) || strayKick;
             return false;
           }
         }
@@ -653,7 +654,9 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
       },
     },
   );
-  if (kick || (strayLine && strayKickDue(meetingId))) void background(drive(meetingId));
+  if (kick) void background(drive(meetingId));
+  // A stray (new, or still speaking at most once a minute): only its removal, never the booking's lookups.
+  else if (strayKick || (strayLine && strayKickDue(meetingId))) void background(driveStrays(meetingId));
   if (kept && joined) await announceChatMode(meetingId).catch(() => undefined);
 }
 

@@ -223,7 +223,8 @@ function botGone(m: Tracked) {
 function addStrays(m: Tracked, ids: string[]) {
   const b = m.bot;
   const fresh = ids.filter((id) => id !== b.botId && !b.released?.includes(id) && !b.strays?.includes(id));
-  if (fresh.length) b.strays = [...(b.strays ?? []), ...fresh];
+  // A newly found bot gets its first removal attempt straight away, whatever an older stray's backoff.
+  if (fresh.length) Object.assign(b, { strays: [...(b.strays ?? []), ...fresh], strayNextAt: undefined });
   return fresh.length > 0;
 }
 
@@ -290,6 +291,20 @@ export async function lanesIdle() {
 }
 
 export const laneBusy = (id: string) => lanes.has(id) || queued.has(id);
+
+/**
+ * Only the strays' removal, in the meeting's lane (a stray speaking, say): never the
+ * booking's own lookups, so its backoff is left alone. If the lane is busy, the run
+ * under way handles strays whose turn has come.
+ */
+export function driveStrays(id: string): Promise<void> {
+  if (laneBusy(id)) return Promise.resolve();
+  const run = cancelStrays(id)
+    .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
+    .finally(() => lanes.delete(id));
+  lanes.set(id, run);
+  return run;
+}
 
 /**
  * Moves the meeting's record along as far as Recall.ai allows right now. If its
