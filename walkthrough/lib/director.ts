@@ -68,6 +68,7 @@ export class Director {
 
   /** Navigates and waits for the app to settle (no spinners, fonts loaded). */
   async goto(url: string, opts: { settle?: boolean; keepCard?: boolean } = {}) {
+    await this.checkRing();
     const res = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     if (res && res.status() >= 400) this.warn(`${url} answered HTTP ${res.status()}`);
     await this.settle(opts.settle !== false);
@@ -158,13 +159,26 @@ export class Director {
 
   /** Rings exactly this element (see highlight). */
   async ring(l: Locator, what: string, tag?: string) {
+    await this.checkRing();
+    this.ringed = what;
     const seen = await l.evaluate((el, t) => (window as any).__wt?.highlight(el, t) ?? null, tag).catch(() => null);
     const problem = ringProblem(seen);
     if (problem) this.warn(`The highlight on ${what} ${problem}`);
   }
 
   async clearHighlight() {
+    await this.checkRing();
     await this.page.evaluate(() => (window as any).__wt?.highlight(null)).catch(() => {});
+  }
+
+  /** The ring being shown, and whether it stayed in view while it was (the overlay hides it if not). */
+  private ringed = '';
+  private async checkRing() {
+    if (!this.ringed) return;
+    const what = this.ringed;
+    this.ringed = '';
+    const lost = await this.page.evaluate(() => (window as any).__wt?.ringLost?.() ?? '').catch(() => '');
+    if (lost) this.warn(`The highlight on ${what} ${lost} while it was shown`);
   }
 
   async label(text?: string) {
@@ -211,6 +225,10 @@ export function ringProblem(r: Ringed | null | undefined): string | undefined {
  * classes return sets that aren't `instanceof Set`, and the app printed the set itself.
  */
 export function garbled(text: string): boolean {
-  const t = text.trim();
-  return !t || /\[object [^\]]*\]|^(undefined|null|NaN)$/.test(t);
+  return /\[object [^\]]*\]|^(undefined|null|NaN)$/.test(text.trim());
+}
+
+/** The sample app's card text that is unreadable: every title must read; a summary may be empty. */
+export function unreadableCards(titles: string[], summaries: string[]): string[] {
+  return [...titles.filter((t) => !t.trim() || garbled(t)), ...summaries.filter(garbled)];
 }

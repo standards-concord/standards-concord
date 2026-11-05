@@ -109,15 +109,69 @@
     return card;
   }
 
+  const MEDIA = 'img,svg,video,canvas,input,textarea,select,.cm-editor';
+
+  /** Whether an element and every ancestor are rendered, visible and not transparent. */
+  function shown(el) {
+    if (!el.isConnected) return false;
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) return false;
+    // checkVisibility's opacity test looks at the element alone; transparency is inherited.
+    let o = 1;
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) o *= Number(getComputedStyle(n).opacity);
+    return o > 0.05;
+  }
+
+  /** The part of an element's box that can be seen: clipped by scrolling ancestors and the window. */
+  function visibleRect(el) {
+    const r = el.getBoundingClientRect();
+    let top = r.top, left = r.left, bottom = r.bottom, right = r.right;
+    for (let n = el.parentElement; n && n !== document.documentElement; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (st.overflowX === 'visible' && st.overflowY === 'visible') continue;
+      const c = n.getBoundingClientRect();
+      top = Math.max(top, c.top); left = Math.max(left, c.left);
+      bottom = Math.min(bottom, c.bottom); right = Math.min(right, c.right);
+    }
+    top = Math.max(top, 0); left = Math.max(left, 0);
+    bottom = Math.min(bottom, innerHeight); right = Math.min(right, innerWidth);
+    return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  const meets = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+  /** Text and media inside an element that can actually be seen, within its visible part. */
+  function visibleContent(el, area) {
+    const words = [];
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let n = walk.nextNode(), i = 0; n && i < 2000 && words.join(' ').length < 80; n = walk.nextNode(), i++) {
+      if (!n.data.trim() || !shown(n.parentElement)) continue;
+      range.selectNodeContents(n);
+      if ([...range.getClientRects()].some((r) => r.width > 0 && meets(r, area))) words.push(n.data.trim());
+    }
+    const items = [...(el.matches(MEDIA) ? [el] : []), ...el.querySelectorAll(MEDIA)];
+    const media = items.some((m) => shown(m) && meets(m.getBoundingClientRect(), area));
+    const label = el.getAttribute('aria-label') || '';
+    return { text: (words.join(' ') || (media ? label : '')).slice(0, 80), media };
+  }
+
   /** Whether an element shows anything: its size on screen and its visible text or media. */
   function describe(el) {
     const r = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    const visible = r.width > 4 && r.height > 4 && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) > 0.05;
-    const onScreen = r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
-    const text = (el.innerText || el.getAttribute('aria-label') || el.value || '').trim();
-    const media = !!el.querySelector?.('img,svg,video,canvas,input,textarea,select,.cm-editor') || /^(IMG|SVG|VIDEO|CANVAS|INPUT|TEXTAREA|SELECT)$/i.test(el.tagName);
-    return { visible, onScreen, text: text.slice(0, 80), media, width: Math.round(r.width), height: Math.round(r.height) };
+    const visible = r.width > 4 && r.height > 4 && shown(el);
+    const area = visibleRect(el);
+    const onScreen = area.width > 4 && area.height > 4;
+    const { text, media } = visible && onScreen ? visibleContent(el, area) : { text: '', media: false };
+    return { visible, onScreen, text, media, width: Math.round(r.width), height: Math.round(r.height) };
+  }
+
+  /** Why a ring that is being followed can no longer be seen, if it can't. */
+  function gone(el) {
+    if (!el.isConnected) return 'was removed from the page';
+    if (!shown(el)) return 'was hidden';
+    const a = visibleRect(el);
+    if (a.width <= 4 || a.height <= 4) return 'went off screen';
+    return '';
   }
 
   window.__wt = {
@@ -157,15 +211,27 @@
         return null;
       }
       state.target = target;
+      state.lost = '';
       // Glide to a new target, then follow it exactly (an easing would lag behind a scroll).
       ring.style.transition = '';
       clearTimeout(state.glide);
       state.glide = setTimeout(() => (ring.style.transition = 'opacity .45s'), 480);
       const pad = 8;
+      const seen = describe(target);
+      const valid = seen.visible && seen.onScreen;
       const draw = () => {
         if (state.target !== target) return;
-        const r = target.getBoundingClientRect();
-        // Clipped to the viewport, so a tall card's ring stays on screen.
+        // A ring around something no longer seen is hidden, never left as a ghost, and the
+        // recorder is told (ringLost) once the ring is cleared or replaced.
+        const why = gone(target);
+        if (why && valid && !state.lost) state.lost = why;
+        ring.classList.toggle('on', !why || !valid);
+        if (why && valid) {
+          state.track = requestAnimationFrame(draw);
+          return;
+        }
+        // Clipped to what can be seen, so a tall card's ring stays on screen.
+        const r = visibleRect(target);
         const top = Math.max(r.top, 8 + pad), bottom = Math.min(r.bottom, innerHeight - 8 - pad);
         const left = Math.max(r.left, 8 + pad), right = Math.min(r.right, innerWidth - 8 - pad);
         Object.assign(ring.style, { left: `${left - pad}px`, top: `${top - pad}px`, width: `${Math.max(0, right - left) + pad * 2}px`, height: `${Math.max(0, bottom - top) + pad * 2}px` });
@@ -175,8 +241,11 @@
       const t = ring.querySelector('.tag');
       t.hidden = !tag;
       t.textContent = tag || '';
-      ring.classList.add('on');
-      return describe(target);
+      return seen;
+    },
+    /** What happened to the current ring after it was drawn ('' if it stayed in view). */
+    ringLost() {
+      return state.lost || '';
     },
     cursorVisible(on) {
       const c = $('.cursor');

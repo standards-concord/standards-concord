@@ -9,7 +9,7 @@
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { request, type APIRequestContext } from '@playwright/test';
-import { garbled, sleep, type Director } from './lib/director.ts';
+import { sleep, unreadableCards, type Director } from './lib/director.ts';
 import type { McpClient } from './lib/mcp.ts';
 import { fill } from './lib/servers.ts';
 import { countChanges, lineDiff, type Terminal } from './lib/terminal.ts';
@@ -93,8 +93,10 @@ async function claimFormat(c: Ctx, format: string) {
 /** The app is showing opportunities, and the hours feature where the story says it should. */
 async function claimAppWorks(c: Ctx, withHours: boolean) {
   await c.d.claimVisible(c.d.page.locator('.card'), 'the sample app lists opportunities');
-  const shown = await c.d.page.locator('.card h2, .card p').allInnerTexts().catch(() => []);
-  const bad = shown.filter(garbled);
+  // Every card has a title; a summary is optional (an empty paragraph), but never an object.
+  const titles = await c.d.page.locator('.card h2').allInnerTexts().catch(() => []);
+  const summaries = await c.d.page.locator('.card p').allInnerTexts().catch(() => []);
+  const bad = unreadableCards(titles, summaries);
   if (bad.length) c.d.warn(`The sample app shows unreadable text: ${JSON.stringify(bad.slice(0, 2))}`);
   if (withHours) await c.d.claimVisible(c.d.page.locator('.pill.hours'), 'the sample app shows hours given');
 }
@@ -119,8 +121,9 @@ async function showClassificationAndChecks(c: Ctx) {
   if (await c.d.click(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge')) {
     await ringAround(c, /Rule-based semantic versioning classification/);
     await sleep(3000);
-    await c.d.page.keyboard.press('Escape');
+    // Clear the ring before closing the popover it is around.
     await c.d.clearHighlight();
+    await c.d.page.keyboard.press('Escape');
   }
   await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
   await ringAround(c, /^Validation$/);
