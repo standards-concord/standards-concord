@@ -151,6 +151,8 @@ export class Director {
    */
   async highlight(target: Locator | undefined, what: string, tag?: string) {
     if (!target) return this.clearHighlight();
+    // Settle the ring being shown before scrolling, which would move it out of view.
+    await this.checkRing();
     const l = await this.find(target, what);
     if (!l) return;
     await l.scrollIntoViewIfNeeded().catch(() => {});
@@ -171,9 +173,13 @@ export class Director {
     await this.page.evaluate(() => (window as any).__wt?.highlight(null)).catch(() => {});
   }
 
-  /** The ring being shown, and whether it stayed in view while it was (the overlay hides it if not). */
+  /**
+   * The ring being shown, and whether it stayed in view while it was (the overlay hides it if
+   * not). Checked when it is cleared or replaced, before scrolling to a new one, when the page
+   * changes, and at the end of the recording.
+   */
   private ringed = '';
-  private async checkRing() {
+  async checkRing() {
     if (!this.ringed) return;
     const what = this.ringed;
     this.ringed = '';

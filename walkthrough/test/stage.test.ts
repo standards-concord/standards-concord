@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium } from '@playwright/test';
 import { hasChromium } from '../lib/browser.ts';
 import { pathToFileURL } from 'node:url';
-import { garbled, ringProblem, unreadableCards, type Director, type Ringed } from '../lib/director.ts';
+import { Director, garbled, ringProblem, unreadableCards, type Ringed } from '../lib/director.ts';
 import { Terminal } from '../lib/terminal.ts';
 
 const required = process.env.WALKTHROUGH_BROWSER_TESTS === '1';
@@ -171,6 +171,50 @@ describe.runIf(run)('in a browser', () => {
     await page.evaluate(() => document.getElementById('b')!.remove());
     await expect.poll(ringShown).toBe(false);
     expect(await lost()).toBe('was removed from the page');
+  });
+
+  it('counts only content inside its own scrolling container, and notices content that disappears', async () => {
+    // The card is on screen, but its only text sits in an inner panel, scrolled out of view.
+    await fixture(`
+      <section id="card" style="margin-top:100px;width:400px;height:200px">
+        <div style="height:120px;overflow:hidden"><p style="margin:300px 0 0">Members</p></div>
+      </section>
+      <section id="note" style="width:400px;height:200px"><p id="words">Governance</p></section>`);
+    expect(ringProblem(await highlight('card'))).toMatch(/blank space/);
+    expect(ringProblem(await highlight('note'))).toBeUndefined();
+    await page.evaluate(() => ((document.getElementById('words') as HTMLElement).style.opacity = '0'));
+    await expect.poll(ringShown).toBe(false);
+    expect(await lost()).toBe('went blank');
+  });
+
+  it('hides a ring whose element is hidden after it was drawn', async () => {
+    await fixture(`<section id="a" style="margin-top:100px;height:150px">Members</section>`);
+    expect(ringProblem(await highlight('a'))).toBeUndefined();
+    await page.evaluate(() => ((document.getElementById('a') as HTMLElement).style.display = 'none'));
+    await expect.poll(ringShown).toBe(false);
+    expect(await lost()).toBe('was hidden');
+  });
+
+  it('the director warns about a ring lost while shown, but not one it scrolled away from itself', async () => {
+    await fixture(`<section id="a" style="margin-top:100px;height:150px">Members</section><section id="b" style="margin-top:1500px;height:150px">Governance</section><section id="c" style="margin-top:1500px;height:150px">Releases</section>`);
+    const d = new Director(page, false);
+    await d.highlight(page.locator('#a'), 'the members');
+    await page.waitForTimeout(50);
+    // Moving to a ring further down scrolls the first one away: that isn't a lost ring.
+    await d.highlight(page.locator('#b'), 'the governance card');
+    await page.waitForTimeout(50);
+    expect(d.warnings).toEqual([]);
+    await page.evaluate(() => document.getElementById('b')!.remove());
+    await page.waitForTimeout(50);
+    await d.clearHighlight();
+    expect(d.warnings).toEqual(['The highlight on the governance card was removed from the page while it was shown']);
+    // The last ring of a recording is checked at the end.
+    await d.highlight(page.locator('#c'), 'the releases');
+    await page.waitForTimeout(50);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(50);
+    await d.checkRing();
+    expect(d.warnings.at(-1)).toBe('The highlight on the releases went off screen while it was shown');
   });
 
   it('loads Claude Code on the web from its address and redraws the session on return', async () => {

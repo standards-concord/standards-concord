@@ -335,6 +335,7 @@ async function main() {
           await run(ctx, scene, step.after);
         }
       }
+      await d.checkRing();
       stat.close();
       await browser.close();
       await writeFile(outFile('.report.json'), JSON.stringify({ check: true, video: name, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
@@ -380,6 +381,7 @@ async function main() {
       }
     }
     await sleep(1500);
+    await d.checkRing(); // a ring still shown at the end must have stayed in view too
     const seconds = await cap.stop();
     // The intro says how long the video is; check it said the truth.
     if (promisesLength && Math.abs(seconds / 60 - promisedMinutes) > 1.5)

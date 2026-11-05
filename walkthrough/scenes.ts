@@ -131,6 +131,7 @@ async function showClassificationAndChecks(c: Ctx) {
 
 /** Rings the card or section that contains some text. */
 async function ringAround(c: Ctx, text: string | RegExp, tag?: string) {
+  await c.d.checkRing(); // before scrolling the old ring away
   const el = await c.d.find(c.d.page.getByText(text), `text ${text}`);
   if (!el) return;
   // Ring the card or section the text sits in (the nearest ancestor of a readable size).
