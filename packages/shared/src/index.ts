@@ -430,10 +430,11 @@ export interface Meeting {
     strays?: string[];
     /** Bots Recall.ai confirmed gone: anything they still send is dropped. */
     released?: string[];
-    /** Bookings a facilitator dismissed: still looked for (with the Meet link each was booked for), and their bot cancelled if it turns up. */
-    dismissed?: { bookingId: string; url: string }[];
-    /** When the dismissed bookings are next looked for (bot clock, ms). */
-    lookAgainAt?: number;
+    /** Bookings a facilitator dismissed: still looked for (with the Meet link each was booked for, and when next, bot clock ms), and their bot cancelled if it turns up. */
+    dismissed?: { bookingId: string; url: string; nextAt?: number }[];
+    /** Failed attempts at removing strays, and when they're next tried (bot clock, ms): their own schedule, apart from the booking's. */
+    strayAttempts?: number;
+    strayNextAt?: number;
     /** A booking that can no longer be resent safely and hasn't turned up: a facilitator can dismiss it. */
     unconfirmed?: boolean;
     /** Cancelling an earlier bot for this call failed; Concord keeps retrying. */

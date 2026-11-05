@@ -11,7 +11,7 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
-import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, normalise, noteStray, settled, tracked } from './botLifecycle.js';
+import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
 import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
@@ -609,6 +609,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
   const words = evt.data.data.words;
   let joined = false;
   let kick = false;
+  let strayLine = false;
   // Decided on the latest copy under the meeting's lock, by the bot's identity: only the
   // meeting's own bot, while it is wanted, is heard. A bot of this meeting's that isn't
   // its current one is cancelled; the current one, once unwanted, is released by the clock.
@@ -620,7 +621,11 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
         normalise(x);
         if (!tracked(x)) return false;
         const b = x.bot;
-        if (fromBot && knownGone(b, fromBot)) return false;
+        if (fromBot && knownGone(b, fromBot)) {
+          // A stray still speaking: its removal is tried again (at most once a minute from its lines).
+          if (b.strays?.includes(fromBot)) strayLine = true;
+          return false;
+        }
         // A line that names another booking than the current one is never the current bot's.
         if (!fromBot && fromBooking && fromBooking !== b.bookingId) return false;
         if (fromBot && fromBot !== b.botId) {
@@ -648,8 +653,17 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
       },
     },
   );
-  if (kick) void background(drive(meetingId));
+  if (kick || (strayLine && strayKickDue(meetingId))) void background(drive(meetingId));
   if (kept && joined) await announceChatMode(meetingId).catch(() => undefined);
+}
+
+/** When a stray's own lines last set off an attempt to remove it, per meeting (real time). */
+const strayKicks = new Map<string, number>();
+function strayKickDue(meetingId: string) {
+  const last = strayKicks.get(meetingId) ?? 0;
+  if (Date.now() - last < 60_000) return false;
+  strayKicks.set(meetingId, Date.now());
+  return true;
 }
 
 /** After the bot has gone: what it heard is analysed (once, however many ask). */
@@ -699,6 +713,8 @@ export async function endLiveMeeting(meetingId: string) {
 export async function dismissBooking(meetingId: string, user: User) {
   const before = getMeeting(meetingId);
   requireFacilitator(before, user, 'dismiss an unconfirmed booking');
+  if ((before.bot?.dismissed?.length ?? 0) >= MAX_DISMISSED)
+    throw new HttpError(409, `${MAX_DISMISSED} dismissed bookings for this call are still being looked for. This one stays unconfirmed, and is looked for too.`);
   const m = await dismissUnconfirmed(meetingId);
   if (!m) throw new HttpError(409, 'Only a booking Recall.ai never confirmed, and that can no longer be checked by sending it again, can be dismissed.');
   logActivity({

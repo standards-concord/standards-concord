@@ -2145,7 +2145,7 @@ describe('invite-by-email', () => {
     const lookAgain = at('2026-11-10T15:53:00Z').getTime();
     const { mutateMeeting } = await import('../src/services/meetings.js');
     await mutateMeeting(m.id, (x) => {
-      x.bot = { ...x.bot!, lookAgainAt: lookAgain, nextAt: lookAgain + 27 * 60_000 };
+      x.bot = { ...x.bot!, dismissed: x.bot!.dismissed!.map((d) => ({ ...d, nextAt: lookAgain })), nextAt: lookAgain + 27 * 60_000 };
     });
     stubMode.listHides = false;
     calls.length = 0;
@@ -2183,6 +2183,114 @@ describe('invite-by-email', () => {
     await meetBotIdle();
     expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: `/bot/${lost}/` }));
     expect(getMeeting(m.id).bot!.dismissed!.map((d) => d.bookingId)).not.toContain(bookingId);
+  });
+
+  /* ----- Fixes from the eleventh review ----- */
+
+  it('11.1: a stray that refuses removal is retried on its own schedule, not after the booking’s six-hour wait', async () => {
+    // Used to share the unanswered booking's backoff, so a refusal pushed the stray's next try six hours out.
+    const { m } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    const t0 = at('2026-11-10T14:46:00Z').getTime() + SLOW_LOOKUP_AFTER_MS;
+    await dispatchDue(new Date(t0 + 60_000));
+    await dispatchDue(new Date(t0 + 2 * 60_000));
+    bots.set('bot-781', { id: 'bot-781', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-781'];
+    await line(m.id, 'An uninvited bot.', 'bot-781');
+    await meetBotIdle();
+    const t2 = t0 + 4 * 60_000;
+    await dispatchDue(new Date(t2));
+    const b = getMeeting(m.id).bot!;
+    expect(b.strays).toEqual(['bot-781']);
+    // The booking looks again in six hours; the stray is tried again within the half hour.
+    expect(b.nextAt).toBe(t2 + 6 * 3600e3);
+    expect(b.strayNextAt).toBeGreaterThan(t2);
+    expect(b.strayNextAt).toBeLessThanOrEqual(t2 + 30 * 60_000);
+    stubMode.refuseIds = [];
+    calls.length = 0;
+    await dispatchDue(new Date(b.strayNextAt!));
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: '/bot/bot-781/' }));
+    expect(getMeeting(m.id).bot!.strays).toBeUndefined();
+    // The booking's own wait is untouched.
+    expect(getMeeting(m.id).bot!.nextAt).toBe(t2 + 6 * 3600e3);
+  });
+
+  it('11.1: a stray that refused removal is tried again when it speaks, without waiting for a sweep', async () => {
+    // Used to ignore lines from a bot already known as a stray, so a refusal left it in the call until the next retry.
+    const m = await liveCall();
+    bots.set('bot-782', { id: 'bot-782', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    stubMode.refuseIds = ['bot-782'];
+    await line(m.id, 'First words.', 'bot-782');
+    await meetBotIdle();
+    expect(getMeeting(m.id).bot!.strays).toEqual(['bot-782']);
+    stubMode.refuseIds = [];
+    calls.length = 0;
+    await line(m.id, 'Still here.', 'bot-782');
+    await meetBotIdle();
+    expect(calls).toContainEqual(expect.objectContaining({ method: 'DELETE', url: '/bot/bot-782/' }));
+    expect(getMeeting(m.id).bot!.strays).toBeUndefined();
+    expect(getMeeting(m.id).transcript.map((l) => l.text)).not.toContain('Still here.');
+  });
+
+  it('11.2: dismissed bookings are looked up a few links per sweep, once per link, and a bot found is cancelled before the next lookup', async () => {
+    // Used to look every dismissed booking up, one by one, before recording or cancelling anything found.
+    const { m, lost, bookingId } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const s = await steward('Steward Sweep');
+    expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
+    const fake = (i: number, url: string) => ({ bookingId: `bk-fake-${i}`, url });
+    const other = (i: number) => `https://meet.google.com/fak-eeee-${String(i).padStart(3, '0')}`;
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      const real = x.bot!.dismissed!.find((d) => d.bookingId === bookingId)!;
+      x.bot = {
+        ...x.bot!,
+        dismissed: [fake(0, other(0)), real, ...[1, 2, 3].map((i) => fake(i, other(i))), ...Array.from({ length: 30 }, (_, i) => fake(100 + i, real.url)), ...Array.from({ length: 14 }, (_, i) => fake(200 + i, other(4 + i)))],
+      };
+    });
+    stubMode.listHides = false;
+    calls.length = 0;
+    await dispatchDue(at('2026-11-10T16:30:00Z'));
+    await meetBotIdle();
+    const isLookup = (c: { method: string; url: string }) => c.method === 'GET' && c.url.startsWith('/bot/?');
+    const lookups = calls.filter(isLookup);
+    expect(lookups).toHaveLength(5);
+    const realUrl = `/bot/?meeting_url=${encodeURIComponent(m.meetingUrl!)}`;
+    expect(lookups.filter((c) => c.url === realUrl)).toHaveLength(1);
+    const found = calls.findIndex((c) => isLookup(c) && c.url === realUrl);
+    const removed = calls.findIndex((c) => c.method === 'DELETE' && c.url === `/bot/${lost}/`);
+    const nextLookup = calls.findIndex((c, i) => i > found && isLookup(c));
+    expect(removed).toBeGreaterThan(found);
+    expect(removed).toBeLessThan(nextLookup);
+    // Its booking is settled; every other one (all 30 on the same link included) is still looked for, the rest next sweep.
+    const left = getMeeting(m.id).bot!.dismissed!;
+    expect(left.map((d) => d.bookingId)).not.toContain(bookingId);
+    expect(left).toHaveLength(48);
+    calls.length = 0;
+    await dispatchDue(at('2026-11-10T16:31:00Z'));
+    expect(calls.filter(isLookup)).toHaveLength(5);
+    expect(calls.filter(isLookup).some((c) => c.url === realUrl)).toBe(false);
+  });
+
+  it('11.2: a call with fifty dismissed bookings still being looked for can’t dismiss another; it stays unconfirmed and looked for', async () => {
+    const { m, bookingId } = await lostBooking();
+    stubMode.listHides = true;
+    stubMode.failCreate = true;
+    await dispatchDue(at('2026-11-10T15:50:00Z'));
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, dismissed: Array.from({ length: 50 }, (_, i) => ({ bookingId: `bk-held-${i}`, url: x.meetingUrl!, nextAt: Date.now() + 3600e3 })) };
+    });
+    const s = await steward('Steward Full');
+    const res = await s.post(`/api/meetings/${m.id}/bot/dismiss`);
+    expect(res.status).toBe(409);
+    expect(res.body.error ?? res.text).toMatch(/50 dismissed bookings/);
+    expect(getMeeting(m.id).bot).toMatchObject({ bookingId, unconfirmed: true });
+    expect(getMeeting(m.id).bot!.dismissed).toHaveLength(50);
   });
 
   it('the calendar reader agrees with the cancellation reader', () => {

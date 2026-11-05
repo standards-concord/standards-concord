@@ -41,6 +41,10 @@ const HOUR = 60 * MINUTE;
 /** An unconfirmed booking looked for this long (since it was made) is looked for every six hours from then on. */
 export const SLOW_LOOKUP_AFTER_MS = 6 * HOUR;
 const RELEASED_KEEP = 20;
+/** Distinct Meet links a sweep looks up for one meeting's dismissed bookings; the rest wait for the next sweep. */
+export const LOOKUPS_PER_SWEEP = 5;
+/** Dismissed bookings one meeting may have still being looked for; past this a facilitator can't dismiss another (it stays unconfirmed, and looked for). */
+export const MAX_DISMISSED = 50;
 
 export const tracked = (m: Meeting | undefined): m is Tracked => !!m?.bot && m.bot.provider === 'recall' && !!m.bot.phase;
 /** Nothing booked, nothing being released, no stray bots. */
@@ -52,7 +56,7 @@ export const settled = (b: Bot) => (b.phase === 'idle' || b.phase === 'done' || 
  */
 export const droppable = (b: Bot) => settled(b) && !b.dismissed?.length;
 /** What every new shape of the record keeps: bots to cancel, bots known gone, dismissed bookings still looked for. */
-const carry = (b: Bot) => ({ strays: b.strays, released: b.released, dismissed: b.dismissed, lookAgainAt: b.lookAgainAt });
+const carry = (b: Bot) => ({ strays: b.strays, released: b.released, dismissed: b.dismissed, strayAttempts: b.strayAttempts, strayNextAt: b.strayNextAt });
 /** Whether the booking can still be sent again under its idempotency key. */
 export const withinKey = (b: Pick<Bot, 'bookedAt'>, t: number) => !!b.bookedAt && t - Date.parse(b.bookedAt) < IDEMPOTENCY_KEY_MS;
 
@@ -329,9 +333,11 @@ async function work(id: string, now?: number) {
     else if (b.phase === 'releasing') progressed = await releaseBot(m, now);
     if (!progressed) break;
   }
-  // A bot found for a dismissed booking is cancelled now, whatever the current booking's backoff.
-  const foundStrays = await lookForDismissed(id, now);
-  if (!waiting || foundStrays) await cancelStrays(id, now);
+  // Dismissed bookings (each bot found is cancelled as soon as it is found), then strays, each on
+  // their own schedule: never held back by the current booking's backoff.
+  await lookForDismissed(id, now);
+  const latest = get<Meeting>('meetings', id);
+  if (tracked(latest) && latest.bot.strays?.length && strayDue(latest.bot, now)) await cancelStrays(id, now);
   // A withdrawn meeting goes once nothing is outstanding.
   await transition(
     id,
@@ -489,14 +495,34 @@ async function releaseBot(m: Tracked, now?: number): Promise<boolean> {
   return !!done;
 }
 
+/** Whether the strays' own retry has come round (someone acting on the call: always). */
+const strayDue = (b: Bot, now?: number) => now === undefined || b.strayNextAt === undefined || b.strayNextAt <= now;
+
+/**
+ * Stray removal that wasn't confirmed: retried on its own schedule, at the next sweep
+ * and then backing off to every 30 minutes at most. It never touches the booking's
+ * own attempts or retry time.
+ */
+function strayFailed(id: string, now?: number) {
+  return transition(
+    id,
+    (m) => !!m.bot.strays?.length,
+    (m) => {
+      const b = m.bot;
+      b.strayAttempts = (b.strayAttempts ?? 0) + 1;
+      b.strayNextAt = now !== undefined && b.strayAttempts > 1 ? now + Math.min(30, 2 ** (b.strayAttempts - 2)) * MINUTE : undefined;
+    },
+  );
+}
+
 async function cancelStrays(id: string, now?: number) {
   const m = get<Meeting>('meetings', id);
   if (!tracked(m) || !m.bot.strays?.length) return;
+  let refused = false;
   for (const stray of m.bot.strays) {
     const latest = get<Meeting>('meetings', id);
     // Adopted meanwhile (Recall.ai said it is this booking's bot): not a stray any more.
     if (!tracked(latest) || !latest.bot.strays?.includes(stray)) continue;
-    const gen = latest.bot.gen;
     const r = await recall.release(stray, 'cancel');
     if (r.ok)
       whenFinished(
@@ -505,56 +531,62 @@ async function cancelStrays(id: string, now?: number) {
           (x) => !!x.bot.strays?.includes(stray) || x.bot.botId === stray,
           (x) => {
             x.bot.strays = x.bot.strays?.filter((s) => s !== stray);
-            if (!x.bot.strays?.length) x.bot.strays = undefined;
+            if (!x.bot.strays?.length) Object.assign(x.bot, { strays: undefined, strayAttempts: undefined, strayNextAt: undefined });
             // Adopted while it was being cancelled: the record's own bot is gone, and the record says so.
             if (x.bot.botId === stray) botGone(x);
             x.bot.released = [...(x.bot.released ?? []).filter((s) => s !== stray), stray].slice(-RELEASED_KEEP);
           },
         ),
       );
-    else await failed(id, gen, r.error, now);
+    else refused = true;
   }
+  if (refused) await strayFailed(id, now);
 }
 
 /**
- * Bookings a facilitator dismissed are still looked for, every six hours (their bot
- * may yet turn up). What turns up is cancelled as a stray, and its booking is then
- * no longer looked for.
+ * Bookings a facilitator dismissed are still looked for, each every six hours (their
+ * bot may yet turn up). A sweep looks up at most LOOKUPS_PER_SWEEP Meet links, the
+ * longest-waiting first, once per link however many bookings share it. Each answer is
+ * recorded as it arrives, and a bot it finds is cancelled straight away, before the
+ * next lookup. A booking whose bot turned up is no longer looked for.
  */
 async function lookForDismissed(id: string, now?: number) {
   const m = get<Meeting>('meetings', id);
-  if (!tracked(m) || !m.bot.dismissed?.length) return false;
+  if (!tracked(m) || !m.bot.dismissed?.length) return;
   const t = now ?? Date.now();
-  if (m.bot.lookAgainAt !== undefined && m.bot.lookAgainAt > t) return false;
-  let added = false;
-  const results: { bookingId: string; found?: { id: string; ended: boolean }[] }[] = [];
-  for (const d of m.bot.dismissed) {
+  const dueNow = m.bot.dismissed.filter((d) => d.nextAt === undefined || d.nextAt <= t).sort((a, b) => (a.nextAt ?? 0) - (b.nextAt ?? 0));
+  const urls = [...new Set(dueNow.map((d) => d.url))].slice(0, LOOKUPS_PER_SWEEP);
+  for (const url of urls) {
+    let bots: { id: string; booking?: string; ended: boolean }[] | undefined;
     try {
-      results.push({ bookingId: d.bookingId, found: (await recall.findBots(d.url, id)).filter((f) => f.booking === d.bookingId) });
+      bots = await recall.findBots(url, id);
     } catch {
-      results.push({ bookingId: d.bookingId });
+      bots = undefined;
     }
+    let found = false;
+    await transition(
+      id,
+      (x) => !!x.bot.dismissed?.some((d) => d.url === url),
+      (x) => {
+        const b = x.bot;
+        b.dismissed = b.dismissed!.flatMap((d) => {
+          if (d.url !== url) return [d];
+          const made = bots?.filter((f) => f.booking === d.bookingId);
+          // Couldn't ask: tried again in half an hour. Nothing yet: in six hours.
+          if (!made?.length) return [{ ...d, nextAt: t + (bots ? 6 * HOUR : 30 * MINUTE) }];
+          found =
+            addStrays(
+              x,
+              made.filter((f) => !f.ended).map((f) => f.id),
+            ) || found;
+          b.released = [...(b.released ?? []), ...made.filter((f) => f.ended && !b.released?.includes(f.id)).map((f) => f.id)].slice(-RELEASED_KEEP);
+          return [];
+        });
+        if (!b.dismissed.length) b.dismissed = undefined;
+      },
+    );
+    if (found) await cancelStrays(id, now);
   }
-  await transition(
-    id,
-    (x) => !!x.bot.dismissed?.length,
-    (x) => {
-      const b = x.bot;
-      for (const r of results) {
-        if (!r.found?.length) continue;
-        added =
-          addStrays(
-            x,
-            r.found.filter((f) => !f.ended).map((f) => f.id),
-          ) || added;
-        b.released = [...(b.released ?? []), ...r.found.filter((f) => f.ended && !b.released?.includes(f.id)).map((f) => f.id)].slice(-RELEASED_KEEP);
-        b.dismissed = b.dismissed?.filter((d) => d.bookingId !== r.bookingId);
-      }
-      if (b.dismissed?.length) b.lookAgainAt = t + 6 * HOUR;
-      else Object.assign(b, { dismissed: undefined, lookAgainAt: undefined });
-    },
-  );
-  return added;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -566,9 +598,10 @@ export function due(m: Meeting, t: number) {
   normalise(m);
   if (!tracked(m)) return false;
   const b = m.bot;
-  const work = b.phase === 'booking' || b.phase === 'releasing' || !!b.strays?.length || (!!m.withdrawn && droppable(b));
-  const lookFor = !!b.dismissed?.length && (b.lookAgainAt === undefined || b.lookAgainAt <= t);
-  return (work && (b.nextAt === undefined || b.nextAt <= t)) || lookFor;
+  const work = b.phase === 'booking' || b.phase === 'releasing' || (!!m.withdrawn && droppable(b));
+  const strays = !!b.strays?.length && strayDue(b, t);
+  const lookFor = !!b.dismissed?.some((d) => d.nextAt === undefined || d.nextAt <= t);
+  return (work && (b.nextAt === undefined || b.nextAt <= t)) || strays || lookFor;
 }
 
 /** Starts the lanes of every record whose turn has come (lanes already running are left to finish). */
@@ -591,12 +624,11 @@ export const releasingCount = () => list<Meeting>('meetings').filter((m) => trac
 export async function dismissUnconfirmed(id: string) {
   const m = await transition(
     id,
-    (x) => (x.bot.phase === 'booking' || x.bot.phase === 'releasing') && !x.bot.botId && !!x.bot.bookingId && !!x.bot.unconfirmed,
+    (x) => (x.bot.phase === 'booking' || x.bot.phase === 'releasing') && !x.bot.botId && !!x.bot.bookingId && !!x.bot.unconfirmed && (x.bot.dismissed?.length ?? 0) < MAX_DISMISSED,
     (x) => {
       const b = x.bot;
       // Never capped: each entry is a bot that may still exist, kept until a lookup settles it.
       b.dismissed = [...(b.dismissed ?? []), { bookingId: b.bookingId!, url: b.bookedUrl ?? x.meetingUrl! }];
-      b.lookAgainAt = undefined;
       if (b.phase === 'releasing') finishRelease(x);
       else x.bot = { provider: 'recall', phase: 'idle', gen: b.gen, status: 'scheduled', ...carry(b) };
     },
