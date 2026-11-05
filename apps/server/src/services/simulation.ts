@@ -13,6 +13,7 @@ import { requestText } from '../llm/context.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
+import { baselineRevision, createApp as createConnectedApp, finishFollowUps, reportAs, revisionOf, startRunAs } from './appChecks.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasRespondedThisRound, hasVotedOnTheseEdits, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
@@ -210,8 +211,27 @@ async function seedHistory() {
   // What the public pages may show of the personas' use cases, from now on.
   for (const u of await list<UseCase>('useCases', project.id)) if (u.visibility === 'public') await freezeDemoSeed(u);
 
+  // Gareth's CRM export is a connected app with autopilot on. Its (simulated) CI passed the
+  // expenses change, so autopilot approved it for him, and failed the one-location change.
+  await seedConnectedApp(project, gareth, minor.id, major.id);
+
   await updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
   return (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
+}
+
+async function seedConnectedApp(project: OntologyProject, owner: User, passesId: string, failsId: string) {
+  const app = await createConnectedApp(project, owner, { name: 'CharityBase volunteer export', repo: 'charitybase-demo/volunteer-export', autopilot: { enabled: true, levels: ['patch', 'minor'], onFailure: 'report' } });
+  const sim = 'Simulated CI run for the demo.';
+  const attempt = await startRunAs(app.id);
+  await reportAs(app.id, { attempt, target: 'baseline', revision: await baselineRevision(project), outcome: 'passed', summary: sim });
+  await reportAs(app.id, { attempt, target: passesId, revision: await revisionOf(await getCR(passesId)), outcome: 'passed', summary: `\`npm test\` passed. ${sim}` });
+  await reportAs(app.id, {
+    attempt,
+    target: failsId,
+    revision: await revisionOf(await getCR(failsId)),
+    outcome: 'failed',
+    summary: `\`npm test\` exited with code 1: "exports a session at several sites" expected 3 locations, got 1. ${sim}`,
+  });
 }
 
 async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
@@ -454,6 +474,8 @@ export async function advanceClock(days: number) {
 
 export async function runTick() {
   const changed = (await crTick()) + (await releaseTick());
+  // Finish what any app result that failed part way still had to do (its note, autopilot).
+  await finishFollowUps();
   return changed;
 }
 

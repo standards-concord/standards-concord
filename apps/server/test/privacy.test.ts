@@ -913,7 +913,9 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   /** A change request drafted from the use case (as synthesis does), stored directly. */
   const derived = async (useCaseId: string, fields: Partial<ChangeRequest>) => {
     const base = (await list<ChangeRequest>(demoId))[0];
-    const cr = { ...structuredClone(base), id: `cr_seven_${Math.random().toString(36).slice(2, 8)}`, number: 6000 + Math.floor(Math.random() * 999), origin: { type: 'synthesis' as const, useCaseIds: [useCaseId] }, useCaseIds: [useCaseId], releaseId: undefined, mergedCommit: undefined, ...fields } as ChangeRequest;
+    // Not the cloned request's approval either: approvedFrom says which stage's rules approved a
+    // request, and merging re-checks them, so a copy carrying another request's would be refused.
+    const cr = { ...structuredClone(base), id: `cr_seven_${Math.random().toString(36).slice(2, 8)}`, number: 6000 + Math.floor(Math.random() * 999), origin: { type: 'synthesis' as const, useCaseIds: [useCaseId] }, useCaseIds: [useCaseId], releaseId: undefined, mergedCommit: undefined, approvedFrom: undefined, ...fields } as ChangeRequest;
     await put('changeRequests', cr, demoId);
     return cr;
   };

@@ -482,7 +482,12 @@ export const actions: Record<string, Action> = {
     await c.d.highlight(c.d.page.getByText('Autopilot on', { exact: true }), 'an app on autopilot', 'autopilot on');
     await sleep(2500);
     await c.d.clearHighlight();
-    // Connect Helping Hands and switch autopilot on.
+    // Connect Helping Hands and switch autopilot on. The form is centred first: scrolled only just
+    // into view, its Connect button sits under the sticky header and the click lands on the header.
+    await c.d.page
+      .getByRole('button', { name: /^Connect app$/i })
+      .evaluate((el) => el.scrollIntoView({ block: 'center' }))
+      .catch(() => {});
     await c.d.type(c.d.page.getByRole('textbox', { name: /App name/i }), 'Helping Hands', 'the App name field');
     await c.d.click(c.d.page.getByRole('button', { name: /^Connect app$/i }), 'the Connect app button');
     await sleep(600);
@@ -501,13 +506,16 @@ export const actions: Record<string, Action> = {
       await api.post(`${c.hub}/api/auth/demo`, { data: { userId: reviewer.id } });
       const app = await api.post(`${c.hub}/api/ontologies/${c.ontology.id}/apps`, { data: { name: 'Volunteer rota planner', autopilot: { enabled: true } } });
       if (!app.ok()) return c.d.warn(`Connecting an app failed: ${app.status()}`);
-      const token = ((await app.json()) as { token: string }).token;
-      const headers = { authorization: `Bearer ${token}` };
-      const pending = (await (await api.get(`${c.hub}/api/app-checks/pending`, { headers })).json()) as { baseline?: { revision: string }; targets?: { changeRequestId: string; revision: string }[] };
-      if (pending.baseline) await api.post(`${c.hub}/api/app-checks`, { headers, data: { target: 'baseline', revision: pending.baseline.revision, outcome: 'passed' } });
+      const appId = ((await app.json()) as { id: string }).id;
+      // The owner reports the run signed in. Autopilot trusts that, or a GitHub run that GitHub
+      // vouches for; a run with only the app token shows its results but doesn't move autopilot.
+      const pending = (await (await api.get(`${c.hub}/api/app-checks/pending?appId=${appId}`)).json()) as { attempt?: number; baseline?: { revision: string }; targets?: { changeRequestId: string; revision: string }[] };
+      // Every result carries the run's attempt number, as the GitHub Action sends it.
+      const attempt = pending.attempt;
+      if (pending.baseline) await api.post(`${c.hub}/api/app-checks`, { data: { appId, target: 'baseline', revision: pending.baseline.revision, attempt, outcome: 'passed' } });
       const target = pending.targets?.find((t) => t.changeRequestId === cr.id);
       if (!target) return c.d.warn('The proposed change is not listed for app checks');
-      const res = await api.post(`${c.hub}/api/app-checks`, { headers, data: { target: cr.id, revision: target.revision, outcome: 'passed', runUrl: 'https://github.com/example/rota-planner/actions/runs/1' } });
+      const res = await api.post(`${c.hub}/api/app-checks`, { data: { appId, target: cr.id, revision: target.revision, attempt, outcome: 'passed', runUrl: 'https://github.com/example/rota-planner/actions/runs/1' } });
       const body = await res.text();
       if (!res.ok()) c.d.warn(`POST /api/app-checks: ${res.status()} ${body.slice(0, 200)}`);
       else if (!/"action":"(approved|voted)/.test(body)) c.d.warn(`Autopilot did not act: ${JSON.stringify(JSON.parse(body).autopilot)}`);

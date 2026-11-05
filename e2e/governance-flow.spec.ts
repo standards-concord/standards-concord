@@ -94,7 +94,7 @@ test('the steward changes a rule, saves the policy, and it sticks', async ({ pag
   await expect(minor).toContainText('1 sign-off');
   await expect(minor).not.toContainText('merged automatically');
   await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAccessibleDescription(/customised/);
-  await expect(page.getByRole('button', { name: /Ownership, ODI and automation/ })).toHaveAccessibleDescription(/3 of 4 automations on/);
+  await expect(page.getByRole('button', { name: /Ownership, ODI and automation/ })).toHaveAccessibleDescription(/4 of 5 automations on/);
 });
 
 test('the steward adds people, gives them roles and removes one', async ({ page }) => {

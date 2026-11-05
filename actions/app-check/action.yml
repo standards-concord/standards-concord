@@ -1,0 +1,86 @@
+name: Concord ontology check
+description: >-
+  Test your application against every change proposed to an ontology on Concord, and
+  report the results so the working group (and your autopilot, if you turn it on) can see
+  whether a change breaks real software.
+author: Concord
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  token:
+    description: The app token from the App checks page in Concord (starts with cna_). Store it as a repository secret.
+    required: true
+  test-command:
+    description: >-
+      The command that tests your app, e.g. "npm test". It runs once against the current working draft and once
+      per proposed change, with CONCORD_ONTOLOGY_FILE pointing at that version of the ontology.
+    required: true
+  concord-url:
+    description: Where Concord runs.
+    required: false
+    default: https://standards-concord.vercel.app
+  ontology-file:
+    description: >-
+      Path (relative to working-directory) of the copy of the ontology your app reads. If set, it is replaced with
+      each version before the tests run and restored afterwards. If not set, read CONCORD_ONTOLOGY_FILE instead.
+    required: false
+    default: ''
+  format:
+    description: Serialisation to download (turtle, jsonld, rdfxml, ntriples, manchester, linkml, shacl).
+    required: false
+    default: turtle
+  working-directory:
+    description: Directory to run the test command in.
+    required: false
+    default: .
+  max-changes:
+    description: Most change requests to test in one run. The rest are picked up next run.
+    required: false
+    default: '20'
+  recheck:
+    description: Test every open change again, even ones already tested at this version.
+    required: false
+    default: 'false'
+  timeout-minutes:
+    description: How long one test run may take before it is stopped and reported as an error.
+    required: false
+    default: '15'
+  share-output:
+    description: >-
+      Send the last lines of a failing test run to Concord, where the working group can read them. Off by default,
+      so nothing from your logs leaves GitHub; people follow the link to your run instead.
+    required: false
+    default: 'false'
+  fail-on-break:
+    description: Fail this job when a proposed change breaks the app (it always fails when the working draft itself breaks it).
+    required: false
+    default: 'false'
+
+outputs:
+  checked:
+    description: Number of change requests tested in this run.
+    value: ${{ steps.check.outputs.checked }}
+  failed:
+    description: Numbers of the change requests that broke the app, comma-separated.
+    value: ${{ steps.check.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: node "$GITHUB_ACTION_PATH/run.mjs"
+      env:
+        CONCORD_APP_TOKEN: ${{ inputs.token }}
+        CONCORD_URL: ${{ inputs.concord-url }}
+        CONCORD_TEST_COMMAND: ${{ inputs.test-command }}
+        CONCORD_ONTOLOGY_PATH: ${{ inputs.ontology-file }}
+        CONCORD_FORMAT: ${{ inputs.format }}
+        CONCORD_MAX_CHANGES: ${{ inputs.max-changes }}
+        CONCORD_RECHECK: ${{ inputs.recheck }}
+        CONCORD_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        CONCORD_SHARE_OUTPUT: ${{ inputs.share-output }}
+        CONCORD_FAIL_ON_BREAK: ${{ inputs.fail-on-break }}

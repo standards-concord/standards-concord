@@ -34,7 +34,7 @@ const vote = (threshold: number, quorum: number, durationDays: number, voterRole
   durationDays,
 });
 
-const automation = { autoTriage: true, autoDraftRelease: true, reminders: true };
+const automation = { autoTriage: true, autoDraftRelease: true, reminders: true, appAutopilot: true };
 
 export const GOVERNANCE_TEMPLATES: Record<GovernanceTemplateId, GovernancePolicy> = {
   'steward-led': {
@@ -164,6 +164,8 @@ export interface EvalInput {
   members: Membership[];
   validationOk: boolean;
   now: Date;
+  /** Treat an open vote as closed (re-checking an approval that came from a vote). */
+  voteClosed?: boolean;
   /**
    * Set when the change needs someone other than the author to sign it off
    * whatever the policy says (e.g. a reworded definition, whose meaning must
@@ -288,7 +290,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     const abstain = vs.filter((v) => v.choice === 'abstain').length;
     const cast = vs.length;
     const eligible = eligibleIds.length;
-    const open = input.status === 'voting';
+    const open = input.status === 'voting' && !input.voteClosed;
     const opensAt = open ? input.statusSince : undefined;
     const closesAt = open ? addDays(input.statusSince, r.vote.durationDays) : undefined;
     voteState = {
@@ -329,7 +331,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     unmet.push(`${changesRequested.length} reviewer(s) requested changes.`);
     next = 'The author should revise the change; reviewers can then re-approve.';
   } else if (input.status === 'voting' && voteState) {
-    const closed = voteState.closesAt ? now.getTime() >= new Date(voteState.closesAt).getTime() : false;
+    const closed = input.voteClosed || (voteState.closesAt ? now.getTime() >= new Date(voteState.closesAt).getTime() : false);
     const everyoneVoted = voteState.cast >= voteState.eligible && voteState.eligible > 0;
     if (!voteState.quorumMet) unmet.push(`Quorum: ${voteState.cast}/${voteState.eligible} have voted, ${pct(r.vote!.quorum)} needed.`);
     if (!voteState.thresholdMet) unmet.push(`Threshold: ${pct(r.vote!.threshold)} of yes/no votes must be yes.`);

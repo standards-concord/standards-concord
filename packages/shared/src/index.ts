@@ -148,6 +148,11 @@ export interface GovernancePolicy {
     autoDraftRelease: boolean;
     /** Nudge reviewers/voters when actions are pending. */
     reminders: boolean;
+    /**
+     * Let members put their say on autopilot: when their application's checks pass
+     * against a proposed change, Concord approves or votes yes for them. Missing means on.
+     */
+    appAutopilot?: boolean;
   };
   /** Changes failing validation (inconsistent ontology, lint errors) can never be approved. */
   requireValidation: boolean;
@@ -782,6 +787,10 @@ export interface Review {
   decision: 'approve' | 'request-changes' | 'object' | 'comment';
   comment?: string;
   at: string;
+  /** Set when autopilot made this review because the person's apps passed their checks. */
+  autopilot?: AutopilotMark;
+  /** When autopilot took this review back. A withdrawn review means the person has no say until they give one. */
+  withdrawnAt?: string;
   /** For change requests: the review round it was given in, and its place in the request's order of decisions. */
   round?: number;
   seq?: number;
@@ -798,12 +807,25 @@ export interface Vote {
   choice: 'yes' | 'no' | 'abstain';
   comment?: string;
   at: string;
+  /** Set when autopilot cast this vote because of the person's app checks. */
+  autopilot?: AutopilotMark;
+  /** When autopilot took this vote back. A withdrawn vote means the person has no vote until they cast one. */
+  withdrawnAt?: string;
   /** For change requests: the round and edits version it was cast on, and its place in the request's order of decisions. */
   round?: number;
   editsVersion?: number;
   seq?: number;
   /** In change request details: true when it no longer counts because the edits changed since. */
   stale?: boolean;
+}
+
+/**
+ * Which app checks an autopilot review or vote was based on. It counts only while it is
+ * the person's latest say, isn't withdrawn, and `revision` is still the change's revision.
+ */
+export interface AutopilotMark {
+  revision: string;
+  apps: { id: string; name: string; runUrl?: string }[];
 }
 
 export interface TimelineEvent {
@@ -821,7 +843,8 @@ export interface TimelineEvent {
     | 'released'
     | 'ai-analysis'
     | 'ops-updated'
-    | 'reminder';
+    | 'reminder'
+    | 'app-check';
   message: string;
 }
 
@@ -929,6 +952,8 @@ export interface ChangeRequest {
   updatedAt: string;
   /** Status entered at — used for review period / vote windows */
   statusSince: string;
+  /** Which stage approved it, so the approval can be re-checked before merging. */
+  approvedFrom?: 'review' | 'voting';
   /** When the request entered review (review period is measured from here). */
   reviewStartedAt?: string;
   /** When the proposed edits last changed; reviews before this no longer count. */
@@ -1072,6 +1097,10 @@ export interface ChangeRequestDetail extends ChangeRequest {
   votes: Vote[];
   governance: GovernanceEvaluation;
   author?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
+  /** The latest result from each connected app that has tested this change. */
+  appChecks?: AppCheckResult[];
+  /** Fingerprint of the ontology this change would produce (working draft head plus the edits). */
+  revision?: string;
 }
 
 export interface Release {
@@ -1260,6 +1289,98 @@ export interface AgentReport {
   changeRequestId?: string;
   status: 'open' | 'answered' | 'converted' | 'closed';
   createdAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Connected apps: test applications against proposed changes, autopilot     */
+/* ------------------------------------------------------------------------ */
+
+export type AppCheckOutcome = 'passed' | 'failed' | 'error';
+
+export interface AutopilotSettings {
+  /** Approve or vote yes for the app's owner when all of their apps pass. */
+  enabled: boolean;
+  /** Change levels autopilot may say yes to. Defaults to patch and minor. */
+  levels: ChangeLevel[];
+  /** When an app fails: 'report' records it (and withdraws any autopilot yes); 'oppose' also votes no in a vote. */
+  onFailure: 'report' | 'oppose';
+}
+
+/**
+ * An application someone builds on the ontology, whose CI (the Concord GitHub Action)
+ * tests it against every proposed change and reports back with the app's token.
+ */
+export interface ConnectedApp {
+  id: string;
+  ontologyId: string;
+  ownerId: string;
+  name: string;
+  /** GitHub repository, as owner/name. */
+  repo?: string;
+  /** First characters of the token, to recognise it. */
+  tokenPrefix: string;
+  /** Only returned when the app is created or its token is replaced. */
+  token?: string;
+  autopilot: AutopilotSettings;
+  /**
+   * The app's result against the current working draft, before any proposed change. `verified`
+   * when GitHub vouched that the run ran in the app's repository, or its owner reported it signed in.
+   */
+  baseline?: { revision: string; outcome: AppCheckOutcome; summary?: string; runUrl?: string; at: string; attempt?: number; commit?: string; current?: boolean; verified?: boolean };
+  lastSeenAt?: string;
+  createdAt: string;
+  owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
+}
+
+export interface AppCheck {
+  id: string;
+  appId: string;
+  ontologyId: string;
+  changeRequestId: string;
+  /** The change request revision that was tested (see ChangeRequestDetail.revision). */
+  revision: string;
+  outcome: AppCheckOutcome;
+  summary?: string;
+  runUrl?: string;
+  /** The app commit that was tested. */
+  commit?: string;
+  /** The run that produced it, as issued by GET /api/app-checks/pending. Newer runs win. */
+  attempt?: number;
+  /** From a verified run (see ConnectedApp.baseline). Only verified results move autopilot. */
+  verified?: boolean;
+  at: string;
+}
+
+export interface AppCheckResult extends AppCheck {
+  app: Pick<ConnectedApp, 'id' | 'name' | 'repo' | 'ownerId' | 'owner'> & { autopilot: boolean };
+  /** False when the change or the working draft has moved on since this was tested. */
+  current: boolean;
+}
+
+/** What GET /api/app-checks/pending returns to an app's CI. Paths are relative to the Concord URL. */
+export interface PendingAppChecks {
+  app: { id: string; name: string };
+  /** Identifies this run. Send it back with every result; results from older runs are ignored. */
+  attempt: number;
+  ontology: { id: string; slug: string; title: string; ontologyIRI: string };
+  formats: OutputFormat[];
+  baseline: { revision: string; source: string; outcome?: AppCheckOutcome };
+  targets: {
+    changeRequestId: string;
+    number: number;
+    title: string;
+    kind: ChangeRequestKind;
+    level?: ChangeLevel;
+    status: ChangeRequestStatus;
+    revision: string;
+    /** Path of the proposed ontology; add ?format=… for another serialisation. */
+    source: string;
+    /** Path of the change request page in the web app. */
+    page: string;
+    lastOutcome?: AppCheckOutcome;
+    /** When this app last reported on the change; never-tested changes are listed first, then the longest ago. */
+    lastTestedAt?: string;
+  }[];
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1531,6 +1652,17 @@ export interface SessionInfo {
  *  GET  /api/oauth/connections                       -> OAuthConnection[]
  *  DELETE /api/oauth/connections/:id
  *  POST /mcp  (Streamable HTTP MCP endpoint; OAuth 2.1 per the MCP authorization spec, or a personal token)
+ *
+ * Connected apps (CI checks and autopilot)
+ *  GET  /api/ontologies/:id/apps                     -> ConnectedApp[]
+ *  POST /api/ontologies/:id/apps {name, repo?, autopilot?} -> ConnectedApp (with token)
+ *  PATCH /api/apps/:id {name?, repo?, autopilot?}    -> ConnectedApp (owner only)
+ *  POST /api/apps/:id/token                          -> ConnectedApp (with a new token; the old one stops working)
+ *  DELETE /api/apps/:id
+ *  GET  /api/change-requests/:id/proposed?format=    -> text: the ontology as it would be with this change merged
+ *  GET  /api/app-checks/pending?all=1&commit=sha     -> PendingAppChecks   (Bearer app token)
+ *  POST /api/app-checks {target: 'baseline'|changeRequestId, revision, attempt, outcome, summary?, runUrl?, commit?}
+ *                                                    -> { check?, stale, autopilot? }   (Bearer app token)
  *
  * Simulation (alpha walkthrough)
  *  POST /api/simulation/step {ontologyId}            -> { events: ActivityItem[] }  (simulated people act: comment, vote, add use case)

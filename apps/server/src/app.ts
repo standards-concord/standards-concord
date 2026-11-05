@@ -14,6 +14,7 @@ import { apiRouter } from './routes/api.js';
 import { forkResolver } from './routes/forkResolver.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
+import { StoreBusyError } from './store/index.js';
 
 export function createApp(): express.Express {
   const app = express();
@@ -62,6 +63,12 @@ export function createApp(): express.Express {
   }
 
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    // Another writer held the database for longer than this request waits: it is busy, not
+    // broken, and the same request will work again shortly.
+    if (isDatabaseBusy(err)) {
+      res.setHeader('Retry-After', '2');
+      return void res.status(503).json({ error: 'The server is busy with another change. Try again in a moment.' });
+    }
     const status = err instanceof HttpError ? err.status : ((err as { status?: number }).status ?? 500);
     if (status >= 500) console.error(`[${req.method} ${req.path}]`, err);
     const message = status >= 500 && !(err instanceof HttpError) ? 'Something went wrong on the server' : (err as Error).message;
@@ -69,4 +76,14 @@ export function createApp(): express.Express {
     res.status(status).json({ error: message });
   });
   return app;
+}
+
+/**
+ * The store gave up waiting for another writer (StoreBusyError, on any store), or SQLite reported
+ * "database is locked" (SQLITE_BUSY, 5, or its extended codes) directly.
+ */
+function isDatabaseBusy(err: unknown): boolean {
+  if (err instanceof StoreBusyError) return true;
+  const e = err as { code?: string; errcode?: number; message?: string };
+  return e?.code === 'ERR_SQLITE_ERROR' && ((e.errcode ?? 0) & 0xff) === 5;
 }

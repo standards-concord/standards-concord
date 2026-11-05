@@ -19,6 +19,7 @@ import type {
   ChangeRequestOrigin,
   ChangeRequestStatus,
   OntologyProject,
+  AutopilotMark,
   Publication,
   PublicationStatement,
   Review,
@@ -35,7 +36,8 @@ import { ontologyDigest, requestText } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
-import { evaluate, reviewsInRound, votesOnEdits } from './governance.js';
+import { applyAutopilot, autopilotStands, checksFor, onStatusChanged, revisionOf } from './appChecks.js';
+import { decisionOrder, evaluate, reviewsInRound, votesOnEdits } from './governance.js';
 import { triageBudgetAvailable, withTriageBudget } from './budget.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -132,11 +134,28 @@ export function updateCR(cr: ChangeRequest, fn: (cr: ChangeRequest) => unknown, 
   });
 }
 
+/**
+ * Change a stored request by id the same safe way: under its ontology's lock, on the latest copy.
+ * fn's own writes (e.g. a withdrawn review) and the request are saved in one transaction.
+ */
+export async function changeCR<T>(id: string, fn: (cr: ChangeRequest) => T | Promise<T>): Promise<T> {
+  return locked(await getCR(id), (c) =>
+    transaction(async () => {
+      const out = await fn(c);
+      await save(c);
+      return out;
+    }),
+  );
+}
+
 const RANK = { patch: 0, minor: 1, major: 2 } as const;
 const needsConfirmation = (cr: ChangeRequest) => !!cr.classification?.reasons?.some((r) => r.rule === 'definition-reworded');
 
 async function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) { return transaction(async () => {
   if (cr.status === status) return;
+  // The stage whose rules approved it. Approved again after a hold (needs-work, e.g. waiting for an
+  // editor to approve what it publishes), it keeps the stage that approved it in the first place.
+  if (status === 'approved') cr.approvedFrom = cr.status === 'voting' || cr.status === 'review' ? cr.status : cr.approvedFrom;
   cr.status = status;
   cr.statusSince = clock.iso();
   if (status === 'review') cr.reviewStartedAt = cr.statusSince;
@@ -483,14 +502,52 @@ function nextSeq(cr: ChangeRequest) {
   return cr.decisionSeq;
 }
 
-export async function governanceFor(cr: ChangeRequest) {
+/** Whether a review or vote was given on the request as it is now: in its current round (a review) or on its current edits (a vote). */
+export const sayIsCurrent = (cr: ChangeRequest, x: Review | Vote) => ('decision' in x ? reviewRound(cr, x) === roundOf(cr) : voteVersion(cr, x) === editsVersionOf(cr));
+
+/**
+ * People whose own review or vote (not autopilot's) counts now: a review in the current round or an
+ * objection that stands, a vote on the current edits or a "no" that stands (see reviewsInRound and
+ * votesOnEdits). Autopilot doesn't speak for them.
+ */
+export async function peopleWhoSpoke(cr: ChangeRequest): Promise<Set<string>> {
+  const own = <T extends Review | Vote>(xs: T[]) => xs.filter((x) => !x.autopilot);
+  const reviews = reviewsInRound(own(await reviewsFor(cr.id)), roundOf(cr), (r) => reviewRound(cr, r)).counted;
+  const votes = votesOnEdits(own(await votesFor(cr.id)), editsVersionOf(cr), (v) => voteVersion(cr, v)).counted;
+  return new Set([...reviews, ...votes].map((x) => x.userId));
+}
+
+/**
+ * Each person's say, as governance counts it. What a person said themselves always wins over
+ * autopilot, whichever came later: if their own review or vote counts now, nothing autopilot did
+ * (in force, withdrawn or no longer standing) can hide it. Only someone whose own say doesn't count
+ * now is represented by autopilot, by its latest say, if that was given on the request as it is now,
+ * is not withdrawn and still stands (see autopilotStands); otherwise they have no say, and an older
+ * one never comes back into force.
+ */
+async function effectiveSay<T extends Review | Vote>(cr: ChangeRequest, items: T[], counted: (own: T[]) => T[], revision: () => Promise<string>, spoke: Set<string>): Promise<T[]> {
+  const out = counted(items.filter((x) => !x.autopilot));
+  const latestAuto = new Map<string, T>();
+  for (const x of items.filter((y) => y.autopilot && !('decision' in y && y.decision === 'comment')).sort(decisionOrder)) latestAuto.set(x.userId, x);
+  for (const [userId, x] of latestAuto)
+    if (!spoke.has(userId) && !x.withdrawnAt && sayIsCurrent(cr, x) && (await autopilotStands(x, cr, await revision(), spoke))) out.push(x);
+  return out;
+}
+
+export async function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest['status']; voteClosed?: boolean } = {}) {
   const project = await getProject(cr.ontologyId);
-  const { counted, currentVotes } = await roundState(cr);
+  const { round, reviews, votes } = await roundState(cr);
+  // Only autopilot's says depend on the change's revision, so it is worked out only if there are any.
+  let rev: string | undefined;
+  const revision = async () => (rev ??= await revisionOf(cr, project));
+  const spoke = [...reviews, ...votes].some((x) => x.autopilot) ? await peopleWhoSpoke(cr) : new Set<string>();
+  const counted = await effectiveSay(cr, reviews, (own) => reviewsInRound(own, round, (r) => reviewRound(cr, r)).counted, revision, spoke);
+  const currentVotes = await effectiveSay(cr, votes, (own) => votesOnEdits(own, editsVersionOf(cr), (v) => voteVersion(cr, v)).counted, revision, spoke);
   return evaluate({
     policy: project.governance,
     level: cr.classification?.level ?? 'minor',
     kind: 'change',
-    status: cr.status,
+    status: opts.status ?? cr.status,
     statusSince: cr.statusSince,
     reviewStartedAt: cr.reviewStartedAt ?? cr.statusSince,
     authorId: cr.authorId,
@@ -499,11 +556,36 @@ export async function governanceFor(cr: ChangeRequest) {
     members: await members(cr.ontologyId),
     validationOk: validationPassed(cr.validation),
     now: clock.now(),
+    voteClosed: opts.voteClosed,
     coAuthorIds: cr.revisedBy,
     independentConfirmation: needsConfirmation(cr)
       ? 'A definition was reworded, so someone other than the author must confirm it still means the same thing.'
       : undefined,
   });
+}
+
+/**
+ * Does an approved request still meet the rule that approved it? Approvals and votes can be
+ * withdrawn (by autopilot, when an app's CI fails) or lapse between approval and merge.
+ */
+export async function approvalHolds(cr: ChangeRequest): Promise<{ ok: boolean; reason?: string }> {
+  if (cr.status !== 'approved' || !cr.approvedFrom) return { ok: true };
+  const g = await governanceFor(cr, { status: cr.approvedFrom, voteClosed: cr.approvedFrom === 'voting' });
+  return g.outcome === 'approved' ? { ok: true } : { ok: false, reason: g.unmet[0] ?? g.next };
+}
+
+/**
+ * Send an approved request back to the stage that approved it because the approval no longer
+ * holds. A review keeps its original review period; a vote reopens for a new voting period.
+ */
+async function revokeApproval(cr: ChangeRequest, reason?: string) {
+  const back = cr.approvedFrom ?? 'review';
+  const startedAt = cr.reviewStartedAt;
+  await setStatus(cr, back, `${back === 'voting' ? 'vote reopened' : 'back in review'}: the approval no longer holds${reason ? ` (${reason})` : ''}`);
+  if (startedAt) cr.reviewStartedAt = startedAt;
+  cr.approvedFrom = undefined;
+  cr.approvedAs = undefined;
+  await logActivity({ ontologyId: cr.ontologyId, type: `cr.${back}`, message: `#${cr.number} ${cr.title} → ${back} again (the approval no longer holds)`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
 }
 
 export async function detail(cr: ChangeRequest): Promise<ChangeRequestDetail> {
@@ -516,6 +598,8 @@ export async function detail(cr: ChangeRequest): Promise<ChangeRequestDetail> {
     votes: votes.map((v) => ({ ...v, editsVersion: voteVersion(cr, v), stale: staleVotes.has(v.id) })),
     governance: await governanceFor(cr),
     author: publicUser(await getUser(cr.authorId)),
+    appChecks: await checksFor(cr),
+    revision: await revisionOf(cr),
   };
 }
 
@@ -530,7 +614,7 @@ export async function submit(cr: ChangeRequest, actor: User) {
   return withTriageBudget(actor, async () => {
     // Classify against the draft as it is now, not as it was when the request was written.
     await triage(cr);
-    return locked(cr, async (c) => {
+    const after = await locked(cr, async (c) => {
       await check(c);
       if (c.status === 'needs-work') {
         // A new round: approvals and requests for changes on the version that was sent back stop
@@ -546,6 +630,10 @@ export async function submit(cr: ChangeRequest, actor: User) {
       await save(c);
       return advanceNow(c, actor);
     });
+    if (after.status !== 'review') return after;
+    // Connected apps may already have results for this version of the change.
+    await onStatusChanged(after);
+    return refresh(after);
   });
 }
 
@@ -611,9 +699,23 @@ async function updateOpsNow(
   return advance(cr, actor);
 }
 
-/** `expectedRound` is the round the decision was made on (see checkRound); the API requires it for anything but a comment. */
-export function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string, expectedRound?: number) {
-  return locked(cr, async (c) => {
+/**
+ * `expectedRound` is the round the decision was made on (see checkRound); the API requires it for
+ * anything but a comment. `stillMeant`, for a say autopilot makes: checked on the latest copy, under
+ * the lock, just before writing. Autopilot decides before it gets the lock, and someone may have
+ * spoken meanwhile; if it returns false, nothing is written.
+ */
+export async function addReview(
+  cr: ChangeRequest,
+  actor: User,
+  decision: Review['decision'],
+  comment?: string,
+  expectedRound?: number,
+  autopilot?: AutopilotMark,
+  stillMeant?: (c: ChangeRequest) => Promise<boolean>,
+) {
+  const out = await locked(cr, async (c) => {
+    if (stillMeant && !(await stillMeant(c))) return c;
     if (!OPEN.includes(c.status) && decision !== 'comment') throw new HttpError(409, `This request is ${c.status}`);
     const roles = await rolesFor(c.ontologyId, actor.id);
     if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
@@ -621,7 +723,7 @@ export function addReview(cr: ChangeRequest, actor: User, decision: Review['deci
     if ((decision === 'request-changes' || decision === 'object') && [c.authorId, ...(c.revisedBy ?? [])].includes(actor.id))
       throw new HttpError(403, 'You wrote these edits, so you can’t request changes to them or object to them. Edit them, or withdraw the request.');
     if (decision !== 'comment') checkRound(c, expectedRound);
-    const review: Review = { id: newId('rev'), changeRequestId: c.id, userId: actor.id, roles, decision, comment, at: clock.iso(), round: roundOf(c), seq: nextSeq(c) };
+    const review: Review = { id: newId('rev'), changeRequestId: c.id, userId: actor.id, roles, decision, comment, at: clock.iso(), round: roundOf(c), seq: nextSeq(c), ...(autopilot && { autopilot }) };
     const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
     c.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
     // The review only counts if the request it was given on is still the stored one.
@@ -629,28 +731,49 @@ export function addReview(cr: ChangeRequest, actor: User, decision: Review['deci
       await put('reviews', review, c.id);
       await save(c);
     });
-    await logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
+    await logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb}${autopilot ? ' (autopilot)' : ''} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
     return advanceNow(c, actor);
   });
+  // Their own say replaces anything autopilot said for them, at every stage.
+  if (!autopilot && decision !== 'comment') return afterOwnSay(out, actor.id);
+  return out;
 }
 
-export function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, expectedRound?: number) {
-  return locked(cr, async (c) => {
+export async function addVote(
+  cr: ChangeRequest,
+  actor: User,
+  choice: Vote['choice'],
+  comment?: string,
+  expectedRound?: number,
+  autopilot?: AutopilotMark,
+  stillMeant?: (c: ChangeRequest) => Promise<boolean>,
+) {
+  const out = await locked(cr, async (c) => {
+    if (stillMeant && !(await stillMeant(c))) return c;
     if (c.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
     checkRound(c, expectedRound);
     const g = await governanceFor(c);
     const roles = await rolesFor(c.ontologyId, actor.id);
     if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles))
       throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
-    const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: c.id, userId: actor.id, roles, choice, comment, at: clock.iso(), round: roundOf(c), editsVersion: editsVersionOf(c), seq: nextSeq(c) };
+    const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: c.id, userId: actor.id, roles, choice, comment, at: clock.iso(), round: roundOf(c), editsVersion: editsVersionOf(c), seq: nextSeq(c), ...(autopilot && { autopilot }) };
     c.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
     await transaction(async () => {
       await put('votes', vote, c.id);
       await save(c);
     });
-    await logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
+    await logActivity({ ontologyId: c.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice}${autopilot ? ' (autopilot)' : ''} on #${c.number} ${c.title}`, link: `/o/${c.ontologyId}/changes/${c.id}` });
     return advanceNow(c, actor);
   });
+  if (!autopilot) return afterOwnSay(out, actor.id);
+  return out;
+}
+
+/** Someone reviewed or voted themselves: withdraw what autopilot said for them on this change. */
+async function afterOwnSay(cr: ChangeRequest, userId: string): Promise<ChangeRequest> {
+  if (![...(await reviewsFor(cr.id)), ...(await votesFor(cr.id))].some((x) => x.userId === userId && x.autopilot && !x.withdrawnAt)) return cr;
+  await applyAutopilot(cr.id, userId);
+  return refresh(cr);
 }
 
 /**
@@ -663,6 +786,7 @@ export function advance(cr: ChangeRequest, by?: User): Promise<ChangeRequest> {
 }
 
 async function advanceNow(cr: ChangeRequest, by?: User): Promise<ChangeRequest> {
+  const startStatus = cr.status;
   // A request whose use case is no longer public stops where it is: it can't be approved into the ontology.
   if (OPEN.includes(cr.status) && !await sourcesPublic(cr)) {
     if (cr.status !== 'needs-work') {
@@ -677,6 +801,15 @@ async function advanceNow(cr: ChangeRequest, by?: User): Promise<ChangeRequest> 
     if (cr.status === 'triage') {
       await setStatus(cr, 'review', 'entered review');
       continue;
+    }
+    // An approval that no longer meets its rule (a say withdrawn, e.g. by autopilot after an app's
+    // CI failed) goes back to the stage that gave it.
+    if (cr.status === 'approved') {
+      const held = await approvalHolds(cr);
+      if (!held.ok) {
+        await revokeApproval(cr, held.reason);
+        continue;
+      }
     }
     const g = await governanceFor(cr);
     if (g.outcome === cr.status) break;
@@ -703,6 +836,11 @@ async function advanceNow(cr: ChangeRequest, by?: User): Promise<ChangeRequest> 
     await logActivity({ ontologyId: cr.ontologyId, type: `cr.${g.outcome}`, message: `#${cr.number} ${cr.title} → ${g.outcome}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
   await save(cr);
+  if (cr.status !== startStatus && (cr.status === 'review' || cr.status === 'voting')) {
+    // Autopilot may approve or vote now, which can move the request on; pick up where it got to.
+    await onStatusChanged(cr);
+    await refresh(cr);
+  }
   if (cr.status === 'approved' && (await governanceFor(cr)).rule.autoMerge) {
     // Merging re-validates the change, so it comes out of the budget of whoever
     // prompted it. If they have none left, it waits until they do, and the
@@ -856,6 +994,8 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
   const checkedRev = cr.rev;
   const notApplicable = cr.validation?.lint.find((i) => i.code === 'change-not-applicable');
   if (notApplicable) return await draftMovedOn(cr, notApplicable.message);
+  const held = await approvalHolds(cr);
+  if (!held.ok) return approvalGone(cr, held.reason, actor);
   const blocked = await mergeBlocker(cr);
   if (blocked) {
     cr.approvedAs = undefined;
@@ -880,24 +1020,49 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
     return await save(cr);
   }
   // The draft moves, and the request is marked merged, in one transaction, and
-  // only if neither the draft nor the request has changed since they were checked.
+  // only if neither the draft nor the request has changed since they were checked,
+  // and its approval still holds. App results are written by other requests (and
+  // processes) without this lock, in transactions of their own, so the approval is
+  // checked again here, where none of them can land in between.
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
-  await ontologyStore.commitWorking(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base, async (commit) => {
-    const latest = await refresh(cr);
-    if (latest.rev !== checkedRev || latest.status !== 'approved' || (await approvalLost(latest, (await governanceFor(latest)).outcome)))
-      throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
-    latest.kgcl = p.kgcl;
-    latest.privacyFindings = undefined;
-    latest.mergedCommit = commit;
-    latest.autoMergeBy = undefined;
-    await setStatus(latest, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
-    await stamp(latest);
-  });
+  let lost: { reason?: string } | undefined;
+  try {
+    await ontologyStore.commitWorking(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base, async (commit) => {
+      const latest = await refresh(cr);
+      if (latest.rev !== checkedRev || latest.status !== 'approved')
+        throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
+      const still = await approvalHolds(latest);
+      if (!still.ok) {
+        lost = still;
+        throw new HttpError(409, 'The approval no longer holds');
+      }
+      if (await approvalLost(latest, (await governanceFor(latest)).outcome))
+        throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
+      latest.kgcl = p.kgcl;
+      latest.privacyFindings = undefined;
+      latest.mergedCommit = commit;
+      latest.autoMergeBy = undefined;
+      await setStatus(latest, 'merged', `merged into the working draft${actor ? '' : ' automatically'}`, actor?.id);
+      await stamp(latest);
+    });
+  } catch (err) {
+    if (!lost) throw err;
+    // Nothing was committed: the draft didn't move. Send it back to the stage that approved it.
+    return approvalGone(await refresh(cr), lost.reason, actor);
+  }
   if (project.stage === 'discovery') {
     project.stage = 'drafting';
     await updateProject(project);
   }
   await logActivity({ ontologyId: cr.ontologyId, actorId: actor?.id, type: 'cr.merged', message: `merged #${cr.number} ${cr.title} into the working draft`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
+  return cr;
+}
+
+/** The approval stopped holding before the merge could land: back to the stage that gave it. */
+async function approvalGone(cr: ChangeRequest, reason: string | undefined, actor: User | undefined): Promise<ChangeRequest> {
+  await revokeApproval(cr, reason);
+  await save(cr);
+  if (actor) throw new HttpError(409, `The approval no longer holds${reason ? `: ${reason}` : ''}`);
   return cr;
 }
 

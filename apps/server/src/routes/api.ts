@@ -11,7 +11,9 @@ import { detached, transaction, get, HttpError, list, put } from '../db.js';
 import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
+import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
+import { reconcile as reconcileAutopilot } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
 import { proposeTermEdit } from '../services/termEdits.js';
 import { withTriageBudget } from '../services/budget.js';
@@ -142,7 +144,13 @@ const PUBLIC_READS = [
   // Checks the triage routine's own bearer token.
   /^\/feedback\/triage\/queue$/,
   /^\/oauth\/requests\/[^/]+$/,
+  // An app's CI signs in with its app token, which the route itself checks.
+  /^\/app-checks\/pending$/,
 ];
+
+/** An app's CI also reads the ontology each proposed change would produce, with its app token. */
+const APP_TOKEN_READS = [/^\/change-requests\/[^/]+\/proposed$/];
+const hasAppToken = (req: Request) => /^Bearer\s+cna_\S+$/i.test(req.get('authorization') ?? '');
 
 export function apiRouter(): Router {
   const r = Router();
@@ -221,6 +229,7 @@ export function apiRouter(): Router {
    */
   r.use((req, _res, next) => {
     if (req.user || (req.method !== 'GET' && req.method !== 'HEAD') || PUBLIC_READS.some((re) => re.test(req.path))) return next();
+    if (hasAppToken(req) && APP_TOKEN_READS.some((re) => re.test(req.path))) return next();
     // Unknown paths still 404 (clients probe for optional features that way).
     const known = (r.stack as unknown as { route?: { methods?: Record<string, boolean> }; match: (path: string) => boolean }[]).some((l) => l.route?.methods?.get && l.match(req.path));
     next(known ? new HttpError(401, 'Sign in first') : undefined);
@@ -349,13 +358,18 @@ export function apiRouter(): Router {
     const roles = (Array.isArray(req.body?.roles) ? req.body.roles : []).filter((x: Role) => ROLES.includes(x)) as Role[];
     if (roles.includes('owner') && !(await rolesFor(p.id, req.user!.id)).includes('owner') && !req.user!.isPlatformAdmin) throw new HttpError(403, 'Only an owner can make someone an owner; use ownership transfer');
     if (!await getUser(String(req.params.userId))) throw new HttpError(404, 'No such user');
-    res.json(await setRoles(p.id, String(req.params.userId), roles));
+    const m = await setRoles(p.id, String(req.params.userId), roles);
+    // What autopilot may say for them depends on their roles.
+    await reconcileAutopilot(p.id, [String(req.params.userId)]);
+    res.json(m);
   });
 
   r.delete('/ontologies/:id/members/:userId', async (req, res) => {
     const p = await project(req);
     await requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
     await removeMember(p.id, String(req.params.userId));
+    // Their apps stop working (see appForToken), and autopilot no longer speaks for them.
+    await reconcileAutopilot(p.id, [String(req.params.userId)]);
     res.status(204).end();
   });
 
@@ -367,7 +381,10 @@ export function apiRouter(): Router {
     await requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(await setGovernance(p, policy, user), { viewer: user }));
+    const updated = await setGovernance(p, policy, user);
+    // Turning autopilot off (or changing who approves and votes) changes what autopilot may say.
+    await reconcileAutopilot(p.id);
+    res.json(await summary(updated, { viewer: user }));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
@@ -854,6 +871,9 @@ export function apiRouter(): Router {
       await reportGap(await project(req), requireUser(req), { agentName: optStr(b.agentName) ?? 'Web form', kind, summary: str(b.summary, 'summary', 300), details: optStr(b.details) ?? '', context: optStr(b.context) }),
     );
   });
+
+  /* ---------------------- connected apps and autopilot ---------------- */
+  mountAppChecks(r);
 
   /* ------------------------------ simulation ------------------------- */
   r.post('/simulation/step', async (req, res) => {

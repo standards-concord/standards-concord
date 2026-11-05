@@ -53,6 +53,34 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.29.0',
+    date: '2026-11-05',
+    title: 'App checks and autopilot',
+    pr: 17,
+    changes: [
+      {
+        id: 'app-checks',
+        type: 'feat',
+        title: 'Test your app against every proposed change',
+        detail:
+          'Connect your app under Changes → App checks, and its CI tests it against every proposed change before the change merges. Results show in each change request’s Checks tab.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+        ask: 'Was it clear how to connect your app’s CI, and would its results on a change request help you decide on the change?',
+      },
+      {
+        id: 'app-autopilot',
+        type: 'feat',
+        title: 'Autopilot votes yes when your app passes',
+        detail:
+          'Turn on autopilot for a connected app and Concord approves or votes yes for you when the app passes a change, then takes the yes back if it later fails. Anything you say yourself always wins.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+        ask: 'Would you trust autopilot to approve or vote for you when your app passes? What would you want to see first?',
+      },
+    ],
+  },
+  {
     version: '0.28.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',

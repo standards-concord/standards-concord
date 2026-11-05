@@ -34,6 +34,10 @@ export type Collection =
   | 'requirementsDocs'
   | 'feedbackPublications'
   | 'activity'
+  | 'apps'
+  | 'appChecks'
+  | 'oidcTokens'
+  | 'appFollowUps'
   | 'forks'
   | 'kv';
 

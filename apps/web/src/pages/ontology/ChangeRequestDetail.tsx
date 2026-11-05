@@ -12,6 +12,8 @@ import { GovernancePanel } from '../../components/GovernancePanel';
 import { PolicyGlance } from '../../components/PolicyRules';
 import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
 import { ValidationDetails, validationVerdict } from '../../components/Validation';
+import { AppChecksCard, AutopilotBadge } from '../../components/AppChecks';
+import { voteStanding } from '../../lib/voteStanding';
 import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
 import { Disclosure, Popover } from '../../components/Disclosure';
@@ -569,6 +571,7 @@ export function ChangeRequestPage() {
                 )}
               </div>
             </Card>
+            <AppChecksCard cr={cr} ontologyId={id} />
             </div>
           )}
           {tab === 'discussion' && (
@@ -602,6 +605,7 @@ export function ChangeRequestPage() {
                               ) : (
                                 <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
                               )}
+                              <AutopilotBadge say={item.r} revision={cr.revision} />
                               <RoleChips roles={item.r.roles} />
                               <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                             </div>
@@ -611,13 +615,14 @@ export function ChangeRequestPage() {
                         {item.kind === 'vote' && (
                           <div className="flex flex-wrap items-center gap-1.5">
                             <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
-                            {item.v.stale ? (
+                            {voteStanding(item.v, cr.editsVersion) === 'earlier' ? (
                               <Badge tone="neutral" title="Cast before the edits changed, so it no longer counts.">{item.v.choice} · earlier edits</Badge>
-                            ) : (item.v.editsVersion ?? 1) !== (cr.editsVersion ?? 1) ? (
+                            ) : voteStanding(item.v, cr.editsVersion) === 'earlier-still-counts' ? (
                               <Badge tone="danger" title="Cast before the edits changed. A vote against stands until the voter changes it.">{item.v.choice} · earlier edits, still counts</Badge>
                             ) : (
                               <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
                             )}
+                            <AutopilotBadge say={item.v} revision={cr.revision} />
                             <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                             {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
                           </div>

@@ -36,6 +36,7 @@ import { GovernanceTab } from './pages/ontology/Governance';
 import { AgentReportsTab, ConnectAgentTab } from './pages/ontology/Agents';
 import { ConnectPage } from './pages/Connect';
 import { OAuthAuthorizePage } from './pages/OAuthAuthorize';
+import { AppsTab } from './pages/ontology/Apps';
 
 const AdminFeedbackPage = lazy(() => import('./pages/AdminFeedback').then((m) => ({ default: m.AdminFeedbackPage })));
 
@@ -128,6 +129,7 @@ function Routed() {
             <Route path="governance" element={<GovernanceTab />} />
             <Route path="agents" element={<AgentReportsTab />} />
             <Route path="connect" element={<ConnectAgentTab />} />
+            <Route path="apps" element={<AppsTab />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>

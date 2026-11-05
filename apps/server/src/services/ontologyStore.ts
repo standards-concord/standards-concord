@@ -50,6 +50,11 @@ async function git(dir: string, args: string[], env: Record<string, string> = {}
     encoding: 'utf8',
     input: opts.input,
     maxBuffer: 256 * 1024 * 1024,
+    // A git that hangs (a stuck disk, a lock) fails the step instead of holding the lock forever.
+    // The database never waits on git: commits are built before the draft pointer moves, and
+    // brought into the branch after, so a failure here is repaired by the next read.
+    timeout: 120_000,
+    killSignal: 'SIGKILL',
     env: {
       ...process.env,
       GIT_AUTHOR_NAME: env.name ?? 'Concord',

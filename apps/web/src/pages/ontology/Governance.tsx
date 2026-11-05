@@ -452,7 +452,7 @@ export function GovernanceTab() {
   }, []);
 
   const edit = (p: Partial<GovernancePolicy>) => setPolicy((x) => ({ ...x, ...p, templateId: p.templateId ?? 'custom', name: p.name ?? (p.templateId ? x.name : x.templateId === 'custom' ? x.name : `${x.name} (customised)`) }));
-  const automations = [policy.automation.autoTriage, policy.automation.autoDraftRelease, policy.automation.reminders, policy.requireValidation].filter(Boolean).length;
+  const automations = [policy.automation.autoTriage, policy.automation.autoDraftRelease, policy.automation.reminders, policy.automation.appAutopilot !== false, policy.requireValidation].filter(Boolean).length;
 
   const saveBar = editing && (
     <div className="flex flex-wrap items-center gap-2">
@@ -541,7 +541,7 @@ export function GovernanceTab() {
       <CollapsibleCard
         title="Ownership, ODI and automation"
         subtitle="Who owns the ontology, what the ODI can do, and which steps run automatically."
-        summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${automations} of 4 automations on`}
+        summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${automations} of 5 automations on`}
       >
         {!editing ? (
           <dl className="grid gap-x-6 gap-y-2 p-5 text-sm sm:grid-cols-[12rem_1fr]">
@@ -557,6 +557,7 @@ export function GovernanceTab() {
                 <li>{policy.automation.autoTriage ? 'On' : 'Off'}: AI triage of every request on arrival</li>
                 <li>{policy.automation.autoDraftRelease ? 'On' : 'Off'}: draft a release when approved changes accumulate</li>
                 <li>{policy.automation.reminders ? 'On' : 'Off'}: nudge reviewers and voters</li>
+                <li>{policy.automation.appAutopilot !== false ? 'On' : 'Off'}: autopilot, so members can have Concord approve or vote yes for them when their apps pass a change</li>
                 <li>{policy.requireValidation ? 'On' : 'Off'}: changes that fail validation can never be approved</li>
               </ul>
             </dd>
@@ -597,6 +598,11 @@ export function GovernanceTab() {
                 <Toggle checked={policy.automation.autoTriage} onChange={(v) => edit({ automation: { ...policy.automation, autoTriage: v } })} label="AI triage: classify and validate every request on arrival" />
                 <Toggle checked={policy.automation.autoDraftRelease} onChange={(v) => edit({ automation: { ...policy.automation, autoDraftRelease: v } })} label="Draft a release automatically when approved changes accumulate" />
                 <Toggle checked={policy.automation.reminders} onChange={(v) => edit({ automation: { ...policy.automation, reminders: v } })} label="Nudge reviewers and voters when actions are pending" />
+                <Toggle
+                  checked={policy.automation.appAutopilot !== false}
+                  onChange={(v) => edit({ automation: { ...policy.automation, appAutopilot: v } })}
+                  label="Autopilot: members can have Concord approve or vote yes for them when their apps pass a change"
+                />
                 <Toggle checked={policy.requireValidation} onChange={(v) => edit({ requireValidation: v })} label="Changes that fail validation can never be approved" />
               </div>
             </div>
