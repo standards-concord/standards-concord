@@ -16,6 +16,7 @@ import { OverviewTab } from './pages/ontology/Overview';
 import { BrowseTab } from './pages/ontology/Browse';
 import { SourceTab } from './pages/ontology/Source';
 import { QueryTab } from './pages/ontology/Query';
+import { ValidateTab } from './pages/ontology/Validate';
 import { UseCasesTab } from './pages/ontology/UseCases';
 import { UseCaseDetailPage } from './pages/ontology/UseCaseDetail';
 import { InterviewPage } from './pages/ontology/Interview';
@@ -90,6 +91,7 @@ function Routed() {
             <Route path="browse" element={<BrowseTab />} />
             <Route path="source" element={<SourceTab />} />
             <Route path="query" element={<QueryTab />} />
+            <Route path="validate" element={<ValidateTab />} />
             <Route path="use-cases" element={<UseCasesTab />} />
             <Route path="use-cases/:useCaseId" element={<UseCaseDetailPage />} />
             <Route path="interview/:sessionId" element={<InterviewPage />} />

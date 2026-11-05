@@ -421,8 +421,17 @@ ${reportDialog}`;
   <p>The ontology IRI and every version IRI serve this page to browsers and RDF to anything that asks for it.</p>
   <pre class="code"><code>curl -L -H 'Accept: text/turtle' ${esc(exampleTarget)}
 curl -L -H 'Accept: application/ld+json' ${esc(exampleTarget)}
-curl -L -H 'Accept: application/rdf+xml' ${esc(exampleTarget)}</code></pre>
+curl -L -H 'Accept: application/rdf+xml' ${esc(exampleTarget)}
+curl -L -H 'Accept-Profile: &lt;http://www.w3.org/ns/shacl#&gt;' ${esc(exampleTarget)}</code></pre>
   ${turtle ? `<p>Or add an extension to this page’s address, for example <a href="${esc(turtle.href)}"><code>${esc(turtle.href)}</code></a>.</p>` : ''}
+  <p>The last one returns the SHACL shapes derived from the ontology (the SHACL profile; <code>?_profile=shacl</code> works too).</p>
+</section>
+<section class="block" id="validate">
+  <h2>Validate data</h2>
+  <p>POST RDF data (Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML) to this address to check it against the ${input.kind === 'release' ? 'version’s' : 'draft’s'} SHACL shapes and terms. The answer is a JSON report, or a SHACL validation report with <code>Accept: text/turtle</code>. Nothing is stored.</p>
+  <pre class="code"><code>curl -X POST ${esc(input.pageUrl)} \
+  -H 'Content-Type: text/turtle' --data-binary @data.ttl</code></pre>
+  ${input.links.app ? `<p>Or <a href="${esc(input.links.app)}/validate?version=${esc(encodeURIComponent(input.kind === 'release' ? input.version : 'draft'))}">upload a file in the validator</a>.</p>` : ''}
 </section>
 ${input.code ? codeSection(input.code) : ''}
 <section class="block">
