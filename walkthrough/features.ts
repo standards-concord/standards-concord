@@ -90,6 +90,8 @@ const RELEASE_FILES = ['ontology.ttl', 'ontology.jsonld', 'ontology.owl', 'ontol
 
 async function openTerminal(c: Ctx, disclosure: string) {
   await c.term.open(disclosure);
+  // Real output is shown as it is: no rewriting the recorded hub's address to the live one (record.ts presentation()).
+  await c.d.page.evaluate(() => ((window as any).__wtRealOutput = true));
   // A fresh session: this video has no agent, and each terminal shot starts clean.
   await c.term.clear();
   await c.term.title(`${c.ontology.slug} — zsh`);
@@ -295,6 +297,8 @@ export const featureActions: Record<string, Action> = {
     c.d.claim(type && /^200 text\/turtle/.test(type), 'the address answers with Turtle when asked for it');
     const out = await shell(c, `curl -sS -H "Accept: text/turtle" ${url} | head -n 14`, process.cwd(), '~');
     c.d.claim(out && /@prefix/.test(out), 'the body is Turtle');
+    const onScreen = await c.d.page.locator('body').innerText().catch(() => '');
+    c.d.claim(onScreen.includes(url), `the terminal shows the address curl really asked (${url})`);
     if (story.release) {
       const full = run(c, `curl -sS -H "Accept: text/turtle" ${url}`, process.cwd());
       c.d.claim(full?.includes(`/${story.release}>`), `the Turtle is version ${story.release}`);

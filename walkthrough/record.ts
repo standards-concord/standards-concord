@@ -470,6 +470,8 @@ function presentation({ local, shown }: { local: string[]; shown: string }) {
     view.dispatch({ changes: { from: 0, to: doc.length, insert: swap(doc) } });
   };
   const fix = (root: Node) => {
+    // A page showing real command output (features.ts) opts out: it must show the address it really asked.
+    if ((window as any).__wtRealOutput) return;
     const el = root instanceof Element ? root : root.parentElement;
     const inEditor = el?.closest('.cm-content');
     if (inEditor) return editor(inEditor);
