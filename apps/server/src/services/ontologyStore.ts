@@ -101,20 +101,22 @@ let ownClaim: { owner: string; onLost: (err: Error) => void; lost: boolean; rene
  * database change it guards, and immediately before any other write.
  */
 function assertStoreHeld(): void {
-  const claim = get<StoreClaim>('kv', STORE_KEY);
   if (ownClaim) {
-    if (claim?.owner === ownClaim.owner && !ownClaim.lost) {
-      // Still ours (taking over rewrites the owner): renew it, atomically with the check, if it is getting old.
-      if (Date.now() - ownClaim.renewed >= STORE_RENEW_MS) {
-        const mine = ownClaim;
-        transaction(() => {
-          if (get<StoreClaim>('kv', STORE_KEY)?.owner !== mine.owner) return;
+    const mine = ownClaim;
+    const due = Date.now() - mine.renewed >= STORE_RENEW_MS;
+    // Checked, and renewed if it is getting old, in one transaction: still ours means nobody took over (that rewrites the owner).
+    const held =
+      !mine.lost &&
+      transaction(() => {
+        const claim = get<StoreClaim>('kv', STORE_KEY);
+        if (claim?.owner !== mine.owner) return false;
+        if (due) {
           put('kv', { ...claim, until: Date.now() + STORE_CLAIM_MS });
           mine.renewed = Date.now();
-        });
-      }
-      return;
-    }
+        }
+        return true;
+      });
+    if (held) return;
     const err = new HttpError(503, 'This server lost its hold on the repositories to another one, so it changed nothing and is stopping.');
     if (!ownClaim.lost) {
       ownClaim.lost = true;
@@ -122,6 +124,7 @@ function assertStoreHeld(): void {
     }
     throw err;
   }
+  const claim = get<StoreClaim>('kv', STORE_KEY);
   if (claim && claim.until > Date.now()) throw new HttpError(503, `Another Concord server (store v${claim.version}) holds the repositories, so nothing was changed.`);
 }
 
@@ -295,7 +298,13 @@ function buildCommit(dir: string, base: string, files: Record<string, string | n
     }
     tree = git(dir, ['write-tree'], {}, { extraEnv });
   } finally {
-    fs.rmSync(index, { force: true });
+    // (If this process no longer holds the repositories, the temporary index is left for its successor to ignore.)
+    try {
+      assertStoreHeld();
+      fs.rmSync(index, { force: true });
+    } catch {
+      /* the error that matters is already on its way */
+    }
   }
   if (tree === git(dir, ['rev-parse', `${base}^{tree}`])) return base;
   return git(dir, ['commit-tree', tree, '-p', base, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
@@ -320,6 +329,7 @@ export const ontologyStore = {
     git(dir, ['init', '-q', '-b', 'main']);
     assertStoreHeld();
     fs.writeFileSync(path.join(dir, FILE), turtle);
+    assertStoreHeld();
     fs.writeFileSync(path.join(dir, 'README.md'), readme);
     git(dir, ['add', '-A']);
     git(dir, ['commit', '-q', '-m', `Create ${project.title}`]);
@@ -444,6 +454,7 @@ export const ontologyStore = {
     if (!syncLease.take(project, token)) return;
     const owner = () => syncLease.renew(project, token);
     try {
+      assertStoreHeld();
       fs.rmSync(stampFile(dir), { force: true });
       const target = this.head(project);
       const tags = releaseTags(project);
@@ -661,12 +672,16 @@ export const ontologyStore = {
    * this process's hold on the repositories: only while it has it.
    */
   wipe(): void {
+    // The repositories are moved out of the way inside the checked transaction (a takeover needs that write lock,
+    // so can't happen in between), to a place only this process uses; deleting them afterwards can't touch a successor's.
+    const repos = path.join(config.dataDir, 'ontologies');
+    const trash = path.join(config.dataDir, `.ontologies-deleted-${randomUUID()}`);
     transaction(() => {
       assertStoreHeld();
       clearAll([['kv', STORE_KEY]]);
+      if (fs.existsSync(repos)) fs.renameSync(repos, trash);
     });
-    assertStoreHeld();
-    fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
+    fs.rmSync(trash, { recursive: true, force: true });
     graphCache.clear();
     lastPruned.clear();
   },

@@ -1663,6 +1663,37 @@ describe('inline term edits', () => {
     }
   });
 
+  it('refuses a write when another server takes over just before the hold is renewed', async () => {
+    const { ontologyStore, project, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+    const { get, put, remove } = await import('../src/db.js');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 0, onLost: lost });
+    // The next check finds the hold due for renewal, and a successor takes over at that very moment.
+    const realNow = Date.now.bind(Date);
+    let tookOver = false;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => {
+      if (!tookOver) {
+        tookOver = true;
+        put('kv', { id: 'git-store', owner: 'successor', version: STORE_VERSION, until: realNow() + 60_000 });
+      }
+      return realNow() + 10_000;
+    });
+    try {
+      const fresh = { ...project, slug: `renew-race-${realNow()}`, title: 'Never created' };
+      await expect(ontologyStore.init(fresh as never, '', '')).rejects.toMatchObject({ status: 503 });
+      expect(tookOver).toBe(true);
+      expect(fs.existsSync(path.join(path.dirname(raw), fresh.slug))).toBe(false);
+      expect(lost).toHaveBeenCalledTimes(1);
+      expect(get<{ owner: string }>('kv', 'git-store')?.owner).toBe('successor');
+    } finally {
+      now.mockRestore();
+      store.release();
+      remove('kv', 'git-store');
+    }
+  });
+
   it('keeps the server’s hold on the repositories through a demo reset', async () => {
     const { claimGitStore } = await import('../src/services/ontologyStore.js');
     const simulation = await import('../src/services/simulation.js');
