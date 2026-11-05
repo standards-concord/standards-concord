@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { bumpVersion, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
+import { bumpVersion, DATA_MEDIA_TYPES, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -32,8 +32,12 @@ export { PUBLIC_BASE };
  *   /def/<slug>/<version>.shaclc  standard SHACL compact syntax (?syntax=extended keeps shape names)
  *
  * Browsers get the HTML page; anything asking for RDF (or JavaScript, or
- * SHACLC) gets that (Vary: Accept). Responses allow any origin, so an app on
- * another site can fetch the ontology or import its classes.
+ * SHACLC) gets that (Vary: Accept). Asking for the SHACL profile
+ * (Accept-Profile: <http://www.w3.org/ns/shacl#>,
+ * text/turtle;profile="http://www.w3.org/ns/shacl#", or ?_profile=shacl) gets
+ * the SHACL shapes. POST validates data against them: see validate.ts.
+ * Responses allow any origin, so an app on another site can fetch the
+ * ontology or import its classes.
  * Persistent IRIs (w3id.org) redirect here, see w3id.ts.
  */
 
@@ -84,6 +88,79 @@ const EXTENSIONS: [string, PublicFormat][] = [
   ['omn', 'manchester'],
   ['nt', 'ntriples'],
 ];
+
+export const SHACL_PROFILE = 'http://www.w3.org/ns/shacl#';
+const SHACL_PROFILE_RE = /^<?http:\/\/www\.w3\.org\/ns\/shacl#?>?$/;
+
+/**
+ * Whether the request asks for the SHACL profile of the ontology (W3C Content
+ * Negotiation by Profile): an Accept-Profile header, a profile parameter on an
+ * Accept media type, or the _profile query parameter. q=0 means "not this".
+ */
+export function wantsShaclProfile(req: Request): boolean {
+  const named = (token: string) => SHACL_PROFILE_RE.test(token.trim()) || token.trim().toLowerCase() === 'shacl';
+  const query = req.query._profile;
+  if (typeof query === 'string' && query.split(',').some(named)) return true;
+  const listed = (header: string | undefined, pick: (part: string) => string | undefined) =>
+    (header ?? '').split(',').some((part) => {
+      const token = pick(part);
+      return token !== undefined && named(token) && !/;\s*q\s*=\s*0(\.0*)?\s*(;|$)/i.test(part);
+    });
+  if (listed(req.get('Accept-Profile'), (part) => part.split(';')[0])) return true;
+  return listed(req.get('Accept'), (part) => /;\s*profile\s*=\s*"?([^";,]+)"?/i.exec(part)?.[1]);
+}
+
+/**
+ * Whether Accept allows a representation: a media type with parameters, such
+ * as text/turtle with profile="http://www.w3.org/ns/shacl#". A range matches
+ * when its type matches and each of its parameters (other than q) equals the
+ * representation's; profile values match by IRI, with or without <>. The most
+ * specific matching range decides (RFC 9110 12.5.1): the exact type beats
+ * type/*, which beats *\/*, and among ranges of one type, more parameters win. So
+ * "text/turtle;q=0, *\/*" refuses Turtle, and
+ * 'text/turtle;profile="…shacl#";q=0, text/turtle' refuses the SHACL profile.
+ */
+export function acceptsRepresentation(header: string | undefined, type: string, params: Record<string, string> = {}): boolean {
+  return acceptMatch(header, type, params).q > 0;
+}
+
+/**
+ * How Accept rates a representation: the quality of the most specific range
+ * that matches it, and where that range is in the header (for ties). No
+ * header accepts everything at q=1.
+ */
+export function acceptMatch(header: string | undefined, type: string, params: Record<string, string> = {}): { q: number; position: number } {
+  if (!header?.trim()) return { q: 1, position: 0 };
+  const want = type.toLowerCase();
+  const [major] = want.split('/');
+  const norm = (k: string, v: string) => (k === 'profile' ? v.replace(/^<|>$/g, '') : v.toLowerCase());
+  let best: { specificity: number; q: number; position: number } | undefined;
+  header.split(',').forEach((part, position) => {
+    const [rangeRaw, ...paramParts] = part.split(';');
+    const range = rangeRaw.trim().toLowerCase();
+    let q = 1;
+    const rangeParams: [string, string][] = [];
+    for (const p of paramParts) {
+      const eq = p.indexOf('=');
+      if (eq < 0) continue;
+      const key = p.slice(0, eq).trim().toLowerCase();
+      const value = p.slice(eq + 1).trim().replace(/^"|"$/g, '');
+      if (key === 'q') q = Number(value);
+      else rangeParams.push([key, value]);
+    }
+    // RFC 9110 12.5.1: the type and subtype decide first (exact over type/* over *\/*), then parameters.
+    let specificity = range === want ? 300 : range === `${major}/*` ? 200 : range === '*/*' ? 100 : 0;
+    if (!specificity) return;
+    if (rangeParams.length) {
+      const matches = rangeParams.every(([k, v]) => params[k] !== undefined && norm(k, params[k]) === norm(k, v));
+      if (!matches) return;
+      specificity += rangeParams.length;
+    }
+    if (!Number.isFinite(q)) q = 0;
+    if (!best || specificity > best.specificity || (specificity === best.specificity && q > best.q)) best = { specificity, q, position };
+  });
+  return best ? { q: best.q, position: best.position } : { q: 0, position: Infinity };
+}
 
 function splitExtension(segment: string): { base: string; format?: PublicFormat } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
@@ -149,7 +226,7 @@ export async function pageInput(
     latestVersion: latest,
     downloads,
     pageUrl: `${root}/${version}`,
-    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root },
+    links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
     requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
@@ -315,6 +392,9 @@ async function serve(req: Request, res: Response) {
   const last = splitExtension(versionSeg ?? slugSeg);
   const slug = versionSeg === undefined ? last.base : slugSeg;
   const requested = versionSeg === undefined ? undefined : last.base;
+  // Public data: any site may read it (no credentials), including the headers that describe it.
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
 
   const project = findProject(slug);
   if (!project) return notFound(res, `There is no ontology called “${slug}”.`);
@@ -338,7 +418,22 @@ async function serve(req: Request, res: Response) {
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
 
-  const format = last.format ?? negotiate(req, res);
+  let format = last.format;
+  let profiled = false;
+  // Data can be POSTed here to validate it (validate.ts).
+  res.set('Accept-Post', DATA_MEDIA_TYPES.join(', '));
+  if (!last.format) res.vary('Accept-Profile');
+  if (!format && wantsShaclProfile(req)) {
+    res.vary('Accept');
+    if (!acceptsRepresentation(req.get('Accept'), 'text/turtle', { profile: SHACL_PROFILE, charset: 'utf-8' })) {
+      res.status(406).set('Cache-Control', 'no-store').type('text/plain').send('The SHACL profile is available as text/turtle.');
+      return;
+    }
+    res.set('Content-Profile', `<${SHACL_PROFILE}>`);
+    profiled = true;
+    format = 'shacl';
+  }
+  format ??= negotiate(req, res);
   if (!format) return;
   // Published before anyone approved what goes public: nothing of it is served until a steward does.
   if (isHeld(project, version)) return held(res, project, version, format);
@@ -356,6 +451,7 @@ async function serve(req: Request, res: Response) {
     version,
     self: `${root}/${version}`,
     mutable: version === 'draft',
+    profiled,
     // The draft is ahead of the latest release: 1.0.0 → 1.1.0-draft.
     packageVersion: version === 'draft' ? `${latest ? bumpVersion(latest, 'minor') : '0.1.0'}-draft` : version,
   });
@@ -377,18 +473,20 @@ export function negotiate(req: Request, res: Response): PublicFormat | undefined
   return NEGOTIABLE[best];
 }
 
-function publicHeaders(res: Response, self: string, mutable: boolean) {
+function publicHeaders(res: Response, self: string, mutable: boolean, profiled = false) {
   res.vary('Accept');
-  // Public data: any site may fetch it, or import the generated classes from it.
+  // Public data: any site may fetch it, or import the generated classes from it, including the headers that describe it.
   res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Expose-Headers', 'Link, Content-Disposition');
+  res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
   res.set('Cache-Control', mutable ? 'no-cache' : 'public, max-age=300');
   res.set(
     'Link',
     [
       `<${self}.html>; rel="alternate"; type="text/html"`,
-      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"`),
+      ...DOWNLOAD_ORDER.map((f) => `<${self}.${FORMAT_INFO[f].extension}>; rel="alternate"; type="${FORMAT_INFO[f].mediaType}"${f === 'shacl' ? `; profile="${SHACL_PROFILE}"` : ''}`),
       `<${self}>; rel="canonical"`,
+      // Content Negotiation by Profile: name the profile this response conforms to.
+      ...(profiled ? [`<${SHACL_PROFILE}>; rel="profile"`] : []),
     ].join(', '),
   );
 }
@@ -407,6 +505,8 @@ export interface SendFormatOptions {
   mutable: boolean;
   /** Semver version for the npm package (falls back to owl:versionInfo, then 0.0.0). */
   packageVersion?: string;
+  /** Sent as the SHACL profile (Content Negotiation by Profile): the Link header names it. */
+  profiled?: boolean;
 }
 
 /**
@@ -416,7 +516,7 @@ export interface SendFormatOptions {
  * the draft and forks) so each offers the same formats.
  */
 export async function sendFormat(req: Request, res: Response, o: SendFormatOptions): Promise<void> {
-  publicHeaders(res, o.self, o.mutable);
+  publicHeaders(res, o.self, o.mutable, o.profiled);
   const fileBase = `${o.project.slug}-${o.version.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
   if (o.format === 'javascript' || o.format === 'typescript' || o.format === 'dts' || o.format === 'npm') {
     const mod = await toWrapperClasses(o.graph, { name: o.project.slug, sourceUrl: o.self });

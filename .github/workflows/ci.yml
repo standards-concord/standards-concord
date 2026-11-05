@@ -21,6 +21,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -32,6 +33,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   workflow_dispatch:
 
 permissions:
