@@ -5,6 +5,7 @@
 - **Every feature ships with Playwright tests** in `e2e/<feature>.spec.ts` that drive it the way a person would: through the UI, as a role that is allowed to do it, and as one that isn't. Import `test` from `e2e/fixtures.ts`, which fails a test on any console error, uncaught exception or crash screen.
 - **Every bug fix ships with a Playwright test that reproduces the bug.** Write the test first and watch it fail on the unfixed code, then fix. Name the behaviour in the test title, and add a short comment saying what used to go wrong, so nobody deletes it as redundant. If a browser test genuinely can't reach the bug (e.g. a server-only race), add an API or unit test instead and say why in the PR.
 - **Keep [docs/e2e-coverage.md](docs/e2e-coverage.md) current.** When you add a page, route, role rule or flow, add its row and the spec that covers it. A row marked as a gap is a bug in the test suite.
+- CI minutes are metered ([docs/ci.md](docs/ci.md)). Draft PRs run only the quick `test` job; the browser tests and walkthrough check run once the PR is **ready for review**. Mark a PR ready and wait for `e2e` and `walkthrough` to pass before merging. Docs-only PRs get no checks.
 - Never skip, quarantine or loosen a test to get CI green. A flaky test is a bug: find the race and fix it (in the app if the app is at fault).
 
 ## How the e2e suite works
