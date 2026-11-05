@@ -29,6 +29,13 @@ export interface ChangeContext {
   author?: string;
   date?: string;
   source?: string;
+  /**
+   * The record that caused the change (a change request, a fork), stamped as
+   * dcterms:provenance on each term an edit creates. Unlike `source` it is
+   * kept apart from the dcterms:source annotations people ask for, so content
+   * comparisons can ignore it without losing those.
+   */
+  provenance?: string;
 }
 
 export interface ApplyResult {
@@ -43,7 +50,16 @@ export function applyChangeOps(graph: OntologyGraph, ops: ChangeOp[], ctx: Chang
   const touched = new Set<string>();
   ops.forEach((op, i) => {
     try {
+      const before = aboutRecorded(g);
       applyOne(g, op, ctx, warnings, touched);
+      // Whatever an edit names or builds (a new term, a rename's destination, every class in a
+      // disjointness), it may not end up changing the recorded provenance properties.
+      for (const t of touched) notRecorded(t);
+      // And whatever route it takes (a mapping, a class's own axioms, a rewritten list), it may not
+      // add or remove a statement about them; only their declaration as annotation properties.
+      const after = aboutRecorded(g);
+      for (const k of after) if (!before.has(k) && !DECLARATIONS.has(k)) notRecorded(k.split(' ').find((t) => ENGINE_RECORDED.has(t))!);
+      for (const k of before) if (!after.has(k)) notRecorded(k.split(' ').find((t) => ENGINE_RECORDED.has(t))!);
     } catch (e) {
       if (e instanceof ChangeOpError) throw e;
       throw new ChangeOpError((e as Error).message, i);
@@ -55,6 +71,33 @@ export function applyChangeOps(graph: OntologyGraph, ops: ChangeOp[], ctx: Chang
 class OpFail extends Error {}
 const fail = (msg: string): never => {
   throw new OpFail(msg);
+};
+
+/**
+ * Provenance the engine records itself when terms change (ChangeContext). It
+ * isn't part of what a term means, so comparisons ignore it; edits may not
+ * set or replace it, or a hand-written value would be ignored too, and a
+ * recorded one could be forged.
+ */
+const ENGINE_RECORDED = new Set([P.provenance, P.created, P.contributor, NS.dcterms + 'modified']);
+const DECLARATIONS = new Set([...ENGINE_RECORDED].map((p) => `${p} ${RDF_TYPE} ${T.AnnotationProperty}`));
+/**
+ * Every statement with a recorded property as its subject or object, as
+ * "s p o" keys (blank nodes by label, so a rewritten list counts as changed).
+ * Statements that merely use one as their predicate (the records) don't count.
+ */
+function aboutRecorded(g: OntologyGraph): Set<string> {
+  const keys = new Set<string>();
+  const key = (q: { subject: Term; predicate: Term; object: Term }) => `${q.subject.value} ${q.predicate.value} ${q.object.termType === 'Literal' ? JSON.stringify(q.object.value) : q.object.value}`;
+  for (const iri of ENGINE_RECORDED) {
+    for (const q of g.store.getQuads(nn(iri) as any, null, null, null)) keys.add(key(q));
+    for (const q of g.store.getQuads(null, null, nn(iri) as any, null)) keys.add(key(q));
+  }
+  return keys;
+}
+const notRecorded = (pred: string) => {
+  if (ENGINE_RECORDED.has(pred)) fail(`<${pred}> is recorded by Concord when a term changes and can't be changed by an edit; use dcterms:source or a note for provenance you want to state`);
+  return pred;
 };
 
 const ANNOTATION_FIELDS: Record<keyof Omit<TermAnnotations, 'mappings'>, string> = {
@@ -88,6 +131,11 @@ export function sameAnnotationValue(a: string | string[] | undefined, b: string 
 function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: string[], touched: Set<string>): void {
   const s = g.store;
   const ex = (i: IRI) => expandIRI(i, g.prefixes);
+  // No edit may add, change, rename, deprecate or remove the recorded provenance properties
+  // themselves (removing dcterms:provenance as a term would erase every record).
+  if ('iri' in op && typeof op.iri === 'string') notRecorded(ex(op.iri));
+  // (The ontology header's created, contributors and modified are ordinary metadata people edit:
+  // forks compare them field by field, and refuse only the fields they stamp themselves.)
   const known = (iri: IRI) => g.isDeclared(iri) || isWellKnown(iri) || isBuiltinDatatype(iri) || inImports(g, iri);
   const requireKnown = (iri: IRI, what: string) => {
     if (!known(iri)) fail(`unknown ${what} <${iri}>: declare it first (or use a well-known vocabulary term)`);
@@ -127,7 +175,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     }
     if (set.mappings) {
       for (const [p, targets] of Object.entries(set.mappings)) {
-        const pred = ex(p);
+        const pred = notRecorded(ex(p));
         removeAll(iri, pred);
         for (const t of targets) add(iri, pred, nn(ex(t)));
         usedAnnotations.add(pred);
@@ -139,7 +187,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       fail(`invalid local name "${localName}": ${kind === 'class' ? 'classes use UpperCamelCase' : kind === 'property' ? 'properties use lowerCamelCase' : 'individuals use letters, digits and hyphens'} with no spaces or underscores`);
     }
     if (!g.namespace) fail('ontology has no namespace (no owl:Ontology header)');
-    const iri = g.namespace + localName;
+    const iri = notRecorded(g.namespace + localName);
     if (s.countQuads(nn(iri), null, null, null) > 0) fail(`term <${iri}> already exists`);
     if (!fields.label?.trim()) fail('label is required');
     if (kind !== 'individual' && !fields.definition?.trim()) fail('definition is required');
@@ -153,16 +201,18 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     if (ctx.source && !(fields.source ?? []).includes(ctx.source)) add(iri, P.source, looksLikeIRI(ctx.source) ? nn(ctx.source) : literal(ctx.source));
     usedAnnotations.add(P.created).add(P.definition);
     if (ctx.author) usedAnnotations.add(P.contributor);
+    if (ctx.provenance) add(iri, P.provenance, literal(ctx.provenance));
     if (ctx.source || fields.source?.length) usedAnnotations.add(P.source);
+    if (ctx.provenance) usedAnnotations.add(P.provenance);
     touched.add(iri);
     return iri;
   };
 
   switch (op.op) {
     case 'addClass': {
-      const supers = (op.subClassOf ?? []).map(ex).map(requireClass);
-      const eqs = (op.equivalentTo ?? []).map(ex).map(requireClass);
-      const disj = (op.disjointWith ?? []).map(ex).map(requireClass);
+      const supers = (op.subClassOf ?? []).map(ex).map(notRecorded).map(requireClass);
+      const eqs = (op.equivalentTo ?? []).map(ex).map(notRecorded).map(requireClass);
+      const disj = (op.disjointWith ?? []).map(ex).map(notRecorded).map(requireClass);
       const restrictions = (op.restrictions ?? []).map((r) => normaliseRestriction(g, r, ex, requireKnown));
       const iri = newTerm(op.localName, 'class', T.Class, op);
       for (const sc of supers) add(iri, P.subClassOf, nn(sc));
@@ -197,7 +247,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     case 'addIndividual': {
       const types = op.types.map(ex).map(requireClass);
       if (!types.length) fail('an individual needs at least one type');
-      const facts = Object.entries(op.facts ?? {}).map(([p, vals]) => [requireKnown(ex(p), 'property'), vals] as const);
+      const facts = Object.entries(op.facts ?? {}).map(([p, vals]) => [notRecorded(requireKnown(ex(p), 'property')), vals] as const);
       const iri = newTerm(op.localName, 'individual', T.NamedIndividual, op);
       for (const t of types) add(iri, RDF_TYPE, nn(t));
       for (const [p, vals] of facts) for (const v of vals) add(iri, p, factValue(g, p, v, ex, requireKnown));
@@ -275,7 +325,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       break;
     }
     case 'addDisjointness': {
-      const classes = [...new Set(op.classes.map(ex))].map(requireClass);
+      const classes = [...new Set(op.classes.map(ex).map(notRecorded))].map(requireClass);
       if (classes.length < 2) fail('disjointness needs at least two distinct classes');
       if (classes.length === 2) add(classes[0], P.disjointWith, nn(classes[1]));
       else {
@@ -287,7 +337,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       break;
     }
     case 'removeDisjointness': {
-      const classes = [...new Set(op.classes.map(ex))];
+      const classes = [...new Set(op.classes.map(ex).map(notRecorded))];
       if (classes.length < 2) fail('need at least two classes');
       let removed = 0;
       const inSet = new Set(classes);
@@ -303,6 +353,8 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
         const members = objects(s, ax, P.members).flatMap((h) => readList(s, h) ?? []).map((t) => t.value);
         const hit = members.filter((m) => inSet.has(m));
         if (hit.length < 2) continue;
+        // Rewriting the axiom restates every member, so none of them may be a recorded property.
+        members.forEach(notRecorded);
         // Drop the axiom and re-assert the pairs that are not being removed.
         for (const q of s.getQuads(ax, null, null, null)) {
           s.removeQuad(q);
@@ -360,7 +412,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       const kinds = g.kindsOf(iri);
       const kind = kinds.has('class') ? 'class' : kinds.has('individual') && kinds.size === 1 ? 'individual' : 'property';
       if (!isValidLocalName(op.newLocalName, kind)) fail(`invalid local name "${op.newLocalName}" for a ${kind}`);
-      const newIri = g.namespace + op.newLocalName;
+      const newIri = notRecorded(g.namespace + op.newLocalName);
       if (newIri === iri) fail('new name is the same as the old one');
       if (s.countQuads(nn(newIri), null, null, null) > 0) fail(`term <${newIri}> already exists`);
       renameTerm(g, iri, newIri, date);

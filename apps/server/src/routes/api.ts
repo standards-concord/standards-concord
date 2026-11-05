@@ -56,6 +56,7 @@ import {
 import { ontologyStore } from '../services/ontologyStore.js';
 import { admitQueryChat, boundedQueryChatRequest, queryChat } from '../services/queryChat.js';
 import { PERSONAS } from '../services/personas.js';
+import * as forks from '../services/forks.js';
 import * as releases from '../services/releases.js';
 import * as requirements from '../services/requirements.js';
 import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseDetail.js';
@@ -778,6 +779,49 @@ export function apiRouter(): Router {
   r.post('/releases/:id/publish', async (req, res) => {
     res.json(await relOut(req, await releases.publishRelease(await releases.getRelease(String(req.params.id)), requireUser(req))));
   });
+
+  /* -------------------------- development forks ---------------------- */
+  const fork = async (req: Request) => await forks.mustFindFork(String(req.params.fork), await project(req));
+  r.get('/ontologies/:id/forks', async (req, res) => {
+    res.json(await Promise.all((await forks.listForks((await project(req)).id)).map((f) => forks.forkSummary(f))));
+  });
+  r.post('/ontologies/:id/forks', async (req, res) => {
+    const f = await forks.createFork(await project(req), requireUser(req), { name: str(req.body?.name, 'name', 80), purpose: optStr(req.body?.purpose) });
+    res.status(201).json(await forks.forkDetail(f));
+  });
+  r.get('/forks', async (req, res) => {
+    res.json(await Promise.all((await forks.forksOwnedBy(requireUser(req).id)).map((f) => forks.forkSummary(f))));
+  });
+  r.get('/ontologies/:id/forks/:fork', async (req, res) => res.json(await forks.forkDetail(await fork(req))));
+  r.get('/ontologies/:id/forks/:fork/check', async (req, res) => res.json(await forks.checkFork(await fork(req))));
+  r.get('/ontologies/:id/forks/:fork/validation', async (req, res) => {
+    const p = await project(req);
+    const f = await fork(req);
+    const graph = await ontologyStore.graphAt(p, f.head);
+    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+  });
+  r.post('/ontologies/:id/forks/:fork/edits', async (req, res) => {
+    const b = req.body ?? {};
+    res.json(
+      await forks.editFork(await fork(req), req.user, {
+        description: optStr(b.description),
+        terms: Array.isArray(b.terms) ? b.terms : undefined,
+        ops: Array.isArray(b.ops) ? b.ops : undefined,
+        message: optStr(b.message),
+      }),
+    );
+  });
+  r.post('/ontologies/:id/forks/:fork/propose', async (req, res) => {
+    const out = await forks.proposeFork(await fork(req), req.user, { title: optStr(req.body?.title), description: optStr(req.body?.description) });
+    res.json({ fork: out.fork, changeRequest: await crs.detail(out.changeRequest) });
+  });
+  r.post('/ontologies/:id/forks/:fork/sync', async (req, res) => res.json(await forks.syncFork(await fork(req), req.user)));
+  r.post('/ontologies/:id/forks/:fork/discard', async (req, res) => {
+    const terms = req.body?.all === true ? 'all' : Array.isArray(req.body?.terms) ? req.body.terms.filter((t: unknown): t is string => typeof t === 'string' && !!t.trim()) : [];
+    if (terms !== 'all' && !terms.length) throw new HttpError(400, 'Name the terms whose changes to discard, or send all: true');
+    res.json(await forks.discardForkChanges(await fork(req), req.user, terms, { includeRelated: req.body?.includeRelated === true }));
+  });
+  r.post('/ontologies/:id/forks/:fork/close', async (req, res) => res.json(await forks.closeFork(await fork(req), req.user)));
 
   /* ------------------------------- agents ---------------------------- */
   /* ----------------------- OAuth for MCP clients ----------------------- */

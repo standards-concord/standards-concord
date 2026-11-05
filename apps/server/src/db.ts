@@ -34,6 +34,7 @@ export type Collection =
   | 'requirementsDocs'
   | 'feedbackPublications'
   | 'activity'
+  | 'forks'
   | 'kv';
 
 let store: Promise<DocStore> | undefined;
@@ -76,6 +77,62 @@ export async function list<T>(collection: Collection, parent?: string): Promise<
 
 export async function remove(collection: Collection, id: string): Promise<void> {
   await (await conn()).remove(collection, id);
+}
+
+/**
+ * Replace a document only if its `field` still has the value the caller read (undefined: not set). Returns
+ * false, writing nothing, if the document changed or doesn't exist: a compare-and-swap that holds across
+ * processes sharing the database (writers take turns inside a transaction). `parent` as for put().
+ */
+export async function putIf<T extends { id: string }>(
+  collection: Collection,
+  doc: T,
+  field: string,
+  expected: string | number | undefined,
+  parent?: string,
+): Promise<boolean> {
+  return transaction(async () => {
+    const current = await get<Record<string, unknown>>(collection, doc.id);
+    if (!current || (current[field] ?? undefined) !== expected) return false;
+    await put(collection, doc, parent);
+    return true;
+  });
+}
+
+const fences = new AsyncLocalStorage<() => Promise<void>>();
+
+/**
+ * Run `fn` with a fence: every putFenced()/putIfFenced() it makes (however deep, across awaits) first runs
+ * `guard` in the same transaction as the write, so a guard that throws stops the write atomically. This is how a
+ * slow process that has lost its hold on something (a lease that ran out) is kept from writing over newer work.
+ */
+export function withFence<T>(guard: () => Promise<void>, fn: () => Promise<T>): Promise<T> {
+  return fences.run(guard, fn);
+}
+
+/** put(), checked against the current fence (if any) in the same transaction. */
+export async function putFenced<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<T> {
+  const guard = fences.getStore();
+  if (!guard) return put(collection, doc, parent);
+  return transaction(async () => {
+    await guard();
+    return put(collection, doc, parent);
+  });
+}
+
+/** putIf(), checked against the current fence (if any) in the same transaction. */
+export async function putIfFenced<T extends { id: string }>(
+  collection: Collection,
+  doc: T,
+  field: string,
+  expected: string | number | undefined,
+  parent?: string,
+): Promise<boolean> {
+  const guard = fences.getStore();
+  return transaction(async () => {
+    await guard?.();
+    return putIf(collection, doc, field, expected, parent);
+  });
 }
 
 /** Delete a document and return it, atomically: of several callers racing for it, only one gets it. */

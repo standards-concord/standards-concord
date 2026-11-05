@@ -42,6 +42,7 @@ export const P = {
   editorialNote: NS.skos + 'editorialNote',
   historyNote: NS.skos + 'historyNote',
   source: NS.dcterms + 'source',
+  provenance: NS.dcterms + 'provenance',
   isDefinedBy: NS.rdfs + 'isDefinedBy',
   deprecated: NS.owl + 'deprecated',
   replacedBy: NS.dcterms + 'isReplacedBy',
@@ -500,7 +501,7 @@ export class OntologyGraph {
 /** Annotation predicates that never count as individual "facts". */
 export const ANNOTATION_PREDICATES = new Set<string>([
   P.label, P.comment, P.definition, P.iaoDefinition, P.altLabel, P.example, P.editorialNote, P.historyNote,
-  P.source, P.isDefinedBy, P.deprecated, P.replacedBy, P.iaoReplacedBy, P.created, P.contributor,
+  P.source, P.provenance, P.isDefinedBy, P.deprecated, P.replacedBy, P.iaoReplacedBy, P.created, P.contributor,
   NS.skos + 'prefLabel', NS.skos + 'note', NS.skos + 'scopeNote', NS.skos + 'changeNote', NS.dcterms + 'modified',
   NS.dcterms + 'creator', ...MAPPING_PROPERTIES,
 ]);

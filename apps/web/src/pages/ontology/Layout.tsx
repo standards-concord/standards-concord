@@ -44,7 +44,7 @@ export const SECTIONS: { label: string; tabs: [path: string, label: string][]; a
   { label: 'Explore', tabs: [['browse', 'Browse'], ['source', 'Source & export'], ['query', 'Query'], ['validate', 'Validate data'], ['connect', 'Connect an agent']] },
   // What agents report is requirements input, next to use cases and meetings.
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
-  { label: 'Changes', tabs: [['changes', 'Change requests'], ['releases', 'Releases']] },
+  { label: 'Changes', tabs: [['changes', 'Change requests'], ['forks', 'Forks'], ['releases', 'Releases']] },
   // Policy and membership are run by owners and stewards, with ODI oversight; everyone else meets the rules on each change request.
   { label: 'Governance', tabs: [['governance', 'Governance']], roles: ['owner', 'steward', 'odi'] },
 ];

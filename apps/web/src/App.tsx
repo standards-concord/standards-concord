@@ -27,6 +27,8 @@ import { MeetingsTab } from './pages/ontology/Meetings';
 import { MeetingDetailPage } from './pages/ontology/MeetingDetail';
 import { ChangeRequestsTab } from './pages/ontology/ChangeRequests';
 import { ChangeRequestPage } from './pages/ontology/ChangeRequestDetail';
+import { ForksTab } from './pages/ontology/Forks';
+import { ForkPage } from './pages/ontology/ForkDetail';
 import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
 import { RequirementsDocPage } from './pages/ontology/RequirementsDoc';
@@ -118,6 +120,8 @@ function Routed() {
             <Route path="meetings/:meetingId" element={<MeetingDetailPage />} />
             <Route path="changes" element={<ChangeRequestsTab />} />
             <Route path="changes/:crId" element={<ChangeRequestPage />} />
+            <Route path="forks" element={<ForksTab />} />
+            <Route path="forks/:forkSlug" element={<ForkPage />} />
             <Route path="releases" element={<ReleasesTab />} />
             <Route path="releases/:releaseId" element={<ReleaseDetailPage />} />
             <Route path="requirements/:version" element={<RequirementsDocPage />} />

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { OntologyGraph } from '@concord/core';
-import type { ChangeRequest, OntologyProject, PublicHold, PublicHoldReview, UseCase, User } from '@concord/shared';
+import type { ChangeRequest, OntologyFork, OntologyProject, PublicHold, PublicHoldReview, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { transaction, get, HttpError, list, put } from '../db.js';
 import { getUser } from '../services/users.js';
@@ -93,7 +93,15 @@ export async function publicVersion(project: OntologyProject, ref: string | unde
  * release, and nothing of a version waiting for approval.
  */
 export async function readOntology(project: OntologyProject, ref: string | undefined, viewer: User | undefined): Promise<OntologyGraph> {
-  if (viewer) return ontologyStore.at(project, ref);
+  if (viewer) {
+    // A development fork ('forks/<slug>') is read at its head, which its record names.
+    if (ref?.startsWith('forks/')) {
+      const fork = (await list<OntologyFork>('forks', project.id)).find((f) => f.slug === ref.slice('forks/'.length));
+      if (!fork) throw new HttpError(404, `No fork called “${ref.slice('forks/'.length)}”`);
+      return ontologyStore.graphAt(project, fork.head);
+    }
+    return ontologyStore.at(project, ref);
+  }
   const version = await publicVersion(project, ref);
   if (!version) throw new HttpError(404, `${project.title} has no published version “${ref}”`);
   if (await isHeld(project, version)) throw new HttpError(503, HELD_MESSAGE);

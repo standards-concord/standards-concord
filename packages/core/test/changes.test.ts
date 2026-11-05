@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DataFactory } from 'n3';
-import { ChangeOpError, NS, XSD, applyChangeOps, lint, sameAnnotationValue, toKGCL } from '../src/index.js';
-import type { ClassView, IndividualView, PropertyView } from '../src/index.js';
+import { ChangeOpError, NS, XSD, applyChangeOps, lint, sameAnnotationValue, termDescription, toKGCL } from '../src/index.js';
+import type { ChangeOp, ClassView, IndividualView, PropertyView } from '../src/index.js';
 import { NSX, X, baseOntology } from './helpers.js';
 
 const cls = (g: ReturnType<typeof baseOntology>, l: string) => g.term(X(l)) as ClassView;
@@ -315,5 +315,86 @@ describe('toKGCL', () => {
     expect(lines).toContain("change definition of ex:Person to 'A human.'");
     expect(lines).toContain('delete edge ex:Person owl:disjointWith ex:Organisation');
     expect(lines.some((l) => l.startsWith('#') && l.includes('max 1'))).toBe(true);
+  });
+});
+
+describe('generated provenance', () => {
+  it('is stamped as dcterms:provenance, apart from requested sources, and ignored when comparing terms', () => {
+    const op = { op: 'addClass', localName: 'Volunteer', label: 'volunteer', definition: 'A person who gives time unpaid.', source: ['https://example.org/meeting/1'] } satisfies ChangeOp;
+    const a = applyChangeOps(baseOntology(), [op], { provenance: 'example#1' }).graph;
+    const b = applyChangeOps(baseOntology(), [op], { provenance: 'example fork f' }).graph;
+    const vals = (g: typeof a, p: string) => g.store.getObjects(X('Volunteer') as any, p as any, null).map((o) => o.value);
+    expect(vals(a, NS.dcterms + 'provenance')).toEqual(['example#1']);
+    expect(vals(a, NS.dcterms + 'source')).toEqual(['https://example.org/meeting/1']);
+    expect(termDescription(a, X('Volunteer'))).toBe(termDescription(b, X('Volunteer')));
+    const c = applyChangeOps(baseOntology(), [{ ...op, source: ['example#1'] }], { provenance: 'example#1' }).graph;
+    expect(termDescription(c, X('Volunteer'))).not.toBe(termDescription(a, X('Volunteer')));
+  });
+});
+
+describe('recorded provenance cannot be reached indirectly', () => {
+  // Eighth review: the guard only looked at an op's own `iri`, so a rename whose destination was
+  // built from a temporarily changed namespace turned every dcterms:source into a forged
+  // dcterms:provenance, and the `classes` of a disjointness were never checked.
+  const DCT = 'http://purl.org/dc/terms/';
+  const intoDcterms = { op: 'setMetadata', set: { preferredNamespace: DCT } } satisfies ChangeOp;
+  const property = { op: 'addDatatypeProperty', localName: 'sourceNote', label: 'source note', definition: 'Where a statement came from.', range: [NS.xsd + 'string'] } satisfies ChangeOp;
+
+  it('refuses a rename into a recorded property', () => {
+    expect(() => applyChangeOps(baseOntology(), [property, intoDcterms, { op: 'renameTerm', iri: X('sourceNote'), newLocalName: 'provenance' }])).toThrow(/recorded by Concord/);
+  });
+
+  it('refuses a new term built at a recorded property', () => {
+    expect(() =>
+      applyChangeOps(baseOntology(), [intoDcterms, { op: 'addDatatypeProperty', localName: 'modified', label: 'modified', definition: 'When it changed.', range: [NS.xsd + 'date'] }]),
+    ).toThrow(/recorded by Concord/);
+  });
+
+  it.each(['addDisjointness', 'removeDisjointness'] as const)('refuses %s that names a recorded property', (op) => {
+    expect(() => applyChangeOps(baseOntology(), [{ op, classes: [X('Person'), DCT + 'created'] }])).toThrow(/recorded by Concord/);
+  });
+});
+
+describe('recorded provenance in disjointness written another way', () => {
+  // Ninth review: addClass's own disjointWith skipped the guard, and removing two classes from a
+  // three-member axiom that also listed a recorded property restated that property as a subject.
+  const PROV = 'http://purl.org/dc/terms/provenance';
+
+  it('refuses a new class declared disjoint with a recorded property', () => {
+    expect(() => applyChangeOps(baseOntology(), [{ op: 'addClass', localName: 'Forged', label: 'forged', definition: 'A class used to test the guard.', disjointWith: [PROV] }])).toThrow(/recorded by Concord/);
+  });
+
+  it('refuses to rewrite a disjointness axiom that lists a recorded property', () => {
+    const g = baseOntology();
+    const { namedNode, blankNode } = DataFactory;
+    const list = (items: string[]) => {
+      let head: ReturnType<typeof blankNode> | ReturnType<typeof namedNode> = namedNode(NS.rdf + 'nil');
+      for (const item of [...items].reverse()) {
+        const cell = blankNode();
+        g.store.addQuad(cell, namedNode(NS.rdf + 'first'), namedNode(item));
+        g.store.addQuad(cell, namedNode(NS.rdf + 'rest'), head);
+        head = cell;
+      }
+      return head;
+    };
+    const ax = blankNode();
+    g.store.addQuad(ax, namedNode(NS.rdf + 'type'), namedNode(NS.owl + 'AllDisjointClasses'));
+    g.store.addQuad(ax, namedNode(NS.owl + 'members'), list([X('Place'), X('Employee'), PROV]));
+    expect(() => applyChangeOps(g, [{ op: 'removeDisjointness', classes: [X('Place'), X('Employee')] }])).toThrow(/recorded by Concord/);
+  });
+});
+
+describe('recorded provenance through mappings', () => {
+  // Tenth review: a mapping could state any predicate, so owl:disjointWith, rdfs:subClassOf or
+  // owl:equivalentClass pointing at dcterms:provenance got past the class guards.
+  it.each(['owl:disjointWith', 'rdfs:subClassOf', 'owl:equivalentClass'])('refuses a %s mapping to a recorded property', (pred) => {
+    expect(() =>
+      applyChangeOps(baseOntology(), [{ op: 'updateAnnotations', iri: X('Person'), set: { mappings: { [pred]: ['http://purl.org/dc/terms/provenance'] } } }]),
+    ).toThrow(/recorded by Concord/);
+  });
+
+  it('still allows ordinary mappings and the engine’s own records', () => {
+    const r = applyChangeOps(baseOntology(), [{ op: 'updateAnnotations', iri: X('Person'), set: { mappings: { 'skos:exactMatch': ['http://schema.org/Person'] } } }], { provenance: 'example#1' });
+    expect(r.graph.store.getObjects(X('Person') as any, (NS.skos + 'exactMatch') as any, null).map((o) => o.value)).toEqual(['http://schema.org/Person']);
   });
 });

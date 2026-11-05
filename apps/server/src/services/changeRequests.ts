@@ -29,7 +29,7 @@ import type {
 } from '@concord/shared';
 import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
+import { get, HttpError, list, mustGet, put, putFenced, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest, requestText } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -79,7 +79,8 @@ async function stamp(cr: ChangeRequest) {
     if ((stored.rev ?? 0) !== (cr.rev ?? 0)) throw new HttpError(409, 'This request was changed by someone else meanwhile. Reload it and try again.');
     cr.rev = (stored.rev ?? 0) + 1;
     cr.updatedAt = clock.iso();
-    return await put('changeRequests', cr, cr.ontologyId);
+    // Fenced: a fork proposal that has lost its hold on the fork writes nothing (see forks.ts, db.withFence).
+    return await putFenced('changeRequests', cr, cr.ontologyId);
   });
 }
 
@@ -226,7 +227,7 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
     await transaction(async () => {
       cr.number = (await list<ChangeRequest>('changeRequests', project.id)).reduce((m, c) => Math.max(m, c.number), 0) + 1;
       await input.atSave?.();
-      await put('changeRequests', cr, cr.ontologyId); // new, so nobody else can be changing it yet
+      await putFenced('changeRequests', cr, cr.ontologyId); // new, so nobody else can be changing it yet (fenced, as in stamp)
       await logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
     });
   };
@@ -248,7 +249,7 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
 }
 
 /** LLM drafts edits from a plain-language request; falls back to a simple parser. */
-async function draftFromNaturalLanguage(project: OntologyProject, working: OntologyGraph, text: string, kind: ChangeRequestKind) {
+export async function draftFromNaturalLanguage(project: OntologyProject, working: OntologyGraph, text: string, kind: ChangeRequestKind) {
   const { value } = await llm.json<Proposal>({
     task: 'draft-change',
     system: CHANGE_DRAFTER,
@@ -747,8 +748,9 @@ const DATE_STAND_IN = '0001-01-01';
 async function publicationOf(cr: ChangeRequest, given?: OntologyProject) {
   const project = given ?? (await getProject(cr.ontologyId));
   const { graph: working, head: base } = await ontologyStore.workingAt(project);
-  // No author: dcterms:contributor would publish the requester's name on every new term.
-  const ctx = (date: string) => ({ date, source: `${project.slug}#${cr.number}` });
+  // No author: dcterms:contributor would publish the requester's name on every new term. Where it came
+  // from is recorded as generated provenance (dcterms:provenance), apart from sources people state.
+  const ctx = (date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
   const after = applyChangeOps(working, cr.ops, ctx(clock.iso().slice(0, 10))).graph;
   const added = diffOntologies(working, after).addedNTriples;
   const kgcl = toKGCL(cr.ops, after.prefixes);

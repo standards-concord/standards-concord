@@ -71,6 +71,11 @@ const DRAFT_REF = 'refs/concord/draft';
 /** A pin this old whose commit never became the draft belongs to a writer that died or stalled; it is reclaimed. */
 export const PIN_GRACE_MS = 10 * 60 * 1000;
 const revokedKey = (writer: string) => `pin-revoked:${writer}`;
+/** Fork branches are refs/heads/forks/<slug>; fork commits not yet on one are held by refs under FORK_PIN (see commitFork). */
+const forkBranch = (forkSlug: string) => `forks/${forkSlug}`;
+const FORK_PIN = 'refs/concord/fork-pins/';
+/** update-ref's "must not exist yet" old value. */
+const NO_SHA = '0000000000000000000000000000000000000000';
 
 /**
  * Only one server process may change the repositories at a time: two running
@@ -282,8 +287,12 @@ async function checkedOut(dir: string, commit: string): Promise<boolean> {
   }
 }
 
-/** A commit on `base` that writes `files` (repository path → content, or null to delete), or `base` itself if nothing changes. Moves nothing. */
-async function buildCommit(dir: string, base: string, files: Record<string, string | null>, message: string, author: CommitAuthor): Promise<string> {
+/**
+ * A commit on `base` that writes `files` (repository path → content, or null to delete), or `base` itself if nothing changes
+ * (unless `always`: a fork records closing it even when nothing changed). `parents` are extra parents (a fork's sync names the
+ * upstream draft it took in). Moves nothing.
+ */
+async function buildCommit(dir: string, base: string, files: Record<string, string | null>, message: string, author: CommitAuthor, opts: { parents?: string[]; always?: boolean } = {}): Promise<string> {
   const index = path.join(dir, '.git', `concord-index-${randomUUID()}`);
   const extraEnv = { GIT_INDEX_FILE: index };
   let tree: string;
@@ -307,8 +316,9 @@ async function buildCommit(dir: string, base: string, files: Record<string, stri
       /* the error that matters is already on its way */
     }
   }
-  if (tree === await git(dir, ['rev-parse', `${base}^{tree}`])) return base;
-  return await git(dir, ['commit-tree', tree, '-p', base, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
+  if (!opts.always && !opts.parents?.length && tree === await git(dir, ['rev-parse', `${base}^{tree}`])) return base;
+  const parents = [base, ...(opts.parents ?? []).filter((p) => p !== base)].flatMap((p) => ['-p', p]);
+  return await git(dir, ['commit-tree', tree, ...parents, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
 }
 
 export interface CommitAuthor {
@@ -727,6 +737,137 @@ export const ontologyStore = {
       return;
     }
     console.warn(`[git] left ${trash.join(', ')} in ${config.dataDir}: repositories moved aside by a reset that may have finished. Delete them once you have checked nothing in them is needed.`);
+  },
+
+  /* ---------------------------------------------------------------------- */
+  /* Development forks                                                      */
+  /* ---------------------------------------------------------------------- */
+  /*
+   * As with the working draft, the database is the truth: a fork's record
+   * (forks collection) names its head commit, and every change to a fork is a
+   * conditional write of that record. Git only holds the commits: each new one
+   * is pinned (refs/concord/fork-pins/<slug>/<sha>) before the record can name
+   * it, then the fork's branch (refs/heads/forks/<slug>, for people looking at
+   * the repository) is moved forward to it and the pin dropped. A commit whose
+   * record write failed loses its pin; one whose writer stopped in between
+   * keeps it, which costs a ref and nothing else. Nothing here touches the
+   * checked-out files or the working draft.
+   */
+
+  forkBranch,
+
+  /** Whether git has a branch for a fork of this name (a name in use, even if its record was never saved). */
+  hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): boolean {
+    return !!refValue(repoDir(project), `refs/heads/${forkBranch(forkSlug)}`);
+  },
+
+  /** ontology.ttl exactly as committed at `commit` (a fork's head or base). */
+  async readAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<string> {
+    if (!/^[0-9a-f]{7,64}$/.test(commit)) throw new HttpError(404, `No ontology at ${commit || 'an empty commit'}`);
+    try {
+      return await git(repoDir(project), ['show', `${commit}:${FILE}`], {}, { raw: true });
+    } catch {
+      throw new HttpError(404, `No ontology at ${commit}`);
+    }
+  },
+
+  /** The ontology at a commit (a fork's head, or the draft it was based on, for three-way comparisons). */
+  async graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph> {
+    const key = `${project.slug}@${commit}`;
+    let g = graphCache.get(key);
+    if (!g) {
+      g = await OntologyGraph.fromTurtle(await this.readAt(project, commit));
+      graphCache.set(key, g);
+    }
+    return g;
+  },
+
+  /**
+   * Commits `graph` to a fork on top of `parent` (the head the caller read the
+   * fork at), runs `record` (the conditional write of the fork record that
+   * makes the commit its head, which throws if the fork moved on), and only
+   * then moves the fork's branch. `create` starts the fork's branch, refusing
+   * if one of that name exists. `extraParents`: a sync names the upstream
+   * draft it took in. Every call makes a commit, even if nothing changed.
+   */
+  async commitFork(
+    project: Pick<OntologyProject, 'slug'>,
+    forkSlug: string,
+    graph: OntologyGraph,
+    message: string,
+    author: CommitAuthor,
+    opts: { parent: string; extraParents?: string[]; create?: boolean },
+    record: (commit: string) => Promise<void>,
+  ): Promise<string> {
+    const dir = repoDir(project);
+    const branch = `refs/heads/${forkBranch(forkSlug)}`;
+    const commit = await buildCommit(dir, opts.parent, { [FILE]: await graph.toTurtle() }, message, { name: author.name, email: author.email ?? 'developer@concord' }, { parents: opts.extraParents, always: true });
+    // Hold the commit before anything can name it: a new fork's branch (which must not exist yet), otherwise a pin.
+    const hold = opts.create ? branch : `${FORK_PIN}${forkSlug}/${commit}`;
+    try {
+      await git(dir, ['update-ref', hold, commit, opts.create ? '' : NO_SHA]);
+    } catch {
+      throw new HttpError(409, opts.create ? `A fork called “${forkSlug}” already exists. Pick another name.` : 'The fork changed while this edit was being prepared. Reload it and try again.');
+    }
+    try {
+      await record(commit);
+    } catch (err) {
+      try {
+        await git(dir, ['update-ref', '-d', hold, commit]);
+      } catch {
+        /* a leftover ref holds an unused commit, nothing more */
+      }
+      throw err;
+    }
+    if (!opts.create) await this.holdFork(project, forkSlug, commit);
+    return commit;
+  },
+
+  /** Moves the fork's branch forward to `commit` (the fork's head) if it isn't already there, then drops the pins it now holds. Never moves it back. */
+  async holdFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string, commit: string): Promise<void> {
+    const dir = repoDir(project);
+    const branch = `refs/heads/${forkBranch(forkSlug)}`;
+    const ancestor = async (a: string, b: string) => {
+      try {
+        await git(dir, ['merge-base', '--is-ancestor', a, b]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const at = refValue(dir, branch);
+      if (!at) await git(dir, ['update-ref', branch, commit, '']);
+      else if (at !== commit && await ancestor(at, commit)) await git(dir, ['update-ref', branch, commit, at]);
+      for (const line of (await git(dir, ['for-each-ref', `--merged=${branch}`, '--format=%(objectname) %(refname)', `${FORK_PIN}${forkSlug}/`])).split('\n').filter(Boolean)) {
+        const [sha, ref] = line.split(' ');
+        await git(dir, ['update-ref', '-d', ref, sha]);
+      }
+    } catch (err) {
+      // The pin still holds the commit; the next change to the fork tries again.
+      console.warn(`[git] ${project.slug}: fork ${forkSlug}'s branch not moved yet: ${(err as Error).message}`);
+    }
+  },
+
+  /** How many commits the working draft has gained since `commit` (how far a fork has fallen behind). */
+  async commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<number> {
+    try {
+      return Number(await git(repoDir(project), ['rev-list', '--count', `${commit}..${await this.head(project)}`]));
+    } catch {
+      return 0;
+    }
+  },
+
+  /** A fork's own commits from `head` (newest first), not the upstream ones it was synced with. */
+  async forkLog(project: Pick<OntologyProject, 'slug'>, head: string, limit = 50) {
+    const out = await git(repoDir(project), ['log', `-${limit}`, '--first-parent', '--format=%H%x1f%an%x1f%aI%x1f%s', head, `^${await this.head(project)}`]);
+    return out
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [sha, author, date, subject] = l.split('\x1f');
+        return { sha, author, date, subject };
+      });
   },
 
   /** Push main and tags to a GitHub remote using a token. */
