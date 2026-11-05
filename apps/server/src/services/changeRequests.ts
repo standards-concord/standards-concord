@@ -1184,8 +1184,26 @@ async function reviseNow(cr: ChangeRequest, actor: User, instruction: string) {
   });
 }
 
+/** Reasoners Concord no longer runs (it moved to sparq in 0.21.0). Reports from them were saved before then. */
+const RETIRED_REASONERS = new Set(['hermit', 'pellet']);
+const OPEN_STATUSES: ChangeRequest['status'][] = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
+
+/**
+ * Open requests last checked by a retired reasoner are checked again (rule-based, no LLM), so
+ * their checks say what Concord runs now rather than "HermiT". Closed ones keep the report they
+ * were decided on. Each is re-checked once: afterwards its report names sparq (or no verdict).
+ */
+export async function recheckRetiredReasonerReports(): Promise<number> {
+  const stale = (await list<ChangeRequest>('changeRequests')).filter(
+    (c) => OPEN_STATUSES.includes(c.status) && RETIRED_REASONERS.has(c.validation?.reasoner.engine ?? ''),
+  );
+  for (const cr of stale) await triage(cr, { analyse: false });
+  return stale.length;
+}
+
 /** Periodic sweep: time-based transitions (review periods ending, votes closing). */
 export async function tick(): Promise<number> {
+  await recheckRetiredReasonerReports();
   let changed = 0;
   for (const cr of (await list<ChangeRequest>('changeRequests')).filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {
     const before = cr.status;

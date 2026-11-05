@@ -173,6 +173,29 @@ test.describe('OWL reasoning with sparq', () => {
     });
   }
 
+  // Used to go wrong: a change request checked before the move to sparq showed "Reasoner (hermit)",
+  // which read as Concord still running HermiT. Open requests are now checked again with sparq
+  // (see api.test.ts); a closed one keeps its report, and says it is from before the move.
+  test('a change request report saved before the move to sparq says so', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const name = `RetiredReport${uniq()}`;
+    await signInAsPersona(page, 'Tom Okafor');
+    const res = await page.request.post(`/api/ontologies/${demo.id}/change-requests`, {
+      data: { title: `Add ${name}`, description: 'An old request.', kind: 'feature', ops: [{ op: 'addClass', localName: name, label: name.toLowerCase(), definition: 'A class checked long ago.' }] },
+    });
+    expect(res.status()).toBe(201);
+    const id = ((await res.json()) as { id: string }).id;
+    // Served as it would be stored from then: withdrawn, checked by HermiT.
+    const stored = (await (await page.request.get(`/api/change-requests/${id}`)).json()) as { validation: { reasoner: Record<string, unknown> } };
+    const old = { ...stored, status: 'withdrawn', validation: { ...stored.validation, reasoner: { ...stored.validation.reasoner, engine: 'hermit', checkMs: undefined, durationMs: 812 } } };
+    await page.route(`**/api/change-requests/${id}`, (route) => route.fulfill({ json: old }));
+    await page.goto(`/o/${demo.id}/changes/${id}?view=checks`);
+    await expect(page.getByText('Reasoner (HermiT, before Concord moved to sparq)')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('HermiT, before Concord moved to sparq · 812 ms')).toBeVisible();
+    await expect(page.getByText('Reasoner (hermit)')).toHaveCount(0);
+    await page.unrouteAll({ behavior: 'wait' });
+  });
+
   test('a signed-out visitor gets no validation report and no reasoner panel', async ({ page, request }) => {
     const demo = await demoOntology(request);
     expect((await page.request.get(`/api/ontologies/${demo.id}/validation`)).status()).toBe(401);

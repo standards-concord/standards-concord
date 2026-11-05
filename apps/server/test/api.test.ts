@@ -2460,3 +2460,38 @@ describe('release approval provenance', () => {
     }
   });
 });
+
+describe('reports from the retired HermiT reasoner', () => {
+  // Used to go wrong: change requests checked before Concord moved to sparq (0.21.0) kept their
+  // stored report, so their checks still said "Reasoner (hermit)" on the live site long after
+  // HermiT was gone. Open ones are now checked again by the governance tick; closed ones keep
+  // the report they were decided on.
+  it('checks open change requests again with sparq, and leaves closed ones as they were', async () => {
+    const editor = await login('editor', 'Editor Hal');
+    const make = async (title: string) => {
+      const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+        title,
+        description: 'Checked before the move to sparq.',
+        kind: 'feature',
+        ops: [{ op: 'addClass', localName: `Retired${Math.random().toString(36).slice(2, 8)}`, label: title.toLowerCase(), definition: 'A class added to test re-checking old reports.' }],
+      });
+      expect(res.status).toBe(201);
+      return res.body.id as string;
+    };
+    const openId = await make('Old open request');
+    const closedId = await make('Old withdrawn request');
+    const hermit = (cr: Awaited<ReturnType<typeof getCR>>) => ({ ...cr.validation!, reasoner: { ...cr.validation!.reasoner, engine: 'hermit' as const, checkMs: undefined } });
+    const open = await getCR(openId);
+    await put('changeRequests', { ...open, validation: hermit(open) }, demoId);
+    const closed = await getCR(closedId);
+    await put('changeRequests', { ...closed, status: 'withdrawn', validation: hermit(closed) }, demoId);
+
+    const crsMod = await import('../src/services/changeRequests.js');
+    await crsMod.tick();
+
+    expect((await getCR(openId)).validation?.reasoner).toMatchObject({ engine: 'sparq', available: true });
+    expect((await getCR(closedId)).validation?.reasoner.engine).toBe('hermit');
+    // Once checked again, a request is not checked again at every tick.
+    expect(await crsMod.recheckRetiredReasonerReports()).toBe(0);
+  });
+});

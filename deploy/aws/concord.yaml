@@ -218,7 +218,7 @@ Resources:
             SECRET_ID=${AppSecret}
             EOT
 
-            # 2 GB swap: HermiT (Java), Node and the Solid server share 2 GB of RAM.
+            # 2 GB swap: Node and the Solid server share 2 GB of RAM.
             if [ ! -f /swapfile ]; then
               dd if=/dev/zero of=/swapfile bs=1M count=2048 && chmod 600 /swapfile && mkswap /swapfile
               echo '/swapfile none swap defaults 0 0' >> /etc/fstab

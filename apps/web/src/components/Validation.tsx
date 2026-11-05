@@ -33,7 +33,7 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
       <SummaryTile
         ok={checkedOf(r) === 'complete' && r.consistent && !r.unsatisfiable.length}
         title={checkedOf(r) === 'consistency' && r.consistent ? 'Partly checked' : !r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'}
-        sub={`Reasoner (${r.engine})`}
+        sub={`Reasoner (${engineName(r.engine)})`}
         warn={checkedOf(r) !== 'complete' && !(r.available && !r.consistent)}
       />
       <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
@@ -103,9 +103,20 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
   );
 }
 
+/**
+ * The reasoner's name on screen. Reports saved before Concord moved to sparq (0.21.0) name
+ * HermiT or Pellet; they are said to be from then, so nobody reads them as what runs now.
+ */
+export function engineName(engine: ReasonerReport['engine']): string {
+  if (engine === 'hermit') return 'HermiT, before Concord moved to sparq';
+  if (engine === 'pellet') return 'Pellet, before Concord moved to sparq';
+  return engine;
+}
+
 /** "sparq · reasoning 1.2 ms (14 ms in all)", or "structural · 3 ms". */
 function timing(r: ReasonerReport) {
-  return r.checkMs !== undefined ? `${r.engine} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${r.engine} · ${r.durationMs} ms`;
+  const name = engineName(r.engine);
+  return r.checkMs !== undefined ? `${name} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${name} · ${r.durationMs} ms`;
 }
 
 /** The working draft's Turtle and the revision it is. */

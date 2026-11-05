@@ -4,7 +4,7 @@
  *
  * A job that fails, or runs past REASONER_TIMEOUT_MS (the worker is then replaced), falls back
  * to the structural checks, also in the worker and with their own limit
- * (REASONER_STRUCTURAL_TIMEOUT_MS), as the HermiT path did. Either way it is no verdict
+ * (REASONER_STRUCTURAL_TIMEOUT_MS). Either way it is no verdict
  * (available: false), so validation fails closed. If the structural checks can't finish
  * either, or a worker can't even start, the result says nothing was checked (engine 'none')
  * and is not consistent. reasonInWorker never rejects.

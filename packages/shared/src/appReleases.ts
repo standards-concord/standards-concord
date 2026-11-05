@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.29.1',
+    date: '2026-11-05',
+    title: 'No more “HermiT” on older change requests',
+    pr: 79,
+    changes: [
+      {
+        id: 'retired-reasoner-reports',
+        type: 'fix',
+        title: 'Older change requests are checked again with sparq',
+        detail:
+          'Open change requests last checked before Concord moved to sparq are checked again, so their Checks tab no longer says “Reasoner (hermit)”. Closed ones keep the report they were decided on, marked as from before the move.',
+        roles: ['steward', 'contributor'],
+        to: '{o}/changes',
+      },
+    ],
+  },
+  {
     version: '0.29.0',
     date: '2026-11-05',
     title: 'App checks and autopilot',
