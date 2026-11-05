@@ -78,6 +78,26 @@ describe('RDF highlighting', () => {
     expect(highlightSegments('classes:\n  Thing:\n    class_uri: vol:Thing\n', 'yaml').some((s) => s.cls === 'tok-attr')).toBe(true);
   });
 
+  it('SHACL compact syntax: shape keywords, parameters and the Turtle terms', () => {
+    const code = 'BASE <https://w3id.org/odi/volunteering/shapes>\nPREFIX vol: <https://w3id.org/odi/volunteering#>\n\nshape volsh:SessionShape -> vol:Session {\n\tvol:startDateTime xsd:dateTime [1..1] .\n\tvol:joiningUrl datatype=xsd:anyURI .\n}';
+    expect(classesOf(code, 'shaclc', ['BASE', 'PREFIX', 'shape', 'datatype', 'SessionShape', 'vol:'])).toEqual({
+      BASE: 'tok-meta',
+      PREFIX: 'tok-meta',
+      shape: 'tok-keyword',
+      datatype: 'tok-keyword',
+      SessionShape: 'tok-name',
+      'vol:': 'tok-prefix',
+    });
+  });
+
+  it('the generated classes use the JavaScript and TypeScript modes', () => {
+    const code = 'export class Volunteer extends Person {\n  get title(): Set<string> {\n    return SetFrom.subjectPredicate(this, "https://x", LiteralAs.string, LiteralFrom.string);\n  }\n}';
+    const ts = highlightSegments(code, 'typescript');
+    expect(ts.find((s) => s.text === 'class')?.cls).toBe('tok-keyword');
+    expect(ts.find((s) => s.text === '"https://x"')?.cls).toBe('tok-string');
+    expect(highlightSegments('import { A } from "https://x/a.js";', 'javascript').find((s) => s.text === 'import')?.cls).toBe('tok-keyword');
+  });
+
   it('plain text is left alone', () => {
     expect(highlightSegments('hello', 'text')).toEqual([{ text: 'hello' }]);
   });

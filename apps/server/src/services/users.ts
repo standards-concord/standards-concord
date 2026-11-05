@@ -47,9 +47,9 @@ export function findByProvider(provider: AuthProvider, subject: string): User | 
 }
 
 export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }) {
-  const existing =
-    findByProvider(p.provider, p.subject) ??
-    (p.email ? list<User>('users').find((u) => !u.simulated && u.email && u.email.toLowerCase() === p.email!.toLowerCase()) : undefined);
+  // Sign-in is by provider and subject only. Matching on email would let a new
+  // identity that merely shares an address take over an existing account.
+  const existing = findByProvider(p.provider, p.subject);
   if (existing) {
     if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
     existing.avatarUrl ??= p.avatarUrl;

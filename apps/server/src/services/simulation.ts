@@ -201,7 +201,7 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
   for (const f of Object.keys(FORMAT_INFO) as OutputFormat[]) {
     if (f === 'turtle') continue;
     try {
-      files[`ontology.${FORMAT_INFO[f].extension}`] = await serialize(stamped, f);
+      files[`ontology.${FORMAT_INFO[f].extension}`] = await serialize(stamped, f, { name: project.slug });
     } catch {
       /* format not available */
     }

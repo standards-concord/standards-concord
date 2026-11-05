@@ -217,7 +217,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   for (const format of Object.keys(FORMAT_INFO) as OutputFormat[]) {
     if (format === 'turtle') continue;
     try {
-      files[`ontology.${FORMAT_INFO[format].extension}`] = await serialize(stamped, format);
+      files[`ontology.${FORMAT_INFO[format].extension}`] = await serialize(stamped, format, { name: project.slug });
     } catch (err) {
       console.warn(`[release] could not serialise ${format}: ${(err as Error).message}`);
     }
