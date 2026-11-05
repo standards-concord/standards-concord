@@ -56,7 +56,7 @@ test.describe('feedback', () => {
 
     await page.getByRole('button', { name: /^Submit (what I’ve said so far|feedback)$/ }).last().click();
     await expect(page.getByRole('heading', { name: 'Thank you!' })).toBeVisible();
-    await page.getByRole('button', { name: 'Back to the hub' }).click();
+    await page.getByRole('link', { name: 'Back to the hub' }).click();
     await expect(page).toHaveURL(/\/$/);
   });
 
