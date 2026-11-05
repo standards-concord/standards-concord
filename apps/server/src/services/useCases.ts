@@ -60,8 +60,20 @@ export function canSee(u: UseCase, viewer?: User): boolean {
   return false;
 }
 
-/** Meetings are working group business: members see them, and so does whoever recorded one. */
-export const canSeeMeeting = (m: { ontologyId: string; createdBy?: string }, viewer?: User) => !!viewer && (isGroupMember(m.ontologyId, viewer) || m.createdBy === viewer.id);
+/** A call's audience: meetings are working group business, so members, and whoever recorded one. */
+export const inMeetingAudience = (m: { ontologyId: string; createdBy?: string }, viewer?: User) => !!viewer && (isGroupMember(m.ontologyId, viewer) || m.createdBy === viewer.id);
+
+type MeetingRecord = { ontologyId: string; createdBy?: string };
+let meetingRule: (m: MeetingRecord, viewer?: User) => boolean = inMeetingAudience;
+/**
+ * Set by services/meetings.ts to the whole rule (meetingView): the audience above, plus facilitators,
+ * less a call that is waiting for approval or was withdrawn, which only facilitators see.
+ */
+export const setMeetingRule = (rule: typeof meetingRule) => {
+  meetingRule = rule;
+};
+/** Whether a call exists for this viewer. Everything that shows or links a call, or what came from it, asks this. */
+export const canSeeMeeting = (m: MeetingRecord, viewer?: User) => meetingRule(m, viewer);
 
 /**
  * Called when a use case stops being public (made private or group-only,
@@ -680,7 +692,7 @@ export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
       ? { ...cr.origin, useCaseIds: cr.origin.useCaseIds.filter(ok) }
       : cr.origin.type === 'chat' && cr.origin.useCaseId && !ok(cr.origin.useCaseId)
         ? { ...cr.origin, useCaseId: undefined }
-        : cr.origin.type === 'meeting' && !canSeeMeeting(get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId) ?? { ontologyId: cr.ontologyId, createdBy: '' }, viewer)
+        : cr.origin.type === 'meeting' && !((m) => !!m && canSeeMeeting(m, viewer))(get<MeetingRecord>('meetings', cr.origin.meetingId))
           ? { type: 'meeting' as const, meetingId: '' }
           : cr.origin;
   return {

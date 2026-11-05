@@ -1347,3 +1347,48 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     expect(most).toBe(1);
   });
 });
+
+describe('merge review: calls waiting for approval, malformed snapshots', () => {
+  it('a use case links and quotes a call only for those the call exists for: not once it waits for approval again', async () => {
+    // A call is shown to the working group, but one waiting for approval only to facilitators. Use case pages used to
+    // check only the first rule, so members who can't facilitate still saw the link to a call waiting for approval.
+    const base = listDocs<{ id: string }>('meetings', demoId)[0];
+    const m = { ...structuredClone(base), id: `mtg_pending_${Math.random().toString(36).slice(2, 8)}`, title: 'Pending approval call' } as { id: string } & Record<string, unknown>;
+    put('meetings', m, demoId);
+    const author = await login('contributor', 'Pending Call Author');
+    const id = await useCaseVia(author, 'Pending call case', 'public');
+    put('useCases', { ...getUseCase(id), source: 'meeting', sourceRef: m.id, sourceLines: [0], links: [{ type: 'meeting', id: m.id, relation: 'related', at: clock.iso() }] }, demoId);
+    const reviewer = await login('reviewer', 'Pending Call Reviewer');
+    const steward = await login('steward', 'Pending Call Steward');
+    const seen = async (a: Awaited<ReturnType<typeof login>>) => (await a.get(`/api/use-cases/${id}`)).body as UseCase;
+    expect((await seen(reviewer)).sourceRef).toBe(m.id);
+    expect((await seen(reviewer)).links?.some((l) => l.id === m.id)).toBe(true);
+
+    put('meetings', { ...m, calendar: { approval: 'pending', start: clock.iso(), end: clock.iso(), uid: 'pending-again', key: 'k' } }, demoId);
+    const now = await seen(reviewer);
+    expect(now.sourceRef).toBeUndefined();
+    expect(now.sourceLines).toBeUndefined();
+    expect(now.links?.some((l) => l.id === m.id) ?? false).toBe(false);
+    expect(JSON.stringify(now)).not.toContain('Pending approval call');
+    expect((await reviewer.get(`/api/meetings/${m.id}`)).status).toBe(404);
+    // Facilitators still see it.
+    expect((await seen(steward)).sourceRef).toBe(m.id);
+  });
+
+  it('a release snapshot whose section lists its use cases wrongly is shown as not recorded, not as an error', async () => {
+    // Snapshot validation used to skip a section's useCaseIds, which the page then calls .some() on: a 500.
+    const project = findProject(demoId)!;
+    const snap = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'requirements.json');
+    const original = fs.readFileSync(snap, 'utf8');
+    try {
+      const good = JSON.parse(original);
+      fs.writeFileSync(snap, JSON.stringify({ ...good, document: { title: 'T', version: '1.0.0', sections: [{ id: 's1', heading: 'H', markdown: 'M', useCaseIds: 'uc_1' }] } }));
+      const res = await request(app).get(`/def/${project.slug}/1.0.0`);
+      expect(res.status).toBe(200);
+      expect(res.text).toContain('were not recorded when it was published');
+      expect(requirementsFor(project, JSON.parse(fs.readFileSync(snap, 'utf8'))).snapshotMissing).toBe(true);
+    } finally {
+      fs.writeFileSync(snap, original);
+    }
+  });
+});

@@ -207,7 +207,7 @@ export function validSnapshot(x: unknown): PublishedRequirements | undefined {
   const d = x.document;
   if (d !== undefined) {
     if (!isObj(d) || !isStr(d.title) || !isStr(d.version) || !['generatedAt', 'intro', 'markdown'].every((k) => optStr(d[k]))) return undefined;
-    if (d.sections !== undefined && !(Array.isArray(d.sections) && d.sections.every((sec) => isObj(sec) && isStr(sec.id) && isStr(sec.heading) && isStr(sec.markdown)))) return undefined;
+    if (d.sections !== undefined && !(Array.isArray(d.sections) && d.sections.every((sec) => isObj(sec) && isStr(sec.id) && isStr(sec.heading) && isStr(sec.markdown) && strList(sec.useCaseIds)))) return undefined;
     if (d.requirements !== undefined && !(Array.isArray(d.requirements) && d.requirements.every((r) => isObj(r) && isStr(r.id) && isStr(r.text) && isStr(r.status) && Array.isArray(r.useCaseIds) && r.useCaseIds.every(isStr) && strList(r.termIris)))) return undefined;
     if (d.unpublished !== undefined && !(isObj(d.unpublished) && typeof d.unpublished.group === 'number' && typeof d.unpublished.private === 'number')) return undefined;
   }

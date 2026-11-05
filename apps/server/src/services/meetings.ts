@@ -13,7 +13,7 @@ import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
 import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
 import { recall } from './recall.js';
-import { allUseCases, canSee, canSeeMeeting, createUseCase, getUseCase, refOf } from './useCases.js';
+import { allUseCases, canSee, createUseCase, getUseCase, inMeetingAudience, refOf, setMeetingRule } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
@@ -296,10 +296,12 @@ export const meetingFor = (m: Meeting, viewer?: User): Meeting => ({ ...m, useCa
  * (visibleMeeting). Its use cases are the ones the viewer may see.
  */
 export function meetingView(m: Meeting, viewer: User | undefined): Meeting | undefined {
-  if (!canSeeMeeting(m, viewer) && !canFacilitate(m, viewer)) return undefined;
+  if (!inMeetingAudience(m, viewer) && !canFacilitate(m, viewer)) return undefined;
   const v = visibleMeeting(m, viewer);
   return v && meetingFor(v, viewer);
 }
+// Use cases, change requests and activity show or link a call only to those it exists for.
+setMeetingRule((m, viewer) => !!viewer && (inMeetingAudience(m, viewer) || canFacilitate(m, viewer)) && !!visibleMeeting(m as Meeting, viewer));
 
 /**
  * Turn an analysed meeting into use cases shared with the working group, one per
