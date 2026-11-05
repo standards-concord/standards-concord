@@ -144,6 +144,8 @@ describe('change request lifecycle', () => {
     expect(res.status).toBe(201);
     expect(res.body.validation.passed).toBe(false);
     expect(res.body.validation.lint.map((l: { message: string }) => l.message).join('\n')).toMatch(/preferredPrefix must be a prefix name/);
+    // Nothing was reasoned over, so the report must not claim consistency (it used to say consistent: true).
+    expect(res.body.validation.reasoner).toMatchObject({ engine: 'none', available: false, checked: 'none', consistent: false });
     const jsonld = await editor.get(`/api/ontologies/${demoId}/source?format=jsonld`);
     expect(Object.keys(JSON.parse(jsonld.text)['@context'])).not.toContain('@import');
   });

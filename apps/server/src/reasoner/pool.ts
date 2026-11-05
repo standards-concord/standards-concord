@@ -6,7 +6,8 @@
  * to the structural checks, also in the worker and with their own limit
  * (REASONER_STRUCTURAL_TIMEOUT_MS), as the HermiT path did. Either way it is no verdict
  * (available: false), so validation fails closed. If the structural checks can't finish
- * either, the result says nothing was checked (engine 'none') and is not consistent.
+ * either, or a worker can't even start, the result says nothing was checked (engine 'none')
+ * and is not consistent. reasonInWorker never rejects.
  */
 import { Worker } from 'node:worker_threads';
 import type { OntologyGraph } from '@concord/core';
@@ -16,6 +17,13 @@ const TIMEOUT_MS = Number(process.env.REASONER_TIMEOUT_MS ?? 60_000);
 const STRUCTURAL_TIMEOUT_MS = Number(process.env.REASONER_STRUCTURAL_TIMEOUT_MS ?? 20_000);
 
 type Outcome = { result: ReasonerResult } | { error: string };
+/** Tests only: make a job never answer, have its worker exit, or have it report a failure. */
+export type TestFault = 'hang' | 'exit' | 'throw';
+/** Tests only: how workers are created, and how many have been. */
+export const poolTesting = {
+  createWorker: (url: URL): Worker => new Worker(url),
+  spawned: 0,
+};
 type Pending = { resolve: (o: Outcome) => void; worker: Worker };
 let worker: Worker | undefined;
 const pending = new Map<number, Pending>();
@@ -28,7 +36,8 @@ function failJobsOn(w: Worker, error: string) {
 }
 
 function spawn(): Worker {
-  const w = new Worker(new URL('./worker.boot.mjs', import.meta.url));
+  const w = poolTesting.createWorker(new URL('./worker.boot.mjs', import.meta.url));
+  poolTesting.spawned++;
   w.on('message', ({ id, result, error }: { id: number; result?: ReasonerResult; error?: string }) => {
     const p = pending.get(id);
     if (!p) return;
@@ -45,9 +54,14 @@ function spawn(): Worker {
 
 const duration = (ms: number) => (ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`);
 
-/** Runs one job in the worker; on timeout the worker is stopped and replaced. */
-function runIn(turtle: string, mode: 'owl' | 'structural' | 'hang', timeoutMs: number): Promise<Outcome> {
-  const w = (worker ??= spawn());
+/** Runs one job in the worker; on timeout the worker is stopped and replaced. Never rejects. */
+function runIn(turtle: string, mode: 'owl' | 'structural', timeoutMs: number, fault?: TestFault): Promise<Outcome> {
+  let w: Worker;
+  try {
+    w = worker ??= spawn();
+  } catch (e) {
+    return Promise.resolve({ error: `could not start: ${(e as Error).message ?? String(e)}` });
+  }
   const id = nextId++;
   return new Promise<Outcome>((resolve) => {
     const timer = setTimeout(() => {
@@ -60,19 +74,19 @@ function runIn(turtle: string, mode: 'owl' | 'structural' | 'hang', timeoutMs: n
     timer.unref();
     pending.set(id, { worker: w, resolve: (o) => { clearTimeout(timer); if (pending.size === 0) w.unref(); resolve(o); } });
     w.ref();
-    w.postMessage({ id, turtle, mode });
+    try {
+      w.postMessage({ id, turtle, mode, fault });
+    } catch (e) {
+      pending.get(id)?.resolve({ error: `could not be sent the job: ${(e as Error).message ?? String(e)}` });
+      pending.delete(id);
+    }
   });
 }
 
-async function run(graph: OntologyGraph, timeoutMs: number, structuralTimeoutMs: number, owlMode: 'owl' | 'hang'): Promise<ReasonerResult> {
-  const started = performance.now();
-  const elapsed = () => Math.round(performance.now() - started);
-  const turtle = await graph.toTurtle();
-  const owl = await runIn(turtle, owlMode, timeoutMs);
-  if ('result' in owl) return owl.result;
-  const error = `the OWL reasoner ${owl.error}`;
-  const structural = await runIn(turtle, 'structural', structuralTimeoutMs);
-  if ('result' in structural) return { ...structural.result, available: false, checked: 'none', error, durationMs: elapsed() };
+type Faults = { owl?: TestFault; structural?: TestFault };
+
+/** No verdict at all: nothing could be checked, so it is not consistent (callers fail closed). */
+function nothingChecked(error: string, durationMs: number): ReasonerResult {
   return {
     engine: 'none',
     available: false,
@@ -81,9 +95,18 @@ async function run(graph: OntologyGraph, timeoutMs: number, structuralTimeoutMs:
     unsatisfiable: [],
     inferredSubClassOf: [],
     explanation: 'Neither the OWL reasoner nor the structural checks could finish, so nothing is known about whether the ontology is consistent.',
-    error: `${error}; the structural checks ${structural.error}`,
-    durationMs: elapsed(),
+    error,
+    durationMs,
   };
+}
+
+async function run(turtle: string, timeoutMs: number, structuralTimeoutMs: number, faults: Faults, elapsed: () => number): Promise<ReasonerResult> {
+  const owl = await runIn(turtle, 'owl', timeoutMs, faults.owl);
+  if ('result' in owl) return owl.result;
+  const error = `the OWL reasoner ${owl.error}`;
+  const structural = await runIn(turtle, 'structural', structuralTimeoutMs, faults.structural);
+  if ('result' in structural) return { ...structural.result, available: false, checked: 'none', error, durationMs: elapsed() };
+  return nothingChecked(`${error}; the structural checks ${structural.error}`, elapsed());
 }
 
 /** OWL 2 DL reasoning (sparq) in the reasoner worker, with the structural fallback; queued so one job runs at a time. */
@@ -92,11 +115,21 @@ export function reasonInWorker(
   opts: {
     timeoutMs?: number;
     structuralTimeoutMs?: number;
-    /** Tests only: 'hang' makes the OWL job never answer, so a timeout is certain rather than a race. */
-    owlMode?: 'owl' | 'hang';
+    /** Tests only: faults to inject into the OWL job and the structural fallback, so each failure is certain rather than a race. */
+    faults?: Faults;
   } = {},
 ): Promise<ReasonerResult> {
-  const job = tail.then(() => run(graph, opts.timeoutMs ?? TIMEOUT_MS, opts.structuralTimeoutMs ?? STRUCTURAL_TIMEOUT_MS, opts.owlMode ?? 'owl'));
-  tail = job.catch(() => undefined);
+  const job = tail.then(async () => {
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
+    try {
+      const turtle = await graph.toTurtle();
+      return await run(turtle, opts.timeoutMs ?? TIMEOUT_MS, opts.structuralTimeoutMs ?? STRUCTURAL_TIMEOUT_MS, opts.faults ?? {}, elapsed);
+    } catch (e) {
+      // Nothing above should throw, but if it does the answer is still "nothing was checked", never a rejection a caller might paper over.
+      return nothingChecked(`the reasoner could not run: ${(e as Error).message ?? String(e)}`, elapsed());
+    }
+  });
+  tail = job;
   return job;
 }

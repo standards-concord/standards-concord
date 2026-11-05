@@ -246,7 +246,17 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
     cr.validation = {
       lint: [{ severity: 'error', code: 'change-not-applicable', message }],
       fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
-      reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
+      // Nothing was checked, so nothing is claimed: a "consistent" here was read as a real verdict.
+      reasoner: {
+        engine: 'none',
+        available: false,
+        checked: 'none',
+        consistent: false,
+        unsatisfiable: [],
+        inferredSubClassOf: [],
+        explanation: 'The change could not be validated, so the ontology was not checked.',
+        durationMs: 0,
+      },
       competencyQuestions: [],
       passed: false,
     };
