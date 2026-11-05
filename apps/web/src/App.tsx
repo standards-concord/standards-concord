@@ -9,6 +9,7 @@ import { LoginPage } from './pages/Login';
 import { HubPage } from './pages/Hub';
 import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
+import { WelcomePage } from './pages/Welcome';
 import { SettingsPage } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
 import { PrivacyPage } from './pages/Privacy';
@@ -79,6 +80,7 @@ function Routed() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />

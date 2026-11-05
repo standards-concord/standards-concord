@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.18.0',
+    version: '0.20.0',
     date: '2026-11-05',
     title: 'OWL reasoning with sparq, also in your browser',
     pr: 51,
@@ -76,6 +76,59 @@ export const APP_RELEASES: AppRelease[] = [
         roles: [],
         to: '{o}#health',
         ask: 'Did the in-browser check agree with the server, and was it clear what it did?',
+      },
+    ],
+  },
+  {
+    version: '0.19.0',
+    date: '2026-11-05',
+    title: 'Sign in with Solid',
+    pr: 66,
+    changes: [
+      {
+        id: 'solid-provider-picker',
+        type: 'feat',
+        title: 'Sign in with Solid, choosing your provider',
+        detail:
+          'The login page now says “Sign in with Solid”, with the Solid logo. It opens the same sign-in window as the other Solid Suite apps: pick solidcommunity.net or another provider, enter your WebID, or type your provider’s address.',
+        roles: [],
+        to: '/login',
+        ask: 'Could you find your provider, and was it clear what to choose if you don’t have a pod yet?',
+      },
+    ],
+  },
+  {
+    version: '0.18.0',
+    date: '2026-11-05',
+    title: 'A welcome page for testers, with two short videos',
+    pr: 60,
+    changes: [
+      {
+        id: 'welcome-page',
+        type: 'feat',
+        title: 'A welcome page that explains Concord and how to take part',
+        detail:
+          'The page to start from: what Concord is for, a narrated tour of the platform, a short video on how to take part and give feedback, and the four steps of the alpha. “Alpha tester? Start here” on the sign-in page leads to it.',
+        roles: [],
+        to: '/welcome',
+        ask: 'Did the welcome page and its videos tell you what you needed before you started?',
+      },
+    ],
+  },
+  {
+    version: '0.17.1',
+    date: '2026-11-05',
+    title: 'Every app on the Connect page has its logo',
+    pr: 65,
+    changes: [
+      {
+        id: 'connect-agent-logos',
+        type: 'fix',
+        title: 'Every app on the Connect page shows its own logo',
+        detail:
+          'ChatGPT, Claude Code, Codex, Cursor and VS Code now show their real logos beside Claude’s, instead of lettered placeholders, so you can spot your app at a glance.',
+        roles: ['agent'],
+        to: '/connect',
       },
     ],
   },
@@ -108,7 +161,7 @@ export const APP_RELEASES: AppRelease[] = [
         type: 'feat',
         title: 'Optionally post a short public summary of your feedback',
         detail:
-          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers. You can withdraw it from the thank-you screen right after sending, or email the alpha team later.',
         roles: [],
         to: '/feedback',
         ask: 'Was it clear what would be made public, and would you tick the box?',

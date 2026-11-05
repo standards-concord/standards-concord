@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
-import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
+import { claim, detached, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
 import { getUser, userForAgentToken } from './services/users.js';
@@ -274,12 +274,12 @@ async function fetchClientMetadata(clientId: string): Promise<CimdResult> {
  * A registered (not metadata-document) client. Upgrades a record older code wrote (see upgradeLegacy) as
  * it is read, so the stored client never carries a usable secret; clientAuth checks the hash instead of the SDK.
  */
-function registeredClient(clientId: string): ClientDoc | undefined {
-  const doc = get<ClientDoc>('oauthClients', clientId);
+async function registeredClient(clientId: string): Promise<ClientDoc | undefined> {
+  const doc = await get<ClientDoc>('oauthClients', clientId);
   if (!doc || !needsUpgrade(doc)) return doc;
-  const upgraded = transaction(() => {
-    const fresh = get<ClientDoc>('oauthClients', clientId);
-    return fresh && needsUpgrade(fresh) ? upgradeLegacy(fresh) : fresh;
+  const upgraded = await transaction(async () => {
+    const fresh = await get<ClientDoc>('oauthClients', clientId);
+    return fresh && needsUpgrade(fresh) ? await upgradeLegacy(fresh) : fresh;
   });
   scheduleScrub();
   return upgraded;
@@ -293,18 +293,18 @@ const needsUpgrade = (doc: ClientDoc) => doc.info.client_secret !== undefined ||
  * confidential client that registered without one. Hashing raises the owed scrub generation in the same
  * write, so the scrub can't be skipped. Call inside a transaction.
  */
-function upgradeLegacy(doc: ClientDoc): ClientDoc {
+async function upgradeLegacy(doc: ClientDoc): Promise<ClientDoc> { return transaction(async () => {
   const { client_secret, ...info } = doc.info;
   const secretHash = typeof client_secret === 'string' ? sha(client_secret) : doc.secretHash;
   if (info.token_endpoint_auth_method === undefined && secretHash !== undefined) info.token_endpoint_auth_method = 'client_secret_post';
   const upgraded = { ...doc, info: info as OAuthClientInformationFull, secretHash };
-  put<ClientDoc>('oauthClients', upgraded);
+  await put<ClientDoc>('oauthClients', upgraded);
   if (client_secret !== undefined) {
-    const state = scrubState();
-    put<ScrubState>('kv', { ...state, owed: state.owed + 1 });
+    const state = await scrubState();
+    await put<ScrubState>('kv', { ...state, owed: state.owed + 1 });
   }
   return upgraded;
-}
+}); }
 
 /**
  * Scrub bookkeeping, by generation: every secret hashed raises `owed`; a scrub that succeeds records the
@@ -317,23 +317,23 @@ interface ScrubState {
   scrubbed: number;
 }
 const SCRUB = 'oauth-secret-scrub-v2';
-const scrubState = (): ScrubState => get<ScrubState>('kv', SCRUB) ?? { id: SCRUB, owed: 1, scrubbed: 0 };
+const scrubState = async (): Promise<ScrubState> => await get<ScrubState>('kv', SCRUB) ?? { id: SCRUB, owed: 1, scrubbed: 0 };
 
 /** Scrub old copies of secrets from the database files if that is owed. True once nothing is owed. */
-export function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): boolean {
+export async function scrubIfOwed(scrub: () => boolean | Promise<boolean> = scrubFreeSpace): Promise<boolean> {
   // All of it, the bookkeeping included, gives up at once if another connection holds a lock: the work
   // stays owed and the scheduler tries again later, so it never stalls requests or throws out of a timer.
   try {
-    return withoutWaiting(() => {
-      const before = scrubState();
+    return await withoutWaiting(async () => {
+      const before = await scrubState();
       if (before.scrubbed >= before.owed) return true;
       const generation = before.owed;
-      if (!scrub()) return false;
-      transaction(() => {
-        const now = scrubState();
-        put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
+      if (!(await scrub())) return false;
+      await transaction(async () => {
+        const now = await scrubState();
+        await put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
       });
-      const after = scrubState();
+      const after = await scrubState();
       return after.scrubbed >= after.owed;
     });
   } catch {
@@ -349,16 +349,18 @@ let scrubTimer: NodeJS.Timeout | undefined;
 let scrubBackoff = 0;
 export function scheduleScrub(delayMs = 0) {
   if (scrubTimer) return;
-  scrubTimer = setTimeout(() => {
-    scrubTimer = undefined;
-    if (scrubIfOwed()) {
-      scrubBackoff = 0;
-      return;
-    }
-    scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
-    scheduleScrub(scrubBackoff);
-  }, delayMs);
+  // Detached: the timer inherits the caller's context, which may be a transaction long over by the time it fires.
+  scrubTimer = setTimeout(() => void detached(scrubAttempt).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`)), delayMs);
   scrubTimer.unref();
+}
+async function scrubAttempt() {
+  scrubTimer = undefined;
+  if (await scrubIfOwed()) {
+    scrubBackoff = 0;
+    return;
+  }
+  scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
+  scheduleScrub(scrubBackoff);
 }
 /** Tests only: whether a scrub attempt is waiting, and cancel it. */
 export const scrubRetryPending = () => scrubTimer !== undefined;
@@ -373,13 +375,13 @@ export function cancelScrubRetry() {
  * database file and its write-ahead log of old copies. A blocked scrub stays owed and is retried in the
  * background with backoff, and at the next start.
  */
-export function migrateClientSecrets(): { hashed: number; scrubbed: boolean } {
-  const hashed = transaction(() => {
-    const legacy = list<ClientDoc>('oauthClients').filter(needsUpgrade);
-    for (const d of legacy) upgradeLegacy(d);
+export async function migrateClientSecrets(): Promise<{ hashed: number; scrubbed: boolean }> {
+  const hashed = await transaction(async () => {
+    const legacy = (await list<ClientDoc>('oauthClients')).filter(needsUpgrade);
+    for (const d of legacy) await upgradeLegacy(d);
     return legacy.filter((d) => d.info.client_secret !== undefined).length;
   });
-  const scrubbed = scrubIfOwed();
+  const scrubbed = await scrubIfOwed();
   if (!scrubbed) scheduleScrub(30_000);
   return { hashed, scrubbed };
 }
@@ -391,23 +393,23 @@ const sameSecret = (given: string, hash: unknown) => isSecretHash(hash) && timin
 
 const clientsStore: OAuthRegisteredClientsStore = {
   async getClient(clientId) {
-    if (!clientId.startsWith('https://')) return registeredClient(clientId)?.info;
-    const doc = get<ClientDoc>('oauthClients', clientId);
+    if (!clientId.startsWith('https://')) return (await registeredClient(clientId))?.info;
+    const doc = await get<ClientDoc>('oauthClients', clientId);
     const age = doc?.fetchedAt && doc.checks === CIMD_CHECKS ? now() - doc.fetchedAt : Infinity;
     if (doc && age < CIMD_FRESH) return doc.info;
     const r = await fetchClientMetadata(clientId);
     if (r.kind === 'ok') {
-      put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now(), checks: CIMD_CHECKS });
+      await put<ClientDoc>('oauthClients', { id: clientId, info: r.info, fetchedAt: now(), checks: CIMD_CHECKS });
       return r.info;
     }
     if (r.kind === 'invalid') {
       // Removed or replaced with something we won't accept: forget the old one at once.
-      if (doc) remove('oauthClients', clientId);
+      if (doc) await remove('oauthClients', clientId);
       return undefined;
     }
     return doc && age < CIMD_FRESH + CIMD_STALE_GRACE ? doc.info : undefined;
   },
-  registerClient(client) {
+  async registerClient(client) {
     const method = client.token_endpoint_auth_method;
     if (method !== undefined && !AUTH_METHODS.includes(method))
       throw new InvalidClientMetadataError(`token_endpoint_auth_method ${method} is not supported; use none (with PKCE) or client_secret_post`);
@@ -419,7 +421,7 @@ const clientsStore: OAuthRegisteredClientsStore = {
     if (method === undefined) info.token_endpoint_auth_method = 'client_secret_post';
     if (info.token_endpoint_auth_method !== 'none' && !info.client_secret) throw new InvalidClientMetadataError('a confidential client needs a secret');
     const { client_secret, ...stored } = info;
-    put<ClientDoc>('oauthClients', { id: info.client_id, info: stored as OAuthClientInformationFull, secretHash: client_secret ? sha(client_secret) : undefined });
+    await put<ClientDoc>('oauthClients', { id: info.client_id, info: stored as OAuthClientInformationFull, secretHash: client_secret ? sha(client_secret) : undefined });
     return info;
   },
 };
@@ -430,22 +432,22 @@ export const clientName = (c: OAuthClientInformationFull) => c.client_name?.trim
 /* Tokens                                                                    */
 /* ------------------------------------------------------------------------ */
 
-function issueTokens(grant: GrantDoc): OAuthTokens {
+async function issueTokens(grant: GrantDoc): Promise<OAuthTokens> { return transaction(async () => {
   const access = secret('cna');
   const refresh = secret('cnr');
-  put<TokenDoc>('oauthTokens', { id: sha(access), grantId: grant.id, kind: 'access', expiresAt: now() + ACCESS_TTL }, grant.id);
-  put<TokenDoc>('oauthTokens', { id: sha(refresh), grantId: grant.id, kind: 'refresh', expiresAt: now() + REFRESH_TTL }, grant.id);
+  await put<TokenDoc>('oauthTokens', { id: sha(access), grantId: grant.id, kind: 'access', expiresAt: now() + ACCESS_TTL }, grant.id);
+  await put<TokenDoc>('oauthTokens', { id: sha(refresh), grantId: grant.id, kind: 'refresh', expiresAt: now() + REFRESH_TTL }, grant.id);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, refresh_token: refresh, scope: grant.scopes.join(' ') || undefined };
-}
+}); }
 
 /** Revoke a connection and every token in its family, all at once. Not for use inside another transaction. */
-function revokeGrant(grantId: string) {
-  transaction(() => revokeGrantNow(grantId));
+async function revokeGrant(grantId: string) {
+  await transaction(async () => await revokeGrantNow(grantId));
 }
-function revokeGrantNow(grantId: string) {
-  for (const t of list<TokenDoc>('oauthTokens', grantId)) remove('oauthTokens', t.id);
-  remove('oauthGrants', grantId);
-}
+async function revokeGrantNow(grantId: string) { return transaction(async () => {
+  for (const t of await list<TokenDoc>('oauthTokens', grantId)) await remove('oauthTokens', t.id);
+  await remove('oauthGrants', grantId);
+}); }
 
 /** Resource indicators must name exactly this server's MCP URL (a trailing slash is tolerated, fragments are not). */
 const sameResource = (expected: string, given: URL | string) => {
@@ -477,20 +479,20 @@ export const provider: OAuthServerProvider = {
       issuer: `${origin}/`,
       expiresAt: now() + REQUEST_TTL,
     };
-    put('oauthRequests', pending);
+    await put('oauthRequests', pending);
     // The consent page is part of the web app, so it shares the person's session and sign-in options.
     res.redirect(302, `${origin}/oauth/authorize?request=${encodeURIComponent(pending.id)}`);
   },
 
   async challengeForAuthorizationCode(client, code) {
-    const c = get<CodeDoc>('oauthCodes', sha(code));
+    const c = await get<CodeDoc>('oauthCodes', sha(code));
     if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired authorization code');
     return c.codeChallenge;
   },
 
   async exchangeAuthorizationCode(client, code, _verifier, redirectUri, resource) {
     // Codes are single use, whatever happens next: taking it deletes it, and only one caller can take it.
-    const c = take<CodeDoc>('oauthCodes', sha(code));
+    const c = await take<CodeDoc>('oauthCodes', sha(code));
     if (!c || c.clientId !== client.client_id || c.expiresAt < now()) throw new InvalidGrantError('Invalid or expired authorization code');
     if (redirectUri && redirectUri !== c.redirectUri) throw new InvalidGrantError('redirect_uri does not match the authorization request');
     if (resource && !sameResource(c.resource, resource)) throw new InvalidTargetError('resource does not match the authorization request');
@@ -504,9 +506,9 @@ export const provider: OAuthServerProvider = {
       resource: c.resource,
       createdAt: new Date().toISOString(),
     };
-    return transaction(() => {
-      put('oauthGrants', grant, c.userId);
-      return issueTokens(grant);
+    return await transaction(async () => {
+      await put('oauthGrants', grant, c.userId);
+      return await issueTokens(grant);
     });
   },
 
@@ -514,34 +516,34 @@ export const provider: OAuthServerProvider = {
     // One transaction (write lock taken before reading) covers checking, consuming, rotating and
     // revoking. Consuming is also a single conditional UPDATE, so of two refreshes racing with the
     // same token exactly one wins; the other is treated as a replay.
-    const outcome = transaction((): { tokens: OAuthTokens } | { error: Error } => {
-      const t = get<TokenDoc>('oauthTokens', sha(refreshToken));
-      const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
+    const outcome = await transaction(async (): Promise<{ tokens: OAuthTokens } | { error: Error }> => {
+      const t = await get<TokenDoc>('oauthTokens', sha(refreshToken));
+      const grant = t ? await get<GrantDoc>('oauthGrants', t.grantId) : undefined;
       if (!t || t.kind !== 'refresh' || !grant || grant.clientId !== client.client_id) return { error: new InvalidGrantError('Invalid or expired refresh token') };
-      const replay = () => {
+      const replay = async () => { return transaction(async () => {
         // A rotated refresh token came back: someone has a copy. Revoke the whole family (RFC 9700 §4.14.2).
-        revokeGrantNow(grant.id);
+        await revokeGrantNow(grant.id);
         return { error: new InvalidGrantError('This refresh token was already used. The connection has been revoked; sign in again.') };
-      };
-      if (t.consumedAt) return replay();
+      }); };
+      if (t.consumedAt) return await replay();
       if (t.expiresAt < now()) return { error: new InvalidGrantError('Invalid or expired refresh token') };
       if (!grant.resource) {
-        revokeGrantNow(grant.id);
+        await revokeGrantNow(grant.id);
         return { error: new InvalidGrantError('This connection predates audience-bound tokens; sign in again.') };
       }
       if (resource && !sameResource(grant.resource, resource)) return { error: new InvalidTargetError('resource does not match the original grant') };
       // Rotate, keeping the old token's hash (marked consumed) so a replay is recognised.
-      if (!claim<TokenDoc>('oauthTokens', t.id, 'consumedAt', now())) return replay();
-      return { tokens: issueTokens(grant) };
+      if (!await claim<TokenDoc>('oauthTokens', t.id, 'consumedAt', now())) return await replay();
+      return { tokens: await issueTokens(grant) };
     });
     if ('error' in outcome) throw outcome.error;
     return outcome.tokens;
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const t = get<TokenDoc>('oauthTokens', sha(token));
+    const t = await get<TokenDoc>('oauthTokens', sha(token));
     if (t?.kind === 'access') {
-      const grant = get<GrantDoc>('oauthGrants', t.grantId);
+      const grant = await get<GrantDoc>('oauthGrants', t.grantId);
       if (!grant || !grant.resource || t.expiresAt < now()) throw new InvalidTokenError('The access token has expired');
       return {
         token,
@@ -553,16 +555,16 @@ export const provider: OAuthServerProvider = {
       };
     }
     // Personal tokens from Settings, for agents that can't do a browser sign-in.
-    const personal = userForAgentToken(token);
+    const personal = await userForAgentToken(token);
     if (personal) return { token, clientId: 'personal-token', scopes: [], extra: { userId: personal.user.id, agentName: personal.tokenName } };
     throw new InvalidTokenError('Invalid access token');
   },
 
   async revokeToken(client, request: OAuthTokenRevocationRequest) {
-    const t = get<TokenDoc>('oauthTokens', sha(request.token));
-    const grant = t ? get<GrantDoc>('oauthGrants', t.grantId) : undefined;
+    const t = await get<TokenDoc>('oauthTokens', sha(request.token));
+    const grant = t ? await get<GrantDoc>('oauthGrants', t.grantId) : undefined;
     // Revoking either token ends the whole connection, as a person disconnecting would.
-    if (t && grant?.clientId === client.client_id) revokeGrant(grant.id);
+    if (t && grant?.clientId === client.client_id) await revokeGrant(grant.id);
   },
 };
 
@@ -570,14 +572,14 @@ export const provider: OAuthServerProvider = {
 /* Consent (called by the web app's /oauth/authorize page)                   */
 /* ------------------------------------------------------------------------ */
 
-function pendingRequest(id: string): PendingRequest {
-  const p = get<PendingRequest>('oauthRequests', id);
+async function pendingRequest(id: string): Promise<PendingRequest> {
+  const p = await get<PendingRequest>('oauthRequests', id);
   if (!p || p.expiresAt < now()) throw new HttpError(404, 'This sign-in link has expired. Go back to your agent and try connecting again.');
   return p;
 }
 
 export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
-  const p = pendingRequest(id);
+  const p = await pendingRequest(id);
   const client = await clientsStore.getClient(p.clientId);
   if (!client) throw new HttpError(404, 'The app asking for access is no longer registered. Try connecting again.');
   if (!isSafeRedirectUri(p.redirectUri)) throw new HttpError(400, 'This app’s return address is not allowed.');
@@ -597,8 +599,8 @@ export async function describeRequest(id: string): Promise<OAuthRequestInfo> {
   };
 }
 
-function finish(p: PendingRequest, params: Record<string, string>) {
-  remove('oauthRequests', p.id);
+async function finish(p: PendingRequest, params: Record<string, string>) {
+  await remove('oauthRequests', p.id);
   if (!isSafeRedirectUri(p.redirectUri)) throw new HttpError(400, 'This app’s return address is not allowed.');
   const url = new URL(p.redirectUri);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -607,10 +609,10 @@ function finish(p: PendingRequest, params: Record<string, string>) {
   return url.href;
 }
 
-export function approveRequest(id: string, user: User): { redirect: string } {
-  const p = pendingRequest(id);
+export async function approveRequest(id: string, user: User): Promise<{ redirect: string }> { return transaction(async () => {
+  const p = await pendingRequest(id);
   const code = secret('cnc');
-  put<CodeDoc>('oauthCodes', {
+  await put<CodeDoc>('oauthCodes', {
     id: sha(code),
     clientId: p.clientId,
     userId: user.id,
@@ -620,23 +622,23 @@ export function approveRequest(id: string, user: User): { redirect: string } {
     resource: p.resource,
     expiresAt: now() + CODE_TTL,
   });
-  return { redirect: finish(p, { code }) };
-}
+  return { redirect: await finish(p, { code }) };
+}); }
 
-export function denyRequest(id: string): { redirect: string } {
-  return { redirect: finish(pendingRequest(id), { error: 'access_denied', error_description: 'The person declined to connect this app' }) };
-}
+export async function denyRequest(id: string): Promise<{ redirect: string }> { return transaction(async () => {
+  return { redirect: await finish(await pendingRequest(id), { error: 'access_denied', error_description: 'The person declined to connect this app' }) };
+}); }
 
-export function listConnections(userId: string): OAuthConnection[] {
-  return list<GrantDoc>('oauthGrants', userId)
+export async function listConnections(userId: string): Promise<OAuthConnection[]> {
+  return (await list<GrantDoc>('oauthGrants', userId))
     .map((g) => ({ id: g.id, clientName: g.clientName, createdAt: g.createdAt, lastUsedAt: g.lastUsedAt }))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function disconnect(userId: string, grantId: string) {
-  const g = get<GrantDoc>('oauthGrants', grantId);
+export async function disconnect(userId: string, grantId: string) {
+  const g = await get<GrantDoc>('oauthGrants', grantId);
   if (!g || g.userId !== userId) throw new HttpError(404, 'Connection not found');
-  revokeGrant(grantId);
+  await revokeGrant(grantId);
 }
 
 /** Who an MCP request is acting for. Undefined means "send a 401 with the metadata link". */
@@ -649,13 +651,13 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
     // OAuth tokens are only good for the MCP URL they were issued for. Personal tokens are not audience-bound.
     const origin = publicOrigin(req);
     if (info.clientId !== 'personal-token' && (!origin || !info.resource || !sameResource(mcpUrlFor(origin), info.resource))) return { error: 'invalid' };
-    const user = getUser(String(info.extra?.userId));
+    const user = await getUser(String(info.extra?.userId));
     if (!user) return { error: 'invalid' };
     const grantId = info.extra?.grantId as string | undefined;
     if (grantId) {
-      const g = get<GrantDoc>('oauthGrants', grantId);
+      const g = await get<GrantDoc>('oauthGrants', grantId);
       // Record use at most once a minute.
-      if (g && (!g.lastUsedAt || Date.now() - Date.parse(g.lastUsedAt) > 60_000)) put('oauthGrants', { ...g, lastUsedAt: new Date().toISOString() }, g.userId);
+      if (g && (!g.lastUsedAt || Date.now() - Date.parse(g.lastUsedAt) > 60_000)) await put('oauthGrants', { ...g, lastUsedAt: new Date().toISOString() }, g.userId);
     }
     return { user, agentName: String(info.extra?.agentName ?? 'Agent') };
   } catch {
@@ -722,14 +724,14 @@ function routerFor(origin: string): Router {
   // is refused rather than ignored: client assertions, HTTP Basic, or a secret from a public client.
   // Registered clients' secrets are stored hashed and compared in constant time here; the stored client has
   // no client_secret, so the SDK's own check (plain string comparison) never runs.
-  const clientAuth = (req: Request, res: Response, next: NextFunction) => {
+  const clientAuth = async (req: Request, res: Response, next: NextFunction) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const refuse = (why: string) => res.status(401).json({ error: 'invalid_client', error_description: why });
     if (body.client_assertion !== undefined || body.client_assertion_type !== undefined)
       return refuse('Client assertions (private_key_jwt) are not supported. Authenticate with none (PKCE) or client_secret_post.');
     if (req.headers.authorization !== undefined) return refuse('HTTP Basic client authentication is not supported. Send client_secret in the request body, or nothing for a public client.');
     if (typeof body.client_id !== 'string') return next(); // the SDK answers invalid_request
-    const doc = body.client_id.startsWith('https://') ? undefined : registeredClient(body.client_id);
+    const doc = body.client_id.startsWith('https://') ? undefined : await registeredClient(body.client_id);
     const given = body.client_secret;
     // Whether a secret is needed comes from the registered method, never from whether a hash happens to be
     // there: a confidential client whose stored hash is missing or damaged fails closed.

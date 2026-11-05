@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lineDiff } from '../lib/terminal.ts';
 import { vtt } from '../lib/mux.ts';
-import { cuesFor, fillMinutes, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap } from '../lib/narration.ts';
+import { cuesFor, extractMarks, fillMinutes, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap, wordTime } from '../lib/narration.ts';
 import { actions } from '../scenes.ts';
 
 describe('narration parser', () => {
@@ -41,7 +41,7 @@ Second paragraph, cleared once spoken.
     expect(b.requires).toEqual(['forks']);
     expect(b.unless).toEqual(['shaclc']);
     // Actions with no paragraph become one silent step.
-    expect(b.steps).toEqual([{ text: '', actions: [{ name: 'open-app', args: [] }, { name: 'show-app-code', args: [] }], after: [], pause: 0 }]);
+    expect(b.steps).toEqual([{ text: '', actions: [{ name: 'open-app', args: [] }, { name: 'show-app-code', args: [] }], after: [], marks: [], pause: 0 }]);
   });
 
   it('keeps a paragraph with no directive as narration over the current screen', () => {
@@ -74,18 +74,65 @@ Second paragraph, cleared once spoken.
   });
 });
 
-describe('the real script', () => {
-  const n = parseNarration(readFileSync(path.join(import.meta.dirname, '..', 'narration.md'), 'utf8'));
+describe.each(['narration.md', 'feedback.md'])('the real script %s', (file) => {
+  const n = parseNarration(readFileSync(path.join(import.meta.dirname, '..', file), 'utf8'));
 
   it('only uses actions that scenes.ts defines', () => {
-    const used = n.scenes.flatMap((s) => s.steps.flatMap((st) => [...st.actions, ...st.after].map((a) => a.name)));
+    const used = n.scenes.flatMap((s) => s.steps.flatMap((st) => [...st.actions, ...st.after, ...st.marks.map((m) => m.action)].map((a) => a.name)));
     expect(used.filter((a) => !actions[a])).toEqual([]);
   });
 
   it('has narration in every scene', () => {
     for (const s of n.scenes) expect(s.steps.some((st) => st.text), s.id).toBe(true);
   });
+
+  it('never speaks or captions a timing mark', () => {
+    for (const s of n.scenes) for (const st of s.steps) expect(st.text).not.toMatch(/\{@/);
+  });
 });
+
+describe('timing marks', () => {
+  it('leaves the words exactly as they would be without the marks', () => {
+    // The voice cache is keyed by the words, so a mark must never change them.
+    const plainText = 'Next, press Go to open the page, and tick each task off.';
+    const marked = extractMarks('Next, {@point-go} press Go to open the page, and {@tick a b} tick each task off.');
+    expect(marked.text).toBe(plainText);
+    expect(speechMap(marked.text, {}).speech).toBe(speechMap(plainText, {}).speech);
+    expect(marked.marks).toEqual([
+      { word: 1, action: { name: 'point-go', args: [] } },
+      { word: 8, action: { name: 'tick', args: ['a', 'b'] } },
+    ]);
+    expect(speechMap(marked.text, {}).words[8]).toBe('tick');
+  });
+
+  it('counts words in the text as shown, after Markdown is stripped', () => {
+    const m = extractMarks('Open **the Classes view** and {@x} press [Go](https://example.org) now.');
+    expect(plainWords(m.text)[m.marks[0].word]).toBe('press');
+  });
+
+  it('refuses a mark with no word after it', () => {
+    expect(() => extractMarks('Press Submit. {@submit}')).toThrow(/must come before a word/);
+  });
+
+  it('parses marks into steps alongside [do:] actions', () => {
+    const n = parseNarration('## One {#one}\n\n[do: open]\nFirst words, then {@click-it} click it.\n');
+    expect(n.scenes[0].steps[0]).toMatchObject({ text: 'First words, then click it.', actions: [{ name: 'open' }], marks: [{ word: 3, action: { name: 'click-it' } }] });
+  });
+
+  it('times a mark from the voice’s own character timestamps', () => {
+    // "Say SHACLC now": the lexicon respells SHACLC, so the word starts are speech offsets.
+    const text = 'Say SHACLC now';
+    const lexicon = { SHACLC: 'shackle see' };
+    const speech = speechMap(text, lexicon).speech;
+    const charStarts = [...speech].map((_, i) => i * 0.1);
+    expect(wordTime(text, lexicon, 3, 2, charStarts)).toBeCloseTo(speech.indexOf('now') * 0.1);
+    // Without timestamps, an estimate from the share of characters.
+    expect(wordTime(text, lexicon, 3, 2)).toBeCloseTo((speech.indexOf('now') / speech.length) * 3);
+    expect(wordTime(text, lexicon, 3, 9)).toBe(3);
+  });
+});
+
+const plainWords = (t: string) => speechMap(t, {}).words;
 
 describe('conditional paragraphs', () => {
   const doc = `## Intro {#intro}

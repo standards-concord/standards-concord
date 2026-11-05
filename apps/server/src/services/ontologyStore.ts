@@ -103,8 +103,11 @@ export const ontologyStore = {
     files: Record<string, string>,
     notes: string,
     author: CommitAuthor,
-    /** Runs after the last await, just before anything is written: throwing writes nothing. */
-    beforeWrite?: () => void,
+    /**
+     * Runs after the last await, just before anything is written: throwing writes nothing. Typed to return
+     * undefined, not void, so an async function (whose throw would come too late to stop the write) is refused.
+     */
+    beforeWrite?: () => undefined,
   ): Promise<string> {
     const dir = repoDir(project);
     const relDir = path.join(dir, 'releases', version);

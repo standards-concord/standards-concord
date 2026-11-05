@@ -14,41 +14,41 @@ import type {
   User,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import { template } from './governance.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getUser, logActivity } from './users.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 
-export const getProject = (id: string) => mustGet<OntologyProject>('ontologies', id);
-export const findProject = (idOrSlug: string) =>
-  get<OntologyProject>('ontologies', idOrSlug) ?? list<OntologyProject>('ontologies').find((o) => o.slug === idOrSlug);
-export const mustFindProject = (idOrSlug: string) => {
-  const p = findProject(idOrSlug);
+export const getProject = async (id: string) => await mustGet<OntologyProject>('ontologies', id);
+export const findProject = async (idOrSlug: string) =>
+  await get<OntologyProject>('ontologies', idOrSlug) ?? (await list<OntologyProject>('ontologies')).find((o) => o.slug === idOrSlug);
+export const mustFindProject = async (idOrSlug: string) => {
+  const p = await findProject(idOrSlug);
   if (!p) throw new HttpError(404, `Ontology ${idOrSlug} not found`);
   return p;
 };
 
-export const members = (ontologyId: string) => list<Membership>('memberships', ontologyId);
-export const rolesFor = (ontologyId: string, userId: string | undefined): Role[] =>
-  userId ? (get<Membership>('memberships', `${ontologyId}:${userId}`)?.roles ?? []) : [];
+export const members = async (ontologyId: string) => await list<Membership>('memberships', ontologyId);
+export const rolesFor = async (ontologyId: string, userId: string | undefined): Promise<Role[]> =>
+  userId ? ((await get<Membership>('memberships', `${ontologyId}:${userId}`))?.roles ?? []) : [];
 
-export function setRoles(ontologyId: string, userId: string, roles: Role[]): Membership {
+export async function setRoles(ontologyId: string, userId: string, roles: Role[]): Promise<Membership> { return transaction(async () => {
   const id = `${ontologyId}:${userId}`;
-  const existing = get<Membership & { id: string }>('memberships', id);
+  const existing = await get<Membership & { id: string }>('memberships', id);
   const m = { id, ontologyId, userId, roles: [...new Set(roles)], addedAt: existing?.addedAt ?? clock.iso() };
-  put('memberships', m, ontologyId);
+  await put('memberships', m, ontologyId);
   return m;
-}
-export function removeMember(ontologyId: string, userId: string) {
-  remove('memberships', `${ontologyId}:${userId}`);
+}); }
+export async function removeMember(ontologyId: string, userId: string) {
+  await remove('memberships', `${ontologyId}:${userId}`);
 }
 
-export function requireRole(ontologyId: string, user: User | undefined, roles: Role[], action: string) {
+export async function requireRole(ontologyId: string, user: User | undefined, roles: Role[], action: string) {
   if (!user) throw new HttpError(401, 'Sign in first');
   if (user.isPlatformAdmin) return;
-  const have = rolesFor(ontologyId, user.id);
+  const have = await rolesFor(ontologyId, user.id);
   if (!have.some((r) => roles.includes(r))) throw new HttpError(403, `Only ${roles.join(' / ')} can ${action}`);
 }
 
@@ -68,7 +68,7 @@ export async function createProject(
   },
   owner: User,
 ): Promise<OntologyProject> {
-  const slug = input.slug ?? uniqueSlug(slugify(input.title));
+  const slug = input.slug ?? await uniqueSlug(slugify(input.title));
   const prefix = input.prefix.replace(/[^A-Za-z0-9_-]/g, '').toLowerCase() || 'ex';
   let graph: Graph;
   if (input.seedTurtle) graph = await OntologyGraph.fromTurtle(input.seedTurtle);
@@ -106,30 +106,58 @@ export async function createProject(
   };
   const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: CC BY 4.0\n\nManaged on the Open Data Institute with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
   await ontologyStore.init(project, await graph.toTurtle(), readme);
-  put('ontologies', project);
-  setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
-  logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
+  await put('ontologies', project);
+  await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
+  await logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
   return project;
 }
 
-function uniqueSlug(base: string) {
-  const taken = new Set(list<OntologyProject>('ontologies').map((o) => o.slug));
+async function uniqueSlug(base: string) {
+  const taken = new Set((await list<OntologyProject>('ontologies')).map((o) => o.slug));
   let s = base;
   for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
   return s;
 }
 
-export function updateProject(p: OntologyProject): OntologyProject {
+export async function updateProject(p: OntologyProject): Promise<OntologyProject> {
   p.updatedAt = clock.iso();
-  return put('ontologies', p);
+  return await put('ontologies', p);
 }
 
-export function setGovernance(p: OntologyProject, policy: GovernancePolicy, actor: User) {
+/**
+ * Hand ownership to another person, or open the vote or ODI approval the policy asks for. The check and every
+ * update happen in one transaction, reading the project afresh: two transfers started at once by the same owner
+ * could otherwise both pass the check and leave two owners in a single-owner project.
+ */
+export async function transferOwnership(ontologyId: string, user: User, toUserId: string) { return transaction(async () => {
+  const p = await mustGet<OntologyProject>('ontologies', ontologyId);
+  await requireRole(p.id, user, ['owner'], 'transfer ownership');
+  const to = await getUser(toUserId);
+  if (!to) throw new HttpError(404, 'No such user');
+  const transfer = p.governance.ownership.transfer;
+  if (transfer === 'owner-decides' || user.isPlatformAdmin) {
+    const keepGroup = p.governance.ownership.model === 'group';
+    p.ownerIds = keepGroup ? [...new Set([...p.ownerIds, to.id])] : [to.id];
+    // A single owner: demote whoever holds ownership now, not just the caller. A platform admin can transfer
+    // without being an owner, and two such transfers at once would otherwise each leave their recipient an owner.
+    if (!keepGroup)
+      for (const m of await members(p.id))
+        if (m.userId !== to.id && m.roles.includes('owner')) await setRoles(p.id, m.userId, m.roles.filter((x) => x !== 'owner'));
+    await setRoles(p.id, to.id, [...await rolesFor(p.id, to.id), 'owner']);
+    await updateProject(p);
+    return { status: 'transferred' as const };
+  }
+  const id = newId('xfer');
+  await put('kv', { id, kind: 'ownership-transfer', ontologyId: p.id, from: user.id, to: to.id, needs: transfer, at: clock.iso() });
+  return { status: transfer === 'member-vote' ? ('vote-opened' as const) : ('awaiting-odi-approval' as const), voteId: id };
+}); }
+
+export async function setGovernance(p: OntologyProject, policy: GovernancePolicy, actor: User) { return transaction(async () => {
   p.governance = policy;
-  updateProject(p);
-  logActivity({ ontologyId: p.id, actorId: actor.id, type: 'governance.updated', message: `changed the governance policy to “${policy.name}”`, link: `/o/${p.id}/governance` });
+  await updateProject(p);
+  await logActivity({ ontologyId: p.id, actorId: actor.id, type: 'governance.updated', message: `changed the governance policy to “${policy.name}”`, link: `/o/${p.id}/governance` });
   return p;
-}
+}); }
 
 /* ------------------------------------------------------------------------ */
 /* Validation cache                                                          */
@@ -138,8 +166,8 @@ export function setGovernance(p: OntologyProject, policy: GovernancePolicy, acto
 const validationCache = new Map<string, Promise<ValidationReport>>();
 
 /** Competency questions from use cases that have SPARQL tests attached. */
-export function competencyTests(ontologyId: string) {
-  return list<UseCase>('useCases', ontologyId)
+export async function competencyTests(ontologyId: string) {
+  return (await list<UseCase>('useCases', ontologyId))
     .filter((u) => u.status !== 'archived')
     .flatMap((u) => u.competencyQuestions)
     .filter((q) => q.sparql)
@@ -164,7 +192,7 @@ export async function workingValidation(p: OntologyProject): Promise<ValidationR
   const graph = await ontologyStore.working(p);
   // A commit landed while the graph loaded: start again so the revision names this graph.
   if (ontologyStore.head(p) !== revision) return workingValidation(p);
-  const cqs = competencyTests(p.id);
+  const cqs = await competencyTests(p.id);
   return { ...(await validateGraph(`${p.slug}@${revision}:${cqs.length}`, graph, cqs)), revision };
 }
 
@@ -175,7 +203,7 @@ export async function workingValidation(p: OntologyProject): Promise<ValidationR
  */
 export async function summary(p: OntologyProject, { withHealth = true, withGraph = true }: { withHealth?: boolean; withGraph?: boolean } = {}): Promise<OntologySummary> {
   const view = withGraph ? (await ontologyStore.working(p)).view() : undefined;
-  const crs = list<ChangeRequest>('changeRequests', p.id);
+  const crs = await list<ChangeRequest>('changeRequests', p.id);
   let health: OntologySummary['health'];
   if (withGraph && withHealth) {
     try {
@@ -211,17 +239,17 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
         properties: view.objectProperties.length + view.datatypeProperties.length,
         individuals: view.individuals.length,
       }),
-      useCases: list<UseCase>('useCases', p.id).length,
+      useCases: (await list<UseCase>('useCases', p.id)).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
-      releases: list<Release>('releases', p.id).filter((r) => r.status === 'published').length,
-      members: members(p.id).length,
+      releases: (await list<Release>('releases', p.id)).filter((r) => r.status === 'published').length,
+      members: (await members(p.id)).length,
     },
     health,
   };
 }
 
-export function membersWithUsers(ontologyId: string) {
-  return members(ontologyId)
-    .map((m) => ({ ...m, user: getUser(m.userId)! }))
+export async function membersWithUsers(ontologyId: string) {
+  return (await Promise.all((await members(ontologyId))
+    .map(async (m) => ({ ...m, user: (await getUser(m.userId))! }))))
     .filter((m) => m.user);
 }
