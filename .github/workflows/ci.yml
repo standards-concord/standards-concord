@@ -1,41 +1,71 @@
 name: CI
 
+# Minutes are metered on a private repo, so CI runs only what a change needs:
+#
+# - Branches are tested through their pull request, not on every push as well
+#   (that used to run everything twice). main is tested on every push.
+# - Draft pull requests get the quick checks (typecheck, unit tests, build). The browser
+#   tests and the walkthrough check run once the PR is marked ready for review, on every
+#   push after that, and on main. Mark a PR ready before you merge it.
+# - Changes that only touch docs, Markdown or deploy scripts don't run CI at all.
 on:
   push:
-    branches: ['**']
+    branches: [main]
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!deploy/**'
+      - '!**/*.md'
+      # The walkthrough reads its script and README from Markdown.
+      - 'walkthrough/**'
+      - '!.github/workflows/e2e-live.yml'
+      - '!.github/workflows/mcp-registry.yml'
+      - '!.github/workflows/walkthrough.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!deploy/**'
+      - '!**/*.md'
+      - 'walkthrough/**'
+      - '!.github/workflows/e2e-live.yml'
+      - '!.github/workflows/mcp-registry.yml'
+      - '!.github/workflows/walkthrough.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Branches cancel superseded runs. main never does: a run that is building the
-# backend image finishes, and newer main pushes queue behind it (GitHub keeps the
-# newest pending one), so the latest main commit always reaches the server and
-# an older image never overwrites a newer one.
+# A newer push to a pull request cancels the run it supersedes. main never cancels: a
+# run that is building the backend image finishes, and newer main pushes queue behind
+# it (GitHub keeps the newest pending one), so the latest main commit always reaches
+# the server and an older image never overwrites a newer one.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+      - uses: ./.github/actions/setup
       # HermiT (full OWL DL reasoning) runs on Java through owlready2.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
-      - uses: actions/setup-python@v5
+      - id: python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pnpm install --frozen-lockfile
+      # owlready2 (and LinkML for the tests) took most of a minute to install each run.
+      - uses: actions/cache@v4
+        with:
+          path: toolkit/.venv
+          key: toolkit-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-linkml-${{ hashFiles('toolkit/requirements.txt', 'toolkit/setup.sh') }}
       - run: ./toolkit/setup.sh --linkml
       - name: Typecheck
         run: pnpm -r typecheck
@@ -47,33 +77,42 @@ jobs:
         run: node scripts/public-url.mjs --check
       - name: Check the plugin files match their schemas
         run: node scripts/validate-listings.mjs
-      - uses: actions/setup-go@v5
+      - name: Check every link to the repo uses the same owner
+        run: node scripts/move-repo.mjs --check
+      # Building the publisher from source took over a minute; the pinned binary is cached.
+      - id: publisher
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/mcp-publisher
+          key: mcp-publisher-${{ runner.os }}-v1.8.6
+      - if: steps.publisher.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: false
-      - name: Check the MCP Registry entry (pinned publisher, as the publish workflow uses)
+      - if: steps.publisher.outputs.cache-hit != 'true'
+        name: Build the MCP Registry publisher (pinned, as the publish workflow uses)
         run: |
-          go install github.com/modelcontextprotocol/registry/cmd/publisher@v1.8.6
-          "$(go env GOPATH)/bin/publisher" validate
+          GOBIN="$HOME/.local/bin" go install github.com/modelcontextprotocol/registry/cmd/publisher@v1.8.6
+          mv "$HOME/.local/bin/publisher" "$HOME/.local/bin/mcp-publisher"
+      - name: Check the MCP Registry entry
+        run: ~/.local/bin/mcp-publisher validate
 
   # Browser tests: the alpha walkthrough and every page of the app, against both the
   # Vite dev server (what `pnpm dev` runs) and the production build (what Vercel serves).
   e2e:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         mode: [dev, preview]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
+          playwright: 'true'
       - name: Build the web app
         if: matrix.mode == 'preview'
         run: pnpm --filter @concord/web build
@@ -88,24 +127,20 @@ jobs:
           path: |
             playwright-report
             test-results
-          retention-days: 14
+          retention-days: 7
 
   # The narrated walkthrough video: every step of its script must still work against
   # this commit's app, so a renamed button fails here rather than in the next recording.
   walkthrough:
-    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Install Chromium and ffmpeg
-        run: |
-          pnpm exec playwright install --with-deps chromium
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          playwright: 'true'
+          apt: ffmpeg
       # Includes the browser tests of the network allowlist, which the general test job
       # (no browser installed) skips.
       - name: Walkthrough unit tests
@@ -119,14 +154,16 @@ jobs:
         with:
           name: walkthrough-check
           path: walkthrough/out/report.json
-          retention-days: 14
+          retention-days: 7
 
-  # Builds the backend image the AWS server runs. The server pulls a new image every
-  # five minutes, so merging to main is the deploy. Branches get their own tag.
+  # Builds the backend image the server runs. The server pulls a new image every five
+  # minutes, so merging to main is the deploy. Only main builds an image (and a manual
+  # run, which tags the image with its branch).
   image:
     needs: [test, e2e]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write

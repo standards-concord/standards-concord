@@ -45,19 +45,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      # HermiT, so the reasoner shows as passing in the video.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
 
       # Inputs are only ever read from the environment, never pasted into the script.
       - name: Choose the voice
@@ -95,14 +82,29 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - if: steps.voice.outputs.ready == 'true'
-        run: pnpm install --frozen-lockfile
+        uses: ./.github/actions/setup
+        with:
+          playwright: 'true'
+          apt: ffmpeg fonts-inter fonts-jetbrains-mono
+      # HermiT, so the reasoner shows as passing in the video.
+      - if: steps.voice.outputs.ready == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - id: python
+        if: steps.voice.outputs.ready == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # owlready2 (and LinkML for the tests) took most of a minute to install each run.
+      - if: steps.voice.outputs.ready == 'true'
+        uses: actions/cache@v4
+        with:
+          path: toolkit/.venv
+          key: toolkit-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('toolkit/requirements.txt', 'toolkit/setup.sh') }}
       - if: steps.voice.outputs.ready == 'true'
         run: ./toolkit/setup.sh
-      - name: Install Chromium, ffmpeg and fonts
-        if: steps.voice.outputs.ready == 'true'
-        run: |
-          pnpm exec playwright install --with-deps chromium
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-inter fonts-jetbrains-mono
 
       # Approved narration is kept with each release, so the next release re-voices only
       # the paragraphs whose words changed, even after the Actions cache has expired.
