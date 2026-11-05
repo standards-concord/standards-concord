@@ -20,7 +20,7 @@ async function solidSignIn(page: Page, account: Account, opts: { provider?: stri
   const picker = page.getByRole('dialog', { name: 'Sign in with Solid' });
   if (opts.provider) {
     await picker.getByRole('button', { name: 'Other provider' }).click();
-    await picker.getByRole('textbox', { name: 'Provider address' }).fill(opts.provider);
+    await picker.getByLabel('Provider address').fill(opts.provider);
     await picker.getByRole('form', { name: 'Sign in with another provider' }).getByRole('button', { name: 'Continue' }).click();
   } else {
     await picker.getByRole('textbox', { name: 'WebID' }).fill(account.webId);
