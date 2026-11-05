@@ -3,7 +3,7 @@
 Concord shows other projects' logos in two places, only to name the thing a button connects to:
 
 - **Connect your agent** (`apps/web/src/components/AgentLogos.tsx`): Claude, ChatGPT, Claude Code, Codex, Cursor and VS Code.
-- **Solid** (`SolidIcon` in `apps/web/src/components/badges.tsx`), for signing in with Solid and in Settings.
+- **Solid** (`SolidIcon` in `apps/web/src/components/badges.tsx`): the Solid row in Settings' sign-in providers. The login page's Solid button will use it too.
 
 | Mark | Path data from | Owner's guidelines |
 | --- | --- | --- |

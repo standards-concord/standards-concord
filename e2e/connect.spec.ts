@@ -103,19 +103,27 @@ test.describe('Connect page', () => {
         const markup = (await logo.innerHTML()).replace(/id="[^"]*"|url\(#[^)]*\)/g, '');
         expect(seen.has(markup), `${name} has a logo of its own`).toBe(false);
         seen.add(markup);
-        // Some solid colour in the logo stands out from the button behind it (a black mark on a dark page would vanish).
-        const { fills, background } = await logo.evaluate((svg) => {
-          let el: Element | null = svg.parentElement;
-          let bg = 'rgba(0, 0, 0, 0)';
-          while (el) {
-            bg = getComputedStyle(el).backgroundColor;
-            if (!/, 0\)$/.test(bg) && bg !== 'transparent') break;
-            el = el.parentElement;
+        // The logo as actually painted stands out from the button behind it: a black mark on a dark page, or a
+        // broken gradient or mask, would leave the box empty. Count the screenshot's pixels that contrast with it.
+        const background = await logo.evaluate((svg) => {
+          for (let el = svg.parentElement; el; el = el.parentElement) {
+            const bg = getComputedStyle(el).backgroundColor;
+            if (!/, 0\)$/.test(bg) && bg !== 'transparent') return bg;
           }
-          return { fills: [...svg.querySelectorAll('path')].map((p) => getComputedStyle(p).fill).filter((f) => f.startsWith('rgb')), background: bg };
+          return 'rgb(255, 255, 255)';
         });
-        const rgb = (c: string) => c.match(/[\d.]+/g)!.slice(0, 3).map(Number);
-        if (fills.length) expect(Math.max(...fills.map((f) => contrast(rgb(f), rgb(background)))), `${name} logo contrast on ${background}`).toBeGreaterThan(1.5);
+        const png = (await logo.screenshot()).toString('base64');
+        const pixels = await page.evaluate(async (data) => {
+          const img = await createImageBitmap(await (await fetch(`data:image/png;base64,${data}`)).blob());
+          const canvas = new OffscreenCanvas(img.width, img.height);
+          const ctx = canvas.getContext('2d')!;
+          ctx.drawImage(img, 0, 0);
+          return Array.from(ctx.getImageData(0, 0, img.width, img.height).data);
+        }, png);
+        const bg = background.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+        let inked = 0;
+        for (let p = 0; p < pixels.length; p += 4) if (contrast(pixels.slice(p, p + 3), bg) > 1.5) inked++;
+        expect(inked / (pixels.length / 4), `${name} logo stands out on ${background}`).toBeGreaterThan(0.15);
       }
     });
   }
