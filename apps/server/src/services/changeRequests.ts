@@ -118,7 +118,7 @@ export function updateCR(cr: ChangeRequest, fn: (cr: ChangeRequest) => unknown, 
 }
 
 const RANK = { patch: 0, minor: 1, major: 2 } as const;
-const needsConfirmation = (cr: ChangeRequest) => !!cr.classification?.reasons.some((r) => r.rule === 'definition-reworded');
+const needsConfirmation = (cr: ChangeRequest) => !!cr.classification?.reasons?.some((r) => r.rule === 'definition-reworded');
 
 function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
   if (cr.status === status) return;
