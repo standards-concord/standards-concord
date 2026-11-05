@@ -60,6 +60,7 @@ const { values: argv } = parseArgs({
     'no-shims': { type: 'boolean' },
     'list-actions': { type: 'boolean' },
     'voice-only': { type: 'boolean' },
+    'voice-budget': { type: 'string' },
     headed: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -73,6 +74,15 @@ if (argv['list-actions']) {
   console.log(Object.keys(actions).sort().join('\n'));
   process.exit(0);
 }
+
+/** Most characters a paid voice may be sent in this run; unset or 0 means no limit. */
+const VOICE_BUDGET = (() => {
+  const raw = argv['voice-budget'] ?? process.env.VOICE_CHAR_BUDGET;
+  if (raw === undefined || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`The voice budget must be a whole number of characters (got "${raw}")`);
+  return n || undefined;
+})();
 
 // A release video must be exactly what the script claims, or nothing at all.
 if (argv.publish) {
@@ -231,10 +241,13 @@ async function main() {
     const clips = new Map<object, { file: string; duration: number; charStarts?: number[] }>();
     const say = (text: string) => speechMap(text, lexicon).speech;
     if (!argv.check) {
-      log(`Voicing ${spoken.length} paragraphs…`);
+      const reqs = spoken.map((x, i) => ({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) }));
+      // Paid voices have limited characters: refuse up front rather than run out halfway.
+      const cost = voice.checkBudget(reqs, VOICE_BUDGET);
+      log(`Voicing ${spoken.length} paragraphs${voice.paid ? ` (${cost.toLocaleString('en')} new characters${VOICE_BUDGET ? ` of a ${VOICE_BUDGET.toLocaleString('en')} budget` : ''})` : ''}…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
-        const c = await voice.synth({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) });
+        const c = await voice.synth(reqs[i]);
         if (!c.cached) fresh++;
         clips.set(x.step, c);
       });

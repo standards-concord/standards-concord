@@ -9,6 +9,13 @@ name: Walkthrough video
 # warnings and no requests to outside hosts, or nothing is attached. Set the
 # ELEVENLABS_API_KEY repository secret (or OPENAI_API_KEY / GOOGLE_TTS_API_KEY) for the
 # narration; without one, release runs are skipped with a notice.
+#
+# Voice characters are limited (and ElevenLabs flags bursts of use), so narration is
+# cached per paragraph and kept with each release: a release re-voices only the paragraphs
+# whose words changed. A run may send at most VOICE_CHAR_BUDGET new characters (repository
+# variable, default 2500; both scripts in full are about 13,000) and refuses before
+# sending anything if it would need more. For a first or full recording, run this
+# workflow by hand with a larger budget (0 for no limit) and the release tag to attach to.
 
 on:
   release:
@@ -25,6 +32,14 @@ on:
         type: choice
         options: [publish, draft]
         default: publish
+      voice_budget:
+        description: Most new narration characters to send (empty uses VOICE_CHAR_BUDGET or 2500; 0 means no limit)
+        type: string
+        default: ''
+      release:
+        description: Release tag to attach the videos to (publish mode only; empty attaches nothing)
+        type: string
+        default: ''
 
 # Nothing here writes to the repository except the attach job, which asks for it itself.
 permissions:
@@ -121,11 +136,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
+          # The newest release that kept its narration (a re-run for a release reuses its own).
           mkdir -p walkthrough/.cache/voice
           for t in $(gh release list --repo "$REPO" --limit 10 --json tagName --jq '.[].tagName'); do
-            [ "$t" = "$TAG" ] && continue
             if gh release download "$t" --repo "$REPO" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
               tar -xzf "$RUNNER_TEMP/walkthrough-voice.tar.gz" -C walkthrough/.cache/voice
               echo "Restored narration from $t"
@@ -144,6 +158,7 @@ jobs:
           ELEVENLABS_OUTPUT_FORMAT: ${{ vars.ELEVENLABS_OUTPUT_FORMAT }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
+          VOICE_CHAR_BUDGET: ${{ inputs.voice_budget || vars.VOICE_CHAR_BUDGET || '2500' }}
         run: |
           if [ "$MODE" = publish ]; then
             pnpm walkthrough --publish --voice "$VOICE"
@@ -169,7 +184,7 @@ jobs:
   # Only a clean --publish run reaches here; this is the one job that can write.
   attach:
     needs: record
-    if: github.event_name == 'release' && needs.record.outputs.recorded == 'true'
+    if: needs.record.outputs.recorded == 'true' && (github.event_name == 'release' || (inputs.release != '' && inputs.mode == 'publish'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -182,7 +197,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.release }}
         run: |
           files=()
           for v in concord-walkthrough concord-feedback; do

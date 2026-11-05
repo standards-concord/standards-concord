@@ -1,6 +1,9 @@
 /**
  * Text to speech for the narration, with a disk cache so re-recording after a UI change
- * only pays for paragraphs whose words changed.
+ * only pays for paragraphs whose words changed. A clip is keyed by its own words and the
+ * voice settings, not its neighbours', so editing one paragraph re-voices only that one.
+ * Paid voices also have a character budget per run (VOICE_CHAR_BUDGET, or --voice-budget),
+ * checked before anything is sent.
  *
  * Providers, best first:
  *   elevenlabs  ElevenLabs (eleven_multilingual_v2). The most natural long-form narration,
@@ -150,20 +153,69 @@ export class Voice {
     return `${this.opts.provider}${this.opts.provider === 'silent' ? '' : ` (${this.opts.voice ?? d.voice}${this.opts.model || d.model ? `, ${this.opts.model ?? d.model}` : ''})`}`;
   }
 
-  private key(req: SynthRequest) {
+  private key(req: SynthRequest, legacy = false) {
     const o = this.opts;
     const d = DEFAULTS[o.provider];
-    // Everything that changes the audio is part of its identity.
-    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, o.provider === 'elevenlabs' ? [req.previous, req.next, ELEVENLABS_FORMAT, ELEVENLABS_SEED, ELEVENLABS_SETTINGS] : null]);
+    // Everything that changes the audio is part of its identity, except the neighbouring
+    // paragraphs: they only smooth the joins, and keying on them would re-voice a
+    // paragraph whenever the one before or after it changed. Clips voiced before that
+    // change (legacy) are still found.
+    const eleven = o.provider === 'elevenlabs' ? [ELEVENLABS_FORMAT, ELEVENLABS_SEED, ELEVENLABS_SETTINGS] : null;
+    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, legacy && eleven ? [req.previous, req.next, ...eleven] : eleven]);
     return createHash('sha256').update(material).digest('hex').slice(0, 24);
   }
 
+  private ext() {
+    return this.opts.provider === 'say' ? 'aiff' : this.opts.provider === 'silent' ? 'wav' : 'mp3';
+  }
+
+  private fileFor(req: SynthRequest, legacy = false) {
+    return path.join(this.cacheDir, this.opts.provider, `${this.key(req, legacy)}.${this.ext()}`);
+  }
+
+  /** Whether voicing this paragraph would cost anything: a paid voice with no cached clip. */
+  needsVoicing(req: SynthRequest) {
+    if (!this.paid) return false;
+    return !existsSync(this.fileFor(req)) && !(this.opts.provider === 'elevenlabs' && existsSync(this.fileFor(req, true)));
+  }
+
+  /** Whether this voice is a paid service (the cloud voices, not say or silent). */
+  get paid() {
+    return ['elevenlabs', 'openai', 'google'].includes(this.opts.provider);
+  }
+
+  /** Characters sent to a paid voice so far in this run. */
+  spent = 0;
+
+  /**
+   * Refuses, before anything is sent, a batch of paragraphs that would take this run past
+   * its character budget. Returns how many characters the batch will cost.
+   */
+  checkBudget(reqs: SynthRequest[], budget: number | undefined) {
+    const cost = reqs.filter((r) => this.needsVoicing(r)).reduce((a, r) => a + r.text.length, 0);
+    if (budget && this.spent + cost > budget)
+      throw new Error(
+        `Voicing this would send ${cost.toLocaleString('en')} new characters to ${this.opts.provider}` +
+          (this.spent ? ` on top of the ${this.spent.toLocaleString('en')} already sent` : '') +
+          `, over this run's budget of ${budget.toLocaleString('en')}. Nothing was sent. Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`,
+      );
+    return cost;
+  }
+
   async synth(req: SynthRequest): Promise<Clip> {
-    const ext = this.opts.provider === 'say' ? 'aiff' : this.opts.provider === 'silent' ? 'wav' : 'mp3';
-    const file = path.join(this.cacheDir, this.opts.provider, `${this.key(req)}.${ext}`);
+    const ext = this.ext();
+    const file = this.fileFor(req);
     const timing = `${file}.timing.json`;
     const readTiming = async () => (existsSync(timing) ? (JSON.parse(await readFile(timing, 'utf8')) as number[]) : undefined);
     if (existsSync(file)) return { file, duration: await probeDuration(file), cached: true, charStarts: await readTiming() };
+    const legacy = this.opts.provider === 'elevenlabs' ? this.fileFor(req, true) : undefined;
+    if (legacy && existsSync(legacy)) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, await readFile(legacy));
+      if (existsSync(`${legacy}.timing.json`)) await writeFile(timing, await readFile(`${legacy}.timing.json`));
+      return { file, duration: await probeDuration(file), cached: true, charStarts: await readTiming() };
+    }
+    if (this.paid) this.spent += req.text.length;
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.part.${ext}`;
     switch (this.opts.provider) {
