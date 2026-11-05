@@ -132,7 +132,7 @@ export const featureActions: Record<string, Action> = {
     await c.d.goto(o(c, '/browse'));
     await c.d.click(c.d.page.getByRole('radio', { name: /Diagram/ }), 'the Diagram view');
     await sleep(800);
-    await c.d.claimVisible(c.d.page.getByRole('main').locator('svg').first(), 'the class diagram is drawn');
+    if (await c.d.claimVisible(c.d.page.getByRole('main').locator('svg').first(), 'the class diagram is drawn')) await c.d.scroll(280, 1400);
   },
   async 'f-open-term'(c) {
     await signInAs(c, 'Tom Okafor');
@@ -147,7 +147,7 @@ export const featureActions: Record<string, Action> = {
   },
   async 'f-type-definition'(c) {
     const form = c.d.page.getByRole('form', { name: /^Edit / });
-    await c.d.type(form.getByLabel('Definition'), TERM.definition, 'the Definition field', 30);
+    await c.d.type(form.getByLabel('Definition'), TERM.definition, 'the Definition field', 55);
   },
   async 'f-confirm-meaning'(c) {
     const form = c.d.page.getByRole('form', { name: /^Edit / });

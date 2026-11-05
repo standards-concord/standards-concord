@@ -46,7 +46,7 @@ Browse also draws the model as a diagram, showing what data each class carries, 
 Now I'm Tom, one of the editors. This is the term "skill". Its definition talks about a person, but in this standard it's volunteers who bring skills to roles.
 
 [do: f-edit-term]
-So I'll fix it right here, on the term's page. {@f-type-definition} I rewrite the definition, then {@f-confirm-meaning} confirm it still means the same thing, and say why.
+So I'll fix it right here, on the term's page. {@f-type-definition} I rewrite the definition so it talks about volunteers and roles. Then I {@f-confirm-meaning} confirm it still means the same thing, and say why.
 
 [do: f-propose]
 Propose change. The term itself doesn't change yet. My edit becomes a change request, for others to review.
