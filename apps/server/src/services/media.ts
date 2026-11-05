@@ -56,27 +56,40 @@ interface GitHubRelease {
   published_at?: string;
   html_url: string;
   draft?: boolean;
-  assets?: { id?: number; name: string; size: number; browser_download_url: string }[];
+  assets?: { id?: number; name: string; size: number; state?: string; browser_download_url: string }[];
 }
 
+/** The files a release must have, fully uploaded, for the page to use it: both videos and their captions. */
+const REQUIRED = MEDIA_FILES.filter((f) => /\.(mp4|vtt)$/.test(f));
+
+/** A release asset GitHub has finished receiving (one still uploading is in state "open"). */
+const uploaded = (a: NonNullable<GitHubRelease['assets']>[number]) => isMediaFile(a.name) && (a.state === undefined || a.state === 'uploaded');
+
+const complete = (r: GitHubRelease) => !r.draft && REQUIRED.every((f) => (r.assets ?? []).some((a) => a.name === f && uploaded(a)));
+
 /**
- * The newest published release that has the videos. A release whose recording failed or
- * hasn't finished yet has none, and shouldn't hide the previous release's videos.
+ * The newest published release with a complete set of videos, reading every page of
+ * releases until one is found. A release whose recording failed, is still uploading, or
+ * only has some of the files shouldn't hide the previous release's videos.
  */
 async function fromGitHub(): Promise<{ index: MediaIndex; assets: Map<string, Asset> }> {
-  const res = await fetch(`https://api.github.com/repos/${repo()}/releases?per_page=20`, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'concord-media' },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (res.status === 404) return { index: { release: null, files: [] }, assets: new Map() };
-  if (!res.ok) throw new Error(`GitHub releases: HTTP ${res.status}`);
-  const releases = (await res.json()) as GitHubRelease[];
-  const r = releases.find((x) => !x.draft && (x.assets ?? []).some((a) => isMediaFile(a.name)));
+  let r: GitHubRelease | undefined;
+  for (let page = 1; page <= 50 && !r; page++) {
+    const res = await fetch(`https://api.github.com/repos/${repo()}/releases?per_page=100&page=${page}`, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'concord-media' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 404) break;
+    if (!res.ok) throw new Error(`GitHub releases: HTTP ${res.status}`);
+    const releases = (await res.json()) as GitHubRelease[];
+    r = releases.find(complete);
+    if (releases.length < 100) break;
+  }
   if (!r) return { index: { release: null, files: [] }, assets: new Map() };
   const assets = new Map<string, Asset>();
   const files: MediaIndex['files'] = [];
   for (const a of r.assets ?? []) {
-    if (!isMediaFile(a.name)) continue;
+    if (!uploaded(a)) continue;
     assets.set(a.name, { url: a.browser_download_url, key: cacheKey(r, a) });
     files.push({ name: a.name, size: a.size, url: `/api/media/${a.name}` });
   }

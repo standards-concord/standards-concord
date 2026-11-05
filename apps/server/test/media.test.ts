@@ -13,18 +13,33 @@ const fresh = async () => {
   return import('../src/services/media.js');
 };
 
+/** A release with a complete set of videos; the tour's captions download from `url`. */
 const release = (id: number | undefined, tag: string, assetId: number | undefined, url: string) => ({
   id,
   tag_name: tag,
   html_url: `https://github.com/x/y/releases/tag/${tag}`,
-  assets: [{ id: assetId, name: 'concord-walkthrough.vtt', size: 1, browser_download_url: url }],
+  assets: [
+    { id: assetId, name: 'concord-walkthrough.vtt', size: 1, state: 'uploaded', browser_download_url: url },
+    ...['concord-walkthrough.mp4', 'concord-feedback.mp4', 'concord-feedback.vtt'].map((name, i) => ({
+      id: assetId === undefined ? undefined : assetId * 10 + i,
+      name,
+      size: 1,
+      state: 'uploaded',
+      browser_download_url: `${url}/${name}`,
+    })),
+  ],
 });
 
 const cacheDir = async () => path.join((await import('../src/config.js')).config.dataDir, 'media');
 
 function stubGitHub(latest: object | object[], files: Record<string, string>) {
   vi.stubGlobal('fetch', async (url: string) => {
-    if (url.startsWith('https://api.github.com/')) return new Response(JSON.stringify(Array.isArray(latest) ? latest : [latest]), { status: 200 });
+    if (url.startsWith('https://api.github.com/')) {
+      const all = Array.isArray(latest) ? latest : [latest];
+      const page = Number(new URL(url).searchParams.get('page') ?? 1);
+      const per = Number(new URL(url).searchParams.get('per_page') ?? 30);
+      return new Response(JSON.stringify(all.slice((page - 1) * per, page * per)), { status: 200 });
+    }
     if (url in files) return new Response(files[url], { status: 200 });
     return new Response('', { status: 404 });
   });
@@ -119,6 +134,20 @@ describe('which release', () => {
     const media = await fresh();
     expect((await media.mediaIndex()).release?.tag).toBe('v1');
     expect(fs.readFileSync((await media.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT v1');
+  });
+
+  it('skips releases with only some of the files, or files still uploading', async () => {
+    const full = release(401, 'v1', 4001, 'https://dl.example/full');
+    const captionsOnly = { ...release(402, 'v2', 4002, 'https://dl.example/x'), assets: full.assets.filter((a) => a.name.endsWith('.vtt')) };
+    const uploading = { ...release(403, 'v3', 4003, 'https://dl.example/y'), assets: release(403, 'v3', 4003, 'https://dl.example/y').assets.map((a) => (a.name === 'concord-feedback.mp4' ? { ...a, state: 'open' } : a)) };
+    stubGitHub([uploading, captionsOnly, full], {});
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v1');
+  });
+
+  it('reads every page of releases to find one with the videos', async () => {
+    const empty = (n: number) => ({ id: 1000 + n, tag_name: `v0.0.${n}`, html_url: 'https://github.com/x/y', assets: [] });
+    stubGitHub([...Array.from({ length: 250 }, (_, i) => empty(i)), release(501, 'v-old', 5001, 'https://dl.example/old')], {});
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v-old');
   });
 
   it('has no videos when no release has them', async () => {
