@@ -24,7 +24,7 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { HttpError, list, mustGet, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
@@ -90,31 +90,35 @@ export async function createChangeRequest(project: OntologyProject, author: User
     analysis ??= drafted.analysis;
   }
 
-  const now = clock.iso();
-  const number = (await list<ChangeRequest>('changeRequests', project.id)).reduce((m, c) => Math.max(m, c.number), 0) + 1;
-  const cr: ChangeRequest = {
-    id: newId('cr'),
-    number,
-    ontologyId: project.id,
-    title: title || 'Untitled change',
-    description: input.description,
-    kind: input.kind,
-    origin: input.origin,
-    authorId: author.id,
-    ops,
-    status: 'draft',
-    analysis,
-    timeline: [ev('created', `opened this ${input.kind === 'bug' ? 'bug report' : 'change request'}`, author.id)],
-    createdAt: now,
-    updatedAt: now,
-    statusSince: now,
-    opsUpdatedAt: now,
-    tests,
-    warnings,
-    baseCommit: ontologyStore.head(project),
-  };
-  await save(cr);
-  await logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
+  // Numbering and saving in one transaction, so two requests opened at once can't both take the same number.
+  const cr = await transaction(async () => {
+    const now = clock.iso();
+    const number = (await list<ChangeRequest>('changeRequests', project.id)).reduce((m, c) => Math.max(m, c.number), 0) + 1;
+    const cr: ChangeRequest = {
+      id: newId('cr'),
+      number,
+      ontologyId: project.id,
+      title: title || 'Untitled change',
+      description: input.description,
+      kind: input.kind,
+      origin: input.origin,
+      authorId: author.id,
+      ops,
+      status: 'draft',
+      analysis,
+      timeline: [ev('created', `opened this ${input.kind === 'bug' ? 'bug report' : 'change request'}`, author.id)],
+      createdAt: now,
+      updatedAt: now,
+      statusSince: now,
+      opsUpdatedAt: now,
+      tests,
+      warnings,
+      baseCommit: ontologyStore.head(project),
+    };
+    await save(cr);
+    await logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
+    return cr;
+  });
   await triage(cr);
   if (input.submit) await submit(cr, author);
   return cr;

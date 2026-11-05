@@ -10,6 +10,8 @@
  * re-run this, then re-apply the hand fixes with `git apply --3way scripts/codemods/async-store.fixes.patch`
  * (and fix whatever new spots it prints). That is quicker and safer than resolving conflicts in ~900 rewritten
  * lines. Refresh the patch afterwards: `git diff <codemod output commit> -- apps > scripts/codemods/async-store.fixes.patch`.
+ * The patch holds the hand fixes made in the conversion commit itself; fixes committed after it (such as the
+ * transactions added in review) are ordinary commits: cherry-pick them on top of the re-run.
  *
  * What it won't do by itself, and prints instead ("needs a hand fix"):
  * - a function made async that is passed as a callback to something other than a known promise-aware caller

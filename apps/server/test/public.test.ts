@@ -256,7 +256,7 @@ describe('review fixes', () => {
     const seeded = (await listUseCases(project.id)).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
     const author = (await getUser(seeded.authorId))!;
     expect(author.simulated).toBe(true);
-    await updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
+    await updateUseCase(seeded.id, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
     for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
       const res = await request(app).get(url);
       expect(res.text, url).not.toContain('07700 900123');

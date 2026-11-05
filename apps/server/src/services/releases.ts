@@ -76,7 +76,8 @@ function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: Chang
     .join('\n');
 }
 
-export async function draftRelease(project: OntologyProject, actor: User | undefined, notes?: string): Promise<Release> {
+/** In one transaction, so two drafts started at once can't both find no draft and each create one. */
+export async function draftRelease(project: OntologyProject, actor: User | undefined, notes?: string): Promise<Release> { return transaction(async () => {
   if (actor) await requireRole(project.id, actor, ['steward', 'owner'], 'draft a release');
   const existing = (await listReleases(project.id)).find((r) => r.status === 'draft' || r.status === 'voting');
   const crs = await pendingChanges(project.id);
@@ -112,7 +113,7 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
     await logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
   return await openVoteIfNeeded(r);
-}
+}); }
 
 /** If the policy needs a vote for this level, open it; otherwise the release is ready to publish. */
 async function openVoteIfNeeded(r: Release): Promise<Release> { return transaction(async () => {

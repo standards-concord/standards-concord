@@ -86,7 +86,9 @@ export async function createUseCase(
   });
 }); }
 
-export async function updateUseCase(u: UseCase, actor: User, patch: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'status' | 'terms'>>) { return transaction(async () => {
+/** Reads the use case inside the transaction, so edits made at the same time to different sections both survive. */
+export async function updateUseCase(id: string, actor: User, patch: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'status' | 'terms'>>) { return transaction(async () => {
+  const u = await getUseCase(id);
   if (u.authorId !== actor.id && !(await rolesFor(u.ontologyId, actor.id)).some((r) => ['editor', 'steward', 'owner'].includes(r)))
     throw new HttpError(403, 'Only the author or an editor can change this use case');
   if (patch.sections) u.sections = { ...u.sections, ...patch.sections };

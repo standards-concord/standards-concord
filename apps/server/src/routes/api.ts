@@ -23,6 +23,7 @@ import {
   requireRole,
   rolesFor,
   setGovernance,
+  transferOwnership,
   setRoles,
   summary,
   updateProject,
@@ -258,31 +259,14 @@ export function apiRouter(): Router {
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
-    const p = await project(req);
-    const user = requireUser(req);
-    await requireRole(p.id, user, ['owner'], 'transfer ownership');
-    const to = await getUser(str(req.body?.toUserId, 'toUserId'));
-    if (!to) throw new HttpError(404, 'No such user');
-    const transfer = p.governance.ownership.transfer;
-    if (transfer === 'owner-decides' || user.isPlatformAdmin) {
-      const keepGroup = p.governance.ownership.model === 'group';
-      p.ownerIds = keepGroup ? [...new Set([...p.ownerIds, to.id])] : [to.id];
-      if (!keepGroup) await setRoles(p.id, user.id, (await rolesFor(p.id, user.id)).filter((x) => x !== 'owner'));
-      await setRoles(p.id, to.id, [...await rolesFor(p.id, to.id), 'owner']);
-      await updateProject(p);
-      return void res.json({ status: 'transferred' });
-    }
-    const id = newId('xfer');
-    await put('kv', { id, kind: 'ownership-transfer', ontologyId: p.id, from: user.id, to: to.id, needs: transfer, at: clock.iso() });
-    res.json({ status: transfer === 'member-vote' ? 'vote-opened' : 'awaiting-odi-approval', voteId: id });
+    res.json(await transferOwnership((await project(req)).id, requireUser(req), str(req.body?.toUserId, 'toUserId')));
   });
 
   /* ------------------------- use cases & interviews ------------------ */
   r.get('/ontologies/:id/use-cases', async (req, res) => res.json(await useCases.listUseCases((await project(req)).id)));
   r.get('/use-cases/:id', async (req, res) => res.json(await useCases.getUseCase(String(req.params.id))));
   r.patch('/use-cases/:id', async (req, res) => {
-    const u = await useCases.getUseCase(String(req.params.id));
-    res.json(await useCases.updateUseCase(u, requireUser(req), req.body ?? {}));
+    res.json(await useCases.updateUseCase(String(req.params.id), requireUser(req), req.body ?? {}));
   });
 
   r.post('/ontologies/:id/interviews', async (req, res) => {

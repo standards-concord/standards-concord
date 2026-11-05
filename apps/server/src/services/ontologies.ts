@@ -121,6 +121,30 @@ export async function updateProject(p: OntologyProject): Promise<OntologyProject
   return await put('ontologies', p);
 }
 
+/**
+ * Hand ownership to another person, or open the vote or ODI approval the policy asks for. The check and every
+ * update happen in one transaction, reading the project afresh: two transfers started at once by the same owner
+ * could otherwise both pass the check and leave two owners in a single-owner project.
+ */
+export async function transferOwnership(ontologyId: string, user: User, toUserId: string) { return transaction(async () => {
+  const p = await mustGet<OntologyProject>('ontologies', ontologyId);
+  await requireRole(p.id, user, ['owner'], 'transfer ownership');
+  const to = await getUser(toUserId);
+  if (!to) throw new HttpError(404, 'No such user');
+  const transfer = p.governance.ownership.transfer;
+  if (transfer === 'owner-decides' || user.isPlatformAdmin) {
+    const keepGroup = p.governance.ownership.model === 'group';
+    p.ownerIds = keepGroup ? [...new Set([...p.ownerIds, to.id])] : [to.id];
+    if (!keepGroup) await setRoles(p.id, user.id, (await rolesFor(p.id, user.id)).filter((x) => x !== 'owner'));
+    await setRoles(p.id, to.id, [...await rolesFor(p.id, to.id), 'owner']);
+    await updateProject(p);
+    return { status: 'transferred' as const };
+  }
+  const id = newId('xfer');
+  await put('kv', { id, kind: 'ownership-transfer', ontologyId: p.id, from: user.id, to: to.id, needs: transfer, at: clock.iso() });
+  return { status: transfer === 'member-vote' ? ('vote-opened' as const) : ('awaiting-odi-approval' as const), voteId: id };
+}); }
+
 export async function setGovernance(p: OntologyProject, policy: GovernancePolicy, actor: User) { return transaction(async () => {
   p.governance = policy;
   await updateProject(p);
