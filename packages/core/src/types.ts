@@ -321,15 +321,37 @@ export interface FairReport {
   checks: FairCheck[];
 }
 
+/** An OWL 2 DL profile violation the reasoner reported (OWL 2 Structural Specification §11 and related rules). */
+export interface OwlProfileNote {
+  /** sparq's violation kind, e.g. Undeclared, IllegalPunning, NonSimpleProperty. */
+  kind: string;
+  detail: string;
+}
+
 export interface ReasonerResult {
-  engine: 'hermit' | 'pellet' | 'structural';
+  /**
+   * sparq: complete OWL 2 DL reasoning (WebAssembly). structural: the fast, incomplete checks.
+   * hermit and pellet only appear in reports stored before Concord moved to sparq.
+   */
+  engine: 'sparq' | 'structural' | 'hermit' | 'pellet';
+  /** false when the OWL reasoner did not finish, so the structural checks filled in (see `error` and `checked`). */
   available: boolean;
+  /**
+   * How much the OWL reasoner decided. complete: consistency and every class's satisfiability.
+   * consistency: the ontology is consistent, but not every class could be checked. none: no verdict.
+   * Absent for the structural reasoner on its own and in reports stored before this field.
+   */
+  checked?: 'complete' | 'consistency' | 'none';
   consistent: boolean;
   unsatisfiable: IRI[];
   /** Inferred direct subclass axioms not asserted: [sub, super] */
   inferredSubClassOf: [IRI, IRI][];
   explanation?: string;
+  /** OWL 2 DL profile violations that did not stop reasoning (e.g. an undeclared property). */
+  profile?: OwlProfileNote[];
   durationMs: number;
+  /** Time spent inside the reasoner itself, excluding loading and serialising. */
+  checkMs?: number;
   error?: string;
 }
 
@@ -348,6 +370,11 @@ export interface ValidationReport {
   fair: FairReport;
   reasoner: ReasonerResult;
   competencyQuestions: CompetencyQuestionResult[];
-  /** true when there are no errors from lint and the reasoner says consistent with no unsatisfiable classes */
+  /**
+   * true when lint has no errors and the OWL reasoner finished and found the ontology consistent with
+   * no unsatisfiable classes. A check that did not finish never passes.
+   */
   passed: boolean;
+  /** The working-draft revision the report is for, when the server validated its working draft. */
+  revision?: string;
 }
