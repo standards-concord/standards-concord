@@ -20,6 +20,8 @@ test('the backend is connected', () => {
 test('the walkthrough page loads', async ({ page }) => {
   await page.goto('/alpha');
   await expect(page.getByRole('heading', { name: 'Guided walkthrough' })).toBeVisible();
+  // Testers can see which version they're testing.
+  await expect(page.getByTestId('app-version')).toHaveText(/^Concord \d+\.\d+\.\d+$/);
 });
 
 test.describe('with the backend', () => {
@@ -69,5 +71,18 @@ test.describe('with the backend', () => {
     const ttl = await request.get('/def/volunteering', { headers: { Accept: 'text/turtle' } });
     expect(ttl.headers()['content-type']).toContain('text/turtle');
     expect(await ttl.text()).toContain('owl:Ontology');
+  });
+
+  test('POST to the ontology IRI validates data through Vercel, and the SHACL profile returns the shapes', async ({ request }) => {
+    const res = await request.post('/def/volunteering', {
+      headers: { 'Content-Type': 'text/turtle' },
+      data: '<https://example.org/o> a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> .',
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const report = await res.json();
+    expect(report.conforms).toBe(false);
+    expect(report.results.length).toBeGreaterThan(0);
+    const shapes = await request.get('/def/volunteering', { headers: { 'Accept-Profile': '<http://www.w3.org/ns/shacl#>' } });
+    expect(await shapes.text()).toContain('sh:NodeShape');
   });
 });

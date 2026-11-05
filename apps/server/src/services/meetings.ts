@@ -1,27 +1,129 @@
 import { EventEmitter } from 'node:events';
-import type { ChangeRequest, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
+import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
-import { getProject } from './ontologies.js';
+import { getProject, rolesFor } from './ontologies.js';
+import { withLock } from '../locks.js';
+import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
+import { recall } from './recall.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
 export const listMeetings = (ontologyId: string) => list<Meeting>('meetings', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-const save = (m: Meeting) => put('meetings', m, m.ontologyId);
+export const saveMeeting = (m: Meeting) => put('meetings', m, m.ontologyId);
+const save = saveMeeting;
+
+/** Serialises changes to one meeting (bookings, webhooks, posting, skipping). */
+export const meetingLock = <T>(id: string, fn: () => Promise<T> | T) => withLock(`meeting:${id}`, fn);
+
+/** Applies a change to the latest stored copy of a meeting, under its lock, so concurrent updates aren't lost. */
+export function mutateMeeting(id: string, change: (m: Meeting) => void): Promise<Meeting> {
+  return meetingLock(id, () => {
+    const m = getMeeting(id);
+    change(m);
+    return save(m);
+  });
+}
+
+/** Roles that can run a call: bring the bot in, skip or approve calls, post in its chat. */
+export const FACILITATOR_ROLES: Role[] = ['owner', 'steward', 'editor'];
+
+/**
+ * Running a call (approving, skipping, chat posting, ending it) is for the
+ * ontology's owners, stewards and editors only. Having added the call, or
+ * having sent the invite, doesn't count: invites can come from anyone.
+ */
+export function canFacilitate(m: Pick<Meeting, 'ontologyId'>, user: User | undefined) {
+  if (!user) return false;
+  return !!user.isPlatformAdmin || config.adminEmails.includes(user.email?.toLowerCase() ?? '') || rolesFor(m.ontologyId, user.id).some((r) => FACILITATOR_ROLES.includes(r));
+}
+
+export function requireFacilitator(m: Pick<Meeting, 'ontologyId'>, user: User | undefined, action: string) {
+  if (!user) throw new HttpError(401, 'Sign in first');
+  if (!canFacilitate(m, user)) throw new HttpError(403, `Only the ontology's owners, stewards and editors can ${action}`);
+}
+
+/** Analysing (or re-analysing) a call: facilitators, or whoever uploaded the transcript or ran the simulation. */
+export function requireAnalyst(m: Meeting, user: User | undefined) {
+  if (!user) throw new HttpError(401, 'Sign in first');
+  const own = m.createdBy === user.id && (m.source === 'upload' || m.source === 'simulation');
+  if (!own && !canFacilitate(m, user)) throw new HttpError(403, "Only the ontology's owners, stewards and editors can analyse this call");
+}
+
+/** Whether a bot is still in (or on its way into) the call. */
+export const botActive = (m: Meeting) =>
+  // Records from before the state machine are read as one here too (normalise is idempotent).
+  (normalise(m), tracked(m)) ? (m.bot.phase === 'booking' || m.bot.phase === 'booked') && m.status !== 'scheduled' : !!m.bot && (m.bot.status === 'joining' || m.bot.status === 'in-call');
+
+/** Whether a Recall.ai bot may still be around: booked, unanswered, or not yet confirmed gone. */
+export const botOutstanding = (m: Meeting) => (normalise(m), tracked(m)) && (m.bot.phase === 'booking' || m.bot.phase === 'booked' || m.bot.phase === 'releasing' || !!m.bot.strays?.length);
+
+/**
+ * What a signed-in person may see of a meeting. Invites waiting for approval, and
+ * withdrawn calls kept until their bot has gone, are for facilitators only, and so
+ * are the call's Meet link, organiser, bot and booking ids, and Recall.ai's errors.
+ */
+export function visibleMeeting(m: Meeting, user: User | undefined): Meeting | undefined {
+  // A withdrawn call whose bots are all gone is only kept to keep looking for a dismissed booking: it is gone for everyone.
+  if (m.withdrawn && tracked(m) && settled(m.bot)) return undefined;
+  if (canFacilitate(m, user)) return m;
+  if (m.calendar?.approval === 'pending' || m.withdrawn) return undefined;
+  const { meetingUrl: _url, ...rest } = m;
+  // Recall.ai's diagnostics can echo the Meet link: others just learn that something went wrong.
+  const problem = (e?: string) => (e ? 'Something went wrong with the bot; a facilitator can see the details.' : undefined);
+  const b = m.bot;
+  return {
+    ...rest,
+    chatNoticeError: problem(m.chatNoticeError),
+    facilitatorPrompts: m.facilitatorPrompts.map((q) => ({ ...q, postError: problem(q.postError) })),
+    // Only what the page shows: whether a bot is booked and how it's doing.
+    bot: b && {
+      provider: b.provider,
+      phase: b.phase,
+      status: b.status,
+      booked: (b.phase ? b.phase === 'booked' : !!b.botId) || undefined,
+      uncertain: b.uncertain,
+      leaving: b.leaving,
+      unconfirmed: b.unconfirmed,
+      error: problem(b.error),
+      cancelError: problem(b.cancelError),
+    },
+    calendar: m.calendar && { ...m.calendar, organizer: undefined, sentBy: undefined, uid: undefined, key: '' },
+  };
+}
+
+/* Series approval: one approval covers every week of a series, while its organiser and Meet link stay the same. */
+
+type SeriesApproval = { id: string; organizer?: string; meetingUrl?: string; approvedBy: string; at: string };
+const approvalKey = (ontologyId: string, uid: string) => `meet-bot:approval:${ontologyId}:${uid}`;
+
+export function seriesApproved(ontologyId: string, uid: string | undefined, organizer: string | undefined, meetingUrl: string | undefined) {
+  if (!uid) return undefined;
+  const a = get<SeriesApproval>('kv', approvalKey(ontologyId, uid));
+  return a && a.organizer === organizer && a.meetingUrl === meetingUrl ? a : undefined;
+}
+
+export function recordSeriesApproval(ontologyId: string, uid: string | undefined, organizer: string | undefined, meetingUrl: string | undefined, userId: string) {
+  if (uid) put('kv', { id: approvalKey(ontologyId, uid), organizer, meetingUrl, approvedBy: userId, at: clock.iso() });
+}
 
 /** Live updates for the meeting page (SSE). */
 export const meetingEvents = new EventEmitter();
 meetingEvents.setMaxListeners(200);
-type MeetingEvent = { type: 'line'; line: TranscriptLine } | { type: 'prompt'; text: string; t?: number } | { type: 'status'; status: Meeting['status']; bot?: Meeting['bot'] };
-const emit = (m: Meeting, e: MeetingEvent) => meetingEvents.emit(m.id, e);
+type MeetingEvent =
+  | { type: 'line'; line: TranscriptLine }
+  | { type: 'prompt'; prompt: FacilitatorPrompt }
+  | { type: 'status'; status: Meeting['status']; bot?: Meeting['bot'] }
+  | { type: 'meeting'; meeting: Meeting };
+export const emit = (m: Meeting, e: MeetingEvent) => meetingEvents.emit(m.id, e);
 
 /* ------------------------------------------------------------------------ */
 /* Transcript parsing                                                        */
@@ -96,10 +198,13 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 /* ------------------------------------------------------------------------ */
 
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
+  m = getMeeting(m.id);
+  if (botActive(m) || botOutstanding(m)) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = getProject(m.ontologyId);
-  m.status = 'processing';
-  save(m);
+  m = await mutateMeeting(m.id, (x) => {
+    x.status = 'processing';
+  });
   emit(m, { type: 'status', status: m.status });
   const graph = await ontologyStore.working(project);
   const { value } = await llm.json<MeetingAnalysis>({
@@ -115,9 +220,10 @@ export async function analyseMeeting(m: Meeting): Promise<Meeting> {
     ],
     fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
   });
-  m.analysis = value;
-  m.status = 'analysed';
-  save(m);
+  m = await mutateMeeting(m.id, (x) => {
+    x.analysis = value;
+    x.status = 'analysed';
+  });
   emit(m, { type: 'status', status: m.status });
   logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   return m;
@@ -196,7 +302,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
 /* Creating meetings                                                         */
 /* ------------------------------------------------------------------------ */
 
-function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
+export function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
   return save({
     id: newId('mtg'),
     ontologyId: project.id,
@@ -224,26 +330,186 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* ------------------------------------------------------------------------ */
 
 const lastPromptAt = new Map<string, number>();
+const lastLineAt = new Map<string, number>();
+
+/** When the last transcript line of a live call arrived (this process only). */
+export const lastLineTime = (meetingId: string) => lastLineAt.get(meetingId);
 
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
-export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGapLines?: number } = {}) {
-  m.transcript.push(line);
-  save(m);
+export async function onLiveLine(
+  meetingId: string,
+  line: TranscriptLine,
+  opts: { minGapLines?: number; accept?: (m: Meeting) => boolean; before?: (m: Meeting) => void } = {},
+): Promise<boolean> {
+  // Whether to keep the line is decided on the latest copy, under the lock, so a skip or cancellation that just happened counts.
+  let accepted = true;
+  const m = await meetingLock(meetingId, () => {
+    const x = getMeeting(meetingId);
+    const gen = x.bot?.gen;
+    if (opts.accept && !opts.accept(x)) {
+      accepted = false;
+      // Refusing the line can still change the bot record (a bot named, a stray noted).
+      if (x.bot?.gen !== gen) {
+        save(x);
+        emit(x, { type: 'meeting', meeting: x });
+      }
+      return x;
+    }
+    opts.before?.(x);
+    x.transcript.push(line);
+    return save(x);
+  });
+  if (!accepted) return false;
+  lastLineAt.set(m.id, Date.now());
   emit(m, { type: 'line', line });
+  // A notice about chat posting that failed earlier is retried as the call goes on.
+  if (m.chatNoticeError || (m.bot?.status === 'in-call' && m.source !== 'simulation' && !!m.postPromptsToChat !== !!m.chatModeAnnounced)) await announceChatMode(meetingId).catch(() => undefined);
   const n = m.transcript.length;
   const gap = opts.minGapLines ?? 4;
-  if (n - (lastPromptAt.get(m.id) ?? 0) < gap) return;
-  const prompt = await facilitate(m);
-  if (!prompt) return;
+  if (n - (lastPromptAt.get(m.id) ?? 0) < gap) return true;
   lastPromptAt.set(m.id, n);
-  const fresh = getMeeting(m.id);
-  const entry = { at: clock.iso(), t: line.t, text: prompt, posted: false };
-  if (fresh.bot?.provider === 'recall' && fresh.bot.botId) entry.posted = await recall.sendChat(fresh.bot.botId, prompt);
-  fresh.facilitatorPrompts.push(entry);
-  // keep the in-memory object in sync for the caller
-  m.facilitatorPrompts = fresh.facilitatorPrompts;
-  save(fresh);
-  emit(fresh, { type: 'prompt', text: prompt, t: line.t });
+  const prompt = await facilitate(m);
+  if (!prompt) return true;
+  const entry: FacilitatorPrompt = { at: clock.iso(), t: line.t, text: prompt, posted: false };
+  let index = -1;
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    index = x.facilitatorPrompts.push(entry) - 1;
+  });
+  emit(fresh, { type: 'prompt', prompt: entry });
+  // A notice about chat posting that failed earlier is retried first. Prompts go
+  // into the chat automatically only once the call has been told they will.
+  await announceChatMode(meetingId).catch(() => undefined);
+  const now = getMeeting(meetingId);
+  if (now.postPromptsToChat && (now.source === 'simulation' || now.chatModeAnnounced)) await postPrompt(meetingId, index, { quiet: true });
+  return true;
+}
+
+/** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
+async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (m.bot?.provider === 'recall') {
+    if (!m.bot.botId || m.bot.phase !== 'booked' || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
+    return recall.sendChat(m.bot.botId, text);
+  }
+  if (m.source === 'simulation') return { ok: true };
+  return { ok: false, error: 'No meeting bot is connected to this call, so there is no chat to post in.' };
+}
+
+const posting = new Set<string>();
+
+/** Posts one prompt into the meeting chat. Only that prompt is updated, on the latest copy of the meeting. */
+export async function postPrompt(meetingId: string, index: number, opts: { quiet?: boolean } = {}) {
+  const m = getMeeting(meetingId);
+  const p = m.facilitatorPrompts[index];
+  if (!p) throw new HttpError(404, 'No such prompt');
+  if (p.posted) return m;
+  const key = `${meetingId}:${index}`;
+  if (posting.has(key)) throw new HttpError(409, 'That prompt is being posted already');
+  posting.add(key);
+  try {
+    const r = await sendToChat(m, p.text);
+    const fresh = await mutateMeeting(meetingId, (x) => {
+      const q = x.facilitatorPrompts[index];
+      if (r.ok) {
+        q.posted = true;
+        q.postedAt = clock.iso();
+        delete q.postError;
+      } else q.postError = r.error;
+    });
+    emit(fresh, { type: 'meeting', meeting: fresh });
+    if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
+    return fresh;
+  } finally {
+    posting.delete(key);
+  }
+}
+
+/**
+ * Tells the call when posting in its chat is switched on or off, so what the bot
+ * said when it joined stays true. Only once the bot is in the call; until then
+ * the next check (when it joins) does it.
+ */
+const announcing = new Set<string>();
+
+export async function announceChatMode(meetingId: string) {
+  if (announcing.has(meetingId)) return;
+  announcing.add(meetingId);
+  try {
+    await announceOnce(meetingId);
+  } finally {
+    announcing.delete(meetingId);
+  }
+}
+
+async function announceOnce(meetingId: string) {
+  const m = getMeeting(meetingId);
+  const want = !!m.postPromptsToChat;
+  if (m.source === 'simulation' || m.bot?.status !== 'in-call' || (m.chatModeAnnounced ?? false) === want) return;
+  const r = await sendToChat(
+    m,
+    want
+      ? `${config.meetBot.botName}: from now on I'll post follow-up questions here in the chat.`
+      : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
+  );
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    if (r.ok) {
+      x.chatModeAnnounced = want;
+      delete x.chatNoticeError;
+    } else x.chatNoticeError = `Couldn’t tell the call that posting is now ${want ? 'on' : 'off'} (${r.error}). Concord will try again${want ? ', and holds back automatic posts until it has' : ''}.`;
+  });
+  emit(fresh, { type: 'meeting', meeting: fresh });
+}
+
+/** Meeting options facilitators can change before or during a call. Every change is logged. */
+export async function updateMeeting(meetingId: string, user: User, patch: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) {
+  const before = getMeeting(meetingId);
+  requireFacilitator(before, user, 'change this call');
+  const changes: string[] = [];
+  // A call waiting for approval is only for facilitators to see, so the activity log doesn't name it.
+  let named = before.calendar?.approval !== 'pending';
+  const m = await meetingLock(meetingId, async () => {
+    const m = getMeeting(meetingId);
+    if (patch.postPromptsToChat !== undefined && patch.postPromptsToChat !== !!m.postPromptsToChat) {
+      m.postPromptsToChat = patch.postPromptsToChat;
+      changes.push(patch.postPromptsToChat ? 'switched on posting prompts in the Meet chat for' : 'switched off posting prompts in the Meet chat for');
+    }
+    if (patch.skip !== undefined || patch.approve !== undefined) {
+      if (!m.calendar) throw new HttpError(400, 'Only calls from a calendar invite can be skipped or approved');
+      if (m.status !== 'scheduled') throw new HttpError(409, 'The bot has already joined this call. End it instead.');
+    }
+    if (patch.approve && m.calendar!.approval === 'pending') {
+      m.calendar!.approval = 'approved';
+      m.calendar!.approvedBy = user.id;
+      delete m.calendar!.approvalNote;
+      recordSeriesApproval(m.ontologyId, m.calendar!.uid, m.calendar!.organizer, m.meetingUrl, user.id);
+      named = true;
+      changes.push(m.calendar!.recurring ? 'approved the co-lead bot joining the series' : 'approved the co-lead bot joining');
+    }
+    if (patch.skip !== undefined && patch.skip !== !!m.calendar!.skip) {
+      // A bot already booked for this call is released (anything it sends is dropped from now on), until Recall.ai confirms.
+      if (patch.skip) beginRelease(m, 'cancel', 'idle');
+      m.calendar!.skip = patch.skip;
+      changes.push(patch.skip ? 'told the co-lead bot to skip' : 'told the co-lead bot to join');
+    }
+    return save(m);
+  });
+  for (const c of changes) logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} ${named ? `“${m.title}”` : 'a call waiting for approval'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
+  emit(m, { type: 'meeting', meeting: m });
+  // The other weeks of an approved series, with the same organiser and Meet link, are approved too.
+  if (patch.approve && m.calendar?.uid) {
+    for (const other of list<Meeting>('meetings', m.ontologyId)) {
+      if (other.id === m.id || other.calendar?.uid !== m.calendar.uid || other.calendar.approval !== 'pending') continue;
+      if (!seriesApproved(m.ontologyId, other.calendar.uid, other.calendar.organizer, other.meetingUrl)) continue;
+      const o = await mutateMeeting(other.id, (x) => {
+        x.calendar!.approval = 'approved';
+        x.calendar!.approvedBy = user.id;
+        delete x.calendar!.approvalNote;
+      });
+      emit(o, { type: 'meeting', meeting: o });
+    }
+  }
+  if (patch.skip) await drive(meetingId);
+  if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
+  return getMeeting(meetingId);
 }
 
 async function facilitate(m: Meeting): Promise<string | undefined> {
@@ -288,93 +554,180 @@ function heuristicFacilitation(m: Meeting): { speak: boolean; prompt?: string } 
 /* Meeting bot adapters                                                      */
 /* ------------------------------------------------------------------------ */
 
-/**
- * The Google Meet Media API is in a closed developer preview, so a real bot
- * joins through Recall.ai (or a self-hosted Attendee, which has a near-identical
- * API). Without a key, invitations are recorded but the bot is simulated.
- */
-const recall = {
-  enabled: () => !!config.meetBot.recallApiKey,
-  base: () => `https://${config.meetBot.recallRegion}.recall.ai/api/v1`,
-  headers: () => ({ Authorization: `Token ${config.meetBot.recallApiKey}`, 'Content-Type': 'application/json' }),
+export const NO_BOT_PROVIDER =
+  'No meeting-bot provider is configured on this server (set RECALL_API_KEY). Use “Simulate a call” to see how the co-facilitator works, or upload the transcript afterwards.';
 
-  async createBot(meeting: Meeting, meetingUrl: string, secret: string) {
-    const res = await fetch(`${recall.base()}/bot/`, {
-      method: 'POST',
-      headers: recall.headers(),
-      body: JSON.stringify({
-        meeting_url: meetingUrl,
-        bot_name: config.meetBot.botName,
-        chat: { on_bot_join: { send_to: 'everyone', message: `Hi, I'm ${config.meetBot.botName}. I'm listening to capture use cases and terms for the ontology, and I may ask the odd clarifying question in chat.` } },
-        recording_config: {
-          transcript: { provider: { meeting_captions: {} } },
-          realtime_endpoints: [
-            {
-              type: 'webhook',
-              url: `${config.publicUrl}/api/webhooks/recall?meeting=${meeting.id}&secret=${secret}`,
-              events: ['transcript.data'],
-            },
-          ],
-        },
-      }),
-    });
-    if (!res.ok) throw new Error(`Recall.ai returned ${res.status}: ${(await res.text()).slice(0, 300)}`);
-    return (await res.json()) as { id: string };
-  },
+export const isMeetUrl = (url: string) => /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(url);
 
-  async sendChat(botId: string, message: string): Promise<boolean> {
-    try {
-      const res = await fetch(`${recall.base()}/bot/${botId}/send_chat_message/`, { method: 'POST', headers: recall.headers(), body: JSON.stringify({ to: 'everyone', message }) });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  },
+/** Removes a meeting along with its webhook secret (only once its bot record has settled: see botLifecycle). */
+export function dropMeeting(id: string) {
+  remove('meetings', id);
+  remove('kv', `meeting-secret:${id}`);
+}
 
-  async leave(botId: string) {
-    await fetch(`${recall.base()}/bot/${botId}/leave_call/`, { method: 'POST', headers: recall.headers() }).catch(() => undefined);
-  },
-};
+/** Webhook secrets whose meeting has gone (removed some other way). */
+export function pruneSecrets() {
+  for (const k of list<{ id: string }>('kv')) if (k.id.startsWith('meeting-secret:') && !get('meetings', k.id.slice('meeting-secret:'.length))) remove('kv', k.id);
+}
 
-export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string) {
-  if (!/^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
-  const secret = newToken();
-  const m = newMeeting(project, user, title, 'google-meet-bot', { meetingUrl, bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' } });
-  put('kv', { id: `meeting-secret:${m.id}`, secret });
+/** "Join a call now": the booking is recorded before it is sent, then sent (see botLifecycle). */
+export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string, opts: { postPromptsToChat?: boolean } = {}) {
+  if (!isMeetUrl(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
+  const m = newMeeting(project, user, title, 'google-meet-bot', {
+    meetingUrl,
+    postPromptsToChat: !!opts.postPromptsToChat,
+    bot: recall.enabled() ? idleBot() : { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER },
+    chatModeAnnounced: !!opts.postPromptsToChat,
+  });
   if (recall.enabled()) {
-    try {
-      const bot = await recall.createBot(m, meetingUrl, secret);
-      m.bot = { provider: 'recall', botId: bot.id, status: 'joining' };
-    } catch (err) {
-      m.bot = { provider: 'recall', status: 'error', error: (err as Error).message };
-    }
-  } else {
-    m.bot = { provider: 'simulated', status: 'error', error: 'No meeting-bot provider is configured on this server (set RECALL_API_KEY). Use “Simulate a call” to see how the co-facilitator works, or upload the transcript afterwards.' };
+    await meetingLock(m.id, () => {
+      const x = getMeeting(m.id);
+      beginBooking(x, undefined, new Date());
+      return save(x);
+    });
+    await drive(m.id);
   }
-  save(m);
   logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
-  return m;
+  return getMeeting(m.id);
 }
 
 /** Recall.ai real-time transcript webhook. */
 export async function recallWebhook(meetingId: string, secret: string, body: unknown) {
   const stored = get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`);
   if (!stored || stored.secret !== secret) throw new HttpError(401, 'Bad webhook secret');
-  const m = getMeeting(meetingId);
-  const evt = body as { event?: string; data?: { data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } } };
-  if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
-    if (m.bot) m.bot.status = 'in-call';
-    const words = evt.data.data.words;
-    await onLiveLine(m, { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative });
-  }
+  getMeeting(meetingId);
+  const evt = body as {
+    event?: string;
+    data?: {
+      bot?: { id?: string; metadata?: Record<string, string> };
+      data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } };
+    };
+  };
+  if (evt.event !== 'transcript.data' || !evt.data?.data?.words?.length) return;
+  const fromBot = evt.data.bot?.id;
+  const fromBooking = evt.data.bot?.metadata?.concord_booking;
+  const words = evt.data.data.words;
+  let joined = false;
+  let kick = false;
+  let strayKick = false;
+  let strayLine = false;
+  // Decided on the latest copy under the meeting's lock, by the bot's identity: only the
+  // meeting's own bot, while it is wanted, is heard. A bot of this meeting's that isn't
+  // its current one is cancelled; the current one, once unwanted, is released by the clock.
+  const kept = await onLiveLine(
+    meetingId,
+    { speaker: evt.data.data.participant?.name ?? 'Unknown', text: words.map((w) => w.text).join(' '), t: words[0].start_timestamp?.relative },
+    {
+      accept: (x) => {
+        normalise(x);
+        if (!tracked(x)) return false;
+        const b = x.bot;
+        if (fromBot && knownGone(b, fromBot)) {
+          // A stray still speaking: its removal is tried again (at most once a minute from its lines).
+          if (b.strays?.includes(fromBot)) strayLine = true;
+          return false;
+        }
+        // A line that names another booking than the current one is never the current bot's.
+        if (!fromBot && fromBooking && fromBooking !== b.bookingId) return false;
+        if (fromBot && fromBot !== b.botId) {
+          // The current booking's bot, before Recall.ai's reply named it (the webhook is signed with this meeting's secret).
+          // A bot that doesn't say which booking it belongs to is never taken for the current one.
+          if (!b.botId && fromBooking && adoptInPlace(x, fromBooking, [{ id: fromBot }])) {
+            bump(x);
+            if (x.bot.phase !== 'booked') {
+              kick = true;
+              return false;
+            }
+          } else {
+            strayKick = noteStray(x, fromBot) || strayKick;
+            return false;
+          }
+        }
+        const blocked = !!x.withdrawn || (!!x.calendar && (!!x.calendar.cancelPending || !!x.calendar.skip || x.calendar.approval === 'pending'));
+        return (x.bot.phase === 'booked' || x.bot.phase === 'booking') && !blocked;
+      },
+      before: (x) => {
+        joined = !x.bot!.inCall;
+        if (x.status === 'scheduled') x.status = 'live';
+        x.bot!.inCall = true;
+        bump(x);
+      },
+    },
+  );
+  if (kick) void background(drive(meetingId));
+  // A stray (new, or still speaking at most once a minute): only its removal, never the booking's lookups.
+  else if (strayKick || (strayLine && strayKickDue(meetingId))) void background(driveStrays(meetingId));
+  if (kept && joined) await announceChatMode(meetingId).catch(() => undefined);
 }
 
-export async function endLiveMeeting(m: Meeting) {
-  if (m.bot?.provider === 'recall' && m.bot.botId) await recall.leave(m.bot.botId);
-  if (m.bot) m.bot.status = 'done';
-  save(m);
-  emit(m, { type: 'status', status: m.status, bot: m.bot });
-  return m.transcript.length ? analyseMeeting(m) : m;
+/** When a stray's own lines last set off an attempt to remove it, per meeting (real time). */
+const strayKicks = new Map<string, number>();
+function strayKickDue(meetingId: string) {
+  const last = strayKicks.get(meetingId) ?? 0;
+  if (Date.now() - last < 60_000) return false;
+  strayKicks.set(meetingId, Date.now());
+  return true;
+}
+
+/** After the bot has gone: what it heard is analysed (once, however many ask). */
+const finishing = new Map<string, Promise<Meeting>>();
+export function finishCall(meetingId: string): Promise<Meeting> {
+  const running = finishing.get(meetingId);
+  if (running) return running;
+  const run = (async () => {
+    const m = getMeeting(meetingId);
+    emit(m, { type: 'status', status: m.status, bot: m.bot });
+    return m.transcript.length && m.status !== 'analysed' && m.status !== 'processing' ? analyseMeeting(m) : m;
+  })().finally(() => finishing.delete(meetingId));
+  finishing.set(meetingId, run);
+  return run;
+}
+
+/**
+ * End call: the bot is released (marked under the lock, so anything it sends is
+ * refused from now on), and the call is analysed only once Recall.ai confirms the
+ * bot has gone. Until then this throws, and the clock keeps trying.
+ */
+export async function endLiveMeeting(meetingId: string) {
+  if (getMeeting(meetingId).bot?.provider === 'recall') {
+    await meetingLock(meetingId, () => {
+      const m = getMeeting(meetingId);
+      const gen = m.bot?.gen;
+      beginRelease(m, 'leave', 'done');
+      if (m.bot?.gen !== gen) emit(save(m), { type: 'meeting', meeting: m });
+    });
+    await drive(meetingId);
+    const m = getMeeting(meetingId);
+    // Every bot of the call's, strays included, must be confirmed gone.
+    if (tracked(m) && (m.bot.phase !== 'done' || !settled(m.bot))) {
+      const what = m.bot.phase === 'done' ? 'Another bot that turned up in this call hasn’t been removed yet.' : 'The bot hasn’t left yet.';
+      throw new HttpError(502, `${m.bot.fault ?? what} Concord will keep trying; the call is analysed once the bot has left.`);
+    }
+    return finishCall(meetingId);
+  }
+  const m = await mutateMeeting(meetingId, (x) => {
+    if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
+  });
+  emit(m, { type: 'meeting', meeting: m });
+  return finishCall(meetingId);
+}
+
+/** A facilitator lets go of a booking Recall.ai never confirmed and that can no longer be checked. */
+export async function dismissBooking(meetingId: string, user: User) {
+  const before = getMeeting(meetingId);
+  requireFacilitator(before, user, 'dismiss an unconfirmed booking');
+  if ((before.bot?.dismissed?.length ?? 0) >= MAX_DISMISSED)
+    throw new HttpError(409, `${MAX_DISMISSED} dismissed bookings for this call are still being looked for. This one stays unconfirmed, and is looked for too.`);
+  const m = await dismissUnconfirmed(meetingId);
+  if (!m) throw new HttpError(409, 'Only a booking Recall.ai never confirmed, and that can no longer be checked by sending it again, can be dismissed.');
+  logActivity({
+    ontologyId: before.ontologyId,
+    actorId: user.id,
+    type: 'meeting.updated',
+    message: `confirmed that an unconfirmed bot booking for ${before.calendar?.approval === 'pending' || before.withdrawn ? 'a call' : `“${before.title}”`} can be let go`,
+    link: `/o/${before.ontologyId}/meetings/${before.id}`,
+  });
+  return get<Meeting>('meetings', meetingId) ?? m;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -401,9 +754,10 @@ export const SIMULATED_CALL: TranscriptLine[] = [
 const runningSimulations = new Set<string>();
 
 /** Replays the scripted call line by line so testers can watch the co-facilitator work. */
-export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number } = {}) {
+export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number; postPromptsToChat?: boolean } = {}) {
   const m = newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
+    postPromptsToChat: !!opts.postPromptsToChat,
     bot: { provider: 'simulated', status: 'in-call' },
   });
   const delay = opts.delayMs ?? 1800;
@@ -412,12 +766,12 @@ export async function simulateCall(project: OntologyProject, user: User, title: 
     for (const line of SIMULATED_CALL) {
       if (!runningSimulations.has(m.id)) return;
       if (delay) await new Promise((r) => setTimeout(r, delay));
-      await onLiveLine(getMeeting(m.id), { ...line, t: getMeeting(m.id).transcript.length * 20 }, { minGapLines: 4 });
+      await onLiveLine(m.id, { ...line, t: getMeeting(m.id).transcript.length * 20 }, { minGapLines: 4 });
     }
     runningSimulations.delete(m.id);
-    const done = getMeeting(m.id);
-    done.bot = { provider: 'simulated', status: 'done' };
-    save(done);
+    const done = await mutateMeeting(m.id, (x) => {
+      x.bot = { provider: 'simulated', status: 'done' };
+    });
     emit(done, { type: 'status', status: done.status, bot: done.bot });
     await analyseMeeting(done);
   };

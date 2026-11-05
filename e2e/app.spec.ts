@@ -62,7 +62,7 @@ test.describe('signed in', () => {
       });
     }
     // Every page from before the regrouping is still reachable.
-    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query & validate', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
+    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query', 'Validate data', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
   });
 
   test('detail pages linked from the ontology open', async ({ page, request }) => {

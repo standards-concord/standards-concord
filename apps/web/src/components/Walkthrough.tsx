@@ -11,6 +11,9 @@ import { formatDate, roleLabel } from '../lib/format';
 import { ActivityList } from './ActivityFeed';
 import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx } from './ui';
 import { Disclosure, Popover } from './Disclosure';
+import { changeIsFor } from '@concord/shared';
+import { changeLink, useTester } from '../lib/tester';
+import { ChangeList } from './TesterStatus';
 
 export function Stepper({ current, onPick, compact }: { current: number; onPick?: (i: number) => void; compact?: boolean }) {
   return (
@@ -64,6 +67,7 @@ function WelcomeStep() {
 
 function RoleStep({ compact }: { compact?: boolean }) {
   const w = useWalkthrough();
+  const tester = useTester();
   const { session, setSession } = useSession();
   const personas = useAsync(() => api.personas(), []);
   const [chosen, setChosen] = useState<string>();
@@ -85,6 +89,9 @@ function RoleStep({ compact }: { compact?: boolean }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted">First choose a role, then the person you’ll be. The others will act around you, and you can switch at any time.</p>
+      {tester.since && tester.changes.length > 0 && (
+        <p className="text-xs text-muted">Roles marked “new” have changes made for them since {tester.since}, the version you last tested.</p>
+      )}
       <InlineError error={login.error} />
       <div className={cx('grid gap-3', !compact && 'sm:grid-cols-2')}>
         {grouped.map(({ role, people }) => {
@@ -93,7 +100,14 @@ function RoleStep({ compact }: { compact?: boolean }) {
             <section key={role.key} aria-label={role.title} className={cx('rounded-xl border bg-surface p-4', expanded ? 'border-accent sm:col-span-2' : 'border-line')}>
               <button type="button" aria-expanded={expanded} onClick={() => setChosen(expanded ? '' : role.key)} className="w-full text-left">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-semibold">{role.title}</span>
+                  <span className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                    {role.title}
+                    {tester.since && tester.newForRole(role.key).length > 0 && (
+                      <Badge tone="accent" title={tester.newForRole(role.key).map((c) => c.title).join('; ')}>
+                        {tester.newForRole(role.key).length} new since {tester.since}
+                      </Badge>
+                    )}
+                  </span>
                   <span className="text-xs font-medium text-accent">{expanded ? 'Hide people' : people.length ? `Choose (${people.length})` : 'Choose'}</span>
                 </div>
                 <p className="mt-0.5 text-xs text-muted">{role.blurb}</p>
@@ -151,6 +165,7 @@ function RoleStep({ compact }: { compact?: boolean }) {
 
 function TourStep({ compact }: { compact?: boolean }) {
   const w = useWalkthrough();
+  const tester = useTester();
   const demo = useDemoOntology();
   const { session } = useSession();
   if (!session?.user)
@@ -163,7 +178,11 @@ function TourStep({ compact }: { compact?: boolean }) {
       </div>
     );
   if (!demo) return <p className="text-sm text-muted">Looking for the demo ontology… (if this persists, create one from the hub).</p>;
-  const tasks = tasksFor(w.myRoles, demo.id);
+  // Returning testers: what changed for their role since they last tested comes first.
+  const whatsNew = tester.since ? tester.forRole.filter((c) => c.type !== 'fix' && changeIsFor(c, tester.roleKey) && changeLink(c.to, demo.id)).slice(0, 3) : [];
+  const newTasks = new Set(tester.changes.filter((c) => changeIsFor(c, tester.roleKey)).flatMap((c) => c.tasks ?? []));
+  const roleTasks = tasksFor(w.myRoles, demo.id);
+  const tasks = [...roleTasks.filter((t) => newTasks.has(t.id)), ...roleTasks.filter((t) => !newTasks.has(t.id))];
   const doneCount = tasks.filter((t) => w.done[t.id]).length;
   const nextTask = tasks.find((t) => !w.done[t.id]);
   return (
@@ -172,9 +191,17 @@ function TourStep({ compact }: { compact?: boolean }) {
         The demo ontology is <Link className="font-medium text-accent hover:underline" to={`/o/${demo.id}`}>{demo.title}</Link>. As{' '}
         {w.myRoles.length ? <strong>{w.myRoles.map(roleLabel).join(', ')}</strong> : 'a participant'}, here’s something to try.
       </p>
+      {whatsNew.length > 0 && (
+        <section aria-label={`New since ${tester.since}`} className="space-y-2">
+          <h3 className="text-sm font-medium text-muted">New since you last tested ({tester.since})</h3>
+          <ChangeList changes={whatsNew} demoId={demo.id} compact={compact} />
+        </section>
+      )}
       {nextTask ? (
         <div className="rounded-xl border border-accent/40 bg-accent-soft/40 p-3" aria-label="Suggested next task" role="group">
-          <div className="text-sm font-medium text-muted">Try next</div>
+          <div className="flex items-center gap-2 text-sm font-medium text-muted">
+            Try next {newTasks.has(nextTask.id) && <Badge tone="accent">Changed since {tester.since}</Badge>}
+          </div>
           <Link to={nextTask.to} className="mt-0.5 block text-sm font-semibold hover:text-accent">
             {nextTask.label}
           </Link>
@@ -211,6 +238,11 @@ function TourStep({ compact }: { compact?: boolean }) {
                 <Link to={t.to} className={cx('text-sm font-medium hover:text-accent', w.done[t.id] && 'text-muted line-through')}>
                   {t.label}
                 </Link>
+                {newTasks.has(t.id) && (
+                  <Badge tone="accent" className="ml-2">
+                    Changed
+                  </Badge>
+                )}
                 {!compact || !w.done[t.id] ? <p className="text-xs text-muted">{t.detail}</p> : null}
               </div>
               <Link to={t.to} className="mt-0.5 text-muted hover:text-accent" aria-label="Go">

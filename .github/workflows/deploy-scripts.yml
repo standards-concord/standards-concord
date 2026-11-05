@@ -1,0 +1,29 @@
+name: Deploy scripts
+
+# CI skips deploy/**, so the scripts that handle secrets get their own few-second check.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/azure/set-key*'
+      - '.github/workflows/deploy-scripts.yml'
+  pull_request:
+    paths:
+      - 'deploy/azure/set-key*'
+      - '.github/workflows/deploy-scripts.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-scripts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  set-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: set-key.sh keeps secrets out of command lines
+        run: bash deploy/azure/set-key.test.sh
