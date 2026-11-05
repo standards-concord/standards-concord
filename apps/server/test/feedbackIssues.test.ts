@@ -882,6 +882,17 @@ describe('triage through the server', () => {
     expect(requests.some((r) => r.includes('/labels/needs-triage'))).toBe(false);
   });
 
+  // The routine's rules list every field, so "no duplicate" naturally comes as null. The server used to
+  // refuse that with a 400, and since the routine never retries with different content, the summary was
+  // never triaged (found on the live site, issue 74).
+  it('takes a null possibleDuplicateOf to mean no duplicate', async () => {
+    await submit('No duplicate, said as null');
+    expect((await triage(1, { needsJesse: false, possibleDuplicateOf: null })).status).toBe(200);
+    expect(issues[0].labels.sort()).toEqual(['feedback', 'size:small', 'triaged', 'ux']);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).not.toContain('Possibly a duplicate');
+  });
+
   it('validates needsJesse and duplicates strictly', async () => {
     await submit('Strict one');
     expect((await triage(1, { needsJesse: 'true' })).status).toBe(400);
@@ -889,6 +900,8 @@ describe('triage through the server', () => {
     expect((await triage(1, { possibleDuplicateOf: 999999 })).status).toBe(400);
     expect((await triage(1, { possibleDuplicateOf: 1 })).status).toBe(400);
     expect((await triage(1, { possibleDuplicateOf: 2 ** 60 })).status).toBe(400);
+    expect((await triage(1, { possibleDuplicateOf: false })).status).toBe(400);
+    expect((await triage(1, { possibleDuplicateOf: '1' })).status).toBe(400);
     expect(comments).toEqual([]);
   });
 
