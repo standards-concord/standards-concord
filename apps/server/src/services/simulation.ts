@@ -8,7 +8,8 @@ import { config } from '../config.js';
 import { clearAll, list, put, transaction } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
-import { PERSONA_ACTOR } from '../llm/prompts.js';
+import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
+import { requestText } from '../llm/context.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
@@ -203,7 +204,7 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     statusSince: now,
   };
   Object.assign(files, await releasePageFiles(project, r, stamped));
-  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: steward.name });
+  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
   await put('releases', r, project.id);
   project.currentVersion = version;
   await updateProject(project);
@@ -243,14 +244,14 @@ function scriptedReaction(p: PersonaSpec, cr: ChangeRequest): { decision: 'appro
 async function personaReaction(p: PersonaSpec, cr: ChangeRequest, compact: (iri: string) => string) {
   const { value } = await llm.json({
     task: 'persona',
-    system: `${PERSONA_ACTOR}\n\nYou are ${p.name} from ${p.organisation}. ${p.persona}`,
+    system: `${PERSONA_ACTOR}\n\nYou are ${p.name} from ${p.organisation}. ${p.persona}\n\n${UNTRUSTED_TEXT}`,
     schema: PersonaActionSchema,
     effort: 'low',
     maxTokens: 1500,
     messages: [
       {
         role: 'user',
-        content: `Change request #${cr.number}: ${cr.title} (${cr.classification?.level ?? 'unclassified'})\n${cr.description}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, compact)}`).join('\n')}\n\nValidation: ${cr.validation?.passed ? 'passed' : 'failed'}\nComments so far:\n${(await Promise.all(cr.timeline.filter((e) => e.type === 'review' || e.type === 'comment').map(async (e) => `- ${(await getUser(e.actorId ?? ''))?.name ?? 'someone'}: ${e.message}`))).join('\n') || '(none)'}\n\nHow do you respond? Also say how you would vote if it goes to a vote.`,
+        content: `${requestText(cr)}\nLevel: ${cr.classification?.level ?? 'unclassified'}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, compact)}`).join('\n')}\n\nValidation: ${cr.validation?.passed ? 'passed' : 'failed'}\nComments so far:\n${(await Promise.all(cr.timeline.filter((e) => e.type === 'review' || e.type === 'comment').map(async (e) => `- ${(await getUser(e.actorId ?? ''))?.name ?? 'someone'}: ${e.message}`))).join('\n') || '(none)'}\n\nHow do you respond? Also say how you would vote if it goes to a vote.`,
       },
     ],
     fallback: () => scriptedReaction(p, cr),

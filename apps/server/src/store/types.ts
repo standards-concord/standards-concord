@@ -45,6 +45,10 @@ export interface DocStore {
    * it was before (without the field). Undefined means it doesn't exist or someone else set the field first.
    */
   claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined>;
+  /** Insert a document only if none has its id, in one statement: true if this call inserted it. */
+  insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean>;
+  /** Delete the documents in a collection whose `field` is a number at or below `max`; returns how many. */
+  removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number>;
   clearAll(): Promise<void>;
   /**
    * Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer

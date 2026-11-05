@@ -17,6 +17,8 @@ export type Collection =
   | 'interviews'
   | 'meetings'
   | 'changeRequests'
+  | 'publicReports'
+  | 'reportNonces'
   | 'reviews'
   | 'votes'
   | 'releases'
@@ -28,6 +30,7 @@ export type Collection =
   | 'oauthGrants'
   | 'oauthTokens'
   | 'feedback'
+  | 'feedbackPublications'
   | 'activity'
   | 'kv';
 
@@ -84,6 +87,16 @@ export async function take<T>(collection: Collection, id: string): Promise<T | u
  */
 export async function claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined> {
   return (await conn()).claim<T>(collection, id, field, value);
+}
+
+/** Insert a document only if none has its id, in one statement: true if this call inserted it. */
+export async function insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
+  return (await conn()).insertOnce(collection, doc, parent);
+}
+
+/** Delete the documents in a collection whose `field` is a number at or below `max`; returns how many. */
+export async function removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
+  return (await conn()).removeWhereAtMost(collection, field, max);
 }
 
 export async function clearAll(): Promise<void> {

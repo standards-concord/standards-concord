@@ -16,6 +16,8 @@ export async function createUser(input: {
   organisation?: string;
   id?: string;
   isPlatformAdmin?: boolean;
+  /** Their own WebID (signed in with Solid). They still get a pod here for what Concord saves for them. */
+  webId?: string;
 }): Promise<User> {
   const id = input.id ?? newId('usr');
   const base: User = {
@@ -23,7 +25,7 @@ export async function createUser(input: {
     name: input.name,
     email: input.email,
     avatarUrl: input.avatarUrl,
-    webId: solid.localWebId(id),
+    webId: input.webId ?? solid.localWebId(id),
     providers: [{ provider: input.provider, subject: input.subject }],
     simulated: input.simulated,
     persona: input.persona,
@@ -34,7 +36,7 @@ export async function createUser(input: {
   // Every account gets a WebID and pod without having to know about Solid.
   try {
     const { webId, podUrl } = await solid.provision(base);
-    base.webId = webId;
+    base.webId = input.webId ?? webId;
     base.podUrl = podUrl;
   } catch (err) {
     console.warn(`[solid] could not provision pod for ${base.name}: ${(err as Error).message}`);
@@ -46,10 +48,31 @@ export async function findByProvider(provider: AuthProvider, subject: string): P
   return (await list<User>('users')).find((u) => u.providers.some((p) => p.provider === provider && p.subject === subject));
 }
 
-export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }) {
-  // Sign-in is by provider and subject only. Matching on email would let a new
-  // identity that merely shares an address take over an existing account.
+/**
+ * Find or create the account for a Google or GitHub identity. Sign-in is by
+ * provider and subject only: matching on email would let a new identity that
+ * merely shares an address take over an existing account.
+ *
+ * `linkTo` is the demo tester account the same browser was using (the caller has
+ * checked the OAuth state, so the browser started this sign-in). When the
+ * identity is new it is attached to that account, so what they saved stays theirs.
+ */
+export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string; webId?: string }, linkTo?: User) {
   const existing = await findByProvider(p.provider, p.subject);
+  if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
+    const linked = await get<User>('users', linkTo.id);
+    if (linked) {
+      linked.providers.push({ provider: p.provider, subject: p.subject });
+      linked.name = p.name;
+      // Signing in with their own WebID makes it the account's WebID.
+      if (p.webId) linked.webId = p.webId;
+      linked.email ??= p.email;
+      linked.avatarUrl ??= p.avatarUrl;
+      // Sessions issued while it was a demo account (in any browser) end here.
+      await destroyUserSessions(linked.id);
+      return await put('users', linked);
+    }
+  }
   if (existing) {
     if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
     existing.avatarUrl ??= p.avatarUrl;
@@ -71,19 +94,33 @@ export const publicUser = (u?: User) => (u ? { id: u.id, name: u.name, avatarUrl
 interface SessionDoc {
   id: string;
   userId: string;
+  /**
+   * How this session was signed in. Administrator access needs a session that
+   * was itself signed in with Google or GitHub: an account that later gains a
+   * provider does not upgrade the sessions it already had.
+   */
+  method?: AuthProvider;
   createdAt: string;
 }
 
-export async function createSession(userId: string): Promise<string> {
+export async function createSession(userId: string, method?: AuthProvider): Promise<string> {
   const id = newToken();
-  await put<SessionDoc>('sessions', { id: hash(id), userId, createdAt: new Date().toISOString() });
+  await put<SessionDoc>('sessions', { id: hash(id), userId, method, createdAt: new Date().toISOString() });
   return id;
 }
-export async function sessionUser(token: string | undefined): Promise<User | undefined> {
+export async function sessionOf(token: string | undefined): Promise<{ user: User; method?: AuthProvider } | undefined> {
   if (!token) return;
   const s = await get<SessionDoc>('sessions', hash(token));
-  return s ? await getUser(s.userId) : undefined;
+  const user = s && await getUser(s.userId);
+  return user ? { user, method: s.method } : undefined;
 }
+export async function sessionUser(token: string | undefined): Promise<User | undefined> {
+  return (await sessionOf(token))?.user;
+}
+/** End every session an account has (for example when a demo account gains a Google or GitHub identity). */
+export async function destroyUserSessions(userId: string) { return transaction(async () => {
+  for (const s of await list<SessionDoc>('sessions')) if (s.userId === userId) await remove('sessions', s.id);
+}); }
 export async function destroySession(token: string | undefined) {
   if (token) await remove('sessions', hash(token));
 }
@@ -136,4 +173,13 @@ export async function logActivity(a: Omit<ActivityItem, 'id' | 'at' | 'actorName
 export async function listActivity(ontologyId?: string, limit = 50): Promise<ActivityItem[]> {
   const items = ontologyId ? await list<ActivityItem>('activity', ontologyId) : await list<ActivityItem>('activity');
   return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+}
+
+/** The author of reports sent from the public page by people without an account. */
+export async function publicReporter(): Promise<User> {
+  const id = 'usr_public';
+  return (
+    await getUser(id) ??
+    await put('users', { id, name: 'Member of the public', webId: solid.localWebId(id), providers: [], simulated: true, createdAt: clock.iso() } satisfies User)
+  );
 }

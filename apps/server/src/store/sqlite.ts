@@ -133,6 +133,26 @@ export class SqliteStore implements DocStore {
     await this.run(() => this.db.prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(collection, id));
   }
 
+  async insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
+    const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
+    const r = await this.run(() =>
+      this.db
+        .prepare('INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(collection, id) DO NOTHING')
+        .run(collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt),
+    );
+    return Number(r.changes) > 0;
+  }
+
+  async removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
+    checkField(field);
+    const r = await this.run(() =>
+      this.db
+        .prepare(`DELETE FROM docs WHERE collection = ? AND json_type(data, '$.${field}') IN ('integer', 'real') AND json_extract(data, '$.${field}') <= ?`)
+        .run(collection, max),
+    );
+    return Number(r.changes);
+  }
+
   async take<T>(collection: Collection, id: string): Promise<T | undefined> {
     const row = await this.run(
       () => this.db.prepare('DELETE FROM docs WHERE collection = ? AND id = ? RETURNING data').get(collection, id) as { data: string } | undefined,

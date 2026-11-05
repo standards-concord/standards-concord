@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lineDiff } from '../lib/terminal.ts';
 import { vtt } from '../lib/mux.ts';
-import { forSpeech, parseNarration, selectScenes, sentences } from '../lib/narration.ts';
+import { cuesFor, fillMinutes, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap } from '../lib/narration.ts';
 import { actions } from '../scenes.ts';
 
 describe('narration parser', () => {
@@ -87,6 +87,38 @@ describe('the real script', () => {
   });
 });
 
+describe('conditional paragraphs', () => {
+  const doc = `## Intro {#intro}
+
+[do: open-hub]
+[if: jsClasses]
+Long tour with the developer story.
+
+[do: open-hub]
+[if: !jsClasses]
+Short tour.
+
+Always said.
+`;
+  it('keeps only the paragraphs whose features match', () => {
+    const n = parseNarration(doc);
+    const withClasses = selectScenes(n, new Set(['jsClasses'])).kept[0].steps.map((s) => s.text);
+    const without = selectScenes(n, new Set()).kept[0].steps.map((s) => s.text);
+    expect(withClasses).toEqual(['Long tour with the developer story.', 'Always said.']);
+    expect(without).toEqual(['Short tour.', 'Always said.']);
+  });
+});
+
+describe('spoken length', () => {
+  it('fills {minutes} from the words in the selected scenes', () => {
+    const words = Array.from({ length: 560 }, () => 'word').join(' ');
+    const n = parseNarration(`## A {#a}\n\nIn about {minutes} minutes.\n\n${words}\n`);
+    const kept = selectScenes(n, new Set()).kept;
+    expect(fillMinutes(kept)).toBe(4);
+    expect(kept[0].steps[0].text).toBe('In about four minutes.');
+  });
+});
+
 describe('helpers', () => {
   it('diffs lines with context', () => {
     const rows = lineDiff('a\nb\nc\nd\ne\nf\ng', 'a\nb\nc\nD\ne\nf\ng', 1);
@@ -98,9 +130,53 @@ describe('helpers', () => {
     ]);
   });
 
-  it('writes one caption cue per sentence', () => {
-    const out = vtt([{ file: 'x', at: 1, duration: 4, text: 'One two. Six six.' }]);
+  it('writes the caption cues it is given, offset by the clip start', () => {
+    const cues = [
+      { start: 0, end: 2, text: 'One two.' },
+      { start: 2, end: 4, text: 'Six six.' },
+    ];
+    const out = vtt([{ file: 'x', at: 1, duration: 4, text: 'One two. Six six.', cues }]);
     expect(out).toContain('00:00:01.000 --> 00:00:03.000\nOne two.');
     expect(out).toContain('00:00:03.000 --> 00:00:05.000\nSix six.');
+  });
+});
+
+describe('captions', () => {
+  it('keeps cues short, preferring a comma break', () => {
+    const long = 'Concord keeps every proposal, vote and release in one place, so a standards group can work without long meetings and still see who decided what.';
+    const ps = phrases(long, 84);
+    expect(ps.length).toBeGreaterThan(1);
+    for (const p of ps) expect(p.text.length).toBeLessThanOrEqual(84);
+    expect(ps[0].text.endsWith(',')).toBe(true);
+    expect(ps.map((p) => p.text).join(' ')).toBe(long);
+  });
+
+  it('splits long sentences into balanced pieces, without orphan words', () => {
+    const ps = phrases('This is Helping Hands, a small web app that lists volunteering opportunities near you.', 60);
+    expect(ps.length).toBe(2);
+    for (const p of ps) expect(p.text.length).toBeGreaterThan(20);
+  });
+
+  it('never lets a short cue overlap the next one', () => {
+    const out = vtt([{ file: 'x', at: 0, duration: 1, text: 'A. B.', cues: [{ start: 0, end: 0.1, text: 'A.' }, { start: 0.2, end: 1, text: 'B.' }] }]);
+    expect(out).toContain('00:00:00.000 --> 00:00:00.200\nA.');
+  });
+
+  it('maps caption words onto the spoken text after the lexicon', () => {
+    const m = speechMap('Write SHACL shapes.', { SHACL: 'shackle' });
+    expect(m.speech).toBe('Write shackle shapes.');
+    expect(m.starts).toEqual([0, 6, 14]);
+  });
+
+  it('times cues from the voice’s character timestamps when given', () => {
+    const text = 'Hello there. Bye now.';
+    const speech = speechMap(text, {}).speech;
+    // Pretend the voice paused for a long time before "Bye".
+    const starts = [...speech].map((_, i) => (i < 13 ? i * 0.1 : 5 + (i - 13) * 0.1));
+    const cues = cuesFor(text, {}, 6, starts);
+    expect(cues).toEqual([
+      { start: 0, end: 5, text: 'Hello there.' },
+      { start: 5, end: 6, text: 'Bye now.' },
+    ]);
   });
 });

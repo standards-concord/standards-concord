@@ -170,6 +170,29 @@ export class PostgresStore implements DocStore {
     await this.write((q) => q.query('DELETE FROM docs WHERE collection = $1 AND id = $2', [collection, id]));
   }
 
+  async insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
+    const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
+    const { rows } = await this.write((q) =>
+      q.query(
+        'INSERT INTO docs (collection, id, parent, data, created_at) VALUES ($1, $2, $3, $4::json, $5) ON CONFLICT (collection, id) DO NOTHING RETURNING id',
+        [collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt],
+      ),
+    );
+    return rows.length > 0;
+  }
+
+  /** Only numbers count, as in SQLite, where a string or null never compares at or below a number. */
+  async removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
+    checkField(field);
+    const { rows } = await this.write((q) =>
+      q.query(
+        `DELETE FROM docs WHERE collection = $1 AND json_typeof(data -> $2) = 'number' AND (data ->> $2)::float8 <= $3 RETURNING id`,
+        [collection, field, max],
+      ),
+    );
+    return rows.length;
+  }
+
   async take<T>(collection: Collection, id: string): Promise<T | undefined> {
     const { rows } = await this.write((q) =>
       q.query<{ data: string }>('DELETE FROM docs WHERE collection = $1 AND id = $2 RETURNING data::text AS data', [collection, id]),

@@ -8,12 +8,13 @@ import type {
   ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
   PropertyView, Restriction, TermAnnotations, TermView,
 } from './types.js';
-import { NS, RDF_TYPE, STANDARD_PREFIXES, localName, today } from './ns.js';
+import { NS, RDF_TYPE, STANDARD_PREFIXES, isSafeNamespace, isSafePrefix, localName, today } from './ns.js';
 import {
   cloneStore, firstObject, hasType, langLit, manchesterExpr, namedNode, nn, objects, readList,
   subjects, typedLit, quad, defaultGraph,
 } from './rdf.js';
 import { writeTurtle } from './turtle.js';
+import { REMOTE_REFUSED, noRemoteDocuments } from './jsonld-loader.js';
 
 export const CHARACTERISTIC_TYPES: Record<PropertyCharacteristic, string> = {
   functional: NS.owl + 'FunctionalProperty',
@@ -100,7 +101,8 @@ export class OntologyGraph {
     this.prefixes = { ...STANDARD_PREFIXES, ...prefixes };
     // Make sure the preferred prefix is usable for output.
     const pref = this.literalOf(this.ontologyIRI, NS.vann + 'preferredNamespacePrefix');
-    if (pref && !(pref in this.prefixes) && this.namespace) this.prefixes[pref] = this.namespace;
+    // Only a well-formed prefix: one from editable metadata such as "@import" must never reach a JSON-LD context.
+    if (pref && isSafePrefix(pref) && !(pref in this.prefixes) && this.namespace && isSafeNamespace(this.namespace)) this.prefixes[pref] = this.namespace;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -119,7 +121,7 @@ export class OntologyGraph {
       case 'turtle': return OntologyGraph.fromTurtle(text);
       case 'ntriples': return parseN3(text, 'N-Triples');
       case 'rdfxml': return parseRdfXml(text);
-      case 'jsonld': return parseJsonLd(text);
+      case 'jsonld': return parseJsonLd(JSON.parse(text));
       default: throw new Error(`Unsupported input format: ${format as string}`);
     }
   }
@@ -357,12 +359,18 @@ export class OntologyGraph {
     const superClasses: IRI[] = [];
     const restrictions: Restriction[] = [];
     const superExprs: string[] = [];
+    const conjuncts: NonNullable<ClassView['superClassConjuncts']> = [];
     for (const o of objects(s, iri, P.subClassOf)) {
       if (o.termType === 'NamedNode') superClasses.push(o.value);
       else if (o.termType === 'BlankNode') {
         const r = this.restrictionOf(o);
         if (r) restrictions.push(r);
-        else superExprs.push(manchesterExpr(s, o, this.prefixes));
+        else {
+          const expression = manchesterExpr(s, o, this.prefixes);
+          superExprs.push(expression);
+          const parts = this.conjunctsOf(o);
+          if (parts) conjuncts.push({ expression, ...parts });
+        }
       }
     }
     const eq = [...objects(s, iri, P.equivalentClass), ...subjects(s, P.equivalentClass, iri)];
@@ -383,8 +391,36 @@ export class OntologyGraph {
       disjointWith: [...disjoint].sort(),
       restrictions: restrictions.sort((a, b) => restrictionKey(a).localeCompare(restrictionKey(b))),
       superClassExpressions: superExprs.length ? superExprs.sort() : undefined,
+      superClassConjuncts: conjuncts.length ? conjuncts.sort((a, b) => a.expression.localeCompare(b.expression)) : undefined,
       equivalentExpressions: nonEmpty(eq.filter((t) => t.termType === 'BlankNode').map((t) => manchesterExpr(s, t, this.prefixes)).sort()),
     }) as ClassView;
+  }
+
+  /**
+   * The parts of an anonymous intersection (`A and (p min 2)`), when every part is a named
+   * class, a simple restriction or another such intersection. A subclass of an intersection
+   * is a subclass of each part, so these can be summarised like ordinary axioms.
+   */
+  conjunctsOf(node: Term): { classes: IRI[]; restrictions: Restriction[] } | undefined {
+    const head = firstObject(this.store, node, NS.owl + 'intersectionOf');
+    const members = head && readList(this.store, head);
+    if (!members?.length) return undefined;
+    const out = { classes: [] as IRI[], restrictions: [] as Restriction[] };
+    for (const m of members) {
+      if (m.termType === 'NamedNode') out.classes.push(m.value);
+      else if (m.termType === 'BlankNode') {
+        const r = this.restrictionOf(m);
+        if (r) {
+          out.restrictions.push(r);
+          continue;
+        }
+        const inner = this.conjunctsOf(m);
+        if (!inner) return undefined;
+        out.classes.push(...inner.classes);
+        out.restrictions.push(...inner.restrictions);
+      } else return undefined;
+    }
+    return out;
   }
 
   /** Parses an owl:Restriction blank node into the simple `Restriction` form. */
@@ -558,10 +594,14 @@ async function parseRdfXml(text: string, baseIRI?: string): Promise<OntologyGrap
   return new OntologyGraph(toDefaultGraph(quads), prefixes);
 }
 
-async function parseJsonLd(text: string): Promise<OntologyGraph> {
+async function parseJsonLd(doc: any): Promise<OntologyGraph> {
   const jsonld = (await import('jsonld')).default;
-  const doc = JSON.parse(text);
-  const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads' })) as unknown as string;
+  // Never fetch remote contexts or @import: a document must not make the server request URLs.
+  const nquads = (await jsonld.toRDF(doc, { format: 'application/n-quads', documentLoader: noRemoteDocuments as any }).catch((err: any) => {
+    // jsonld wraps the loader's refusal in a generic dereferencing error: say plainly what happened.
+    for (let e = err; e; e = e.details?.cause ?? e.cause) if (String(e.message).startsWith(REMOTE_REFUSED)) throw new Error(e.message);
+    throw err;
+  })) as unknown as string;
   const g = await parseN3(nquads, 'N-Quads');
   const prefixes: Record<string, string> = {};
   const ctxs = ([] as unknown[]).concat(doc?.['@context'] ?? []);

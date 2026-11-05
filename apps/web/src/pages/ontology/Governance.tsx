@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ApprovalRule, ChangeLevel, GovernancePolicy, Role } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
-import { Crown, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
+import { Crown, EyeOff, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { pct, plural, roleLabel } from '../../lib/format';
@@ -356,6 +356,110 @@ function RulesSection({
 
 const TRANSFER: Record<GovernancePolicy['ownership']['transfer'], string> = { 'owner-decides': 'The owner decides', 'member-vote': 'Voting members vote', 'odi-approval': 'ODI must approve' };
 
+/**
+ * Versions published before anyone approved what goes public, held until an
+ * owner or steward approves exactly what each publishes. What looks private is
+ * highlighted (a hint: the check misses things), and the whole Turtle is there
+ * to read. The working draft can be fixed with ordinary change requests first.
+ */
+function HeldVersions() {
+  const { id, hasRole } = useOntology();
+  const canReview = hasRole('owner', 'steward');
+  const holds = useAsync(() => (canReview ? api.publicHolds(id) : Promise.resolve([])), [id, canReview]);
+  const heading = useRef<HTMLSpanElement>(null);
+  const [status, setStatus] = useState('');
+  const approve = useAction(async (version: string, fingerprint: string) => {
+    try {
+      await api.approvePublicHold(id, version, fingerprint);
+      setStatus(`${version === 'draft' ? 'The working draft' : `Version ${version}`} is published again.`);
+    } finally {
+      // Approved, or changed since it was shown: either way, show what is there now.
+      await holds.reload();
+      requestAnimationFrame(() => heading.current?.focus());
+    }
+  });
+  if (!canReview) return null;
+  if (holds.error && !holds.data) return <ErrorCard title="Couldn’t load the versions waiting for approval" error={holds.error} onRetry={() => void holds.reload()} />;
+  if (!holds.data || (!holds.data.length && !status)) return null;
+  const kind = (k: 'use case title' | 'name') => (k === 'name' ? 'a person’s name' : 'a use case title');
+  return (
+    <section aria-labelledby="held-h">
+      <Card>
+        <CardHeader
+          icon={EyeOff}
+          title={
+            <span id="held-h" ref={heading} tabIndex={-1} className="outline-none">
+              Waiting for approval before they are public ({holds.data.length})
+            </span>
+          }
+        />
+        <p className="px-5 pt-3 pb-2 text-sm text-muted">
+          Older versions of Concord published changes drafted from use cases without anyone approving them. Until you approve exactly what each version publishes, its public page and downloads say it is being reviewed. Fix the working draft with a change request first if it needs it; a release can only be approved as it is.
+        </p>
+        <p role="status" className="sr-only">
+          {status}
+        </p>
+        {!holds.data.length && <p className="px-5 pb-3 text-sm text-muted">Nothing is waiting for approval.</p>}
+        <ul className="divide-y divide-line">
+          {holds.data.map((h) => (
+            <li key={h.version} className="space-y-2 px-5 py-3" data-held={h.version}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-medium">{h.version === 'draft' ? 'Working draft' : `Version ${h.version}`}</span>
+                <span className="text-xs text-muted">{plural(h.statements, 'statement')}</span>
+              </div>
+              {h.error && (
+                <p className="text-sm text-warn" role="note">
+                  {h.error}
+                </p>
+              )}
+              {h.hints.length ? (
+                <>
+                  <p className="text-sm text-warn">{plural(h.hints.length, 'item')} may name a use case or a person. The check can miss things, so read it all.</p>
+                  <ul className="max-h-60 space-y-1 overflow-auto">
+                    {h.hints.map((x, i) => (
+                      <li key={i} className="break-words rounded bg-warn-soft px-1 font-mono text-xs" data-hint={x.kind}>
+                        {x.subject}
+                        {x.predicate && ` · ${x.predicate}`} · <span className="font-sans">{x.object}</span>
+                        <span className="sr-only"> (may be {kind(x.kind)})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="text-sm text-muted">Nothing looks private, but the check can miss things, so read it all.</p>
+              )}
+              <div className="space-y-1" data-held-content>
+                <p className="text-xs text-muted">Approving publishes exactly these, as shown here:</p>
+                {(
+                  [
+                    ['turtle', 'The ontology (Turtle; every download is made from it)', h.turtle],
+                    ['notes', 'Release notes', h.notes],
+                    ['snapshot', 'Use case snapshot shown on the page', h.snapshot],
+                  ] as const
+                ).map(([key, label, text]) => (
+                  <details key={key} data-part={key} className="rounded border border-line">
+                    <summary className="cursor-pointer px-2 py-1 text-sm">
+                      {label}
+                      {!text && <span className="text-muted"> (none)</span>}
+                    </summary>
+                    {text && <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words border-t border-line p-2 font-mono text-xs">{text}</pre>}
+                  </details>
+                ))}
+              </div>
+              <Button size="sm" variant="primary" loading={approve.pending} disabled={!h.fingerprint} onClick={() => void approve.run(h.version, h.fingerprint)}>
+                Approve exactly this for publishing
+              </Button>
+            </li>
+          ))}
+        </ul>
+        <div className="px-5 pb-3">
+          <InlineError error={approve.error} />
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 export function GovernanceTab() {
   const { id, ontology, hasRole, reload } = useOntology();
   const templates = useAsync(() => api.governanceTemplates(), []);
@@ -416,6 +520,7 @@ export function GovernanceTab() {
       {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can view the policy; only owners and stewards can change it.</p>}
       {editing && <p className="rounded-lg bg-accent-soft px-4 py-2.5 text-sm">Editing the policy. Nothing changes for anyone until you save; the summary below previews your edits.</p>}
       <InlineError error={save.error} />
+      <HeldVersions />
 
       <PolicySummary policy={policy} preview={editing && dirty} />
 

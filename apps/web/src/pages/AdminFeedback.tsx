@@ -1,9 +1,12 @@
 import { Fragment, useMemo, useState } from 'react';
-import type { FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
-import { Download, Mic, ListChecks } from 'lucide-react';
-import { api } from '../api';
+import type { FeedbackQuestion, FeedbackSubmission, PodFeedbackFolder, PodFeedbackReport } from '@concord/shared';
+import { Database, Download, Mic, ListChecks } from 'lucide-react';
+import { Link } from 'react-router';
+import { api, type PublicationNeedingAdmin } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { download, formatDate } from '../lib/format';
+import { useSession } from '../lib/session';
+import { WebIdIcon } from '../components/badges';
 import { Page } from '../components/Shell';
 import { Markdown } from '../components/Markdown';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, PageHeader, cx } from '../components/ui';
@@ -11,6 +14,130 @@ import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Lo
 function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
   if (v === undefined) return '';
   return Array.isArray(v) ? v.join('; ') : String(v);
+}
+
+/** The tester's opt-in public summary on its feedback row: its issue, or where it is in the queue. */
+function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
+  return (
+    <span className="block text-xs" title={p.summary}>
+      {p.issue ? (
+        <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+          Public: issue #{p.issue.number}
+        </a>
+      ) : (
+        <span className="text-muted">
+          Public summary: {p.state}
+          {p.adminNeeded || p.state === 'needs-admin' ? ' (see “Public summaries waiting for you”)' : ''}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** One summary waiting for a decision: say which issue is ours, or that none is. */
+const KIND_LABEL: Record<PublicationNeedingAdmin['kind'], string> = {
+  'post-unknown': 'Post with unknown outcome',
+  withdrawal: 'Withdrawal',
+  'comment-unknown': 'Triage comment with unknown outcome',
+  'triage-parked': 'Out of the triage queue',
+};
+
+/** A number typed by an administrator: an issue number or a comment id. */
+function NumberField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="flex items-center gap-1 text-xs">
+      {label}
+      <input className="w-28 rounded border border-border bg-transparent px-1 py-0.5" inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value.replace(/\D/g, ''))} />
+    </label>
+  );
+}
+
+/** One summary waiting for a decision, with the choices that apply to it. */
+function PublicationDecision({ p, onDone }: { p: PublicationNeedingAdmin; onDone: () => void }) {
+  const [num, setNum] = useState('');
+  const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[2]) => {
+    await api.resolveFeedbackPublication(p.id, p.ref, body);
+    onDone();
+  });
+  const n = Number(num);
+  const btn = (label: string, body: Parameters<typeof api.resolveFeedbackPublication>[2], disabled = false) => (
+    <Button size="sm" variant="ghost" disabled={disabled} loading={act.pending} onClick={() => void act.run(body)}>
+      {label}
+    </Button>
+  );
+  return (
+    <li className="space-y-2 border-t border-border p-4 first:border-t-0" aria-label={`Public summary: ${p.summary}`}>
+      <p className="text-sm">
+        <Badge>{KIND_LABEL[p.kind]}</Badge> {p.feedbackDeleted && <Badge>Feedback deleted</Badge>}
+      </p>
+      <blockquote className="border-l-2 border-border pl-3 text-sm">{p.summary}</blockquote>
+      {p.reason && <p className="text-xs text-muted">{p.reason}</p>}
+      <p className="text-xs text-muted">
+        {p.issue ? (
+          <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer">
+            Issue #{p.issue.number}
+          </a>
+        ) : (
+          <>
+            Its marker on GitHub is <code>{p.marker}</code> in {p.repo}.
+          </>
+        )}
+      </p>
+      {(p.kind === 'post-unknown' || p.kind === 'withdrawal') && !p.issue && (
+        <div className="flex flex-wrap items-center gap-2">
+          {p.candidates.map((c) => (
+            <span key={c.number} className="flex items-center gap-1">
+              <a className="text-sm text-accent underline" href={c.url} target="_blank" rel="noreferrer">
+                Issue #{c.number}
+              </a>
+              {btn(`This is it (#${c.number})`, { action: 'adopt', issue: c.number })}
+            </span>
+          ))}
+          {!p.candidates.length && <span className="text-xs text-muted">No likely issues were found.</span>}
+          <NumberField label="Issue number" value={num} onChange={setNum} />
+          {btn('Use this issue', { action: 'adopt', issue: n }, !(n > 0))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {p.kind === 'post-unknown' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('None is ours: post again', { action: 'repost' })}
+          </>
+        )}
+        {p.kind === 'withdrawal' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('Confirm nothing is left on GitHub', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'comment-unknown' && (
+          <>
+            <NumberField label="Comment id" value={num} onChange={setNum} />
+            {btn('Record this comment', { action: 'comment', comment: n }, !(n > 0))}
+            {btn('Confirm there is no triage comment', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'triage-parked' && btn('Put back in the triage queue', { action: 'check' })}
+      </div>
+      <InlineError error={act.error} />
+    </li>
+  );
+}
+
+function PublicationsNeedingAdmin() {
+  const list = useAsync(() => api.publicationsNeedingAdmin(), []);
+  if (!list.data?.length) return null;
+  return (
+    <Card className="mb-6">
+      <CardHeader title="Public summaries waiting for you" />
+      <ul>
+        {list.data.map((p) => (
+          <PublicationDecision key={p.id} p={p} onDone={list.reload} />
+        ))}
+      </ul>
+    </Card>
+  );
 }
 
 /** Single-series horizontal bars: one hue, counts as direct labels, hover title per bar. */
@@ -60,13 +187,103 @@ function Distribution({ q, subs }: { q: FeedbackQuestion; subs: FeedbackSubmissi
 
 function toCsv(subs: FeedbackSubmission[], qs: FeedbackQuestion[]) {
   const qIds = [...new Set([...qs.map((q) => q.id), ...subs.flatMap((s) => Object.keys(s.answers))])];
-  const head = ['id', 'createdAt', 'pathway', 'name', 'email', 'role', 'usedVoice', 'themes', ...qIds];
+  const head = ['id', 'createdAt', 'appVersion', 'sinceVersion', 'pathway', 'name', 'email', 'role', 'usedVoice', 'themes', ...qIds];
   const esc = (v: unknown) => {
     const s = v === undefined || v === null ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const rows = subs.map((s) => [s.id, s.createdAt, s.pathway, s.name, s.email, s.role, s.usedVoice, (s.themes ?? []).join('; '), ...qIds.map((q) => answerText(s.answers[q]))].map(esc).join(','));
+  const rows = subs.map((s) => [s.id, s.createdAt, s.appVersion, s.sinceVersion, s.pathway, s.name, s.email, s.role, s.usedVoice, (s.themes ?? []).join('; '), ...qIds.map((q) => answerText(s.answers[q]))].map(esc).join(','));
   return [head.join(','), ...rows].join('\n');
+}
+
+const FOLDER_STATUS: Record<PodFeedbackFolder['status'], { label: string; tone: 'ok' | 'danger' | 'neutral' | 'warn' }> = {
+  ok: { label: 'Readable', tone: 'ok' },
+  partial: { label: 'Partly read', tone: 'warn' },
+  forbidden: { label: 'Not shared with you', tone: 'danger' },
+  missing: { label: 'No feedback', tone: 'neutral' },
+  error: { label: 'Couldn’t read', tone: 'warn' },
+};
+
+/**
+ * Testers' feedback read straight from their pods, as the admin's own WebID.
+ * Only works when the admin signed in with Solid: the pods then check their
+ * access control against that WebID, not against anything Concord says.
+ */
+function PodFeedback() {
+  const { session } = useSession();
+  const [report, setReport] = useState<PodFeedbackReport>();
+  const read = useAction(async () => setReport(await api.podFeedback()));
+  const u = session?.user;
+  const viaSolid = !!u?.providers.some((p) => p.provider === 'solid' && p.subject === u.webId);
+  const readers = session?.feedbackReaders ?? [];
+  if (!session?.solid.enabled) return null;
+  return (
+    <div className="mb-6" data-testid="pod-feedback">
+    <Card>
+      <CardHeader
+        icon={Database}
+        title="Read from testers’ pods"
+        subtitle={
+          readers.length
+            ? `Each tester’s concord/feedback/ folder is shared read-only with ${readers.length === 1 ? 'the admin WebID' : `${readers.length} admin WebIDs`} (ADMIN_WEBIDS).`
+            : 'No admin WebIDs are set (ADMIN_WEBIDS), so testers’ feedback folders aren’t shared with anyone.'
+        }
+        actions={
+          viaSolid ? (
+            <Button icon={Database} loading={read.pending} onClick={() => void read.run()}>
+              Read as my WebID
+            </Button>
+          ) : undefined
+        }
+      />
+      <div className="space-y-3 px-5 pb-5">
+        {!viaSolid && (
+          <p className="text-sm text-muted">
+            To read feedback straight from the pods, <Link to="/login?next=/admin/feedback" className="text-accent hover:underline">sign in with your WebID</Link>. The pods check their sharing against your WebID themselves.
+          </p>
+        )}
+        <InlineError error={read.error} />
+        {report && (
+          <>
+            <p className="flex items-center gap-1.5 text-xs text-muted">
+              <WebIdIcon className="size-3.5" /> Read as <code className="font-mono">{report.readAs}</code>
+            </p>
+            {!report.folders.length ? (
+              <p className="text-sm text-muted">No tester has saved feedback to a pod yet.</p>
+            ) : (
+              <ul className="divide-y divide-line rounded-lg border border-line" data-testid="pod-folders">
+                {report.folders.map((f) => (
+                  <li key={f.url} className="space-y-1 px-4 py-3 text-sm" data-testid="pod-folder">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{f.testerName}</span>
+                      <Badge tone={FOLDER_STATUS[f.status].tone}>{FOLDER_STATUS[f.status].label}</Badge>
+                      {(f.status === 'ok' || f.status === 'partial') && <span className="text-xs text-muted">{f.items.length} submission{f.items.length === 1 ? '' : 's'}</span>}
+                      {!!f.unread && <span className="text-xs text-warn">{f.unread} not read</span>}
+                      <a href={f.url} target="_blank" rel="noreferrer" className="ml-auto truncate font-mono text-xs text-accent hover:underline">
+                        {f.url}
+                      </a>
+                    </div>
+                    {f.sharingError && (
+                      <p className="text-xs text-danger" data-testid="pod-sharing-error">
+                        Couldn’t share this folder with the admins: {f.sharingError}
+                      </p>
+                    )}
+                    {f.items.slice(0, 5).map((s) => (
+                      <div key={s.id} className="text-xs text-muted">
+                        {formatDate(s.createdAt)} · {s.pathway}
+                        {s.appVersion ? ` · v${s.appVersion}` : ''} · {Object.keys(s.answers).length} answer{Object.keys(s.answers).length === 1 ? '' : 's'}
+                      </div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    </Card>
+    </div>
+  );
 }
 
 export function AdminFeedbackPage() {
@@ -104,6 +321,8 @@ export function AdminFeedbackPage() {
         }
       />
       <InlineError error={sum.error} />
+      <PublicationsNeedingAdmin />
+      <PodFeedback />
       {summary && (
         <Card className="mb-6">
           <CardHeader icon={ListChecks} title="Summary" />
@@ -153,18 +372,29 @@ export function AdminFeedbackPage() {
                 {data.map((s) => (
                   <Fragment key={s.id}>
                     <tr className="cursor-pointer border-b border-line align-top hover:bg-surface-2" onClick={() => setOpenId(openId === s.id ? undefined : s.id)}>
-                      <td className="px-4 py-2.5 whitespace-nowrap">{formatDate(s.createdAt, true)}</td>
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        {formatDate(s.createdAt, true)}
+                        {s.appVersion && (
+                          <span className="block text-xs text-muted">
+                            Version {s.appVersion}
+                            {s.sinceVersion && ` (last tested ${s.sinceVersion})`}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2.5">
                         {s.name || <span className="text-muted">Anonymous</span>}
                         {s.role && <span className="block text-xs text-muted">{s.role}</span>}
                       </td>
                       <td className="px-4 py-2.5">
                         <span className="inline-flex items-center gap-1">
-                          {s.pathway === 'structured' ? 'Guided' : 'General'}
+                          {s.pathway === 'structured' ? 'Guided' : s.pathway === 'changes' ? 'What’s changed' : 'General'}
                           {s.usedVoice && <Mic className="size-3.5 text-muted" aria-label="Used voice" />}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">{Object.keys(s.answers).length}</td>
+                      <td className="px-4 py-2.5">
+                        {Object.keys(s.answers).length}
+                        {s.publication && <PublicationCell p={s.publication} />}
+                      </td>
                       <td className="px-4 py-2.5">
                         <div className="flex flex-wrap gap-1">
                           {(s.themes ?? []).map((t) => (

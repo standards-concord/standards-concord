@@ -1,3 +1,83 @@
+diff --git a/apps/server/src/store/postgres.ts b/apps/server/src/store/postgres.ts
+index 9867d77..c2042c3 100644
+--- a/apps/server/src/store/postgres.ts
++++ b/apps/server/src/store/postgres.ts
+@@ -170,6 +170,29 @@ export class PostgresStore implements DocStore {
+     await this.write((q) => q.query('DELETE FROM docs WHERE collection = $1 AND id = $2', [collection, id]));
+   }
+ 
++  async insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
++    const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
++    const { rows } = await this.write((q) =>
++      q.query(
++        'INSERT INTO docs (collection, id, parent, data, created_at) VALUES ($1, $2, $3, $4::json, $5) ON CONFLICT (collection, id) DO NOTHING RETURNING id',
++        [collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt],
++      ),
++    );
++    return rows.length > 0;
++  }
++
++  /** Only numbers count, as in SQLite, where a string or null never compares at or below a number. */
++  async removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
++    checkField(field);
++    const { rows } = await this.write((q) =>
++      q.query(
++        `DELETE FROM docs WHERE collection = $1 AND json_typeof(data -> $2) = 'number' AND (data ->> $2)::float8 <= $3 RETURNING id`,
++        [collection, field, max],
++      ),
++    );
++    return rows.length;
++  }
++
+   async take<T>(collection: Collection, id: string): Promise<T | undefined> {
+     const { rows } = await this.write((q) =>
+       q.query<{ data: string }>('DELETE FROM docs WHERE collection = $1 AND id = $2 RETURNING data::text AS data', [collection, id]),
+diff --git a/apps/server/src/store/sqlite.ts b/apps/server/src/store/sqlite.ts
+index 2560c22..99177f7 100644
+--- a/apps/server/src/store/sqlite.ts
++++ b/apps/server/src/store/sqlite.ts
+@@ -133,6 +133,26 @@ export class SqliteStore implements DocStore {
+     await this.run(() => this.db.prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(collection, id));
+   }
+ 
++  async insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
++    const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
++    const r = await this.run(() =>
++      this.db
++        .prepare('INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(collection, id) DO NOTHING')
++        .run(collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt),
++    );
++    return Number(r.changes) > 0;
++  }
++
++  async removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
++    checkField(field);
++    const r = await this.run(() =>
++      this.db
++        .prepare(`DELETE FROM docs WHERE collection = ? AND json_type(data, '$.${field}') IN ('integer', 'real') AND json_extract(data, '$.${field}') <= ?`)
++        .run(collection, max),
++    );
++    return Number(r.changes);
++  }
++
+   async take<T>(collection: Collection, id: string): Promise<T | undefined> {
+     const row = await this.run(
+       () => this.db.prepare('DELETE FROM docs WHERE collection = ? AND id = ? RETURNING data').get(collection, id) as { data: string } | undefined,
+diff --git a/apps/server/src/store/types.ts b/apps/server/src/store/types.ts
+index b617a7e..d1e43c9 100644
+--- a/apps/server/src/store/types.ts
++++ b/apps/server/src/store/types.ts
+@@ -45,6 +45,10 @@ export interface DocStore {
+    * it was before (without the field). Undefined means it doesn't exist or someone else set the field first.
+    */
+   claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined>;
++  /** Insert a document only if none has its id, in one statement: true if this call inserted it. */
++  insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean>;
++  /** Delete the documents in a collection whose `field` is a number at or below `max`; returns how many. */
++  removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number>;
+   clearAll(): Promise<void>;
+   /**
+    * Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer
 diff --git a/apps/server/src/oauth.ts b/apps/server/src/oauth.ts
 index fb707f6..4672747 100644
 --- a/apps/server/src/oauth.ts
@@ -58,43 +138,253 @@ index fb707f6..4672747 100644
  /** Tests only: whether a scrub attempt is waiting, and cancel it. */
  export const scrubRetryPending = () => scrubTimer !== undefined;
  export function cancelScrubRetry() {
+diff --git a/apps/server/src/public/holds.ts b/apps/server/src/public/holds.ts
+index ba19fa1..44656b7 100644
+--- a/apps/server/src/public/holds.ts
++++ b/apps/server/src/public/holds.ts
+@@ -71,10 +71,19 @@ export async function holdLegacy(project: OntologyProject) { return transaction(
+ }); }
+ 
+ /** A release published while the working draft is held carries what's held: it's held too. */
+-export async function holdReleaseIfDraftHeld(project: OntologyProject, version: string) { return transaction(async () => {
++/** Hold `version` if the working draft is held. True if this call added the hold. */
++export async function holdReleaseIfDraftHeld(project: OntologyProject, version: string): Promise<boolean> { return transaction(async () => {
+   const hold = await holdOf(project);
+-  if (!hold?.versions.includes('draft') || hold.versions.includes(version)) return;
++  if (!hold?.versions.includes('draft') || hold.versions.includes(version)) return false;
+   await put('kv', { ...hold, versions: [...hold.versions, version] });
++  return true;
++}); }
++
++/** Take back a hold added for a version that was then never written. */
++export async function unholdVersion(project: OntologyProject, version: string) { return transaction(async () => {
++  const hold = await holdOf(project);
++  if (!hold?.versions.includes(version)) return;
++  await put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version) });
+ }); }
+ 
+ /** The version a reference names, as the public sees versions: 'draft' or a release. Anything else (a commit, a tag) isn't public. */
+@@ -108,7 +117,7 @@ async function content(project: OntologyProject, version: string) {
+   const release = await publishedRelease(project.id, version);
+   return { turtle: read('ontology.ttl'), notes: release?.notes ?? '', snapshot: read('requirements.json') };
+ }
+-const fingerprintOf = (c: ReturnType<typeof content>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
++const fingerprintOf = (c: Awaited<ReturnType<typeof content>>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
+ 
+ /**
+  * What a steward reviews: everything the version publishes (its Turtle, its
+diff --git a/apps/server/src/public/validate.ts b/apps/server/src/public/validate.ts
+index 86eb4eb..718dc59 100644
+--- a/apps/server/src/public/validate.ts
++++ b/apps/server/src/public/validate.ts
+@@ -148,7 +148,7 @@ function reportType(accept: string | undefined): Target['wants'] | undefined {
+ }
+ 
+ interface Target {
+-  project: NonNullable<ReturnType<typeof findProject>>;
++  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+   version: string;
+   wants: 'application/json' | 'text/turtle';
+ }
 diff --git a/apps/server/src/routes/api.ts b/apps/server/src/routes/api.ts
-index 2965c45..287b0d3 100644
+index f45c989..112c6d4 100644
 --- a/apps/server/src/routes/api.ts
 +++ b/apps/server/src/routes/api.ts
-@@ -6,7 +6,7 @@ import { ROLE_INFO } from '@concord/shared';
- import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
+@@ -6,7 +6,7 @@ import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
+ import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
  import { clock } from '../clock.js';
  import { config } from '../config.js';
--import { HttpError, list, put } from '../db.js';
-+import { detached, HttpError, list, put } from '../db.js';
+-import { transaction, get, HttpError, list, put } from '../db.js';
++import { detached, transaction, get, HttpError, list, put } from '../db.js';
  import { newId } from '../ids.js';
  import { llm } from '../llm/provider.js';
  import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
-@@ -339,9 +339,16 @@ export function apiRouter(): Router {
+@@ -356,7 +356,13 @@ export function apiRouter(): Router {
+   // Meetings are for signed-in people; pending invites, Meet links and organisers for facilitators only.
+   r.get('/ontologies/:id/meetings', async (req, res) => {
+     if (!req.user) return void res.json([]);
+-    res.json((await meetings.listMeetings((await project(req)).id)).flatMap(async (m) => await meetings.visibleMeeting(m, req.user) ?? []));
++    // A loop, not flatMap(): flatMap would return each async check's promise instead of the meeting.
++    const shown: Meeting[] = [];
++    for (const m of await meetings.listMeetings((await project(req)).id)) {
++      const v = await meetings.visibleMeeting(m, req.user);
++      if (v) shown.push(v);
++    }
++    res.json(shown);
+   });
+   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
+     res.status(201).json(await meetings.uploadTranscript(await project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
+@@ -440,12 +446,28 @@ export function apiRouter(): Router {
      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
      const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
      send('meeting', { type: 'meeting', meeting: m });
 -    const onEvent = async (e: { type: string } & Record<string, unknown>) => {
-+    // An EventEmitter listener: nothing awaits it, so the database read can't be allowed to reject. It runs in
+-      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: await show(await meetings.getMeeting(m.id)) });
+-      else if (e.type === 'meeting') {
+-        const x = await show(e.meeting as Meeting);
+-        if (x) send('meeting', { type: 'meeting', meeting: x });
+-      } else send(e.type, e);
++    // An EventEmitter listener: nothing awaits it, so its database reads can't be allowed to reject. It runs in
 +    // the context of whoever emitted, possibly inside their transaction, so it reads detached from it: what it
-+    // sends is committed, and it isn't refused once that transaction has ended.
++    // sends is committed, and it isn't refused once that transaction has ended. Events go out one at a time, in
++    // the order they were emitted, even when one needs a read and the next doesn't.
++    let queue: Promise<void> = Promise.resolve();
++    const inOrder = (step: () => Promise<void> | void) => {
++      queue = queue.then(step).catch(() => {});
++    };
 +    const onEvent = (e: { type: string } & Record<string, unknown>) => {
-       if (e.type === 'prompt') send('prompt', { type: 'prompt', prompt: { at: clock.iso(), t: e.t, text: e.text, posted: false } });
--      else if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: await meetings.getMeeting(m.id) as Meeting });
-+      else if (e.type === 'status')
-+        void detached(() => meetings.getMeeting(m.id)).then(
-+          (meeting) => send('status', { type: 'status', status: e.status, meeting }),
-+          () => send('status', { type: 'status', status: e.status }),
++      if (e.type === 'status')
++        inOrder(() =>
++          detached(async () => await show(await meetings.getMeeting(m.id))).then(
++            (meeting) => void send('status', { type: 'status', status: e.status, meeting }),
++            () => void send('status', { type: 'status', status: e.status }),
++          ),
 +        );
-       else send(e.type, e);
++      else if (e.type === 'meeting')
++        inOrder(async () => {
++          const x = await detached(() => show(e.meeting as Meeting));
++          if (x) send('meeting', { type: 'meeting', meeting: x });
++        });
++      else inOrder(() => void send(e.type, e));
      };
      meetings.meetingEvents.on(m.id, onEvent);
+     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
+@@ -684,7 +706,10 @@ export function apiRouter(): Router {
+       // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened to it.
+       return !!mid && !await meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
+     };
+-    res.json(all.filter(async (a) => !await hidden(a)));
++    // One at a time with a loop: filter() would take each async check's promise as true and show everything.
++    const shown: typeof all = [];
++    for (const a of all) if (!(await hidden(a))) shown.push(a);
++    res.json(shown);
+   });
+ 
+   /* ------------------------------ feedback --------------------------- */
+diff --git a/apps/server/src/services/alpha.ts b/apps/server/src/services/alpha.ts
+index 93c9959..2bcf48b 100644
+--- a/apps/server/src/services/alpha.ts
++++ b/apps/server/src/services/alpha.ts
+@@ -218,11 +218,14 @@ export function mirrorToPod(user: User): Promise<void> {
+       const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', versions: h.versions };
+       // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
+       await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json', when);
+-      const now = await history(user.id);
+-      now.keptExisting = true;
+-      now.mirroredRev = Math.max(now.mirroredRev, h.rev);
+-      now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
+-      await put('kv', now);
++      // Re-read and saved in one transaction: a visit saved while the pod was being written must not be lost.
++      await transaction(async () => {
++        const now = await history(user.id);
++        now.keptExisting = true;
++        now.mirroredRev = Math.max(now.mirroredRev, h.rev);
++        now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
++        await put('kv', now);
++      });
+     } catch (err) {
+       console.warn(`[alpha] pod copy of ${user.id}'s testing record is behind: ${(err as Error).message}`);
+     }
+@@ -298,9 +301,12 @@ function applyVisit(h: HistoryDoc, input: VisitInput) {
+ 
+ /** Record that the tester used `version`. Saved here first, then mirrored to their pod. */
+ export async function recordVersion(tester: User, input: VisitInput): Promise<AlphaMe> {
+-  const h = await history(tester.id);
+-  applyVisit(h, input);
+-  await saveHistory(h);
++  // Read and saved in one transaction, so visits arriving at once (several tabs) can't overwrite each other.
++  await transaction(async () => {
++    const h = await history(tester.id);
++    applyVisit(h, input);
++    await saveHistory(h);
++  });
+   await mirrorToPod(tester);
+   return await meFor(tester);
+ }
+@@ -315,14 +321,14 @@ export async function recordFeedback(
+   tester: User,
+   sub: FeedbackSubmission,
+   visit: Omit<VisitInput, 'feedbackId'> | undefined,
+-  store: () => void,
++  store: () => Promise<unknown>,
+ ): Promise<{ kind: 'solid' | 'local'; url: string }> {
+   await transaction(async () => {
+     const h = await history(tester.id);
+     if (h.movedTo) throw movedError();
+     if (visit) applyVisit(h, { ...visit, feedbackId: sub.id });
+     h.feedbackToCopy = [...new Set([...(h.feedbackToCopy ?? []), sub.id])];
+-    store();
++    await store();
+     await saveHistory(h);
+   });
+   await mirrorToPod(tester);
+diff --git a/apps/server/src/services/changeRequests.ts b/apps/server/src/services/changeRequests.ts
+index 3e5e4ab..723f911 100644
+--- a/apps/server/src/services/changeRequests.ts
++++ b/apps/server/src/services/changeRequests.ts
+@@ -440,7 +440,8 @@ function literalText(object: string): string | undefined {
+ const DATE_STAND_IN = '0001-01-01';
+ 
+ /** What merging this request now would publish, worked out exactly as merge() does it. */
+-async function publicationOf(cr: ChangeRequest, project = await getProject(cr.ontologyId)) {
++async function publicationOf(cr: ChangeRequest, given?: OntologyProject) {
++  const project = given ?? (await getProject(cr.ontologyId));
+   const working = await ontologyStore.working(project);
+   const base = ontologyStore.head(project);
+   // No author: dcterms:contributor would publish the requester's name on every new term.
+diff --git a/apps/server/src/services/feedback.ts b/apps/server/src/services/feedback.ts
+index 740ec02..cb3332f 100644
+--- a/apps/server/src/services/feedback.ts
++++ b/apps/server/src/services/feedback.ts
+@@ -375,7 +375,10 @@ async function readFolder(get: PodGet, testerId: string, url: string): Promise<P
+  */
+ export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
+   if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
+-  const pods = (await solid.pods()).filter(async (p) => !(await get_<User>('users', p.userId))?.simulated);
++  // Looked up first, then filtered: filter() itself would take each async lookup's promise as a yes.
++  const all = await solid.pods();
++  const real = await Promise.all(all.map(async (p) => !(await get_<User>('users', p.userId))?.simulated));
++  const pods = all.filter((_, i) => real[i]);
+   const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
+   // A few folders at a time keeps the transport's queue short (each folder queues up to MAX_POD_ITEMS reads).
+   const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
+diff --git a/apps/server/src/services/feedbackIssues.ts b/apps/server/src/services/feedbackIssues.ts
+index beb5e9f..0551cb2 100644
+--- a/apps/server/src/services/feedbackIssues.ts
++++ b/apps/server/src/services/feedbackIssues.ts
+@@ -310,11 +310,11 @@ async function takeSlot(repo: string): Promise<number | undefined> { return tran
+ /* --------------------------- fenced transitions ------------------------- */
+ 
+ /** Change a record only while `claim` still holds it and it isn't withdrawn. */
+-async function fenced(id: string, claim: string, change: (p: Publication) => Partial<Publication> | undefined): Promise<Publication | undefined> {
++async function fenced(id: string, claim: string, change: (p: Publication) => Partial<Publication> | undefined | Promise<Partial<Publication> | undefined>): Promise<Publication | undefined> {
+   return await transaction(async () => {
+     const p = await get<Publication>('feedbackPublications', id);
+     if (!p || p.claim !== claim || p.state === 'withdrawn') return undefined;
+-    const c = change(p);
++    const c = await change(p);
+     if (!c) return undefined;
+     const next = { ...p, ...c };
+     await put('feedbackPublications', next);
+@@ -711,9 +711,10 @@ const triageable = async (p: Publication) => p.state === 'filed' && !!p.issue &&
+ 
+ /** What the routine may triage: the ten oldest filed summaries not yet triaged, and the triaged ones for spotting duplicates. */
+ export async function triageQueue() {
+-  const filed = (await list<Publication>('feedbackPublications'))
+-    .filter(triageable)
+-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
++  // Checked first, then filtered: filter() itself would take each async check's promise as true.
++  const all = await list<Publication>('feedbackPublications');
++  const ok = await Promise.all(all.map(triageable));
++  const filed = all.filter((_, i) => ok[i]).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+   const row = (p: Publication) => ({ issue: p.issue!.number, url: p.issue!.url, summary: p.summary, createdAt: p.createdAt, ...(p.decision && !p.triagedAt ? { savedDecision: p.decision } : {}) });
+   return {
+     pending: filed.filter((p) => !p.triagedAt && !p.commentUnknown && !p.triageParked).slice(0, 10).map(row),
 diff --git a/apps/server/src/services/meetings.ts b/apps/server/src/services/meetings.ts
-index 4a22ac8..871fea5 100644
+index 54a9627..60c72b4 100644
 --- a/apps/server/src/services/meetings.ts
 +++ b/apps/server/src/services/meetings.ts
-@@ -167,7 +167,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
+@@ -273,7 +273,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
    const project = await getProject(m.ontologyId);
    const ucs: UseCase[] = [];
    const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
@@ -103,7 +393,7 @@ index 4a22ac8..871fea5 100644
      ucs.push(
        await createUseCase(project, actor, {
          source: 'meeting',
-@@ -180,7 +180,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
+@@ -286,7 +286,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
          terms: i === 0 ? a.terms : [],
        }),
      );
@@ -112,27 +402,568 @@ index 4a22ac8..871fea5 100644
    let changeRequest: ChangeRequest | undefined;
    try {
      changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
+@@ -302,8 +302,8 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
+ /* Creating meetings                                                         */
+ /* ------------------------------------------------------------------------ */
+ 
+-export function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
+-  return save({
++export async function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Promise<Meeting> {
++  return await save({
+     id: newId('mtg'),
+     ontologyId: project.id,
+     title: title || 'Working group call',
+@@ -320,7 +320,7 @@ export function newMeeting(project: OntologyProject, user: User, title: string,
+ export async function uploadTranscript(project: OntologyProject, user: User, title: string, raw: string) {
+   const transcript = parseTranscript(raw);
+   if (!transcript.length) throw new HttpError(400, 'Could not find any speaker turns in that transcript. Expected “Name: text” lines, a Google Meet transcript, or a .vtt/.srt file.');
+-  const m = newMeeting(project, user, title, 'upload', { transcript, status: 'processing' });
++  const m = await newMeeting(project, user, title, 'upload', { transcript, status: 'processing' });
+   await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.uploaded', message: `uploaded the transcript of “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
+   return analyseMeeting(m);
+ }
+@@ -350,7 +350,7 @@ export async function onLiveLine(
+       accepted = false;
+       // Refusing the line can still change the bot record (a bot named, a stray noted).
+       if (x.bot?.gen !== gen) {
+-        save(x);
++        await save(x);
+         emit(x, { type: 'meeting', meeting: x });
+       }
+       return x;
+@@ -573,7 +573,7 @@ export async function pruneSecrets() { return transaction(async () => {
+ /** "Join a call now": the booking is recorded before it is sent, then sent (see botLifecycle). */
+ export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string, opts: { postPromptsToChat?: boolean } = {}) {
+   if (!isMeetUrl(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
+-  const m = newMeeting(project, user, title, 'google-meet-bot', {
++  const m = await newMeeting(project, user, title, 'google-meet-bot', {
+     meetingUrl,
+     postPromptsToChat: !!opts.postPromptsToChat,
+     bot: recall.enabled() ? idleBot() : { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER },
+@@ -694,7 +694,7 @@ export async function endLiveMeeting(meetingId: string) {
+       const m = await getMeeting(meetingId);
+       const gen = m.bot?.gen;
+       beginRelease(m, 'leave', 'done');
+-      if (m.bot?.gen !== gen) emit(save(m), { type: 'meeting', meeting: m });
++      if (m.bot?.gen !== gen) emit(await save(m), { type: 'meeting', meeting: m });
+     });
+     await drive(meetingId);
+     const m = await getMeeting(meetingId);
+@@ -755,7 +755,7 @@ const runningSimulations = new Set<string>();
+ 
+ /** Replays the scripted call line by line so testers can watch the co-facilitator work. */
+ export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number; postPromptsToChat?: boolean } = {}) {
+-  const m = newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
++  const m = await newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
+     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
+     postPromptsToChat: !!opts.postPromptsToChat,
+     bot: { provider: 'simulated', status: 'in-call' },
+diff --git a/apps/server/src/services/ontologyStore.ts b/apps/server/src/services/ontologyStore.ts
+index 3f4a145..b63aaea 100644
+--- a/apps/server/src/services/ontologyStore.ts
++++ b/apps/server/src/services/ontologyStore.ts
+@@ -103,8 +103,11 @@ export const ontologyStore = {
+     files: Record<string, string>,
+     notes: string,
+     author: CommitAuthor,
+-    /** Runs after the last await, just before anything is written: throwing writes nothing. */
+-    beforeWrite?: () => void,
++    /**
++     * Runs after the last await, just before anything is written: throwing writes nothing. Typed to return
++     * undefined, not void, so an async function (whose throw would come too late to stop the write) is refused.
++     */
++    beforeWrite?: () => undefined,
+   ): Promise<string> {
+     const dir = repoDir(project);
+     const relDir = path.join(dir, 'releases', version);
+diff --git a/apps/server/src/services/releases.ts b/apps/server/src/services/releases.ts
+index 35e6e14..9dfea80 100644
+--- a/apps/server/src/services/releases.ts
++++ b/apps/server/src/services/releases.ts
+@@ -13,7 +13,7 @@ import { clock } from '../clock.js';
+ import { config } from '../config.js';
+ import { transaction, get, HttpError, list, mustGet, put } from '../db.js';
+ import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
+-import { anyHeld, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
++import { anyHeld, historyApproved, holdReleaseIfDraftHeld, unholdVersion } from '../public/holds.js';
+ import { newId } from '../ids.js';
+ import { evaluate } from './governance.js';
+ import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
+@@ -223,15 +223,20 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
+ 
+   const author = actor ?? await getUser(r.createdBy);
+   // Published commits carry no names.
+-  r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, async () => { return transaction(async () => {
+-    // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
+-    // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
+-    if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
+-      throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
+-    // Made from a working draft still waiting for approval: it waits too. The draft is the one captured, so
+-    // whether it's held now is whether what this release carries is held.
+-    await holdReleaseIfDraftHeld(project, r.version);
+-  }); });
++  // Made from a working draft still waiting for approval: it waits too, from before its files exist, so the
++  // public never sees it unheld. Recorded first because writeRelease's check below has to be synchronous.
++  const held = await holdReleaseIfDraftHeld(project, r.version);
++  try {
++    r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, () => {
++      // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
++      // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
++      if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
++        throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
++    });
++  } catch (err) {
++    if (held) await unholdVersion(project, r.version);
++    throw err;
++  }
+   r.status = 'published';
+   r.publishedAt = clock.iso();
+   r.statusSince = r.publishedAt;
+diff --git a/apps/server/test/alpha-history.test.ts b/apps/server/test/alpha-history.test.ts
+index d5b8e07..cee33c7 100644
+--- a/apps/server/test/alpha-history.test.ts
++++ b/apps/server/test/alpha-history.test.ts
+@@ -117,9 +117,17 @@ describe('the first copy in a tester’s pod', () => {
+     fs.writeFileSync(path.join(dir, '.testing.jsonld.concord-tmp'), 'old', { mode: 0o644 });
+     fs.chmodSync(path.join(dir, '.testing.jsonld.concord-tmp'), 0o644);
+     const modesAtWrite: number[] = [];
++    // Only writes to files in the tester's folder count: on PGlite the database writes its own files the same way.
++    const theirs = new Set<number>();
++    const open = fs.openSync.bind(fs);
++    vi.spyOn(fs, 'openSync').mockImplementation(((file: fs.PathLike, ...rest: unknown[]) => {
++      const fd = (open as (...a: unknown[]) => number)(file, ...rest);
++      if (String(file).startsWith(dir)) theirs.add(fd);
++      return fd;
++    }) as typeof fs.openSync);
+     const write = fs.writeSync.bind(fs);
+     vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, ...rest: unknown[]) => {
+-      modesAtWrite.push(fs.fstatSync(fd).mode & 0o777);
++      if (theirs.has(fd)) modesAtWrite.push(fs.fstatSync(fd).mode & 0o777);
+       return (write as (...a: unknown[]) => number)(fd, ...rest);
+     }) as typeof fs.writeSync);
+     expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBeUndefined();
+@@ -220,13 +228,13 @@ describe('feedback sent while playing a persona', () => {
+     expect((await agent.get('/api/alpha/me')).body.tester.id).toBe(demoId);
+     const into = await upsertFederatedUser({ provider: 'github', subject: 'persona-move-into', name: 'Moved into' });
+     const { getUser } = await import('../src/services/users.js');
+-    await mergeTesterRecords(getUser(demoId)!, into);
++    await mergeTesterRecords((await getUser(demoId))!, into);
+     const { listFeedback } = await import('../src/services/feedback.js');
+-    const before = listFeedback().length;
++    const before = (await listFeedback()).length;
+     const fb = await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] });
+     expect(fb.status).toBe(409);
+     expect(String(fb.headers['set-cookie'])).toMatch(/concord_tester=;/);
+-    expect(listFeedback()).toHaveLength(before);
++    expect(await listFeedback()).toHaveLength(before);
+     // With the stale cookie gone, the persona can send feedback as anyone signed out of a tester account would.
+     expect((await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] })).status).toBe(201);
+   });
+diff --git a/apps/server/test/api.test.ts b/apps/server/test/api.test.ts
+index 9217fc3..19e3bdc 100644
+--- a/apps/server/test/api.test.ts
++++ b/apps/server/test/api.test.ts
+@@ -196,6 +196,15 @@ describe('requirements', () => {
+     expect(p.body.useCases.length).toBeGreaterThanOrEqual(1);
+   });
+ 
++  // With the store async, each call's visibility check ran inside flatMap(), so the list came back as empty objects.
++  it('lists the calls a signed-in person can see', async () => {
++    const tester = await login('steward', 'Steward Lists');
++    const m = await tester.post(`/api/ontologies/${demoId}/meetings/upload`).send({ title: 'Listed call', transcript: 'Priya Shah: Hello.\nTom Okafor: Hi.' });
++    expect(m.status).toBe(201);
++    const listed = await tester.get(`/api/ontologies/${demoId}/meetings`);
++    expect(listed.body.find((x: { id?: string }) => x.id === m.body.id)).toMatchObject({ title: 'Listed call' });
++  });
++
+   it('replays a simulated call with co-facilitator prompts', async () => {
+     const tester = await login('steward', 'Steward Vic');
+     const m = await tester.post(`/api/ontologies/${demoId}/meetings/simulate?delayMs=0`).send({ title: 'Sim' });
 diff --git a/apps/server/test/auth.test.ts b/apps/server/test/auth.test.ts
-index c902ecb..070733d 100644
+index d0deadb..a8114cb 100644
 --- a/apps/server/test/auth.test.ts
 +++ b/apps/server/test/auth.test.ts
 @@ -64,9 +64,9 @@ describe('reading feedback', () => {
        // A demo account with the same address is not an administrator.
        const demo = await createUser({ name: 'Pretend admin', email: 'admin@example.org', provider: 'demo', subject: 'demo-admin' });
        const { createSession } = await import('../src/services/users.js');
--      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`);
-+      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(admin.id)}`);
+-      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`);
++      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(admin.id, 'github')}`);
        expect(asAdmin.status).toBe(200);
--      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id)}`);
-+      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demo.id)}`);
+-      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id, 'demo')}`);
++      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demo.id, 'demo')}`);
        expect(asDemo.status).toBe(403);
      } finally {
        config.adminEmails.splice(0, config.adminEmails.length, ...saved);
+@@ -81,9 +81,9 @@ describe('reading feedback', () => {
+     const saved = config.adminWebIds.slice();
+     config.adminWebIds.push(admin.webId!, demo.webId!, persona.webId);
+     try {
+-      const get = (id: string) => request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(id, 'github')}`);
++      const get = async (id: string) => request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(id, 'github')}`);
+       expect((await get(admin.id)).status).toBe(200);
+-      const session = await request(app).get('/api/session').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`);
++      const session = await request(app).get('/api/session').set('Cookie', `concord_session=${await createSession(admin.id, 'github')}`);
+       expect(session.body.user.isPlatformAdmin).toBe(true);
+       // Listing a demo account's or a persona's WebID does not make them administrators.
+       expect((await get(demo.id)).status).toBe(403);
+@@ -92,6 +92,6 @@ describe('reading feedback', () => {
+       config.adminWebIds.splice(0, config.adminWebIds.length, ...saved);
+     }
+     // Without the setting, the same account is an ordinary user.
+-    expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id, 'github')}`)).status).toBe(403);
++    expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(admin.id, 'github')}`)).status).toBe(403);
+   });
+ });
+diff --git a/apps/server/test/feedbackIssues.test.ts b/apps/server/test/feedbackIssues.test.ts
+index 5cc2813..547aea0 100644
+--- a/apps/server/test/feedbackIssues.test.ts
++++ b/apps/server/test/feedbackIssues.test.ts
+@@ -250,8 +250,8 @@ function gate() {
+   const hold = new Promise<number>((r) => (open = r));
+   return { hold, open };
+ }
+-const until = async (cond: () => boolean) => {
+-  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
++const until = async (cond: () => boolean | Promise<boolean>) => {
++  for (let i = 0; i < 200 && !(await cond()); i++) await new Promise((r) => setTimeout(r, 10));
+ };
+ 
+ describe('the public summary text', () => {
+@@ -734,6 +734,19 @@ describe('triage through the server', () => {
+     expect(q.body.triaged.map((p: { issue: number }) => p.issue)).toEqual([1]);
+   });
+ 
++  // With the store async, the queue's check ran inside filter(), which took every check's promise as a yes: withdrawn
++  // summaries, and ones whose feedback had been deleted, were offered for triage.
++  it('leaves out summaries that are withdrawn or whose feedback is gone', async () => {
++    await submit('Still filed');
++    const withdrawn = await submit('Withdrawn before triage');
++    const deleted = await submit('Feedback deleted before triage');
++    expect((await withdraw(withdrawn)).status).toBe(200);
++    const { remove } = await import('../src/db.js');
++    await remove('feedback', deleted.body.id);
++    const q = await request(app).get('/api/feedback/triage/queue').set('Authorization', `Bearer ${TRIAGE_TOKEN}`);
++    expect(q.body.pending.map((p: { summary: string }) => p.summary)).toEqual(['Still filed']);
++  });
++
+   it('posts one comment with the footer and applies only the fixed labels', async () => {
+     await submit('Triage first');
+     const res = await submit('Triage labels');
+diff --git a/apps/server/test/meetBot.test.ts b/apps/server/test/meetBot.test.ts
+index f0d9153..9a34654 100644
+--- a/apps/server/test/meetBot.test.ts
++++ b/apps/server/test/meetBot.test.ts
+@@ -304,6 +304,9 @@ describe('invite-by-email', () => {
+     await dispatchDue(at('2026-11-10T16:05:00Z'));
+     expect((await getMeeting(m.id)).status).toBe('live');
+     await dispatchDue(at('2026-11-10T16:20:00Z'));
++    // The analysis runs in the background once the bot has left (with the async store it no longer finishes
++    // within the few turns before the next read).
++    await meetBotIdle();
+     m = await getMeeting(m.id);
+     expect(m.status).toBe('analysed');
+     expect(m.bot?.status).toBe('done');
+@@ -470,7 +473,7 @@ describe('invite-by-email', () => {
+     const { scheduleFromInvite } = await import('../src/services/meetBot.js');
+     const { getProject } = await import('../src/services/ontologies.js');
+     const [m] = await calendarMeetings();
+-    const got = await scheduleFromInvite(getProject(m.ontologyId), { id: 'u', name: 'x' } as never, calendar(oneOff({ uid: 'shared-1', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' })), {
++    const got = await scheduleFromInvite(await getProject(m.ontologyId), { id: 'u', name: 'x' } as never, calendar(oneOff({ uid: 'shared-1', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' })), {
+       now: at('2026-11-09T10:00:00Z'),
+     });
+     expect(got.meetings.map((x) => x.id)).toEqual([m.id]);
+@@ -613,6 +616,7 @@ describe('invite-by-email', () => {
+     // Retried every minute; once the bot is out, the call is analysed.
+     stubMode.failCancel = false;
+     await dispatchDue(at('2026-11-10T15:30:00Z'));
++    await meetBotIdle(); // the analysis runs in the background once the bot has left
+     expect(await getMeeting(m.id)).toMatchObject({ status: 'analysed', bot: { status: 'done' } });
+   });
+ 
+@@ -807,7 +811,7 @@ describe('invite-by-email', () => {
+     // Hold the meeting's lock, queue the webhook behind it, then mark the call skipped before releasing.
+     let release!: () => void;
+     const held = meetingLock(m.id, () => new Promise<void>((r) => (release = r)));
+-    const hook = await line(m.id, 'Arrives during the skip.', m.bot!.botId);
++    const hook = line(m.id, 'Arrives during the skip.', m.bot!.botId);
+     await new Promise((r) => setTimeout(r, 20));
+     const fresh = await getMeeting(m.id);
+     await saveMeeting({ ...fresh, calendar: { ...fresh.calendar!, skip: true } });
+@@ -1574,7 +1578,8 @@ describe('invite-by-email', () => {
+     await sync(at('2026-11-10T14:00:00Z'));
+     await dispatchDue(at('2026-11-10T14:46:00Z'));
+     const ids = (await calendarMeetings()).map((x) => x.id);
+-    expect(ids.every(async (id) => (await list<{ id: string }>('kv')).some((k) => k.id === `meeting-secret:${id}`))).toBe(true);
++    const kv = await list<{ id: string }>('kv');
++    expect(ids.every((id) => kv.some((k) => k.id === `meeting-secret:${id}`))).toBe(true);
+     writeFeed();
+     await syncCalendar(at('2026-11-10T14:48:00Z'));
+     expect((await list<{ id: string }>('kv')).filter((k) => ids.some((id) => k.id === `meeting-secret:${id}`))).toEqual([]);
+diff --git a/apps/server/test/pod-mirror.test.ts b/apps/server/test/pod-mirror.test.ts
+index fa64c18..cf7254b 100644
+--- a/apps/server/test/pod-mirror.test.ts
++++ b/apps/server/test/pod-mirror.test.ts
+@@ -49,8 +49,8 @@ const { createUser } = await import('../src/services/users.js');
+ const { recordVersion } = await import('../src/services/alpha.js');
+ 
+ const saved = config.solid.serverUrl;
+-beforeAll(() => {
+-  openDb();
++beforeAll(async () => {
++  await openDb();
+   config.solid.serverUrl = 'https://pods.example';
+ });
+ afterAll(() => {
+@@ -60,7 +60,7 @@ afterAll(() => {
+ async function testerWithPod(subject: string) {
+   const u = await createUser({ name: `Pod tester ${subject}`, provider: 'demo', subject });
+   const podUrl = `https://pods.example/${subject}/`;
+-  put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
++  await put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
+   return { u, record: `${podUrl}concord/alpha/testing.jsonld`, folder: `${podUrl}concord/alpha/` };
+ }
+ const asideOf = (folder: string) => [...store.keys()].filter((k) => k.startsWith(`${folder}testing.previous-`));
+diff --git a/apps/server/test/public.test.ts b/apps/server/test/public.test.ts
+index a39106b..bca398f 100644
+--- a/apps/server/test/public.test.ts
++++ b/apps/server/test/public.test.ts
+@@ -803,9 +803,9 @@ describe('versions published before approval existed', () => {
+     const tester = await createUser({ name: 'Legacy Hold Person', provider: 'github', subject: 'legacy-hold' });
+     await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'LEGACY_HOLD_PILOT' } });
+     const { updateProject } = await import('../src/services/ontologies.js');
+-    updateProject({ ...project, publishedWithApproval: undefined });
++    await updateProject({ ...project, publishedWithApproval: undefined });
+     const { remove } = await import('../src/db.js');
+-    remove('kv', `public-hold:${project.id}`);
++    await remove('kv', `public-hold:${project.id}`);
+     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+     await refreshReleasePages();
+     return project;
+@@ -890,7 +890,7 @@ describe('versions published before approval existed', () => {
+     await refreshReleasePages();
+     expect((await holdOf(project))!.versions).toEqual(versions);
+     const { updateProject } = await import('../src/services/ontologies.js');
+-    updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
++    await updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
+     await refreshReleasePages();
+     expect((await holdOf(project))!.versions).toEqual(versions);
+     // A new ontology is never held.
+@@ -904,7 +904,7 @@ describe('versions published before approval existed', () => {
+   it('holds a release made from a draft that is still held', async () => {
+     const project = await legacy();
+     const { holdReleaseIfDraftHeld } = await import('../src/public/holds.js');
+-    holdReleaseIfDraftHeld(project, '9.0.0');
++    await holdReleaseIfDraftHeld(project, '9.0.0');
+     expect((await holdOf(project))!.versions).toContain('9.0.0');
+   });
+ 
+@@ -944,8 +944,8 @@ describe('versions published before approval existed', () => {
+     const { updateProject } = await import('../src/services/ontologies.js');
+     const { remove } = await import('../src/db.js');
+     // As if writing the hold failed at startup: not marked, and no record.
+-    remove('kv', `public-hold:${project.id}`);
+-    updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
++    await remove('kv', `public-hold:${project.id}`);
++    await updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
+     expect((await request(app).get('/def/volunteering/draft.ttl')).status).toBe(503);
+     expect((await request(app).get('/def/volunteering/1.0.0')).status).toBe(503);
+     expect((await request(app).get(`/api/ontologies/${project.id}/source`)).status).toBe(503);
+@@ -962,7 +962,7 @@ describe('versions published before approval existed', () => {
+   it('shows the steward everything the fingerprint covers: Turtle, release notes and the use case snapshot (eighth review)', async () => {
+     const project = await legacy();
+     const { list } = await import('../src/db.js');
+-    const release = list<{ id: string; version: string; notes: string }>('releases', project.id).find((r) => r.version === '1.0.0')!;
++    const release = (await list<{ id: string; version: string; notes: string }>('releases', project.id)).find((r) => r.version === '1.0.0')!;
+     await put('releases', { ...release, notes: `${release.notes}\nThanks to NOTES_ONLY_NAME.` }, project.id);
+     const snapshot = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'requirements.json');
+     const before = fs.existsSync(snapshot) ? fs.readFileSync(snapshot, 'utf8') : '';
+@@ -1004,7 +1004,7 @@ describe('versions published before approval existed', () => {
+     const { vi } = await import('vitest');
+     const { setRoles } = await import('../src/services/ontologies.js');
+     const owner = await createUser({ name: 'Eighth race owner', provider: 'github', subject: 'eighth-race' });
+-    setRoles(project.id, owner.id, ['owner', 'steward']);
++    await setRoles(project.id, owner.id, ['owner', 'steward']);
+     const merged = await drafted8(project);
+     void merged;
+     const release = await draftRelease((await findProject('volunteering'))!, owner);
+@@ -1047,8 +1047,8 @@ describe('versions published before approval existed', () => {
+     const { vi } = await import('vitest');
+     const { setRoles, updateProject } = await import('../src/services/ontologies.js');
+     const owner = await createUser({ name: 'Eighth push owner', provider: 'github', subject: 'eighth-push' });
+-    setRoles(project.id, owner.id, ['owner', 'steward']);
+-    updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
++    await setRoles(project.id, owner.id, ['owner', 'steward']);
++    await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
+     const saved = config.github.publishToken;
+     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
+     const push = vi.spyOn(ontologyStore, 'push').mockImplementation(() => undefined);
+@@ -1063,7 +1063,7 @@ describe('versions published before approval existed', () => {
+     } finally {
+       push.mockRestore();
+       (config.github as { publishToken?: string }).publishToken = saved;
+-      updateProject({ ...(await findProject('volunteering'))!, github: undefined });
++      await updateProject({ ...(await findProject('volunteering'))!, github: undefined });
+     }
+   });
+ 
+@@ -1071,8 +1071,8 @@ describe('versions published before approval existed', () => {
+     // Used to: review and fingerprint the first record for 1.0.0, a rejected attempt, while the page showed the published one.
+     const project = await legacy();
+     const { list, remove } = await import('../src/db.js');
+-    const published = list<Release>('releases', project.id).find((r) => r.version === '1.0.0' && r.status === 'published')!;
+-    remove('releases', published.id);
++    const published = (await list<Release>('releases', project.id)).find((r) => r.version === '1.0.0' && r.status === 'published')!;
++    await remove('releases', published.id);
+     await put('releases', { ...published, id: 'rel_ninth_rejected', status: 'rejected', notes: 'Harmless notes from an attempt that was rejected.' }, project.id);
+     await put('releases', { ...published, notes: `${published.notes}\nThanks to PUBLIC_NOTES_PRIVATE_NAME.` }, project.id);
+     try {
+@@ -1086,7 +1086,7 @@ describe('versions published before approval existed', () => {
+       expect((await agent.post(`/api/ontologies/${project.id}/public-holds/1.0.0/approve`).send({ fingerprint: seen.fingerprint })).status).toBe(409);
+       expect((await review()).notes).toBe('Notes changed after the review.');
+     } finally {
+-      remove('releases', 'rel_ninth_rejected');
++      await remove('releases', 'rel_ninth_rejected');
+       await put('releases', published, project.id);
+     }
+   });
+@@ -1097,14 +1097,14 @@ describe('versions published before approval existed', () => {
+     const { vi } = await import('vitest');
+     const { setRoles, updateProject } = await import('../src/services/ontologies.js');
+     const owner = await createUser({ name: 'Ninth push owner', provider: 'github', subject: 'ninth-push' });
+-    setRoles(project.id, owner.id, ['owner', 'steward']);
++    await setRoles(project.id, owner.id, ['owner', 'steward']);
+     // Repair the draft, then approve every held version.
+     const working = await ontologyStore.working(project);
+     await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle((await working.toTurtle()).replace(/"Raised by Legacy Hold Person in the LEGACY_HOLD_PILOT\."/, '"Repaired."')), 'Repair', { name: 'Concord' });
+     const { agent } = await steward('Ninth push steward');
+     for (const h of (await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[])
+       expect((await agent.post(`/api/ontologies/${project.id}/public-holds/${h.version}/approve`).send({ fingerprint: h.fingerprint })).status).toBe(200);
+-    updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
++    await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
+     const saved = config.github.publishToken;
+     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
+     const push = vi.spyOn(ontologyStore, 'push').mockImplementation(() => undefined);
+@@ -1115,14 +1115,14 @@ describe('versions published before approval existed', () => {
+       expect(push).not.toHaveBeenCalled();
+       // An ontology made under the approval rules is pushed as before.
+       const fresh = await createProject({ title: 'Ninth pushed vocab', description: '', prefix: 'npv' }, owner);
+-      updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
++      await updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
+       await drafted8(fresh);
+       await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject(fresh.slug))!, owner)).id))!, owner);
+       expect(push).toHaveBeenCalledTimes(1);
+     } finally {
+       push.mockRestore();
+       (config.github as { publishToken?: string }).publishToken = saved;
+-      updateProject({ ...(await findProject('volunteering'))!, github: undefined });
++      await updateProject({ ...(await findProject('volunteering'))!, github: undefined });
+     }
+   });
+ 
+diff --git a/apps/server/test/releaseWrite.test.ts b/apps/server/test/releaseWrite.test.ts
+new file mode 100644
+index 0000000..dccbfe5
+--- /dev/null
++++ b/apps/server/test/releaseWrite.test.ts
+@@ -0,0 +1,44 @@
++import fs from 'node:fs';
++import path from 'node:path';
++import { beforeAll, describe, expect, it } from 'vitest';
++import { openDb } from '../src/db.js';
++import { findProject } from '../src/services/ontologies.js';
++import { ontologyStore } from '../src/services/ontologyStore.js';
++import { seedDemo } from '../src/services/simulation.js';
++
++/**
++ * Publishing checks, just before writing, that the working draft is still the one captured for the release.
++ * When the store became async, that check was briefly an async callback: its throw arrived after the files were
++ * written, so a release could carry a draft nobody approved. The check's type now refuses async functions.
++ */
++describe('the check made just before a release is written', () => {
++  beforeAll(async () => {
++    await openDb();
++    await seedDemo();
++  });
++
++  it('writes nothing when it throws', async () => {
++    const project = (await findProject('volunteering'))!;
++    const graph = await ontologyStore.working(project);
++    const head = ontologyStore.head(project);
++    const dir = path.join(ontologyStore.dir(project), 'releases', '99.0.0');
++    await expect(
++      ontologyStore.writeRelease(project, '99.0.0', graph, { 'RELEASE_NOTES.md': 'x' }, 'x', { name: 'Test' }, () => {
++        throw new Error('the draft changed');
++      }),
++    ).rejects.toThrow('the draft changed');
++    expect(fs.existsSync(dir)).toBe(false);
++    expect(ontologyStore.head(project)).toBe(head);
++  });
++
++  it('cannot be an async function, whose throw would come after the write', () => {
++    const project = { slug: 'never-called' } as never;
++    // Only typechecked, never run: `pnpm typecheck` fails if the parameter ever accepts a promise again.
++    const _unused = () =>
++      // @ts-expect-error an async check is refused
++      ontologyStore.writeRelease(project, '0.0.0', undefined as never, {}, '', { name: 'x' }, async () => {
++        throw new Error('too late');
++      });
++    expect(_unused).toBeTypeOf('function');
++  });
++});
+diff --git a/apps/server/test/report.test.ts b/apps/server/test/report.test.ts
+index d853a3f..d4dbd9f 100644
+--- a/apps/server/test/report.test.ts
++++ b/apps/server/test/report.test.ts
+@@ -437,7 +437,7 @@ describe('public reports: third review', () => {
+     const { body } = await v.send({ description: 'A report whose first approval stalls past its claim.' });
+     const [a, b] = [await steward(), await steward()];
+     const held = holdNextApproval();
+-    const first = (await accept(a, body.reference)).then((r) => r);
++    const first = accept(a, body.reference);
+     await held.waiting;
+     // Two minutes pass: the first claim is stale, and another moderator takes it over and finishes.
+     const doc = (await get<PublicReport>('publicReports', body.reference))!;
+@@ -455,7 +455,7 @@ describe('public reports: third review', () => {
+     const { body } = await v.send({ description: 'A report dismissed while it is being opened.' });
+     const [a, b] = [await steward(), await steward()];
+     const held = holdNextApproval();
+-    const approving = (await accept(a, body.reference)).then((r) => r);
++    const approving = accept(a, body.reference);
+     await held.waiting;
+     const refused = await dismiss(b, body.reference);
+     expect(refused.status).toBe(409);
+@@ -477,7 +477,7 @@ describe('public reports: third review', () => {
+     const { body } = await v.send({ description: 'A report dismissed after its approval stalled.' });
+     const [a, b] = [await steward(), await steward()];
+     const held = holdNextApproval();
+-    const late = (await accept(a, body.reference)).then((r) => r);
++    const late = accept(a, body.reference);
+     await held.waiting;
+     const doc = (await get<PublicReport>('publicReports', body.reference))!;
+     await put('publicReports', { ...doc, claimedAt: doc.claimedAt! - 121_000 }, doc.ontologyId);
+@@ -606,14 +606,14 @@ describe('public reports and versions waiting for approval', () => {
+   it('shows no term from a version that is waiting for a steward’s approval', async () => {
+     const project = (await findProject('volunteering'))!;
+     const { put: store, remove: drop } = await import('../src/db.js');
+-    store('kv', { id: `public-hold:${project.id}`, ontologyId: project.id, versions: ['draft', '1.0.0'], since: new Date().toISOString() });
++    await store('kv', { id: `public-hold:${project.id}`, ontologyId: project.id, versions: ['draft', '1.0.0'], since: new Date().toISOString() });
+     try {
+       const page = await request(app).get(`${URL}?term=${encodeURIComponent(TERM)}&version=1.0.0`);
+       expect(page.status).toBe(404);
+       expect(page.text).not.toContain('volunteering opportunity');
+       expect((await request(app).get(`${URL}/token?term=${encodeURIComponent(TERM)}&version=1.0.0`)).status).toBe(404);
+     } finally {
+-      drop('kv', `public-hold:${project.id}`);
++      await drop('kv', `public-hold:${project.id}`);
+     }
+   });
+ });
 diff --git a/apps/server/test/safeFetch.test.ts b/apps/server/test/safeFetch.test.ts
-index 3ef6bc6..a9cb0d8 100644
+index 7d45aa5..379f1a3 100644
 --- a/apps/server/test/safeFetch.test.ts
 +++ b/apps/server/test/safeFetch.test.ts
-@@ -127,7 +127,7 @@ describe('single-use writes with more than one database connection', () => {
+@@ -131,7 +131,7 @@ describe('single-use writes with more than one database connection', () => {
    let other: DatabaseSync;
    beforeAll(async () => {
      await closeDb();
@@ -231,4 +1062,77 @@ index 6592f95..65ec5de 100644
 +    expect(await get('kv', 'written-after-a-wait')).toBeDefined();
      expect(await scrubIfOwed()).toBe(true);
      expect(bytes().includes(late.secret)).toBe(false);
+   });
+diff --git a/apps/server/test/solidOidc.test.ts b/apps/server/test/solidOidc.test.ts
+index 327e8bc..5750868 100644
+--- a/apps/server/test/solidOidc.test.ts
++++ b/apps/server/test/solidOidc.test.ts
+@@ -373,6 +373,30 @@ describe('the admin’s view of the pods', () => {
+       config.solid.serverUrl = saved;
+     }
+   });
++
++  // With the store async, the "is this a demo account?" lookup ran inside filter(), which took every lookup's promise
++  // as a yes, so demo accounts' pods were read too.
++  it('leaves out the pods of demo accounts', async () => {
++    const saved = config.solid.serverUrl;
++    config.solid.serverUrl = 'http://127.0.0.1:1';
++    try {
++      for (const [id, simulated] of [['u-podreal', false], ['u-poddemo', true]] as const) {
++        await put('users', { id, name: id, email: '', createdAt: new Date().toISOString(), simulated } as unknown as User);
++        await put('kv', { id: `pod:${id}`, podUrl: `http://127.0.0.1:1/${id}/`, webId: `http://127.0.0.1:1/${id}/profile/card#me`, clientId: 'c', clientSecret: 's' });
++      }
++      const asked: string[] = [];
++      const get = async (url: string) => {
++        asked.push(url);
++        return new Response('', { status: 200 });
++      };
++      const ids = (await readPodFeedback({ webId: 'https://jesse.example/#me', get })).folders.map((f) => f.testerId);
++      expect(ids).toContain('u-podreal');
++      expect(ids).not.toContain('u-poddemo');
++      expect(asked.some((u) => u.includes('u-poddemo'))).toBe(false);
++    } finally {
++      config.solid.serverUrl = saved;
++    }
++  });
+ });
+ 
+ describe('the pod and sign-in modules never use the plain fetch', () => {
+diff --git a/apps/server/test/solidOidcFlow.test.ts b/apps/server/test/solidOidcFlow.test.ts
+index fa4e1ab..2e13198 100644
+--- a/apps/server/test/solidOidcFlow.test.ts
++++ b/apps/server/test/solidOidcFlow.test.ts
+@@ -366,7 +366,7 @@ describe('reading a pod as the signed-in WebID', () => {
+   });
+ 
+   it('provisions a pod through the guarded transport (the account API, then client credentials)', async () => {
+-    await openDb(':memory:');
++    await openDb();
+     const made = await solid.provision({ id: 'u-provision1', name: 'New Tester' });
+     expect(made).toEqual({ webId: `${base}/newpod/profile/card#me`, podUrl: `${base}/newpod/` });
+     expect(seen.filter((r) => r.includes('/.account/')).length).toBeGreaterThanOrEqual(5);
+diff --git a/apps/server/test/validate.test.ts b/apps/server/test/validate.test.ts
+index ca2aa19..a15f662 100644
+--- a/apps/server/test/validate.test.ts
++++ b/apps/server/test/validate.test.ts
+@@ -150,9 +150,9 @@ describe('POST to the ontology IRI validates data', () => {
+   it('validates nothing against a version held for approval, like every other public read', async () => {
+     const { put, remove } = await import('../src/db.js');
+     const { findProject } = await import('../src/services/ontologies.js');
+-    const project = findProject('volunteering')!;
++    const project = (await findProject('volunteering'))!;
+     const key = `public-hold:${project.id}`;
+-    put('kv', { id: key, ontologyId: project.id, versions: ['draft'], since: new Date().toISOString() });
++    await put('kv', { id: key, ontologyId: project.id, versions: ['draft'], since: new Date().toISOString() });
+     try {
+       const held = await post('/def/volunteering/draft', `${VALID}ex:opp vol:titl "typo" .\n`);
+       expect(held.status).toBe(503);
+@@ -161,7 +161,7 @@ describe('POST to the ontology IRI validates data', () => {
+       // A version that isn't held still validates.
+       expect((await post('/def/volunteering/1.0.0', VALID)).status).toBe(200);
+     } finally {
+-      remove('kv', key);
++      await remove('kv', key);
+     }
+     expect((await post('/def/volunteering/draft', VALID)).status).toBe(200);
    });

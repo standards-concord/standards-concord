@@ -34,7 +34,7 @@ const dbFile = path.join(server, 'src/db.ts');
 const dry = process.argv.includes('--dry');
 
 /** db.ts exports that touch the database. HttpError and the Collection type stay as they are. */
-const SEEDS = ['openDb', 'closeDb', 'get', 'mustGet', 'list', 'put', 'remove', 'take', 'claim', 'clearAll', 'transaction', 'withoutWaiting', 'scrubFreeSpace'];
+const SEEDS = ['openDb', 'closeDb', 'get', 'mustGet', 'list', 'put', 'remove', 'take', 'claim', 'insertOnce', 'removeWhereAtMost', 'clearAll', 'transaction', 'withoutWaiting', 'scrubFreeSpace'];
 
 /** Callees that take an async callback and await what it returns. */
 const PROMISE_AWARE_CALLEES = new Set([
@@ -231,6 +231,12 @@ function awaitCall(call, callee) {
   let outer = call;
   while (Node.isParenthesizedExpression(outer.getParent())) outer = outer.getParent();
   if (Node.isAwaitExpression(outer.getParent())) return;
+  // `expect(p).rejects` and `expect(p).resolves` want the promise itself: awaiting it would throw before expect.
+  const host = outer.getParent();
+  if (Node.isCallExpression(host) && host.getExpression().getText() === 'expect' && host.getArguments()[0] === outer) {
+    const then = host.getParent();
+    if (Node.isPropertyAccessExpression(then) && ['rejects', 'resolves'].includes(then.getName())) return;
+  }
   if (needsParens(call)) {
     edit(call, call.getStart(), '(await ', { rank: 1 });
     edit(call, call.getEnd(), ')', { close: true, rank: 1 });
