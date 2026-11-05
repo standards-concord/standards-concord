@@ -181,6 +181,24 @@ test.describe('progressive disclosure', () => {
     for (const name of [/Lint findings/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
   });
 
+  test('the overview says the draft is being reviewed, not "undefined", when its counts are withheld', async ({ page }) => {
+    // The server leaves out graph counts while the working draft waits for publishing approval (#35); the
+    // report-style summary sentence used to assume they were always there.
+    await page.route(new RegExp(`/api/ontologies/${demo.id}$`), async (route) => {
+      const o = await (await route.fetch()).json();
+      await route.fulfill({ json: { ...o, health: undefined, stats: { releases: o.stats.releases } } });
+    });
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const summary = page.getByTestId('overview-summary');
+    await expect(summary).toContainText('The working draft is being reviewed before it is published.');
+    await page.getByRole('button', { name: /Ontology details/ }).click();
+    const about = page.getByRole('region', { name: 'About this ontology' });
+    await expect(about).not.toContainText('undefined');
+    await expect(about).not.toContainText('NaN');
+    await expect(about.getByRole('definition').first()).toHaveText('—');
+  });
+
   test('a contributor is asked to review changes, since any member can send one back, but not to merge or vote', async ({ page }) => {
     const me = await signIn(page, { name: 'Bystander', role: 'contributor' });
     const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { number: number; status: string; authorId: string }[];

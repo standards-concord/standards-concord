@@ -31,10 +31,15 @@ ${v.metadata.description ?? ''}
 ${terms.slice(0, maxTerms).map(line).join('\n')}${terms.length > maxTerms ? `\n… and ${terms.length - maxTerms} more terms` : ''}`;
 }
 
-export function useCaseDigest(u: UseCase): string {
+/**
+ * A use case for a prompt. `anonymous` leaves out its title (use cases may be
+ * private while what's drafted from them is published), so a model can't
+ * copy it into the ontology.
+ */
+export function useCaseDigest(u: UseCase, opts: { anonymous?: boolean; n?: number } = {}): string {
   const s = u.sections;
   const parts = [
-    `## Use case: ${s.name ?? '(unnamed)'} [${u.id}]`,
+    opts.anonymous ? `## Use case ${opts.n ?? ''} [${u.id}]`.replace('  ', ' ') : `## Use case: ${s.name ?? '(unnamed)'} [${u.id}]`,
     s.goal && `Goal: ${s.goal}`,
     s.actors && `Actors: ${s.actors}`,
     s.stakeholders && `Stakeholders: ${s.stakeholders}`,

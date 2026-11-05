@@ -61,14 +61,26 @@ export function OverviewTab() {
         <section aria-label="About this ontology">
           <p className="max-w-[68ch] text-lg leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
           <p className="mt-3 max-w-[68ch] text-sm leading-relaxed text-muted" data-testid="overview-summary">
-            <Link to={`/o/${id}/browse`} className={proseLink}>
-              {plural(o.stats.classes, 'class', 'classes')} and {plural(o.stats.properties, 'property', 'properties')}
-            </Link>
-            , drawn from{' '}
-            <Link to={`/o/${id}/use-cases`} className={proseLink}>
-              {plural(o.stats.useCases, 'use case')}
-            </Link>
-            . Version {o.currentVersion}
+            {o.stats.classes === undefined || o.stats.properties === undefined ? (
+              // The server withholds counts while the working draft is reviewed before publishing.
+              <>The working draft is being reviewed before it is published. </>
+            ) : (
+              <>
+                <Link to={`/o/${id}/browse`} className={proseLink}>
+                  {plural(o.stats.classes, 'class', 'classes')} and {plural(o.stats.properties, 'property', 'properties')}
+                </Link>
+                {o.stats.useCases !== undefined && (
+                  <>
+                    , drawn from{' '}
+                    <Link to={`/o/${id}/use-cases`} className={proseLink}>
+                      {plural(o.stats.useCases, 'use case')}
+                    </Link>
+                  </>
+                )}
+                .{' '}
+              </>
+            )}
+            Version {o.currentVersion}
             {o.stats.releases > 0 && (
               <>
                 {' '}
@@ -86,10 +98,10 @@ export function OverviewTab() {
           </p>
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
-              <Row term="Classes">{o.stats.classes}</Row>
-              <Row term="Properties">{o.stats.properties}</Row>
-              <Row term="Individuals">{o.stats.individuals}</Row>
-              <Row term="Use cases">{o.stats.useCases}</Row>
+              <Row term="Classes">{o.stats.classes ?? '—'}</Row>
+              <Row term="Properties">{o.stats.properties ?? '—'}</Row>
+              <Row term="Individuals">{o.stats.individuals ?? '—'}</Row>
+              <Row term="Use cases">{o.stats.useCases ?? '—'}</Row>
               <Row term="Releases">{o.stats.releases}</Row>
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>

@@ -17,7 +17,7 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const ontologies = useOntologies();
   const templates = useAsync(() => api.governanceTemplates(), []);
   const user = useSession().session?.user;
-  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: true });
+  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: false });
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const create = useAction(async () => {
     const o = await api.createOntology({
@@ -28,9 +28,10 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       governanceTemplate: form.governanceTemplate || undefined,
       creditCreator: form.creditCreator,
     });
-    await ontologies.reload();
     onClose();
     nav(`/o/${o.id}`);
+    // In the background: the list counts every ontology, and the new one's first validation can be slow.
+    void ontologies.reload();
   });
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>
@@ -109,6 +110,9 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
+/** "3 classes", or "— classes" when the count is withheld. */
+const count = (n: number | undefined, one: string, many = `${one}s`) => (n === undefined ? `— ${many}` : plural(n, one, many));
+
 export function HubPage() {
   const ontologies = useOntologies();
   const { now, isDemo } = useSession();
@@ -170,14 +174,15 @@ export function HubPage() {
                     <p className="mt-0.5 font-mono text-xs text-subtle">{o.prefix}:</p>
                     <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
                     <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
-                      {plural(o.stats.classes, 'class', 'classes')}, {plural(o.stats.properties, 'property', 'properties')}, {plural(o.stats.useCases, 'use case')} and{' '}
-                      {plural(o.stats.members, 'member')}.
+                      {/* Counts are withheld while the working draft is reviewed before publishing: show a dash, never "undefined". */}
+                      {count(o.stats.classes, 'class', 'classes')}, {count(o.stats.properties, 'property', 'properties')}, {count(o.stats.useCases, 'use case')} and{' '}
+                      {count(o.stats.members, 'member')}.
                     </p>
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                       <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
                         <HealthChip o={o} />
                         <span>Version {o.currentVersion}</span>
-                        {o.stats.openChangeRequests > 0 && <span>{plural(o.stats.openChangeRequests, 'open change')}</span>}
+                        {(o.stats.openChangeRequests ?? 0) > 0 && <span>{plural(o.stats.openChangeRequests!, 'open change')}</span>}
                       </span>
                       <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
                     </div>

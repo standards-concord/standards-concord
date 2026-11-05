@@ -4,7 +4,7 @@
  */
 import type { Store, Term, Literal, Quad } from 'n3';
 import type { OutputFormat } from './types.js';
-import { NS, RDF_TYPE } from './ns.js';
+import { NS, RDF_TYPE, isSafeNamespace, isSafePrefix } from './ns.js';
 import { canonical, nn, readList } from './rdf.js';
 import { writeNTriples } from './turtle.js';
 import type { OntologyGraph } from './graph.js';
@@ -12,6 +12,7 @@ import { toManchester } from './manchester.js';
 import { toLinkML } from './linkml.js';
 import { toShacl, toShaclc } from './shacl.js';
 import { toWrapperClasses, withWrapperImport } from './codegen.js';
+import { noRemoteDocuments } from './jsonld-loader.js';
 
 export const FORMAT_INFO: Record<OutputFormat, { label: string; mediaType: string; extension: string }> = {
   turtle: { label: 'Turtle', mediaType: 'text/turtle', extension: 'ttl' },
@@ -60,10 +61,33 @@ async function writeJsonLd(graph: OntologyGraph): Promise<string> {
   for (const q of graph.store.getQuads(null, null, null, null)) for (const t of [q.subject, q.predicate, q.object, (q.object as any).datatype]) if (t?.value) used.add(t.value);
   const context: Record<string, string> = {};
   for (const [p, ns] of Object.entries(graph.prefixes).sort(([a], [b]) => a.localeCompare(b))) {
-    if (p && [...used].some((u) => u.startsWith(ns))) context[p] = ns;
+    // Only safe prefixes: a keyword such as @import would make a JSON-LD processor load a context.
+    if (p && isSafePrefix(p) && [...used].some((u) => u.startsWith(ns)) && isSafeNamespace(ns)) context[p] = ns; // Unused prefixes aren't checked.
   }
-  const compacted = await jsonld.compact(expanded, context as any);
-  return JSON.stringify(sortKeys(compacted), null, 2) + '\n';
+  // In a context, a namespace "p:rest" is read as a compact IRI using the term p unless rest starts with "//":
+  // a prefix urn with the namespace urn:example:vol:, or zz with zz:foo, would loop. Such a term is left out.
+  const readAsCompact = (iri: string, p: string) => iri.startsWith(`${p}:`) && !iri.startsWith(`${p}://`);
+  for (const p of Object.keys(context)) if (Object.values(context).some((ns) => readAsCompact(ns, p))) delete context[p];
+  // The compactor also refuses to write a full IRI that starts with "p:" when it can't shorten it (a prefix
+  // https, or e with an IRI e:Thing). Exactly the terms it names are left out, and those IRIs written in full.
+  for (let attempts = Object.keys(context).length; ; attempts--) {
+    try {
+      return JSON.stringify(sortKeys(await compactJsonLd(expanded, context)), null, 2) + '\n';
+    } catch (err) {
+      const term = /confused with prefix "([^"]*)"/.exec(String((err as Error)?.message))?.[1];
+      if (term === undefined || !Object.hasOwn(context, term) || attempts <= 0) throw err;
+      delete context[term];
+    }
+  }
+}
+
+/**
+ * Compacts expanded JSON-LD with a context, never loading anything: a remote
+ * context or `@import` in the context is an error, whatever put it there.
+ */
+export async function compactJsonLd(expanded: object, context: Record<string, unknown>): Promise<object> {
+  const jsonld = (await import('jsonld')).default;
+  return jsonld.compact(expanded as any, context as any, { documentLoader: noRemoteDocuments as any });
 }
 
 /** Sorts object keys and node arrays for stable output (never reorders @list members). */
