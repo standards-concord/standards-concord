@@ -97,7 +97,7 @@ test('fits a phone screen', async ({ page }) => {
 });
 
 test.describe('feature clips playlist', () => {
-  const playlist = (page: Page) => page.getByRole('region', { name: 'More features, one at a time' });
+  const playlist = (page: Page) => page.getByRole('region', { name: 'More features' });
 
   test('lists the clips the release has in a drop-down, and plays the one picked', async ({ page }) => {
     await page.goto('/welcome');

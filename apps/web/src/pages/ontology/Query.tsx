@@ -12,7 +12,7 @@ import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
 import { QueryRunner, QueryStopped, type RunResult } from '../../lib/queryRunner';
 import { limitOf, withoutLimit } from '../../lib/sparqlLimit';
-import { Badge, Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
+import { Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
 import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
 import { ChatView } from '../../components/ChatView';
@@ -203,7 +203,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const [target, setTarget] = useLocalStorage<Target>(`${storageKey}.target`, 'ontology');
   const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
-  const [queryMs, setQueryMs] = useState<number>();
   const [data, setData] = useLocalStorage(`${storageKey}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
 
   const setResult = (r: Result | null) => {
@@ -313,19 +312,17 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     setRanKey(keyFor(q, t));
     setRunning(true);
     try {
-      const { result: r, ms } = await runner().run({ source: t === 'data' ? `${turtle.data}\n${data}` : turtle.data, query: q, form: queryForm(q) });
+      const { result: r } = await runner().run({ source: t === 'data' ? `${turtle.data}\n${data}` : turtle.data, query: q, form: queryForm(q) });
       if (r.kind === 'rows') {
         // The assistant's readable headings, for the columns this query still has.
         const headings = r.vars.map((v) => cols.find((c) => c.variable === v)?.label);
         setResult({ ...r, headings: headings.some((h) => h !== undefined) ? headings : undefined });
       } else setResult(r);
-      setQueryMs(ms);
     } catch (e) {
       // A newer run replaced this one: that run reports its own outcome.
       if (e instanceof QueryStopped && e.reason === 'cancelled' && runnerRef.current?.running) return;
       setQueryError(e);
       setResult(null);
-      setQueryMs(undefined);
     } finally {
       if (!runnerRef.current?.running) setRunning(false);
     }
@@ -439,13 +436,12 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     <div className="space-y-4">
       <p className="flex flex-wrap items-center gap-2 text-sm text-muted">
         <Cpu className="size-4" />
-        Queries run in your browser with the sparq engine (WebAssembly), and your sample data never leaves this page. The assistant sees your messages, the query and the ontology.
+        Queries run in your browser, so your sample data never leaves this page. The assistant sees your messages, the query and the ontology.
+        {/* How many triples loaded, and how fast, is under-the-hood detail: it is only announced to screen readers. */}
         {ready && (
-          <Badge tone="ok">
-            <span data-testid="sparq-ready">
-              {ready.triples.toLocaleString()} triples loaded in {ready.ms} ms
-            </span>
-          </Badge>
+          <span role="status" className="sr-only" data-testid="sparq-ready" data-triples={ready.triples}>
+            Ontology loaded
+          </span>
         )}
       </p>
       {loadError ? <InlineError error={loadError} /> : null}
@@ -606,7 +602,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                   </button>
                 </p>
               )}
-              {!ready && !loadError && <Loading label="Loading the ontology into sparq…" />}
+              {!ready && !loadError && <Loading label="Loading the ontology…" />}
               {running && (
                 <p role="status" className="flex items-center gap-2 text-sm text-muted" data-testid="query-running">
                   <Loader2 className="size-4 animate-spin" aria-hidden /> Running the query…
@@ -646,7 +642,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                       {result.count.toLocaleString()} triple{result.count === 1 ? '' : 's'}
                       {result.shown < result.count ? ` (showing the first ${result.shown.toLocaleString()})` : ''}
                       {result.cut ? ' · very long values are shortened' : ''}
-                      {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                     </p>
                     <CodeView code={result.text} language="ntriples" ariaLabel="Query result triples" maxHeight={360} />
                   </div>
@@ -659,7 +654,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                           ? `Showing the first ${result.rows.length.toLocaleString()} of ${result.complete ? '' : 'more than '}${result.total.toLocaleString()} rows`
                           : `${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`}
                         {result.cut ? ' · very long values are shortened' : ''}
-                        {queryMs !== undefined ? ` · ${queryMs} ms` : ''}
                       </span>
                       <a href={`data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(result.vars, result.rows, result.headings))}`} download="query-results.csv" className="inline-flex items-center gap-1 hover:text-fg">
                         <Download className="size-3" /> CSV

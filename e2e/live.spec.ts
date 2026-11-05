@@ -55,7 +55,7 @@ test.describe('with the backend', () => {
     const wasm = page.waitForResponse((r) => r.url().endsWith('.wasm'));
     await page.goto(`/o/${demo.id}/query`);
     expect((await wasm).headers()['content-type']).toContain('application/wasm');
-    await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
+    await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded|Ontology loaded/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Run', exact: true }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
     // The query assistant answers through the backend, and its query runs here when asked.

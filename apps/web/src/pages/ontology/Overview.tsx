@@ -233,7 +233,7 @@ export function OverviewTab() {
           <h2 id="health-title" className="text-xl font-bold">
             Health of the working draft
           </h2>
-          <p className="mt-1 text-sm text-muted">Strict OWL lint, reasoner consistency, FAIR checks and competency-question tests, run on every change.</p>
+          <p className="mt-1 text-sm text-muted">Checked again on every change.</p>
           <div className="mt-4">
             {validation.error && !validation.data ? (
               <ErrorCard error={validation.error} onRetry={validation.reload} />

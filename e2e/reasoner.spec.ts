@@ -15,9 +15,15 @@ test.describe('OWL reasoning with sparq', () => {
     await page.goto(`/o/${demo.id}`);
     const health = page.locator('#health');
     await expect(health.getByText('Consistent.', { exact: true })).toBeVisible({ timeout: 30_000 });
-    await expect(health.getByText(/^sparq · reasoning [\d.]+ ms \(\d+ ms in all\)$/)).toBeVisible();
+    // Which engine ran and how long it took is under-the-hood detail: it used to sit beside the
+    // verdict ("sparq · reasoning 3.8 ms (10 ms in all)") and now waits behind "Reasoner details".
+    const timing = health.getByText(/^Checked by sparq in [\d.]+ ms \(\d+ ms in all\)\.$/);
+    await expect(timing).toBeHidden();
+    await expect(health.getByText(/sparq ·|Reasoner \(sparq\)/)).toHaveCount(0);
+    await health.getByRole('button', { name: /Reasoner details/ }).click();
+    await expect(timing).toBeVisible();
     // The OWL reasoner ran, so the summary tile isn't "Not run".
-    await expect(health.getByText('Reasoner (sparq)')).toBeVisible();
+    await expect(health.getByRole('group', { name: 'Health summary' })).toContainText('Consistent');
 
     // Only the draft's Turtle comes from the server; the reasoner itself is fetched and run here.
     const validationCalls: string[] = [];
@@ -29,7 +35,8 @@ test.describe('OWL reasoning with sparq', () => {
     await health.getByRole('button', { name: 'Check again in this browser' }).click();
     await Promise.all([wasm, source, worker]);
     const status = health.getByRole('status');
-    await expect(status).toContainText(/This browser: consistent, all classes satisfiable \(sparq · reasoning [\d.]+ ms/);
+    await expect(status).toContainText('This browser: consistent, all classes satisfiable.');
+    await expect(status).not.toContainText(/ ms\b/);
     await expect(status).toContainText('Same result as the server.');
     expect(validationCalls).toEqual([]);
   });
@@ -92,7 +99,8 @@ test.describe('OWL reasoning with sparq', () => {
     await page.goto(`/o/${demo.id}/changes/${cr.id}?view=checks`);
     await expect(page.getByText('1 unsatisfiable class.')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(new RegExp(`^Unsatisfiable: ${name.toLowerCase()}$`, 'i'))).toBeVisible();
-    await expect(page.getByText(/^sparq · reasoning [\d.]+ ms/).first()).toBeVisible();
+    await page.getByRole('button', { name: /Reasoner details/ }).first().click();
+    await expect(page.getByText(/^Checked by sparq in [\d.]+ ms/).first()).toBeVisible();
     // The in-browser re-check is only offered for the working draft, not for a proposal.
     await expect(page.getByRole('button', { name: 'Check again in this browser' })).toHaveCount(0);
   });
