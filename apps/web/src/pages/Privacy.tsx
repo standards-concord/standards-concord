@@ -66,31 +66,40 @@ export function PrivacyPage() {
           <ul>
             <li>use cases, interviews with the AI interviewer, and meeting transcripts you upload or that the meeting bot records;</li>
             <li>change requests, comments, reviews and votes;</li>
-            <li>answers to the alpha feedback questionnaire and the feedback chat.</li>
+            <li>answers to the alpha feedback questionnaire and the feedback chat;</li>
+            <li>
+              your testing history: which versions of Concord you used and when, which roles you tried, and which feedback you sent on each version, so the alpha team
+              can ask you about what changed.
+            </li>
           </ul>
           <p>
             Members of an ontology’s working group can see what is added to it. When a working group publishes a version of its ontology, that version, its release notes and
-            its use cases are public on the web.
+            its use cases are public on the web. The alpha team (Concord’s administrators) can read all feedback, including your name and email if you give them; other
+            testers can’t.
           </p>
         </Section>
 
         <Section id="privacy-storage" title="Where it is kept">
           <ul>
             <li>
-              <strong>Concord’s database.</strong> Your account, the ontologies and everything shared with a working group are kept in Concord’s backend database, on the
-              cloud servers that host Concord (Microsoft Azure today, moving to Vercel and Neon).
+              <strong>Concord’s servers.</strong> Your account, your interviews, your feedback and testing history, and everything shared with a working group are kept in
+              Concord’s backend database; ontologies and their releases are kept as Git repositories. Both are on the cloud servers that host Concord (Microsoft Azure
+              today, moving to Vercel and Neon).
             </li>
             <li>
-              <strong>Your own Solid pod.</strong> Your interview transcripts and a copy of your feedback go to a Solid pod rather than the shared database. Concord
-              doesn’t run pods for you: you bring your own, from a pod provider such as solidcommunity.net, which keeps it under its own privacy policy. You control your
-              pod and can delete what Concord wrote there yourself; Concord can’t do that for you. Concord gives its administrators read access to the feedback folder it
-              writes in your pod. If you haven’t connected a pod, Concord keeps these files on its own servers instead, and deletes them with your account.
+              <strong>Your Solid pod.</strong> When you’re signed in, Concord also writes a copy of your interview transcripts, feedback and testing history to a{' '}
+              <code>concord/</code> folder in your Solid pod, and shares its <code>concord/feedback/</code> folder read-only with the alpha team’s WebIDs. We expect you to
+              bring your own pod, from a provider such as solidcommunity.net, which keeps it under its own privacy policy; you control it and can delete what Concord
+              wrote there yourself. Some Concord test servers still create a pod for you on a pod server Concord runs; those pods are deleted with your account. If a pod
+              can’t be reached, Concord keeps the copy on its own servers instead.
             </li>
             <li>
-              <strong>Your browser.</strong> Concord sets a sign-in cookie that lasts 30 days, short-lived cookies (10 minutes) while you sign in, and remembers your chosen
-              look and walkthrough progress in the browser’s own storage. There is no advertising or tracking, and no analytics service.
+              <strong>Your browser.</strong> Concord sets a sign-in cookie that lasts 30 days, a cookie that lasts 30 days and remembers who you are while you switch
+              between demo personas, and short-lived cookies (10 minutes) while you sign in. It remembers your chosen look, your walkthrough progress and the link to
+              withdraw a public summary in the browser’s own storage.
             </li>
           </ul>
+          <p>There is no advertising, and no third-party tracking or analytics.</p>
         </Section>
 
         <Section id="privacy-sharing" title="Services that process it for us">
@@ -119,14 +128,16 @@ export function PrivacyPage() {
           <ul>
             <li>
               <strong>Reporting a problem on a public ontology page.</strong> Anyone can report a problem with a term without signing in. Concord keeps the title and
-              description you write, and shows them only to that ontology’s editors, stewards and owners. It doesn’t store your IP address: to stop abuse it keeps a
-              scrambled form of it in memory for at most a day, and sets a cookie on that page for one day.
+              description you write, and shows them only to that ontology’s editors, stewards and owners. It doesn’t store your IP address with the report: to stop abuse
+              it keeps a scrambled form of it in memory only, which is cleared after a day (the next time anyone sends a report, or when the server restarts), and sets a
+              cookie on that page for one day.
             </li>
             <li>
               <strong>Public feedback summaries (opt-in).</strong> When you send feedback you can tick a box to post a short summary as a GitHub issue on the Concord
-              repository, which is public. Only that summary is posted, exactly as you saw it, with links and email addresses removed. Your name, email, answers and the
-              conversation are not posted. You can withdraw it later from the same browser: Concord replaces the issue’s text and closes it. GitHub may still show earlier
-              versions in the issue’s edit history, so ask us if you need the issue removed entirely.
+              repository, which is public. Only that summary is posted, exactly as you saw it; your name, email, answers and the conversation are not attached. Concord
+              removes links and email addresses from it, but it can’t spot names, so don’t include names, organisations or other details that identify anyone. You can
+              withdraw the summary from the thank-you screen straight after sending it: Concord replaces the issue’s title and text and closes it. After you leave that
+              screen, or if you need the issue removed entirely (GitHub keeps an edit history), write to us.
             </li>
           </ul>
         </Section>

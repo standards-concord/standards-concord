@@ -22,22 +22,29 @@ test('the privacy policy opens directly without signing in', async ({ page }) =>
   await expect(page.getByRole('heading', { level: 1, name: 'Privacy policy' })).toBeVisible();
 });
 
-test('the privacy policy covers sign-in data, storage, public posts and deletion', async ({ page }) => {
+test('the privacy policy covers each section and every sign-in method the server offers', async ({ page, request }) => {
   await page.goto('/privacy');
   for (const name of ['When you sign in', 'What you add', 'Where it is kept', 'Services that process it for us', 'Public reports and GitHub issues', 'Getting your data deleted', 'Contact']) {
     await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
   }
+  // Every sign-in method this server offers must say what it shares (a new provider without a line here fails).
+  const session = (await (await request.get('/api/session')).json()) as { providers: Record<string, boolean> };
+  const lines: Record<string, string> = { google: 'Google:', github: 'GitHub:', solid: 'Your WebID (Solid):', demo: 'Try the demo:' };
   const signInSection = page.getByRole('region', { name: 'When you sign in' });
-  await expect(signInSection).toContainText('Google:');
-  await expect(signInSection).toContainText('GitHub:');
-  await expect(signInSection).toContainText('profile picture');
-  await expect(page.getByRole('region', { name: 'Where it is kept' })).toContainText('Solid pod');
-  // Concord doesn't run people's pods, so it can't promise to delete them: that's the pod provider's job.
-  await expect(page.getByRole('region', { name: 'Getting your data deleted' })).toContainText('yours to delete with your pod provider');
-  await expect(page.getByRole('region', { name: 'Public reports and GitHub issues' })).toContainText('GitHub issue');
-  // Deletion requests go to a real address, as a mail link.
-  const contact = page.getByRole('region', { name: 'Getting your data deleted' }).getByRole('link');
-  await expect(contact).toHaveAttribute('href', /^mailto:[^@\s]+@[^@\s]+\.[a-z]+$/);
+  for (const [provider, on] of Object.entries(session.providers)) {
+    if (!on) continue;
+    expect(lines[provider], `the policy has no line for the "${provider}" sign-in`).toBeTruthy();
+    await expect(signInSection).toContainText(lines[provider]);
+  }
+  // Google and GitHub are what the Google review checks, even where they aren't configured.
+  await expect(signInSection).toContainText(lines.google);
+  await expect(signInSection).toContainText(lines.github);
+  // Interviews and feedback are kept on Concord's servers as well as in a pod (an early draft said otherwise).
+  await expect(page.getByRole('region', { name: 'Where it is kept' })).toContainText('Your account, your interviews, your feedback and testing history');
+  // A public summary can only be withdrawn from the thank-you screen (the withdraw button lives there only).
+  await expect(page.getByRole('region', { name: 'Public reports and GitHub issues' })).toContainText('from the thank-you screen straight after sending it');
+  // Deletion requests go to the ODI address Jesse chose, as a mail link.
+  await expect(page.getByRole('region', { name: 'Getting your data deleted' }).getByRole('link')).toHaveAttribute('href', 'mailto:solid-eng@theodi.org');
 });
 
 test('a signed-in tester reaches the privacy policy from the footer', async ({ page }) => {

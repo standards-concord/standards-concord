@@ -143,7 +143,7 @@ export function LoginPage() {
             <p className="mt-5 flex items-start gap-2 border-t border-line pt-4 text-xs text-muted">
               <KeyRound className="mt-0.5 size-3.5 shrink-0" />
               <span>
-                Your interview transcripts go to your own Solid pod, not a shared database. Already have a WebID? Sign in with it. Signing in shares
+                Already have a WebID? Sign in with it. Signing in shares
                 your name, email address and profile picture with Concord; see our{' '}
                 <Link to="/privacy" className="text-accent hover:underline">
                   privacy policy
