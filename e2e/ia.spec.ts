@@ -596,9 +596,26 @@ test.describe('progressive disclosure', () => {
       await cqGroup.click();
       await expect(detail.first()).toHaveAttribute('aria-expanded', 'true');
     }
-    // One primary action, chosen by the use case's state.
-    const primary = uc.source === 'chat' && uc.status === 'eliciting' ? 'Continue the interview' : uc.status === 'ready' || uc.status === 'synthesised' ? 'Draft changes' : 'Mark as ready';
-    await expect(page.getByRole('button', { name: primary })).toHaveClass(/bg-accent /);
+  });
+
+  test('a use case offers one primary action, chosen by its state', async ({ page, request }) => {
+    const ucs = (await (await request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; status: string; sections: { name?: string } }[];
+    // Once the working group accepts a use case, drafting changes is the next step. Other
+    // tests share the demo and may move this one on, so the expectation follows its status.
+    const shifts = ucs.find((u) => u.sections.name === 'Find weekly shifts that need volunteers');
+    expect(shifts).toBeTruthy();
+    await page.goto(`/o/${demo.id}/use-cases/${shifts!.id}`);
+    await settle(page);
+    const draft = page.getByRole('button', { name: 'Draft changes' });
+    if (['accepted', 'in-progress'].includes(shifts!.status)) await expect(draft).toHaveClass(/bg-accent /);
+    else if (shifts!.status !== 'closed') await expect(draft).not.toHaveClass(/bg-accent /);
+    // A closed use case has nothing left to draft.
+    const closed = ucs.find((u) => u.status === 'closed');
+    expect(closed).toBeTruthy();
+    await page.goto(`/o/${demo.id}/use-cases/${closed!.id}`);
+    await settle(page);
+    await expect(page.getByRole('heading', { level: 2 }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Draft changes' })).toHaveCount(0);
   });
 
   test('releases are grouped into in progress, latest and previous', async ({ page, request }) => {

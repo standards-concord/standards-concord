@@ -2,12 +2,13 @@ import path from 'node:path';
 import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
-import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, User } from '@concord/shared';
+import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { detached, transaction, get, HttpError, list, put } from '../db.js';
+import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
@@ -53,6 +54,8 @@ import {
 import { ontologyStore } from '../services/ontologyStore.js';
 import { PERSONAS } from '../services/personas.js';
 import * as releases from '../services/releases.js';
+import * as requirements from '../services/requirements.js';
+import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseDetail.js';
 import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
@@ -112,6 +115,10 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
 
 const project = async (req: Request) => await mustFindProject(String(req.params.id));
 
+/** Change request detail plus the use cases it addresses that the viewer may see. */
+const crOut = async (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...await useCases.crForViewer(await crs.detail(c), req.user), useCases: await useCasesForCR(c, req.user) });
+/** Release detail plus the use cases it closes and its requirements document. */
+const relOut = async (req: Request, r: import('@concord/shared').Release) => ({ ...await releases.releaseDetail(r, req.user), ...await releaseTrace(r, req.user) });
 /** GET routes anyone may call without signing in. */
 const PUBLIC_READS = [
   /^\/ontologies$/,
@@ -119,6 +126,11 @@ const PUBLIC_READS = [
   // Not validation: it runs the use cases' competency questions over their private example data.
   /^\/ontologies\/[^/]+\/(view|search|source)$/,
   /^\/ontologies\/[^/]+\/terms\/.+$/,
+  // Use cases and published requirements documents: each read checks what the viewer may see
+  // (services/useCases.ts canSee, services/requirements.ts), so signed-out callers get only public ones.
+  /^\/ontologies\/[^/]+\/(use-cases|public-use-cases|requirements)$/,
+  /^\/ontologies\/[^/]+\/requirements\/[^/]+(\/markdown)?$/,
+  /^\/use-cases\/[^/]+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
   /^\/alpha\/me$/,
@@ -131,6 +143,13 @@ const PUBLIC_READS = [
 export function apiRouter(): Router {
   const r = Router();
   r.use(express.json({ limit: '5mb' }));
+  // Responses depend on who is signed in (and on consent that can be withdrawn at any time), so no cache may keep or share them.
+  r.use((_req, res, next) => {
+    res.set('Cache-Control', 'private, no-store');
+    res.vary('Cookie');
+    res.vary('Authorization');
+    next();
+  });
 
   /* ------------------------------ auth ------------------------------ */
   r.get('/session', async (req, res) => res.json(await sessionInfo(req.user)));
@@ -207,7 +226,7 @@ export function apiRouter(): Router {
    * The summary a caller may see. For someone signed out, whether the working draft is held is decided before it is
    * read: a summary read first and checked after could count a draft that was replaced and approved meanwhile.
    */
-  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => await forCaller(req, await summary(p, { withGraph: !!req.user || !await isHeld(p, 'draft') }));
+  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => await forCaller(req, await summary(p, { withGraph: !!req.user || !await isHeld(p, 'draft'), viewer: req.user }));
   /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
   const forCaller = async (req: Request, s: OntologySummary) => {
     if (req.user) return s;
@@ -235,7 +254,7 @@ export function apiRouter(): Router {
     );
     // Without its health: validating a new ontology (the OWL reasoner's first run) can take a while, and nothing
     // waits on it here; the ontology's own page asks for it.
-    res.status(201).json(await summary(p, { withHealth: false }));
+    res.status(201).json(await summary(p, { withHealth: false, viewer: req.user }));
   });
 
   r.get('/ontologies/:id', async (req, res) => {
@@ -288,9 +307,11 @@ export function apiRouter(): Router {
   r.get('/ontologies/:id/validation', async (req, res) => {
     const p = await project(req);
     const ref = optStr(req.query.ref);
-    if (!ref || ref === 'working') return void res.json(await workingValidation(p));
+    // Each competency question result names the use case it came from, and is shown only if the
+    // viewer may see that use case now: a report that was running when one was withdrawn drops it.
+    if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
@@ -324,7 +345,7 @@ export function apiRouter(): Router {
     await requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(await setGovernance(p, policy, user)));
+    res.json(await summary(await setGovernance(p, policy, user), { viewer: user }));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
@@ -332,10 +353,66 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------- use cases & interviews ------------------ */
-  r.get('/ontologies/:id/use-cases', async (req, res) => res.json(await useCases.listUseCases((await project(req)).id)));
-  r.get('/use-cases/:id', async (req, res) => res.json(await useCases.getUseCase(String(req.params.id))));
-  r.patch('/use-cases/:id', async (req, res) => {
-    res.json(await useCases.updateUseCase(String(req.params.id), requireUser(req), req.body ?? {}));
+  r.get('/ontologies/:id/use-cases', async (req, res) => res.json(await useCases.listUseCases((await project(req)).id, req.user)));
+  r.get('/ontologies/:id/public-use-cases', async (req, res) => res.json(await requirements.publicUseCases((await project(req)).id)));
+  r.get('/use-cases/:id', async (req, res) => res.json(await useCaseDetail(String(req.params.id), req.user)));
+  // Changes that can take consent away (edits, visibility, withdrawal, archiving, triage) wait for any
+  // release or drafted change request being committed from the ontology's use cases (withConsentLock).
+  // The consent lock is taken outside any transaction (a transaction waiting on it could hold up its holder).
+  const consentChange = async (req: Request, fn: (u: UseCase, user: User) => Promise<unknown>) => {
+    const user = requireUser(req);
+    const id = String(req.params.id);
+    const ontologyId = (await useCases.getUseCaseFor(id, user)).ontologyId;
+    return useCases.withConsentLock(ontologyId, async () => {
+      await transaction(async () => {
+        await fn(await useCases.getUseCaseFor(id, user), user);
+      });
+      return await useCaseDetail(id, user);
+    });
+  };
+  r.patch('/use-cases/:id', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.updateUseCase(u, user, req.body ?? {}))));
+  r.post('/use-cases/:id/visibility', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.setVisibility(u, user, req.body?.visibility))));
+  r.post('/use-cases/:id/withdraw', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.withdrawUseCase(u, user))));
+  r.post('/use-cases/:id/submit', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.submitUseCase(u, user))));
+  r.post('/use-cases/:id/triage', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.triageUseCase(u, user, req.body?.status, optStr(req.body?.note)))));
+  r.post('/use-cases/:id/links', async (req, res) => {
+    const user = requireUser(req);
+    const b = req.body ?? {};
+    await useCases.addLink(String(req.params.id), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
+    res.json(await useCaseDetail(String(req.params.id), user));
+  });
+  r.delete('/use-cases/:id/links/:target', async (req, res) => {
+    const user = requireUser(req);
+    await useCases.removeLink(String(req.params.id), user, String(req.params.target));
+    res.json(await useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/anonymise', async (req, res) => {
+    const user = requireUser(req);
+    await useCases.proposeAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(await useCaseDetail(String(req.params.id), user));
+  });
+  r.post('/use-cases/:id/anonymise/publish', async (req, res) => {
+    const user = requireUser(req);
+    const out = await useCases.publishAnonymised(String(req.params.id), user, req.body?.draft);
+    res.json({ original: await useCaseDetail(out.original.id, user), published: await useCaseDetail(out.published.id, user) });
+  });
+  r.post('/use-cases/:id/anonymise/decline', async (req, res) => {
+    const user = requireUser(req);
+    await useCases.declineAnonymised(String(req.params.id), user);
+    res.json(await useCaseDetail(String(req.params.id), user));
+  });
+
+  /* ------------------------ requirements documents ------------------- */
+  r.get('/ontologies/:id/requirements', async (req, res) => res.json(await requirements.listDocuments((await project(req)).id, req.user)));
+  r.get('/ontologies/:id/requirements/:version', async (req, res) => res.json(await requirements.documentFor((await project(req)).id, String(req.params.version).replace(/^v/, ''), req.user)));
+  r.get('/ontologies/:id/requirements/:version/markdown', async (req, res) => {
+    const doc = await requirements.documentFor((await project(req)).id, String(req.params.version).replace(/^v/, ''), req.user);
+    res.type('text/markdown; charset=utf-8').send(requirements.renderMarkdown(doc));
+  });
+  r.post('/releases/:id/requirements', async (req, res) => {
+    const user = requireUser(req);
+    const rel = await releases.getRelease(String(req.params.id));
+    res.status(201).json(await requirements.generateRequirements(await mustFindProject(rel.ontologyId), { version: rel.version, release: rel, actor: user }));
   });
 
   r.post('/ontologies/:id/interviews', async (req, res) => {
@@ -343,31 +420,40 @@ export function apiRouter(): Router {
   });
   r.get('/interviews/:id', async (req, res) => {
     const s = await useCases.getInterview(String(req.params.id));
-    if (s.userId !== req.user?.id) throw new HttpError(403, 'Interviews are private to the person interviewed');
-    res.json({ ...s, useCase: await useCases.getUseCase(s.useCaseId) });
+    if (s.userId !== req.user?.id) throw new HttpError(404, `interview ${s.id} not found`);
+    res.json({ ...s, useCase: await useCaseDetail(s.useCaseId, req.user) });
   });
   r.post('/interviews/:id/messages', async (req, res) => {
     const s = await useCases.getInterview(String(req.params.id));
-    res.json(await useCases.interviewTurn(s, requireUser(req), str(req.body?.content, 'content', 8000)));
+    const user = requireUser(req);
+    const out = await useCases.interviewTurn(s, user, str(req.body?.content, 'content', 8000));
+    res.json({ session: out.session, useCase: await useCaseDetail(out.useCase.id, user) });
   });
   r.post('/interviews/:id/finish', async (req, res) => {
-    res.json(await useCases.finishInterview(await useCases.getInterview(String(req.params.id)), requireUser(req)));
+    const user = requireUser(req);
+    const out = await useCases.finishInterview(await useCases.getInterview(String(req.params.id)), user);
+    res.json({ useCase: await useCaseDetail(out.useCase.id, user) });
   });
   r.post('/ontologies/:id/synthesise', async (req, res) => {
     const p = await project(req);
     const user = requireUser(req);
     const cr = await useCases.synthesise(p, user, Array.isArray(req.body?.useCaseIds) ? req.body.useCaseIds : undefined);
-    res.status(201).json(await crs.detail(cr));
+    res.status(201).json(await crOut(cr, req));
   });
 
   /* ------------------------------ meetings --------------------------- */
-  // Meetings are for signed-in people; pending invites, Meet links and organisers for facilitators only.
+  // Meetings are working group business: members, whoever recorded one, and facilitators see them; to anyone else
+  // they don't exist. Pending invites, Meet links and organisers are for facilitators only (meetings.meetingView).
+  const meetingFor = async (req: Request) => {
+    const m = await meetings.meetingView(await meetings.getMeeting(String(req.params.id)), req.user);
+    if (!m) throw new HttpError(404, 'No such meeting');
+    return m;
+  };
   r.get('/ontologies/:id/meetings', async (req, res) => {
-    if (!req.user) return void res.json([]);
     // A loop, not flatMap(): flatMap would return each async check's promise instead of the meeting.
     const shown: Meeting[] = [];
     for (const m of await meetings.listMeetings((await project(req)).id)) {
-      const v = await meetings.visibleMeeting(m, req.user);
+      const v = await meetings.meetingView(m, req.user);
       if (v) shown.push(v);
     }
     res.json(shown);
@@ -408,10 +494,8 @@ export function apiRouter(): Router {
     );
   });
   const visible = async (req: Request) => {
-    const user = requireUser(req);
-    const m = await meetings.visibleMeeting(await meetings.getMeeting(String(req.params.id)), user);
-    if (!m) throw new HttpError(404, 'No such meeting');
-    return m;
+    requireUser(req);
+    return await meetingFor(req);
   };
   r.get('/meetings/:id', async (req, res) => res.json(await visible(req)));
   r.patch('/meetings/:id', async (req, res) => {
@@ -428,9 +512,11 @@ export function apiRouter(): Router {
     res.json(await meetings.postPrompt(m.id, Number(req.params.index)));
   });
   r.post('/meetings/:id/analyse', async (req, res) => {
+    const user = requireUser(req);
+    await meetingFor(req);
     const m = await meetings.getMeeting(String(req.params.id));
-    await meetings.requireAnalyst(m, requireUser(req));
-    res.json(await meetings.analyseMeeting(m));
+    await meetings.requireAnalyst(m, user);
+    res.json(await meetings.meetingView(await meetings.analyseMeeting(m), user));
   });
   r.post('/meetings/:id/end', async (req, res) => {
     const m = await meetings.getMeeting(String(req.params.id));
@@ -440,17 +526,18 @@ export function apiRouter(): Router {
   });
   r.post('/meetings/:id/propose', async (req, res) => {
     const user = requireUser(req);
+    await meetingFor(req);
     const m = await meetings.getMeeting(String(req.params.id));
-    if (!await meetings.visibleMeeting(m, user)) throw new HttpError(404, 'No such meeting');
     // Analysing first is only for those who may analyse it.
     if (!m.analysis) await meetings.requireAnalyst(m, user);
     const out = await meetings.proposeFromMeeting(m, user);
-    res.json({ useCases: out.useCases, changeRequest: out.changeRequest ? await crs.detail(out.changeRequest) : undefined });
+    const shown = await filterAsync(out.useCases, (u) => useCases.canSee(u, user));
+    res.json({ useCases: await Promise.all(shown.map((u) => useCases.present(u, user))) });
   });
   r.get('/meetings/:id/stream', async (req, res) => {
     const user = requireUser(req);
     const m = await visible(req);
-    const show = async (x: Meeting) => await meetings.visibleMeeting(x, user);
+    const show = (x: Meeting) => meetings.meetingView(x, user);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
@@ -557,19 +644,20 @@ export function apiRouter(): Router {
   /* ---------------------------- change requests ---------------------- */
   r.get('/ontologies/:id/change-requests', async (req, res) => {
     const status = optStr(req.query.status);
-    res.json((await crs.listCRs((await project(req)).id)).filter((c) => !status || c.status === status));
+    res.json((await Promise.all((await crs.listCRs((await project(req)).id)).filter((c) => !status || c.status === status).map(async (c) => await useCases.crForViewer(c, req.user)))));
   });
 
   // A request drafted from use cases is published only as an editor approved it: what it would publish, then the approval of exactly that.
   r.get('/change-requests/:id/publication', async (req, res) => {
-    requireUser(req);
     const cr = await crs.getCR(String(req.params.id));
+    // Withheld from this viewer (a use case it came from isn't shared with them): so is what it would publish.
+    if (await useCases.crWithheld(cr, requireUser(req))) throw new HttpError(404, 'No such change request');
     if (!crs.needsPublicationApproval(cr)) throw new HttpError(404, 'This request doesn’t need its publication approved');
     res.set('Cache-Control', 'no-store').json(await crs.publicationPreview(cr));
   });
   r.post('/change-requests/:id/approve-publication', async (req, res) => {
     const cr = await crs.approvePublication(await crs.getCR(String(req.params.id)), requireUser(req), req.body?.fingerprint);
-    res.json(await crs.detail(cr));
+    res.json(await crOut(cr, req));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {
@@ -578,6 +666,10 @@ export function apiRouter(): Router {
     const b = req.body ?? {};
     const kind: ChangeRequestKind = ['feature', 'bug', 'gap', 'editorial', 'deprecation'].includes(b.kind) ? b.kind : 'feature';
     if (!(await rolesFor(p.id, user.id)).length) await setRoles(p.id, user.id, ['contributor']);
+    // Check cited use cases before creating anything: the same rule linking applies, so a draft,
+    // archived or withdrawn use case is refused here rather than after the change request exists.
+    const useCaseIds: string[] = Array.isArray(b.useCaseIds) ? b.useCaseIds.map(String) : [];
+    await useCases.assertCitable(useCaseIds, user, p.id);
     const cr = await crs.createChangeRequest(p, user, {
       title: optStr(b.title) ?? '',
       description: optStr(b.description) ?? '',
@@ -586,8 +678,19 @@ export function apiRouter(): Router {
       ops: Array.isArray(b.ops) ? b.ops : undefined,
       naturalLanguage: Array.isArray(b.ops) ? undefined : (optStr(b.naturalLanguage) ?? [optStr(b.title), optStr(b.description)].filter(Boolean).join('\n\n')),
       submit: !!b.submit,
+      // A cited use case may be withdrawn while the request is drafted. So the check is made again,
+      // under the consent lock, at the moment the request is first stored, and linked in the same
+      // step: if it fails, nothing was ever stored or shown.
+      commit: useCaseIds.length
+        ? (draft, store) =>
+            useCases.withConsentLock(p.id, async () => {
+              await useCases.assertCitable(useCaseIds, user, p.id);
+              await store();
+              await useCases.linkChangeRequest(draft, useCaseIds, user);
+            })
+        : undefined,
     });
-    res.status(201).json(await crs.detail(cr));
+    res.status(201).json(await crOut(await crs.getCR(cr.id), req));
   });
 
   r.post('/ontologies/:id/bug-reports', async (req, res) => {
@@ -604,44 +707,44 @@ export function apiRouter(): Router {
       origin: { type: 'bug-report' },
       naturalLanguage: `Bug report${termIri ? ` about <${termIri}>` : ''}: ${title}\n\n${description}`,
     });
-    res.status(201).json(await crs.detail(cr));
+    res.status(201).json(await crOut(cr, req));
   });
 
   const cr = async (req: Request) => await crs.getCR(String(req.params.id));
-  r.get('/change-requests/:id', async (req, res) => res.json(await crs.detail(await cr(req))));
-  r.patch('/change-requests/:id', async (req, res) => res.json(await crs.detail(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}))));
-  r.post('/change-requests/:id/submit', async (req, res) => res.json(await crs.detail(await crs.submit(await cr(req), requireUser(req)))));
+  r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
+  r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
+  r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {
     const decision = req.body?.decision;
     if (!['approve', 'request-changes', 'object', 'comment'].includes(decision)) throw new HttpError(400, 'decision must be approve, request-changes, object or comment');
-    res.json(await crs.detail(await crs.addReview(await cr(req), requireUser(req), decision, optStr(req.body?.comment))));
+    res.json(await crOut(await crs.addReview(await cr(req), requireUser(req), decision, optStr(req.body?.comment)), req));
   });
   r.post('/change-requests/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(await crs.detail(await crs.addVote(await cr(req), requireUser(req), choice, optStr(req.body?.comment))));
+    res.json(await crOut(await crs.addVote(await cr(req), requireUser(req), choice, optStr(req.body?.comment)), req));
   });
-  r.post('/change-requests/:id/merge', async (req, res) => res.json(await crs.detail(await crs.merge(await cr(req), requireUser(req)))));
-  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(await crs.detail(await crs.withdraw(await cr(req), requireUser(req)))));
-  r.post('/change-requests/:id/revise', async (req, res) => res.json(await crs.detail(await crs.revise(await cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)))));
+  r.post('/change-requests/:id/merge', async (req, res) => res.json(await crOut(await crs.merge(await cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(await crOut(await crs.withdraw(await cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/revise', async (req, res) => res.json(await crOut(await crs.revise(await cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)), req)));
   r.post('/change-requests/:id/retriage', async (req, res) => {
     requireUser(req);
-    res.json(await crs.detail(await crs.advance(await crs.triage(await cr(req)))));
+    res.json(await crOut(await crs.advance(await crs.triage(await cr(req))), req));
   });
 
   /* ------------------------------ releases --------------------------- */
-  r.get('/ontologies/:id/releases', async (req, res) => res.json(await releases.listReleases((await project(req)).id)));
+  r.get('/ontologies/:id/releases', async (req, res) => res.json((await Promise.all((await releases.listReleases((await project(req)).id)).map(async (r) => await releases.releaseForViewer(r, req.user))))));
   r.post('/ontologies/:id/releases', async (req, res) => {
-    res.status(201).json(await releases.releaseDetail(await releases.draftRelease(await project(req), requireUser(req), optStr(req.body?.notes))));
+    res.status(201).json(await relOut(req, await releases.draftRelease(await project(req), requireUser(req), optStr(req.body?.notes))));
   });
-  r.get('/releases/:id', async (req, res) => res.json(await releases.releaseDetail(await releases.getRelease(String(req.params.id)))));
+  r.get('/releases/:id', async (req, res) => res.json(await relOut(req, await releases.getRelease(String(req.params.id)))));
   r.post('/releases/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(await releases.releaseDetail(await releases.voteOnRelease(await releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
+    res.json(await relOut(req, await releases.voteOnRelease(await releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
   });
   r.post('/releases/:id/publish', async (req, res) => {
-    res.json(await releases.releaseDetail(await releases.publishRelease(await releases.getRelease(String(req.params.id)), requireUser(req))));
+    res.json(await relOut(req, await releases.publishRelease(await releases.getRelease(String(req.params.id)), requireUser(req))));
   });
 
   /* ------------------------------- agents ---------------------------- */
@@ -682,7 +785,8 @@ export function apiRouter(): Router {
     // It acts as simulated members and returns their activity, so only for signed-in testers.
     requireUser(req);
     const id = optStr(req.body?.ontologyId) ?? DEMO_SLUG;
-    res.json({ events: await step((await mustFindProject(id)).id, req.user?.id) });
+    // The same projection as the activity feed: nothing about use cases or calls this tester may not see.
+    res.json({ events: await useCases.visibleActivity(await step((await mustFindProject(id)).id, req.user?.id), req.user) });
   });
   r.post('/simulation/clock', async (req, res) => {
     demoOnly();
@@ -702,21 +806,24 @@ export function apiRouter(): Router {
   /* ------------------------------ activity --------------------------- */
   r.get('/activity', async (req, res) => {
     const id = optStr(req.query.ontologyId);
-    const all = await listActivity(id ? (await mustFindProject(id)).id : undefined, 100);
-    // Meetings are for signed-in people, and so is what happens to them; a call waiting for
+    const all = await useCases.visibleActivity(await listActivity(id ? (await mustFindProject(id)).id : undefined, 300), req.user);
+    // Meetings are working group business, and so is what happens to them; a call waiting for
     // approval (and what's been said about it) is for facilitators only.
     const hidden = async (a: (typeof all)[number]) => {
       if (!a.type.startsWith('meeting.')) return false;
       if (!req.user) return true;
       const mid = /\/meetings\/(mtg_[\w-]+)/.exec(a.link ?? '')?.[1];
       const m = mid ? await get<Meeting>('meetings', mid) : undefined;
-      if (m) return !await meetings.visibleMeeting(m, req.user);
+      if (m) return !await meetings.meetingView(m, req.user);
       // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened to it.
       return !!mid && !await meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
     };
     // One at a time with a loop: filter() would take each async check's promise as true and show everything.
     const shown: typeof all = [];
-    for (const a of all) if (!(await hidden(a))) shown.push(a);
+    for (const a of all) {
+      if (shown.length >= 100) break;
+      if (!(await hidden(a))) shown.push(a);
+    }
     res.json(shown);
   });
 

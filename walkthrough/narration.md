@@ -96,7 +96,7 @@ There's a visual builder for people who'd rather not write SPARQL, and the resul
 ## Gathering requirements {#requirements}
 
 [do: open-use-cases]
-Changes start with requirements. People describe how they'd use the standard as use cases, following Elisa Kendall's approach, with competency questions: questions the ontology must be able to answer, like which opportunities suit someone free on weekends.
+Changes start with requirements. People describe how they'd use the standard as use cases, with competency questions: questions the ontology must be able to answer, like which opportunities suit someone free on weekends.
 
 [do: open-meetings]
 Requirements also come from meetings. You can upload a Google Meet transcript. And with a meeting-bot provider configured, you can invite a bot that joins the call, takes notes, and asks clarifying questions in the chat.

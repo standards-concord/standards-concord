@@ -28,6 +28,7 @@ import { ChangeRequestsTab } from './pages/ontology/ChangeRequests';
 import { ChangeRequestPage } from './pages/ontology/ChangeRequestDetail';
 import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
+import { RequirementsDocPage } from './pages/ontology/RequirementsDoc';
 import { GovernanceTab } from './pages/ontology/Governance';
 import { AgentReportsTab, ConnectAgentTab } from './pages/ontology/Agents';
 import { ConnectPage } from './pages/Connect';
@@ -104,6 +105,7 @@ function Routed() {
             <Route path="changes/:crId" element={<ChangeRequestPage />} />
             <Route path="releases" element={<ReleasesTab />} />
             <Route path="releases/:releaseId" element={<ReleaseDetailPage />} />
+            <Route path="requirements/:version" element={<RequirementsDocPage />} />
             <Route path="governance" element={<GovernanceTab />} />
             <Route path="agents" element={<AgentReportsTab />} />
             <Route path="connect" element={<ConnectAgentTab />} />
