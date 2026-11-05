@@ -35,10 +35,11 @@ afterAll(async () => {
 const ZERO = '0000000000000000000000000000000000000000';
 
 /**
- * `beforeRefUpdate` runs as an updateRefs call arrives (someone else pushing, say); `dropRefUpdate` makes the stand-in
- * hang up on it without answering, after applying it or not.
+ * `beforeRefUpdate` runs as a ref update arrives (someone else pushing, say); `dropRefUpdate` makes the stand-in hang
+ * up on an updateRefs call without answering, after applying it or not; `refuseMain` refuses it with that reason;
+ * `refsDown` fails creating a tag's ref with a server error.
  */
-function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () => void; dropRefUpdate?: () => 'applied' | 'not applied' | undefined; onWrite?: (n: number, path: string) => Promise<void> } = {}) {
+function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () => void; dropRefUpdate?: () => 'applied' | 'not applied' | undefined; refuseMain?: string; refsDown?: () => boolean; onWrite?: (n: number, path: string) => Promise<void> } = {}) {
   const bare = mkdtempSync(join(tmpdir(), 'standin-'));
   execFileSync('git', ['init', '-q', '--bare', bare]);
   let writes = 0;
@@ -91,9 +92,20 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
           git(['update-ref', '-d', `refs/tags/${body.tag}`]);
           return send(201, { sha: made });
         }
+        if (req.method === 'POST' && path === '/git/refs') {
+          if (opts.refsDown?.()) return send(503, { message: 'Service unavailable' });
+          opts.beforeRefUpdate?.();
+          if (sha(body.ref)) return send(422, { message: 'Reference already exists' });
+          git(['update-ref', body.ref, body.sha, ZERO]);
+          return send(201, { ref: body.ref, object: { sha: body.sha } });
+        }
         if (req.method === 'POST' && req.url === '/graphql') {
           opts.beforeRefUpdate?.();
           const updates: { name: string; beforeOid: string; afterOid: string }[] = body.variables.input.refUpdates;
+          // As GitHub: updateRefs points refs only at commits (found by #83's run against GitHub itself).
+          const notCommit = updates.map((u) => git(['cat-file', '-t', u.afterOid])).find((type) => type !== 'commit');
+          if (notCommit) return send(200, { data: { updateRefs: null }, errors: [{ message: `Invalid object type ${notCommit}, expected commit` }] });
+          if (opts.refuseMain) return send(200, { data: { updateRefs: null }, errors: [{ message: opts.refuseMain }] });
           // All or none, each from exactly the value named (git's own atomic transaction).
           const input = updates.map((u) => `update ${u.name} ${u.afterOid} ${u.beforeOid === ZERO ? '' : u.beforeOid}\n`).join('');
           const drop = opts.dropRefUpdate?.();
@@ -152,7 +164,7 @@ async function history(start = 1_762_300_000) {
 }
 
 describe('GitHub publisher', () => {
-  it('recreates the history with identical ids, tags each release, and moves main and the tags together', async () => {
+  it('recreates the history with identical ids, moves main, then creates a tag for each release', async () => {
     const { r1, r2, releases } = await history();
     const gh = gitHubStandIn();
     const api = await gh.listen();
@@ -162,7 +174,7 @@ describe('GitHub publisher', () => {
       gh.git(['fsck', '--strict', '--no-dangling']);
       expect(gh.sha('refs/tags/v1.0.0^{commit}')).toBe(r1);
       expect(gh.sha('refs/tags/v2.0.0')).toBe(releaseTag(releases[1]).sha);
-      // One ref update for main and both tags.
+      // main moved once; each tag's ref was created.
       expect(gh.calls.filter((c) => c === 'POST /graphql')).toHaveLength(1);
       // Again: nothing to send.
       gh.calls.length = 0;
@@ -370,6 +382,58 @@ describe('GitHub publisher, when refs move under it', () => {
     }
   });
 
+  it('passes on why GitHub refused to move main, rather than calling it a conflict', async () => {
+    // Found against GitHub itself: an update GitHub refused for another reason was reported as "one moved".
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    const { gh, api } = await copyOf(first.gh, { refuseMain: 'Cannot update protected branch' });
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toThrow(/GitHub refused to move main \(Cannot update protected branch\)/);
+      expect(gh.sha('refs/heads/main')).toBe(r1);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('makes the tags next time when it stops after moving main', async () => {
+    // updateRefs can't point a ref at a tag (found against GitHub itself), so tags are created after main moves.
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    let down = true;
+    const { gh, api } = await copyOf(first.gh, { refsDown: () => down });
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toBeInstanceOf(PublishPaused);
+      expect(gh.sha('refs/heads/main')).toBe(r2);
+      expect(gh.sha('refs/tags/v2.0.0')).toBeUndefined();
+      down = false;
+      expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).toEqual({ commits: 0, tags: 1 });
+      expect(gh.sha('refs/tags/v2.0.0')).toBe(releaseTag(releases[1]).sha);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('leaves alone a tag someone creates while it is publishing', async () => {
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    let racing: ReturnType<typeof gitHubStandIn> | undefined;
+    const { gh, api } = await copyOf(first.gh, {
+      beforeRefUpdate: () => {
+        if (!racing!.sha('refs/tags/v2.0.0')) racing!.git(['update-ref', 'refs/tags/v2.0.0', r1]);
+      },
+    });
+    racing = gh;
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toThrow(/v2\.0\.0 .* another tag/);
+      expect(gh.sha('refs/tags/v2.0.0')).toBe(r1);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
   it('keeps its progress when the writes run out at the tags, so the next run only makes the tags', async () => {
     // r1 review of #83: the pause came after the commits but before main moved, so every run sent them all again.
     const { r2, releases } = await history();
@@ -556,12 +620,15 @@ describe('GitHub publishing outbox', () => {
       },
     });
     const api = await gh.listen();
+    // Counters left by an earlier run on the same database don't count.
+    const count = async (hour: string) => (await get<{ count: number }>('kv', `github-writes:${hour}`))?.count ?? 0;
+    const before = { '2031-03-01T10': await count('2031-03-01T10'), '2031-03-01T11': await count('2031-03-01T11') };
+    const used = async (hour: keyof typeof before) => (await count(hour)) - before[hour];
     try {
       await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
       await withToken(() => runGitHubPublish(project.id, { api }));
       expect((await githubPublishJob(project.id))!.status).toBe('done');
-      const used = async (hour: string) => (await get<{ count: number }>('kv', `github-writes:${hour}`))?.count ?? 0;
-      // The first write also took one for the ref update, which then used it.
+      // The first write also took one for moving main, which then used it.
       const posts = gh.calls.filter((c) => c.startsWith('POST')).length;
       expect(await used('2031-03-01T10')).toBe(4 + 1);
       expect(await used('2031-03-01T11')).toBe(posts - 4 - 1);
