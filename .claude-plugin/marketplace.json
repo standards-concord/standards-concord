@@ -2,7 +2,7 @@
   "name": "concord",
   "owner": {
     "name": "Concord (Open Data Institute)",
-    "url": "https://github.com/jeswr/standards-concord"
+    "url": "https://github.com/standards-concord/standards-concord"
   },
   "metadata": {
     "description": "Concord's MCP connector for the Open Data Institute."

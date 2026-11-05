@@ -24,28 +24,28 @@ concurrency:
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: 22
-          cache: pnpm
+          playwright: 'true'
+          apt: ffmpeg fonts-inter fonts-jetbrains-mono
       # HermiT, so the reasoner shows as passing in the video.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
-      - uses: actions/setup-python@v5
+      - id: python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pnpm install --frozen-lockfile
+      # owlready2 (and LinkML for the tests) took most of a minute to install each run.
+      - uses: actions/cache@v4
+        with:
+          path: toolkit/.venv
+          key: toolkit-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('toolkit/requirements.txt', 'toolkit/setup.sh') }}
       - run: ./toolkit/setup.sh
-      - name: Install Chromium, ffmpeg and fonts
-        run: |
-          pnpm exec playwright install --with-deps chromium
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-inter fonts-jetbrains-mono
       # Voices are cached by their exact words, so unchanged paragraphs are never re-voiced.
       - uses: actions/cache@v4
         with:
