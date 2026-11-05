@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.14.0',
+    version: '0.15.0',
     date: '2026-11-05',
     title: 'Ask for a query in plain words',
     pr: 38,
@@ -75,6 +75,24 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'Queries run in the background with a Cancel button, a time limit and a memory cap. Queries that would build enormous values are refused before they run, and very long values are shortened in the results.',
         roles: [],
         to: '{o}/query',
+      },
+    ],
+  },
+  {
+    version: '0.14.0',
+    date: '2026-11-05',
+    title: 'Check data explains what’s wrong and where',
+    pr: 50,
+    changes: [
+      {
+        id: 'check-data-explained',
+        type: 'feat',
+        title: 'Check data explains problems and shows where they are',
+        detail:
+          'Problems read as plain sentences using your own prefixes, are underlined in the editor (hover to read), and clicking one jumps to it. Typos and syntax errors are underlined as you type, and Format tidies the Turtle.',
+        roles: [],
+        to: '{o}/query?view=check',
+        ask: 'When Check data finds a problem, can you tell what’s wrong and where to fix it?',
       },
     ],
   },

@@ -24,6 +24,8 @@
     "@codemirror/view": "^6.43.15",
     "@concord/core": "workspace:*",
     "@concord/shared": "workspace:*",
+    "@dagrejs/dagre": "1.1.5",
+    "@fontsource/inter": "5",
     "@lezer/highlight": "^1.2.5",
     "@sparq-org/sparq": "0.1.5",
     "cytoscape": "^3.34.3",

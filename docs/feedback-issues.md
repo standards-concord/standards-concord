@@ -46,14 +46,16 @@ Each submission gets one record in `feedbackPublications`, keyed by the feedback
 
 ## Turning it on
 
-1. Create a fine-grained personal access token at <https://github.com/settings/personal-access-tokens/new>:
-   - **Resource owner:** `jeswr`
-   - **Repository access:** Only select repositories → `standards-concord/standards-concord`
+1. Create a fine-grained personal access token. [This link](https://github.com/settings/personal-access-tokens/new?name=Concord+feedback+issues&description=Concord+server+files+and+triages+opted-in+feedback+summaries&target_name=standards-concord&expires_in=366&issues=write) fills in everything except the repository:
+   - **Resource owner:** `standards-concord`
+   - **Repository access:** Only select repositories → `standards-concord` (GitHub doesn't let a link choose this)
    - **Repository permissions:** Issues → **Read and write** (Metadata: read-only is added automatically). Nothing else.
 2. Set it on the server (the value is read without echoing):
 
    ```sh
-   ./deploy/azure/set-key.sh FEEDBACK_GITHUB_TOKEN
+   # Works from any folder; needs `gh` and `az` signed in. Inside a checkout, ./deploy/azure/set-key.sh does the same.
+   setkey() { local r=standards-concord/standards-concord; bash <(gh api -H 'Accept: application/vnd.github.raw' "repos/$r/contents/deploy/azure/set-key.sh") "$@"; }
+   setkey FEEDBACK_GITHUB_TOKEN
    ```
 
    The server applies it within five minutes. To post to another repository, also set `FEEDBACK_GITHUB_REPO=owner/name`.
@@ -62,7 +64,7 @@ Without the token, the option isn't shown.
 
 ## Hourly triage
 
-A scheduled Claude session can triage these issues every hour. It writes nothing to GitHub itself: it reads its queue from the server and sends its decision back, and the server posts the one comment and applies labels from a fixed list. That way the server records every comment's id (so a withdrawal deletes exactly those), refuses to comment once a summary is withdrawn, and makes a withdrawal wait while a comment is being posted.
+Claude triages these issues every hour, from the project thread that built this feature (a scheduled task that wakes that thread at five past each hour; Jesse chose this over a separate session on 2026-11-05). It stays silent unless a summary needs Jesse or the server refuses a decision. It writes nothing to GitHub itself: it reads its queue from the server and sends its decision back, and the server posts the one comment and applies labels from a fixed list. That way the server records every comment's id (so a withdrawal deletes exactly those), refuses to comment once a summary is withdrawn, and makes a withdrawal wait while a comment is being posted.
 
 | Endpoint | What it does |
 | --- | --- |
@@ -79,4 +81,4 @@ The server enforces, for each decision:
 
 Both need `Authorization: Bearer <FEEDBACK_TRIAGE_TOKEN>`. The token must be at least 32 characters; without it (or with a shorter one) the endpoints answer 404.
 
-**Rotating the token:** generate a new one (`openssl rand -hex 32`), set it on the server with `./deploy/azure/set-key.sh FEEDBACK_TRIAGE_TOKEN`, then replace `CONCORD_TRIAGE_TOKEN` in the routine's environment. The old token stops working as soon as the server picks up the new one (within five minutes); a run in between gets 401 and changes nothing. The routine's prompt and what has to be in place before it's switched on are in [feedback-triage-routine.md](feedback-triage-routine.md). It is **switched off** until then.
+**Setting or rotating the token:** generate one into the clipboard (`openssl rand -hex 32 | tr -d '\n' | pbcopy`), paste it into `setkey FEEDBACK_TRIAGE_TOKEN`, then set the Claude environment's network secret for the backend host to `Authorization: Bearer <the token>`, and clear the clipboard (`pbcopy < /dev/null`). The old token stops working as soon as the server picks up the new one (within five minutes); a run in between gets 401 and changes nothing. What the hourly run does, and what has to be in place for it, is in [feedback-triage-routine.md](feedback-triage-routine.md).
