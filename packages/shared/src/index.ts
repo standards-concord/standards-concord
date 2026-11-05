@@ -195,6 +195,10 @@ export interface OntologySummary extends OntologyProject {
     reasoner?: string;
     /** How far the OWL reasoner got: everything, consistency only, or no verdict. Absent on older summaries. */
     reasonerChecked?: 'complete' | 'consistency' | 'none';
+    /** The reasoner's own consistency verdict (`consistent` above also counts unsatisfiable classes). Absent on older summaries. */
+    reasonerConsistent?: boolean;
+    /** How many unsatisfiable classes the reasoner reported. Absent on older summaries. */
+    unsatisfiable?: number;
   };
 }
 

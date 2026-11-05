@@ -94,29 +94,65 @@ test.describe('OWL reasoning with sparq', () => {
   });
 
   // Used to go wrong: when the reasoner timed out or crashed, the health popover said "Not run
-  // (structural checks only)", but since the timeout fix no structural checks run in that case.
-  for (const [checked, error, row, note] of [
-    ['none', 'the OWL reasoner took longer than 60 s and was stopped', "No verdict, so validation can't pass", 'OWL reasoner gave no verdict'],
-    ['consistency', 'classification ran out of budget', 'Consistent, not every class checked', "OWL reasoner showed the draft is consistent but couldn't check every class"],
-  ] as const) {
-    test(`the health chip describes a reasoner result of "${checked}" without claiming other checks ran`, async ({ page, request }) => {
+  // (structural checks only)", though no structural checks run then; and it called any
+  // unsatisfiable class "Inconsistent", even with no verdict or a consistent ontology, so the
+  // popover disagreed with the health panel's detail.
+  const cases: { name: string; health: Record<string, unknown>; row: string; chip: RegExp; note?: string }[] = [
+    {
+      name: 'no verdict (timed out)',
+      health: { consistent: true, reasonerConsistent: true, unsatisfiable: 0, reasoner: 'structural', reasonerChecked: 'none', incomplete: ["OWL reasoner gave no verdict, so validation can't pass: the OWL reasoner took longer than 60 s and was stopped"] },
+      row: "No verdict, so validation can't pass",
+      chip: /Checks incomplete/,
+      note: 'took longer than 60 s',
+    },
+    {
+      name: 'no verdict, with unsatisfiable classes from the structural fallback',
+      health: { consistent: false, reasonerConsistent: true, unsatisfiable: 1, reasoner: 'structural', reasonerChecked: 'none', incomplete: ["OWL reasoner gave no verdict, so validation can't pass: outside OWL 2 DL"] },
+      row: "No verdict, so validation can't pass",
+      chip: /Checks incomplete/,
+      note: 'outside OWL 2 DL',
+    },
+    {
+      name: 'consistency only',
+      health: { consistent: true, reasonerConsistent: true, unsatisfiable: 0, reasoner: 'structural', reasonerChecked: 'consistency', incomplete: ["OWL reasoner showed the draft is consistent but couldn't check every class, so validation can't pass: classification ran out of budget"] },
+      row: 'Consistent, not every class checked',
+      chip: /Checks incomplete/,
+      note: 'classification ran out of budget',
+    },
+    {
+      name: 'consistent with an unsatisfiable class',
+      health: { consistent: false, reasonerConsistent: true, unsatisfiable: 1, reasoner: 'sparq', reasonerChecked: 'complete', incomplete: [] },
+      row: 'Consistent, but 1 unsatisfiable class',
+      chip: /Needs fixing/,
+    },
+    {
+      name: 'inconsistent',
+      health: { consistent: false, reasonerConsistent: false, unsatisfiable: 0, reasoner: 'sparq', reasonerChecked: 'complete', incomplete: [] },
+      row: 'Inconsistent',
+      chip: /Needs fixing/,
+    },
+  ];
+  for (const c of cases) {
+    test(`the health popover matches the reasoner's result: ${c.name}`, async ({ page, request }) => {
       const demo = await demoOntology(request);
       await signIn(page, { name: `Reasoner health ${uniq()}`, role: 'steward' });
-      // The server's own reasoner finishes on the demo, so the summary is given the result of one that didn't.
+      // The server's own reasoner finishes cleanly on the demo, so the summary is given another result.
       await page.route(new RegExp(`/api/ontologies/${demo.id}(\\?.*)?$`), async (route) => {
         const res = await route.fetch();
         const o = await res.json();
-        o.health = { ...o.health, consistent: true, reasoner: 'structural', reasonerChecked: checked, incomplete: [`${note}, so validation can't pass: ${error}`] };
+        o.health = { ...o.health, errors: 0, ...c.health };
         await route.fulfill({ response: res, json: o });
       });
       await page.goto(`/o/${demo.id}`);
       const chip = page.getByRole('button', { name: /^Health: / });
+      await expect(chip).toContainText(c.chip);
       await chip.click();
       const panel = page.getByRole('dialog', { name: /^Health: / });
       const reasonerRow = panel.getByRole('listitem').filter({ hasText: 'Reasoner' });
-      await expect(reasonerRow).toContainText(row);
+      await expect(reasonerRow).toContainText(c.row);
+      if (c.row !== 'Inconsistent') await expect(reasonerRow).not.toContainText('Inconsistent');
       await expect(panel).not.toContainText('structural checks only');
-      await expect(panel.getByRole('note')).toContainText(error);
+      if (c.note) await expect(panel.getByRole('note')).toContainText(c.note);
       // The page may still refetch the summary; let any handler in flight finish before teardown.
       await page.unrouteAll({ behavior: 'wait' });
     });

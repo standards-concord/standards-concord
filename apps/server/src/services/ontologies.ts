@@ -182,6 +182,8 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
         consistent: v.reasoner.consistent && v.reasoner.unsatisfiable.length === 0,
         reasoner: v.reasoner.available ? v.reasoner.engine : 'structural',
         reasonerChecked: v.reasoner.checked ?? (v.reasoner.available ? 'complete' : 'none'),
+        reasonerConsistent: v.reasoner.consistent,
+        unsatisfiable: v.reasoner.unsatisfiable.length,
         // Required checks that could not run. FAIR checks that need the network are left out of the score instead.
         incomplete: v.reasoner.available
           ? []
