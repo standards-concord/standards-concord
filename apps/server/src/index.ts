@@ -8,7 +8,7 @@ import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 
 openDb();
-// One version at a time writes the repositories (upgrades are exclusive; see docs/deploy.md).
+// One server at a time changes the repositories (upgrades are exclusive; see docs/deploy.md). It exits if it ever loses them.
 const store = await claimGitStore();
 setInterval(store.renew, 10_000).unref();
 for (const signal of ['SIGTERM', 'SIGINT'] as const)

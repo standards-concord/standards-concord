@@ -68,61 +68,90 @@ export const PIN_GRACE_MS = 10 * 60 * 1000;
 const revokedKey = (writer: string) => `pin-revoked:${writer}`;
 
 /**
- * The version of how repositories are kept (pins, the draft ref, reclaiming).
- * Processes running different versions must never write at the same time: an
- * older one doesn't know how a newer one names or reclaims pins. So upgrades
- * are exclusive (docs/deploy.md): each process claims the store for its
- * version at start-up and keeps the claim alive; one won't start while a
- * live process of another version holds it, and won't move a working draft
- * if one has taken it over.
+ * Only one server process may change the repositories at a time: two running
+ * different versions could disagree about how pins are named and reclaimed,
+ * and nothing is gained from two of the same. So the process claims them at
+ * start-up (one claim, with this process's own token) and keeps the claim
+ * alive. Every change to git or to the working draft first checks the claim
+ * is still this process's; if it isn't (this process stalled long enough for
+ * another to start), it changes nothing and the process exits. Upgrades are
+ * therefore exclusive (docs/deploy.md). A process that never claimed (tests,
+ * scripts) may write only while no live claim exists.
  */
 export const STORE_VERSION = 2;
 const STORE_KEY = 'git-store';
 const STORE_CLAIM_MS = 30_000;
-type StoreClaim = { id: string; version: number; until: number };
-const storeTakenBy = (): StoreClaim | undefined => {
+type StoreClaim = { id: string; owner: string; version: number; until: number };
+let ownClaim: { owner: string; onLost: (err: Error) => void; lost: boolean } | undefined;
+
+/** Throws (and, if this process held the claim, reports it lost) unless this process may change the repositories now. Call inside the transaction of the change it guards. */
+function assertStoreHeld(): void {
   const claim = get<StoreClaim>('kv', STORE_KEY);
-  return claim && claim.version !== STORE_VERSION && claim.until > Date.now() ? claim : undefined;
-};
+  if (ownClaim) {
+    if (claim?.owner === ownClaim.owner && !ownClaim.lost) return;
+    const err = new HttpError(503, 'This server lost its hold on the repositories to another one, so it changed nothing and is stopping.');
+    if (!ownClaim.lost) {
+      ownClaim.lost = true;
+      ownClaim.onLost(err);
+    }
+    throw err;
+  }
+  if (claim && claim.until > Date.now()) throw new HttpError(503, `Another Concord server (store v${claim.version}) holds the repositories, so nothing was changed.`);
+}
 
 /**
- * Claims the repositories for this version (at start-up), waiting up to
- * `waitMs` for a process of another version to let go (a stopped one's claim
- * lapses within STORE_CLAIM_MS); throws if it doesn't. Returns `renew`, to
- * call every few seconds (it stops renewing, and this process stops
- * committing, if another version ever takes over), and `release`, for
- * shutting down.
+ * Claims the repositories for this process (at start-up), waiting up to
+ * `waitMs` for another process's claim to lapse (a stopped one's does within
+ * STORE_CLAIM_MS); throws if it doesn't. `onLost` runs once if the claim is
+ * ever found to be another's (default: exit). Returns `renew`, to call every
+ * few seconds, and `release`, which gives up only this process's own claim.
  */
-export async function claimGitStore(waitMs = STORE_CLAIM_MS + 5_000): Promise<{ renew: () => void; release: () => void }> {
-  const claim = () =>
-    transaction(() => {
-      const other = storeTakenBy();
-      if (other) throw new Error(`A Concord process running another version (store v${other.version}) is still using these repositories. Stop it before starting this one.`);
-      put('kv', { id: STORE_KEY, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+export async function claimGitStore(opts: { waitMs?: number; onLost?: (err: Error) => void } = {}): Promise<{ renew: () => void; release: () => void }> {
+  const owner = randomUUID();
+  const onLost =
+    opts.onLost ??
+    ((err: Error) => {
+      console.error(`[git] ${err.message}`);
+      process.exit(1);
     });
-  for (const giveUp = Date.now() + waitMs; ; ) {
+  const take = () =>
+    transaction(() => {
+      const claim = get<StoreClaim>('kv', STORE_KEY);
+      if (claim && claim.owner !== owner && claim.until > Date.now())
+        throw new Error(`Another Concord server (store v${claim.version}) is still using these repositories. Stop it before starting this one.`);
+      put('kv', { id: STORE_KEY, owner, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+    });
+  for (const giveUp = Date.now() + (opts.waitMs ?? STORE_CLAIM_MS + 5_000); ; ) {
     try {
-      claim();
+      take();
       break;
     } catch (err) {
       if (Date.now() >= giveUp) throw err;
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }
+  const mine = { owner, onLost, lost: false };
+  ownClaim = mine;
   return {
     renew: () => {
       try {
-        claim();
-      } catch (err) {
-        console.error(`[git] ${(err as Error).message}`);
+        transaction(() => {
+          assertStoreHeld();
+          put('kv', { id: STORE_KEY, owner, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+        });
+      } catch {
+        /* reported through onLost */
       }
     },
-    release: () =>
+    release: () => {
       transaction(() => {
-        if (get<StoreClaim>('kv', STORE_KEY)?.version === STORE_VERSION) remove('kv', STORE_KEY);
-      }),
+        if (get<StoreClaim>('kv', STORE_KEY)?.owner === owner) remove('kv', STORE_KEY);
+      });
+      if (ownClaim === mine) ownClaim = undefined;
+    },
   };
 }
+
 /** Pins are looked at by ordinary reads at most this often per repository (a throttle only: correctness never depends on it). */
 const PRUNE_EVERY_MS = 60_000;
 const lastPruned = new Map<string, number>();
@@ -154,6 +183,7 @@ export const SYNC_LEASE_MS = 30_000;
 const syncLease = {
   take(project: Pick<OntologyProject, 'slug'>, token: string): boolean {
     return transaction(() => {
+      assertStoreHeld();
       const held = get<{ token: string; until: number }>('kv', syncKey(project));
       if (held && held.until > Date.now()) return false;
       put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
@@ -163,6 +193,7 @@ const syncLease = {
   /** Throws if this sync has lost the lease; otherwise renews it. */
   renew(project: Pick<OntologyProject, 'slug'>, token: string): void {
     transaction(() => {
+      assertStoreHeld();
       if (get<{ token: string }>('kv', syncKey(project))?.token !== token) throw new Error('another sync took over');
       put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
     });
@@ -257,6 +288,7 @@ export const ontologyStore = {
 
   async init(project: OntologyProject, turtle: string, readme: string): Promise<string> {
     const dir = repoDir(project);
+    transaction(assertStoreHeld);
     fs.mkdirSync(dir, { recursive: true });
     git(dir, ['init', '-q', '-b', 'main']);
     fs.writeFileSync(path.join(dir, FILE), turtle);
@@ -264,7 +296,10 @@ export const ontologyStore = {
     git(dir, ['add', '-A']);
     git(dir, ['commit', '-q', '-m', `Create ${project.title}`]);
     const sha = git(dir, ['rev-parse', 'HEAD']);
-    put('kv', { id: headKey(project), sha });
+    transaction(() => {
+      assertStoreHeld();
+      put('kv', { id: headKey(project), sha });
+    });
     return sha;
   },
 
@@ -277,6 +312,7 @@ export const ontologyStore = {
     return transaction(() => {
       const now = get<{ sha: string }>('kv', headKey(project));
       if (now) return now.sha;
+      assertStoreHeld();
       put('kv', { id: headKey(project), sha });
       return sha;
     });
@@ -303,12 +339,12 @@ export const ontologyStore = {
     // unpinned again if it doesn't. The draft (commit === base) is already held.
     const writer = randomUUID();
     const pin = commit === base ? undefined : `${PIN}${commit}-t${Date.now()}-${writer}`;
+    transaction(assertStoreHeld);
     if (pin) git(dir, ['update-ref', pin, commit]);
     try {
       transaction(() => {
         if (this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
-        const other = storeTakenBy();
-        if (other) throw new HttpError(503, `Concord is being upgraded (store v${other.version}), so nothing was committed. Try again in a minute.`);
+        assertStoreHeld();
         // Reclaiming a pin is recorded in the database first (see prunePins), so either this sees it, or the reclaimer sees this.
         if (pin && get('kv', revokedKey(writer))) throw new HttpError(409, 'This change took too long to record, so nothing was committed. Try again.');
         record?.(commit);
@@ -423,6 +459,7 @@ export const ontologyStore = {
   prunePins(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
     lastPruned.set(project.slug, Date.now());
+    transaction(assertStoreHeld);
     const has = (ancestor: string, of: string) => {
       try {
         git(dir, ['merge-base', '--is-ancestor', ancestor, of]);
@@ -452,6 +489,7 @@ export const ontologyStore = {
       if (!held.has(ref)) {
         if (!writer || Date.now() - Number(at) < PIN_GRACE_MS) continue;
         const reclaimed = transaction(() => {
+          assertStoreHeld();
           const now = this.head(project);
           if (now === sha || has(sha, now)) return false;
           put('kv', { id: revokedKey(writer), at: new Date().toISOString() });

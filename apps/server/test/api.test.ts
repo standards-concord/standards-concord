@@ -1563,30 +1563,61 @@ describe('inline term edits', () => {
     for (const ref of rawGit('for-each-ref', '--format=%(refname)', 'refs/concord/commits/').split('\n')) rawGit('update-ref', '-d', ref);
   });
 
-  it('runs one version at a time: a server waits for, or refuses to start beside, another version, and stops committing if one takes over', async () => {
-    const { ontologyStore, project, rawGit, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+  it('lets one server at a time change the repositories, and stops one that lost its hold from changing anything', async () => {
+    const { ontologyStore, project, rawGit, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
     const { get, put, remove } = await import('../src/db.js');
     const { OntologyGraph } = await import('@concord/core');
-    // A live server of another version holds the repositories: this one won't start...
-    put('kv', { id: 'git-store', version: STORE_VERSION + 1, until: Date.now() + 60_000 });
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const withLabel = async (label: string) => OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`);
+    // A live server (here, of another version) holds the repositories: this one won't start, and changes nothing.
+    put('kv', { id: 'git-store', owner: 'other', version: STORE_VERSION + 1, until: Date.now() + 60_000 });
     try {
-      await expect(claimGitStore(1_500)).rejects.toThrow('another version');
-      // ...and nothing is committed, leaving no pin behind.
+      await expect(claimGitStore({ waitMs: 1_500 })).rejects.toThrow('Another Concord server');
       const head = ontologyStore.head(project);
-      const graph = await OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:upgrade> <http://www.w3.org/2000/01/rdf-schema#label> "upgrade" .\n`);
-      await expect(ontologyStore.commitWorking(project, graph, 'during an upgrade', { name: 'Old' })).rejects.toMatchObject({ status: 503 });
+      await expect(ontologyStore.commitWorking(project, await withLabel('blocked'), 'while another holds it', { name: 'Blocked' })).rejects.toMatchObject({ status: 503 });
       expect(ontologyStore.head(project)).toBe(head);
       expect(pinnedCommits(rawGit)).toEqual([]);
     } finally {
       remove('kv', 'git-store');
     }
-    // Once the other version stops (its claim lapses), this one starts, and gives its claim up when it shuts down.
-    put('kv', { id: 'git-store', version: STORE_VERSION + 1, until: Date.now() + 1_000 });
-    const store = await claimGitStore(5_000);
-    expect(get<{ version: number }>('kv', 'git-store')?.version).toBe(STORE_VERSION);
-    store.renew();
-    store.release();
-    expect(get('kv', 'git-store')).toBeUndefined();
+
+    // Once the other stops (its claim lapses), this one starts and works.
+    put('kv', { id: 'git-store', owner: 'other', version: STORE_VERSION + 1, until: Date.now() + 1_000 });
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 5_000, onLost: lost });
+    try {
+      expect(get<{ owner: string }>('kv', 'git-store')?.owner).not.toBe('other');
+      store.renew();
+      await ontologyStore.commitWorking(project, await withLabel('claimed'), 'while holding it', { name: 'Holder' });
+      expect(lost).not.toHaveBeenCalled();
+
+      // It stalls, and another server takes over: now it changes nothing, by any path, and reports the loss (once).
+      const head = ontologyStore.head(project);
+      put('kv', { id: 'git-store', owner: 'successor', version: STORE_VERSION, until: Date.now() + 60_000 });
+      rawGit('read-tree', '--reset', '-u', `${head}~1`);
+      ontologyStore.log(project);
+      expect(rawGit('status', '--porcelain', '--untracked-files=no')).not.toBe('');
+      expect(lost).toHaveBeenCalledTimes(1);
+      await expect(ontologyStore.commitWorking(project, await withLabel('stale'), 'after losing it', { name: 'Stale' })).rejects.toMatchObject({ status: 503 });
+      expect(ontologyStore.head(project)).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+      expect(() => ontologyStore.prunePins(project)).toThrow('lost its hold');
+      const fresh = { ...project, slug: `claim-lost-${Date.now()}`, title: 'Never created' };
+      await expect(ontologyStore.init(fresh as never, '', '')).rejects.toMatchObject({ status: 503 });
+      expect(fs.existsSync(path.join(path.dirname(raw), fresh.slug))).toBe(false);
+      store.renew();
+      expect(lost).toHaveBeenCalledTimes(1);
+      // Shutting down gives up only its own claim, never the successor's.
+      store.release();
+      expect(get<{ owner: string }>('kv', 'git-store')?.owner).toBe('successor');
+    } finally {
+      store.release();
+      remove('kv', 'git-store');
+    }
+    // With no server holding them, git is put back in line.
+    ontologyStore.log(project);
+    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
   });
 
   it('never moves the draft ref back when two cleanups race', async () => {
