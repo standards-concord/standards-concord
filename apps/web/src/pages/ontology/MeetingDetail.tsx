@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 import type { Meeting, MeetingAnalysis, UseCase } from '@concord/shared';
-import { ArrowLeft, Bot, CircleHelp, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, GitPullRequestDraft, ScanSearch } from 'lucide-react';
+import { useCaseLabel } from '@concord/shared';
+import { ArrowLeft, Bot, CircleHelp, ClipboardList, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, ScanSearch } from 'lucide-react';
 import { api, streamMeeting } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Segmented, Spinner, Toggle } from '../../components/ui';
 import { Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { useSession } from '../../lib/session';
 import { ChatToggle, MeetingStatus, useCanFacilitate } from './Meetings';
@@ -32,10 +34,9 @@ function fmtT(t?: number) {
 export function MeetingDetailPage() {
   const { meetingId = '' } = useParams();
   const { id } = useOntology();
-  const nav = useNavigate();
   const m = useAsync(() => api.meeting(meetingId), [meetingId]);
   const [view, setView] = useState<View>('summary');
-  const [proposed, setProposed] = useState<{ useCases: UseCase[]; changeRequestId?: string }>();
+  const [proposed, setProposed] = useState<{ useCases: UseCase[] }>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const live = m.data?.status === 'live';
   const scheduled = m.data?.status === 'scheduled';
@@ -121,9 +122,15 @@ export function MeetingDetailPage() {
   });
   const propose = useAction(async () => {
     const r = await api.proposeFromMeeting(meetingId);
-    setProposed({ useCases: r.useCases, changeRequestId: r.changeRequest?.id });
-    if (r.changeRequest) nav(`/o/${id}/changes/${r.changeRequest.id}`);
+    setProposed({ useCases: r.useCases });
+    void m.reload();
   });
+  // Which use cases each transcript line fed into.
+  const lineUseCases = useMemo(() => {
+    const map = new Map<number, { id: string; number: number; groupNumber?: number }[]>();
+    for (const u of m.data?.useCases ?? []) for (const i of u.sourceLines ?? []) map.set(i, [...(map.get(i) ?? []), { id: u.id, number: u.number, groupNumber: u.groupNumber }]);
+    return map;
+  }, [m.data?.useCases]);
 
   if (m.error && !m.data) return <ErrorCard error={m.error} onRetry={m.reload} />;
   if (!m.data) return <Loading />;
@@ -157,13 +164,18 @@ export function MeetingDetailPage() {
         )}
         {!mt.transcript.length && !waitingBot && !scheduled && <p className="text-sm text-muted">No transcript yet.</p>}
         {mt.transcript.map((l, i) => (
-          <div key={i} className="flex gap-3">
+          <div key={i} id={`line-${i}`} className={`flex gap-3 ${lineUseCases.has(i) ? 'rounded-md bg-accent-soft/30 -mx-2 px-2 py-1' : ''}`}>
             <span className="w-10 shrink-0 pt-0.5 text-right font-mono text-[0.7rem] text-subtle">{fmtT(l.t)}</span>
             <div className="min-w-0">
               <span className="text-xs font-semibold" style={{ color: colorFor(l.speaker) }}>
                 {l.speaker}
               </span>
               <p className="text-sm leading-relaxed">{l.text}</p>
+              {lineUseCases.get(i)?.map((u) => (
+                <Link key={u.id} to={`/o/${id}/use-cases/${u.id}`} className="mt-1 mr-1 inline-block rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[0.65rem] text-accent hover:underline" title="This line fed into a use case">
+                  {useCaseLabel(u)}
+                </Link>
+              ))}
             </div>
           </div>
         ))}
@@ -295,21 +307,33 @@ export function MeetingDetailPage() {
               Analyse transcript
             </Button>
           )}
-          {a && (
-            <Button variant="primary" icon={GitPullRequestDraft} loading={propose.pending} onClick={() => void propose.run()}>
-              Turn into use cases and a change request
+          {a && !mt.useCases?.length && (
+            <Button variant="primary" icon={ClipboardList} loading={propose.pending} onClick={() => void propose.run()}>
+              Turn into use cases
             </Button>
           )}
         </div>
       </div>
       <InlineError error={analyse.error || propose.error || update.error || end.error} />
-      {proposed && !proposed.changeRequestId && (
+      {proposed && (
         <Card className="mb-4 p-4 text-sm">
-          Created {proposed.useCases.length} use case{proposed.useCases.length === 1 ? '' : 's'}.{' '}
+          Created {proposed.useCases.length} use case{proposed.useCases.length === 1 ? '' : 's'}, shared with the working group. Change requests are public, so to draft changes from one, its author makes it public first.{' '}
           <Link to={`/o/${id}/use-cases`} className="text-accent hover:underline">
             Review them
           </Link>
-          .
+        </Card>
+      )}
+
+      {!!mt.useCases?.length && (
+        <Card className="mb-4">
+          <CardHeader icon={ClipboardList} title={`Use cases from this call (${mt.useCases.length})`} subtitle="Highlighted lines in the transcript fed into them" />
+          <ul className="divide-y divide-line" data-testid="meeting-use-cases">
+            {mt.useCases.map((u) => (
+              <li key={u.id} className="px-5 py-3">
+                <UseCaseRefLink ontologyId={id} r={u} />
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
 

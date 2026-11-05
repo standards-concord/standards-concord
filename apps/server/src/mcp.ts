@@ -15,6 +15,7 @@ import { PUBLIC_BASE } from './public/w3id.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
+import { crForViewer } from './services/useCases.js';
 import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
 
 /**
@@ -197,7 +198,7 @@ function buildServer(user: User, agentName: string) {
     ({ ontology, title, description }) =>
       withProject(ontology, async (p) => {
         const cr = await createChangeRequest(p, user, { title, description, naturalLanguage: `${title}\n\n${description}`, kind: 'feature', origin: { type: 'agent', agentName }, submit: true });
-        return json(await summariseCR(cr.id, p));
+        return json(await summariseCR(cr.id, p, user));
       }),
   );
 
@@ -207,7 +208,7 @@ function buildServer(user: User, agentName: string) {
     async ({ id }) => {
       try {
         const cr = await getCR(id);
-        return json(await summariseCR(cr.id, (await resolve(cr.ontologyId))!));
+        return json(await summariseCR(cr.id, (await resolve(cr.ontologyId))!, user));
       } catch {
         return fail(`No change request ${id}`);
       }
@@ -217,8 +218,9 @@ function buildServer(user: User, agentName: string) {
   return server;
 }
 
-async function summariseCR(id: string, p: OntologyProject) {
-  const d = await detail(await getCR(id));
+async function summariseCR(id: string, p: OntologyProject, viewer: User) {
+  // The same projection as the web API: a request based on a use case this user may not see is withheld.
+  const d = await crForViewer(await detail(await getCR(id)), viewer);
   return {
     id: d.id,
     number: d.number,

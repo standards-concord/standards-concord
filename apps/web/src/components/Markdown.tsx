@@ -30,7 +30,9 @@ const md = new Marked({
       const text = this.parser.parseInline(token.tokens);
       const href = safeHref(token.href);
       if (!href) return text;
-      return `<a target="_blank" rel="noreferrer" href="${attr(href)}"${token.title ? ` title="${attr(token.title)}"` : ''}>${text}</a>`;
+      // In-page anchors (#uc-…, #req-…) stay in the same tab.
+      const tab = href.startsWith('#') ? '' : ' target="_blank" rel="noreferrer"';
+      return `<a${tab} href="${attr(href)}"${token.title ? ` title="${attr(token.title)}"` : ''}>${text}</a>`;
     },
     // No remote images: loading one would tell its server who is reading, and when. Shown as a link instead.
     image(token: Tokens.Image) {

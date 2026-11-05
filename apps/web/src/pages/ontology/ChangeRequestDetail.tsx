@@ -1,7 +1,7 @@
 import { useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
+import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -16,6 +16,7 @@ import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
 import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { needsOdiApproval, odiApproved } from '../../lib/asks';
 
@@ -395,19 +396,14 @@ export function ChangeRequestPage() {
               view meeting
             </Link>
           )}
-          {cr.origin.type === 'chat' && cr.origin.useCaseId && (
-            <Link className="text-accent hover:underline" to={`/o/${id}/use-cases/${cr.origin.useCaseId}`}>
-              view use case
-            </Link>
-          )}
-          {cr.origin.type === 'synthesis' &&
-            cr.origin.useCaseIds.map((u, i) => (
-              <Link key={u} className="text-accent hover:underline" to={`/o/${id}/use-cases/${u}`}>
-                use case {i + 1}
-              </Link>
-            ))}
         </div>
-        {cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>}
+        {cr.withheld ? (
+          <p role="note" className="mt-2 text-sm text-muted">
+            This change request was drafted from, or cites, a use case that is no longer shared with you (its author may have withdrawn it), so its details are not shown. It can't be merged; a new request can be opened instead.
+          </p>
+        ) : (
+          cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
@@ -436,6 +432,19 @@ export function ChangeRequestPage() {
                 ) : (
                   <Markdown text={cr.description} />
                 )}
+              </Card>
+            )}
+
+            {!!cr.useCases?.length && (
+              <Card>
+                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
+                <ul className="divide-y divide-line" data-testid="cr-use-cases">
+                  {cr.useCases.map((u) => (
+                    <li key={u.id} className="px-5 py-3">
+                      <UseCaseRefLink ontologyId={id} r={u} />
+                    </li>
+                  ))}
+                </ul>
               </Card>
             )}
 

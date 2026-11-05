@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router';
 import { canCastVote, type ReleaseDetail } from '@concord/shared';
-import { ArrowLeft, ExternalLink, Minus, Rocket, Scale, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { ArrowLeft, ClipboardList, ExternalLink, FileText, Minus, RefreshCw, Rocket, Scale, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { api, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -12,6 +12,7 @@ import { PolicyGlance } from '../../components/PolicyRules';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Markdown } from '../../components/Markdown';
 import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading } from '../../components/ui';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { ReleaseStatus } from './Releases';
 
@@ -34,6 +35,7 @@ export function ReleaseDetailPage() {
   const myVote = r.votes.find((v) => v.userId === session?.user?.id);
   const vote = (c: VoteChoice) => act.run(() => api.voteRelease(r.id, c));
   const canPublish = hasRole('steward', 'owner');
+  const canWrite = hasRole('editor', 'steward', 'owner');
 
   return (
     <div>
@@ -75,6 +77,7 @@ export function ReleaseDetailPage() {
               </div>
             </Disclosure>
           </Card>
+          <RequirementsCard r={r} canWrite={canWrite} onChange={() => void state.reload()} />
           <Card>
             <CardHeader title={`Included changes (${r.changeRequests.length})`} />
             <ul className="divide-y divide-line">
@@ -201,5 +204,59 @@ function ApprovalHistory({ r, userById }: { r: ReleaseDetail; userById: ReturnTy
         <ApprovalRecord g={r.governance} outcome={published ? 'approved' : 'rejected'} decidedAt={decidedAt} votes={r.votes} userById={userById} subject="release" timing={recorded ? 'recorded' : 'unavailable'} />
       </div>
     </CollapsibleCard>
+  );
+}
+
+/** The release's use cases and requirements document, and the use cases it closes. */
+function RequirementsCard({ r, canWrite, onChange }: { r: ReleaseDetail; canWrite: boolean; onChange: () => void }) {
+  const { id } = useOntology();
+  const gen = useAction(async () => {
+    await api.generateRequirements(r.id);
+    onChange();
+  });
+  const doc = r.requirements;
+  return (
+    <Card>
+      <CardHeader
+        icon={ClipboardList}
+        title="Use cases and requirements"
+        subtitle={
+          r.status === 'published'
+            ? 'Published with this release, and committed as USE_CASES.md.'
+            : 'Drafted with the release. It is frozen and committed when the release is published.'
+        }
+        actions={
+          canWrite &&
+          r.status !== 'published' && (
+            <Button size="sm" icon={RefreshCw} loading={gen.pending} onClick={() => void gen.run()}>
+              {doc ? 'Rewrite' : 'Write it now'}
+            </Button>
+          )
+        }
+      />
+      <div className="space-y-4 p-5 text-sm">
+        {doc ? (
+          <Link to={`/o/${id}/requirements/${doc.version}`} className="inline-flex items-center gap-1.5 font-medium text-accent hover:underline">
+            <FileText className="size-4" /> {doc.title}
+            {doc.status === 'draft' && <span className="font-normal text-muted">(draft)</span>}
+          </Link>
+        ) : (
+          <p className="text-muted">{r.status === 'published' ? 'No document was written for this release.' : 'Being written… refresh in a moment.'}</p>
+        )}
+        {!!r.useCases?.length && (
+          <div>
+            <p className="mb-1.5 text-xs font-semibold tracking-wide text-muted uppercase">{r.status === 'published' ? 'Use cases this release closed' : 'Use cases this release will close'}</p>
+            <ul className="space-y-1.5">
+              {r.useCases.map((u) => (
+                <li key={u.id}>
+                  <UseCaseRefLink ontologyId={id} r={u} />
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <InlineError error={gen.error} />
+      </div>
+    </Card>
   );
 }
