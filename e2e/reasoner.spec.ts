@@ -132,6 +132,18 @@ test.describe('OWL reasoning with sparq', () => {
       chip: /Needs fixing/,
     },
   ];
+  test('the health popover shows the server\'s own clean result as "Consistent"', async ({ page, request }) => {
+    // Not injected: the summary's reasoner fields come from the server, so dropping them shows up here.
+    const demo = await demoOntology(request);
+    await signIn(page, { name: `Reasoner health ${uniq()}`, role: 'steward' });
+    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { health: Record<string, unknown> };
+    expect(o.health).toMatchObject({ reasoner: 'sparq', reasonerChecked: 'complete', reasonerConsistent: true, unsatisfiable: 0, consistent: true, incomplete: [] });
+    await page.goto(`/o/${demo.id}`);
+    await page.getByRole('button', { name: /^Health: / }).click();
+    const reasonerRow = page.getByRole('dialog', { name: /^Health: / }).getByRole('listitem').filter({ hasText: 'Reasoner' });
+    await expect(reasonerRow).toHaveText(/Reasoner\s*Consistent$/);
+  });
+
   for (const c of cases) {
     test(`the health popover matches the reasoner's result: ${c.name}`, async ({ page, request }) => {
       const demo = await demoOntology(request);
