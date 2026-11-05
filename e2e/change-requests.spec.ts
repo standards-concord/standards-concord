@@ -121,7 +121,7 @@ test.describe('change requests', () => {
     await expect(page.getByText(/AI revision requested by Tom Okafor/)).toBeVisible();
 
     // Reviewers' earlier approvals no longer count once the edits change.
-    await expect(page.getByText(/updated the proposed edits \(earlier approvals no longer count\)/)).toBeVisible();
+    await expect(page.getByText(/updated the proposed edits \(earlier approvals and votes for no longer count; votes against and objections stand\)/)).toBeVisible();
   });
 
   // Regression: Resubmit used to do nothing. The old "request changes" review still counted, so the

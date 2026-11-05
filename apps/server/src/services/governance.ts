@@ -206,6 +206,22 @@ export function reviewsInRound<T extends Review>(reviews: T[], round: number, ro
   return { counted, stale };
 }
 
+/**
+ * Which votes count on a change request's current edits. A vote is on the edits it was cast on, so when
+ * the edits change, "yes" and "abstain" stop counting and the voter is asked again. A "no" stands until
+ * the voter changes it, like an objection: otherwise rewriting the edits, even to the same effect, would
+ * be a way for an author to erase opposition. Only each person's latest vote can count.
+ */
+export function votesOnEdits<T extends Vote>(votes: T[], editsVersion: number, versionOf: (v: T) => number): { counted: T[]; stale: Set<string> } {
+  const ordered = votes.map((v, i) => ({ v, i, n: versionOf(v) })).sort((a, b) => a.n - b.n || decisionOrder(a.v, b.v) || a.i - b.i);
+  const latest = new Map<string, { v: T; n: number }>();
+  for (const x of ordered) latest.set(x.v.userId, x);
+  const counted = [...latest.values()].filter((x) => x.n === editsVersion || x.v.choice === 'no').map((x) => x.v);
+  const keep = new Set(counted.map((v) => v.id));
+  const stale = new Set(ordered.filter((x) => x.n !== editsVersion && !keep.has(x.v.id)).map((x) => x.v.id));
+  return { counted, stale };
+}
+
 /** Latest review per person (a later approval supersedes an earlier request for changes). */
 function latestReviews(reviews: Review[]): Review[] {
   const byUser = new Map<string, Review>();

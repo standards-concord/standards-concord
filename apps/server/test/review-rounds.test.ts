@@ -120,26 +120,41 @@ describe('review rounds', () => {
     }
   });
 
-  // Edits written differently but with the same effect (a duplicate alias, extra whitespace, an empty
-  // optional list, a field the edit ignores) used to count as new edits and erase the ballot.
-  it('edits with the same effect keep the ballot, "no" votes included', async () => {
-    const { author, a, crId, ops } = await setUp({ minApprovals: 0, vote: { voterRoles: ['member'], threshold: 0.75, quorum: 0.5, durationDays: 5 } });
+  // Rewriting the edits to the same effect (a duplicate alias, extra whitespace, an empty list, a field
+  // the edit ignores, a blank entry) used to erase the "no" votes, so an author could clear opposition and
+  // pass a 75% vote with one "yes". Comparing edits by their effect kept finding new equivalent encodings,
+  // so now any change to the edits starts again, but a vote against stands until the voter changes it.
+  it('rewriting the edits can’t erase a vote against: a "no" stands, a "yes" is asked again', async () => {
+    const { owner, author, a, b, crId, ops } = await setUp({ minApprovals: 0, vote: { voterRoles: ['member'], threshold: 0.75, quorum: 0.5, durationDays: 5 } });
+    const c = await person('reviewer');
+    expect((await owner.agent.put(`/api/ontologies/${(await get(owner, crId)).ontologyId}/members/${c.id}`).send({ roles: ['reviewer', 'member'] })).status).toBe(200);
     expect((await vote(a, crId, 'no')).status).toBe(200);
+    expect((await vote(c, crId, 'yes')).status).toBe(200);
     const op = ops[0];
+    let version = 1;
     for (const same of [
       { ...op, altLabels: ['rota slot', 'rota slot'] },
+      { ...op, altLabels: ['rota slot', '  '] },
       { ...op, label: `  ${op.label}  ` },
       { ...op, subClassOf: [] },
       { ...op, ignoredByTheEdit: 'anything' },
     ]) {
       const res = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [same] });
       expect(res.status).toBe(200);
-      expect(res.body.editsVersion, JSON.stringify(same)).toBe(1);
-      expect(res.body.governance.vote.no).toBe(1);
+      expect(res.body.editsVersion, JSON.stringify(same)).toBe(++version);
+      expect(res.body.governance.vote.no, JSON.stringify(same)).toBe(1);
+      expect(res.body.governance.vote.yes).toBe(0);
     }
-    // A real change does start again.
-    const changed = (await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...op, altLabels: ['rota slot', 'duty'] }] })).body;
-    expect(changed.editsVersion).toBe(2);
+    const now = await get(author, crId);
+    expect(now.votes.find((v: { userId: string }) => v.userId === a.id).stale).toBe(false);
+    expect(now.votes.find((v: { userId: string }) => v.userId === c.id).stale).toBe(true);
+    // One "yes" doesn't outvote the standing "no" at 75%.
+    const after = (await vote(b, crId, 'yes')).body;
+    expect(after.governance.vote.no).toBe(1);
+    expect(after.governance.vote.yes).toBe(1);
+    expect(after.status).toBe('voting');
+    // The voter can still change their mind on the new edits.
+    expect((await vote(a, crId, 'yes')).body.governance.vote.no).toBe(0);
   });
 
   // A resubmission of the same edits used to erase the ballot, "no" votes included.
@@ -154,21 +169,39 @@ describe('review rounds', () => {
     expect(resubmitted.votes.every((v: { stale: boolean }) => !v.stale)).toBe(true);
   });
 
-  // An AI revision that changed nothing, or the same edits with their keys in another order, used to
-  // reset everyone's reviews (and so could erase a ballot without changing anything).
-  it('the same edits again, even written differently, keep the reviews', async () => {
+  // An AI revision that changed nothing used to reset everyone's reviews.
+  it('the same edits again keep the reviews', async () => {
     const { author, b, crId, ops } = await setUp({ minApprovals: 2 });
     await review(b, crId, 'approve');
-    const reordered = Object.fromEntries(Object.entries(ops[0]).reverse());
-    for (const same of [ops, [reordered]]) {
-      const res = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: same });
-      expect(res.status).toBe(200);
-      expect(res.body.round).toBe(1);
-      expect(res.body.governance.approvals).toBe(1);
-    }
+    const res = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops });
+    expect(res.status).toBe(200);
+    expect(res.body.round).toBe(1);
+    expect(res.body.governance.approvals).toBe(1);
     const changed = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...ops[0], definition: 'A scheduled block of volunteering time.' }] });
     expect(changed.body.round).toBe(2);
     expect(changed.body.governance.approvals).toBe(0);
+  });
+
+  // The comparison by effect called some different edits the same (it sorted lists whose order matters,
+  // such as a property's ranges, and its own provenance hid a "source" the edit set), and then silently
+  // kept the old edits and their approvals. Any difference is now saved as new edits.
+  it('edits that differ in any way are saved as new edits, with a new round', async () => {
+    const { author, b, crId, ops } = await setUp({ minApprovals: 2 });
+    const op = ops[0];
+    let round = 1;
+    for (const different of [
+      { ...op, altLabels: ['rota slot', 'duty'] },
+      { ...op, altLabels: ['duty', 'rota slot'] },
+      { ...op, altLabels: ['duty', 'rota slot'], source: ['compare'] },
+      Object.fromEntries(Object.entries({ ...op, altLabels: ['duty', 'rota slot'], source: ['compare'] }).reverse()),
+    ]) {
+      await review(b, crId, 'approve');
+      const res = await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [different] });
+      expect(res.status).toBe(200);
+      expect(res.body.ops, JSON.stringify(different)).toEqual([different]);
+      expect(res.body.round).toBe(++round);
+      expect(res.body.governance.approvals).toBe(0);
+    }
   });
 
   // A real edit while in review kept the old review period, so under lazy consensus it could be

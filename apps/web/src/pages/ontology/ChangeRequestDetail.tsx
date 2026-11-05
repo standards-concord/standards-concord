@@ -40,7 +40,10 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const open = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
   const voterRoles = cr.governance.rule.vote?.voterRoles ?? [];
   const canVote = cr.status === 'voting' && (voterRoles.some((r) => myRoles.includes(r)) || hasRole());
-  const myVote = [...cr.votes].reverse().find((v) => v.userId === uid && !v.stale);
+  const myLatestVote = [...cr.votes].reverse().find((v) => v.userId === uid);
+  const myVote = myLatestVote?.stale ? undefined : myLatestVote;
+  // A "no" stands when the edits change; anything else is asked again.
+  const myVoteOnEarlierEdits = !!myLatestVote && (myLatestVote.editsVersion ?? 1) !== (cr.editsVersion ?? 1);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
   // Decisions name the round on screen, so one made on a version that has since changed is refused.
@@ -104,7 +107,13 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </Button>
           </div>
           {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on this.</p>}
-          {myVote && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
+          {myVote && !myVoteOnEarlierEdits && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
+          {myVote && myVoteOnEarlierEdits && (
+            <p role="status" className="text-xs text-warn">You voted “no” on earlier edits. It still counts until you change it, so look at the new edits and vote again if your view has changed.</p>
+          )}
+          {!myVote && myLatestVote && (
+            <p role="status" className="text-xs text-warn">You voted “{myLatestVote.choice}” on earlier edits, which no longer counts. Please look at the new edits and vote again.</p>
+          )}
         </>
       )}
       {cr.status === 'approved' && (
@@ -454,6 +463,8 @@ export function ChangeRequestPage() {
                             <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
                             {item.v.stale ? (
                               <Badge tone="neutral" title="Cast before the edits changed, so it no longer counts.">{item.v.choice} · earlier edits</Badge>
+                            ) : (item.v.editsVersion ?? 1) !== (cr.editsVersion ?? 1) ? (
+                              <Badge tone="danger" title="Cast before the edits changed. A vote against stands until the voter changes it.">{item.v.choice} · earlier edits, still counts</Badge>
                             ) : (
                               <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
                             )}

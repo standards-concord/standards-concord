@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Review } from '@concord/shared';
-import { reviewsInRound } from '../src/services/governance.js';
+import type { Review, Vote } from '@concord/shared';
+import { reviewsInRound, votesOnEdits } from '../src/services/governance.js';
 
 /**
  * Which reviews count in a change request's current round. Regression: resubmitting used to leave
@@ -57,5 +57,32 @@ describe('reviews in a round', () => {
     const r = count([rev('a', 'comment', 1)], 2);
     expect(r.counted).toEqual([]);
     expect(r.stale).toEqual([]);
+  });
+});
+
+/**
+ * Which votes count on the current edits. Regression: rewriting the edits to the same effect used to
+ * erase "no" votes, so an author could clear opposition before a threshold vote.
+ */
+const vote = (userId: string, choice: Vote['choice'], editsVersion: number, seq: number) =>
+  ({ id: `v${seq}`, subjectType: 'change-request', subjectId: 'cr', userId, roles: ['member'], choice, at: '2026-03-01T10:00:00Z', editsVersion, seq }) as Vote & { editsVersion: number };
+const tally = (votes: (Vote & { editsVersion: number })[], version: number) => {
+  const { counted, stale } = votesOnEdits(votes, version, (v) => v.editsVersion);
+  return { counted: counted.map((v) => `${v.userId}:${v.choice}`).sort(), stale: votes.filter((v) => stale.has(v.id)).map((v) => `${v.userId}:${v.choice}`) };
+};
+
+describe('votes on the edits', () => {
+  it('a "no" stands when the edits change; "yes" and "abstain" are asked again', () => {
+    const r = tally([vote('a', 'no', 1, 1), vote('b', 'yes', 1, 2), vote('c', 'abstain', 1, 3)], 2);
+    expect(r.counted).toEqual(['a:no']);
+    expect(r.stale).toEqual(['b:yes', 'c:abstain']);
+  });
+
+  it('only the latest vote can stand: a "no" changed to "yes" doesn’t come back when the edits change', () => {
+    expect(tally([vote('a', 'no', 1, 1), vote('a', 'yes', 1, 2)], 2).counted).toEqual([]);
+  });
+
+  it('a vote on the new edits replaces a standing "no"', () => {
+    expect(tally([vote('a', 'no', 1, 1), vote('a', 'yes', 2, 2)], 2).counted).toEqual(['a:yes']);
   });
 });

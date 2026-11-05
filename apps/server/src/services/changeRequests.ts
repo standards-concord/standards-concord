@@ -4,7 +4,6 @@ import {
   classifyChange,
   compactIRI,
   diffOntologies,
-  expandIRI,
   toKGCL,
   validate,
   withDeclaredLevel,
@@ -32,7 +31,7 @@ import { ontologyDigest } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
-import { evaluate, reviewsInRound } from './governance.js';
+import { evaluate, reviewsInRound, votesOnEdits } from './governance.js';
 import { triageBudgetAvailable, withTriageBudget } from './budget.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -387,59 +386,6 @@ function fallbackAnalysis(cr: ChangeRequest, c: (iri: string) => string) {
 export const reviewsFor = (crId: string) => list<Review>('reviews', crId);
 export const votesFor = (subjectId: string) => list<Vote>('votes', subjectId);
 
-/**
- * A canonical form of the edits, to tell a real change from the same edits written differently: object
- * keys in order, and lists inside an edit (superclasses, labels, ...) compared as sets. The order of the
- * edits themselves matters, so it is kept.
- */
-function canonical(v: unknown, top = false): string {
-  if (Array.isArray(v)) {
-    const items = v.map((x) => canonical(x));
-    return `[${(top ? items : items.sort()).join(',')}]`;
-  }
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o)
-      .filter((k) => o[k] !== undefined)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(v) ?? 'null';
-}
-export const opsKey = (ops: ChangeOp[]) => canonical(ops, true);
-
-/** What a list of edits requires of the draft (the values updateAnnotations edits expect to find), as a set. */
-function preconditions(graph: OntologyGraph, ops: ChangeOp[]) {
-  const norm = (v: unknown): unknown => (typeof v === 'string' ? v.trim() : Array.isArray(v) ? [...new Set(v.map((x) => (typeof x === 'string' ? x.trim() : x)))] : v);
-  const each = ops.flatMap((o) =>
-    o.op === 'updateAnnotations' && o.expect
-      ? [canonical({ iri: expandIRI(o.iri, graph.prefixes), expect: Object.fromEntries(Object.entries(o.expect).map(([k, v]) => [k, norm(v)])) })]
-      : [],
-  );
-  return [...new Set(each)].sort().join('\n');
-}
-
-/**
- * Whether new edits are the same as the current ones. Edits written differently but with the same
- * effect (keys in another order, a duplicate alias, extra whitespace, an empty optional list, a field
- * the edit ignores, a prefixed name for a full IRI) are the same: applied to the working draft they give
- * an identical ontology, and they require the same of the draft. If either can't be applied, only
- * edits that are identical in canonical form are the same.
- */
-export function sameEdits(working: OntologyGraph, a: ChangeOp[], b: ChangeOp[]) {
-  if (opsKey(a) === opsKey(b)) return true;
-  if (preconditions(working, a) !== preconditions(working, b)) return false;
-  // The same provenance for both, so only the edits themselves can differ.
-  const ctx = { author: 'Concord', date: '2000-01-01', source: 'compare' };
-  try {
-    const d = diffOntologies(applyChangeOps(working, a, ctx).graph, applyChangeOps(working, b, ctx).graph);
-    return d.addedTriples === 0 && d.removedTriples === 0;
-  } catch {
-    return false;
-  }
-}
-
 const roundOf = (cr: ChangeRequest) => cr.round ?? 1;
 const editsVersionOf = (cr: ChangeRequest) => cr.editsVersion ?? 1;
 /** Reviews and votes stored before rounds existed are placed by time: current if given since the edits last changed, otherwise earlier. */
@@ -453,9 +399,9 @@ export function roundState(cr: ChangeRequest) {
   const reviews = reviewsFor(cr.id);
   const { counted, stale } = reviewsInRound(reviews, round, (r) => reviewRound(cr, r));
   const votes = votesFor(cr.id);
-  // Votes are on the edits, so they count until the edits change (a resubmission of the same edits keeps the ballot).
-  const currentVotes = votes.filter((v) => voteVersion(cr, v) === editsVersionOf(cr));
-  return { round, reviews, counted, stale, votes, currentVotes };
+  // Votes are on the edits: a resubmission of the same edits keeps the ballot, new edits ask again, and a "no" stands.
+  const { counted: currentVotes, stale: staleVotes } = votesOnEdits(votes, editsVersionOf(cr), (v) => voteVersion(cr, v));
+  return { round, reviews, counted, stale, votes, currentVotes, staleVotes };
 }
 
 /** Whether this person's review or vote counts now; someone whose review is from an earlier round is asked again. */
@@ -501,13 +447,13 @@ export function governanceFor(cr: ChangeRequest) {
 }
 
 export function detail(cr: ChangeRequest): ChangeRequestDetail {
-  const { round, reviews, stale, votes } = roundState(cr);
+  const { round, reviews, stale, votes, staleVotes } = roundState(cr);
   return {
     ...cr,
     round,
     editsVersion: editsVersionOf(cr),
     reviews: reviews.map((r) => ({ ...r, round: reviewRound(cr, r), stale: stale.has(r.id) })),
-    votes: votes.map((v) => ({ ...v, editsVersion: voteVersion(cr, v), stale: voteVersion(cr, v) !== editsVersionOf(cr) })),
+    votes: votes.map((v) => ({ ...v, editsVersion: voteVersion(cr, v), stale: staleVotes.has(v.id) })),
     governance: governanceFor(cr),
     author: publicUser(getUser(cr.authorId)),
   };
@@ -549,7 +495,7 @@ interface EditsPatch {
 }
 
 /** Identifies the edits a revision started from, to tell whether someone changed them meanwhile. */
-const editsBasis = (cr: ChangeRequest) => `${cr.opsUpdatedAt ?? cr.createdAt} ${opsKey(cr.ops)}`;
+const editsBasis = (cr: ChangeRequest) => `${cr.opsUpdatedAt ?? cr.createdAt} ${JSON.stringify(cr.ops)}`;
 
 export async function updateOps(cr: ChangeRequest, actor: User, patch: EditsPatch) {
   const { title, description, ops } = patch;
@@ -567,8 +513,6 @@ async function updateOpsNow(
   actor: User,
   patch: EditsPatch & { basis?: string; tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
 ) {
-  // The draft the new edits are compared on (see sameEdits): read before taking the lock, and the same for both lists.
-  const working = patch.ops ? await ontologyStore.working(getProject(cr.ontologyId)) : undefined;
   await locked(cr, (c) => {
     canEdit(c, actor);
     // A revision computed from edits someone has since replaced would silently undo their work.
@@ -579,8 +523,11 @@ async function updateOpsNow(
     if (patch.warnings) c.warnings = patch.warnings;
     if (patch.title) c.title = patch.title;
     if (patch.description !== undefined) c.description = patch.description;
-    // Only a real change to the edits starts a new round (the same edits written differently don't).
-    if (patch.ops && !sameEdits(working!, c.ops, patch.ops)) {
+    // Only a change to the edits starts a new round (the same edits again, say from an AI revision that changed
+    // nothing, don't). Any difference counts, even one with the same effect: telling those apart means applying
+    // both lists, which is slow on large lists and easy to get wrong. New edits cost the request its approvals,
+    // never its opposition (votes against and objections stand), so rewriting edits gains an author nothing.
+    if (patch.ops && JSON.stringify(patch.ops) !== JSON.stringify(c.ops)) {
       c.ops = patch.ops;
       c.opsUpdatedAt = clock.iso();
       c.round = roundOf(c) + 1;
@@ -589,7 +536,7 @@ async function updateOpsNow(
       c.reviewStartedAt = c.opsUpdatedAt;
       // Whoever writes the edits can't also be the independent reviewer of them.
       if (actor.id !== c.authorId && !(c.revisedBy ?? []).includes(actor.id)) c.revisedBy = [...(c.revisedBy ?? []), actor.id];
-      c.timeline.push(ev('ops-updated', 'updated the proposed edits (earlier approvals no longer count)', actor.id));
+      c.timeline.push(ev('ops-updated', 'updated the proposed edits (earlier approvals and votes for no longer count; votes against and objections stand)', actor.id));
       if (c.status === 'voting' || c.status === 'approved') setStatus(c, 'review', 'returned to review after the edits changed', actor.id);
       c.approvedAs = undefined;
     }

@@ -84,6 +84,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | A veto, a request for changes or a lost approval after approval stops the merge; decisions wait while a merge is under way | ✅ | API only: `review-rounds.test.ts` (the race needs a paused merge, which a browser can't arrange) |
 | Decisions name the round they were made on; one made on an older version is refused | ✅ | API: `review-rounds.test.ts` (the page always sends the round on screen) |
 | Authors can't request changes to or object to their own edits | ✅ | API: `review-rounds.test.ts` |
+| A vote against stands when the edits change (the voter is told, and can change it); votes for are asked again | ✅ | governance-flow (API: `review-rounds.test.ts`, `governance.test.ts`) |
 | Ownership transfer (owner decides) | ✅ | governance-flow |
 | Ownership transfer by member vote or ODI approval | ❌ | |
 | Simulated participants and clock | ✅ | alpha, ia, account |
@@ -130,7 +131,7 @@ Each fix has a test that fails without it.
 | Section tabs could open the wrong page after a quick click (stale remembered page; the ia.spec flake) | The target is looked up at click time | ia: "each section remembers the page you were last on" |
 | Resubmit did nothing after "request changes" (the old review sent it straight back to Needs work) | Resubmitting starts a new review round, like GitHub dismissing stale reviews; reviewers can approve from Needs work | change-requests: "resubmitting starts a new review round…"; review-rounds.test.ts, governance.test.ts |
 | An approved request stayed approved, and could be merged, after an owner's veto or after its only approver switched to an objection; a veto during a merge was overtaken by it | Approval needs governance to still say "approved" (unless a vote passed); merges go through #28's lock and revision check | review-rounds.test.ts |
-| Saving the same edits again, even written differently (keys in another order, a duplicate alias, extra whitespace, an empty list, an ignored field), reset everyone's reviews and could erase a ballot | Edits count as changed only if, applied to the draft, they give a different ontology or require something different of it; votes stay with the edits they were cast on | review-rounds.test.ts |
+| Rewriting a request's edits, even to the same effect, erased every vote, so an author could clear the "no" votes; comparing edits by their effect then lost real edits (order-sensitive lists, a `source`), and stalled the server on large lists | Any change to the edits is saved and starts a new round, but a vote against stands until the voter changes it; the same edits again keep reviews and votes | governance-flow: "a vote against stands when the edits change…"; review-rounds.test.ts, governance.test.ts |
 | A merge that failed on the latest draft said earlier approvals no longer counted, but they still did | A failed merge starts a new round | review-rounds.test.ts |
 | Simulated reviewers posted the same comment twice in one round | Anyone who has said anything this round isn't asked again | review-rounds.test.ts |
 | A decision made on a page showing an older version landed in the new round | Decisions carry the round they were made on, and a mismatch is a 409 | review-rounds.test.ts |
