@@ -5,7 +5,7 @@ import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { addVote, getCR, votesFor as getCRVotes } from '../src/services/changeRequests.js';
-import { step } from '../src/services/simulation.js';
+import { seedDemo, step } from '../src/services/simulation.js';
 import { personas } from '../src/services/users.js';
 
 /**
@@ -68,8 +68,12 @@ const vote = async (p: { agent: Agent }, crId: string, choice: string, round?: n
 };
 const mentions = (cr: { timeline: { message: string }[] }, re: RegExp) => cr.timeline.some((e) => re.test(e.message));
 
-beforeAll(() => {
+// Signing in seeds the demo ontology the first time, which runs the OWL reasoner over it (tens of seconds on
+// a busy machine). That one-off setup belongs here, under the hook timeout, not in whichever test signs in first:
+// the first test used to time out on a loaded machine with the reasoner installed, and pass when run alone.
+beforeAll(async () => {
   openDb();
+  await seedDemo();
 });
 
 afterEach(() => {
