@@ -1,2 +1,2 @@
-# Python toolkit for @concord/core (OWL DL reasoning via HermiT / Pellet).
-owlready2>=0.47
+# Python tools used only by tests: LinkML checks the schemas that @concord/core generates.
+linkml

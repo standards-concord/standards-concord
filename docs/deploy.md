@@ -3,7 +3,7 @@
 Concord runs in two parts:
 
 - **Vercel** serves the web app, including the in-browser query engine (sparq, WebAssembly). A small routing middleware ([middleware.ts](../middleware.ts)) forwards `/api`, `/auth`, `/mcp`, `/people`, `/healthz` and the OAuth endpoints for MCP clients (`/.well-known/*`, `/authorize`, `/token`, `/register`, `/revoke`) to the backend, with cookies, request bodies and streamed responses passed through. People and coding agents only ever use the Vercel link. When `CONCORD_PROXY_SECRET` is set (step 5), the middleware also tells the backend which domain the request came through and the visitor's IP address, vouched for by that secret, so the backend builds OAuth metadata and MCP URLs for that domain and rate-limits by the real visitor; adding a custom domain in Vercel then needs no backend change. Without the secret the backend ignores those headers and uses `PUBLIC_URL`.
-- **One small VM** runs everything that needs a long-running server: the API, sign-in, the MCP endpoint for agents, live meeting streams and the Meet bot webhook, the governance clock (a tick every minute that closes review periods and votes, merges and drafts releases), git history for each ontology, the HermiT reasoner, and a Community Solid Server for private data. Caddy gives it HTTPS automatically. It runs on Azure, launched by one script, [deploy/azure/deploy.sh](../deploy/azure/deploy.sh). An AWS version is kept as an alternative (see the end of this page).
+- **One small VM** runs everything that needs a long-running server: the API, sign-in, the MCP endpoint for agents, live meeting streams and the Meet bot webhook, the governance clock (a tick every minute that closes review periods and votes, merges and drafts releases), git history for each ontology, and a Community Solid Server for private data. Caddy gives it HTTPS automatically. It runs on Azure, launched by one script, [deploy/azure/deploy.sh](../deploy/azure/deploy.sh). An AWS version is kept as an alternative (see the end of this page).
 
 GitHub Actions ([ci.yml](../.github/workflows/ci.yml)) typechecks and tests every pull request and every push to `main`, then builds the backend image from `main` and pushes it to GitHub's container registry. The server checks for a new image every five minutes, so merging to `main` is the deploy. Vercel redeploys the web app by itself when a push to `main` changes the web app or the routing middleware. Other branches and pull requests get no Vercel build (the free plan allows 100 deployments a day, and CI already tests the production build); `git.deploymentEnabled` and `ignoreCommand` in [vercel.json](../vercel.json) set this. [ci.md](ci.md) explains what runs when, and how to keep within the free minutes; [moving-accounts.md](moving-accounts.md) covers moving to a dedicated GitHub organisation and Vercel account.
 
@@ -33,7 +33,7 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 6. **Add the Claude key.** `./deploy/azure/set-key.sh ANTHROPIC_API_KEY` asks for the value without showing it, so the interviewer, triage, meeting analysis, persona simulation and feedback chat use Claude.
 
-7. **Check it.** `./deploy/smoke.sh https://<vercel-url>` signs in as a demo tester and exercises the API, HermiT validation, SPARQL, an interview, a change request and the MCP endpoint through Vercel. Then send testers `https://<vercel-url>/alpha`.
+7. **Check it.** `./deploy/smoke.sh https://<vercel-url>` signs in as a demo tester and exercises the API, validation with the OWL reasoner, SPARQL, an interview, a change request and the MCP endpoint through Vercel. Then send testers `https://<vercel-url>/alpha`.
 
 ## Adding keys later
 
@@ -81,10 +81,9 @@ The backend assumes one process. Changes to one meeting (bookings, transcript li
 
 ## Why the backend is a server
 
-The ontology is also available in the browser: the Query tab loads it into sparq and runs SPARQL and SHACL checks locally. The rest needs a server that stays up:
+The ontology is also available in the browser: the Query tab loads it into sparq and runs SPARQL and SHACL checks locally, and the health panel can rerun the OWL 2 DL reasoner (sparq's `checkOwlDl`) in the browser. The server runs the same reasoner, with no Java, because the result gates change requests and must not come from the reviewer's own machine. The rest needs a server that stays up:
 
 - **Agents** connect to `/mcp` from their own machines, signing in with OAuth, and their gap reports open change requests that everyone sees.
 - **Live meetings** need a webhook that Recall.ai calls as people speak, and a stream that pushes the co-facilitator's prompts to everyone watching.
 - **The governance clock** has to run when nobody has the site open, so review periods end and votes close on time.
-- **Full OWL DL reasoning** uses HermiT. sparq's WebAssembly build covers RDFS and OWL 2 RL, and its DL reasoner covers ALCH, which is not enough for the qualified cardinality restrictions and functional properties the standards use. When sparq's DL reasoner covers OWL 2 DL, consistency checks can move into the browser as well.
 - **Private data** goes into Solid pods on the bundled Community Solid Server, and each ontology's history lives in git.

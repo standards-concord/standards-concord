@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./types": "./src/types.ts",
+    "./reasoner": "./src/reasonTurtle.ts",
     "./data-formats": "./src/dataFormats.ts"
   },
   "scripts": {
@@ -13,7 +14,7 @@
   },
   "dependencies": {
     "@rdfjs/wrapper": "0.34.0",
-    "@sparq-org/sparq": "0.1.5",
+    "@sparq-org/sparq": "0.1.8",
     "@theodi/shacl-converter": "1.0.5",
     "esbuild": "0.28.2",
     "jsonld": "^9.0.0",

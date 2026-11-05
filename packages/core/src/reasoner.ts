@@ -7,11 +7,13 @@
  * clashing with domain/range + disjointness) and inconsistency (individuals in
  * disjoint or unsatisfiable classes, functional data properties with two values).
  *
- * `owlReasoner` runs a complete OWL 2 DL reasoner (HermiT, or Pellet) via the
- * Python toolkit (owlready2), falling back to the structural reasoner when the
- * toolkit, Python or Java is unavailable.
+ * `owlReasoner` is the one entry point for complete OWL 2 DL reasoning. It runs
+ * sparq's hypertableau reasoner (`checkOwlDl`, compiled to WebAssembly), so the
+ * same code runs on the server and in the browser. sparq is fail-closed: when it
+ * cannot decide (a construct outside OWL 2 DL, or the work budget ran out), the
+ * result falls back to the structural checks and says why, with `available: false`.
  */
-import type { ReasonerResult } from './types.js';
+import type { OwlProfileNote, ReasonerResult } from './types.js';
 import { NS, OWL2_DATATYPES, RDF_TYPE, compactIRI, isBuiltinDatatype } from './ns.js';
 import { P, T } from './graph.js';
 import type { OntologyGraph } from './graph.js';
@@ -180,102 +182,218 @@ export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
 }
 
 /* ------------------------------------------------------------------------ */
-/* OWL DL reasoner via the Python toolkit                                    */
+/* OWL 2 DL reasoner: sparq (WebAssembly)                                     */
 /* ------------------------------------------------------------------------ */
 
 export interface OwlReasonerOptions {
-  python?: string;
-  timeoutMs?: number;
-  engine?: 'hermit' | 'pellet';
+  /** sparq's deterministic work budget. Omitted members keep sparq's defaults. */
+  budget?: { maxSteps?: number; maxNodes?: number };
 }
 
-/** Locates toolkit/ (CONCORD_TOOLKIT_DIR, else <repo>/toolkit relative to this package). */
-export async function toolkitDir(): Promise<string> {
-  const env = typeof process !== 'undefined' ? process.env.CONCORD_TOOLKIT_DIR : undefined;
-  if (env) return env;
-  const { fileURLToPath } = await import('node:url');
-  const path = await import('node:path');
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../toolkit');
+/** The parts of `@sparq-org/sparq`'s `checkOwlDl` result that Concord reads. */
+interface SparqOwlDlResult {
+  consistent: boolean | 'unknown';
+  reason: null | { kind: string; construct?: string; detail?: string; triples?: string[]; violations?: { kind: string; detail: string }[]; imports?: string[] };
+  profile: { dl: boolean | 'unknown'; violations: { kind: string; detail: string; triples: string[] }[]; unchecked: { rule: string }[] };
+  unsatisfiable: string[];
+  inferredSubClassOf: [string, string][];
+  classification: 'complete' | { unknown: string } | null;
 }
+type CheckOwlDl = (tbox: string, abox?: string, options?: { format?: 'ntriples'; budget?: OwlReasonerOptions['budget'] }) => Promise<SparqOwlDlResult>;
 
-async function findPython(dir: string, explicit?: string): Promise<string> {
-  if (explicit) return explicit;
-  if (process.env.CONCORD_PYTHON) return process.env.CONCORD_PYTHON;
-  const { existsSync } = await import('node:fs');
-  const path = await import('node:path');
-  const venv = path.join(dir, '.venv', 'bin', 'python');
-  return existsSync(venv) ? venv : 'python3';
-}
-
-export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions = {}): Promise<ReasonerResult> {
-  const engine = opts.engine ?? 'hermit';
-  const t0 = Date.now();
-  const fallback = (error: string): ReasonerResult => ({ ...structuralReasoner(graph), available: false, error, durationMs: Date.now() - t0 });
-  if (typeof process === 'undefined' || !process.versions?.node) return fallback('OWL reasoner requires Node.js');
-  let dir: string;
-  let python: string;
-  try {
-    dir = await toolkitDir();
-    python = await findPython(dir, opts.python);
-  } catch (e) {
-    return fallback(`toolkit not found: ${(e as Error).message}`);
-  }
-  const { spawn } = await import('node:child_process');
-  const path = await import('node:path');
-  const script = path.join(dir, 'reason.py');
-  const { store: dlStore, replaced } = owl2DatatypesOnly(graph);
-  const input = writeNTriples(dlStore);
-  const caveat = replaced.length
-    ? `Datatypes outside the OWL 2 datatype map were treated as rdfs:Literal for ${engine}: ${replaced.map((d) => compactIRI(d, graph.prefixes)).join(', ')}.`
-    : undefined;
-
-  return new Promise<ReasonerResult>((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    let done = false;
-    const finish = (r: ReasonerResult) => {
-      if (!done) { done = true; resolve(r); }
-    };
-    const child = spawn(python, [script, '--engine', engine, '--format', 'ntriples', '--iri', graph.ontologyIRI || 'http://example.org/concord-input'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(fallback(`${engine} timed out after ${opts.timeoutMs ?? 120000} ms`));
-    }, opts.timeoutMs ?? 120000);
-    child.stdout.on('data', (d) => (stdout += d));
-    child.stderr.on('data', (d) => (stderr += d));
-    child.on('error', (e) => { clearTimeout(timer); finish(fallback(`could not start ${python}: ${e.message}`)); });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      let out: any;
-      try { out = JSON.parse(stdout); } catch {
-        return finish(fallback(`reasoner produced no result (exit ${code}): ${stderr.trim().slice(-2000)}`));
-      }
-      if (!out.available) return finish(fallback(out.error ?? `reasoner unavailable (exit ${code})`));
-      finish({
-        engine,
-        available: true,
-        consistent: !!out.consistent,
-        unsatisfiable: out.unsatisfiable ?? [],
-        inferredSubClassOf: out.inferredSubClassOf ?? [],
-        explanation: [out.explanation, caveat].filter(Boolean).join('\n') || undefined,
-        durationMs: Date.now() - t0,
-      });
-    });
-    child.stdin.on('error', () => { /* reported via close */ });
-    child.stdin.end(input);
+let sparqLoad: Promise<CheckOwlDl> | undefined;
+/** Loads sparq's reasoner once. Its WebAssembly bundle is only fetched on first use. */
+function loadSparq(): Promise<CheckOwlDl> {
+  sparqLoad ??= import('@sparq-org/sparq').then((m) => {
+    const fn = (m as unknown as { checkOwlDl?: CheckOwlDl }).checkOwlDl;
+    if (typeof fn !== 'function') throw new Error('this @sparq-org/sparq has no checkOwlDl (it needs 0.1.7 or later)');
+    return fn;
   });
+  sparqLoad.catch(() => { sparqLoad = undefined; });
+  return sparqLoad;
 }
 
+/** Why sparq gave no verdict, in a sentence, naming the first offending triple. */
+function undecidedReason(r: SparqOwlDlResult, g: OntologyGraph): string {
+  const why = r.reason;
+  const c = (nt: string) => nt.replace(/<([^>]+)>/g, (_, iri: string) => compactIRI(iri, g.prefixes)).replace(/ \.$/, '');
+  const first = why?.triples?.[0] ? ` (for example: ${c(why.triples[0])})` : '';
+  switch (why?.kind) {
+    case 'OutOfFragment': return `sparq does not decide ${why.construct ?? 'one of the constructs used'}${first}`;
+    case 'NotInDl': return `the ontology is outside OWL 2 DL: ${(why.violations ?? []).map((v) => v.detail).join('; ')}`;
+    case 'ResourceBudget': return 'sparq ran out of its work budget before reaching a verdict';
+    case 'DatatypeUnknown': return `sparq could not decide a datatype question${first}`;
+    case 'Unconfirmed': return 'sparq found a candidate model with nominals that it could not confirm';
+    case 'ImportsNotLoaded': return `owl:imports targets were not loaded: ${(why.imports ?? []).join(', ')}`;
+    default: return `sparq could not read the graph as an OWL 2 ontology (${why?.kind ?? 'unknown'}${why?.detail ? `: ${why.detail}` : ''})`;
+  }
+}
+
+/**
+ * Complete OWL 2 DL reasoning with sparq: consistency, unsatisfiable classes and the
+ * inferred (direct, not asserted) subclass relations. Works in Node and in the browser.
+ */
+export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions = {}): Promise<ReasonerResult> {
+  const t0 = now();
+  const structural = () => structuralReasoner(graph);
+  const fallback = (error: string, extra: Partial<ReasonerResult> = {}): ReasonerResult => ({ ...structural(), available: false, checked: 'none', error, ...extra, durationMs: Math.round(now() - t0) });
+  let checkOwlDl: CheckOwlDl;
+  try {
+    checkOwlDl = await loadSparq();
+  } catch (e) {
+    return fallback(`the sparq reasoner could not load: ${(e as Error).message}`);
+  }
+  const { store: dlStore, replaced } = owl2DatatypesOnly(graph);
+  const caveat = replaced.length
+    ? `Datatypes outside the OWL 2 datatype map were treated as rdfs:Literal: ${replaced.map((d) => compactIRI(d, graph.prefixes)).join(', ')}.`
+    : undefined;
+  let r: SparqOwlDlResult;
+  const tCheck = now();
+  try {
+    r = await checkOwlDl(writeNTriples(dlStore), undefined, { format: 'ntriples', ...(opts.budget ? { budget: opts.budget } : {}) });
+  } catch (e) {
+    return fallback(`sparq failed: ${(e as Error).message}`);
+  }
+  const checkMs = Math.round((now() - tCheck) * 10) / 10;
+  const profile = profileNotes(r, graph);
+
+  if (r.consistent === 'unknown') return fallback(undecidedReason(r, graph), { profile });
+  if (r.consistent === false) {
+    // sparq gives the verdict; the structural checks often name the clash.
+    const s = structural();
+    return {
+      engine: 'sparq', available: true, checked: 'complete', consistent: false, unsatisfiable: [], inferredSubClassOf: [],
+      explanation: ['The ontology is inconsistent: no interpretation satisfies all its axioms (typically an individual in disjoint classes or in an unsatisfiable class, or a value that breaks a range, cardinality or key).', !s.consistent && s.explanation ? `Likely cause: ${s.explanation}` : undefined, caveat].filter(Boolean).join('\n'),
+      profile, durationMs: Math.round(now() - t0), checkMs,
+    };
+  }
+  if (r.classification !== 'complete') {
+    const kind = r.classification && typeof r.classification === 'object' ? r.classification.unknown : 'unknown';
+    // Consistency is decided; only the class-by-class tests are missing. Report nothing about
+    // classes rather than the structural guesses, which would sit oddly next to "consistent".
+    return fallback(`sparq showed the ontology is consistent but could not finish checking every class (${kind === 'ResourceBudget' ? 'it ran out of its work budget' : kind})`, {
+      consistent: true,
+      checked: 'consistency',
+      unsatisfiable: [],
+      inferredSubClassOf: [],
+      explanation: undefined,
+      profile,
+    });
+  }
+  const unsat = [...r.unsatisfiable].filter((c) => c !== T.Nothing).sort();
+  const s = unsat.length ? structural() : undefined;
+  return {
+    engine: 'sparq', available: true, checked: 'complete', consistent: true,
+    unsatisfiable: unsat,
+    inferredSubClassOf: directInferred(graph, r.inferredSubClassOf, new Set(unsat)),
+    explanation: [
+      unsat.length ? `${unsat.length} class(es) are unsatisfiable (equivalent to owl:Nothing), typically because they are subclasses of disjoint classes or carry contradictory restrictions.` : undefined,
+      ...(s?.explanation?.split('\n').filter((l) => unsat.some((u) => l.startsWith(compactIRI(u, graph.prefixes) + ' '))) ?? []),
+      caveat,
+    ].filter(Boolean).join('\n') || undefined,
+    profile, durationMs: Math.round(now() - t0), checkMs,
+  };
+}
+
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** OWL 2 DL profile violations sparq reported, other than ones caused by our datatype rewrite. */
+function profileNotes(r: SparqOwlDlResult, g: OntologyGraph): OwlProfileNote[] | undefined {
+  const c = (iri: string) => compactIRI(iri, g.prefixes);
+  const notes = r.profile.violations.map((v) => ({ kind: v.kind, detail: v.detail.replace(/https?:\/\/[^\s,;)]+/g, (iri) => c(iri)) }));
+  const seen = new Set<string>();
+  return notes.length ? notes.filter((n) => !seen.has(n.detail) && !!seen.add(n.detail)) : undefined;
+}
+
+/**
+ * Reduces sparq's entailed subsumptions to the ones an editor wants to see: direct
+ * superclasses of each class that don't already follow from the asserted named hierarchy.
+ *
+ * sparq returns every entailed pair that isn't asserted, so together with the asserted edges
+ * `sup` is the whole (transitively closed) subsumption relation and needs no closure here.
+ * A pair implied through an asserted parent is dropped in O(parents); only the remaining,
+ * genuinely new pairs get the O(|sup(a)|) directness test. Linear in sparq's output for
+ * ordinary hierarchies, where nearly every entailed pair follows from an asserted parent.
+ */
+export function directInferred(graph: OntologyGraph, entailed: [string, string][], unsat: Set<string>): [string, string][] {
+  // Classes become small integers, so the hot loop hashes numbers rather than long IRIs.
+  const ids = new Map<string, number>();
+  const iris: string[] = [];
+  const id = (iri: string) => {
+    let n = ids.get(iri);
+    if (n === undefined) { n = iris.length; ids.set(iri, n); iris.push(iri); }
+    return n;
+  };
+  const sup: Set<number>[] = [];
+  const told: number[][] = [];
+  const link = (a: number, b: number, asserted: boolean) => {
+    if (a === b) return;
+    (sup[a] ??= new Set()).add(b);
+    if (asserted) (told[a] ??= []).push(b);
+  };
+  const s = graph.store;
+  for (const q of s.getQuads(null, P.subClassOf, null, null)) {
+    if (q.subject.termType === 'NamedNode' && q.object.termType === 'NamedNode') link(id(q.subject.value), id(q.object.value), true);
+  }
+  for (const q of s.getQuads(null, P.equivalentClass, null, null)) {
+    if (q.subject.termType !== 'NamedNode' || q.object.termType !== 'NamedNode') continue;
+    const [a, b] = [id(q.subject.value), id(q.object.value)];
+    link(a, b, true);
+    link(b, a, true);
+  }
+  const pairs = new Int32Array(entailed.length * 2);
+  entailed.forEach(([a, b], k) => { const x = id(a), y = id(b); pairs[2 * k] = x; pairs[2 * k + 1] = y; link(x, y, false); });
+  const has = (a: number, b: number) => sup[a]?.has(b) ?? false;
+  const equiv = (a: number, b: number) => has(a, b) && has(b, a);
+  const thing = id(T.Thing);
+  /** a ⊑ b follows from an asserted edge out of a (or out of a class asserted equivalent to a). */
+  const toldImplied = (a: number, b: number) => {
+    let stack: number[] | undefined;
+    let seen: Set<number> | undefined;
+    let x: number | undefined = a;
+    while (x !== undefined) {
+      for (const p of told[x] ?? []) {
+        // Back at a through an equivalence: that's a's own (inferred) parent, not a told one.
+        if (p === a) continue;
+        if (p === b) return true;
+        if (has(p, b)) {
+          if (!equiv(p, a)) return true;
+          if (!(seen ??= new Set([a])).has(p)) { seen.add(p); (stack ??= []).push(p); }
+        }
+      }
+      x = stack?.pop();
+    }
+    return false;
+  };
+  const out: [string, string][] = [];
+  for (let k = 0; k < entailed.length; k++) {
+    const a = pairs[2 * k], b = pairs[2 * k + 1];
+    if (a === b || b === thing || toldImplied(a, b) || equiv(a, b) || unsat.has(iris[a])) continue;
+    // Direct: no strict intermediate between a and b.
+    let direct = true;
+    for (const m of sup[a]!) {
+      if (m !== b && has(m, b) && !equiv(m, a) && !equiv(m, b)) { direct = false; break; }
+    }
+    if (direct) out.push([iris[a], iris[b]]);
+  }
+  return out.sort((x, y) => x[0].localeCompare(y[0]) || x[1].localeCompare(y[1]));
+}
 
 /**
  * Copy of the graph in which datatypes outside the OWL 2 datatype map (e.g. xsd:date)
  * are replaced by rdfs:Literal in axioms, and such literals in assertions become
- * plain strings, so that DL reasoners accept the ontology.
+ * plain strings, so that the DL reasoner decides the ontology instead of abstaining.
+ * Annotation values are rewritten too (they never affect reasoning), but are not
+ * reported, so that a dated ontology header doesn't add a caveat.
  */
 function owl2DatatypesOnly(graph: OntologyGraph): { store: Store; replaced: string[] } {
   const store = cloneStore(graph.store);
   const replaced = new Set<string>();
-  const annotationProps = new Set(graph.view().annotationProperties.map((p) => p.iri));
+  const view = graph.view();
+  const annotationProps = new Set(view.annotationProperties.map((p) => p.iri));
+  // A property declared as a data or object property is logical even in a vocabulary namespace.
+  const logicalProps = new Set([...view.datatypeProperties, ...view.objectProperties].map((p) => p.iri));
+  const isAnnotation = (p: string) => !logicalProps.has(p) && (annotationProps.has(p) || p.startsWith(NS.dcterms) || p.startsWith(NS.skos) || p.startsWith(NS.rdfs));
   for (const q of store.getQuads(null, null, null, null)) {
     const o = q.object as Term;
     const p = q.predicate.value;
@@ -283,12 +401,12 @@ function owl2DatatypesOnly(graph: OntologyGraph): { store: Store; replaced: stri
       store.removeQuad(q);
       store.addQuad(q.subject as any, q.predicate as any, nn(NS.rdfs + 'Literal'));
       replaced.add(o.value);
-    } else if (o.termType === 'Literal' && !annotationProps.has(p) && !p.startsWith(NS.dcterms) && !p.startsWith(NS.skos) && !p.startsWith(NS.rdfs)) {
+    } else if (o.termType === 'Literal') {
       const dt = (o as any).datatype?.value as string | undefined;
       if (dt && isBuiltinDatatype(dt) && !OWL2_DATATYPES.has(dt)) {
         store.removeQuad(q);
         store.addQuad(q.subject as any, q.predicate as any, literal(o.value));
-        replaced.add(dt);
+        if (!isAnnotation(p)) replaced.add(dt);
       }
     }
   }
