@@ -485,17 +485,26 @@ describe.runIf(run)('egress proxy', () => {
     // with EPIPE. That used to be reported as an "unparseable request (EPIPE)" outside
     // request, which failed the v0.32.0 release recording of the feedback video.
     it('does not report a client that hangs up part-way through a response', async () => {
-      const before = new Set(outside);
-      for (let k = 0; k < 24; k++)
-        await new Promise<void>((resolve) => {
-          const sock = net.connect(Number(new URL(egress.url).port), '127.0.0.1', () =>
-            sock.write(`GET ${A}/big HTTP/1.1\r\nHost: ${new URL(A).host}\r\n\r\n`),
-          );
-          sock.once('data', () => setTimeout(() => (k % 2 ? sock.resetAndDestroy() : sock.destroy()), 10 * (k % 8)));
-          sock.on('close', () => resolve());
-        });
-      await new Promise((r) => setTimeout(r, 300));
-      expect([...outside].filter((o) => !before.has(o))).toEqual([]);
+      // Its own proxy and set, so nothing an earlier test recorded can hide a new entry.
+      const mine = new Set<string>();
+      const hangUps: string[] = [];
+      const proxy = await startEgressProxy([A], mine, { onHangUp: (code) => hangUps.push(code) });
+      try {
+        // Close or reset part-way until the proxy's write has failed with EPIPE at least once.
+        for (let k = 0; k < 200 && !hangUps.includes('EPIPE'); k++)
+          await new Promise<void>((resolve) => {
+            const sock = net.connect(Number(new URL(proxy.url).port), '127.0.0.1', () =>
+              sock.write(`GET ${A}/big HTTP/1.1\r\nHost: ${new URL(A).host}\r\n\r\n`),
+            );
+            sock.once('data', () => setTimeout(() => (k % 2 ? sock.resetAndDestroy() : sock.destroy()), 10 * (k % 8)));
+            sock.on('close', () => resolve());
+          });
+        await new Promise((r) => setTimeout(r, 300));
+        expect(hangUps).toContain('EPIPE');
+        expect([...mine]).toEqual([]);
+      } finally {
+        await proxy.close();
+      }
     });
 
     it('reports a tunnel that closes before its first bytes can be checked', async () => {

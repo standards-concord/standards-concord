@@ -182,7 +182,12 @@ const connectTo = (hostPort: string, onConnect: () => void) => {
 const TUNNEL = Symbol('tunnel');
 type TunnelSocket = net.Socket & { [TUNNEL]?: string };
 
-export async function startEgressProxy(allowedOrigins: string[], outside: Set<string>): Promise<Egress> {
+export interface EgressOptions {
+  /** Called with the error code each time a client hang-up is ignored rather than reported (for tests). */
+  onHangUp?: (code: string) => void;
+}
+
+export async function startEgressProxy(allowedOrigins: string[], outside: Set<string>, options: EgressOptions = {}): Promise<Egress> {
   // Which host:port pairs may be reached with TLS (https: origins) and in plain text (http:).
   const tls = new Set<string>();
   const plain = new Set<string>();
@@ -301,7 +306,8 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
   const HANG_UPS = new Set(['ECONNRESET', 'EPIPE']);
   const clientError = (err: NodeJS.ErrnoException, socket: net.Socket) => {
     const to = (socket as TunnelSocket)[TUNNEL];
-    if (!HANG_UPS.has(err.code ?? '')) blocked(`unparseable request (${err.code ?? err.message})${to ? ` to ${to}` : ''}`);
+    if (HANG_UPS.has(err.code ?? '')) options.onHangUp?.(err.code!);
+    else blocked(`unparseable request (${err.code ?? err.message})${to ? ` to ${to}` : ''}`);
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     else socket.destroy();
   };
