@@ -1,0 +1,246 @@
+.su-sign-in-card {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: 400px;
+  min-width: 0;
+  margin-inline: auto;
+  padding: var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: 28px;
+  box-shadow: var(--shadow-1);
+  background: var(--surface);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--lh-base);
+  overflow-wrap: anywhere;
+}
+.su-sign-in-stack {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.su-sign-in-card :is(h2, p, ul) {
+  margin: 0;
+}
+.su-sign-in-header {
+  text-align: center;
+}
+.su-sign-in-title {
+  font-size: var(--text-xl);
+  line-height: var(--lh-xl);
+  font-weight: 600;
+}
+.su-sign-in-muted {
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+  color: var(--foreground-muted);
+}
+.su-sign-in-card [data-slot="button"],
+.su-sign-in-help [data-slot="button"] {
+  height: auto;
+  min-height: max(44px, var(--control-h));
+  max-width: 100%;
+  border-radius: 999px;
+  white-space: normal;
+}
+.su-sign-in-card [data-slot="input"] {
+  height: 48px;
+  min-height: 48px;
+  padding-inline: var(--space-4);
+  border-radius: 999px;
+}
+.su-sign-in-card :is(button, input, a, h2):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.su-sign-in-card .su-sign-in-submit {
+  background: var(--foreground);
+  color: var(--surface);
+}
+.su-sign-in-card .su-sign-in-submit:disabled {
+  background: var(--surface-2);
+  color: var(--foreground-muted);
+  opacity: 1;
+}
+.su-sign-in-card .su-sign-in-provider[aria-busy="true"]:disabled {
+  opacity: 1;
+}
+.su-sign-in-card .su-sign-in-back {
+  justify-self: start;
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+}
+.su-sign-in-accounts {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  overflow: hidden;
+  list-style: none;
+}
+.su-sign-in-accounts > li + li {
+  border-top: 1px solid var(--border);
+}
+.su-sign-in-card .su-sign-in-account {
+  display: flex;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--foreground);
+  text-align: left;
+}
+.su-sign-in-card .su-sign-in-account:is(:hover, :focus-visible) {
+  background: var(--surface-2);
+}
+.su-sign-in-card .su-sign-in-account:focus-visible {
+  outline-offset: -3px;
+}
+.su-sign-in-account-copy {
+  display: grid;
+  flex: 1;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.su-sign-in-account-name {
+  font-weight: 600;
+}
+.su-sign-in-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.su-sign-in-user,
+.su-sign-in-avatar [data-slot="avatar-fallback"] {
+  background: var(--surface-2);
+  color: var(--foreground);
+}
+.su-sign-in-card .su-sign-in-provider {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  min-height: 52px;
+  padding: var(--space-3) 52px;
+  border-radius: 999px;
+  text-align: center;
+  font-weight: 600;
+}
+.su-sign-in-provider:not(:disabled):hover {
+  box-shadow: inset 0 0 0 100px rgb(0 0 0 / 8%);
+}
+.su-sign-in-logo {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #fff;
+  color: #111;
+  font-weight: 700;
+}
+.su-sign-in-logo :is(img, svg) {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+.su-sign-in-card .su-sign-in-other {
+  position: relative;
+  min-height: 52px;
+  padding-inline: 52px;
+}
+.su-sign-in-other > svg {
+  position: absolute;
+  left: 16px;
+}
+.su-sign-in-providers {
+  padding: 0;
+  list-style: none;
+}
+.su-sign-in-divider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+.su-sign-in-footer {
+  justify-items: center;
+  gap: var(--space-1);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--foreground-muted);
+}
+.su-sign-in-footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.su-sign-in-footer [data-slot="button"] {
+  font-size: var(--text-sm);
+}
+.su-sign-in-footer [aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.su-sign-in-error {
+  overflow-wrap: anywhere;
+}
+.su-sign-in-help[data-slot="sheet-content"] {
+  box-sizing: border-box;
+  width: min(420px, 100%);
+  max-width: 100%;
+  padding: var(--space-4);
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+}
+.su-sign-in-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.su-sign-in-spinner {
+  flex: none;
+  animation: su-sign-in-spin 1s linear infinite;
+}
+@keyframes su-sign-in-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (min-width: 480px) {
+  .su-sign-in-card {
+    padding: var(--space-8);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .su-sign-in-spinner {
+    animation: none;
+  }
+  .su-sign-in-card *,
+  .su-sign-in-help {
+    transition: none;
+  }
+}

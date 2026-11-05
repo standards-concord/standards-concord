@@ -1,0 +1,30 @@
+{
+  "source": "https://github.com/jeswr/solid-sdk",
+  "commit": "483de5d153d98345d02e017ce87cb27f47786aec",
+  "files": {
+    "packages/suite-ui/src/sign-in/index.ts": "b341ff6fc1479a9c4eb2ab7c79cc99395848ddc36230110679e38bd00ab90a80",
+    "packages/suite-ui/src/sign-in/types.ts": "97a5ad5a5070f32b3566aa9eca45f917f6947ed78c520b0463e985dbcfdb1cbc",
+    "packages/suite-ui/src/sign-in/model.ts": "06571b14e3b7482b886b6d7089167545d6f7e457909dca35903544608a94089d",
+    "packages/suite-ui/src/sign-in/brands.tsx": "dcc9e4a665e126e08c665f89c4733015f6774df83349994d9047fdedf88d903e",
+    "packages/suite-ui/src/sign-in/sign-in-card.tsx": "8d7293c87ac4b188e268d81c4b75bc1383a9a8bc854a0a867116de86bcf86a79",
+    "packages/suite-ui/src/components/ui/alert.tsx": "3b97cdcf286f159720aa4829fda95847f93eac16836bee177c2e700b7fb0da57",
+    "packages/suite-ui/src/components/ui/avatar.tsx": "8e6042052cee07ba4d47f719b3ac210fa864a59b602105cbd8e7daec19b7df1d",
+    "packages/suite-ui/src/components/ui/button.tsx": "50f4e12f3091668bcbe478c9be6539742aebcba1a35439fa4c2857ee5ef8fb68",
+    "packages/suite-ui/src/components/ui/collapsible.tsx": "1441e5495175ce8df73ee99ce01d9ff4061e4135e460515130b8b9b7d54c52e5",
+    "packages/suite-ui/src/components/ui/dialog.tsx": "ec808c0b07c1c9078fa6d957532a6517548a0b4e24310786be78e1d2f304a641",
+    "packages/suite-ui/src/components/ui/icon-button.tsx": "392ef886a5238b96f386efce7adfd0d9bbc5c0a6ccaca3d0fdffe382d8347e33",
+    "packages/suite-ui/src/components/ui/input.tsx": "12d33796d2b861829c7f66c0de45e20a3e1e1da7ede97f1fbcb63b4d1d83bb65",
+    "packages/suite-ui/src/components/ui/label.tsx": "24ce3980ac042296760b5512c7b55ed6dfd37357316d140207e43d97dc801803",
+    "packages/suite-ui/src/components/ui/separator.tsx": "8b8c1f06e27370f94cb96dbb1cd59c77c0324f0f6bf01fc99d8b19e469644767",
+    "packages/suite-ui/src/components/ui/sheet.tsx": "05bd4dd4b81a7539dcfb136e94f7319cdcd09bba803fabecb5d36ffb0a2ea9d7",
+    "packages/suite-ui/src/components/ui/tooltip.tsx": "92c188f179ff47af2ae6c3d8cc43e4f57be0609eb0aa54a0a1ccab391fff5254",
+    "packages/suite-ui/src/lib/utils.ts": "e5deb74f072d9ebd9efe7f8c50b8bbac1fc5fc023493cde0d4262c1bf22e2ea3",
+    "packages/suite-ui/src/lib/density.tsx": "a2510f1837935c84ecf1187306196b2f3e985c4ece174a4c650d1e77584a905b",
+    "packages/suite-ui/src/styles/components.css": "03fd57daae2f38bbbb5fefabbfa56dc47f824bb2c15e20df1e8043b05c3b051b",
+    "packages/suite-ui/src/styles/sign-in.css": "b4bb914ee96a60f12dad721485c6ed98b8a3e738630ad595dcb73bcf31f55afb",
+    "packages/suite-ui/LICENSE": "0c99be426a87e779a473c40eb25c08170859e0d9f24fb5b4f5a1156e2d595233",
+    "packages/suite-ui/THIRD_PARTY_NOTICES.md": "fa060f7aeb8464380b85304a2f9abd8af4f862cff5e122c0934eca98be134a8f",
+    "packages/pod-auth/LICENSE": "0c99be426a87e779a473c40eb25c08170859e0d9f24fb5b4f5a1156e2d595233",
+    "packages/pod-auth/src/directory.ts": "67d606c91d5bd323d3f0565ad7e5783186cbba3b1d49cf5fce11c77b3a037161"
+  }
+}
