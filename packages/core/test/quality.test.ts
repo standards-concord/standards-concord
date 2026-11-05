@@ -292,6 +292,16 @@ describe('owlReasoner (sparq OWL 2 DL)', () => {
     expect(directInferred(g, entailed, new Set())).toEqual([[X('Extra'), X('C5')]]);
     expect(performance.now() - t0).toBeLessThan(3000);
   });
+  it('reports no unsatisfiable classes or inferred relations when sparq only decided consistency', async () => {
+    // Used to go wrong: the consistency-only result carried the structural fallback's
+    // unsatisfiable classes, so the health row said "Inconsistent" next to "consistent".
+    const g = await T('ex:A a owl:Class ; owl:disjointWith ex:B . ex:B a owl:Class . ex:C a owl:Class ; rdfs:subClassOf ex:A, ex:B .');
+    const r = await owlReasoner(g, { budget: { maxSteps: 3 } });
+    expect(r).toMatchObject({ checked: 'consistency', consistent: true, unsatisfiable: [], inferredSubClassOf: [] });
+    expect(r.explanation ?? '').not.toMatch(/unsatisfiable/i);
+    // With enough budget, sparq finds C unsatisfiable itself.
+    expect((await owlReasoner(g)).unsatisfiable).toEqual(['https://example.org/t#C']);
+  });
   it('keeps inferred parents of classes that are equivalent to each other', async () => {
     // Round 2 of the reduction walked A -> B -> A through the equivalence and took A's own
     // inferred parent for an asserted one, so A ≡ B with A, B ⊑ P (via a domain) gave nothing.

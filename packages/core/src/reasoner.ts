@@ -269,8 +269,16 @@ export async function owlReasoner(graph: OntologyGraph, opts: OwlReasonerOptions
   }
   if (r.classification !== 'complete') {
     const kind = r.classification && typeof r.classification === 'object' ? r.classification.unknown : 'unknown';
-    // Consistency is decided; only the class-by-class tests are missing.
-    return fallback(`sparq showed the ontology is consistent but could not finish checking every class (${kind === 'ResourceBudget' ? 'it ran out of its work budget' : kind})`, { consistent: true, checked: 'consistency', profile });
+    // Consistency is decided; only the class-by-class tests are missing. Report nothing about
+    // classes rather than the structural guesses, which would sit oddly next to "consistent".
+    return fallback(`sparq showed the ontology is consistent but could not finish checking every class (${kind === 'ResourceBudget' ? 'it ran out of its work budget' : kind})`, {
+      consistent: true,
+      checked: 'consistency',
+      unsatisfiable: [],
+      inferredSubClassOf: [],
+      explanation: undefined,
+      profile,
+    });
   }
   const unsat = [...r.unsatisfiable].filter((c) => c !== T.Nothing).sort();
   const s = unsat.length ? structural() : undefined;

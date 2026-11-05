@@ -62,6 +62,7 @@ test.describe('OWL reasoning with sparq', () => {
     await check.click();
     await expect(status).toContainText('This browser: unsatisfiable:');
     await expect(status).toContainText("The server's result for the same revision differs.");
+    await page.unrouteAll({ behavior: 'wait' });
   });
 
   test('a change that makes a class unsatisfiable is caught by sparq on the server', async ({ page, request }) => {
@@ -116,6 +117,8 @@ test.describe('OWL reasoning with sparq', () => {
       await expect(reasonerRow).toContainText(row);
       await expect(panel).not.toContainText('structural checks only');
       await expect(panel.getByRole('note')).toContainText(error);
+      // The page may still refetch the summary; let any handler in flight finish before teardown.
+      await page.unrouteAll({ behavior: 'wait' });
     });
   }
 
