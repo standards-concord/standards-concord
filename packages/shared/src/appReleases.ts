@@ -53,9 +53,10 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.17.0',
+    version: '0.18.0',
     date: '2026-11-05',
     title: 'Sign in with Solid',
+    pr: 66,
     changes: [
       {
         id: 'solid-provider-picker',
@@ -70,6 +71,24 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.17.0',
+    date: '2026-11-05',
+    title: 'A privacy policy',
+    pr: 63,
+    changes: [
+      {
+        id: 'privacy-policy',
+        type: 'feat',
+        title: 'A privacy policy explains what Concord keeps about you',
+        detail:
+          'A new Privacy policy page, linked from the footer of every page and from the sign-in card, says what Google, GitHub and WebID sign-in share, where your contributions are kept, which services process them, and how to have your data deleted.',
+        roles: [],
+        to: '/privacy',
+        ask: 'Does the privacy policy tell you what you’d want to know before signing in?',
+      },
+    ],
+  },
+  {
     version: '0.16.0',
     date: '2026-11-05',
     title: 'Share a public summary of your feedback',
@@ -80,7 +99,7 @@ export const APP_RELEASES: AppRelease[] = [
         type: 'feat',
         title: 'Optionally post a short public summary of your feedback',
         detail:
-          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers. You can withdraw it from the thank-you screen right after sending, or email the alpha team later.',
         roles: [],
         to: '/feedback',
         ask: 'Was it clear what would be made public, and would you tick the box?',

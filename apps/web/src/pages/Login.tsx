@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router';
 import { ArrowRight, Compass, KeyRound } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
@@ -86,7 +86,14 @@ export function LoginPage() {
             </div>
             <p className="mt-5 flex items-start gap-2 border-t border-line pt-4 text-xs text-muted">
               <KeyRound className="mt-0.5 size-3.5 shrink-0" />
-              We create a WebID and a private Solid pod for you automatically — your interview transcripts are stored there, not in a shared database. Already have a Solid pod? Sign in with Solid.
+              <span>
+                Already have a Solid pod? Sign in with Solid. Signing in shares
+                your name, email address and profile picture with Concord; see our{' '}
+                <Link to="/privacy" className="text-accent hover:underline">
+                  privacy policy
+                </Link>
+                .
+              </span>
             </p>
           </Card>
         )}
