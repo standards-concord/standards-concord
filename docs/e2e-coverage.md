@@ -10,7 +10,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | What a person does there | Status | Specs |
 | --- | --- | --- | --- |
-| `/login` | Try the demo; deep link `?next=` returns to the page; signed-in people are sent on; walkthrough link | ✅ | app, account |
+| `/login` | Try the demo; deep link `?next=` returns to the page; signed-in people are sent on; "Alpha tester? Start here" leads to `/welcome` | ✅ | app, account, welcome |
+| `/welcome` | Alpha landing page: what Concord is for, both walkthrough videos with captions and transcripts (or a notice before any release has them), the four alpha steps, links into `/alpha` and `/feedback`; no floating walkthrough panel; fits a phone; works signed out. `/api/media/` serves only the six video files | ✅ | welcome, account |
 | `/alpha` | Guided walkthrough: welcome, pick a role, tasks per role, simulate the others, feedback; floating panel | ✅ | alpha |
 | `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out. Opt-in public summary posted as a GitHub issue exactly as previewed, then withdrawn | ✅ | feedback, feedback-issues (against a GitHub stand-in) |
 | `/connect` | Pick an app, install links and commands, copy buttons | ✅ | connect |
@@ -54,7 +55,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 
 | Role | Allowed (tested) | Refused or hidden (tested) | Specs |
 | --- | --- | --- | --- |
-| Signed out | Login, walkthrough, feedback, connect, public pages | Every `/o/...` page and settings redirect to login; MCP without a token is 401 | app, account, agents, public-page |
+| Signed out | Login, welcome page, walkthrough, feedback, connect, public pages | Every `/o/...` page and settings redirect to login; MCP without a token is 401 | app, account, agents, public-page |
 | Contributor (Aisha) | Describe use cases, comment, approve (doesn't count), check data | Submit or withdraw someone else's request; edit the policy; manage members | change-requests, requirements, governance-flow |
 | Editor (Tom) | Draft, submit, revise, withdraw own requests | Own approval doesn't count; drafting a release is 403 | change-requests, governance-flow |
 | Reviewer (Mei, Gareth) | Approve, report bugs, report problems with terms | | change-requests, browse-basics |
