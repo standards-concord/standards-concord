@@ -21,6 +21,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -32,6 +33,7 @@ on:
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'
       - '!.github/workflows/walkthrough.yml'
+      - '!.github/workflows/deploy-scripts.yml'
   workflow_dispatch:
 
 permissions:
@@ -133,7 +135,7 @@ jobs:
   # this commit's app, so a renamed button fails here rather than in the next recording.
   walkthrough:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -141,7 +143,11 @@ jobs:
         with:
           playwright: 'true'
           apt: ffmpeg
+      # Includes the browser tests of the network allowlist, which the general test job
+      # (no browser installed) skips.
       - name: Walkthrough unit tests
+        env:
+          WALKTHROUGH_BROWSER_TESTS: '1'
         run: pnpm --filter @concord/walkthrough test
       - name: Run every walkthrough step
         run: pnpm walkthrough --check --strict

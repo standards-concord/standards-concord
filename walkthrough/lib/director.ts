@@ -18,7 +18,47 @@ export class Director {
   constructor(
     readonly page: Page,
     private readonly strict: boolean,
-  ) {}
+  ) {
+    // A script error, a console error or a failed request is a broken shot, even if every
+    // click landed: the page may be showing an error state the narration doesn't mention.
+    page.context().on('weberror', (e) => this.note(`Page error on ${e.page()?.url() ?? '?'}: ${e.error().message.split('\n')[0]}`));
+    page.context().on('console', (m) => {
+      if (m.type() === 'error' && !/ERR_BLOCKED_BY_CLIENT/.test(m.text())) this.note(`Console error on ${m.page()?.url() ?? '?'}: ${m.text().split('\n')[0].slice(0, 200)}`);
+    });
+    page.context().on('requestfailed', (r) => {
+      const why = r.failure()?.errorText ?? '';
+      // Blocked requests are reported as outside requests; aborted ones are cancelled by navigating away.
+      if (!/ERR_BLOCKED_BY_CLIENT|ERR_ABORTED/.test(why)) this.note(`Request failed: ${r.method()} ${r.url()} (${why})`);
+    });
+    page.context().on('response', (r) => {
+      if (r.status() >= 400 && !/\/favicon\.ico$/.test(r.url())) this.note(`HTTP ${r.status()} from ${r.request().method()} ${r.url()}`);
+    });
+  }
+
+  /** Records a warning without throwing (for events that arrive outside a step). */
+  note(msg: string) {
+    this.warnings.push(msg);
+    console.warn(`  ! ${msg}`);
+  }
+
+  /**
+   * Checks something the narration claims (a query returned rows, validation passed).
+   * A recording where an action ran but its claimed outcome didn't happen must not publish.
+   */
+  claim(ok: unknown, msg: string) {
+    if (!ok) this.warn(`Narrated outcome not shown: ${msg}`);
+    return !!ok;
+  }
+
+  /** Waits for something to appear as the narration claims, or warns. */
+  async claimVisible(target: Locator, msg: string, timeout = 10_000) {
+    const ok = await target
+      .first()
+      .waitFor({ state: 'visible', timeout })
+      .then(() => true)
+      .catch(() => false);
+    return this.claim(ok, msg);
+  }
 
   warn(msg: string) {
     this.warnings.push(msg);
@@ -28,7 +68,8 @@ export class Director {
 
   /** Navigates and waits for the app to settle (no spinners, fonts loaded). */
   async goto(url: string, opts: { settle?: boolean; keepCard?: boolean } = {}) {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    const res = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    if (res && res.status() >= 400) this.warn(`${url} answered HTTP ${res.status()}`);
     await this.settle(opts.settle !== false);
     // A chapter card carries across navigation; unless asked to keep it, fade it out now.
     if (!opts.keepCard) await this.page.evaluate(() => (window as any).__wt?.hideChapter()).catch(() => {});

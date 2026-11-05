@@ -1,9 +1,8 @@
 import { test, expect, demoOntology, settle, signInAsPersona, uniq } from './fixtures';
 
 /**
- * Browse on main: search, open a term, deep-link to it, and report a problem with it.
- * PR #9 replaces the Browse views (class diagram, accessible tree) and brings browse.spec.ts;
- * these are the basics any version must keep.
+ * Browse basics: search, open a term, deep-link to it, and report a problem with it. The
+ * visual views (class tree, diagram, graph) are covered in browse.spec.ts.
  */
 
 test.describe('browse basics', () => {
@@ -12,7 +11,8 @@ test.describe('browse basics', () => {
     await signInAsPersona(page, 'Gareth Lewis');
     await page.goto(`/o/${demo.id}/browse`);
     await settle(page);
-    await page.getByRole('main').getByRole('button', { name: 'volunteer', exact: true }).click();
+    await page.getByRole('textbox', { name: /^Search terms/ }).fill('volunteer');
+    await page.getByRole('main').getByRole('button', { name: /^volunteer Class/ }).click();
     await expect(page).toHaveURL(/[?&]term=https%3A%2F%2Fw3id\.org%2Fodi%2Fvolunteering%23Volunteer/);
     await expect(page.getByRole('heading', { level: 2, name: 'volunteer' })).toBeVisible();
     await page.reload();
@@ -25,9 +25,9 @@ test.describe('browse basics', () => {
     await signInAsPersona(page, 'Gareth Lewis');
     await page.goto(`/o/${demo.id}/browse`);
     await settle(page);
-    await page.getByRole('textbox', { name: 'Search terms, definitions…' }).fill('skill');
+    await page.getByRole('textbox', { name: /^Search terms/ }).fill('skill');
     await expect(page.getByRole('main').getByRole('button', { name: /skill/i }).first()).toBeVisible();
-    await expect(page.getByRole('main').getByRole('button', { name: 'physical location', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('main').getByRole('button', { name: /^physical location\b/ })).toHaveCount(0);
   });
 
   test('a problem with a term is reported from its page and becomes a change request about it', async ({ page, request }) => {

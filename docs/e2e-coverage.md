@@ -22,6 +22,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
+| `/o/:id/validate` | Paste or upload data, pick the version, read the report (shapes and terms, cut short at 1,000), download JSON and Turtle reports, see how to call the API | ✅ | validate |
 | `/o/:id/query?view=check` | Check data: problems as sentences in the data's own prefixes, underlined in the editor with hover popups, click to jump; live syntax and misspelt-term underlines; Format; any member can check, signed out goes to sign in | ✅ | check-data, query |
 | `/o/:id/connect` | Connect an agent to this ontology | ✅ | connect |
 | `/o/:id/use-cases` | List, describe a use case (starts an interview), draft changes from a selection | ✅ | requirements, ia; 🔜 #15 (sharing modes, anonymised versions) |
@@ -29,7 +30,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/interview/:id` | Chat (typed, Enter/Shift+Enter, spoken), progress, layouts, finish | ✅ | requirements, ia |
 | `/o/:id/meetings` | Upload or paste a transcript, choose a file, invite the bot, run a simulated call | ✅ | meeting-transcripts; 🔜 #11 (invite by email, prompts in Meet chat) |
 | `/o/:id/meetings/:id` | Transcript, live stream, bot prompts, analysis, turn into use cases and a change request | ✅ | meeting-transcripts |
-| `/o/:id/changes` | Filter by scope and status, new change request, report a bug | ✅ | change-requests, ia |
+| `/o/:id/changes` | Filter by scope and status, new change request, report a bug, reports from the public page (editors and up) | ✅ | change-requests, ia, public-page |
 | `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure; 🔜 #17 (app checks, autopilot) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
 | `/o/:id/releases/:id` | Notes, included changes, publish; approval details | ✅ | governance-flow, ia, public-page |
@@ -41,8 +42,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | Status | Specs |
 | --- | --- | --- |
-| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI) |
-| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side |
+| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live, validate (POST validation at the IRI, SHACL profile) |
+| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side and `apps/server/test/validate.test.ts` for POST validation at a held version |
 | `/mcp` with OAuth (discovery, registration, consent, tools) | ✅ | oauth |
 | `/mcp` with a personal token: every tool, refusal without a token, revoked token | ✅ | agents |
 | WebID profile (`/people/:id`) | ✅ | account |
@@ -75,6 +76,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Auto-merge off → approved → manual merge | ✅ | governance-flow |
 | Withdraw | ✅ | change-requests |
 | Bug report (from Changes and from a term) | ✅ | change-requests, browse-basics |
+| Report a problem from the public page (anonymously, or by signing in as a member), held for editors to open as a bug report or dismiss | ✅ | public-page; server side (tokens, limits, claims, versions) in `apps/server/test/report.test.ts` |
 | Changes from agents (`propose_change`, `report_gap`) | ✅ | agents |
 | Changes from use cases and meetings | ✅ | requirements, meeting-transcripts |
 | Draft release → publish → current version, change requests released | ✅ | governance-flow |
@@ -93,13 +95,12 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | PR | Adds | Spec |
 | --- | --- | --- |
 | #9 | Class diagram, better graph, accessible tree, richer class pages | browse.spec.ts |
-| #11 | Meet bot by invite email, prompts in Meet chat | meetings.spec.ts |
+| #11 | Meet bot by invite email, prompts in Meet chat; calls still getting rid of a bot, and letting go of a booking Recall.ai never confirmed (stood-in server answers: no Recall.ai key in e2e; the bot state machine is in apps/server/test/meetBot.test.ts) | meetings.spec.ts |
 | #15 | Use case sharing modes, anonymised versions, per-release requirements | use-cases.spec.ts |
 | #17 | App checks against proposed changes, autopilot votes | app-checks.spec.ts |
 | #18 | SHACL compact syntax and JavaScript classes at the ontology URI | classes.spec.ts |
 | #19 | Development forks | forks.spec.ts |
 | #28 | Inline term editing in Browse | term-edit.spec.ts |
-| #32 | Data validator page, POST validation at the ontology IRI | validate.spec.ts |
 | #34 | OAuth client-auth downgrade refusal, unverified app label | oauth.spec.ts, connect.spec.ts |
 | #35 | Privacy redaction in everything published | public-page.spec.ts |
 | #37 | One place for agents, Appearance page, role-based views | roles.spec.ts |
