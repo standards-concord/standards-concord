@@ -102,18 +102,34 @@ export async function embeddedFonts(text: string, fonts: string[], family = 'Int
       return `@font-face{font-family:${family};font-weight:${f.weight};font-style:${f.style};unicode-range:${f.range};src:url(${src})}`;
     }),
   );
-  // For each face, a letter of the text that it draws (to check, later, that it has loaded).
+  // For each face, a capital letter only it draws (to check, later, that it has loaded).
   const probes = needed.flatMap((f) => {
-    const ranges = parseUnicodeRange(f.range);
-    const inFace = points.filter((c) => ranges.some(([a, b]) => c >= a && c <= b));
-    // A letter if there is one; otherwise whatever visible character (an accent, say) it draws.
-    const p = inFace.find((c) => /[\p{L}\p{N}]/u.test(String.fromCodePoint(c))) ?? inFace.find((c) => /[\p{M}\p{S}\p{P}]/u.test(String.fromCodePoint(c)));
-    return p === undefined ? [] : [{ family, weight: f.weight, style: f.style, text: String.fromCodePoint(p) }];
+    const others = needed.filter((o) => o !== f && o.weight === f.weight && o.style === f.style).flatMap((o) => parseUnicodeRange(o.range));
+    const ch = probeLetter(parseUnicodeRange(f.range), others);
+    return ch ? [{ family, weight: f.weight, style: f.style, text: ch }] : [];
   });
   return { css: rules.join(''), probes };
 }
 
 export type Probe = Awaited<ReturnType<typeof embeddedFonts>>['probes'][number];
+
+/** Bold, plain capitals, one in each of Inter's subsets (Latin, Latin Extended, Cyrillic and
+ * Cyrillic Extended, Greek and Greek Extended, Vietnamese). */
+const PROBE_LETTERS = ['H', 'Ł', 'Ж', 'Қ', 'Ω', 'Ἀ', 'Ạ'];
+
+/**
+ * A capital letter that a face with the given unicode-range draws and no other face does (where
+ * ranges overlap, another face could draw it): one of PROBE_LETTERS if any fits, else the first
+ * such capital in the range.
+ */
+export function probeLetter(ranges: [number, number][], others: [number, number][]) {
+  const fits = (c: number) => ranges.some(([a, b]) => c >= a && c <= b) && !others.some(([a, b]) => c >= a && c <= b);
+  const known = PROBE_LETTERS.find((l) => fits(l.codePointAt(0)!));
+  if (known) return known;
+  for (const [a, b] of ranges)
+    for (let c = a; c <= Math.min(b, a + 4096); c++) if (fits(c) && /\p{Lu}/u.test(String.fromCodePoint(c))) return String.fromCodePoint(c);
+  return undefined;
+}
 
 const frame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
@@ -162,13 +178,15 @@ const PROBE_ROW = 60;
  * blank, so once every letter has ink, every face the labels use has loaded.
  */
 function withProbes(clone: SVGSVGElement, probes: Probe[], width: number, height: number) {
-  const perRow = Math.max(1, Math.floor(width / PROBE_CELL));
+  // At most ten letters a row, however wide the drawing, so the strip stays small.
+  const perRow = Math.min(10, Math.max(1, probes.length));
   const rows = Math.ceil(probes.length / perRow);
+  const stripWidth = perRow * PROBE_CELL;
   const svg = clone.cloneNode(true) as SVGSVGElement;
   const ns = 'http://www.w3.org/2000/svg';
   const strip = document.createElementNS(ns, 'g');
   const band = document.createElementNS(ns, 'rect');
-  Object.entries({ x: -20, y: height - 20, width, height: rows * PROBE_ROW, fill: '#fff' }).forEach(([k, v]) => band.setAttribute(k, String(v)));
+  Object.entries({ x: -20, y: height - 20, width: stripWidth, height: rows * PROBE_ROW, fill: '#fff' }).forEach(([k, v]) => band.setAttribute(k, String(v)));
   strip.append(band);
   probes.forEach((p, i) => {
     const t = document.createElementNS(ns, 'text');
@@ -178,24 +196,31 @@ function withProbes(clone: SVGSVGElement, probes: Probe[], width: number, height
     strip.append(t);
   });
   svg.append(strip);
+  const full = Math.max(width, stripWidth);
+  svg.setAttribute('width', String(full));
   svg.setAttribute('height', String(height + rows * PROBE_ROW));
-  svg.setAttribute('viewBox', `-20 -20 ${width} ${height + rows * PROBE_ROW}`);
+  svg.setAttribute('viewBox', `-20 -20 ${full} ${height + rows * PROBE_ROW}`);
   return { markup: new XMLSerializer().serializeToString(svg), perRow, rows };
 }
 
-/** Whether every probe letter in the strip has been drawn. */
-function probesDrawn(img: HTMLImageElement, count: number, perRow: number, rows: number, width: number, height: number) {
+/**
+ * Whether every probe letter in the strip has been drawn: each cell needs opaque dark pixels.
+ * Throws if the browser can't give a canvas to check with.
+ */
+function probesDrawn(img: HTMLImageElement, count: number, perRow: number, rows: number, height: number) {
+  if (!count) return true;
   const c = document.createElement('canvas');
-  c.width = width;
+  c.width = perRow * PROBE_CELL;
   c.height = rows * PROBE_ROW;
   const ctx = c.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return true;
-  ctx.drawImage(img, 0, height, width, c.height, 0, 0, width, c.height);
+  if (!ctx) throw new Error('This browser could not create the image.');
+  ctx.drawImage(img, 0, height, c.width, c.height, 0, 0, c.width, c.height);
   for (let i = 0; i < count; i++) {
     const px = ctx.getImageData((i % perRow) * PROBE_CELL, Math.floor(i / perRow) * PROBE_ROW, PROBE_CELL, PROBE_ROW).data;
     let ink = 0;
-    for (let j = 0; j < px.length; j += 4) if (px[j] + px[j + 1] + px[j + 2] < 300) ink++;
-    if (ink < 20) return false;
+    for (let j = 0; j < px.length; j += 4) if (px[j + 3] > 200 && px[j] + px[j + 1] + px[j + 2] < 300) ink++;
+    // A 36 px capital has hundreds; a face still loading draws none.
+    if (ink < 50) return false;
   }
   return true;
 }
@@ -243,7 +268,7 @@ export async function downloadPng(live: SVGSVGElement | null, filename: string, 
     img.src = url;
     await img.decode();
     const until = performance.now() + 5000;
-    while (!probesDrawn(img, probes.length, perRow, rows, width, height)) {
+    while (!probesDrawn(img, probes.length, perRow, rows, height)) {
       if (performance.now() > until) throw new Error("The diagram's fonts didn't load in time. Try again, or save it as SVG.");
       await sleep(30);
     }

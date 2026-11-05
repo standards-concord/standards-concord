@@ -641,83 +641,97 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await page.getByRole('button', { name: 'Inherited attributes' }).click();
     await expect(d.locator('[data-node] tspan', { hasText: '↑' }).first()).toBeVisible();
     await expect(d.locator('[data-node] text', { hasText: /^\+ \d+ more/ }).first()).toHaveAttribute('font-style', 'italic');
-    // Zoomed well in, so most of the drawing is out of view.
-    for (let i = 0; i < 8; i++) await d.getByRole('button', { name: 'Zoom in' }).click();
-    const svgText = await exportSvg(page, d);
-    const download = page.waitForEvent('download');
-    await d.getByRole('button', { name: 'Download as PNG' }).click();
-    const png = readFileSync(await (await download).path()).toString('base64');
-    // Where each run of text is drawn, in the file's coordinates (with its 20 px margin).
-    const areas = await d.locator('svg[data-width]').evaluate((svg) => {
-      const m = (svg.querySelector('[data-viewport]') as SVGGElement).getScreenCTM()!.inverse();
-      return [...svg.querySelectorAll('text')]
-        .flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]))
-        .filter((t) => t.textContent?.trim())
-        .map((t) => {
-          const r = t.getBoundingClientRect();
-          const a = new DOMPoint(r.left, r.top).matrixTransform(m);
-          const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
-          return { text: t.textContent!.slice(0, 30), x: a.x + 20, y: a.y + 20, w: b.x - a.x, h: b.y - a.y };
-        });
-    });
-    expect(areas.length).toBeGreaterThan(15);
-    const viewer = await page.context().newPage();
-    const results = await viewer.evaluate(
-      async ({ svgText, png, areas }) => {
-        const load = async (src: string) => {
-          const img = new Image();
-          img.src = src;
-          await img.decode();
-          return img;
-        };
-        const out = await load(`data:image/png;base64,${png}`);
-        const svg = await load(URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml' })));
-        // The SVG image's embedded fonts load after it decodes; give them time.
-        await new Promise((r) => setTimeout(r, 1500));
-        const k = out.naturalWidth / svg.naturalWidth;
-        const pixels = (img: HTMLImageElement) => {
-          const c = document.createElement('canvas');
-          c.width = out.naturalWidth;
-          c.height = out.naturalHeight;
-          const ctx = c.getContext('2d')!;
-          ctx.drawImage(img, 0, 0, c.width, c.height);
-          return ctx.getImageData(0, 0, c.width, c.height).data;
-        };
-        const a = pixels(out);
-        const b = pixels(svg);
-        const width = out.naturalWidth;
-        // Each label on its own, so one missing or misplaced label can't hide in the total.
-        return areas.map((r) => {
-          const x0 = Math.max(0, Math.floor(r.x * k) - 2);
-          const y0 = Math.max(0, Math.floor(r.y * k) - 2);
-          const x1 = Math.min(width, Math.ceil((r.x + r.w) * k) + 2);
-          const y1 = Math.min(out.naturalHeight, Math.ceil((r.y + r.h) * k) + 2);
-          const bg = (y0 * width + x0) * 4;
-          let inkA = 0;
-          let inkB = 0;
-          let differ = 0;
-          for (let y = y0; y < y1; y++)
-            for (let x = x0; x < x1; x++) {
-              const i = (y * width + x) * 4;
-              const da = Math.abs(a[i] - b[bg]) + Math.abs(a[i + 1] - b[bg + 1]) + Math.abs(a[i + 2] - b[bg + 2]);
-              const db = Math.abs(b[i] - b[bg]) + Math.abs(b[i + 1] - b[bg + 1]) + Math.abs(b[i + 2] - b[bg + 2]);
-              if (da > 60) inkA++;
-              if (db > 60) inkB++;
-              if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 120) differ++;
-            }
-          return { text: r.text, inkA, inkB, ratio: differ / Math.max(1, inkA, inkB) };
-        });
-      },
-      { svgText, png, areas },
-    );
-    for (const r of results) {
-      expect(r.inkB, `${r.text} drawn in the SVG`).toBeGreaterThan(10);
-      expect(r.ratio, `${r.text}: ${JSON.stringify(r)}`).toBeLessThan(0.05);
+    // At the fitted view, zoomed in, and zoomed well in (most of the drawing out of view).
+    const compare = async (zoom: string) => {
+      const svgText = await exportSvg(page, d);
+      const download = page.waitForEvent('download');
+      await d.getByRole('button', { name: 'Download as PNG' }).click();
+      const png = readFileSync(await (await download).path()).toString('base64');
+      // Where each run of text is drawn, in the file's coordinates (with its 20 px margin).
+      const areas = await d.locator('svg[data-width]').evaluate((svg) => {
+        const m = (svg.querySelector('[data-viewport]') as SVGGElement).getScreenCTM()!.inverse();
+        return [...svg.querySelectorAll('text')]
+          .flatMap((t) => (t.querySelector('tspan') ? [...t.querySelectorAll('tspan')] : [t]))
+          .filter((t) => t.textContent?.trim())
+          .map((t) => {
+            const r = t.getBoundingClientRect();
+            const a = new DOMPoint(r.left, r.top).matrixTransform(m);
+            const b = new DOMPoint(r.right, r.bottom).matrixTransform(m);
+            return { text: t.textContent!.slice(0, 30), x: a.x + 20, y: a.y + 20, w: b.x - a.x, h: b.y - a.y };
+          });
+      });
+      expect(areas.length).toBeGreaterThan(15);
+      const viewer = await page.context().newPage();
+      const results = await viewer.evaluate(
+        async ({ svgText, png, areas }) => {
+          const load = async (src: string) => {
+            const img = new Image();
+            img.src = src;
+            await img.decode();
+            return img;
+          };
+          const out = await load(`data:image/png;base64,${png}`);
+          const svg = await load(URL.createObjectURL(new Blob([svgText], { type: 'image/svg+xml' })));
+          // The SVG image's embedded fonts load after it decodes; give them time.
+          await new Promise((r) => setTimeout(r, 1500));
+          const k = out.naturalWidth / svg.naturalWidth;
+          const pixels = (img: HTMLImageElement) => {
+            const c = document.createElement('canvas');
+            c.width = out.naturalWidth;
+            c.height = out.naturalHeight;
+            const ctx = c.getContext('2d')!;
+            ctx.drawImage(img, 0, 0, c.width, c.height);
+            return ctx.getImageData(0, 0, c.width, c.height).data;
+          };
+          const a = pixels(out);
+          const b = pixels(svg);
+          const width = out.naturalWidth;
+          // Each label on its own, so one missing or misplaced label can't hide in the total.
+          return areas.map((r) => {
+            const x0 = Math.max(0, Math.floor(r.x * k) - 2);
+            const y0 = Math.max(0, Math.floor(r.y * k) - 2);
+            const x1 = Math.min(width, Math.ceil((r.x + r.w) * k) + 2);
+            const y1 = Math.min(out.naturalHeight, Math.ceil((r.y + r.h) * k) + 2);
+            const bg = (y0 * width + x0) * 4;
+            let inkA = 0;
+            let inkB = 0;
+            let differ = 0;
+            for (let y = y0; y < y1; y++)
+              for (let x = x0; x < x1; x++) {
+                const i = (y * width + x) * 4;
+                const da = Math.abs(a[i] - b[bg]) + Math.abs(a[i + 1] - b[bg + 1]) + Math.abs(a[i + 2] - b[bg + 2]);
+                const db = Math.abs(b[i] - b[bg]) + Math.abs(b[i + 1] - b[bg + 1]) + Math.abs(b[i + 2] - b[bg + 2]);
+                if (da > 60) inkA++;
+                if (db > 60) inkB++;
+                if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > 120) differ++;
+              }
+            return { text: r.text, inkA, inkB, ratio: differ / Math.max(1, inkA, inkB) };
+          });
+        },
+        { svgText, png, areas },
+      );
+      for (const r of results) {
+        expect(r.inkB, `${zoom}: ${r.text} drawn in the SVG`).toBeGreaterThan(10);
+        expect(r.ratio, `${zoom}: ${r.text}: ${JSON.stringify(r)}`).toBeLessThan(0.05);
+      }
+      await viewer.close();
+    };
+    for (const steps of [0, 3, 5]) {
+      for (let i = 0; i < steps; i++) await d.getByRole('button', { name: 'Zoom in' }).click();
+      await compare(await d.getByLabel(/^Zoom \d+ percent$/).innerText());
     }
-    await viewer.close();
   });
 
   test('a PNG of a large diagram is saved within the size budget', async ({ page }) => {
+    // Every canvas the export makes, including the one that checks the fonts, stays in budget.
+    await page.addInitScript(() => {
+      const sizes: number[][] = ((window as unknown as { canvasSizes: number[][] }).canvasSizes = []);
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...a: Parameters<typeof getContext>) {
+        sizes.push([this.width, this.height]);
+        return getContext.apply(this, a);
+      } as typeof getContext;
+    });
     const classes = [];
     const attrs = [];
     for (let i = 0; i < 500; i++) {
@@ -736,15 +750,34 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     expect(Math.max(w, h)).toBeLessThanOrEqual(16_384);
     expect(w * h).toBeLessThanOrEqual(64_000_000);
     await expect(d.getByRole('alert')).toHaveCount(0);
+    for (const [cw, ch] of await page.evaluate(() => (window as unknown as { canvasSizes: number[][] }).canvasSizes)) {
+      expect(Math.max(cw, ch)).toBeLessThanOrEqual(16_384);
+      expect(cw * ch).toBeLessThanOrEqual(64_000_000);
+    }
+  });
+
+  test('labels with only accents or punctuation in a subset still save as PNG', async ({ page }) => {
+    // Decomposed accents (each subset's only characters here are combining marks), a lone full
+    // stop, and a combining grave on its own.
+    const labels = ['Cafe\u0301', 're\u0301sume\u0301', '.', 'a\u0300', '\u0300'];
+    await stub(page, labels.map((label, i) => ({ ...cls(`C${i}`), label })));
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(labels.length);
+    const download = page.waitForEvent('download');
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    expect(readFileSync(await (await download).path()).subarray(1, 4).toString()).toBe('PNG');
+    await expect(d.getByRole('alert')).toHaveCount(0);
   });
 
   test('a PNG too large for the browser is saved smaller, and one it cannot make says so', async ({ page }) => {
     // A browser that can't allocate canvases above a given size (as large canvases fail on
     // memory-constrained devices), and then one that can't encode any PNG at all.
     await page.addInitScript(() => {
-      const w = window as unknown as { canvasLimit?: number; failEncode?: boolean };
+      const w = window as unknown as { canvasLimit?: number; failEncode?: boolean; failNext?: number };
       const getContext = HTMLCanvasElement.prototype.getContext;
       HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, ...a: Parameters<typeof getContext>) {
+        if (w.failNext && w.failNext-- > 0) return null;
         return w.canvasLimit && this.width * this.height > w.canvasLimit ? null : getContext.apply(this, a);
       } as typeof getContext;
       const toBlob = HTMLCanvasElement.prototype.toBlob;
@@ -770,8 +803,17 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await d.getByRole('button', { name: 'Download as PNG' }).click();
     await expect(d.getByRole('alert')).toContainText("Couldn't save the diagram as PNG");
     expect(downloads).toBe(0);
+    // No canvas for the small check that the fonts have loaded (the first one the export asks
+    // for): it says so, rather than saving an image that may be missing its labels.
+    await page.evaluate(() => {
+      const w = window as unknown as { failEncode: boolean; failNext: number };
+      w.failEncode = false;
+      w.failNext = 1;
+    });
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    await expect(d.getByRole('alert')).toContainText("Couldn't save the diagram as PNG");
+    expect(downloads).toBe(0);
     // Trying again clears the message once it works.
-    await page.evaluate(() => ((window as unknown as { failEncode: boolean }).failEncode = false));
     const again = page.waitForEvent('download');
     await d.getByRole('button', { name: 'Download as PNG' }).click();
     await again;
