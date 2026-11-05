@@ -135,7 +135,11 @@ export async function transferOwnership(ontologyId: string, user: User, toUserId
   if (transfer === 'owner-decides' || user.isPlatformAdmin) {
     const keepGroup = p.governance.ownership.model === 'group';
     p.ownerIds = keepGroup ? [...new Set([...p.ownerIds, to.id])] : [to.id];
-    if (!keepGroup) await setRoles(p.id, user.id, (await rolesFor(p.id, user.id)).filter((x) => x !== 'owner'));
+    // A single owner: demote whoever holds ownership now, not just the caller. A platform admin can transfer
+    // without being an owner, and two such transfers at once would otherwise each leave their recipient an owner.
+    if (!keepGroup)
+      for (const m of await members(p.id))
+        if (m.userId !== to.id && m.roles.includes('owner')) await setRoles(p.id, m.userId, m.roles.filter((x) => x !== 'owner'));
     await setRoles(p.id, to.id, [...await rolesFor(p.id, to.id), 'owner']);
     await updateProject(p);
     return { status: 'transferred' as const };

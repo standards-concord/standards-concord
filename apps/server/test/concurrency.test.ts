@@ -67,6 +67,25 @@ describe('requests made at the same time', () => {
     expect(res.body).toEqual({ status: 'transferred' });
   });
 
+  // A platform admin passes the owner check without being an owner, and each transfer used to demote only the
+  // caller, so two admin transfers at once left the first recipient (and the real owner) still owners.
+  it('two ownership transfers by an admin at once leave exactly one owner', async () => {
+    const owner = await login('Owner Ode');
+    const admin = { ...(await login('Admin Ama')).user, isPlatformAdmin: true };
+    const a = await login('Recipient Abe');
+    const b = await login('Recipient Bea');
+    const id = await newOntology(owner.agent);
+    for (const m of [a, b]) expect((await owner.agent.put(`/api/ontologies/${id}/members/${m.user.id}`).send({ roles: ['member'] })).status).toBe(200);
+
+    const results = await Promise.all([a, b].map((m) => transferOwnership(id, admin, m.user.id)));
+    expect(results.map((r) => r.status)).toEqual(['transferred', 'transferred']);
+
+    const owners = (await members(id)).filter((m) => m.roles.includes('owner')).map((m) => m.userId);
+    expect(owners).toHaveLength(1);
+    expect([a.user.id, b.user.id]).toContain(owners[0]);
+    expect((await getProject(id)).ownerIds).toEqual(owners);
+  });
+
   // Each request counted the existing change requests and took the next number, and both could count before
   // either saved.
   it('change requests opened at once get different numbers', async () => {
