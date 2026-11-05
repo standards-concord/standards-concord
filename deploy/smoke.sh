@@ -1,7 +1,7 @@
 #!/bin/bash
 # End-to-end check of a live Concord deployment, through the same URL testers use.
 #   ./deploy/smoke.sh https://standards-concord.vercel.app
-# Signs in as a demo tester, then reads, validates (HermiT), queries, interviews,
+# Signs in as a demo tester, then reads, validates (sparq OWL reasoner), queries, interviews,
 # raises a change request and checks the meeting stream and MCP endpoint.
 set -uo pipefail
 base=${1:?Usage: smoke.sh <public url>}
@@ -26,7 +26,7 @@ id=$(printf %s "$body" | json 'v[0].id')
 echo "     ontology: $id"
 check 'ontology view' 200 "$base/api/ontologies/$id/view"
 check 'Turtle source' 200 "$base/api/ontologies/$id/source"
-check 'validation (HermiT)' 200 "$base/api/ontologies/$id/validation"
+check 'validation (OWL reasoner)' 200 "$base/api/ontologies/$id/validation"
 printf '     reasoner: %s\n' "$(printf %s "$body" | json 'JSON.stringify(v.reasoner ?? Object.keys(v))' 2>/dev/null)"
 post 'SPARQL' 200 "/api/ontologies/$id/sparql" '{"query":"SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"}'
 post 'start interview' 201 "/api/ontologies/$id/interviews" '{}'

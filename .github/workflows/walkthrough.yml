@@ -103,26 +103,6 @@ jobs:
         with:
           playwright: 'true'
           apt: ffmpeg fonts-inter fonts-jetbrains-mono
-      # HermiT, so the reasoner shows as passing in the video.
-      - if: steps.voice.outputs.ready == 'true'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - id: python
-        if: steps.voice.outputs.ready == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      # owlready2 (and LinkML for the tests) took most of a minute to install each run.
-      - if: steps.voice.outputs.ready == 'true'
-        uses: actions/cache@v4
-        with:
-          path: toolkit/.venv
-          key: toolkit-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('toolkit/requirements.txt', 'toolkit/setup.sh') }}
-      - if: steps.voice.outputs.ready == 'true'
-        run: ./toolkit/setup.sh
-
       # Approved narration is kept with each release, so the next release re-voices only
       # the paragraphs whose words changed, even after the Actions cache has expired.
       # Paid narration is saved even when the recording fails afterwards (a later run then
