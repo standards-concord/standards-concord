@@ -93,13 +93,32 @@ export class PreconditionFailed extends Error {}
 
 const localTag = (bytes: Buffer) => `"sha256-${createHash('sha256').update(bytes).digest('hex')}"`;
 
+/** The permission bits of a file, if it exists. */
+const modeOf = (file: string) => {
+  try {
+    return fs.statSync(file).mode & 0o777;
+  } catch {
+    return undefined;
+  }
+};
+
+/** The one temporary name used to replace `file`: a leftover from a crash is simply reused (overwritten), never piled up. */
+const tmpFor = (file: string) => path.join(path.dirname(file), `.${path.basename(file)}.concord-tmp`);
+
 /**
  * Write a private file only if `when` holds, the way a pod's PUT would:
  * `ifNoneMatch: '*'` creates it exclusively; `ifMatch` replaces it only if its
- * bytes still hash to that tag, through a temporary file renamed into place (so
- * a reader never sees half a file). This server is the only writer of these
- * files, and the check and rename run without yielding, so nothing can slip in
- * between them.
+ * bytes still hash to that tag, through a temporary file (with the original's
+ * permissions) renamed into place, so a reader never sees half a file.
+ *
+ * What this guarantees: no other write by this server can land between the
+ * check and the rename, because everything from the read to the rename runs
+ * synchronously on the one thread that does all of this server's writes to
+ * these files. What it doesn't: these local files are the development fallback
+ * for when there is no Solid server, and only Concord is meant to write them; a
+ * program outside Concord editing a file in the instant between the check and
+ * the rename can still lose that edit. (Pods get a real compare-and-swap through
+ * If-Match.)
  */
 function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -120,9 +139,16 @@ function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
     throw err;
   }
   if (localTag(current) !== when.ifMatch) throw new PreconditionFailed(`${file} changed`);
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, bytes, { flag: 'wx' });
-  fs.renameSync(tmp, file);
+  const tmp = tmpFor(file);
+  try {
+    fs.writeFileSync(tmp, bytes, { flag: 'w' });
+    const mode = modeOf(file);
+    if (mode !== undefined) fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
 }
 
 export const solid = {
@@ -232,10 +258,14 @@ export const solid = {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ifNoneMatch: '*' };
       throw err;
     }
+    const mode = modeOf(file);
     for (let n = 0; ; n++) {
       if (n >= 5) throw new Error(`could not find a free name to keep ${file}`);
       try {
-        fs.writeFileSync(path.join(dir, asideName(n)), bytes, { flag: 'wx' });
+        const aside = path.join(dir, asideName(n));
+        // Created exclusively, then given the original's permissions (a private file's copy stays private).
+        fs.writeFileSync(aside, bytes, { flag: 'wx', mode: 0o600 });
+        if (mode !== undefined) fs.chmodSync(aside, mode);
         return { ifMatch: localTag(bytes) };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;

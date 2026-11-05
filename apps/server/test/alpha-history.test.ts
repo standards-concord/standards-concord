@@ -90,7 +90,39 @@ describe('the first copy in a tester’s pod', () => {
     expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
     const dir = path.dirname(file);
     expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8'))).toEqual(['appeared meanwhile']);
-    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect(fs.readdirSync(dir).filter((f) => f.includes('tmp'))).toEqual([]);
+  });
+
+  // The copy and the replacement used to get default permissions, so a private (0600) file became world-readable.
+  it('keeps a private file’s permissions on its copy and on the record that replaces it', async () => {
+    const u = await tester('local-private');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'private', 'text/plain');
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    fs.chmodSync(file, 0o600);
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBeUndefined();
+    const dir = path.dirname(file);
+    const aside = fs.readdirSync(dir).find((f) => f.includes('.previous-'))!;
+    expect(fs.statSync(path.join(dir, aside)).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  // A failed rename (or a crash before it) used to leave a new temporary file behind on every try.
+  it('leaves no temporary file behind when replacing fails, and reuses one a crash left', async () => {
+    const u = await tester('local-tmp');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'theirs', 'text/plain');
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    const leftovers = () => fs.readdirSync(dir).filter((f) => f.includes('tmp'));
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw Object.assign(new Error('EXDEV: cross-device link not permitted'), { code: 'EXDEV' });
+    });
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(leftovers()).toEqual([]);
+    rename.mockRestore();
+    // As if the server had been killed between writing the temporary file and renaming it.
+    fs.writeFileSync(path.join(dir, '.testing.jsonld.concord-tmp'), 'half written');
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    expect(leftovers()).toEqual([]);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'testing.jsonld'), 'utf8')).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.1', '0.8.0']);
   });
 
   it('writes nothing while the pod can’t say whether something is there, and catches up later', async () => {
