@@ -13,6 +13,8 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
+import { proposeTermEdit } from '../services/termEdits.js';
+import { withTriageBudget } from '../services/budget.js';
 import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
 import { podReader } from '../solidOidc.js';
 import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
@@ -263,7 +265,7 @@ export function apiRouter(): Router {
     const p = await project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
+    res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: await ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, await ontologyStore.log(p, 30)) : [] });
   });
 
   // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.
@@ -309,10 +311,10 @@ export function apiRouter(): Router {
     // Signed-in viewers get the working draft's revision, so the in-browser reasoner check
     // compares with the server's report for the same revision (a commit can land while it loads).
     const working = !!req.user && (!ref || ref === 'working');
-    let revision = working ? ontologyStore.head(p) : undefined;
+    let revision = working ? await ontologyStore.head(p) : undefined;
     let graph = await readOntology(p, ref, req.user);
-    while (working && ontologyStore.head(p) !== revision) {
-      revision = ontologyStore.head(p);
+    while (working && (await ontologyStore.head(p)) !== revision) {
+      revision = await ontologyStore.head(p);
       graph = await readOntology(p, ref, req.user);
     }
     if (revision) res.set('X-Concord-Revision', revision);
@@ -729,6 +731,11 @@ export function apiRouter(): Router {
     res.status(201).json(await crOut(cr, req));
   });
 
+  r.post('/ontologies/:id/term-edits', async (req, res) => {
+    const cr = await proposeTermEdit(await project(req), requireUser(req), req.body ?? {});
+    res.status(201).json(await crOut(cr, req));
+  });
+
   const cr = async (req: Request) => await crs.getCR(String(req.params.id));
   r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
@@ -747,8 +754,8 @@ export function apiRouter(): Router {
   r.post('/change-requests/:id/withdraw', async (req, res) => res.json(await crOut(await crs.withdraw(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/revise', async (req, res) => res.json(await crOut(await crs.revise(await cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)), req)));
   r.post('/change-requests/:id/retriage', async (req, res) => {
-    requireUser(req);
-    res.json(await crOut(await crs.advance(await crs.triage(await cr(req))), req));
+    const user = requireUser(req);
+    res.json(await crOut(await withTriageBudget(user, async () => crs.advance(await crs.triage(await cr(req)))), req));
   });
 
   /* ------------------------------ releases --------------------------- */

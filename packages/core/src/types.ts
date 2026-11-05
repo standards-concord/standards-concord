@@ -184,6 +184,12 @@ export type ChangeOp =
       op: 'updateAnnotations';
       iri: IRI;
       set: TermAnnotations;
+      /**
+       * The values these fields had when the edit was proposed. Applying the op
+       * fails if any of them has changed since (e.g. another edit merged first),
+       * so a later merge never silently overwrites someone else's change.
+       */
+      expect?: Omit<TermAnnotations, 'mappings'>;
     }
   | {
       op: 'setSuperClasses';

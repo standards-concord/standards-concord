@@ -990,7 +990,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('a withdrawal waits while a merge is committing, and a merge waits for a withdrawal (finding 2)', async () => {
     const { id, agent } = await publicCase('Merge Race Author', 'Merge race case');
     const editor = await login('editor', 'Merge Race Editor');
-    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
+    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true }, ops: [addClass('Merge race thing')] });
     // Drafted from a use case, so an editor approves exactly what it publishes before it can merge.
     const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
     await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Merge Race Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
@@ -1388,17 +1388,19 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
   it('a release snapshot whose section lists its use cases wrongly is shown as not recorded, not as an error', async () => {
     // Snapshot validation used to skip a section's useCaseIds, which the page then calls .some() on: a 500.
     const project = (await findProject(demoId))!;
-    const snap = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'requirements.json');
-    const original = fs.readFileSync(snap, 'utf8');
+    // Release files are read from git, so the test writes them there.
+    const original = (await ontologyStore.readReleaseFile(project, '1.0.0', 'requirements.json'))!;
+    const setSnapshot = async (content: string) => await ontologyStore.updateReleaseFiles(project, { '1.0.0': { 'requirements.json': content } }, 'test: set requirements.json');
     try {
       const good = JSON.parse(original);
-      fs.writeFileSync(snap, JSON.stringify({ ...good, document: { title: 'T', version: '1.0.0', sections: [{ id: 's1', heading: 'H', markdown: 'M', useCaseIds: 'uc_1' }] } }));
+      const bad = JSON.stringify({ ...good, document: { title: 'T', version: '1.0.0', sections: [{ id: 's1', heading: 'H', markdown: 'M', useCaseIds: 'uc_1' }] } });
+      await setSnapshot(bad);
       const res = await request(app).get(`/def/${project.slug}/1.0.0`);
       expect(res.status).toBe(200);
       expect(res.text).toContain('were not recorded when it was published');
-      expect((await requirementsFor(project, JSON.parse(fs.readFileSync(snap, 'utf8')))).snapshotMissing).toBe(true);
+      expect((await requirementsFor(project, JSON.parse(bad))).snapshotMissing).toBe(true);
     } finally {
-      fs.writeFileSync(snap, original);
+      await setSnapshot(original);
     }
   });
 });

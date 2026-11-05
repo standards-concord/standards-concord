@@ -164,7 +164,7 @@ const target = async (req: Request, res: Response, next: NextFunction) => {
   const requested = req.params.version === undefined ? 'latest' : String(req.params.version);
   const latest = await latestVersion(project);
   const version =
-    requested === 'latest' ? (latest ?? 'draft') : requested === 'draft' || requested === 'working' ? 'draft' : ontologyStore.versions(project).includes(requested) ? requested : undefined;
+    requested === 'latest' ? (latest ?? 'draft') : requested === 'draft' || requested === 'working' ? 'draft' : (await ontologyStore.versions(project)).includes(requested) ? requested : undefined;
   if (!version) return fail(404, `${project.title} has no version “${requested}”.`);
   // A version waiting for a steward to approve what it publishes (holds.ts): answers name its terms, so none are given.
   if (await isHeld(project, version)) return void res.status(503).set('Retry-After', '86400').set('Connection', 'close').json({ error: HELD_MESSAGE });

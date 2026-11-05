@@ -396,6 +396,11 @@ export function ChangeRequestPage() {
               view meeting
             </Link>
           )}
+          {cr.origin.type === 'term-edit' && (
+            <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.termIri)}`}>
+              view term
+            </Link>
+          )}
         </div>
         {cr.withheld ? (
           <p role="note" className="mt-2 text-sm text-muted">
