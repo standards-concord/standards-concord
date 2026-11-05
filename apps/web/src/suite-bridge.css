@@ -1,0 +1,142 @@
+/*
+ * The Solid Suite's shared components (packages/suite-ui: the "Sign in with Solid"
+ * card and its dialog) read the suite's design tokens. Concord has its own looks
+ * (index.css), so instead of loading the suite's tokens.css and theme.css (which
+ * would restyle all of Concord), this maps each suite token onto the active look's
+ * token. The suite components then follow whichever look and colour scheme is on.
+ *
+ * Suite names that Concord doesn't use are defined on :root. Two suite names mean
+ * something else in Concord: --muted (a fill in the suite, a text colour here) and
+ * the --text-* sizes (the suite's scale is a touch smaller than Tailwind's). Those are
+ * redefined only on the suite's own overlay surfaces, which is where its components
+ * appear; Concord's pages never see them.
+ */
+:root {
+  --background: var(--bg);
+  --foreground: var(--fg);
+  --foreground-muted: var(--muted);
+  --foreground-subtle: var(--subtle);
+  --muted-foreground: var(--muted);
+  --surface-3: var(--surface-2);
+  --border: var(--line);
+  --border-strong: var(--line-strong);
+  --input: var(--control-line);
+  --ring: var(--focus);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-fg);
+  --primary-soft: var(--accent-soft);
+  --primary-soft-foreground: var(--fg);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--fg);
+  --card: var(--surface);
+  --card-foreground: var(--fg);
+  --popover: var(--surface);
+  --popover-foreground: var(--fg);
+  --destructive: var(--danger);
+  --destructive-foreground: var(--danger-fg);
+  --destructive-soft: var(--danger-soft);
+  --success: var(--ok);
+  --warning: var(--warn);
+  --warning-foreground: var(--fg);
+  --info: var(--accent);
+  --glyph: var(--muted);
+  --overlay: rgb(0 0 0 / 0.45);
+
+  --font-ui: var(--font-body);
+  --font-mono: var(--font-code);
+  --lh-xs: 1rem;
+  --lh-sm: 1.25rem;
+  --lh-base: 1.375rem;
+  --lh-md: 1.5rem;
+  --lh-lg: 1.625rem;
+  --lh-xl: 1.75rem;
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --radius-full: var(--r-pill);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 6%), 0 0 0 1px var(--line);
+  --shadow-2: 0 4px 12px rgb(0 0 0 / 10%), 0 0 0 1px var(--line);
+  --shadow-3: 0 16px 40px rgb(0 0 0 / 18%), 0 0 0 1px var(--line);
+  --duration-fast: 100ms;
+  --duration-base: 160ms;
+  --duration-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* The suite's comfortable density; touch screens get 44px targets. */
+  --control-h: 36px;
+  --control-h-sm: 28px;
+  --row-h: 44px;
+  --cell-px: 12px;
+}
+
+@media (pointer: coarse) {
+  :root {
+    --control-h: 44px;
+    --control-h-sm: 44px;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --overlay: rgb(0 0 0 / 0.6);
+    --shadow-1: 0 0 0 1px var(--line);
+    --shadow-2: 0 0 0 1px var(--line-strong);
+    --shadow-3: 0 0 0 1px var(--line-strong);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}
+
+[data-slot='dialog-content'],
+[data-slot='sheet-content'],
+[data-slot='tooltip-content'] {
+  --muted: var(--surface-2);
+  --accent: var(--primary-soft);
+  --text-xs: 0.75rem;
+  --text-xs--line-height: var(--lh-xs);
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: var(--lh-sm);
+  --text-base: 0.875rem;
+  --text-base--line-height: var(--lh-base);
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: var(--lh-lg);
+  --text-xl: 1.375rem;
+  --text-xl--line-height: var(--lh-xl);
+  --text-row: var(--text-base);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+}
+
+/* Concord shows the sign-in card inside the suite's dialog, so the dialog is its frame. */
+.concord-solid-dialog .su-sign-in-card {
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* A refused provider is reported above the card, clear of the dialog's Close button. */
+.concord-solid-dialog .concord-solid-error {
+  margin-top: var(--space-8);
+}

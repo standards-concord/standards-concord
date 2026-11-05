@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.19.0',
+    version: '0.20.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,
@@ -67,6 +67,24 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'agent'],
         to: '{o}/forks',
         ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
+      },
+    ],
+  },
+  {
+    version: '0.19.0',
+    date: '2026-11-05',
+    title: 'Sign in with Solid',
+    pr: 66,
+    changes: [
+      {
+        id: 'solid-provider-picker',
+        type: 'feat',
+        title: 'Sign in with Solid, choosing your provider',
+        detail:
+          'The login page now says “Sign in with Solid”, with the Solid logo. It opens the same sign-in window as the other Solid Suite apps: pick solidcommunity.net or another provider, enter your WebID, or type your provider’s address.',
+        roles: [],
+        to: '/login',
+        ask: 'Could you find your provider, and was it clear what to choose if you don’t have a pod yet?',
       },
     ],
   },
