@@ -86,7 +86,7 @@ export interface QueryChatGate {
   /** Call just before the first request to Claude: from then on the allowance is spent. */
   spend: () => void;
   /** Always call when the request ends: frees the person to ask again, and gives back an allowance that wasn't spent. */
-  done: () => void;
+  done: () => Promise<void>;
 }
 
 /**
@@ -97,7 +97,7 @@ export interface QueryChatGate {
  * transaction and given back if Claude is never called; otherwise the
  * offline helper answers.
  */
-export function admitQueryChat(userId: string, ontologyId: string, isMember: boolean): QueryChatGate {
+export async function admitQueryChat(userId: string, ontologyId: string, isMember: boolean): Promise<QueryChatGate> {
   if (busy.has(userId)) throw new HttpError(429, 'Still answering your previous question');
   const now = Date.now();
   const mine = (recent.get(userId) ?? []).filter((t) => now - t < QUERY_CHAT_LIMITS.windowMs);
@@ -106,21 +106,23 @@ export function admitQueryChat(userId: string, ontologyId: string, isMember: boo
   busy.add(userId);
   let reserved: string[] = [];
   let spent = false;
+  const parent = `query-assistant:${new Date(now).toISOString().slice(0, 10)}`;
   const gate = (useClaude: boolean, offlineReason?: QueryChatResponse['offlineReason']): QueryChatGate => ({
     useClaude,
     offlineReason,
     spend: () => void (spent = true),
-    done: () => {
+    done: async () => {
       busy.delete(userId);
-      if (reserved.length && !spent) releaseCounters(reserved);
+      const back = spent ? [] : reserved;
       reserved = [];
+      if (back.length) await releaseCounters(back, parent);
     },
   });
   try {
     if (config.llm.provider !== 'anthropic') return gate(false, 'unavailable');
     if (!isMember) return gate(false, 'not-member');
     const counters = allowanceCounters(new Date(now).toISOString().slice(0, 10), userId, ontologyId);
-    if (!reserveCounters(counters, `query-assistant:${new Date(now).toISOString().slice(0, 10)}`)) return gate(false, 'limit');
+    if (!(await reserveCounters(counters, parent))) return gate(false, 'limit');
     reserved = counters.map((c) => c.id);
     return gate(true);
   } catch (e) {

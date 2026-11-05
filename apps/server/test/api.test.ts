@@ -1,5 +1,3 @@
-import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
@@ -20,7 +18,7 @@ async function login(role: string, name = `Tester ${role}`): Promise<Agent> {
 let demoId: string;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
 });
@@ -198,6 +196,15 @@ describe('requirements', () => {
     expect(p.body.useCases.length).toBeGreaterThanOrEqual(1);
   });
 
+  // With the store async, each call's visibility check ran inside flatMap(), so the list came back as empty objects.
+  it('lists the calls a signed-in person can see', async () => {
+    const tester = await login('steward', 'Steward Lists');
+    const m = await tester.post(`/api/ontologies/${demoId}/meetings/upload`).send({ title: 'Listed call', transcript: 'Priya Shah: Hello.\nTom Okafor: Hi.' });
+    expect(m.status).toBe(201);
+    const listed = await tester.get(`/api/ontologies/${demoId}/meetings`);
+    expect(listed.body.find((x: { id?: string }) => x.id === m.body.id)).toMatchObject({ title: 'Listed call' });
+  });
+
   it('replays a simulated call with co-facilitator prompts', async () => {
     const tester = await login('steward', 'Steward Vic');
     const m = await tester.post(`/api/ontologies/${demoId}/meetings/simulate?delayMs=0`).send({ title: 'Sim' });
@@ -329,72 +336,64 @@ describe('query assistant (offline helper)', () => {
     const provider = config.llm.provider;
     try {
       (config.llm as { provider: string }).provider = 'anthropic';
-      const outsider = admitQueryChat('someone-else', demoId, false);
-      outsider.done();
+      const outsider = await admitQueryChat('someone-else', demoId, false);
+      await outsider.done();
       expect(outsider).toMatchObject({ useClaude: false, offlineReason: 'not-member' });
       // Today's allowances are per person, per ontology and for the deployment, and kept in the database.
       const limits = { ...config.llm.queryAssistant };
       Object.assign(config.llm.queryAssistant, { perUserPerDay: 2, perOntologyPerDay: 3, perDay: 100 });
-      const take = (user: string, ontology = 'ont-quota') => {
-        const g = admitQueryChat(user, ontology, true);
+      const take = async (user: string, ontology = 'ont-quota') => {
+        const g = await admitQueryChat(user, ontology, true);
         if (g.useClaude) g.spend();
-        g.done();
+        await g.done();
         return g.useClaude;
       };
-      expect([take('quota-a'), take('quota-a'), take('quota-a')]).toEqual([true, true, false]);
-      const over = admitQueryChat('quota-a', 'ont-quota', true);
-      over.done();
+      expect([await take('quota-a'), await take('quota-a'), await take('quota-a')]).toEqual([true, true, false]);
+      const over = await admitQueryChat('quota-a', 'ont-quota', true);
+      await over.done();
       expect(over.offlineReason).toBe('limit');
       // One person can't use up everyone's allowance, but the ontology's is shared.
-      expect([take('quota-b'), take('quota-c')]).toEqual([true, false]);
-      expect(take('quota-c', 'another-ontology')).toBe(true);
+      expect([await take('quota-b'), await take('quota-c')]).toEqual([true, false]);
+      expect(await take('quota-c', 'another-ontology')).toBe(true);
       const { get } = await import('../src/db.js');
       const day = new Date().toISOString().slice(0, 10);
-      expect(get<{ count: number }>('kv', `query-assistant:${day}:user:quota-a`)?.count).toBe(2);
-      expect(get<{ count: number }>('kv', `query-assistant:${day}:ontology:ont-quota`)?.count).toBe(3);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:user:quota-a`))?.count).toBe(2);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:ontology:ont-quota`))?.count).toBe(3);
       Object.assign(config.llm.queryAssistant, limits);
     } finally {
       (config.llm as { provider: string }).provider = provider;
     }
   });
 
-  it('reserves allowances atomically: two connections can’t both take the last one, and a failed write leaves nothing taken', async () => {
-    const { reserveCounters, get } = await import('../src/db.js');
-    const { config } = await import('../src/config.js');
+  it('reserves allowances atomically: a rival can’t take the last one in the gap, and a failed write leaves nothing taken', async () => {
+    const { reserveCounters, get, detached } = await import('../src/db.js');
     const ids = ['atomic:user', 'atomic:ontology', 'atomic:all'];
     const limits = ids.map((id) => ({ id, max: 1 }));
-    const count = (id: string) => get<{ count: number }>('kv', id)?.count ?? 0;
-    // A second connection tries to reserve in the gap between this one's read and its write
-    // (another backend process would do this). It used to get the same last allowance.
-    const second = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
-    second.exec('PRAGMA busy_timeout = 0');
-    let rival: boolean | 'blocked' | undefined;
-    const first = reserveCounters(limits, 'atomic', {
+    const count = async (id: string) => (await get<{ count: number }>('kv', id))?.count ?? 0;
+    // A rival (another request, or another backend process) tries to reserve in the gap between this one's read
+    // and its write. It used to get the same last allowance; now it waits its turn and finds none left.
+    let rival: Promise<boolean> | undefined;
+    const first = await reserveCounters(limits, 'atomic', {
       afterRead: () => {
-        try {
-          rival = reserveCounters(limits, 'atomic', { db: second });
-        } catch {
-          rival = 'blocked';
-        }
+        rival = detached(() => reserveCounters(limits, 'atomic'));
       },
     });
-    second.close();
     expect(first).toBe(true);
-    expect(rival).toBe('blocked');
-    expect(ids.map(count)).toEqual([1, 1, 1]);
-    expect(reserveCounters(limits, 'atomic')).toBe(false);
+    expect(await rival).toBe(false);
+    expect(await Promise.all(ids.map(count))).toEqual([1, 1, 1]);
+    expect(await reserveCounters(limits, 'atomic')).toBe(false);
 
     // A failure part-way through the writes rolls all of them back, and the next attempt works.
     const fresh = ['atomic2:user', 'atomic2:ontology', 'atomic2:all'].map((id) => ({ id, max: 1 }));
-    expect(() =>
+    await expect(
       reserveCounters(fresh, 'atomic', {
         beforeWrite: (i) => {
           if (i === 1) throw new Error('disk full');
         },
       }),
-    ).toThrow('disk full');
-    expect(fresh.map((k) => count(k.id))).toEqual([0, 0, 0]);
-    expect(reserveCounters(fresh, 'atomic')).toBe(true);
+    ).rejects.toThrow('disk full');
+    expect(await Promise.all(fresh.map((k) => count(k.id)))).toEqual([0, 0, 0]);
+    expect(await reserveCounters(fresh, 'atomic')).toBe(true);
   });
 
   it('a request that fails before Claude is called gives its allowance back and frees the person', async () => {
@@ -404,7 +403,7 @@ describe('query assistant (offline helper)', () => {
     const agent = await login('contributor', 'Refund through the API');
     const me = (await agent.get('/api/session')).body.user.id as string;
     const day = new Date().toISOString().slice(0, 10);
-    const used = () => get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`)?.count ?? 0;
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
     const provider = config.llm.provider;
     const spy = vi.spyOn(ontologyStore, 'at').mockRejectedValueOnce(new Error('the ontology failed to load'));
     try {
@@ -412,7 +411,7 @@ describe('query assistant (offline helper)', () => {
       const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me };
       const failed = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
       expect(failed.status).toBe(500);
-      expect(used()).toBe(0);
+      expect(await used()).toBe(0);
       // Not stuck as "still answering": the next request is admitted.
       (config.llm as { provider: string }).provider = provider;
       const next = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
@@ -426,35 +425,45 @@ describe('query assistant (offline helper)', () => {
   it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
     const { admitQueryChat } = await import('../src/services/queryChat.js');
     const { config } = await import('../src/config.js');
-    const { get, withoutWaiting } = await import('../src/db.js');
+    const { get, put, transaction, detached, withoutWaiting } = await import('../src/db.js');
     const day = new Date().toISOString().slice(0, 10);
-    const used = (id: string) => get<{ count: number }>('kv', `query-assistant:${day}:${id}`)?.count ?? 0;
+    const used = async (id: string) => (await get<{ count: number }>('kv', `query-assistant:${day}:${id}`))?.count ?? 0;
     const provider = config.llm.provider;
     const limits = { ...config.llm.queryAssistant };
     try {
       (config.llm as { provider: string }).provider = 'anthropic';
       Object.assign(config.llm.queryAssistant, { perUserPerDay: 1, perOntologyPerDay: 1, perDay: 1000 });
       // Something fails before the provider is called: the reservation is refunded, so the last allowance is still there.
-      const failed = admitQueryChat('refund-a', 'ont-refund', true);
+      const failed = await admitQueryChat('refund-a', 'ont-refund', true);
       expect(failed.useClaude).toBe(true);
-      expect(used('user:refund-a')).toBe(1);
-      failed.done();
-      expect([used('user:refund-a'), used('ontology:ont-refund')]).toEqual([0, 0]);
-      const second = admitQueryChat('refund-a', 'ont-refund', true);
+      expect(await used('user:refund-a')).toBe(1);
+      await failed.done();
+      expect([await used('user:refund-a'), await used('ontology:ont-refund')]).toEqual([0, 0]);
+      const second = await admitQueryChat('refund-a', 'ont-refund', true);
       expect(second.useClaude).toBe(true);
       second.spend();
-      second.done();
-      expect(used('user:refund-a')).toBe(1);
+      await second.done();
+      expect(await used('user:refund-a')).toBe(1);
 
-      // When admission throws (here: the database is locked by another connection), the person isn't left "busy".
-      const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
-      other.exec('BEGIN IMMEDIATE');
-      expect(() => withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).toThrow(/locked|busy/i);
-      other.exec('ROLLBACK');
-      other.close();
-      const after = admitQueryChat('refund-b', 'ont-refund-b', true);
+      // When admission throws (here: another writer holds the lock), the person isn't left "busy".
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let holding!: () => void;
+      const locked = new Promise<void>((r) => (holding = r));
+      const holder = detached(() =>
+        transaction(async () => {
+          await put('kv', { id: 'refund-lock' });
+          holding();
+          await held;
+        }),
+      );
+      await locked;
+      await expect(withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).rejects.toThrow(/busy/i);
+      release();
+      await holder;
+      const after = await admitQueryChat('refund-b', 'ont-refund-b', true);
       expect(after.useClaude).toBe(true);
-      after.done();
+      await after.done();
     } finally {
       (config.llm as { provider: string }).provider = provider;
       Object.assign(config.llm.queryAssistant, limits);

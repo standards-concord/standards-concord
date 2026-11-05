@@ -9,6 +9,13 @@ function bool(v: string | undefined, dflt: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 }
 
+/** A non-negative dollar amount from the environment; anything else (unset, blank, "abc", -1) gives the default. */
+function usd(v: string | undefined, dflt: number): number {
+  if (v === undefined || v.trim() === '') return dflt;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+}
+
 /** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly). */
 const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -48,6 +55,13 @@ export const config = {
       perUserPerDay: Number(process.env.QUERY_ASSISTANT_PER_USER_DAILY_LIMIT ?? 40),
       perOntologyPerDay: Number(process.env.QUERY_ASSISTANT_PER_ONTOLOGY_DAILY_LIMIT ?? 150),
     },
+    /**
+     * Most this deployment may spend on Claude per UTC day and per UTC month, in US dollars, estimated from each
+     * response's token usage (llm/budget.ts). Once a limit is reached, AI features use their offline fallbacks
+     * until the next day or month. 0 turns real AI calls off.
+     */
+    dailyBudgetUsd: usd(process.env.LLM_DAILY_BUDGET_USD, 5),
+    monthlyBudgetUsd: usd(process.env.LLM_MONTHLY_BUDGET_USD, 40),
   },
 
   google: {
