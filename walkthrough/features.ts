@@ -134,7 +134,22 @@ export const featureActions: Record<string, Action> = {
     await c.d.claimVisible(c.d.page.getByText('Same result as the server.'), 'the in-browser result agrees with the server');
   },
   async 'f-show-fair'(c) {
-    await c.d.highlight(c.d.page.getByRole('button', { name: /^FAIR checks/ }), 'the FAIR checks');
+    // The narration says you can see which checks pass and which couldn't be run, but the group
+    // lists only failing checks until "Show all" is chosen, so open both before it is spoken.
+    await c.d.clearHighlight();
+    const page = c.d.page;
+    const group = page.getByRole('button', { name: /^FAIR checks/ });
+    if ((await group.getAttribute('aria-expanded').catch(() => null)) !== 'true') await c.d.click(group, 'the FAIR checks', { settle: false });
+    if (!(await c.d.click(page.getByRole('button', { name: /^Show all \d+ checks$/ }), 'Show all checks', { settle: false }))) return;
+    const v = (await apiJson(c, `/api/ontologies/${c.ontology.id}/validation`)) as { fair?: { checks?: { title: string; passed: boolean; status?: string }[] } } | undefined;
+    const checks = v?.fair?.checks ?? [];
+    const passing = checks.find((k) => k.passed);
+    const skipped = checks.find((k) => k.status === 'not-checked');
+    if (passing) await c.d.claimVisible(page.locator('#health').getByText(passing.title, { exact: true }), `a passing FAIR check is listed (${passing.title})`);
+    else c.d.claim(false, 'some FAIR checks pass');
+    if (skipped) await c.d.claimVisible(page.locator('#health').getByText(/could not be run here/), 'the checks that could not be run are named');
+    else c.d.claim(false, 'some FAIR checks could not be run here');
+    await c.d.highlight(page.locator('#health').getByRole('list').filter({ hasText: passing?.title ?? 'FAIR' }).first(), 'the FAIR checks');
   },
 
   /* ------------------------------ browse ------------------------------ */
