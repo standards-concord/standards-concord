@@ -65,7 +65,12 @@ export async function upsertFederatedUser(p: { provider: AuthProvider; subject: 
     if (!existing && linkTo) {
       // Re-read: whether it is still a demo-only account is decided on the stored copy, not the caller's.
       const linked = await get<User>('users', linkTo.id);
-      if (linked && !linked.simulated && linked.providers.every((x) => x.provider === 'demo')) {
+      // Another sign-in from this browser attached an identity to it a moment ago. Making a new account here would
+      // have the caller move the demo account's testing record into it, closing the record the other identity now
+      // holds, so this sign-in is refused instead; signing in again starts from the account as it now is.
+      if (linked && !linked.simulated && !linked.providers.every((x) => x.provider === 'demo'))
+        throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
+      if (linked && !linked.simulated) {
         linked.providers.push({ provider: p.provider, subject: p.subject });
         linked.name = p.name;
         // Signing in with their own WebID makes it the account's WebID.

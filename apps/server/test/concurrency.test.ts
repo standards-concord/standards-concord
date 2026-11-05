@@ -140,7 +140,7 @@ describe('requests made at the same time', () => {
 
   // Signing in looked the identity up and attached it in separate steps (r9 review): two sign-ins at once could
   // attach one GitHub identity to two demo accounts, or two identities to one account with one overwriting the other.
-  it('attaches an identity to one account, and keeps both identities attached to one account', async () => {
+  it('attaches an identity to one account, and refuses a second identity linking the same demo account at once', async () => {
     const demo = (n: string) => createUser({ name: `Demo ${n}`, provider: 'demo', subject: `race-demo-${n}` });
     const [a, b] = await Promise.all([demo('a'), demo('b')]);
     const id = { provider: 'github' as const, subject: 'race-gh-1', name: 'Racer' };
@@ -148,12 +148,24 @@ describe('requests made at the same time', () => {
     const holders = [await getUser(a.id), await getUser(b.id)].filter((u) => u!.providers.some((p) => p.subject === 'race-gh-1'));
     expect(holders).toHaveLength(1);
 
+    // Two identities at once for one demo account: one is attached to it, and the other is refused rather than given
+    // a new account. A new account used to make the sign-in move the demo account's testing record into it, closing
+    // the record the first identity now holds (r10 review).
     const c = await demo('c');
-    const [one, two] = await Promise.all([
+    const results = await Promise.allSettled([
       upsertFederatedUser({ provider: 'github', subject: 'race-gh-2', name: 'Racer two' }, c),
       upsertFederatedUser({ provider: 'google', subject: 'race-go-2', name: 'Racer two' }, c),
     ]);
-    expect(await findByProvider('github', 'race-gh-2')).toMatchObject({ id: one.id });
-    expect(await findByProvider('google', 'race-go-2')).toMatchObject({ id: two.id });
+    const done = results.filter((r): r is PromiseFulfilledResult<User> => r.status === 'fulfilled');
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(done.map((r) => r.value.id)).toEqual([c.id]);
+    expect(refused.map((r) => (r.reason as { status?: number }).status)).toEqual([409]);
+    const attached = (await getUser(c.id))!.providers.filter((p) => p.provider !== 'demo');
+    expect(attached).toHaveLength(1);
+    // Signing in again with the refused identity, now that the account isn't a demo one, makes its own account.
+    const again = attached[0].provider === 'github' ? { provider: 'google' as const, subject: 'race-go-2' } : { provider: 'github' as const, subject: 'race-gh-2' };
+    const fresh = await upsertFederatedUser({ ...again, name: 'Racer two' });
+    expect(fresh.id).not.toBe(c.id);
+    expect(await findByProvider(again.provider, again.subject)).toMatchObject({ id: fresh.id });
   });
 });
