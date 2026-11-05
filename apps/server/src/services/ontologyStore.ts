@@ -22,7 +22,7 @@ import { get, HttpError, list, put, remove, transaction } from '../db.js';
  *
  * The database is the only source of truth; git is a projection of it.
  * Every new commit is pinned by a ref of its writer's own
- * (refs/concord/commits/<sha>-<time>-<writer>) before the pointer can name it,
+ * (refs/concord/commits/<sha>-t<time>-<writer>) before the pointer can name it,
  * so git gc never removes it. The draft itself is held by refs/concord/draft,
  * which only ever moves forward to the draft the database names; a pin is
  * dropped once that ref holds its commit, by its writer if its advance is
@@ -66,6 +66,25 @@ const DRAFT_REF = 'refs/concord/draft';
 /** A pin this old whose commit never became the draft belongs to a writer that died or stalled; it is reclaimed. */
 export const PIN_GRACE_MS = 10 * 60 * 1000;
 const revokedKey = (writer: string) => `pin-revoked:${writer}`;
+/** When a pin from an earlier version (with no writer or time in its name) was first seen. */
+const seenKey = (project: Pick<OntologyProject, 'slug'>, ref: string) => `pin-seen:${project.slug}:${ref.slice(PIN.length)}`;
+/** Pins are looked at by ordinary reads at most this often per repository (a throttle only: correctness never depends on it). */
+const PRUNE_EVERY_MS = 60_000;
+const lastPruned = new Map<string, number>();
+
+/** Whether any pins exist, read from the files (no git process). */
+function hasPins(dir: string): boolean {
+  try {
+    if (fs.readdirSync(path.join(dir, '.git', PIN)).length) return true;
+  } catch {
+    /* none loose */
+  }
+  try {
+    return fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8').includes(` ${PIN}`);
+  } catch {
+    return false;
+  }
+}
 const syncKey = (project: Pick<OntologyProject, 'slug'>) => `git-sync:${project.slug}`;
 /** A sync that hasn't shown it is alive for this long is presumed dead, and its lease can be taken over. */
 export const SYNC_LEASE_MS = 30_000;
@@ -228,7 +247,7 @@ export const ontologyStore = {
     // A new commit is pinned (by a ref only this writer uses) before the database can point at it, and
     // unpinned again if it doesn't. The draft (commit === base) is already held.
     const writer = randomUUID();
-    const pin = commit === base ? undefined : `${PIN}${commit}-${Date.now()}-${writer}`;
+    const pin = commit === base ? undefined : `${PIN}${commit}-t${Date.now()}-${writer}`;
     if (pin) git(dir, ['update-ref', pin, commit]);
     try {
       transaction(() => {
@@ -271,7 +290,17 @@ export const ontologyStore = {
       /* never synced */
     }
     const tags = releaseTags(project);
-    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`)) && checkedOut(dir, head)) return;
+    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`)) && checkedOut(dir, head)) {
+      // In line; but pins of writers that died are only reclaimed once they are old, so look at them now and then.
+      if (Date.now() - (lastPruned.get(project.slug) ?? 0) >= PRUNE_EVERY_MS && hasPins(dir)) {
+        try {
+          this.prunePins(project);
+        } catch (err) {
+          console.warn(`[git] ${project.slug}: pin cleanup failed, will retry: ${(err as Error).message}`);
+        }
+      }
+      return;
+    }
     try {
       this.sync(project);
     } catch (err) {
@@ -336,6 +365,7 @@ export const ontologyStore = {
    */
   prunePins(project: Pick<OntologyProject, 'slug'>): void {
     const dir = repoDir(project);
+    lastPruned.set(project.slug, Date.now());
     const has = (ancestor: string, of: string) => {
       try {
         git(dir, ['merge-base', '--is-ancestor', ancestor, of]);
@@ -359,10 +389,19 @@ export const ontologyStore = {
     const held = new Set(git(dir, ['for-each-ref', `--merged=${draft}`, '--format=%(refname)', PIN]).split('\n').filter(Boolean));
     for (const line of git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', PIN]).split('\n').filter(Boolean)) {
       const [sha, ref] = line.split(' ');
+      // <sha>-t<time>-<writer>. A pin from an earlier version has neither, and its writer (which may still be
+      // running, e.g. during a deploy) doesn't check for reclaims: its grace period runs from when it was first seen.
+      const [, at, writer] = /^[0-9a-f]+-t(\d+)-(.+)$/.exec(ref.slice(PIN.length)) ?? [];
       if (!held.has(ref)) {
-        // <sha>-<time>-<writer>; pins from before had no time, and no writer still running can own one.
-        const [, at, writer] = /^[0-9a-f]+-(\d+)-(.+)$/.exec(ref.slice(PIN.length)) ?? [];
-        if (at && Date.now() - Number(at) < PIN_GRACE_MS) continue;
+        const since = writer
+          ? Number(at)
+          : transaction(() => {
+              const seen = get<{ at: number }>('kv', seenKey(project, ref));
+              if (seen) return seen.at;
+              put('kv', { id: seenKey(project, ref), at: Date.now() });
+              return Date.now();
+            });
+        if (Date.now() - since < PIN_GRACE_MS) continue;
         const reclaimed = transaction(() => {
           const now = this.head(project);
           if (now === sha || has(sha, now)) return false;
@@ -372,6 +411,7 @@ export const ontologyStore = {
         if (!reclaimed) continue;
       }
       git(dir, ['update-ref', '-d', ref, sha]);
+      if (!writer) remove('kv', seenKey(project, ref));
     }
   },
 

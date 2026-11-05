@@ -1028,29 +1028,53 @@ describe('inline term edits', () => {
     rawGit('reflog', 'expire', '--expire=now', '--all');
     rawGit('gc', '-q', '--prune=now');
   };
-  /** A writer in another process committing a draft with one more triple; with afterPin it is killed, or stopped until SIGCONT, right after pinning its commit. */
-  const writerProcess = async (label: string, afterPin?: 'kill' | 'stop') => {
+  /**
+   * A writer in another process (see writerProcess.ts): `advance <label>` commits a draft with one more
+   * triple, `prune` cleans up pins. With `at`, it is killed, or paused until resume(), at that point.
+   * Always stop() it in a finally block.
+   */
+  const writerProcess = async (args: string[], opts: { at?: 'pin' | 'draft-read'; then?: 'kill' | 'pause' } = {}) => {
     const { spawn } = await import('node:child_process');
     const { fileURLToPath } = await import('node:url');
     const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
     const { project } = await repo();
-    const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', fileURLToPath(new URL('./writerProcess.ts', import.meta.url)), 'advance', label], {
+    const resumeFile = path.join(os.tmpdir(), `concord-resume-${Math.random().toString(36).slice(2)}`);
+    const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', fileURLToPath(new URL('./writerProcess.ts', import.meta.url)), ...args], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
-      env: { ...process.env, WRITER_AFTER_PIN: afterPin ?? '', WRITER_SLUG: project.slug },
+      env: { ...process.env, WRITER_AT: opts.at ?? '', WRITER_DO: opts.then ?? '', WRITER_RESUME: resumeFile, WRITER_SLUG: project.slug },
     });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
-    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-    const stopped = async () => {
-      for (let i = 0; i < 1200; i++) {
-        const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
-        if (stat.slice(stat.lastIndexOf(')') + 2).startsWith('T')) return;
-        await sleep(50);
-      }
-      throw new Error(`writer never stopped: ${out}`);
+    let done = false;
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+      child.on('exit', (code, signal) => {
+        done = true;
+        resolve({ code, signal });
+      }),
+    );
+    return {
+      exited,
+      output: () => out.replace(/^paused\n/, '').trim(),
+      /** Resolves once it is waiting at its pause point. */
+      paused: async () => {
+        for (let i = 0; i < 1200 && !out.startsWith('paused\n'); i++) {
+          if (done) throw new Error(`writer exited instead of pausing: ${out}`);
+          await sleep(50);
+        }
+        if (!out.startsWith('paused\n')) throw new Error(`writer never paused: ${out}`);
+      },
+      resume: async () => {
+        fs.writeFileSync(resumeFile, '');
+        return exited;
+      },
+      stop: () => {
+        if (!done) child.kill('SIGKILL');
+        fs.rmSync(resumeFile, { force: true });
+      },
     };
-    return { child, exited, stopped, output: () => out.trim() };
   };
 
   it('never lets a copy read before a merge be saved over it', async () => {
@@ -1423,70 +1447,157 @@ describe('inline term edits', () => {
   it('keeps a slow writer’s pin, and reclaims a stalled one’s only by refusing its commit', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
-    // Slow: stopped right after pinning; meanwhile another process syncs and collects garbage, within the grace period.
-    const slow = await writerProcess('slow', 'stop');
-    await slow.stopped();
-    const [slowCommit] = pinnedCommits(rawGit);
-    ontologyStore.sync(project);
-    collectGarbage(rawGit);
-    expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
-    slow.child.kill('SIGCONT');
-    await slow.exited;
-    expect(slow.output()).toBe(`committed ${slowCommit}`);
-    expect(ontologyStore.head(project)).toBe(slowCommit);
-    collectGarbage(rawGit);
-    expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+    // Slow: paused right after pinning; meanwhile another process syncs and collects garbage, within the grace period.
+    const slow = await writerProcess(['advance', 'slow'], { at: 'pin', then: 'pause' });
+    try {
+      await slow.paused();
+      const [slowCommit] = pinnedCommits(rawGit);
+      ontologyStore.sync(project);
+      collectGarbage(rawGit);
+      expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+      await slow.resume();
+      expect(slow.output()).toBe(`committed ${slowCommit}`);
+      expect(ontologyStore.head(project)).toBe(slowCommit);
+      collectGarbage(rawGit);
+      expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+    } finally {
+      slow.stop();
+    }
 
     // Stalled past the grace period: its pin is reclaimed, and when it resumes its commit is refused, so nothing points at a lost commit.
-    const stalled = await writerProcess('stalled', 'stop');
-    await stalled.stopped();
-    const [stalledCommit] = pinnedCommits(rawGit);
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+    const before = ontologyStore.head(project);
+    const stalled = await writerProcess(['advance', 'stalled'], { at: 'pin', then: 'pause' });
     try {
-      ontologyStore.sync(project);
+      await stalled.paused();
+      const [stalledCommit] = pinnedCommits(rawGit);
+      const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+      try {
+        ontologyStore.prunePins(project);
+      } finally {
+        now.mockRestore();
+      }
+      collectGarbage(rawGit);
+      expect(() => rawGit('cat-file', '-t', stalledCommit)).toThrow();
+      await stalled.resume();
+      expect(stalled.output()).toBe('refused 409');
+      expect(ontologyStore.head(project)).toBe(before);
+      expect(pinnedCommits(rawGit)).toEqual([]);
     } finally {
-      now.mockRestore();
+      stalled.stop();
     }
-    collectGarbage(rawGit);
-    expect(() => rawGit('cat-file', '-t', stalledCommit)).toThrow();
-    stalled.child.kill('SIGCONT');
-    await stalled.exited;
-    expect(stalled.output()).toBe('refused 409');
-    expect(ontologyStore.head(project)).toBe(slowCommit);
-    expect(pinnedCommits(rawGit)).toEqual([]);
   });
 
-  it('reclaims the pins of writers that died, and keeps no pins for a draft that did not change', async () => {
+  it('reclaims the pins of writers that died through ordinary reads, and makes no pins for a draft that did not change', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
     const { OntologyGraph } = await import('@concord/core');
-    for (const label of ['crashed-1', 'crashed-2', 'crashed-3']) expect((await (await writerProcess(label, 'kill')).exited).signal).toBe('SIGKILL');
+    for (const label of ['crashed-1', 'crashed-2', 'crashed-3']) {
+      const crashed = await writerProcess(['advance', label], { at: 'pin', then: 'kill' });
+      try {
+        expect((await crashed.exited).signal).toBe('SIGKILL');
+      } finally {
+        crashed.stop();
+      }
+    }
     const abandoned = pinnedCommits(rawGit);
     expect(abandoned).toHaveLength(3);
-    // Within the grace period they are left alone (their writers might only be slow), even as others commit.
+    // Within the grace period they are left alone (their writers might only be slow), even as others commit and read.
     const graph = await OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:after-crash> <http://www.w3.org/2000/01/rdf-schema#label> "after crash" .\n`);
     await ontologyStore.commitWorking(project, graph, 'after the crashes', { name: 'Survivor' });
+    await ontologyStore.working(project);
     expect(pinnedCommits(rawGit).sort()).toEqual([...abandoned].sort());
-    // Past it, the next sync reclaims them, and their commits can be collected.
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+    // Past it, ordinary reads (with git already in line, so no sync runs) reclaim them, and their commits can be collected.
+    const sync = vi.spyOn(ontologyStore, 'sync');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 365 * 24 * 3600_000);
     try {
-      ontologyStore.sync(project);
+      ontologyStore.log(project);
+      await ontologyStore.working(project);
     } finally {
       now.mockRestore();
+      sync.mockRestore();
     }
+    expect(sync).not.toHaveBeenCalled();
     collectGarbage(rawGit);
     for (const sha of abandoned) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
     const head = ontologyStore.head(project);
     onlyDraftPins(rawGit, head);
 
-    // Advances and commits that change nothing add no pins, and neither does an ordinary merge, once synced.
-    for (let i = 0; i < 20; i++) ontologyStore.advanceTo(project, head, head);
-    for (let i = 0; i < 3; i++) expect(await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'nothing new', { name: 'Same' })).toBe(head);
-    onlyDraftPins(rawGit, head);
+    // Advances and commits that change nothing make no pins at all (looked at with syncing, and so cleanup, off).
+    const off = vi.spyOn(ontologyStore, 'sync').mockImplementation(() => undefined);
+    try {
+      for (let i = 0; i < 20; i++) ontologyStore.advanceTo(project, head, head);
+      for (let i = 0; i < 3; i++) expect(await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'nothing new', { name: 'Same' })).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+    } finally {
+      off.mockRestore();
+    }
+    // And an ordinary merge leaves none once synced.
     const id = await approvedEdit('Contributor Pinless', `${VOL}Cause`, { comment: 'Merged without a pin left behind.' });
     expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Pinless')))).status).toBe('merged');
     expect(ontologyStore.head(project)).not.toBe(head);
     onlyDraftPins(rawGit, ontologyStore.head(project));
+  });
+
+  it('gives pins from an earlier version a grace period, since their writers may still be running during a deploy', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
+    const head = ontologyStore.head(project);
+    // Commits only pins hold, named as the two earlier versions named them (<time>-<sha> and <sha>-<writer>).
+    const tree = rawGit('rev-parse', `${head}^{tree}`);
+    const oldStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by an earlier version');
+    const newerStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by the previous version');
+    rawGit('update-ref', `refs/concord/commits/${Date.now() - 3600_000}-${oldStyle}`, oldStyle);
+    rawGit('update-ref', `refs/concord/commits/${newerStyle}-12345678-1234-4123-8123-123456789abc`, newerStyle);
+    const now = vi.spyOn(Date, 'now');
+    try {
+      // First seen now: kept, however old their names look.
+      ontologyStore.prunePins(project);
+      collectGarbage(rawGit);
+      expect(pinnedCommits(rawGit).sort()).toEqual([oldStyle, newerStyle].sort());
+      now.mockReturnValue(Date.now() + PIN_GRACE_MS - 60_000);
+      ontologyStore.prunePins(project);
+      expect(pinnedCommits(rawGit)).toHaveLength(2);
+      // A grace period after they were first seen, they are reclaimed.
+      now.mockReturnValue(Date.now() + 2 * PIN_GRACE_MS);
+      ontologyStore.prunePins(project);
+    } finally {
+      now.mockRestore();
+    }
+    expect(pinnedCommits(rawGit)).toEqual([]);
+    collectGarbage(rawGit);
+    for (const sha of [oldStyle, newerStyle]) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
+  });
+
+  it('never moves the draft ref back when two cleanups race', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const { OntologyGraph } = await import('@concord/core');
+    const text = ontologyStore.readWorkingText(project);
+    const triple = (label: string) => `\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`;
+    const first = await OntologyGraph.fromTurtle(text + triple('race-1'));
+    const second = await OntologyGraph.fromTurtle(text + triple('race-1') + triple('race-2'));
+    // A draft recorded while git lags behind it.
+    const lagging = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => undefined);
+    let h1: string;
+    try {
+      h1 = await ontologyStore.commitWorking(project, first, 'first', { name: 'Racer' });
+    } finally {
+      lagging.mockRestore();
+    }
+    const behind = rawGit('rev-parse', 'refs/concord/draft');
+    expect(behind).not.toBe(h1);
+    // A cleanup in another process reads the draft ref (still behind), then pauses before moving it to h1...
+    const cleanup = await writerProcess(['prune'], { at: 'draft-read', then: 'pause' });
+    try {
+      await cleanup.paused();
+      // ...while a newer draft is committed and git brought fully in line.
+      const h2 = await ontologyStore.commitWorking(project, second, 'second', { name: 'Racer' });
+      expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(h2);
+      await cleanup.resume();
+      expect(cleanup.output()).toMatch(/^refused/);
+      expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(h2);
+    } finally {
+      cleanup.stop();
+    }
   });
 });
