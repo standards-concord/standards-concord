@@ -445,6 +445,16 @@ describe('release approval provenance', () => {
     };
     await put('releases', r, demoId);
     const before = await releaseGovernance(r);
+    // Between the first check and the last one (while the files are built), the policy changes once: the last
+    // check sees that, and it's what is recorded.
+    const working = ontologyStore.working.bind(ontologyStore);
+    const between = vi.spyOn(ontologyStore, 'working').mockImplementationOnce(async (p) => {
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 2;
+      changed.governance.releases.patch.reviewPeriodDays = 33;
+      await updateProject(changed);
+      return working(p);
+    });
     const write = ontologyStore.writeRelease.bind(ontologyStore);
     const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async (...args: Parameters<typeof write>) => {
       const changed = await getProject(demoId);
@@ -455,11 +465,13 @@ describe('release approval provenance', () => {
     });
     try {
       const published = await publishRelease(r, undefined);
+      expect(between).toHaveBeenCalled();
       expect(spy).toHaveBeenCalled();
-      expect(published.approval?.requiredApprovals).toBe(before.requiredApprovals);
-      expect(published.approval?.rule.reviewPeriodDays).toBe(before.rule.reviewPeriodDays);
+      expect(published.approval?.requiredApprovals).toBe(before.requiredApprovals + 2);
+      expect(published.approval?.rule.reviewPeriodDays).toBe(33);
       expect((await releaseApproval(published)).approvalSource).toBe('recorded');
     } finally {
+      between.mockRestore();
       spy.mockRestore();
       const restored = await getProject(demoId);
       restored.governance = original;
