@@ -53,9 +53,9 @@ test.describe('Connect page', () => {
     await expect(page.getByTestId('mcp-url')).toBeHidden();
     await page.getByText('Advanced setup').click();
     await expect(page.getByTestId('mcp-url')).toHaveText(mcp);
-    await expect(page.getByTestId('plugin-install')).toContainText('/plugin marketplace add jeswr/standards-concord');
+    await expect(page.getByTestId('plugin-install')).toContainText('/plugin marketplace add standards-concord/standards-concord');
     await expect(page.getByTestId('plugin-install')).toContainText('/plugin install concord@concord');
-    await expect(page.getByTestId('plugin-install')).toContainText('codex plugin marketplace add jeswr/standards-concord');
+    await expect(page.getByTestId('plugin-install')).toContainText('codex plugin marketplace add standards-concord/standards-concord');
     await expect(page.getByTestId('plugin-update-note')).toContainText('/plugin marketplace update concord');
     await expect(page.getByTestId('plugin-update-note')).toContainText('sign in again');
     await expect(page.getByTestId('advanced-setup').getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#tokens');
