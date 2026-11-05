@@ -53,7 +53,10 @@ test.describe('Query tab', () => {
     const r = await wasm;
     expect(r.status()).toBe(200);
     expect(r.headers()['content-type']).toContain('application/wasm');
-    await expect(page.getByTestId('sparq-ready')).toHaveText(/[\d,]+ triples loaded in \d+ ms/, { timeout: 30_000 });
+    await expect(page.getByTestId('sparq-ready')).toHaveText('Ontology loaded', { timeout: 30_000 });
+    await expect(page.getByTestId('sparq-ready')).toHaveAttribute('data-triples', /^[1-9]\d*$/);
+    // How many triples loaded and how fast is under-the-hood detail, so it isn't printed on the page.
+    await expect(page.getByText(/triples loaded in \d+ ms|sparq engine/)).toHaveCount(0);
     await expect(page.getByText(/magic word|WebAssembly.instantiate/)).toHaveCount(0);
   });
 

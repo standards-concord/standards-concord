@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.32.0',
+    date: '2026-11-05',
+    title: 'Less to read on every page',
+    changes: [
+      {
+        id: 'simpler-wording',
+        type: 'feat',
+        title: 'Less text, and only what needs your attention',
+        detail:
+          'FAIR checks list only the failing ones until you choose Show all. Engine names and timings (which reasoner ran, how many milliseconds) are tucked under Reasoner details, and several page introductions are shorter.',
+        roles: [],
+        to: '{o}#health',
+        ask: 'Is there anything on the page you now miss, or anything else that still feels like too much to read?',
+      },
+    ],
+  },
+  {
     version: '0.31.0',
     date: '2026-11-05',
     title: 'Profile pictures in the demo',

@@ -6,7 +6,7 @@ import { Popover } from '../../components/Disclosure';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { formatDate, relativeTime, titleCase } from '../../lib/format';
+import { formatDate, plural, relativeTime, titleCase } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, CopyButton, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Segmented, Textarea, Toggle } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -426,7 +426,7 @@ export function MeetingsTab() {
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Meetings</h2>
-          <p className="max-w-2xl text-sm text-muted">Turn conversations into requirements. Concord extracts use cases, terms (with the speaker’s own words as evidence), competency questions, disagreements and decisions.</p>
+          <p className="max-w-2xl text-sm text-muted">Turn conversations into use cases, terms, questions and decisions.</p>
         </div>
         {populated && (
           <Popover
@@ -491,7 +491,7 @@ export function MeetingsTab() {
                       {SOURCE_LABEL[m.source]} · {m.transcript.length} lines · {relativeTime(m.createdAt, now())}
                     </div>
                   </div>
-                  {m.analysis && <span className="text-xs text-muted">{m.analysis.useCases.length} use cases · {m.analysis.terms.length} terms</span>}
+                  {m.analysis && <span className="text-xs text-muted">{plural(m.analysis.useCases.length, 'use case')} · {plural(m.analysis.terms.length, 'term')}</span>}
                   <MeetingStatus m={m} />
                 </Link>
               </li>

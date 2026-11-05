@@ -6,7 +6,7 @@ import { ClipboardList, FileText, MessageSquarePlus, GitPullRequestDraft } from 
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { pct, relativeTime } from '../../lib/format';
+import { pct, plural, relativeTime } from '../../lib/format';
 import { UseCaseStatusBadge, VisibilityBadge } from '../../components/UseCaseSharing';
 import { Badge, Button, Card, Chip, EmptyState, ErrorCard, InlineError, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
@@ -167,7 +167,7 @@ export function UseCasesTab() {
                   </div>
                   {uc.sections.goal && <p className="mt-1 line-clamp-1 text-sm text-muted">{uc.sections.goal}</p>}
                   <p className="mt-1 text-xs text-subtle">
-                    {SOURCE_LABEL[uc.source] ?? uc.source} · {pct(uc.completeness)} complete · {cqs} competency question{cqs === 1 ? '' : 's'} · {uc.terms.length} terms · {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · updated {relativeTime(uc.updatedAt, now())}
+                    {SOURCE_LABEL[uc.source] ?? uc.source} · {pct(uc.completeness)} complete · {plural(cqs, 'competency question')} · {plural(uc.terms.length, 'term')} · {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · updated {relativeTime(uc.updatedAt, now())}
                   </p>
                 </div>
                 {uc.status === 'draft' && uc.source === 'chat' && uc.authorId === session?.user?.id && (

@@ -275,11 +275,11 @@ export function AppsTab() {
           </Button>
         </div>
         <p className="max-w-3xl text-sm text-muted">
-          Building something on {ontology.title}? Connect your app and its CI tests it against every proposed change before the change is merged. Results show on each{' '}
+          Connect your app and its CI tests it against every proposed change. Results show on each{' '}
           <Link className="text-accent hover:underline" to={`/o/${id}/changes`}>
             change request
           </Link>
-          , so everyone can see what a change would break. Turn on autopilot and Concord approves or votes yes for you whenever your app passes, so changes don’t wait on you.
+          . With autopilot on, a pass counts as your approval or yes vote.
         </p>
       </div>
 

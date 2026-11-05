@@ -140,9 +140,8 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
   return (
     <section ref={section} id="clips" aria-labelledby="clips-title" className="mt-14 scroll-mt-20">
       <h2 id="clips-title" className="text-xl font-semibold tracking-tight">
-        More features, one at a time
+        More features
       </h2>
-      <p className="mt-2 max-w-2xl text-muted">Short clips of things the videos above don’t show. Pick one, or let them play in turn.</p>
       {current ? (
         <Card as="article" className="mt-6 overflow-hidden md:grid md:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="aspect-video bg-black">

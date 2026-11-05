@@ -98,9 +98,21 @@ test.describe('progressive disclosure', () => {
     const fair = health.getByRole('button', { name: /FAIR checks/ });
     await expect(fair).toContainText(/\d+ of \d+ pass/);
     if ((await fair.getAttribute('aria-expanded')) !== 'true') await fair.click();
-    // Opening the group shows every check at once: there is no second "Show all" toggle inside it.
-    await expect(health.getByText(/Show all \d+ checks|Show failing only/)).toHaveCount(0);
-    await expect(health.getByText(report.fair.checks[0].title, { exact: true }).first()).toBeVisible();
+    // Opening the group lists only the failing checks; passing ones (and the scoring note and
+    // FOOPS! references) wait behind "Show all".
+    type Check = { title: string; passed: boolean; status?: string };
+    const checks = report.fair.checks as Check[];
+    const failing = checks.filter((c) => (c.status ?? (c.passed ? 'pass' : 'fail')) === 'fail');
+    const passing = checks.filter((c) => c.passed);
+    for (const c of failing) await expect(health.getByText(c.title, { exact: true }).first()).toBeVisible();
+    if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
+    await expect(health.getByText(/FOOPS! test \(Garijo/)).toHaveCount(0);
+    const showAll = health.getByRole('button', { name: `Show all ${checks.length} checks` });
+    await showAll.click();
+    await expect(health.getByText(checks[0].title, { exact: true }).first()).toBeVisible();
+    await expect(health.getByText(/FOOPS! test \(Garijo/)).toBeVisible();
+    await health.getByRole('button', { name: 'Show failing only' }).click();
+    if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
 
     const cqs = health.getByRole('button', { name: /Competency questions/ });
     if ((await cqs.getAttribute('aria-expanded')) !== 'true') await cqs.click();
