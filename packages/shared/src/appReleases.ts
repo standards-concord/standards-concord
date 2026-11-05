@@ -79,6 +79,22 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.26.1',
+    date: '2026-11-05',
+    title: 'Links that look like buttons take one Tab',
+    pr: 71,
+    changes: [
+      {
+        id: 'single-link-buttons',
+        type: 'fix',
+        title: 'One tab stop for each link that looks like a button',
+        detail:
+          'Sign in, Give feedback, Back to the hub, the walkthrough’s Go and the download buttons were a button inside a link, so the keyboard stopped on them twice and screen readers announced them inconsistently. Each is now a single link.',
+        roles: [],
+      },
+    ],
+  },
+  {
     version: '0.26.0',
     date: '2026-11-05',
     title: 'Edit a term where you read it',

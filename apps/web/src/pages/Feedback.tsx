@@ -13,7 +13,7 @@ import { FeedbackPrivacy } from '../components/FeedbackPrivacy';
 import { dictationSupport } from '../lib/speech';
 import { Page } from '../components/Shell';
 import { ChatView } from '../components/ChatView';
-import { Badge, Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
+import { Badge, Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx, LinkButton } from '../components/ui';
 
 type Pathway = FeedbackSubmission['pathway'];
 
@@ -332,9 +332,7 @@ export function FeedbackPage() {
           <FeedbackPrivacy className="mt-3 justify-center text-left" />
           {submitted.publication && <PublicationNote feedbackId={submitted.id} publication={submitted.publication} />}
           <div className="mt-6 flex justify-center gap-2">
-            <Link to="/">
-              <Button>Back to the hub</Button>
-            </Link>
+            <LinkButton to="/">Back to the hub</LinkButton>
             <Button variant="ghost" onClick={() => { setSubmitted(undefined); setPathway(undefined); setMessages([]); setAnswers({}); }}>
               Tell us something else
             </Button>

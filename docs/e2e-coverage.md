@@ -158,7 +158,7 @@ Each fix has a test that fails without it.
 | New edits made during review inherited the old review period | A real edit starts its own review period | review-rounds.test.ts |
 | An author could request changes on their own request and resubmit, to reset everyone's reviews | Writers can't request changes or object to their own edits | review-rounds.test.ts |
 | With the clock moved back, an earlier approval hid a later veto | Decisions are ordered by a per-request sequence number, not the clock | governance.test.ts |
-| Buttons nested in links (Hub, Shell, Feedback, Walkthrough, OAuth consent, Overview) | Routed to the IA thread, after #37 | |
+| Buttons nested in links (header Sign in and Give feedback, Hub, Walkthrough, Login, Profile, Feedback, OAuth consent, Not found, Releases, Source download): two tab stops for one action, invalid HTML | Links styled as buttons are single links (LinkButton, AnchorButton, buttonClasses) | markup: "no nested interactive elements" |
 | Check data problems showed full `<https://…>` IRIs: sparq wraps IRIs in angle brackets, which the prefix lookup never matched, and only the ontology's prefixes were tried | Problems are written with the data's own prefixes first | check-data: "problems use the prefixes the data declares" |
 | Check data: an out-of-range `\U` escape threw while rendering and crashed the page | Invalid escapes are positioned syntax errors | check-data: "an invalid character escape is a syntax error, not a crash" |
 | Check data: after an edit, an old report's underline moved onto the record's name | Out-of-date reports underline nothing and can't be jumped to until checked again | check-data: "problems read as sentences…" |
