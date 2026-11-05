@@ -132,6 +132,8 @@ describe('gitdb', () => {
         .toString()
         .trim();
       expect(ours, JSON.stringify([name, email])).toBe(theirs);
+      // And it reads back as written (r2 review: a kept CR made the commit unreadable).
+      expect((await readCommit(ours)).author, JSON.stringify([name, email])).toEqual(p);
     }
   });
 

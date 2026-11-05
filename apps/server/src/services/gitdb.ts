@@ -183,7 +183,8 @@ export function isoDate(p: Person): string {
 
 const person = (p: Person) => `${p.name} <${p.email}> ${p.time} ${p.tz}`;
 const parsePerson = (s: string): Person => {
-  const m = /^(.*) <(.*)> (\d+) ([+-]\d{4})$/.exec(s);
+  // Whatever ident() keeps: anything but LF, < and > (a CR included, which `.` would not match).
+  const m = /^([^<>\n]*) <([^<>\n]*)> (\d+) ([+-]\d{4})$/.exec(s);
   if (!m) throw new Error(`Unreadable signature: ${s}`);
   return { name: m[1], email: m[2], time: Number(m[3]), tz: m[4] };
 };
