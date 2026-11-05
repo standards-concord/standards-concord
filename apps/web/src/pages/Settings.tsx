@@ -7,7 +7,7 @@ import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { formatDate, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
-import { GitHubIcon, GoogleIcon } from '../components/badges';
+import { GitHubIcon, GoogleIcon, WebIdIcon } from '../components/badges';
 import { LookPicker } from '../components/LookPicker';
 import { Avatar, Badge, Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Loading, PageHeader } from '../components/ui';
 
@@ -86,7 +86,9 @@ export function SettingsPage() {
           <CardHeader icon={Lock} title="Your WebID and Solid pod" />
           <div className="space-y-4 p-5">
             <p className="text-sm text-muted">
-              Your private data — such as interview transcripts — lives in your own Solid pod, not in Concord’s database. We set this up for you automatically; you don’t need to do anything.
+              {u.providers.some((p) => p.provider === 'solid' && p.subject === u.webId)
+                ? 'You signed in with your own WebID. What Concord saves for you, such as interview transcripts, goes in a private pod we keep for you here, not in Concord’s database.'
+                : 'Your private data — such as interview transcripts — lives in your own Solid pod, not in Concord’s database. We set this up for you automatically; you don’t need to do anything.'}
             </p>
             <div>
               <div className="mb-1 text-xs font-medium text-muted">WebID</div>
@@ -115,8 +117,8 @@ export function SettingsPage() {
           <ul className="divide-y divide-line">
             {u.providers.map((p) => (
               <li key={p.provider + p.subject} className="flex items-center gap-3 px-5 py-3 text-sm">
-                {p.provider === 'google' ? <GoogleIcon /> : p.provider === 'github' ? <GitHubIcon /> : <UserRound className="size-4 text-muted" />}
-                <span className="font-medium">{titleCase(p.provider)}</span>
+                {p.provider === 'google' ? <GoogleIcon /> : p.provider === 'github' ? <GitHubIcon /> : p.provider === 'solid' ? <WebIdIcon /> : <UserRound className="size-4 text-muted" />}
+                <span className="font-medium">{p.provider === 'solid' ? 'Solid (your WebID)' : titleCase(p.provider)}</span>
                 <span className="truncate text-xs text-muted">{p.subject}</span>
               </li>
             ))}
