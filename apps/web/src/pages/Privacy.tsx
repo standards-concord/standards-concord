@@ -90,7 +90,7 @@ export function PrivacyPage() {
               <strong>Your Solid pod.</strong> When you’re signed in, Concord also writes a copy of your interview transcripts, feedback and testing history to a{' '}
               <code>concord/</code> folder in your Solid pod, and shares its <code>concord/feedback/</code> folder read-only with the alpha team’s WebIDs. We expect you to
               bring your own pod, from a provider such as solidcommunity.net, which keeps it under its own privacy policy; you control it and can delete what Concord
-              wrote there yourself. Some Concord test servers still create a pod for you on a pod server Concord runs; those pods are deleted with your account. If a pod
+              wrote there yourself. Some Concord test servers still create a pod for you on a pod server Concord runs; if you ask us to delete your account, we delete that pod too (see below). If a pod
               can’t be reached, Concord keeps the copy on its own servers instead.
             </li>
             <li>
@@ -129,8 +129,8 @@ export function PrivacyPage() {
             <li>
               <strong>Reporting a problem on a public ontology page.</strong> Anyone can report a problem with a term without signing in. Concord keeps the title and
               description you write, and shows them only to that ontology’s editors, stewards and owners. It doesn’t store your IP address with the report: to stop abuse
-              it keeps a scrambled form of it in memory only, which is cleared after a day (the next time anyone sends a report, or when the server restarts), and sets a
-              cookie on that page for one day.
+              it keeps a scrambled form of it in memory only. Entries older than a day are cleared during a later clean-up that a report sets off, or when the server
+              restarts. It also sets a cookie on that page for one day.
             </li>
             <li>
               <strong>Public feedback summaries (opt-in).</strong> When you send feedback you can tick a box to post a short summary as a GitHub issue on the Concord
@@ -145,7 +145,7 @@ export function PrivacyPage() {
         <Section id="privacy-deletion" title="Getting your data deleted">
           <p>
             Write to {mail} from the email address on your account, or say which Google, GitHub or WebID account you signed in with. We will delete your account and what you added
-            from Concord’s servers within 30 days, and tell you when it is done. What Concord wrote to your own Solid pod is yours to delete with your pod provider. We will tell you if anything can’t be removed, such as text that is
+            from Concord’s servers within 30 days, and tell you when it is done. That includes a pod Concord created for you on its own pod server. What Concord wrote to a pod you brought yourself is yours to delete with your pod provider. We will tell you if anything can’t be removed, such as text that is
             part of a version a working group has already published.
           </p>
           <p>You can also ask us for a copy of what Concord holds about you, or to correct it.</p>

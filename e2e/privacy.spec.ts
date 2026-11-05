@@ -41,6 +41,10 @@ test('the privacy policy covers each section and every sign-in method the server
   await expect(signInSection).toContainText(lines.github);
   // Interviews and feedback are kept on Concord's servers as well as in a pod (an early draft said otherwise).
   await expect(page.getByRole('region', { name: 'Where it is kept' })).toContainText('Your account, your interviews, your feedback and testing history');
+  // The cookies the server sets (concord_session and concord_tester last 30 days) and the pod folder shared with the admins' WebIDs are disclosed.
+  const kept = page.getByRole('region', { name: 'Where it is kept' });
+  await expect(kept).toContainText('a cookie that lasts 30 days and remembers who you are while you switch between demo personas');
+  await expect(kept).toContainText('shares its concord/feedback/ folder read-only with the alpha team’s WebIDs');
   // A public summary can only be withdrawn from the thank-you screen (the withdraw button lives there only).
   await expect(page.getByRole('region', { name: 'Public reports and GitHub issues' })).toContainText('from the thank-you screen straight after sending it');
   // Deletion requests go to the ODI address Jesse chose, as a mail link.
