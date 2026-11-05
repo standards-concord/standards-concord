@@ -1,5 +1,5 @@
 import { Link, useParams } from 'react-router';
-import type { ReleaseDetail } from '@concord/shared';
+import { canCastVote, type ReleaseDetail } from '@concord/shared';
 import { ArrowLeft, ExternalLink, Minus, Rocket, Scale, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { api, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
@@ -27,7 +27,8 @@ export function ReleaseDetailPage() {
   const r = state.data;
   const g = r.governance;
   const voterRoles = g.rule.vote?.voterRoles ?? [];
-  const canVote = voterRoles.some((x) => myRoles.includes(x)) || hasRole();
+  // The same check the server uses to accept and count a vote.
+  const canVote = canCastVote(myRoles, voterRoles);
   const myVote = r.votes.find((v) => v.userId === session?.user?.id);
   const vote = (c: VoteChoice) => act.run(() => api.voteRelease(r.id, c));
   const canPublish = hasRole('steward', 'owner');

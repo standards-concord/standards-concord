@@ -61,7 +61,7 @@ export function PhaseBubble({
         </>
       }
     >
-      <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">{title}</h4>
+      <h4 className="mb-3 text-sm font-semibold">{title}</h4>
       <ol className="relative space-y-3">
         {steps.map((s, i) => {
           const done = i < current;
@@ -222,7 +222,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
     >
       {(close) => (
         <>
-          <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">Health of the working draft</h4>
+          <h4 className="mb-3 text-sm font-semibold">Health of the working draft</h4>
           {h ? (
             // A two-column grid, so every value starts in the same column whatever the label's length.
             <ul className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">

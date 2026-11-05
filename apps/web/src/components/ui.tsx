@@ -73,7 +73,7 @@ export function PageHeader({ title, subtitle, actions, eyebrow }: { title: React
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        {eyebrow && <div className="page-eyebrow mb-1 text-xs font-medium tracking-wide text-muted uppercase">{eyebrow}</div>}
+        {eyebrow && <div className="page-eyebrow mb-1 text-sm font-medium text-muted">{eyebrow}</div>}
         <h1 className="page-title">{title}</h1>
         {subtitle && <p className="mt-1 max-w-2xl text-sm text-muted">{subtitle}</p>}
       </div>
@@ -232,7 +232,7 @@ export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { chec
         onClick={() => onChange(!checked)}
         className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-control')}
       >
-        <span className={cx('inline-block size-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4.5' : 'translate-x-0.5')} />
+        <span className={cx('inline-block size-4 rounded-full shadow transition-transform', checked ? 'translate-x-4.5 bg-accent-fg' : 'translate-x-0.5 bg-switch-thumb')} />
       </button>
       {label && (
         <label htmlFor={id} className="cursor-pointer text-sm">

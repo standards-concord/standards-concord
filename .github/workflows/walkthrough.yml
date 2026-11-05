@@ -125,12 +125,16 @@ jobs:
 
       # Approved narration is kept with each release, so the next release re-voices only
       # the paragraphs whose words changed, even after the Actions cache has expired.
-      - uses: actions/cache@v4
+      # Paid narration is saved even when the recording fails afterwards (a later run then
+      # re-voices nothing), so each run saves under its own key and restores the newest.
+      - uses: actions/cache/restore@v4
         if: steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}
-          restore-keys: walkthrough-voice-${{ steps.voice.outputs.voice }}-
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-
+            walkthrough-voice-${{ steps.voice.outputs.voice }}-
       - name: Restore narration from the last release
         if: steps.voice.outputs.ready == 'true'
         env:
@@ -165,7 +169,16 @@ jobs:
           else
             pnpm walkthrough --voice "$VOICE"
           fi
+      - name: Keep the narration, even if the recording failed
+        if: always() && steps.voice.outputs.ready == 'true'
+        run: |
+          mkdir -p walkthrough/.cache/voice walkthrough/out
           tar -czf walkthrough/out/walkthrough-voice.tar.gz -C walkthrough/.cache/voice .
+      - uses: actions/cache/save@v4
+        if: always() && steps.voice.outputs.ready == 'true'
+        with:
+          path: walkthrough/.cache/voice
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v4
         if: always() && steps.voice.outputs.ready == 'true'

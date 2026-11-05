@@ -208,8 +208,9 @@ test('the picker follows Concord’s look, and its styles leave the rest of Conc
       el.remove();
       return c;
     }, value);
-  const eyebrow = page.locator('.page-eyebrow');
-  expect(await eyebrow.evaluate((el) => getComputedStyle(el).color)).toBe(await resolve('var(--muted)'));
+  // (The restyle removed the login page's all-caps eyebrow, so this checks its muted paragraph instead.)
+  const muted = page.getByText(/^Requirements come in from interviews/);
+  expect(await muted.evaluate((el) => getComputedStyle(el).color)).toBe(await resolve('var(--muted)'));
 
   await page.getByRole('button', { name: 'Sign in with Solid' }).click();
   // The dialog is drawn with the look's surface.

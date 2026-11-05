@@ -11,8 +11,8 @@ export function LevelBadge({ level, className }: { level?: ChangeLevel; classNam
     major: 'bg-warn-soft text-warn border border-warn/40',
   }[level];
   return (
-    <span className={cx('inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.7rem] font-semibold tracking-wide uppercase', cls, className)} title={`${level} change (semver)`}>
-      {level}
+    <span className={cx('inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.7rem] font-semibold', cls, className)} title={`${level} change (semver)`}>
+      {level[0].toUpperCase() + level.slice(1)}
     </span>
   );
 }
@@ -131,6 +131,18 @@ export function GitHubIcon({ className = 'size-4' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.37-3.87-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z" />
+    </svg>
+  );
+}
+
+/**
+ * The Open Data Institute logo (the solid O, D and I), drawn in the current text colour, so
+ * it is black on white and white on black as the ODI brand asks. Used by the ODI look only.
+ */
+export function OdiLogo({ className }: { className?: string }) {
+  return (
+    <svg className={cx('h-6 w-auto', className)} viewBox="0 0 200 85.8" fill="currentColor" role="img" aria-label="Open Data Institute">
+      <path d="M160,.7V27.2A37.9,37.9,0,0,0,136.6,3.7,49.7,49.7,0,0,0,119.1.6H82.7V27a42.9,42.9,0,1,0,0,31.8V85.1h36.4a51.9,51.9,0,0,0,17.5-3,41.9,41.9,0,0,0,13.8-8.5A40.1,40.1,0,0,0,160,58.5V85.1h40V.7Z" />
     </svg>
   );
 }

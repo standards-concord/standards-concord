@@ -21,7 +21,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
-import { releaseTick, voteOnRelease } from './releases.js';
+import { releaseGovernance, releaseTick, voteOnRelease } from './releases.js';
 import { createUseCase } from './useCases.js';
 import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
@@ -334,6 +334,7 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
     for (const u of actors) {
       if (actions >= maxActions) break;
       if ((await list<{ userId: string }>('votes', r.id)).some((v) => v.userId === u.id)) continue;
+      if (!canVote((await releaseGovernance(r)).rule, await rolesFor(ontologyId, u.id))) continue;
       try {
         await voteOnRelease(r, u, personaFor(u)?.key === 'gareth' && r.level === 'major' ? 'no' : 'yes');
         actions++;

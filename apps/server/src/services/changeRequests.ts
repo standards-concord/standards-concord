@@ -26,6 +26,7 @@ import type {
   User,
   Vote,
 } from '@concord/shared';
+import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put, putFenced, putIfFenced, transaction } from '../db.js';
 import { newId } from '../ids.js';
@@ -471,7 +472,7 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
   if (cr.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
   const g = await governanceFor(cr);
   const roles = await rolesFor(cr.ontologyId, actor.id);
-  if (!g.rule.vote || !roles.some((r) => g.rule.vote!.voterRoles.includes(r)))
+  if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles))
     throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
   const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
   await transaction(async () => {
