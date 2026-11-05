@@ -127,6 +127,20 @@ describe('the first copy in a tester’s pod', () => {
     expect(modesAtWrite.every((m) => (m & 0o077) === 0)).toBe(true);
   });
 
+  // A short write (fewer bytes written than asked) used to be ignored, renaming a truncated record over the original.
+  it('writes every byte of the record even when the system writes only part of it at a time', async () => {
+    const u = await tester('local-short-write');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'theirs', 'text/plain');
+    const write = fs.writeSync.bind(fs) as (...a: unknown[]) => number;
+    vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, buf: Buffer, off = 0, len = buf.length - off) =>
+      write(fd, buf, off, Math.min(len, 7))) as unknown as typeof fs.writeSync);
+    const me = await recordVersion(u, { version: '0.8.0' });
+    expect(me.podBehind).toBeUndefined();
+    vi.restoreAllMocks();
+    const file = path.join(config.dataDir, 'private', u.id, 'alpha', 'testing.jsonld');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.0']);
+  });
+
   // A failed rename (or a crash before it) used to leave a new temporary file behind on every try.
   it('leaves no temporary file behind when replacing fails, and reuses one a crash left', async () => {
     const u = await tester('local-tmp');

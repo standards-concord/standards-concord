@@ -147,7 +147,12 @@ function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
     const fd = fs.openSync(tmp, 'w', 0o600);
     try {
       fs.fchmodSync(fd, 0o600);
-      fs.writeSync(fd, bytes);
+      // writeSync may write fewer bytes than asked: keep going until all of them are down.
+      for (let off = 0; off < bytes.length; ) {
+        const n = fs.writeSync(fd, bytes, off, bytes.length - off);
+        if (n <= 0) throw new Error(`could not write ${tmp}`);
+        off += n;
+      }
       const mode = modeOf(file);
       if (mode !== undefined) fs.fchmodSync(fd, mode);
     } finally {
