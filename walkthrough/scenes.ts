@@ -621,11 +621,15 @@ export const actions: Record<string, Action> = {
     await c.d.claimVisible(c.d.page.getByRole('heading', { name: /Explore the demo/ }), 'picking a person moves on to the tasks');
   },
   async 'alpha-show-tasks'(c) {
+    await c.d.highlight(c.d.page.getByRole('group', { name: 'Suggested next task' }), 'the suggested task');
+  },
+  // Timed to "Press Go" and "tick each task off" in feedback.md.
+  async 'alpha-point-go'(c) {
     const next = c.d.page.getByRole('group', { name: 'Suggested next task' });
-    await c.d.highlight(next, 'the suggested task');
-    await sleep(1200);
     await c.d.pointAt(next.getByRole('button', { name: 'Go' }), 'the Go button');
-    await sleep(1400);
+  },
+  async 'alpha-tick-task'(c) {
+    const next = c.d.page.getByRole('group', { name: 'Suggested next task' });
     await c.d.click(next.getByRole('button', { name: /I’ve done this/ }), 'I’ve done this');
     await c.d.claimVisible(c.d.page.getByText(/^1 of \d+ done$/), 'the task is ticked off');
     await c.d.clearHighlight();

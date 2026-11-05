@@ -8,7 +8,7 @@ title: Testing Concord: how to take part and give feedback
   format is the same as narration.md; the actions are in scenes.ts.
 
   Keep it short and practical. Testers watch it to know what to do next, so say what
-  to press as it is pressed.
+  to press as it is pressed: put {@action} just before the words it goes with.
 -->
 
 # How to take part
@@ -46,15 +46,14 @@ Each role has a few people to choose from. You play that person, and everyone el
 ## Try the tasks {#tasks}
 
 [do: alpha-show-tasks]
-Next, the walkthrough suggests a few things to try in that role. Press Go to open the right page, and tick each task off when you're done.
+Next, the walkthrough suggests a few things to try in that role. {@alpha-point-go} Press Go to open the right page, and {@alpha-tick-task} tick each task off when you're done.
 
 [do: alpha-keep-open]
 If you'd rather explore on your own, keep the guide open. It sits in the corner of every page, so you won't lose your place.
 
 ## Let the others act {#simulate}
 
-[do: alpha-simulate]
-Real governance takes days, or weeks. So press Simulate the others, and the other participants comment, review and vote.
+Real governance takes days, or weeks. So {@alpha-simulate} press Simulate the others, and the other participants comment, review and vote.
 
 [do: alpha-fast-forward]
 Then move the clock forward a day or a week, so reviews close and votes are counted.
@@ -76,8 +75,7 @@ Or just tell us something. A bug, an idea, or something that confused you. Type 
 [do: type-feedback]
 The assistant may ask a follow-up question or two. Say as much or as little as you like.
 
-[do: submit-feedback]
-When you're done, press Submit, and it goes straight to the team building Concord.
+When you're done, {@submit-feedback} press Submit, and it goes straight to the team building Concord.
 
 ## Any time {#anytime}
 

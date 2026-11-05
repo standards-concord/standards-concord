@@ -27,7 +27,7 @@ import { Director, sleep } from './lib/director.ts';
 import { guardContext, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
+import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, wordTime, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
@@ -305,6 +305,7 @@ async function main() {
         log(`▶ ${scene.id}`);
         for (const step of scene.steps) {
           await run(ctx, scene, step.actions);
+          await run(ctx, scene, step.marks.map((m) => m.action));
           await run(ctx, scene, step.after);
         }
       }
@@ -322,6 +323,9 @@ async function main() {
     const chapters: { at: number; title: string }[] = [];
     const LEAD = 0.35;
     const GAP = 0.45;
+    /** How late a timed mark may run before the recording counts it as out of sync. */
+    const MAX_LATE = 0.75;
+    const sync: { scene: string; action: string; word: string; at: number; late: number }[] = [];
     for (const scene of kept) {
       log(`▶ ${scene.id}`);
       chapters.push({ at: cap.now(), title: scene.title });
@@ -331,7 +335,20 @@ async function main() {
         const start = cap.now();
         if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
         const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
-        await Promise.all([run(ctx, scene, step.actions), speaking]);
+        const opening = run(ctx, scene, step.actions);
+        // Timed marks wait for the step's opening actions, then for their word.
+        const marked = (async () => {
+          await opening;
+          for (const m of step.marks) {
+            const due = clip ? start + LEAD + wordTime(step.text, lexicon, clip.duration, m.word, clip.charStarts) : cap.now();
+            if (due > cap.now()) await sleep((due - cap.now()) * 1000);
+            const late = cap.now() - due;
+            sync.push({ scene: scene.id, action: m.action.name, word: plain(step.text).split(/\s+/)[m.word], at: Number(due.toFixed(2)), late: Number(late.toFixed(2)) });
+            if (late > MAX_LATE) d.warnings.push(`${scene.id} / {@${m.action.name}} ran ${late.toFixed(1)}s after its word; move the mark later or shorten what runs before it`);
+            await run(ctx, scene, [m.action]);
+          }
+        })();
+        await Promise.all([opening, marked, speaking]);
         await run(ctx, scene, step.after);
         await sleep((GAP + step.pause) * 1000);
       }
@@ -372,6 +389,9 @@ async function main() {
       fontsMissing: [...fonts.missing],
       promisedMinutes: promisesLength ? promisedMinutes : undefined,
       toolchain: await toolchain(chromiumVersion),
+      // Timed marks: when each was due in the video, and how late its action started.
+      sync,
+      frameLatency: cap.latency(),
       warnings: d.warnings,
       captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };
