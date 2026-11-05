@@ -1,7 +1,7 @@
 /**
- * Drives stage/terminal.html. Every call is remembered, so when a scene goes back to
- * the browser and later returns to the terminal, the session so far is redrawn
- * instantly and carries on: it looks like one continuous terminal session.
+ * Drives stage/claude-web.html, Claude Code on the web. Every call is remembered, so when
+ * a scene goes back to the browser and later returns to Claude Code, the session so far is
+ * redrawn instantly and carries on: it looks like one continuous session.
  */
 import type { Director } from './director.ts';
 
@@ -40,7 +40,7 @@ export class Terminal {
       if (ANIMATED[op.fn]) args[1] = { ...((args[1] as object) ?? {}), cps: 0 };
       await this.call(op.fn, args, false);
     }
-    // Keyboard only in the terminal: hide the pointer.
+    // Keyboard only in Claude Code: hide the pointer.
     await this.d.page.evaluate(() => (window as any).__wt?.cursorVisible(false));
     // Viewers of the video alone never see the README, so say it on screen.
     await this.d.label(SCRIPTED);
@@ -50,7 +50,8 @@ export class Terminal {
     return this.call('title', [t]);
   }
   clear() {
-    this.history = [];
+    // A new conversation in the same project: its name and connectors stay.
+    this.history = this.history.filter((op) => op.fn === 'title' || op.fn === 'connected');
     return this.call('clear', [], false);
   }
   blank(n = 1) {
@@ -85,6 +86,18 @@ export class Terminal {
   }
   diff(file: string, summary: string, rows: DiffRow[]) {
     return this.call('diff', [file, summary, rows]);
+  }
+  /** A file from the project, shown as a code card. */
+  file(name: string, text: string) {
+    return this.call('file', [name, text]);
+  }
+  /** The add-a-connector dialog, typed in and connected; not part of the redrawn session. */
+  connector(name: string, url: string, opts: { cps?: number } = {}) {
+    return this.call('connector', [name, url, opts], false);
+  }
+  async closeConnector(name: string) {
+    await this.call('closeConnector', [], false);
+    await this.call('connected', [name]);
   }
 }
 

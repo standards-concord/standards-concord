@@ -307,7 +307,7 @@ async function main() {
     const d = new Director(page, !!argv.strict);
     const ctx: Ctx = {
       d,
-      term: new Terminal(d, `${stat.url}/__stage/terminal.html`),
+      term: new Terminal(d, `${stat.url}/__stage/claude-web.html`),
       mcp,
       api,
       hub,

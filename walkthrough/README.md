@@ -75,7 +75,7 @@ With no `--voice`, the first provider whose key is set is used, then `say` on a 
 
 ## What's real and what's scripted
 
-Everything in the hub is the real app, driven by Playwright. The sample app ([sample-app/](sample-app/)) is a real app whose code is edited on camera and reloaded. The Claude Code terminal is a scripted replay drawn in [stage/terminal.html](stage/terminal.html): its words are fixed so each recording tells the same story, but every MCP tool result it shows comes from a real call to the Concord being recorded, and the edits it shows are applied to the app for real.
+Everything in the hub is the real app, driven by Playwright. The sample app ([sample-app/](sample-app/)) is a real app whose code is edited on camera and reloaded. Claude Code (on the web) is a scripted replay drawn in [stage/claude-web.html](stage/claude-web.html): its words are fixed so each recording tells the same story, but every MCP tool result it shows comes from a real call to the Concord being recorded, and the edits it shows are applied to the app for real.
 
 The video says so itself. While the terminal is on screen a caption reads "Scripted demonstration: real Concord tool calls; prepared agent responses and code", and the narration says it out loud. The autopilot scene reports a passing CI run to Concord rather than running one, and is labelled "Simulated CI" on screen and in the narration.
 

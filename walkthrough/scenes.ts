@@ -9,7 +9,7 @@
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { request, type APIRequestContext } from '@playwright/test';
-import { sleep, type Director } from './lib/director.ts';
+import { garbled, sleep, type Director } from './lib/director.ts';
 import type { McpClient } from './lib/mcp.ts';
 import { fill } from './lib/servers.ts';
 import { countChanges, lineDiff, type Terminal } from './lib/terminal.ts';
@@ -93,6 +93,9 @@ async function claimFormat(c: Ctx, format: string) {
 /** The app is showing opportunities, and the hours feature where the story says it should. */
 async function claimAppWorks(c: Ctx, withHours: boolean) {
   await c.d.claimVisible(c.d.page.locator('.card'), 'the sample app lists opportunities');
+  const shown = await c.d.page.locator('.card h2, .card p').allInnerTexts().catch(() => []);
+  const bad = shown.filter(garbled);
+  if (bad.length) c.d.warn(`The sample app shows unreadable text: ${JSON.stringify(bad.slice(0, 2))}`);
   if (withHours) await c.d.claimVisible(c.d.page.locator('.pill.hours'), 'the sample app shows hours given');
 }
 
@@ -127,18 +130,23 @@ async function showClassificationAndChecks(c: Ctx) {
 async function ringAround(c: Ctx, text: string | RegExp, tag?: string) {
   const el = await c.d.find(c.d.page.getByText(text), `text ${text}`);
   if (!el) return;
-  const box = await el.evaluate((node) => {
+  // Ring the card or section the text sits in (the nearest ancestor of a readable size).
+  const marked = await el.evaluate((node) => {
+    // Never a whole page column: stop below anything taller than most of the screen.
     let n: HTMLElement | null = node as HTMLElement;
     while (n && n.parentElement) {
       const r = n.getBoundingClientRect();
       if (r.height >= 110 && r.width >= 280) break;
+      if (n.parentElement.getBoundingClientRect().height > innerHeight * 0.8) break;
       n = n.parentElement;
     }
-    n?.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior });
-    const r = (n ?? (node as HTMLElement)).getBoundingClientRect();
-    return { x: r.x, y: r.y, width: r.width, height: Math.min(r.height, innerHeight - r.y - 24) };
+    const target = n ?? (node as HTMLElement);
+    target.scrollIntoView({ block: 'center', behavior: 'instant' as ScrollBehavior });
+    document.querySelectorAll('[data-wt-ring]').forEach((x) => x.removeAttribute('data-wt-ring'));
+    target.setAttribute('data-wt-ring', '');
+    return true;
   });
-  await c.d.page.evaluate(([b, t]) => (window as any).__wt?.highlight(b, t), [box, tag] as const);
+  if (marked) await c.d.ring(c.d.page.locator('[data-wt-ring]').first(), `the section with ${text}`, tag);
 }
 
 function summariseTerms(json: any): string {
@@ -209,7 +217,9 @@ export const actions: Record<string, Action> = {
     await ringAround(c, 'Health of the working draft');
   },
   async 'highlight-members'(c) {
-    await ringAround(c, /^Members/);
+    // The members panel itself. Ringing "the nearest big ancestor of the text" picked the
+    // whole side column, scrolled out of view, so the first tour's ring sat on blank space.
+    await c.d.highlight(c.d.page.getByRole('region', { name: /^Members/ }), 'the members panel');
   },
   async 'clear-highlight'(c) {
     await c.d.clearHighlight();
@@ -302,36 +312,33 @@ export const actions: Record<string, Action> = {
   async 'open-app'(c) {
     if (c.d.page.url() === c.app.url) await show(c, c.app.url);
     else await gotoApp(c);
+    await claimAppWorks(c, false);
     await sleep(500);
     await c.d.pointAt(c.d.page.locator('.card').first(), 'an opportunity card');
   },
   async 'show-app-code'(c) {
     await c.term.open();
-    await c.term.title('helping-hands — zsh');
-    await c.term.shell('head -n 13 app.js');
+    await c.term.title('helping-hands');
     const src = await readFile(path.join(c.app.dir, 'app.js'), 'utf8');
-    await c.term.print(c.shown(src.split('\n').slice(0, 13).join('\n')));
+    await c.term.file('app.js', c.shown(src.split('\n').slice(0, 13).join('\n')));
   },
 
   /* ---------------------------- Claude Code ---------------------------- */
   async 'install-mcp'(c) {
     await c.term.open();
     const oauth = c.features.has('connectPage');
-    const cmd = `claude mcp add --transport http concord ${c.shownHub}/mcp${oauth ? '' : ' --header "Authorization: Bearer cnc_••••••••"'}`;
-    await c.term.shell(cmd, { cps: 28 });
+    await c.term.connector('Concord', `${c.shownHub}/mcp`, { cps: 26 });
     await c.mcp.connect();
-    await c.term.print(`Added HTTP MCP server concord with URL: ${c.shownHub}/mcp to local config`);
-    await sleep(400);
-    await c.term.shell('claude mcp list');
-    await c.term.print(`Checking MCP server health…\n\nconcord: ${c.shownHub}/mcp (HTTP) - ✓ Connected`);
+    // Without the Connect page's sign-in, the hub only takes a bearer token.
+    if (!oauth) c.d.warn('The hub has no OAuth sign-in, so the connector shown is not how it would connect');
+    await sleep(1600);
+    await c.term.closeConnector('Concord');
   },
   async 'open-connect-page'(c) {
     await c.d.goto(`${c.hub}/connect`);
   },
   async 'start-claude'(c) {
     await c.term.open();
-    await c.term.shell('claude');
-    await c.term.blank();
     await c.term.startAgent({ cwdPath: '~/code/helping-hands' });
   },
   async 'ask-feature'(c) {
@@ -542,9 +549,7 @@ export const actions: Record<string, Action> = {
   },
   async 'new-session-check'(c) {
     await c.term.open();
-    await c.term.blank();
-    await c.term.shell('claude');
-    await c.term.blank();
+    await c.term.clear();
     await c.term.startAgent({ cwdPath: '~/code/helping-hands' });
     await c.term.think(800);
     const r = await mcpCall(c, 'check_forks', {}, '');

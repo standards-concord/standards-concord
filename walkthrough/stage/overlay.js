@@ -109,6 +109,17 @@
     return card;
   }
 
+  /** Whether an element shows anything: its size on screen and its visible text or media. */
+  function describe(el) {
+    const r = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    const visible = r.width > 4 && r.height > 4 && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity) > 0.05;
+    const onScreen = r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+    const text = (el.innerText || el.getAttribute('aria-label') || el.value || '').trim();
+    const media = !!el.querySelector?.('img,svg,video,canvas,input,textarea,select,.cm-editor') || /^(IMG|SVG|VIDEO|CANVAS|INPUT|TEXTAREA|SELECT)$/i.test(el.tagName);
+    return { visible, onScreen, text: text.slice(0, 80), media, width: Math.round(r.width), height: Math.round(r.height) };
+  }
+
   window.__wt = {
     setCursor(x, y) {
       state.x = x;
@@ -131,19 +142,41 @@
       card.classList.remove('on');
       await wait(650);
     },
-    highlight(rect, tag) {
+    /**
+     * Rings an element and keeps the ring on it, frame by frame, through scrolling and
+     * layout changes (a snapshot of where it was drifted off). Pass null to clear.
+     * Returns what it ringed, so the recorder can refuse a ring around nothing.
+     */
+    highlight(target, tag) {
       const ring = $('.ring');
-      if (!ring) return;
-      if (!rect) {
+      if (!ring) return null;
+      cancelAnimationFrame(state.track);
+      if (!target) {
         ring.classList.remove('on');
-        return;
+        state.target = null;
+        return null;
       }
+      state.target = target;
+      // Glide to a new target, then follow it exactly (an easing would lag behind a scroll).
+      ring.style.transition = '';
+      clearTimeout(state.glide);
+      state.glide = setTimeout(() => (ring.style.transition = 'opacity .45s'), 480);
       const pad = 8;
-      Object.assign(ring.style, { left: `${rect.x - pad}px`, top: `${rect.y - pad}px`, width: `${rect.width + pad * 2}px`, height: `${rect.height + pad * 2}px` });
+      const draw = () => {
+        if (state.target !== target) return;
+        const r = target.getBoundingClientRect();
+        // Clipped to the viewport, so a tall card's ring stays on screen.
+        const top = Math.max(r.top, 8 + pad), bottom = Math.min(r.bottom, innerHeight - 8 - pad);
+        const left = Math.max(r.left, 8 + pad), right = Math.min(r.right, innerWidth - 8 - pad);
+        Object.assign(ring.style, { left: `${left - pad}px`, top: `${top - pad}px`, width: `${Math.max(0, right - left) + pad * 2}px`, height: `${Math.max(0, bottom - top) + pad * 2}px` });
+        state.track = requestAnimationFrame(draw);
+      };
+      draw();
       const t = ring.querySelector('.tag');
       t.hidden = !tag;
       t.textContent = tag || '';
       ring.classList.add('on');
+      return describe(target);
     },
     cursorVisible(on) {
       const c = $('.cursor');
