@@ -53,6 +53,61 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.16.0',
+    date: '2026-11-05',
+    title: 'Edit a term where you read it',
+    pr: 28,
+    changes: [
+      {
+        id: 'inline-term-edit',
+        type: 'feat',
+        title: 'Edit a term from Browse',
+        detail:
+          'Next to “Report a problem”, Edit lets you change a term’s label, definition, comment, other names, examples and editorial note in place. Saving opens a change request; nothing changes until it is reviewed and merged.',
+        roles: [],
+        to: '{o}/browse',
+        ask: 'Was it easy to propose a change to a term from Browse, and to find your change request afterwards?',
+      },
+      {
+        id: 'safer-merges',
+        type: 'fix',
+        title: 'Merges and releases no longer clash',
+        detail:
+          'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
+        roles: ['steward'],
+        to: '{o}/changes',
+      },
+    ],
+  },
+  {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'Sign in with your WebID',
+    pr: 46,
+    changes: [
+      {
+        id: 'solid-signin',
+        type: 'feat',
+        title: 'Sign in with your own WebID (Solid)',
+        detail:
+          'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
+        roles: [],
+        to: '/login',
+        ask: 'If you have a WebID, how easy was it to sign in with it?',
+      },
+      {
+        id: 'feedback-readers',
+        type: 'feat',
+        title: 'See who can read your feedback',
+        detail:
+          'The feedback page says who can read what you send: the alpha team. The copy saved in your pod is shared read-only with the team’s WebID, and they read it there as that WebID.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Is it clear who can read your feedback?',
+      },
+    ],
+  },
+  {
     version: '0.14.0',
     date: '2026-11-05',
     title: 'Check data explains what’s wrong and where',

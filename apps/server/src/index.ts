@@ -8,6 +8,7 @@ import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
 import { processOutstanding } from './services/feedbackIssues.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
+import { syncFeedbackSharing } from './services/feedback.js';
 
 openDb();
 // One server at a time changes the repositories (upgrades are exclusive; see docs/deploy.md). It exits if it ever loses them.
@@ -41,6 +42,11 @@ setInterval(() => {
   runTick().catch((err) => console.warn('[tick]', (err as Error).message));
 }, 60_000).unref();
 void runTick();
+
+// ADMIN_WEBIDS may have changed since the last start: share testers' pod feedback folders with exactly that list.
+void syncFeedbackSharing()
+  .then((c) => (c.shared || c.failed ? console.log(`[solid] feedback folders shared with ${config.adminWebIds.length} admin WebID(s): ${c.shared} updated, ${c.unchanged} unchanged, ${c.failed} failed`) : undefined))
+  .catch((err) => console.warn('[solid] feedback sharing sync failed', (err as Error).message));
 
 // The co-lead bot's calendar: pick up invites to its address, book bots before calls start.
 setInterval(() => {

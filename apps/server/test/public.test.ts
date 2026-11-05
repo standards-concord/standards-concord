@@ -27,6 +27,9 @@ import type { ChangeRequest, OntologySummary, PublicHoldReview, Release } from '
 const getReleaseFile = (name: string) => ontologyStore.readReleaseFile(findProject('volunteering')!, '1.0.0', name);
 const setReleaseFile = (name: string, content: string | null) => ontologyStore.updateReleaseFiles(findProject('volunteering')!, { '1.0.0': { [name]: content } }, `test: set ${name}`);
 
+// Marked approved by hand: merge re-checks governance unless it knows what the request was approved as.
+const APPROVED = { status: 'approved' as const, approvedAs: { level: 'major' as const, confirmation: true, voted: true } };
+
 const app = createApp();
 
 beforeAll(async () => {
@@ -587,7 +590,7 @@ describe('sixth review fixes', () => {
       {
         ...getCR(cr.id),
         title: 'Changes',
-        status: 'approved',
+        ...APPROVED,
         ops: [
           { op: 'addClass', localName: 'SECRETPILOTRECORD', label: 'record', definition: 'Requested by MacDonalds for SecretPilots.' },
           { op: 'addClass', localName: 'SixSafe', label: 'six safe', definition: 'Fine.', altLabels: ['MACDONALDRECORD'] },
@@ -628,7 +631,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     const tester = await createUser({ name: `Tester ${title}`, provider: 'github', subject: `seventh-${title}` });
     const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: `Use case ${title}` } });
     const cr = await synthesise(project, tester, [uc.id]);
-    put('changeRequests', { ...getCR(cr.id), title, ops, status: 'approved' }, project.id);
+    put('changeRequests', { ...getCR(cr.id), title, ops, ...APPROVED }, project.id);
     return { project, tester, cr: getCR(cr.id) };
   };
 
@@ -676,7 +679,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     expect(getCR(cr.id).privacyCleared).toBeDefined();
     await updateOps(getCR(cr.id), tester, { title: 'Version check, retitled' });
     expect(getCR(cr.id).privacyCleared).toBeUndefined();
-    put('changeRequests', { ...getCR(cr.id), status: 'approved' }, cr.ontologyId);
+    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
     expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
   });
 
@@ -706,7 +709,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     const { cr, tester } = await drafted('Revision check', [{ op: 'addClass', localName: 'SeventhRevised', label: 'seventh revised', definition: 'x' }]);
     const revised = await revise(getCR(cr.id), tester, 'Add a class SeventhExtra for the Secret Pilot');
     expect(revised.privacyCleared).toBeUndefined();
-    put('changeRequests', { ...getCR(cr.id), status: 'approved' }, cr.ontologyId);
+    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
     expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
     expect(await draftTtl()).not.toContain('SeventhRevised');
   });
@@ -724,7 +727,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     for (const x of preview.statements) expect(x.nt).toMatch(/ \.$/);
     const { user } = await editor('Eighth full editor');
     await approvePublication(getCR(cr.id), user, preview.fingerprint);
-    put('changeRequests', { ...getCR(cr.id), status: 'approved' }, cr.ontologyId);
+    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
     expect((await merge(getCR(cr.id), undefined)).status).toBe('merged');
     expect(await draftTtl()).toContain(hidden);
   });
@@ -966,9 +969,8 @@ describe('versions published before approval existed', () => {
     const { list } = await import('../src/db.js');
     const release = list<{ id: string; version: string; notes: string }>('releases', project.id).find((r) => r.version === '1.0.0')!;
     put('releases', { ...release, notes: `${release.notes}\nThanks to NOTES_ONLY_NAME.` }, project.id);
-    const snapshot = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'requirements.json');
-    const before = fs.existsSync(snapshot) ? fs.readFileSync(snapshot, 'utf8') : '';
-    fs.writeFileSync(snapshot, before.replace(/\}\s*$/, ', "note": "SNAPSHOT_ONLY_NAME" }') || '{ "note": "SNAPSHOT_ONLY_NAME" }');
+    const before = getReleaseFile('requirements.json');
+    setReleaseFile('requirements.json', before?.replace(/\}\s*$/, ', "note": "SNAPSHOT_ONLY_NAME" }') || '{ "note": "SNAPSHOT_ONLY_NAME" }');
     try {
       const { agent } = await steward('Eighth full-content steward');
       const rel = ((await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[]).find((h) => h.version === '1.0.0')!;
@@ -976,16 +978,15 @@ describe('versions published before approval existed', () => {
       expect(rel.snapshot).toContain('SNAPSHOT_ONLY_NAME');
       expect(rel.turtle).toContain('@prefix');
     } finally {
-      fs.writeFileSync(snapshot, before);
+      setReleaseFile('requirements.json', before ?? null);
       put('releases', release, project.id);
     }
   });
 
   it('still lists every other held version when one release can’t be read (eighth review)', async () => {
     const project = await legacy();
-    const file = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'ontology.ttl');
-    const good = fs.readFileSync(file, 'utf8');
-    fs.writeFileSync(file, '@prefix broken <nope');
+    const good = getReleaseFile('ontology.ttl')!;
+    setReleaseFile('ontology.ttl', '@prefix broken <nope');
     try {
       const { agent } = await steward('Eighth malformed steward');
       const res = await agent.get(`/api/ontologies/${project.id}/public-holds`);
@@ -997,7 +998,7 @@ describe('versions published before approval existed', () => {
       expect(draft.error).toBeUndefined();
       expect(draft.statements).toBeGreaterThan(0);
     } finally {
-      fs.writeFileSync(file, good);
+      setReleaseFile('ontology.ttl', good);
     }
   });
 
