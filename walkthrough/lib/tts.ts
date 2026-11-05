@@ -16,7 +16,7 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -129,6 +129,9 @@ export function estimateSeconds(text: string) {
   return Math.max(0.6, words / 2.6);
 }
 
+/** A send that would pass the run's character budget; nothing was sent. */
+export class BudgetExceeded extends Error {}
+
 export interface SynthRequest {
   text: string;
   /** Neighbouring paragraphs, so the voice keeps a natural flow across clips. */
@@ -184,22 +187,53 @@ export class Voice {
     return ['elevenlabs', 'openai', 'google'].includes(this.opts.provider);
   }
 
-  /** Characters sent to a paid voice so far in this run. */
+  /** Characters sent to a paid voice so far in this run (across videos, with a ledger). */
   spent = 0;
+  /** Most characters this run may send to a paid voice; undefined means no limit. */
+  budget?: number;
+  private ledger?: string;
+
+  /**
+   * Shares the budget with other processes of the same run (one per video): what they
+   * sent is read from `file`, and every send is added to it.
+   */
+  useLedger(file: string) {
+    this.ledger = file;
+    this.spent = existsSync(file) ? Number(JSON.parse(readFileSync(file, 'utf8')).spent) || 0 : 0;
+  }
+
+  private overBudget(cost: number, before = false) {
+    return new BudgetExceeded(
+      `Voicing this would send ${cost.toLocaleString('en')} new characters to ${this.opts.provider}` +
+        (this.spent ? ` on top of the ${this.spent.toLocaleString('en')} already sent` : '') +
+        `, over this run's budget of ${this.budget!.toLocaleString('en')}.${before ? ' Nothing was sent.' : ''} Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`,
+    );
+  }
+
+  /**
+   * Counts characters about to be sent, refusing (before the send) if that would pass the
+   * budget. Called for every attempt, retries included: each one may be billed.
+   */
+  private charge(chars: number) {
+    if (!this.paid) return;
+    if (this.budget && this.spent + chars > this.budget) throw this.overBudget(chars);
+    this.spent += chars;
+    if (this.ledger) writeFileSync(this.ledger, JSON.stringify({ spent: this.spent }));
+  }
 
   /**
    * Refuses, before anything is sent, a batch of paragraphs that would take this run past
-   * its character budget. Returns how many characters the batch will cost.
+   * its budget. Returns how many characters the batch will cost.
    */
-  checkBudget(reqs: SynthRequest[], budget: number | undefined) {
-    const cost = reqs.filter((r) => this.needsVoicing(r)).reduce((a, r) => a + r.text.length, 0);
-    if (budget && this.spent + cost > budget)
-      throw new Error(
-        `Voicing this would send ${cost.toLocaleString('en')} new characters to ${this.opts.provider}` +
-          (this.spent ? ` on top of the ${this.spent.toLocaleString('en')} already sent` : '') +
-          `, over this run's budget of ${budget.toLocaleString('en')}. Nothing was sent. Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`,
-      );
+  checkBudget(reqs: SynthRequest[]) {
+    const cost = this.cost(reqs);
+    if (this.budget && this.spent + cost > this.budget) throw this.overBudget(cost, true);
     return cost;
+  }
+
+  /** Characters a batch of paragraphs would send: the ones not cached, for a paid voice. */
+  cost(reqs: SynthRequest[]) {
+    return reqs.filter((r) => this.needsVoicing(r)).reduce((a, r) => a + r.text.length, 0);
   }
 
   async synth(req: SynthRequest): Promise<Clip> {
@@ -215,7 +249,6 @@ export class Voice {
       if (existsSync(`${legacy}.timing.json`)) await writeFile(timing, await readFile(`${legacy}.timing.json`));
       return { file, duration: await probeDuration(file), cached: true, charStarts: await readTiming() };
     }
-    if (this.paid) this.spent += req.text.length;
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.part.${ext}`;
     switch (this.opts.provider) {
@@ -252,9 +285,11 @@ export class Voice {
    * POSTs and reads the whole response with `read`, retrying timeouts, dropped
    * connections (including mid-body), rate limits and server errors.
    */
-  private async post<T>(url: string, init: RequestInit, what: string, read: (res: Response) => Promise<T>): Promise<T> {
+  private async post<T>(url: string, init: RequestInit, what: string, read: (res: Response) => Promise<T>, chars = 0): Promise<T> {
     const wait = (attempt: number) => new Promise((r) => setTimeout(r, Voice.retryBaseMs * 2 ** attempt));
     for (let attempt = 1; ; attempt++) {
+      // Outside the try: going over the budget is never retried.
+      this.charge(chars);
       let res: Response;
       try {
         // The timeout covers the body too: the signal stays live until read() finishes.
@@ -295,6 +330,7 @@ export class Voice {
       },
       'ElevenLabs',
       async (res) => (await res.json()) as { audio_base64: string; alignment?: { characters: string[]; character_start_times_seconds: number[] } },
+      req.text.length,
     );
     const starts = j.alignment?.character_start_times_seconds;
     return { audio: Buffer.from(j.audio_base64, 'base64'), charStarts: starts && starts.length === req.text.length ? starts : undefined };
@@ -317,6 +353,7 @@ export class Voice {
       },
       'OpenAI speech',
       async (res) => Buffer.from(await res.arrayBuffer()),
+      req.text.length,
     );
   }
 
@@ -344,6 +381,7 @@ export class Voice {
       },
       'Google Text-to-Speech',
       async (res) => Buffer.from(((await res.json()) as { audioContent: string }).audioContent, 'base64'),
+      req.text.length,
     );
   }
 }

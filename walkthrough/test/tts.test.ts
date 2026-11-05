@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Voice } from '../lib/tts.ts';
+import { BudgetExceeded, Voice } from '../lib/tts.ts';
 
 describe('voice requests', () => {
   afterEach(() => {
@@ -57,24 +57,83 @@ describe('voice cache and budget', () => {
     expect(v.needsVoicing(req('Hello.', 'Before.', 'After.'))).toBe(false);
   });
 
+  beforeEach(() => {
+    process.env.ELEVENLABS_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    delete process.env.ELEVENLABS_API_KEY;
+    vi.unstubAllGlobals();
+  });
+
+  const elevenlabs = (budget?: number) => {
+    const v = new Voice({ provider: 'elevenlabs' }, dir());
+    v.budget = budget;
+    return v;
+  };
+
   it('refuses a batch over the budget before sending anything', async () => {
     let calls = 0;
     vi.stubGlobal('fetch', async () => {
       calls++;
       return { ok: false, status: 500, text: async () => '' };
     });
-    const v = new Voice({ provider: 'elevenlabs' }, dir());
     const reqs = [req('a'.repeat(600)), req('b'.repeat(600))];
-    expect(() => v.checkBudget(reqs, 1000)).toThrow(/1,200 new characters.*budget of 1,000.*Nothing was sent/);
-    expect(v.checkBudget(reqs, 1200)).toBe(1200);
-    expect(v.checkBudget(reqs, undefined)).toBe(1200);
+    expect(() => elevenlabs(1000).checkBudget(reqs)).toThrow(/1,200 new characters.*budget of 1,000\. Nothing was sent/);
+    expect(elevenlabs(1200).checkBudget(reqs)).toBe(1200);
+    expect(elevenlabs(undefined).checkBudget(reqs)).toBe(1200);
     expect(calls).toBe(0);
   });
 
   it('counts only paragraphs that are not cached, and nothing for free voices', () => {
-    const v = new Voice({ provider: 'elevenlabs' }, dir());
+    const v = elevenlabs(10);
     touch((v as any).fileFor(req('cached paragraph')));
-    expect(v.checkBudget([req('cached paragraph'), req('new one')], 10)).toBe(7);
-    expect(new Voice({ provider: 'silent' }, dir()).checkBudget([req('x'.repeat(5000))], 10)).toBe(0);
+    expect(v.checkBudget([req('cached paragraph'), req('new one')])).toBe(7);
+    const free = new Voice({ provider: 'silent' }, dir());
+    free.budget = 10;
+    expect(free.checkBudget([req('x'.repeat(5000))])).toBe(0);
+  });
+
+  // Retries used to be free as far as the budget knew, so one paragraph could be sent
+  // (and billed) four times under a budget that allowed it once.
+  it('charges every attempt, and stops retrying when the budget runs out', async () => {
+    Voice.retryBaseMs = 1;
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls++;
+      return { ok: false, status: 503, text: async () => 'busy' };
+    });
+    const v = elevenlabs(2500);
+    await expect(v.synth(req('p'.repeat(1000)))).rejects.toBeInstanceOf(BudgetExceeded);
+    expect(calls).toBe(2); // the third attempt would have passed 2,500
+    expect(v.spent).toBe(2000);
+  });
+
+  it('refuses at send time when a clip that was cached has gone', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls++;
+      return { ok: false, status: 500, text: async () => '' };
+    });
+    const v = elevenlabs(100);
+    const big = req('q'.repeat(500));
+    const file = (v as any).fileFor(big);
+    touch(file);
+    expect(v.checkBudget([big])).toBe(0); // cached when checked…
+    rmSync(file); // …and gone by the time it is needed
+    await expect(v.synth(big)).rejects.toThrow(/500 new characters.*budget of 100/);
+    expect(calls).toBe(0);
+  });
+
+  // Each video used to get a fresh budget, so recording both could send twice the cap.
+  it('shares one budget across the videos of a run', () => {
+    const ledger = path.join(dir(), 'ledger.json');
+    const first = elevenlabs(2500);
+    first.useLedger(ledger);
+    (first as any).charge(2000); // the tour sent 2,000
+    const second = elevenlabs(2500);
+    second.useLedger(ledger);
+    expect(second.spent).toBe(2000);
+    expect(() => second.checkBudget([req('f'.repeat(1000))])).toThrow(/on top of the 2,000 already sent/);
+    expect(second.checkBudget([req('f'.repeat(500))])).toBe(500);
   });
 });

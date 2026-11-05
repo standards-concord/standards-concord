@@ -13,7 +13,7 @@ name: Walkthrough video
 # Voice characters are limited (and ElevenLabs flags bursts of use), so narration is
 # cached per paragraph and kept with each release: a release re-voices only the paragraphs
 # whose words changed. A run may send at most VOICE_CHAR_BUDGET new characters (repository
-# variable, default 2500; both scripts in full are about 13,000) and refuses before
+# variable, default 2500; both scripts in full are about 8,000) and refuses before
 # sending anything if it would need more. For a first or full recording, run this
 # workflow by hand with a larger budget (0 for no limit) and the release tag to attach to.
 

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { test, expect } from './fixtures';
 
 /**
@@ -115,5 +117,19 @@ test.describe('media API', () => {
     expect((await request.get('/api/media/concord-feedback.mp4')).status()).toBe(404);
     expect((await request.get('/api/media/README.md')).status()).toBe(404);
     expect((await request.get('/api/media/..%2F..%2Fpackage.json')).status()).toBe(404);
+  });
+
+  // A symlink with an allowed name used to be served, so it could hand any readable file
+  // on the server to anyone. Only regular files in the folder are served now.
+  test('never serves a symlink, even with an allowed name', async ({ request }) => {
+    const link = path.join(import.meta.dirname, 'fixtures', 'media', 'concord-feedback.transcript.md');
+    fs.symlinkSync(path.join(import.meta.dirname, '..', 'package.json'), link);
+    try {
+      expect((await request.get('/api/media/concord-feedback.transcript.md')).status()).toBe(404);
+      const index = await (await request.get('/api/media/index.json')).json();
+      expect(index.files.map((f: { name: string }) => f.name)).not.toContain('concord-feedback.transcript.md');
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
   });
 });
