@@ -120,10 +120,12 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const [comment, setComment] = useState('');
   const [reviseOpen, setReviseOpen] = useState(false);
   const [instruction, setInstruction] = useState('');
-  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>) => {
+  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>, sent = '') => {
     const d = await fn();
     onUpdate(d);
-    setComment('');
+    // Clear only the comment that was just sent: anything typed while the request was in flight stays.
+    // (It used to be wiped whenever any action finished, e.g. typing a comment straight after Approve.)
+    setComment((now) => (now.trim() === sent ? '' : now));
   });
   const revise = useAction(async () => {
     onUpdate(await api.revise(cr.id, instruction.trim()));
@@ -139,8 +141,8 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const myVote = cr.votes.find((v) => v.userId === uid);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
-  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c));
-  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c));
+  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c), c ?? '');
+  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c), c ?? '');
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
 
   if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;

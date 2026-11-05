@@ -153,6 +153,7 @@ test.describe('change requests', () => {
     await page.goto(url);
     await actions(page).getByRole('button', { name: 'Approve' }).click();
     // Her approval is recorded, but she is told it doesn't count towards the threshold.
+    await expect(actions(page).getByText('You previously chose “approve”.')).toBeVisible();
     await expect(actions(page).getByText(/Your approval is recorded but only .* approvals count/)).toBeVisible();
     await actions(page).getByRole('textbox').fill('Coordinators call these "slots".');
     await actions(page).getByRole('button', { name: 'Comment' }).click();
@@ -160,6 +161,36 @@ test.describe('change requests', () => {
     // Shown once, as her comment (it used to appear a second time in the timeline).
     await expect(page.getByText('Coordinators call these "slots".')).toHaveCount(1);
     await expect(page.getByText('Commented', { exact: true })).toBeVisible();
+  });
+
+  test('a comment typed while another action is still saving is kept, not wiped when it finishes', async ({ page, request }) => {
+    // Typing a comment straight after Approve used to lose it: the textbox was cleared whenever any action finished.
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    const url = await newChangeRequest(page, demo.id, { title: `Typed while saving ${uniq()}`, ask: `Add a class Typing${uniq()}.` });
+    await page.goto(url);
+    await actions(page).getByRole('button', { name: 'Submit for review' }).click();
+    await expect(status(page)).toContainText('In review');
+
+    await signInAsPersona(page, 'Mei Chen');
+    await page.goto(url);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/change-requests\/[^/]+\/reviews?$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await actions(page).getByRole('button', { name: 'Approve' }).click();
+    const box = actions(page).getByRole('textbox');
+    await box.fill('Typed while the approval was saving.');
+    release();
+    await expect(actions(page).getByText('You previously chose “approve”.')).toBeVisible();
+    await expect(box).toHaveValue('Typed while the approval was saving.');
+    await actions(page).getByRole('button', { name: 'Comment' }).click();
+    // The comment that was sent is the one cleared.
+    await expect(box).toHaveValue('');
+    await page.getByRole('tab', { name: /^Discussion/ }).click();
+    await expect(page.getByText('Typed while the approval was saving.')).toHaveCount(1);
   });
 
   test('anyone can report a bug, and it becomes a change request', async ({ page, request }) => {
