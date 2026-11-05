@@ -287,6 +287,33 @@ describe.runIf(run)('in a browser', () => {
     expect(await page.locator('#url').innerText()).toBe('claude.ai/code/helping-hands');
   });
 
+  it('colours JavaScript in code and edit cards, without changing the text', async () => {
+    // Jesse (2026-11-05): the JavaScript in the Claude Code scenes had no syntax highlighting.
+    await page.setContent(stage('claude-web.html'));
+    await page.addScriptTag({ content: stage('highlight.js') });
+    const term = (fn: string, ...args: unknown[]) => page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
+    await term('startAgent', { cwdPath: '~/code/helping-hands' });
+    const lines = ['// Logs time', 'const activity = new VolunteeringActivity(id, store, DataFactory);', 'activity.hoursVolunteered = 2;', 'li.innerHTML = `', '  ${age ? `<span class="pill">${age}+</span>` : ""}', '  <p>${one(o.summary)}</p>`;'];
+    await term('diff', 'app.js', 'Added 6 lines', [{ t: 'del', n: 1, s: 'const old = "x";' }, ...lines.map((s, i) => ({ t: 'add', n: i + 1, s }))]);
+    const rows = page.locator('.diff > div');
+    expect(await rows.allInnerTexts()).toEqual(['1- const old = "x";', ...lines.map((s, i) => `${i + 1}+ ${s}`)]);
+    const cls = (row: number, text: string) => rows.nth(row).locator('span[class^="tk-"]', { hasText: text }).first().getAttribute('class');
+    expect(await cls(1, 'Logs time')).toBe('tk-c');
+    expect(await cls(2, 'const')).toBe('tk-k');
+    expect(await cls(2, 'VolunteeringActivity')).toBe('tk-t');
+    expect(await cls(3, 'hoursVolunteered')).toBe('tk-p');
+    expect(await cls(3, '2')).toBe('tk-n');
+    // A template literal that spans lines, with templates nested inside it, stays a string on every line.
+    expect(await rows.nth(5).locator('span[class^="tk-"]').getAttribute('class')).toBe('tk-s');
+    expect(await rows.nth(6).locator('span[class^="tk-"]').getAttribute('class')).toBe('tk-s');
+    // Removed lines stay plain.
+    expect(await rows.nth(0).locator('span[class^="tk-"]').count()).toBe(0);
+    await term('file', 'app.js', 'import { VolunteeringDataset } from "https://hub/def/volunteering.js";');
+    expect(await page.locator('.card pre').last().locator('.tk-k').first().innerText()).toBe('import');
+    await term('file', 'data/activities.ttl', 'ex:a a vol:VolunteeringActivity .');
+    expect(await page.locator('.card pre').last().locator('span').count()).toBe(0);
+  });
+
   it('draws Claude Code on the web from the calls the scenes make', async () => {
     await page.setContent(stage('claude-web.html'));
     const term = (fn: string, ...args: unknown[]) => page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
