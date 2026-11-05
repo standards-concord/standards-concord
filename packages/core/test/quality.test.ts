@@ -290,7 +290,9 @@ describe('owlReasoner (sparq OWL 2 DL)', () => {
     entailed.push([X('Extra'), X('C5')]);
     const t0 = performance.now();
     expect(directInferred(g, entailed, new Set())).toEqual([[X('Extra'), X('C5')]]);
-    expect(performance.now() - t0).toBeLessThan(3000);
+    // Well under a second alone; the bound leaves room for CI running every package's tests at
+    // once (it took 5.5 s then), and still catches the old quadratic version by a wide margin.
+    expect(performance.now() - t0).toBeLessThan(10_000);
   });
   it('reports no unsatisfiable classes or inferred relations when sparq only decided consistency', async () => {
     // Used to go wrong: the consistency-only result carried the structural fallback's
