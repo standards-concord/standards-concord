@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type DocStore, openStore, StoreBusyError, type StoreOptions } from '../src/store/index.js';
+import { FifoLock } from '../src/store/lock.js';
 import { TransactionAbortedError, TransactionEndedError } from '../src/store/types.js';
 
 /**
@@ -32,6 +33,18 @@ const backends: Backend[] = [
 ];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A plain pg connection to the test server, outside any store: to hold locks or end other sessions. */
+async function withAdmin<T>(fn: (c: { query(sql: string): Promise<unknown> }) => Promise<T>): Promise<T> {
+  const { default: pg } = await import('pg');
+  const c = new pg.Client({ connectionString: pgUrl, application_name: 'concord-test-admin' });
+  await c.connect();
+  try {
+    return await fn(c);
+  } finally {
+    await c.end();
+  }
+}
 function gate() {
   let open!: () => void;
   const opened = new Promise<void>((r) => (open = r));
@@ -292,28 +305,145 @@ describe.each(backends)('document store on $name', (backend) => {
     expect(await store.claim('kv', 'p', 'constructor', 'you')).toBeUndefined();
   });
 
-  it('serves waiting transactions in arrival order, so none is overtaken', async () => {
-    // Astra (PR #53 review): on SQLite, newer transactions could keep overtaking one already waiting.
-    const order: string[] = [];
-    const g = gate();
-    const first = store.transaction(async () => {
-      await g.opened;
-      order.push('first');
-    });
-    await sleep(10);
-    const waiting = store.transaction(async () => {
-      order.push('waiting');
-    });
-    await sleep(10);
-    const newer = Array.from({ length: 20 }, (_, i) =>
+  it('a claim still running when its transaction fails is rolled back with it', async () => {
+    // Astra (PR #53 re-review 2): the claim's UPDATE, sent after its SELECT returned, ran after the ROLLBACK
+    // and saved the field outside the failed transaction.
+    await store.put('kv', { id: 'c' });
+    await expect(
       store.transaction(async () => {
-        order.push(`newer-${i}`);
+        await Promise.all([store.claim('kv', 'c', 'owner', 'me'), Promise.reject(new Error('another branch failed'))]);
       }),
-    );
-    g.open();
-    await Promise.all([first, waiting, ...newer]);
-    expect(order.slice(0, 2)).toEqual(['first', 'waiting']);
+    ).rejects.toThrow('another branch failed');
+    await sleep(50);
+    expect(await store.get('kv', 'c')).toEqual({ id: 'c' });
   });
+
+  it('a statement still running when the callback returns counts: if it fails, the transaction does', async () => {
+    // Astra (PR #53 re-review 2): the transaction checked for failures before the un-awaited put had failed,
+    // so it reported success though Postgres had saved nothing.
+    let caught = false;
+    await expect(
+      store.transaction(async () => {
+        await store.put('kv', { id: 'first' });
+        void store.put('kv', { id: null as unknown as string }).catch(() => (caught = true));
+        return 'looks saved';
+      }),
+    ).rejects.toBeInstanceOf(TransactionAbortedError);
+    expect(caught).toBe(true);
+    expect(await store.list('kv')).toEqual([]);
+  });
+
+  it('a statement still running when the callback returns is saved with the transaction', async () => {
+    await store.transaction(async () => {
+      void store.put('kv', { id: 'not-awaited' });
+    });
+    expect(await store.get('kv', 'not-awaited')).toEqual({ id: 'not-awaited' });
+  });
+
+  it('detached work started inside a transaction runs outside it, and survives its rollback', async () => {
+    let detached: Promise<unknown> | undefined;
+    await expect(
+      store.transaction(async () => {
+        await store.put('kv', { id: 'inside' });
+        detached = store.detached(async () => {
+          await sleep(20);
+          await store.put('kv', { id: 'background' });
+        });
+        throw new Error('roll back');
+      }),
+    ).rejects.toThrow('roll back');
+    await detached;
+    expect((await store.list<Doc>('kv')).map((d) => d.id)).toEqual(['background']);
+  });
+
+  if (backend.name !== 'sqlite')
+    it("a statement can't run on a transaction's connection once the transaction has ended", async () => {
+      // Astra (PR #53 re-review 2): an operation that had already picked up the transaction's connection
+      // (claim, between its read and its write) checked nothing before its next statement, so after the
+      // transaction ended it ran on a connection already back in the pool. Each statement is now checked.
+      const raw = store as unknown as { reader(): { query(sql: string, params?: unknown[]): Promise<unknown> } };
+      let q!: { query(sql: string, params?: unknown[]): Promise<unknown> };
+      await store.transaction(async () => {
+        q = raw.reader();
+        await q.query('SELECT 1');
+      });
+      await expect(
+        q.query("INSERT INTO docs (collection, id, data, created_at) VALUES ('kv', 'late', '{}', '0')"),
+      ).rejects.toBeInstanceOf(TransactionEndedError);
+      expect(await store.get('kv', 'late')).toBeUndefined();
+    });
+
+  if (backend.name !== 'sqlite')
+    it('work left over from a transaction cannot use it while COMMIT is in flight, nor escape a failed COMMIT', async () => {
+      // Astra (PR #53 re-review 2): the transaction counted as committed before COMMIT was sent, so a child
+      // arriving during a COMMIT that then failed saved its write on its own.
+      const raw = store as unknown as { reader(): { query(sql: string): Promise<unknown> } };
+      const exec = (sql: string) => store.transaction(() => raw.reader().query(sql));
+      await exec(`CREATE OR REPLACE FUNCTION concord_test_fail_at_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(0.3); RAISE EXCEPTION 'refused at commit'; END $$`);
+      await exec(`CREATE CONSTRAINT TRIGGER concord_test_fail_at_commit AFTER INSERT ON docs DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW WHEN (NEW.id = 'fail-at-commit') EXECUTE FUNCTION concord_test_fail_at_commit()`);
+      try {
+        let child: Promise<unknown> | undefined;
+        await expect(
+          store.transaction(async () => {
+            await store.put('kv', { id: 'fail-at-commit' });
+            child = (async () => {
+              await sleep(100); // COMMIT is running its 0.3 s trigger by now.
+              await store.put('kv', { id: 'child' });
+            })();
+            child.catch(() => {}); // Checked below, once the transaction has failed.
+          }),
+        ).rejects.toThrow('refused at commit');
+        await expect(child).rejects.toBeInstanceOf(TransactionEndedError);
+        expect(await store.list('kv')).toEqual([]);
+      } finally {
+        await exec('DROP TRIGGER IF EXISTS concord_test_fail_at_commit ON docs');
+      }
+    });
+
+  if (!backend.multiConnection || backend.name === 'sqlite')
+    describe('one connection, shared in arrival order', () => {
+      it('serves transactions in arrival order', async () => {
+        // The hand-off that stops a newcomer overtaking is checked directly on FifoLock below; this checks the
+        // store goes through it for transactions arriving while others finish.
+        const order: number[] = [];
+        const all: Promise<unknown>[] = [];
+        for (let i = 0; i < 60; i++) {
+          all.push(
+            store.transaction(async () => {
+              order.push(i);
+              await sleep(0);
+            }),
+          );
+          await new Promise((r) => setImmediate(r));
+        }
+        await Promise.all(all);
+        expect(order).toEqual([...order].sort((x, y) => x - y));
+      });
+
+      it('a read outside the transaction holding the connection waits at most about 5 s, and withoutWaiting not at all', async () => {
+        // Astra (PR #53 re-review 2): on PGlite, reads and writes waited without limit, withoutWaiting included.
+        const g = gate();
+        const held = gate();
+        const tx = store.transaction(async () => {
+          await store.put('kv', { id: 'held' });
+          held.open();
+          await g.opened;
+        });
+        await held.opened;
+        let started = Date.now();
+        await expect(store.detached(() => store.withoutWaiting(() => store.get('kv', 'held')))).rejects.toBeInstanceOf(StoreBusyError);
+        await expect(store.detached(() => store.withoutWaiting(() => store.put('kv', { id: 'x' })))).rejects.toBeInstanceOf(StoreBusyError);
+        expect(Date.now() - started).toBeLessThan(1000);
+        started = Date.now();
+        await expect(store.detached(() => store.get('kv', 'held'))).rejects.toBeInstanceOf(StoreBusyError);
+        expect(Date.now() - started).toBeGreaterThan(4000);
+        g.open();
+        await tx;
+        expect(await store.get('kv', 'held')).toEqual({ id: 'held' });
+      });
+    });
 
   it('scrubFreeSpace succeeds when nothing holds a lock, and keeps the data', async () => {
     await store.put('oauthClients', { id: 'c', secret: 'x'.repeat(1000) });
@@ -361,10 +491,11 @@ describe.each(backends)('document store on $name', (backend) => {
       it('survives the server dropping its connections, idle or mid-transaction', async () => {
         // Astra (PR #53 review): with no 'error' listener on the pool or its clients, a terminated backend
         // crashed the process.
-        const admin = await connect();
         const kill = () =>
-          (admin as unknown as { driver: { query: (s: string) => Promise<unknown> } }).driver.query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = '' AND state IS NOT NULL",
+          withAdmin((c) =>
+            c.query(
+              "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = '' AND state IS NOT NULL",
+            ),
           );
         await store.put('kv', { id: 'before' }); // Leaves an idle connection in the pool.
         const inTx = store.transaction(async () => {
@@ -379,6 +510,82 @@ describe.each(backends)('document store on $name', (backend) => {
         await store.put('kv', { id: 'after' });
         expect((await store.list<Doc>('kv')).map((d) => d.id)).toEqual(['before', 'after']);
       });
+
+    if (backend.name === 'postgres') {
+      it('a table lock held elsewhere makes reads and writes give up: after about 5 s, or at once withoutWaiting', async () => {
+        // Astra (PR #53 re-review 2): reads outside a transaction had no lock timeout, and a table lock's
+        // refusal surfaced as a raw 55P03 rather than StoreBusyError.
+        await store.put('kv', { id: 'x' });
+        const g = gate();
+        const held = gate();
+        const locker = withAdmin(async (c) => {
+          await c.query('BEGIN');
+          await c.query('LOCK TABLE docs IN ACCESS EXCLUSIVE MODE');
+          held.open();
+          await g.opened;
+          await c.query('ROLLBACK');
+        });
+        await held.opened;
+        try {
+          let started = Date.now();
+          await expect(store.withoutWaiting(() => store.get('kv', 'x'))).rejects.toBeInstanceOf(StoreBusyError);
+          await expect(store.withoutWaiting(() => store.put('kv', { id: 'y' }))).rejects.toBeInstanceOf(StoreBusyError);
+          expect(Date.now() - started).toBeLessThan(2000);
+          started = Date.now();
+          await expect(store.get('kv', 'x')).rejects.toBeInstanceOf(StoreBusyError);
+          expect(Date.now() - started).toBeGreaterThan(4000);
+          expect(Date.now() - started).toBeLessThan(9000);
+        } finally {
+          g.open();
+          await locker;
+        }
+        expect(await store.get('kv', 'x')).toEqual({ id: 'x' });
+      });
+
+      it('with every pooled connection in use, withoutWaiting gives up at once, even when two arrive together', async () => {
+        // Astra (PR #53 re-review 2): both of two simultaneous withoutWaiting calls saw the one idle connection,
+        // so the second queued for it instead of giving up.
+        const small = await connect({ kind: 'postgres', url: pgUrl!, max: 1 });
+        await small.get('kv', 'warm'); // Leaves one idle connection.
+        const g = gate();
+        const first = small.withoutWaiting(() =>
+          small.transaction(async () => {
+            await small.put('kv', { id: 'first' });
+            await g.opened;
+          }),
+        );
+        try {
+          const started = Date.now();
+          const second = small.withoutWaiting(() => small.get('kv', 'first'));
+          await expect(second).rejects.toBeInstanceOf(StoreBusyError);
+          expect(Date.now() - started).toBeLessThan(150);
+          await expect(small.withoutWaiting(() => small.put('kv', { id: 'third' }))).rejects.toBeInstanceOf(StoreBusyError);
+        } finally {
+          g.open(); // Even if an expectation failed, so the writer lock doesn't stay held for later tests.
+          await first;
+        }
+        expect(await small.get('kv', 'first')).toEqual({ id: 'first' });
+      });
+
+      it('opening the store gives up after about 5 s if another connection keeps the writer lock', async () => {
+        // Astra (PR #53 re-review 2): creating the schema waited for the writer lock without limit.
+        const g = gate();
+        const held = gate();
+        const tx = store.transaction(async () => {
+          held.open();
+          await g.opened;
+        });
+        await held.opened;
+        try {
+          const started = Date.now();
+          await expect(openStore(opts)).rejects.toBeInstanceOf(StoreBusyError);
+          expect(Date.now() - started).toBeGreaterThan(4000);
+        } finally {
+          g.open();
+          await tx;
+        }
+      });
+    }
 
     it('withoutWaiting gives up at once while another connection holds the writer lock, and works once it is free', async () => {
       const other = await connect();
@@ -400,5 +607,49 @@ describe.each(backends)('document store on $name', (backend) => {
       await other.withoutWaiting(() => other.transaction(async () => other.put('kv', { id: 'later' })));
       expect((await other.list<Doc>('kv')).map((d) => d.id)).toEqual(['held', 'later']);
     });
+  });
+});
+
+describe('FifoLock (the one connection of SQLite and PGlite)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('hands itself to the next waiter on release, so a newcomer arriving at that moment cannot overtake', async () => {
+    // Astra (PR #53 review): SQLite's gate freed the connection and woke its waiters, so a transaction arriving
+    // in that moment took it first; 100 newcomers overtook one waiter. (Re-review 2: the store-level test
+    // passed without the fix, as nothing arrived in that moment; this checks the moment itself.)
+    const lock = new FifoLock();
+    const order: string[] = [];
+    expect(lock.acquire()).toBeUndefined();
+    const waiter = lock.acquire()!.then(() => order.push('waiter'));
+    lock.release();
+    const newcomer = lock.acquire(); // Same synchronous step as the release.
+    expect(newcomer).toBeInstanceOf(Promise);
+    expect(() => lock.acquire(true)).toThrow(StoreBusyError);
+    const late = newcomer!.then(() => order.push('newcomer'));
+    await waiter;
+    lock.release();
+    await late;
+    lock.release();
+    expect(order).toEqual(['waiter', 'newcomer']);
+    expect(lock.busy).toBe(false);
+  });
+
+  it('a waiter gives up with StoreBusyError after 5 s, and leaves the queue', async () => {
+    vi.useFakeTimers();
+    const lock = new FifoLock();
+    lock.acquire();
+    const outcome = lock.acquire()!.then(
+      () => 'granted',
+      (e: unknown) => (e instanceof StoreBusyError ? 'busy' : 'other'),
+    );
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(await Promise.race([outcome, 'still waiting'])).toBe('still waiting');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toBe('busy');
+    lock.release();
+    expect(lock.busy).toBe(false);
+    expect(lock.acquire()).toBeUndefined();
   });
 });

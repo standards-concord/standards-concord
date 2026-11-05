@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Collection } from '../db.js';
-import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, TransactionAbortedError, type TxState } from './types.js';
+import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, Pending, StoreBusyError, TransactionAbortedError, type TxState } from './types.js';
 
 /** What the store needs from a connection: pg's `Pool`/`PoolClient` and PGlite (and its transactions) all fit. */
 export interface Queryable {
@@ -8,14 +8,18 @@ export interface Queryable {
 }
 
 /** A Postgres connection source: node-postgres's pool for Neon, or PGlite in process. */
-export interface PgDriver extends Queryable {
+export interface PgDriver {
   /**
-   * Run fn on one connection between BEGIN and COMMIT, rolling back if it throws. Fails with StoreBusyError if
-   * no connection is free within BUSY_TIMEOUT_MS, or at once with `noWait`.
+   * Run one statement outside any transaction, with the same bounded waits as a transaction (it runs in a short
+   * one that starts with `begin(noWait)`).
    */
-  transaction<T>(fn: (q: Queryable) => Promise<T>, opts?: { noWait?: boolean }): Promise<T>;
-  /** Whether every connection is in use, so a call would have to wait for one. */
-  saturated(): boolean;
+  read<R>(sql: string, params: unknown[] | undefined, opts: { noWait: boolean }): Promise<{ rows: R[] }>;
+  /**
+   * Run fn on one connection between `begin(noWait)` and COMMIT, rolling back if it throws. Fails with
+   * StoreBusyError if no connection is free within BUSY_TIMEOUT_MS, or at once with `noWait`. Rejects with
+   * TransactionAbortedError if COMMIT turns out to have rolled back.
+   */
+  transaction<T>(fn: (q: Queryable) => Promise<T>, opts: { noWait: boolean }): Promise<T>;
   /** VACUUM FULL the docs table without waiting for locks. False if it had to skip the table. */
   vacuumDocs(): Promise<boolean>;
   close(): Promise<void>;
@@ -39,8 +43,20 @@ const LOCK_TIMEOUT = `${BUSY_TIMEOUT_MS}ms`;
 const IDLE_IN_TRANSACTION_TIMEOUT = '30s';
 const STATEMENT_TIMEOUT = '30s';
 
+/**
+ * Starts every transaction, reads outside one included: bounded waits, and a server-side end to a transaction
+ * whose function instance died holding the lock. The settings are transaction-local (`set_config(..., true)`), so
+ * nothing outlives the transaction on a pooled connection (PgBouncer, Neon's pooler). Constants only: sent as
+ * one simple query with BEGIN to save a round trip.
+ */
+export function begin(noWait: boolean) {
+  const lock = noWait ? NO_WAIT_LOCK_TIMEOUT : LOCK_TIMEOUT;
+  return `BEGIN; SELECT set_config('lock_timeout', '${lock}', true), set_config('statement_timeout', '${STATEMENT_TIMEOUT}', true), set_config('idle_in_transaction_session_timeout', '${IDLE_IN_TRANSACTION_TIMEOUT}', true)`;
+}
+
 /** Postgres refused a lock within lock_timeout (55P03); statement_timeout (57014) is a different failure. */
 const isLockTimeout = (e: unknown) => (e as { code?: string })?.code === '55P03';
+export const asBusy = (e: unknown) => (isLockTimeout(e) ? new StoreBusyError({ cause: e }) : e);
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS docs (
@@ -57,8 +73,9 @@ const SCHEMA = `
 
 interface PgTx {
   state: TxState;
-  /** The transaction's connection. */
+  /** The transaction's connection, through `pending`. */
   q: Queryable;
+  pending: Pending;
 }
 
 interface Ctx {
@@ -80,10 +97,20 @@ export class PostgresStore implements DocStore {
 
   /** Create the schema if needed. Safe when several instances cold-start at once: they take turns on the writer lock. */
   static async open(driver: PgDriver): Promise<PostgresStore> {
-    await driver.transaction(async (q) => {
-      await q.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]);
-      for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) await q.query(stmt);
-    });
+    await driver
+      .transaction(
+      async (q) => {
+        await q.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]).catch((e) => {
+          throw asBusy(e);
+        });
+        for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) await q.query(stmt);
+      },
+      { noWait: false },
+    )
+      .catch(async (e) => {
+        await driver.close().catch(() => {});
+        throw e;
+      });
     return new PostgresStore(driver);
   }
 
@@ -93,27 +120,11 @@ export class PostgresStore implements DocStore {
     return { tx: liveTransaction(c.tx), noWait: c.noWait };
   }
 
-  /**
-   * Reads go on the transaction's connection inside one, otherwise on any pooled connection. A statement that
-   * fails inside a transaction dooms it (Postgres refuses everything after it until ROLLBACK), so that is recorded.
-   */
+  /** Statements go on the transaction's connection inside one, otherwise each in its own short read transaction. */
   private reader(): Queryable {
     const c = this.current();
-    if (c.tx) {
-      const tx = c.tx;
-      return {
-        query: async <R>(sql: string, params?: unknown[]) => {
-          try {
-            return await tx.q.query<R>(sql, params);
-          } catch (e) {
-            tx.state.failed ??= e;
-            throw isLockTimeout(e) ? new StoreBusyError({ cause: e }) : e;
-          }
-        },
-      };
-    }
-    if (c.noWait && this.driver.saturated()) throw new StoreBusyError();
-    return this.driver;
+    if (c.tx) return c.tx.q;
+    return { query: <R>(sql: string, params?: unknown[]) => this.driver.read<R>(sql, params, { noWait: c.noWait }) };
   }
 
   /** A single write: inside a transaction it joins it; outside, it is its own short transaction holding the writer lock. */
@@ -193,35 +204,40 @@ export class PostgresStore implements DocStore {
     const { noWait } = c;
     const state: TxState = { status: 'open' };
     try {
-      return await this.driver.transaction(
-        async (q) => {
-          // Bounded waits, and a server-side end to a transaction whose function instance died holding the lock.
-          await q.query(
-            "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true), set_config('idle_in_transaction_session_timeout', $3, true)",
-            [noWait ? NO_WAIT_LOCK_TIMEOUT : LOCK_TIMEOUT, STATEMENT_TIMEOUT, IDLE_IN_TRANSACTION_TIMEOUT],
-          );
+      const out = await this.driver.transaction(
+        async (conn) => {
           if (noWait) {
-            const { rows } = await q.query<{ ok: boolean }>('SELECT pg_try_advisory_xact_lock($1) AS ok', [WRITER_LOCK]);
+            const { rows } = await conn.query<{ ok: boolean }>('SELECT pg_try_advisory_xact_lock($1) AS ok', [WRITER_LOCK]);
             if (!rows[0]?.ok) throw new StoreBusyError();
           } else {
-            await q.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]).catch((e) => {
-              throw isLockTimeout(e) ? new StoreBusyError({ cause: e }) : e;
+            await conn.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]).catch((e) => {
+              throw asBusy(e);
             });
           }
-          const tx: PgTx = { state, q };
+          // Every statement goes through `pending`, so the transaction can wait for the ones still running when
+          // fn is done, and none can start once COMMIT or ROLLBACK is on its way.
+          const pending = new Pending(state);
+          const q: Queryable = {
+            query: <R>(sql: string, params?: unknown[]) =>
+              pending.start(() => conn.query<R>(sql, params)).catch((e) => {
+                throw asBusy(e);
+              }),
+          };
+          let out: T;
           try {
-            const out = await this.als.run({ store: this, tx, noWait }, fn);
-            if (state.failed !== undefined) throw new TransactionAbortedError(state.failed);
-            // Marked before the driver sends COMMIT and returns the connection, so nothing left over can use it.
-            state.status = 'committed';
-            return out;
-          } catch (e) {
-            state.status = 'rolledBack';
-            throw e;
+            out = await this.als.run({ store: this, tx: { state, q, pending }, noWait }, fn);
+          } finally {
+            state.status = 'finishing';
+            await pending.settle();
           }
+          if (state.failed !== undefined) throw new TransactionAbortedError(state.failed);
+          state.status = 'committing';
+          return out;
         },
         { noWait },
       );
+      state.status = 'committed';
+      return out;
     } catch (e) {
       state.status = 'rolledBack'; // Also if COMMIT itself failed.
       throw e;
@@ -231,6 +247,10 @@ export class PostgresStore implements DocStore {
   withoutWaiting<T>(fn: () => Promise<T>): Promise<T> {
     const c = this.als.getStore();
     return this.als.run({ store: this, tx: c?.store === this ? c.tx : undefined, noWait: true }, fn);
+  }
+
+  detached<T>(fn: () => Promise<T>): Promise<T> {
+    return this.als.run({ store: this, noWait: false }, fn);
   }
 
   /**

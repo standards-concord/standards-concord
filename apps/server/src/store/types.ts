@@ -19,10 +19,15 @@ import type { Collection } from '../db.js';
  * - **A transaction is all or nothing, even if fn catches an error.** If any statement in it failed, it rolls
  *   back and rejects with TransactionAbortedError, though fn caught the error and returned. (Postgres can't go
  *   on after a failed statement; SQLite could, but behaves the same so code can't come to rely on it.)
- * - **Work a transaction started but didn't await** can't use it once it has ended. After a commit it runs as
- *   ordinary calls outside any transaction; after a rollback its calls reject with TransactionEndedError, so
- *   the leftovers of a failed transaction (say, the other branches of a rejected Promise.all) can't save
- *   half of its work.
+ * - **A transaction ends only once the statements it started have finished.** When fn returns (or throws), the
+ *   transaction waits for any statement still running on its behalf (say, one fn started but didn't await, or
+ *   a `claim` halfway between its read and its write), and those count: if one fails, nothing is saved and it
+ *   rejects with TransactionAbortedError. Then it commits or rolls back. Work fn started that calls the store
+ *   later still can't use the transaction: while COMMIT is in flight, and after a rollback, its calls reject
+ *   with TransactionEndedError (so the leftovers of a failed transaction, such as the other branches of a
+ *   rejected Promise.all, can't save half of it); after a successful commit they run as ordinary calls on
+ *   their own. So await everything that belongs to the transaction, and start background work with
+ *   `detached(fn)`.
  * - **`list` order** is creation time, then insertion order for ties.
  */
 export interface DocStore {
@@ -41,8 +46,14 @@ export interface DocStore {
    */
   claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined>;
   clearAll(): Promise<void>;
-  /** Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer transaction. */
+  /**
+   * Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer
+   * transaction. Await every call that is meant to be part of it: one that is still waiting on something else
+   * when fn returns ends up outside it (see above).
+   */
   transaction<T>(fn: () => Promise<T>): Promise<T>;
+  /** Run fn outside any transaction the caller is in: for background work started from inside one. */
+  detached<T>(fn: () => Promise<T>): Promise<T>;
   /**
    * Run fn without waiting on locks another connection holds: anything blocked throws at once instead of
    * stalling. For background work that can simply be retried later.
@@ -70,28 +81,69 @@ export class TransactionAbortedError extends Error {
   }
 }
 
-/** Work started inside a transaction that rolled back tried to use the store afterwards. */
+/** Work started inside a transaction tried to use it while it was committing, or after it rolled back. */
 export class TransactionEndedError extends Error {
   constructor() {
-    super('This work was started by a transaction that has rolled back');
+    super('This work belongs to a transaction that has ended: await it inside the transaction, or start it with detached()');
   }
 }
 
 /** One transaction's lifetime, shared by every context that can see it (including ones withoutWaiting copies). */
 export interface TxState {
-  status: 'open' | 'committed' | 'rolledBack';
-  /** The first statement error inside the transaction, if any: it can then only roll back. */
+  /**
+   * `finishing`: fn has returned or thrown, and statements it started are being waited for (they still run in
+   * the transaction). `committing`: COMMIT has been sent and its outcome isn't known yet.
+   */
+  status: 'open' | 'finishing' | 'committing' | 'committed' | 'rolledBack';
+  /** The first statement failure inside the transaction, if any: it can then only roll back. */
   failed?: unknown;
 }
 
 /**
- * The transaction a call should use, from the context it inherited: the open one; none if that one has
- * committed (the call is leftover work and runs on its own); and an error if it rolled back.
+ * The transaction a store call should use, from the context it inherited: that one while it is open or
+ * finishing; none once it has committed (the call is leftover work and runs on its own); an error while it is
+ * committing or after it rolled back.
  */
 export function liveTransaction<T extends { state: TxState }>(tx: T | undefined): T | undefined {
   if (!tx || tx.state.status === 'committed') return undefined;
-  if (tx.state.status === 'rolledBack') throw new TransactionEndedError();
-  return tx;
+  if (tx.state.status === 'open' || tx.state.status === 'finishing') return tx;
+  throw new TransactionEndedError();
+}
+
+/**
+ * The statements one transaction has started and not yet seen finish, so it can wait for them before ending.
+ * A statement may start only while the transaction is open or finishing.
+ */
+export class Pending {
+  private readonly running = new Set<Promise<unknown>>();
+
+  constructor(private readonly state: TxState) {}
+
+  /** Start a statement in the transaction: refused once it is committing or over; a failure dooms it. */
+  start<T>(statement: () => Promise<T>): Promise<T> {
+    const { status } = this.state;
+    if (status !== 'open' && status !== 'finishing') return Promise.reject(new TransactionEndedError());
+    const p = statement().catch((e: unknown) => {
+      this.state.failed ??= e;
+      throw e;
+    });
+    this.running.add(p);
+    const done = () => this.running.delete(p);
+    p.then(done, done);
+    return p;
+  }
+
+  /**
+   * Wait until nothing is running, including statements started by the ones being waited for (a claim's write
+   * after its read): each round lets every continuation queued by the last one run before looking again.
+   */
+  async settle() {
+    for (;;) {
+      await new Promise((r) => setImmediate(r));
+      if (!this.running.size) return;
+      await Promise.allSettled([...this.running]);
+    }
+  }
 }
 
 export const BUSY_TIMEOUT_MS = 5000;

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Collection } from '../db.js';
-import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, TransactionAbortedError, type TxState } from './types.js';
+import { FifoLock } from './lock.js';
+import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, TransactionAbortedError, TransactionEndedError, type TxState } from './types.js';
 
 interface SqliteTx {
   state: TxState;
@@ -13,11 +14,6 @@ interface Ctx {
   store: SqliteStore;
   tx?: SqliteTx;
   noWait: boolean;
-}
-
-interface Waiter {
-  grant: () => void;
-  timer: NodeJS.Timeout;
 }
 
 /**
@@ -34,8 +30,7 @@ interface Waiter {
 export class SqliteStore implements DocStore {
   readonly kind = 'sqlite' as const;
   private readonly als = new AsyncLocalStorage<Ctx>();
-  private locked = false;
-  private readonly waiters: Waiter[] = [];
+  private readonly lock = new FifoLock();
 
   private constructor(private readonly db: DatabaseSync) {}
 
@@ -65,35 +60,6 @@ export class SqliteStore implements DocStore {
     return { tx: liveTransaction(c.tx), noWait: c.noWait };
   }
 
-  /** Take the connection: at once (no promise) if it is free, else in arrival order, failing after BUSY_TIMEOUT_MS. */
-  private acquire(noWait: boolean): Promise<void> | undefined {
-    if (!this.locked) {
-      this.locked = true;
-      return undefined;
-    }
-    if (noWait) throw new StoreBusyError();
-    return new Promise((resolve, reject) => {
-      const w: Waiter = {
-        grant: () => {
-          clearTimeout(w.timer);
-          resolve();
-        },
-        timer: setTimeout(() => {
-          this.waiters.splice(this.waiters.indexOf(w), 1);
-          reject(new StoreBusyError());
-        }, BUSY_TIMEOUT_MS),
-      };
-      this.waiters.push(w);
-    });
-  }
-
-  /** Hand the connection to the next in line (it stays locked), or free it. */
-  private release() {
-    const next = this.waiters.shift();
-    if (next) next.grant();
-    else this.locked = false;
-  }
-
   /**
    * Run one synchronous statement: inside the caller's transaction, or holding the connection for just this
    * statement. The connection's busy_timeout is 0, and a statement blocked by another connection's lock is
@@ -105,7 +71,7 @@ export class SqliteStore implements DocStore {
     if (c.tx) return this.inTransaction(c.tx, step);
     const deadline = Date.now() + BUSY_TIMEOUT_MS;
     for (let wait = 1; ; wait = Math.min(wait * 2, 50)) {
-      const turn = this.acquire(c.noWait);
+      const turn = this.lock.acquire(c.noWait);
       if (turn) await turn;
       try {
         return step();
@@ -113,14 +79,18 @@ export class SqliteStore implements DocStore {
         if (!isBusy(e)) throw e;
         if (c.noWait || Date.now() >= deadline) throw new StoreBusyError({ cause: e });
       } finally {
-        this.release();
+        this.lock.release();
       }
       await sleep(wait);
     }
   }
 
-  /** A statement that fails inside a transaction dooms it, as it would on Postgres. */
+  /**
+   * A statement that fails inside a transaction dooms it, as it would on Postgres. node:sqlite statements run to
+   * completion when called, so none is ever left running when the transaction ends.
+   */
   private inTransaction<T>(tx: SqliteTx, step: () => T): T {
+    if (tx.state.status !== 'open' && tx.state.status !== 'finishing') throw new TransactionEndedError();
     try {
       return step();
     } catch (e) {
@@ -193,7 +163,7 @@ export class SqliteStore implements DocStore {
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     const c = this.current();
     if (c.tx) return fn();
-    const turn = this.acquire(c.noWait);
+    const turn = this.lock.acquire(c.noWait);
     if (turn) await turn;
     const tx: SqliteTx = { state: { status: 'open' } };
     try {
@@ -211,8 +181,13 @@ export class SqliteStore implements DocStore {
       }
       let out: T;
       try {
-        out = await this.als.run({ store: this, tx, noWait: c.noWait }, fn);
+        try {
+          out = await this.als.run({ store: this, tx, noWait: c.noWait }, fn);
+        } finally {
+          tx.state.status = 'finishing';
+        }
         if (tx.state.failed !== undefined) throw new TransactionAbortedError(tx.state.failed);
+        tx.state.status = 'committing';
         this.db.exec('COMMIT');
       } catch (e) {
         if (this.db.isTransaction) this.db.exec('ROLLBACK');
@@ -221,9 +196,13 @@ export class SqliteStore implements DocStore {
       tx.state.status = 'committed';
       return out;
     } finally {
-      if (tx.state.status === 'open') tx.state.status = 'rolledBack';
-      this.release();
+      if (tx.state.status !== 'committed') tx.state.status = 'rolledBack';
+      this.lock.release();
     }
+  }
+
+  detached<T>(fn: () => Promise<T>): Promise<T> {
+    return this.als.run({ store: this, noWait: false }, fn);
   }
 
   withoutWaiting<T>(fn: () => Promise<T>): Promise<T> {
@@ -249,7 +228,7 @@ export class SqliteStore implements DocStore {
   }
 
   async close(): Promise<void> {
-    const turn = this.acquire(false);
+    const turn = this.lock.acquire(false);
     if (turn) await turn;
     this.db.close();
   }
