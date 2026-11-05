@@ -50,10 +50,16 @@ export function applyChangeOps(graph: OntologyGraph, ops: ChangeOp[], ctx: Chang
   const touched = new Set<string>();
   ops.forEach((op, i) => {
     try {
+      const before = aboutRecorded(g);
       applyOne(g, op, ctx, warnings, touched);
       // Whatever an edit names or builds (a new term, a rename's destination, every class in a
       // disjointness), it may not end up changing the recorded provenance properties.
       for (const t of touched) notRecorded(t);
+      // And whatever route it takes (a mapping, a class's own axioms, a rewritten list), it may not
+      // add or remove a statement about them; only their declaration as annotation properties.
+      const after = aboutRecorded(g);
+      for (const k of after) if (!before.has(k) && !DECLARATIONS.has(k)) notRecorded(k.split(' ').find((t) => ENGINE_RECORDED.has(t))!);
+      for (const k of before) if (!after.has(k)) notRecorded(k.split(' ').find((t) => ENGINE_RECORDED.has(t))!);
     } catch (e) {
       if (e instanceof ChangeOpError) throw e;
       throw new ChangeOpError((e as Error).message, i);
@@ -74,6 +80,21 @@ const fail = (msg: string): never => {
  * recorded one could be forged.
  */
 const ENGINE_RECORDED = new Set([P.provenance, P.created, P.contributor, NS.dcterms + 'modified']);
+const DECLARATIONS = new Set([...ENGINE_RECORDED].map((p) => `${p} ${RDF_TYPE} ${T.AnnotationProperty}`));
+/**
+ * Every statement with a recorded property as its subject or object, as
+ * "s p o" keys (blank nodes by label, so a rewritten list counts as changed).
+ * Statements that merely use one as their predicate (the records) don't count.
+ */
+function aboutRecorded(g: OntologyGraph): Set<string> {
+  const keys = new Set<string>();
+  const key = (q: { subject: Term; predicate: Term; object: Term }) => `${q.subject.value} ${q.predicate.value} ${q.object.termType === 'Literal' ? JSON.stringify(q.object.value) : q.object.value}`;
+  for (const iri of ENGINE_RECORDED) {
+    for (const q of g.store.getQuads(nn(iri) as any, null, null, null)) keys.add(key(q));
+    for (const q of g.store.getQuads(null, null, nn(iri) as any, null)) keys.add(key(q));
+  }
+  return keys;
+}
 const notRecorded = (pred: string) => {
   if (ENGINE_RECORDED.has(pred)) fail(`<${pred}> is recorded by Concord when a term changes and can't be changed by an edit; use dcterms:source or a note for provenance you want to state`);
   return pred;

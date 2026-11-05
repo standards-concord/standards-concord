@@ -361,3 +361,18 @@ describe('recorded provenance in disjointness written another way', () => {
     expect(() => applyChangeOps(g, [{ op: 'removeDisjointness', classes: [X('Place'), X('Employee')] }])).toThrow(/recorded by Concord/);
   });
 });
+
+describe('recorded provenance through mappings', () => {
+  // Tenth review: a mapping could state any predicate, so owl:disjointWith, rdfs:subClassOf or
+  // owl:equivalentClass pointing at dcterms:provenance got past the class guards.
+  it.each(['owl:disjointWith', 'rdfs:subClassOf', 'owl:equivalentClass'])('refuses a %s mapping to a recorded property', (pred) => {
+    expect(() =>
+      applyChangeOps(baseOntology(), [{ op: 'updateAnnotations', iri: X('Person'), set: { mappings: { [pred]: ['http://purl.org/dc/terms/provenance'] } } }]),
+    ).toThrow(/recorded by Concord/);
+  });
+
+  it('still allows ordinary mappings and the engine’s own records', () => {
+    const r = applyChangeOps(baseOntology(), [{ op: 'updateAnnotations', iri: X('Person'), set: { mappings: { 'skos:exactMatch': ['http://schema.org/Person'] } } }], { provenance: 'example#1' });
+    expect(r.graph.store.getObjects(X('Person') as any, (NS.skos + 'exactMatch') as any, null).map((o) => o.value)).toEqual(['http://schema.org/Person']);
+  });
+});

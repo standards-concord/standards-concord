@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
@@ -85,21 +86,29 @@ function casMain(dir: string, commit: string, from: string): boolean {
  * Nothing commits from the checkout or its index: every commit on main is
  * built from an exact parent commit and lands with a compare-and-swap on the
  * branch, and readers read commits, not files. The checkout is only kept up
- * to date for people browsing the repository. Bringing it up to date runs
- * under a lock (a directory, so it holds across processes) so the newest
- * HEAD always wins; a lock whose holder has died, or that is far older than
- * any update takes, is taken over.
+ * to date for people browsing the repository, so updating it never blocks a
+ * request for long and never fails one.
+ *
+ * Updates run under a lock directory (it holds across processes) naming its
+ * holder by host, process and a random token. The holder rechecks that it
+ * still holds the lock right before writing, and keeps going until the
+ * checkout matches HEAD as it is after the write. A
+ * lock is taken over when its holder is a process on this host that has
+ * died, or when it is far older than any update takes (a holder on another
+ * host, or a reused process id).
  */
 const LOCK_STALE_MS = 5 * 60_000;
-const LOCK_WAIT_MS = 15_000;
+const LOCK_WAIT_MS = 250;
+const HOST = os.hostname();
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 function lockAbandoned(lock: string): boolean {
   try {
     if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) return true;
-    const pid = Number(fs.readFileSync(path.join(lock, 'owner'), 'utf8').split(':')[0]);
+    const [host, pid] = fs.readFileSync(path.join(lock, 'owner'), 'utf8').split(':');
+    if (host !== HOST) return false; // Can't tell from here: wait for it to go stale.
     try {
-      process.kill(pid, 0);
+      process.kill(Number(pid), 0);
       return false;
     } catch (err) {
       return (err as NodeJS.ErrnoException).code === 'ESRCH';
@@ -109,10 +118,18 @@ function lockAbandoned(lock: string): boolean {
   }
 }
 
-function withCheckoutLock<T>(dir: string, fn: () => T): T {
+/** Runs `fn(stillHeld)` holding the lock, or returns false without running it if the lock stays busy. */
+function withCheckoutLock(dir: string, fn: (stillHeld: () => boolean) => void): boolean {
   const lock = path.join(dir, '.git', 'concord-checkout.lock');
   const owner = path.join(lock, 'owner');
-  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const token = `${HOST}:${process.pid}:${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const held = () => {
+    try {
+      return fs.readFileSync(owner, 'utf8') === token;
+    } catch {
+      return false;
+    }
+  };
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
@@ -121,29 +138,37 @@ function withCheckoutLock<T>(dir: string, fn: () => T): T {
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      if (lockAbandoned(lock)) fs.rmSync(lock, { recursive: true, force: true });
-      if (Date.now() > deadline) throw new HttpError(503, 'The ontology is busy saving another change. Try again in a moment.');
+      if (lockAbandoned(lock)) {
+        fs.rmSync(lock, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) return false;
       Atomics.wait(sleeper, 0, 0, 10);
     }
   }
   try {
-    return fn();
+    fn(held);
+    return true;
   } finally {
     // Only give back our own lock (it may have been taken over).
-    try {
-      if (fs.readFileSync(owner, 'utf8') === token) fs.rmSync(lock, { recursive: true, force: true });
-    } catch {
-      // Already gone.
-    }
+    if (held()) fs.rmSync(lock, { recursive: true, force: true });
   }
 }
 
-/** Make the checkout (files and index) match whatever HEAD is now. */
+/** Make the checkout (files and index) match whatever HEAD is now. Best effort: see above. */
 function syncCheckout(dir: string) {
   try {
-    withCheckoutLock(dir, () => git(dir, ['read-tree', '-u', '--reset', git(dir, ['rev-parse', 'HEAD'])]));
+    const done = withCheckoutLock(dir, (stillHeld) => {
+      for (let i = 0; i < 5; i++) {
+        const head = git(dir, ['rev-parse', 'HEAD']);
+        if (!stillHeld()) return; // Taken over: the new holder writes the checkout.
+        git(dir, ['read-tree', '-u', '--reset', head]);
+        if (git(dir, ['rev-parse', 'HEAD']) === head) return;
+      }
+    });
+    // Busy for longer than a request should wait: the holder, the next update or the next start catches it up.
+    if (!done) console.warn(`[ontology] the checkout in ${dir} is being updated by another process`);
   } catch (err) {
-    // Only people browsing the repository see the checkout; the next update catches it up.
     console.warn(`[ontology] could not update the checkout in ${dir}: ${(err as Error).message}`);
   }
 }

@@ -3,10 +3,12 @@ import type { ChangeOp } from '@concord/core/types';
 import type { OntologyFork } from '@concord/shared';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import nodePath from 'node:path';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
+import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
 import { createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from '../src/services/changeRequests.js';
@@ -644,7 +646,8 @@ describe('fifth review', () => {
     expect((await dev.post(`${path}/edits`).send({ ops })).status).toBe(200);
     // Upstream merges the same edits through a change request, which stamps its own provenance.
     const p = findProject('volunteering')!;
-    const g = applyChangeOps(await ontologyStore.working(p), ops, { author: 'Steward', date: '2026-11-04', provenance: 'volunteering#999' }).graph;
+    // Same day as the fork's edit: a rename records its date, so a rename on another day is different content.
+    const g = applyChangeOps(await ontologyStore.working(p), ops, { author: 'Steward', date: clock.iso().slice(0, 10), provenance: 'volunteering#999' }).graph;
     await ontologyStore.commitWorking(p, g, 'Merge the same edits', { name: 'Steward', email: 'steward@example.org' });
     const sync = (await dev.post(`${path}/sync`)).body;
     expect(sync.conflicts).toEqual([]);
@@ -1045,16 +1048,51 @@ describe('ninth review', () => {
     expect(git('tag', '--list', 'v99.0.0')).toBe('');
   });
 
-  it("a live process's checkout lock is never taken over because of its age, a dead one's is", () => {
-    const lock = nodePath.join(dir(), '.git', 'concord-checkout.lock');
-    const old = new Date(Date.now() - 60_000);
-    fs.mkdirSync(lock);
-    fs.writeFileSync(nodePath.join(lock, 'owner'), `${process.pid}:held-by-a-live-process`);
-    fs.utimesSync(lock, old, old);
-    ontologyStore.syncCheckout(p());
-    expect(fs.readFileSync(nodePath.join(lock, 'owner'), 'utf8')).toBe(`${process.pid}:held-by-a-live-process`);
-    fs.writeFileSync(nodePath.join(lock, 'owner'), '2147483646:held-by-a-dead-process');
-    ontologyStore.syncCheckout(p());
-    expect(fs.existsSync(lock)).toBe(false);
-  }, 30_000);
+  describe('the checkout lock', () => {
+    // Tenth review: the lock named only a process id (so a holder on another host, or a reused id,
+    // looked alive or dead wrongly), a busy lock blocked the server for 15 seconds, and the
+    // five-minute takeover was never tested.
+    const lock = () => nodePath.join(dir(), '.git', 'concord-checkout.lock');
+    const hold = (owner: string, ageMs: number) => {
+      fs.rmSync(lock(), { recursive: true, force: true });
+      fs.mkdirSync(lock());
+      fs.writeFileSync(nodePath.join(lock(), 'owner'), owner);
+      const at = new Date(Date.now() - ageMs);
+      fs.utimesSync(lock(), at, at);
+    };
+    const owner = () => fs.readFileSync(nodePath.join(lock(), 'owner'), 'utf8');
+    /** Move the checkout behind HEAD, so it shows whether an update ran. */
+    const behind = async () => {
+      const before = ontologyStore.head(p());
+      await upstream([addClass(`Lock${Date.now()}`, 'lock check')]);
+      git('read-tree', '-u', '--reset', before);
+    };
+    const current = () => fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8').trim() === ontologyStore.readAt(p(), 'HEAD');
+
+    it.each([
+      ['a live process on this host', () => `${os.hostname()}:${process.pid}:live`],
+      ['a process on another host', () => 'another-host.example:1:remote'],
+    ])('is left to %s, without holding the server up', async (_, name) => {
+      await behind();
+      hold(name(), 60_000);
+      const started = Date.now();
+      ontologyStore.syncCheckout(p());
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(owner()).toBe(name());
+      expect(current()).toBe(false);
+      fs.rmSync(lock(), { recursive: true, force: true });
+    });
+
+    it.each([
+      ['a dead process on this host', () => `${os.hostname()}:2147483646:dead`, 60_000],
+      ['anyone, once it is more than five minutes old', () => `${os.hostname()}:${process.pid}:stuck`, 6 * 60_000],
+      ['a process on another host, once it is more than five minutes old', () => 'another-host.example:1:remote', 6 * 60_000],
+    ])('is taken over from %s, and the checkout caught up', async (_, name, age) => {
+      await behind();
+      hold(name(), age);
+      ontologyStore.syncCheckout(p());
+      expect(fs.existsSync(lock())).toBe(false);
+      expect(current()).toBe(true);
+    });
+  });
 });
