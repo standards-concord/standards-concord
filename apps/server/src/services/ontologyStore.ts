@@ -6,6 +6,7 @@ import { OntologyGraph } from '@concord/core';
 import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
 import { clearAll, get, HttpError, list, put, remove, transaction } from '../db.js';
+import { dbStore } from './ontologyStoreDb.js';
 
 /**
  * Each ontology is a git repository. The working draft is `ontology.ttl` on
@@ -331,7 +332,9 @@ export interface CommitAuthor {
   email?: string;
 }
 
-export const ontologyStore = {
+export const gitStore = {
+  kind: 'git' as const,
+
   /** The repository folder, with its checkout brought in line with the database first. */
   async dir(project: Pick<OntologyProject, 'slug'>): Promise<string> {
     await this.ensureSynced(project);
@@ -693,7 +696,8 @@ export const ontologyStore = {
       .filter(Boolean)
       .map((l) => {
         const [sha, author, date, subject] = l.split('\x1f');
-        return { sha, author, date, subject };
+        // Newer git writes UTC as Z; keep +00:00, as older git (and the database store) write it.
+        return { sha, author, date: date.replace(/Z$/, '+00:00'), subject };
       });
   },
 
@@ -762,7 +766,7 @@ export const ontologyStore = {
   forkBranch,
 
   /** Whether git has a branch for a fork of this name (a name in use, even if its record was never saved). */
-  hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): boolean {
+  async hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<boolean> {
     return !!refValue(repoDir(project), `refs/heads/${forkBranch(forkSlug)}`);
   },
 
@@ -871,7 +875,8 @@ export const ontologyStore = {
       .filter(Boolean)
       .map((l) => {
         const [sha, author, date, subject] = l.split('\x1f');
-        return { sha, author, date, subject };
+        // Newer git writes UTC as Z; keep +00:00, as older git (and the database store) write it.
+        return { sha, author, date: date.replace(/Z$/, '+00:00'), subject };
       });
   },
 
@@ -884,4 +889,66 @@ export const ontologyStore = {
     await this.sync(project);
     await git(dir, ['push', '-q', 'origin', 'main', '--follow-tags']);
   },
+
+  /** Publishes main and the release tags to a GitHub repository (owner/name). */
+  async publish(project: OntologyProject, target: { repo: string; token: string }): Promise<void> {
+    await this.push(project, `https://x-access-token:${target.token}@github.com/${target.repo}.git`);
+  },
 };
+gitStore satisfies OntologyStoreApi;
+
+/** What every ontology store provides: the git-backed one above, or the database-backed one (ontologyStoreDb.ts). */
+export interface OntologyStoreApi {
+  kind: 'git' | 'db';
+  dir(project: Pick<OntologyProject, 'slug'>): Promise<string>;
+  init(project: OntologyProject, turtle: string, readme: string): Promise<string>;
+  head(project: Pick<OntologyProject, 'slug'>): Promise<string>;
+  advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => Promise<void> | void): Promise<void>;
+  ensureSynced(project: Pick<OntologyProject, 'slug'>): Promise<void>;
+  sync(project: Pick<OntologyProject, 'slug'>): Promise<void>;
+  prunePins(project: Pick<OntologyProject, 'slug'>): Promise<void>;
+  recoverWipe(): Promise<void>;
+  checkout(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<void>;
+  readWorkingText(project: Pick<OntologyProject, 'slug'>, commit?: string): Promise<string>;
+  working(project: Pick<OntologyProject, 'slug'>): Promise<OntologyGraph>;
+  workingAt(project: Pick<OntologyProject, 'slug'>): Promise<{ graph: OntologyGraph; head: string }>;
+  at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph>;
+  readReleaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): Promise<string | undefined>;
+  commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor, base?: string, record?: (commit: string) => Promise<void> | void): Promise<string>;
+  writeRelease(
+    project: OntologyProject,
+    version: string,
+    graph: OntologyGraph,
+    files: Record<string, string>,
+    notes: string,
+    author: CommitAuthor,
+    base?: string,
+    record?: (commit: string) => Promise<void> | void,
+  ): Promise<string>;
+  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): Promise<string>;
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string>;
+  forgetReleases(project: Pick<OntologyProject, 'slug'>): void;
+  versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]>;
+  log(project: Pick<OntologyProject, 'slug'>, limit?: number): Promise<{ sha: string; author: string; date: string; subject: string }[]>;
+  wipe(clear?: () => Promise<void>): Promise<void>;
+  forkBranch(forkSlug: string): string;
+  hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<boolean>;
+  readAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<string>;
+  graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph>;
+  commitFork(
+    project: Pick<OntologyProject, 'slug'>,
+    forkSlug: string,
+    graph: OntologyGraph,
+    message: string,
+    author: CommitAuthor,
+    opts: { parent: string; extraParents?: string[]; create?: boolean },
+    record: (commit: string) => Promise<void>,
+  ): Promise<string>;
+  holdFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string, commit: string): Promise<void>;
+  commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<number>;
+  forkLog(project: Pick<OntologyProject, 'slug'>, head: string, limit?: number): Promise<{ sha: string; author: string; date: string; subject: string }[]>;
+  publish(project: OntologyProject, target: { repo: string; token: string }): Promise<void>;
+}
+
+/** The store this deployment uses (config.ontologyStore). */
+export const ontologyStore: OntologyStoreApi = config.ontologyStore === 'db' ? dbStore : gitStore;

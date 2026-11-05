@@ -21,6 +21,12 @@ const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
   : (process.env.RENDER_EXTERNAL_URL ?? (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : undefined));
 
+function ontologyStoreKind(value: string | undefined, postgres: boolean): 'git' | 'db' {
+  if (value === 'git' || value === 'db') return value;
+  if (value) throw new Error(`ONTOLOGY_STORE must be git or db, not ${value}`);
+  return postgres ? 'db' : 'git';
+}
+
 /** All configuration comes from the environment so the same build runs locally and deployed. */
 export const config = {
   port: Number(process.env.PORT ?? 8787),
@@ -28,6 +34,12 @@ export const config = {
   /** Where the web app is served from in development (OAuth redirects back here). */
   webUrl: (process.env.WEB_URL ?? process.env.PUBLIC_URL ?? platformUrl ?? 'http://localhost:5173').replace(/\/$/, ''),
   dataDir: path.resolve(process.env.CONCORD_DATA_DIR ?? path.join(repoRoot, '.data')),
+  /**
+   * Where ontologies' files and history live. `git`: a git repository per ontology under dataDir (the VM). `db`:
+   * git's objects stored in the database (services/gitdb.ts), for hosts with no disk (Vercel). Default: `db`
+   * when the store is Postgres (DATABASE_URL), otherwise `git`.
+   */
+  ontologyStore: ontologyStoreKind(process.env.ONTOLOGY_STORE, !!(process.env.DATABASE_URL ?? process.env.POSTGRES_URL)),
   repoRoot,
   webDist: path.join(repoRoot, 'apps/web/dist'),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',

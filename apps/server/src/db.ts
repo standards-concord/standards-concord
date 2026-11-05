@@ -39,6 +39,8 @@ export type Collection =
   | 'oidcTokens'
   | 'appFollowUps'
   | 'forks'
+  | 'gitObjects'
+  | 'gitRefs'
   | 'kv';
 
 let store: Promise<DocStore> | undefined;

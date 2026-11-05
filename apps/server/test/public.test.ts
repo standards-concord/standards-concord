@@ -135,9 +135,9 @@ describe('public ontology pages', () => {
   });
 
   it('writes the page into each release for the copy on GitHub', async () => {
-    const file = path.join(await ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0', 'index.html');
-    expect(fs.existsSync(file)).toBe(true);
-    const html = fs.readFileSync(file, 'utf8');
+    // Read from the history, as it will be published (there is no checked-out folder with ONTOLOGY_STORE=db).
+    const html = (await ontologyStore.readReleaseFile((await findProject('volunteering'))!, '1.0.0', 'index.html'))!;
+    expect(html).toBeDefined();
     expect(html).toContain('href="ontology.jsonld"');
     expect(html).toContain('Version 1.0.0');
   });
@@ -558,7 +558,6 @@ describe('fourth review fixes', () => {
 describe('fifth review fixes', () => {
   const NS = 'https://w3id.org/odi/volunteering#';
   const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
-  const releaseDir = async () => path.join(await ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0');
   const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
   const rerun = async () => {
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
@@ -1121,7 +1120,7 @@ describe('versions published before approval existed', () => {
     await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
     const saved = config.github.publishToken;
     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
-    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(async () => undefined);
+    const push = vi.spyOn(ontologyStore, 'publish').mockImplementation(async () => undefined);
     try {
       await drafted8(project);
       const release = await draftRelease((await findProject('volunteering'))!, owner);
@@ -1177,7 +1176,7 @@ describe('versions published before approval existed', () => {
     await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
     const saved = config.github.publishToken;
     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
-    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(async () => undefined);
+    const push = vi.spyOn(ontologyStore, 'publish').mockImplementation(async () => undefined);
     try {
       await drafted8(project);
       const published = await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject('volunteering'))!, owner)).id))!, owner);

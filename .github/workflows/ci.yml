@@ -81,6 +81,11 @@ jobs:
         run: pnpm -r typecheck
       - name: Test
         run: pnpm -r test
+      # Ontologies' history in the database instead of git repositories on disk (as on Vercel).
+      - name: Test the server with the database-backed ontology store
+        run: pnpm --filter @concord/server test
+        env:
+          ONTOLOGY_STORE: db
       - name: Build the web app
         run: pnpm --filter @concord/web build
       - name: Check the public MCP URL is the same in every listing
