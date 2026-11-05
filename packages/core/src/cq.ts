@@ -2,7 +2,7 @@
  * Competency questions (Grüninger & Fox): SPARQL queries run against the ontology
  * plus example data in an in-memory Oxigraph store, and whole-ontology validation.
  */
-import type { CompetencyQuestionResult, FairContext, ValidationReport } from './types.js';
+import type { CompetencyQuestionResult, FairContext, ReasonerResult, ValidationReport } from './types.js';
 import type { OntologyGraph } from './graph.js';
 import { writeNTriples } from './turtle.js';
 import { lint } from './lint.js';
@@ -62,16 +62,22 @@ export async function runCompetencyQuestions(graph: OntologyGraph, cqs: Competen
 export interface ValidateOptions {
   cqs?: CompetencyQuestion[];
   reasoner?: 'owl' | 'structural';
+  /** Runs the OWL reasoner, e.g. in a worker. Defaults to owlReasoner on this thread. */
+  owlReasoner?: (graph: OntologyGraph) => Promise<ReasonerResult>;
   /** Network facts for the FAIR checks (whether the ontology IRI resolves). */
   fair?: FairContext;
 }
 
-/** Strict lint + FAIR + reasoner (+ CQs). Passes when lint has no errors and the ontology is coherent. */
+/**
+ * Strict lint + FAIR + reasoner (+ CQs). Passes when lint has no errors and the reasoner finished
+ * and found the ontology consistent and coherent. When the OWL reasoner gives no verdict, or
+ * cannot classify every class, validation does not pass: the gate fails closed.
+ */
 export async function validate(graph: OntologyGraph, opts: ValidateOptions = {}): Promise<ValidationReport> {
   const issues = lint(graph, { strict: true });
   const fair = fairCheck(graph, opts.fair);
-  const reasoner = opts.reasoner === 'structural' ? structuralReasoner(graph) : await owlReasoner(graph);
+  const reasoner = opts.reasoner === 'structural' ? structuralReasoner(graph) : await (opts.owlReasoner ?? owlReasoner)(graph);
   const competencyQuestions = opts.cqs?.length ? await runCompetencyQuestions(graph, opts.cqs) : [];
-  const passed = !issues.some((i) => i.severity === 'error') && reasoner.consistent && reasoner.unsatisfiable.length === 0;
+  const passed = !issues.some((i) => i.severity === 'error') && reasoner.available && reasoner.consistent && reasoner.unsatisfiable.length === 0;
   return { lint: issues, fair, reasoner, competencyQuestions, passed };
 }

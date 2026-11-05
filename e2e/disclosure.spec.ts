@@ -23,12 +23,13 @@ test.describe('summaries, popups and disclosures', () => {
     const reasonerRow = panel.getByRole('listitem').filter({ hasText: 'Reasoner' });
     if (o.health!.incomplete!.length) {
       // Without the OWL reasoner, the chip must not claim the draft is healthy.
-      await expect(chip).toContainText(o.health!.consistent && !o.health!.errors ? 'Checks incomplete' : 'Needs fixing');
-      await expect(reasonerRow).toContainText(/Not run|Inconsistent/);
+      // A logical problem counts only when the reasoner decided it, so without a verdict it's "Checks incomplete".
+      await expect(chip).toContainText(o.health!.errors ? 'Needs fixing' : 'Checks incomplete');
+      await expect(reasonerRow).toContainText(/No verdict|not every class checked/);
       await expect(panel.getByRole('note')).toContainText('Not every check could run');
     } else {
       await expect(chip).not.toContainText('Checks incomplete');
-      await expect(reasonerRow).not.toContainText('Not run');
+      await expect(reasonerRow).not.toContainText('No verdict');
     }
   });
 
@@ -104,8 +105,9 @@ test.describe('summaries, popups and disclosures', () => {
     await expect(main.getByText('Classes', { exact: true })).toBeHidden();
     // "Open changes" lives in the header only.
     await expect(main.getByText('Open changes', { exact: true })).toHaveCount(0);
+    // The counts are said once, in a sentence, and each is listed again only inside the details.
+    await expect(page.getByTestId('overview-summary')).toContainText(/\d+ class/);
     const details = page.getByRole('button', { name: /Ontology details/ });
-    await expect(details).toContainText(/\d+ class/);
     await details.click();
     for (const label of ['Classes', 'Properties', 'Individuals', 'Use cases', 'Releases', 'Ontology IRI', 'Governance', 'Created']) await expect(main.getByText(label, { exact: true }).first()).toBeVisible();
   });

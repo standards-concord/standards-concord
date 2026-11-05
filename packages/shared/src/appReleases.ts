@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.20.0',
+    version: '0.22.0',
     date: '2026-11-05',
     title: 'Ask for a query in plain words',
     pr: 38,
@@ -75,6 +75,61 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'Queries run in the background with a Cancel button, a time limit and a memory cap. Queries that would build enormous values are refused before they run, and very long values are shortened in the results.',
         roles: [],
         to: '{o}/query',
+      },
+    ],
+  },
+  {
+    version: '0.21.0',
+    date: '2026-11-05',
+    title: 'OWL reasoning with sparq, also in your browser',
+    pr: 51,
+    changes: [
+      {
+        id: 'sparq-reasoning',
+        type: 'perf',
+        title: 'Faster, stricter OWL reasoning',
+        detail:
+          'Consistency and class checks now use sparq’s OWL 2 DL reasoner instead of HermiT, and take milliseconds rather than about a second. When the reasoner can’t finish a check, validation says so and doesn’t pass.',
+        roles: [],
+        to: '{o}#health',
+      },
+      {
+        id: 'reasoner-in-browser',
+        type: 'feat',
+        title: 'Check the draft again in your own browser',
+        detail:
+          'The health panel on an ontology’s overview has a “Check again in this browser” button. It runs the same reasoner on your device and tells you whether it agrees with the server.',
+        roles: [],
+        to: '{o}#health',
+        ask: 'Did the in-browser check agree with the server, and was it clear what it did?',
+      },
+    ],
+  },
+  {
+    version: '0.20.0',
+    date: '2026-11-05',
+    title: 'The ODI look, and an overview that reads like a report',
+    pr: 42,
+    changes: [
+      {
+        id: 'odi-look',
+        type: 'feat',
+        title: 'Concord now looks like the ODI',
+        detail:
+          'The default look follows the ODI brand: Helvetica, black on white, ODI blue and the ODI logo, with no all-caps labels. Settings, Appearance still lets you switch to the other looks.',
+        roles: [],
+        to: '/settings#appearance',
+        ask: 'Does Concord feel like an ODI tool now? Is anything harder to read or find?',
+      },
+      {
+        id: 'overview-report',
+        type: 'feat',
+        title: 'The ontology overview shows what’s waiting for you',
+        detail:
+          'Each ontology’s front page opens with one plain sentence of counts, a panel listing the changes waiting for you (review, vote, approve, merge or revise), a table of changes in progress and the draft’s health.',
+        roles: ['steward', 'member', 'odi'],
+        to: '{o}',
+        ask: 'When you open an ontology, can you tell straight away what needs you?',
       },
     ],
   },

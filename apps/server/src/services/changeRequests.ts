@@ -26,6 +26,7 @@ import type {
   User,
   Vote,
 } from '@concord/shared';
+import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { HttpError, list, mustGet, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
@@ -40,6 +41,7 @@ import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
 import { createHash } from 'node:crypto';
 import { findSecrets, secretsOf } from './redact.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -210,7 +212,7 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
   const cqs = [...await competencyTests(project.id), ...(tests ?? [])];
-  const validation = await validate(after, { cqs, reasoner: 'owl', fair: await fairContext(after.ontologyIRI) });
+  const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI) });
   return { before, after, diff, classification, validation, warnings };
 }
 
@@ -372,7 +374,7 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
   if (cr.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
   const g = await governanceFor(cr);
   const roles = await rolesFor(cr.ontologyId, actor.id);
-  if (!g.rule.vote || !roles.some((r) => g.rule.vote!.voterRoles.includes(r)))
+  if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles))
     throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
   const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
   await put('votes', vote, cr.id);

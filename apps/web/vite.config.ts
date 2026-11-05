@@ -15,7 +15,16 @@ export default defineConfig({
   // falls through to index.html ("expected magic word 00 61 73 6d"). Serving
   // sparq unbundled keeps the .wasm next to the module in dev; the production
   // build already rewrites the URL to a hashed asset.
-  optimizeDeps: { exclude: ['@sparq-org/sparq'] },
+  optimizeDeps: {
+    exclude: ['@sparq-org/sparq'],
+    // The dependency scan starts from index.html and doesn't follow `new Worker(new URL(...))`,
+    // so the reasoner worker's dependencies were found only when it first ran. Vite then
+    // re-optimised and reloaded the page mid-check (a cold dev server's first in-browser check).
+    entries: ['index.html', 'src/lib/reasonWorker.ts'],
+  },
+  // The in-browser reasoner (src/lib/reasonWorker.ts) and the query worker run as module Web Workers: they
+  // code-split, and the query worker loads sparq with a dynamic import.
+  worker: { format: 'es' },
   server: {
     port: 5173,
     proxy: {
@@ -29,7 +38,5 @@ export default defineConfig({
       '^/def/': { target, changeOrigin: false },
     },
   },
-  // The query worker loads sparq with a dynamic import, which needs module workers.
-  worker: { format: 'es' },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
 });

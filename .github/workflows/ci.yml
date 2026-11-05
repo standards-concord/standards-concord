@@ -66,21 +66,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      # HermiT (full OWL DL reasoning) runs on Java through owlready2.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
+      # Python only for LinkML, which checks the generated schemas in the core tests.
       - id: python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # owlready2 (and LinkML for the tests) took most of a minute to install each run.
+      # LinkML took most of a minute to install each run.
       - uses: actions/cache@v4
         with:
           path: toolkit/.venv
           key: toolkit-venv-${{ runner.os }}-py${{ steps.python.outputs.python-version }}-linkml-${{ hashFiles('toolkit/requirements.txt', 'toolkit/setup.sh') }}
-      - run: ./toolkit/setup.sh --linkml
+      - run: ./toolkit/setup.sh
       - name: Typecheck
         run: pnpm -r typecheck
       - name: Test
