@@ -41,14 +41,18 @@ test.describe('OWL reasoning with sparq', () => {
     // loaded, so an edit in between showed up as the server "disagreeing". Here the draft moves on
     // (a different revision is served) and then differs at the same revision.
     let mode: 'moved' | 'tampered' = 'moved';
-    await page.route(new RegExp(`/api/ontologies/${demo.id}/source\\?`), async (route) => {
-      const res = await route.fetch();
-      const headers = { ...res.headers() };
-      let body = await res.text();
-      if (mode === 'moved') headers['x-concord-revision'] = 'a-later-revision';
-      else body += `\n<${VOL}Person> <http://www.w3.org/2002/07/owl#disjointWith> <${VOL}Volunteer> .\n`;
-      await route.fulfill({ status: res.status(), headers, body });
-    });
+    // The real draft and its revision, fetched up front so the handler answers at once.
+    const real = await page.request.get(`/api/ontologies/${demo.id}/source?format=turtle&ref=working`);
+    const turtle = await real.text();
+    const revision = real.headers()['x-concord-revision'];
+    expect(revision).toBeTruthy();
+    await page.route(new RegExp(`/api/ontologies/${demo.id}/source\\?`), (route) =>
+      route.fulfill({
+        contentType: 'text/turtle; charset=utf-8',
+        headers: { 'x-concord-revision': mode === 'moved' ? 'a-later-revision' : revision },
+        body: mode === 'moved' ? turtle : `${turtle}\n<${VOL}Person> <http://www.w3.org/2002/07/owl#disjointWith> <${VOL}Volunteer> .\n`,
+      }),
+    );
     await page.goto(`/o/${demo.id}`);
     const health = page.locator('#health');
     await expect(health.getByText('Consistent.', { exact: true })).toBeVisible({ timeout: 30_000 });
@@ -149,12 +153,11 @@ test.describe('OWL reasoning with sparq', () => {
       const demo = await demoOntology(request);
       await signIn(page, { name: `Reasoner health ${uniq()}`, role: 'steward' });
       // The server's own reasoner finishes cleanly on the demo, so the summary is given another result.
-      await page.route(new RegExp(`/api/ontologies/${demo.id}(\\?.*)?$`), async (route) => {
-        const res = await route.fetch();
-        const o = await res.json();
-        o.health = { ...o.health, errors: 0, ...c.health };
-        await route.fulfill({ response: res, json: o });
-      });
+      // The changed summary is made up front, so the handler answers at once: an async fetch inside
+      // it raced with the page's own requests ("Route is already handled").
+      const o = await (await page.request.get(`/api/ontologies/${demo.id}`)).json();
+      o.health = { ...o.health, errors: 0, ...c.health };
+      await page.route(new RegExp(`/api/ontologies/${demo.id}(\\?.*)?$`), (route) => route.fulfill({ json: o }));
       await page.goto(`/o/${demo.id}`);
       const chip = page.getByRole('button', { name: /^Health: / });
       await expect(chip).toContainText(c.chip);
