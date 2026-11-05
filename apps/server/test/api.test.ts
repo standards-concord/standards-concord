@@ -1,10 +1,16 @@
 import request from 'supertest';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
 import { getCR } from '../src/services/changeRequests.js';
+import { getProject, members, updateProject } from '../src/services/ontologies.js';
+import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { publishRelease, releaseApproval, releaseGovernance } from '../src/services/releases.js';
+import type { Release, Vote } from '@concord/shared';
 
 const app = createApp();
 type Agent = ReturnType<typeof request.agent>;
@@ -31,21 +37,21 @@ async function approveForReal(id: string, { as, confirmation = false }: { as?: '
   const { getUser } = await import('../src/services/users.js');
   const { effectiveRule } = await import('../src/services/governance.js');
   const { getProject } = await import('../src/services/ontologies.js');
-  const cr = getCR(id);
+  const cr = await getCR(id);
   // The rule of the level it is approved as.
-  const rule = as ? effectiveRule(getProject(cr.ontologyId).governance, as, 'change') : crsMod.governanceFor(cr).rule;
+  const rule = as ? effectiveRule((await getProject(cr.ontologyId)).governance, as, 'change') : (await crsMod.governanceFor(cr)).rule;
   const role = rule.approverRoles[0];
   let seq = cr.decisionSeq ?? 0;
   for (let i = 0; i < rule.minApprovals; i++) {
     const agent = await login(role, `Approver ${i + 1} of #${cr.number}`);
-    const user = getUser((await agent.get('/api/session')).body.user.id)!;
-    put('reviews', { id: newId('rev'), changeRequestId: id, userId: user.id, roles: [role], decision: 'approve', at: '2000-01-02T00:00:00Z', round: cr.round ?? 1, seq: ++seq }, id);
+    const user = (await getUser((await agent.get('/api/session')).body.user.id))!;
+    await put('reviews', { id: newId('rev'), changeRequestId: id, userId: user.id, roles: [role], decision: 'approve', at: '2000-01-02T00:00:00Z', round: cr.round ?? 1, seq: ++seq }, id);
   }
   if (rule.vote)
-    for (const m of members(cr.ontologyId).filter((x) => x.roles.some((r) => rule.vote!.voterRoles.includes(r))))
-      put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: m.userId, roles: m.roles, choice: 'yes', at: '2000-01-03T00:00:00Z', round: cr.round ?? 1, editsVersion: cr.editsVersion ?? 1, seq: ++seq }, id);
-  const latest = getCR(id);
-  put(
+    for (const m of (await members(cr.ontologyId)).filter((x) => x.roles.some((r) => rule.vote!.voterRoles.includes(r))))
+      await put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: m.userId, roles: m.roles, choice: 'yes', at: '2000-01-03T00:00:00Z', round: cr.round ?? 1, editsVersion: cr.editsVersion ?? 1, seq: ++seq }, id);
+  const latest = await getCR(id);
+  await put(
     'changeRequests',
     { ...latest, decisionSeq: seq, status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: as ?? latest.classification?.level ?? 'minor', confirmation, voted: !!rule.vote } },
     latest.ontologyId,
@@ -53,14 +59,40 @@ async function approveForReal(id: string, { as, confirmation = false }: { as?: '
 }
 
 /** The review round a decision has to name: the round of the version being decided on (read from the store). */
-function roundOf(_agent: Agent, id: string): number {
-  return getCR(id).round ?? 1;
+async function roundOf(_agent: Agent, id: string): Promise<number> {
+  return (await getCR(id)).round ?? 1;
 }
 
 let demoId: string;
 
+let dataDir: string;
+/**
+ * A write made straight to the database file, as another process would make it: synchronously, so a test can make
+ * it from inside a stubbed synchronous call (clock.iso, Date.now), at an exact point in the code under test.
+ */
+function writeElsewhere(sql: string, ...params: (string | number)[]) {
+  const db = new DatabaseSync(path.join(dataDir, 'concord.sqlite'));
+  try {
+    db.prepare(sql).run(...params);
+  } finally {
+    db.close();
+  }
+}
+/** Bumps a change request's revision from "another process". */
+const bumpRevElsewhere = (id: string) =>
+  writeElsewhere(`UPDATE docs SET data = json_set(data, '$.rev', coalesce(json_extract(data, '$.rev'), 0) + 1) WHERE collection = 'changeRequests' AND id = ?`, id);
+/** Writes a kv document from "another process". */
+const putKvElsewhere = (doc: { id: string; [key: string]: unknown }) =>
+  writeElsewhere(
+    `INSERT INTO docs (collection, id, parent, data, created_at) VALUES ('kv', ?, NULL, ?, ?) ON CONFLICT(collection, id) DO UPDATE SET data = excluded.data`,
+    doc.id,
+    JSON.stringify(doc),
+    new Date().toISOString(),
+  );
+
 beforeAll(async () => {
-  openDb();
+  dataDir = (await import('../src/config.js')).config.dataDir;
+  await openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
 });
@@ -129,8 +161,8 @@ describe('change request lifecycle', () => {
     expect(submitted.body.status).toBe('review');
 
     // Working group: minor needs 2 approvals and a 7-day review period.
-    await reviewer.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(reviewer, id), decision: 'approve', comment: 'Fine' });
-    const approved2 = await steward.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(steward, id), decision: 'approve' });
+    await reviewer.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(reviewer, id), decision: 'approve', comment: 'Fine' });
+    const approved2 = await steward.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(steward, id), decision: 'approve' });
     expect(approved2.body.governance.approvals).toBe(2);
     expect(approved2.body.status).toBe('review');
     expect(approved2.body.governance.reviewPeriodOver).toBe(false);
@@ -154,6 +186,26 @@ describe('change request lifecycle', () => {
     const v = await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=1.1.0`);
     expect(v.text).toMatch(/owl:versionInfo "1\.1\.0"/);
     expect(v.text).toMatch(/owl:backwardCompatibleWith/);
+
+    // The approval is recorded at publish time: changing the policy afterwards doesn't rewrite the history.
+    expect(published.body.approvalSource).toBe('recorded');
+    const recorded = published.body.governance;
+    const project = await steward.get(`/api/ontologies/${demoId}`);
+    const policy = structuredClone(project.body.governance);
+    const original = structuredClone(policy);
+    policy.releases.minor.minApprovals = recorded.requiredApprovals + 3;
+    policy.releases.minor.reviewPeriodDays = 99;
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy })).status).toBe(200);
+    const later = await steward.get(`/api/releases/${draft.id}`);
+    expect(later.body.approvalSource).toBe('recorded');
+    expect(later.body.governance.requiredApprovals).toBe(recorded.requiredApprovals);
+    expect(later.body.governance.rule.reviewPeriodDays).toBe(recorded.rule.reviewPeriodDays);
+    expect(later.body.governance.reviewPeriodEndsAt).toBe(recorded.reviewPeriodEndsAt);
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy: original })).status).toBe(200);
+
+    // The set-up release had no approval rules, and says so rather than borrowing today's.
+    const first = (await steward.get(`/api/ontologies/${demoId}/releases`)).body.find((r: { version: string }) => r.version === '1.0.0');
+    expect((await steward.get(`/api/releases/${first.id}`)).body.approvalSource).toBe('bootstrap');
   });
 
   it('rejects edits that make the ontology inconsistent from being approved', async () => {
@@ -169,6 +221,27 @@ describe('change request lifecycle', () => {
     expect(res.body.validation.passed).toBe(false);
     expect(['needs-work', 'review']).toContain(res.body.status);
     expect(res.body.governance.validationOk).toBe(false);
+  });
+
+  // A preferred prefix of "@import" used to be stored and then written into the
+  // JSON-LD context, which made the server fetch the namespace URL whenever it
+  // wrote JSON-LD. The browser has no control for this field, so it is tested here.
+  it('refuses a change request that sets a JSON-LD keyword as the preferred prefix', async () => {
+    const editor = await login('editor', 'Editor Ike');
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Change the prefix',
+      description: 'Sets a keyword prefix.',
+      kind: 'feature',
+      ops: [{ op: 'setMetadata', set: { preferredPrefix: '@import', preferredNamespace: 'http://127.0.0.1:9/context' } }],
+    });
+    // Like any edit that can't be applied, it is kept as a draft that fails validation, so it can never merge.
+    expect(res.status).toBe(201);
+    expect(res.body.validation.passed).toBe(false);
+    expect(res.body.validation.lint.map((l: { message: string }) => l.message).join('\n')).toMatch(/preferredPrefix must be a prefix name/);
+    // Nothing was reasoned over, so the report must not claim consistency (it used to say consistent: true).
+    expect(res.body.validation.reasoner).toMatchObject({ engine: 'none', available: false, checked: 'none', consistent: false });
+    const jsonld = await editor.get(`/api/ontologies/${demoId}/source?format=jsonld`);
+    expect(Object.keys(JSON.parse(jsonld.text)['@context'])).not.toContain('@import');
   });
 
   it('drafts edits from plain language offline', async () => {
@@ -219,6 +292,15 @@ describe('requirements', () => {
     expect(p.body.useCases.length).toBeGreaterThanOrEqual(1);
   });
 
+  // With the store async, each call's visibility check ran inside flatMap(), so the list came back as empty objects.
+  it('lists the calls a signed-in person can see', async () => {
+    const tester = await login('steward', 'Steward Lists');
+    const m = await tester.post(`/api/ontologies/${demoId}/meetings/upload`).send({ title: 'Listed call', transcript: 'Priya Shah: Hello.\nTom Okafor: Hi.' });
+    expect(m.status).toBe(201);
+    const listed = await tester.get(`/api/ontologies/${demoId}/meetings`);
+    expect(listed.body.find((x: { id?: string }) => x.id === m.body.id)).toMatchObject({ title: 'Listed call' });
+  });
+
   it('replays a simulated call with co-facilitator prompts', async () => {
     const tester = await login('steward', 'Steward Vic');
     const m = await tester.post(`/api/ontologies/${demoId}/meetings/simulate?delayMs=0`).send({ title: 'Sim' });
@@ -260,6 +342,18 @@ describe('agents over MCP', () => {
       }),
     );
     expect(JSON.parse(data.result.content[0].text).valid).toBe(false);
+    // SHACL too, in any format, against the latest release by default (as for POST to the ontology IRI).
+    const shacl = parse(
+      await call(7, 'tools/call', {
+        name: 'validate_data',
+        arguments: { ontology: 'volunteering', format: 'jsonld', data: JSON.stringify({ '@id': 'https://example.org/opp', '@type': 'https://w3id.org/odi/volunteering#VolunteeringOpportunity' }) },
+      }),
+    );
+    const report = JSON.parse(shacl.result.content[0].text);
+    expect(report.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(report.conforms).toBe(false);
+    expect(report.results.some((r: { path?: string }) => r.path === 'https://w3id.org/odi/volunteering#hasRole')).toBe(true);
+    expect(report.shapes).toMatch(new RegExp(`/def/volunteering/${report.version.replace(/\./g, '\\.')}\\.shacl\\.ttl$`));
     const gap = parse(await call(6, 'tools/call', { name: 'report_gap', arguments: { ontology: 'volunteering', kind: 'missing-concept', summary: 'No badges for volunteers', details: 'We award digital badges to volunteers for completed hours.' } }));
     const out = JSON.parse(gap.result.content[0].text);
     expect(out.recommendation).toBeDefined();
@@ -268,6 +362,463 @@ describe('agents over MCP', () => {
   it('refuses requests without a token', async () => {
     const res = await request(app).post('/mcp').send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(res.status).toBe(401);
+  });
+});
+
+describe('query assistant (offline helper)', () => {
+  type Reply = { reply: string; query: string; target: string; columns: { variable: string; label: string }[]; simulated: boolean; unchanged?: boolean; offlineReason?: string; offlineState?: unknown };
+  type Turn = { role: 'user' | 'assistant'; content: string };
+  beforeEach(async () => (await import('../src/services/queryChat.js')).resetQueryChatLimits());
+
+  const ask = async (agent: Agent, messages: Turn[], query = '', offlineState?: unknown) => {
+    const res = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages, query, target: 'ontology', offlineState });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body as Reply;
+  };
+  /** Runs a conversation the way the page does: each answer's query goes back with the next message. */
+  const converse = async (agent: Agent, ...said: string[]) => {
+    const history: Turn[] = [];
+    let query = '';
+    let state: unknown;
+    const replies: Reply[] = [];
+    for (const text of said) {
+      history.push({ role: 'user', content: text });
+      const r = await ask(agent, history, query, state);
+      replies.push(r);
+      history.push({ role: 'assistant', content: r.reply });
+      if (!r.unchanged) (query = r.query), (state = r.offlineState);
+    }
+    return replies;
+  };
+
+  it('needs a signed-in person and a message, and bounds what it is sent', async () => {
+    expect((await request(app).post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'hi' }] })).status).toBe(401);
+    const agent = await login('contributor');
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [] })).status).toBe(400);
+    const long = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: 'x'.repeat(8001) });
+    expect(long.status).toBe(400);
+    const { boundedQueryChatRequest } = await import('../src/services/queryChat.js');
+    const b = boundedQueryChatRequest({
+      messages: Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `${i} ${'w'.repeat(3000)}` })).concat([{ role: 'user', content: 'latest' }]),
+      dataSummary: [{ classIri: 'x'.repeat(301), count: 1 }, { classIri: 'https://e.org/A', count: 2 }, { classIri: 'https://e.org/B', count: -1 }],
+    });
+    expect(b.messages.at(-1)).toEqual({ role: 'user', content: 'latest' });
+    expect(b.messages.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(8000);
+    expect(b.dataSummary).toEqual([{ classIri: 'https://e.org/A', count: 2 }]);
+  });
+
+  it('limits each person to one question at a time and a number per ten minutes', async () => {
+    const { QUERY_CHAT_LIMITS } = await import('../src/services/queryChat.js');
+    const agent = await login('contributor', 'Rate limited');
+    const one = [{ role: 'user' as const, content: 'Which classes have no definition?' }];
+    for (let i = 0; i < QUERY_CHAT_LIMITS.perUser; i++) await ask(agent, one);
+    const over = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: one, query: '', target: 'ontology' });
+    expect(over.status).toBe(429);
+  });
+
+  it('refuses a conversation sent on under another account', async () => {
+    const agent = await login('contributor', 'Account check');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data' };
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: 'someone-else' })).status).toBe(409);
+    expect((await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ ...body, account: me })).status).toBe(200);
+  });
+
+  it('says why the offline helper answered', async () => {
+    const member = await login('contributor');
+    expect((await ask(member, [{ role: 'user', content: 'List every organisation' }])).offlineReason).toBe('unavailable');
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const provider = config.llm.provider;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const outsider = await admitQueryChat('someone-else', demoId, false);
+      await outsider.done();
+      expect(outsider).toMatchObject({ useClaude: false, offlineReason: 'not-member' });
+      // Today's allowances are per person, per ontology and for the deployment, and kept in the database.
+      const limits = { ...config.llm.queryAssistant };
+      Object.assign(config.llm.queryAssistant, { perUserPerDay: 2, perOntologyPerDay: 3, perDay: 100 });
+      const take = async (user: string, ontology = 'ont-quota') => {
+        const g = await admitQueryChat(user, ontology, true);
+        if (g.useClaude) g.spend();
+        await g.done();
+        return g.useClaude;
+      };
+      expect([await take('quota-a'), await take('quota-a'), await take('quota-a')]).toEqual([true, true, false]);
+      const over = await admitQueryChat('quota-a', 'ont-quota', true);
+      await over.done();
+      expect(over.offlineReason).toBe('limit');
+      // One person can't use up everyone's allowance, but the ontology's is shared.
+      expect([await take('quota-b'), await take('quota-c')]).toEqual([true, false]);
+      expect(await take('quota-c', 'another-ontology')).toBe(true);
+      const { get } = await import('../src/db.js');
+      const day = new Date().toISOString().slice(0, 10);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:user:quota-a`))?.count).toBe(2);
+      expect((await get<{ count: number }>('kv', `query-assistant:${day}:ontology:ont-quota`))?.count).toBe(3);
+      Object.assign(config.llm.queryAssistant, limits);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('reserves allowances atomically: a rival can’t take the last one in the gap, and a failed write leaves nothing taken', async () => {
+    const { reserveCounters, get, detached } = await import('../src/db.js');
+    const ids = ['atomic:user', 'atomic:ontology', 'atomic:all'];
+    const limits = ids.map((id) => ({ id, max: 1 }));
+    const count = async (id: string) => (await get<{ count: number }>('kv', id))?.count ?? 0;
+    // A rival (another request, or another backend process) tries to reserve in the gap between this one's read
+    // and its write. It used to get the same last allowance; now it waits its turn and finds none left.
+    let rival: Promise<boolean> | undefined;
+    const first = await reserveCounters(limits, 'atomic', {
+      afterRead: () => {
+        rival = detached(() => reserveCounters(limits, 'atomic'));
+      },
+    });
+    expect(first).toBe(true);
+    expect(await rival).toBe(false);
+    expect(await Promise.all(ids.map(count))).toEqual([1, 1, 1]);
+    expect(await reserveCounters(limits, 'atomic')).toBe(false);
+
+    // A failure part-way through the writes rolls all of them back, and the next attempt works.
+    const fresh = ['atomic2:user', 'atomic2:ontology', 'atomic2:all'].map((id) => ({ id, max: 1 }));
+    await expect(
+      reserveCounters(fresh, 'atomic', {
+        beforeWrite: (i) => {
+          if (i === 1) throw new Error('disk full');
+        },
+      }),
+    ).rejects.toThrow('disk full');
+    expect(await Promise.all(fresh.map((k) => count(k.id)))).toEqual([0, 0, 0]);
+    expect(await reserveCounters(fresh, 'atomic')).toBe(true);
+  });
+
+  it('a request that fails before Claude is called gives its allowance back and frees the person', async () => {
+    const { config } = await import('../src/config.js');
+    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Refund through the API');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const spy = vi.spyOn(ontologyStore, 'at').mockRejectedValueOnce(new Error('the ontology failed to load'));
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const body = { messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me };
+      const failed = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(failed.status).toBe(500);
+      expect(await used()).toBe(0);
+      // Not stuck as "still answering": the next request is admitted.
+      (config.llm as { provider: string }).provider = provider;
+      const next = await agent.post(`/api/ontologies/${demoId}/query-chat`).send(body);
+      expect(next.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+      (config.llm as { provider: string }).provider = provider;
+    }
+  });
+
+  it('a call the spending limit refuses gives the chat allowance back', async () => {
+    // The allowance was marked spent before the model call, but the deployment's dollar budget can refuse a call
+    // before anything is sent to Claude: all three counters stayed taken though no request was made.
+    const { config } = await import('../src/config.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Budget refusal');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const budget = config.llm.dailyBudgetUsd;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = 0;
+      const r = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me });
+      expect(r.status).toBe(200);
+      expect(r.body.simulated).toBe(true);
+      expect(await used()).toBe(0);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = budget;
+    }
+  });
+
+  it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
+    const { admitQueryChat } = await import('../src/services/queryChat.js');
+    const { config } = await import('../src/config.js');
+    const { get, put, transaction, detached, withoutWaiting } = await import('../src/db.js');
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async (id: string) => (await get<{ count: number }>('kv', `query-assistant:${day}:${id}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const limits = { ...config.llm.queryAssistant };
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      Object.assign(config.llm.queryAssistant, { perUserPerDay: 1, perOntologyPerDay: 1, perDay: 1000 });
+      // Something fails before the provider is called: the reservation is refunded, so the last allowance is still there.
+      const failed = await admitQueryChat('refund-a', 'ont-refund', true);
+      expect(failed.useClaude).toBe(true);
+      expect(await used('user:refund-a')).toBe(1);
+      await failed.done();
+      expect([await used('user:refund-a'), await used('ontology:ont-refund')]).toEqual([0, 0]);
+      const second = await admitQueryChat('refund-a', 'ont-refund', true);
+      expect(second.useClaude).toBe(true);
+      second.spend();
+      await second.done();
+      expect(await used('user:refund-a')).toBe(1);
+
+      // When admission throws (here: another writer holds the lock), the person isn't left "busy".
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let holding!: () => void;
+      const locked = new Promise<void>((r) => (holding = r));
+      const holder = detached(() =>
+        transaction(async () => {
+          await put('kv', { id: 'refund-lock' });
+          holding();
+          await held;
+        }),
+      );
+      await locked;
+      await expect(withoutWaiting(() => admitQueryChat('refund-b', 'ont-refund-b', true))).rejects.toThrow(/busy/i);
+      release();
+      await holder;
+      const after = await admitQueryChat('refund-b', 'ont-refund-b', true);
+      expect(after.useClaude).toBe(true);
+      await after.done();
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      Object.assign(config.llm.queryAssistant, limits);
+    }
+  });
+
+  it('writes, refines step by step and counts, keeping earlier filters', async () => {
+    const agent = await login('contributor');
+    const [first, more, under, title, count] = await converse(
+      agent,
+      'List every volunteering opportunity',
+      'Also show the minimum age and who it is offered by',
+      'Only those with a minimum age under 15',
+      'Also show the title',
+      'How many are there?',
+    );
+    expect(first).toMatchObject({ simulated: true, target: 'data' });
+    expect(first.query).toContain('vol:VolunteeringOpportunity');
+    expect(first.columns.map((c) => c.label)).toContain('title');
+    expect(first.query).toContain('LIMIT 100');
+    expect(first.reply).toContain('up to 100 rows');
+    expect(more.query).toContain('vol:minimumAge');
+    expect(more.query).toContain('vol:offeredBy');
+    expect(under.query).toContain('FILTER(?minimumAge < 15)');
+    expect(under.query).toContain('vol:offeredBy');
+    // A later refinement keeps the filter.
+    expect(title.query).toContain('FILTER(?minimumAge < 15)');
+    expect(count.query).toContain('COUNT(DISTINCT');
+    expect(count.query).toContain('FILTER(?minimumAge < 15)');
+    expect(count.columns[0].label).toMatch(/Number of volunteering opportunity/i);
+  });
+
+  it('"at least" includes the boundary, "remove" removes and "all of them" lifts the limit', async () => {
+    const agent = await login('contributor');
+    const [, atLeast, removed, all] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with a minimum age of at least 16', 'Remove the minimum age', 'Show all of them');
+    expect(atLeast.query).toContain('FILTER(?minimumAge >= 16)');
+    expect(atLeast.reply).toContain('at least 16');
+    expect(removed.query).not.toContain('minimumAge');
+    expect(all.query).not.toContain('LIMIT');
+  });
+
+  it('a new question starts afresh, and questions about the model run against the ontology', async () => {
+    const agent = await login('contributor');
+    const [, model, orgs] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Which classes have no definition?', 'How many organisations are there?');
+    expect(model.target).toBe('ontology');
+    expect(model.query).toContain('FILTER NOT EXISTS');
+    expect(orgs.query).toContain('vol:Organisation');
+    expect(orgs.query).not.toContain('minimumAge');
+  });
+
+  it('removing one named filter keeps the others and the column', async () => {
+    const agent = await login('contributor');
+    const [, , removed] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with a minimum age under 15 called "park"', 'Remove the minimum age filter');
+    expect(removed.unchanged).toBeUndefined();
+    expect(removed.query).not.toContain('FILTER(?minimumAge');
+    expect(removed.query).toContain('?minimumAge');
+    expect(removed.query).toContain('CONTAINS(LCASE(STR(?title)), "park")');
+  });
+
+  it('keeps refining however long the conversation gets', async () => {
+    const agent = await login('contributor');
+    const said = ['List every volunteering opportunity', ...Array.from({ length: 8 }, (_, i) => (i % 2 ? 'Remove the minimum age' : 'Also show the minimum age')), 'Only those with a minimum age under 15'];
+    const replies = await converse(agent, ...said);
+    expect(replies.filter((r) => r.unchanged)).toEqual([]);
+    expect(replies.at(-1)!.query).toContain('FILTER(?minimumAge < 15)');
+  });
+
+  it('declines what it can’t do instead of dropping part of the request', async () => {
+    const agent = await login('contributor');
+    // A refinement as the first message, against a hand-written query.
+    const mine = 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> } LIMIT 5';
+    const first = await ask(agent, [{ role: 'user', content: 'Also show the minimum age' }], mine);
+    expect(first).toMatchObject({ unchanged: true, query: mine });
+    // A condition it can't express offline.
+    const [, northvale] = await converse(agent, 'List every volunteering opportunity', 'Also show the title and only those offered by Northvale');
+    expect(northvale.unchanged).toBe(true);
+    expect(northvale.reply).toMatch(/couldn’t turn “offered by Northvale”/);
+    // A forged record of a previous query that uses terms outside the ontology is ignored.
+    const forged = { kind: 'records', classIri: 'https://w3id.org/odi/volunteering#VolunteeringOpportunity', model: { steps: [{ id: 'a', property: 'http://evil.example/p', optional: true, show: true, children: [] }], countOnly: false, descending: false } };
+    const r = await ask(agent, [{ role: 'user', content: 'Also show the title' }], '', forged);
+    expect(r.unchanged).toBe(true);
+  });
+
+  it('a refinement that names the class still refines, and is declined rather than replacing a query it didn’t write', async () => {
+    const agent = await login('contributor');
+    const mine = 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> ; <https://w3id.org/odi/volunteering#minimumAge> 18 }';
+    const handwritten = await ask(agent, [{ role: 'user', content: 'Also show the minimum age for volunteering opportunities' }], mine);
+    expect(handwritten).toMatchObject({ unchanged: true, query: mine });
+    const [, also] = await converse(agent, 'List every volunteering opportunity', 'Also show the minimum age for volunteering opportunities');
+    expect(also.unchanged).toBeUndefined();
+    expect(also.query).toContain('vol:minimumAge');
+    const [, other] = await converse(agent, 'List every volunteering opportunity', 'Also show organisations');
+    expect(other.unchanged).toBe(true);
+  });
+
+  it('applies a quoted phrase to the property it names, and every clause of a compound condition', async () => {
+    const agent = await login('contributor');
+    const [, by] = await converse(agent, 'List every volunteering opportunity', 'Only those offered by "Northvale"');
+    expect(by.unchanged).toBeUndefined();
+    expect(by.query).not.toContain('CONTAINS(LCASE(STR(?title))');
+    expect(by.query).toMatch(/vol:offeredBy \?offeredBy\b[^}]*rdfs:label \?offeredBy\w*/);
+    expect(by.query).toMatch(/CONTAINS\(LCASE\(STR\(\?offeredBy\w*\)\), "northvale"\)/);
+    expect(by.query).not.toMatch(/OPTIONAL \{[^}]*vol:offeredBy/);
+    const [, both] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by "Northvale"');
+    expect(both.query).toContain('FILTER(?minimumAge < 15)');
+    expect(both.query).toMatch(/"northvale"/);
+    // One clause it can't express declines the whole message.
+    const [, part] = await converse(agent, 'List every volunteering opportunity', 'Only those with minimum age under 15 and offered by Northvale');
+    expect(part.unchanged).toBe(true);
+    expect(part.query).not.toContain('minimumAge < 15');
+    // Two conditions on one property used to overwrite each other, and stray words used to be ignored.
+    for (const message of [
+      'Only those with minimum age over 10 and minimum age under 15',
+      'Only those called "Park" and called "Garden"',
+      'Only those with minimum age under 15 offered by Northvale',
+      'Only those with minimum age under 15 in London',
+    ]) {
+      const [list, r] = await converse(agent, 'List every volunteering opportunity with its minimum age', message);
+      expect(r.unchanged, message).toBe(true);
+      expect(r.query, message).toBe(list.query);
+    }
+  });
+
+  it('keeps a condition from an earlier message unless told to replace it', async () => {
+    const agent = await login('contributor');
+    // The second condition used to silently replace the first.
+    const [, over, under] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those with minimum age under 15');
+    expect(under.unchanged).toBe(true);
+    expect(under.query).toBe(over.query);
+    expect(under.reply).toContain('already a condition on minimum age (over 10)');
+    const [, park, garden] = await converse(agent, 'List every volunteering opportunity', 'Only those called "Park"', 'Also only those called "Garden"');
+    expect(garden.unchanged).toBe(true);
+    expect(garden.query).toBe(park.query);
+    // "Now also" adds; it used to count as permission to replace.
+    for (const [first, second] of [
+      ['Only those with minimum age under 15', 'Now also only those with minimum age over 10'],
+      ['Only those called "Park"', 'Now also only those called "Garden"'],
+      ['Only those with minimum age under 15', 'Now only those with minimum age over 10'],
+      ['Only those with minimum age under 15', 'Also only those with minimum age over 10 instead'],
+    ]) {
+      const [, before, after] = await converse(agent, 'List every volunteering opportunity with its minimum age', first, second);
+      expect(after.unchanged, second).toBe(true);
+      expect(after.query, second).toBe(before.query);
+    }
+    // Saying so replaces it.
+    const [, , instead] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Only those with minimum age under 15 instead');
+    expect(instead.query).toContain('FILTER(?minimumAge < 15)');
+    expect(instead.query).not.toContain('?minimumAge > 10');
+    // A condition on another property adds to it.
+    const [, , both] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those with minimum age over 10', 'Also only those called "Park"');
+    expect(both.query).toContain('FILTER(?minimumAge > 10)');
+    expect(both.query).toContain('"park"');
+  });
+
+  it('treats quoted words as values, never as instructions', async () => {
+    const agent = await login('contributor');
+    // "count" used to turn the list into a count, and "all rows" used to lift the limit.
+    const [, count] = await converse(agent, 'List every volunteering opportunity', 'Only those called "count"');
+    expect(count.query).not.toContain('COUNT(');
+    expect(count.query).toContain('"count"');
+    const [, rows] = await converse(agent, 'List every volunteering opportunity', 'Only those called "all rows"');
+    expect(rows.query).toContain('LIMIT 100');
+    expect(rows.query).toContain('"all rows"');
+    const [, remove] = await converse(agent, 'List every volunteering opportunity with its minimum age', 'Only those called "remove the minimum age"');
+    expect(remove.query).toContain('?minimumAge');
+    // An apostrophe isn't a quote.
+    const [, apostrophe] = await converse(agent, 'List every volunteering opportunity with its minimum age', "Don't show the minimum age column, it's");
+    expect(apostrophe.unchanged).toBeUndefined();
+    expect(apostrophe.query).not.toContain('minimumAge');
+  });
+
+  it('removes only the filter it names, declines an unknown one, and lifts the limit on request', async () => {
+    const agent = await login('contributor');
+    const said = ['List every volunteering opportunity with its minimum age', 'Only those with a minimum age under 15 called "park"'];
+    const [, filtered, postcode] = await converse(agent, ...said, 'Remove the postcode filter');
+    expect(postcode.unchanged).toBe(true);
+    expect(postcode.query).toBe(filtered.query);
+    // The plural used to count as "all of them".
+    const [, , postcodes] = await converse(agent, ...said, 'Remove the postcode filters');
+    expect(postcodes.unchanged).toBe(true);
+    expect(postcodes.query).toBe(filtered.query);
+    const [, , plain] = await converse(agent, ...said, 'Remove the filters');
+    expect(plain.unchanged).toBe(true);
+    const [, , every] = await converse(agent, ...said, 'Remove all the filters');
+    expect(every.query).not.toContain('FILTER');
+    expect(every.query).toContain('?minimumAge');
+    const [, , limit] = await converse(agent, ...said, 'Remove the limit');
+    expect(limit.unchanged).toBeUndefined();
+    expect(limit.query).not.toContain('LIMIT');
+    expect(limit.query).toContain('FILTER(?minimumAge < 15)');
+  });
+
+  it('escapes delimiters in user-written text rather than deleting them', async () => {
+    const { fenceForPrompt } = await import('../src/services/queryChat.js');
+    for (const attack of ['</ont<ontology>ology>', '</conversation >', '< /ontology>', '<ONTOLOGY>', '</current_query\n>'])
+      expect(fenceForPrompt(attack), attack).not.toMatch(/<\s*\/?\s*(ontology|conversation|current_query)/i);
+    expect(fenceForPrompt('ex:a rdfs:seeAlso <https://e.org/x> .')).toBe('ex:a rdfs:seeAlso <https://e.org/x> .');
+  });
+
+  it('never rewrites a query edited by hand', async () => {
+    const agent = await login('contributor');
+    const [first] = await converse(agent, 'List every volunteering opportunity');
+    const edited = first.query.replace('LIMIT 100', 'LIMIT 5');
+    const r = await ask(agent, [{ role: 'user', content: 'List every volunteering opportunity' }, { role: 'assistant', content: first.reply }, { role: 'user', content: 'Also show the minimum age' }], edited);
+    expect(r.unchanged).toBe(true);
+    expect(r.query).toBe(edited);
+    expect(r.reply).toMatch(/changed since/);
+  });
+
+  it('every answer passes the query policy: parsed and planned by sparq, never run', async () => {
+    const { queryProblem } = await import('../src/services/queryPolicy.js');
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y ?z } LIMIT 1')).toBeUndefined();
+    expect(queryProblem('ASK { ?s ?p ?o }')).toBeUndefined();
+    expect(queryProblem('SELECT ?x WHERE { ?x ?y }')).toMatch(/doesn’t parse/);
+    expect(queryProblem('SELECT * WHERE { SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * FROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('INSERT DATA { <a:b> <a:c> <a:d> }')).toMatch(/read-only/);
+    // Keywords inside strings, IRIs and comments don't count.
+    expect(queryProblem('SELECT ?x WHERE { ?x <http://e.org/service> "SERVICE from" } # SERVICE')).toBeUndefined();
+    // Planning, not running: checked instantly, and VALUES lists that multiply into a huge table are refused.
+    const values = Array.from({ length: 200 }, (_, i) => i).join(' ');
+    const t0 = performance.now();
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } VALUES ?b { ${values} } VALUES ?c { ${values} } VALUES ?d { ${values} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem('SELECT * WHERE { VALUES (?a ?b) { (1 2) (3 4) } VALUES ?c { 1 2 3 } }')).toBeUndefined();
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${values} } }`)).toBeUndefined();
+    // However the terms or names are written: signed numbers without spaces, Unicode variable names.
+    const packed = Array.from({ length: 200 }, (_, i) => i).join('+');
+    expect(queryProblem(`SELECT * WHERE { VALUES ?a { ${packed} } VALUES ?b { ${packed} } VALUES ?c { ${packed} } VALUES ?d { ${packed} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { VALUES ?ä { ${values} } VALUES ?ö { ${values} } VALUES ?ü { ${values} } VALUES ?é { ${values} } }`)).toMatch(/1,600,000,000 rows/);
+    expect(queryProblem(`SELECT * WHERE { ?s ?p ?o } VALUES ?a { ${values} }`)).toBeUndefined();
+    expect(performance.now() - t0).toBeLessThan(1000);
+    // A comment ended by a carriage return can't hide what follows it.
+    expect(queryProblem('SELECT * WHERE { # note\r SERVICE SILENT <http://example.org/sparql> { ?s ?p ?o } }')).toMatch(/SERVICE/);
+    expect(queryProblem('SELECT * # note\rFROM <http://example.org/g> WHERE { ?s ?p ?o }')).toMatch(/FROM/);
+    expect(queryProblem('SELECT * WHERE { { SELECT * FROM NAMED <http://example.org/g> WHERE { ?s ?p ?o } } }')).toMatch(/doesn’t parse|FROM/);
   });
 });
 
@@ -291,7 +842,7 @@ describe('feedback', () => {
 });
 
 describe('anonymous access', () => {
-  it('keeps use cases, interviews, meetings, change requests, releases and feedback behind sign-in', async () => {
+  it('keeps interviews, meetings, change requests, releases and feedback behind sign-in, and shows signed-out visitors only public use cases', async () => {
     const agent = await login('contributor', 'Private author');
     const uc = await agent.post(`/api/ontologies/${demoId}/interviews`).send({});
     expect(uc.status).toBe(201);
@@ -300,9 +851,13 @@ describe('anonymous access', () => {
     const cr = (await agent.get(`/api/ontologies/${demoId}/change-requests`)).body[0] as { id: string };
     const rel = (await agent.get(`/api/ontologies/${demoId}/releases`)).body[0] as { id: string };
     const meetings = (await agent.get(`/api/ontologies/${demoId}/meetings`)).body as { id: string }[];
+    // Use case reads are open, but check what each viewer may see: signed out, only public ones.
+    const anonList = await request(app).get(`/api/ontologies/${demoId}/use-cases`);
+    expect(anonList.status).toBe(200);
+    expect((anonList.body as { visibility: string }[]).every((u) => u.visibility === 'public')).toBe(true);
+    expect(JSON.stringify(anonList.body)).not.toContain('Private author');
+    expect((await request(app).get(`/api/use-cases/${useCaseId ?? ucs[0].id}`)).status).toBe(404);
     const paths = [
-      `/api/ontologies/${demoId}/use-cases`,
-      `/api/use-cases/${useCaseId ?? ucs[0].id}`,
       `/api/interviews/${uc.body.id}`,
       `/api/ontologies/${demoId}/change-requests`,
       `/api/change-requests/${cr.id}`,
@@ -398,7 +953,7 @@ describe('inline term edits', () => {
 
     // Working group: a patch needs one editor or steward sign-off and a day open for comment.
     const editor = await login('editor', 'Editor Ines');
-    const approved = await editor.post(`/api/change-requests/${res.body.id}/reviews`).send({ round: roundOf(editor, res.body.id), decision: 'approve' });
+    const approved = await editor.post(`/api/change-requests/${res.body.id}/reviews`).send({ round: await roundOf(editor, res.body.id), decision: 'approve' });
     expect(approved.body.governance.approvals).toBe(1);
     await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
     expect((await editor.get(`/api/change-requests/${res.body.id}`)).body.status).toBe('merged');
@@ -418,8 +973,8 @@ describe('inline term edits', () => {
     const second = await edit(b, { termIri: TC, set: { comment: 'Measured in hours per week.' }, previous: { comment: original }, submit: true });
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
-    await editor.post(`/api/change-requests/${first.body.id}/reviews`).send({ round: roundOf(editor, first.body.id), decision: 'approve' });
-    await editor.post(`/api/change-requests/${second.body.id}/reviews`).send({ round: roundOf(editor, second.body.id), decision: 'approve' });
+    await editor.post(`/api/change-requests/${first.body.id}/reviews`).send({ round: await roundOf(editor, first.body.id), decision: 'approve' });
+    await editor.post(`/api/change-requests/${second.body.id}/reviews`).send({ round: await roundOf(editor, second.body.id), decision: 'approve' });
     await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
 
     const states = await Promise.all([first, second].map(async (r) => (await editor.get(`/api/change-requests/${r.body.id}`)).body));
@@ -446,10 +1001,10 @@ describe('inline term edits', () => {
     const editor = await login('editor', 'Editor Race');
     for (const id of [one.body.id, two.body.id]) {
       await (id === one.body.id ? a : b).post(`/api/change-requests/${id}/submit`);
-      await editor.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(editor, id), decision: 'approve' });
-      put('changeRequests', { ...crsMod.getCR(id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z' }, demoId);
+      await editor.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(editor, id), decision: 'approve' });
+      await put('changeRequests', { ...await crsMod.getCR(id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z' }, demoId);
     }
-    const results = await Promise.all([crsMod.merge(crsMod.getCR(one.body.id), undefined), crsMod.merge(crsMod.getCR(two.body.id), undefined)]);
+    const results = await Promise.all([crsMod.merge(await crsMod.getCR(one.body.id), undefined), crsMod.merge(await crsMod.getCR(two.body.id), undefined)]);
     expect(results.map((r) => r.status).sort()).toEqual(['merged', 'needs-work']);
     const loser = results.find((r) => r.status === 'needs-work')!;
     expect(JSON.stringify(loser.timeline)).toMatch(/Earlier approvals no longer count/);
@@ -492,11 +1047,11 @@ describe('inline term edits', () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const contributor = await login('contributor', 'Contributor Withdraw');
     const created = await edit(contributor, { termIri: SKILL, set: { examples: ['withdraw me'] }, submit: true });
-    const snapshot = crsMod.getCR(created.body.id); // what a slow re-triage started from
+    const snapshot = await crsMod.getCR(created.body.id); // what a slow re-triage started from
     expect((await contributor.post(`/api/change-requests/${created.body.id}/withdraw`)).status).toBe(200);
     const after = await crsMod.triage(snapshot);
     expect(after.status).toBe('withdrawn');
-    expect(crsMod.getCR(created.body.id).status).toBe('withdrawn');
+    expect((await crsMod.getCR(created.body.id)).status).toBe('withdrawn');
   });
 
   it('does not count an approval from someone who rewrote the edits', async () => {
@@ -508,9 +1063,9 @@ describe('inline term edits', () => {
     const patched = await rewriter.patch(`/api/change-requests/${id}`).send({ ops: [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Rewritten wording.' } }] });
     expect(patched.status).toBe(200);
     expect(patched.body.revisedBy).toContain((await rewriter.get('/api/session')).body.user.id);
-    const own = await rewriter.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(rewriter, id), decision: 'approve' });
+    const own = await rewriter.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(rewriter, id), decision: 'approve' });
     expect(own.body.governance.approvals).toBe(0);
-    const independent = await other.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(other, id), decision: 'approve' });
+    const independent = await other.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(other, id), decision: 'approve' });
     expect(independent.body.governance.approvals).toBe(1);
   });
 
@@ -556,7 +1111,7 @@ describe('inline term edits', () => {
     const LOC = `${VOL}Location`;
     const long = 'x'.repeat(4100);
     const created = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Long note', description: '', kind: 'editorial', ops: [{ op: 'updateAnnotations', iri: LOC, set: { editorialNote: long } }], submit: true });
-    await steward.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: roundOf(steward, created.body.id), decision: 'approve' });
+    await steward.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: await roundOf(steward, created.body.id), decision: 'approve' });
     await steward.post('/api/simulation/clock').send({ advanceDays: 2 });
     expect((await editor.get(termPath(LOC))).body.editorialNote).toBe(long);
 
@@ -611,7 +1166,7 @@ describe('inline term edits', () => {
     const multi = 'Saturday 10:00 to 12:00\nat the community garden';
     const created = await edit(contributor, { termIri: SESSION, set: { examples: [multi, 'A one-off beach clean'] }, submit: true });
     expect(created.status).toBe(201);
-    await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: roundOf(editor, created.body.id), decision: 'approve' });
+    await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: await roundOf(editor, created.body.id), decision: 'approve' });
     await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
     const examples = (await contributor.get(termPath(SESSION))).body.examples;
     expect(examples).toHaveLength(2);
@@ -630,7 +1185,7 @@ describe('inline term edits', () => {
   };
   const userOf = async (agent: Agent) => {
     const { getUser } = await import('../src/services/users.js');
-    return getUser((await agent.get('/api/session')).body.user.id)!;
+    return (await getUser((await agent.get('/api/session')).body.user.id))!;
   };
 
   it('keeps the working-draft lock while a slow holder is alive, and stops a holder that lost it from writing', async () => {
@@ -644,16 +1199,16 @@ describe('inline term edits', () => {
       // A slow but live holder keeps renewing its lease, so it never looks abandoned to another process.
       await withWorkingDraftLock({ id: demoId }, async () => {
         await sleep(300);
-        expect(get<{ expiresAt: number }>('kv', key)!.expiresAt).toBeGreaterThan(Date.now());
-        assertStillHeld({ id: demoId });
+        expect((await get<{ expiresAt: number }>('kv', key))!.expiresAt).toBeGreaterThan(Date.now());
+        await assertStillHeld({ id: demoId });
       });
-      expect(get('kv', key)).toBeUndefined();
+      expect((await get('kv', key))).toBeUndefined();
 
       // Another process's live lease: we wait, then give up, without touching it.
-      put('kv', { id: key, token: 'another-process', pid: 0, expiresAt: Date.now() + 60_000 });
+      await put('kv', { id: key, token: 'another-process', pid: 0, expiresAt: Date.now() + 60_000 });
       await expect(withWorkingDraftLock({ id: demoId }, async () => 'got it')).rejects.toMatchObject({ status: 503 });
-      expect(get('kv', key)).toMatchObject({ token: 'another-process' });
-      remove('kv', key);
+      expect((await get('kv', key))).toMatchObject({ token: 'another-process' });
+      await remove('kv', key);
 
       // A holder that stalled past its lease and was taken over can no longer write, and leaves its successor's lease alone.
       const contributor = await login('contributor', 'Contributor Stalled');
@@ -661,13 +1216,13 @@ describe('inline term edits', () => {
       const user = await userOf(contributor);
       await expect(
         withWorkingDraftLock({ id: demoId }, async () => {
-          put('kv', { id: key, token: 'successor', pid: 0, expiresAt: Date.now() + 60_000 });
-          return crsMod.withdraw(crsMod.getCR(created.body.id), user);
+          await put('kv', { id: key, token: 'successor', pid: 0, expiresAt: Date.now() + 60_000 });
+          return crsMod.withdraw(await crsMod.getCR(created.body.id), user);
         }),
       ).rejects.toMatchObject({ status: 503 });
-      expect(crsMod.getCR(created.body.id).status).toBe('review');
-      expect(get('kv', key)).toMatchObject({ token: 'successor' });
-      remove('kv', key);
+      expect((await crsMod.getCR(created.body.id)).status).toBe('review');
+      expect((await get('kv', key))).toMatchObject({ token: 'successor' });
+      await remove('kv', key);
     } finally {
       Object.assign(lockTiming, saved);
     }
@@ -695,7 +1250,7 @@ describe('inline term edits', () => {
       expect((await contributor.post(`/api/change-requests/${first.body.id}/withdraw`)).status).toBe(200);
       held.open();
       expect((await revising).status).toBe(409);
-      expect(crsMod.getCR(first.body.id).status).toBe('withdrawn');
+      expect((await crsMod.getCR(first.body.id)).status).toBe('withdrawn');
 
       // Someone else rewrote the edits while the AI was revising: theirs are kept, and they still can't approve their own rewrite.
       held = gate();
@@ -708,10 +1263,10 @@ describe('inline term edits', () => {
       const late = await revising2;
       expect(late.status).toBe(409);
       expect(late.body.error).toMatch(/changed the edits while they were being revised/);
-      const stored = crsMod.getCR(second.body.id);
+      const stored = await crsMod.getCR(second.body.id);
       expect(stored.ops).toEqual(theirs);
       expect(stored.revisedBy).toContain((await userOf(editorB)).id);
-      expect((await editorB.post(`/api/change-requests/${second.body.id}/reviews`).send({ round: roundOf(editorB, second.body.id), decision: 'approve' })).body.governance.approvals).toBe(0);
+      expect((await editorB.post(`/api/change-requests/${second.body.id}/reviews`).send({ round: await roundOf(editorB, second.body.id), decision: 'approve' })).body.governance.approvals).toBe(0);
     } finally {
       spy.mockRestore();
     }
@@ -736,10 +1291,10 @@ describe('inline term edits', () => {
       return original.call(ontologyStore, p);
     });
     try {
-      const merging = crsMod.merge(crsMod.getCR(created.body.id), await userOf(editor));
+      const merging = crsMod.merge(await crsMod.getCR(created.body.id), await userOf(editor));
       await vi.waitFor(() => expect(calls).toBeGreaterThan(0));
       const patching = crsMod
-        .updateOps(crsMod.getCR(created.body.id), await userOf(author), { ops: [{ op: 'updateAnnotations', iri: LOC, set: { definition: 'Unreviewed definition.' } }] })
+        .updateOps(await crsMod.getCR(created.body.id), await userOf(author), { ops: [{ op: 'updateAnnotations', iri: LOC, set: { definition: 'Unreviewed definition.' } }] })
         .then(() => 'saved', (err: { status?: number }) => err.status);
       await sleep(50);
       held.open();
@@ -765,8 +1320,8 @@ describe('inline term edits', () => {
     // Approved as major, after the vote passed: merging doesn't start another vote.
     const voted = await edit(contributor, { termIri: ORG, set: { definition: 'A scheduled period of volunteering, possibly repeating.' }, previous: { definition: current }, definitionIntent: 'new-meaning' });
     expect(voted.body.classification.level).toBe('major');
-    put('changeRequests', { ...crsMod.getCR(voted.body.id), status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true } }, demoId);
-    const merged = await crsMod.merge(crsMod.getCR(voted.body.id), stewardUser);
+    await put('changeRequests', { ...await crsMod.getCR(voted.body.id), status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true } }, demoId);
+    const merged = await crsMod.merge(await crsMod.getCR(voted.body.id), stewardUser);
     expect(merged.status).toBe('merged');
     expect((await contributor.get(termPath(ORG))).body.definition).toBe('A scheduled period of volunteering, possibly repeating.');
 
@@ -774,7 +1329,7 @@ describe('inline term edits', () => {
     const now = (await contributor.get(termPath(ORG))).body.definition;
     const grew = await edit(contributor, { termIri: ORG, set: { definition: 'An employment shift.' }, previous: { definition: now }, definitionIntent: 'new-meaning' });
     await approveForReal(grew.body.id, { as: 'patch' });
-    const back = await crsMod.merge(crsMod.getCR(grew.body.id), stewardUser);
+    const back = await crsMod.merge(await crsMod.getCR(grew.body.id), stewardUser);
     expect(back.status).not.toBe('merged');
     expect(back.status).not.toBe('approved');
     // Approved by the patch rule, it no longer holds under the major rule: a vote opens, or it goes back to review.
@@ -800,25 +1355,25 @@ describe('inline term edits', () => {
       await approveForReal(one.body.id);
       // A manual merge re-validates the change, so it needs budget too.
       expect((await editor.post(`/api/change-requests/${one.body.id}/merge`)).status).toBe(429);
-      expect(crsMod.getCR(one.body.id).status).toBe('approved');
+      expect((await crsMod.getCR(one.body.id)).status).toBe('approved');
 
       // An approval that would trigger an automatic merge: recorded, and the merge waits for the approver's budget.
       const LOC = `${VOL}Location`;
       const two = await edit(b, { termIri: LOC, set: { examples: ['a village hall'] }, submit: true });
       await editor.post('/api/simulation/clock').send({ advanceDays: 2 });
-      expect(crsMod.getCR(one.body.id).status).toBe('merged');
+      expect((await crsMod.getCR(one.body.id)).status).toBe('merged');
       spy.mockClear();
-      const approved = await editor.post(`/api/change-requests/${two.body.id}/reviews`).send({ round: roundOf(editor, two.body.id), decision: 'approve' });
+      const approved = await editor.post(`/api/change-requests/${two.body.id}/reviews`).send({ round: await roundOf(editor, two.body.id), decision: 'approve' });
       expect(approved.status).toBe(200);
       expect(approved.body.status).toBe('approved');
       expect(approved.body.autoMergeBy).toBe((await userOf(editor)).id);
       await editor.post('/api/simulation/clock').send({ advanceDays: 0.01 });
-      expect(crsMod.getCR(two.body.id).status).toBe('approved');
+      expect((await crsMod.getCR(two.body.id)).status).toBe('approved');
       // Once they have budget again, the governance clock merges it, on their budget.
       triageBudget.max = 2;
       await editor.post('/api/simulation/clock').send({ advanceDays: 0.01 });
-      expect(crsMod.getCR(two.body.id).status).toBe('merged');
-      expect(crsMod.getCR(two.body.id).autoMergeBy).toBeUndefined();
+      expect((await crsMod.getCR(two.body.id)).status).toBe('merged');
+      expect((await crsMod.getCR(two.body.id)).autoMergeBy).toBeUndefined();
       // That merge used the editor's second allowance (the first was the re-triage).
       expect((await editor.post(`/api/change-requests/${one.body.id}/retriage`)).status).toBe(429);
       // Re-checking the other open requests after each merge used no LLM triage.
@@ -837,11 +1392,11 @@ describe('inline term edits', () => {
     const editor = await login('editor', 'Editor Combined');
     const steward = await userOf(await login('steward', 'Steward Combined'));
     const create = (title: string, ops: object[]) => editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title, description: '', kind: 'change', ops });
-    const approve = (r: { body: { id: string; classification: { level: 'patch' | 'minor' | 'major' } } }) =>
-      approveForReal(r.body.id);
+    const approve = async (r: { body: { id: string; classification: { level: 'patch' | 'minor' | 'major' } } }) =>
+      await approveForReal(r.body.id);
     const helper = await create('Add helper', [{ op: 'addClass', localName: 'Helper', label: 'helper', definition: 'An agent that helps out with a volunteering opportunity.', subClassOf: [`${VOL}Agent`] }]);
     await approve(helper);
-    expect((await crsMod.merge(crsMod.getCR(helper.body.id), steward)).status).toBe('merged');
+    expect((await crsMod.merge(await crsMod.getCR(helper.body.id), steward)).status).toBe('merged');
     // Each passes on its own; together Helper would be unsatisfiable.
     const sub = await create('Helpers are people', [{ op: 'setSuperClasses', iri: HELPER, superClasses: [PERSON] }]);
     const disjoint = await create('Helpers are not people', [{ op: 'addDisjointness', classes: [HELPER, PERSON] }]);
@@ -851,10 +1406,10 @@ describe('inline term edits', () => {
     await approve(disjoint);
     const { ontologyStore } = await import('../src/services/ontologyStore.js');
     const { getProject } = await import('../src/services/ontologies.js');
-    const head = async () => ontologyStore.head(getProject(demoId));
-    expect((await crsMod.merge(crsMod.getCR(sub.body.id), steward)).status).toBe('merged');
+    const head = async () => await ontologyStore.head((await getProject(demoId)));
+    expect((await crsMod.merge(await crsMod.getCR(sub.body.id), steward)).status).toBe('merged');
     const before = await head();
-    const second = await crsMod.merge(crsMod.getCR(disjoint.body.id), steward);
+    const second = await crsMod.merge(await crsMod.getCR(disjoint.body.id), steward);
     expect(second.status).toBe('needs-work');
     expect(second.validation!.passed).toBe(false);
     expect(JSON.stringify(second.timeline)).toMatch(/fails validation/);
@@ -867,8 +1422,8 @@ describe('inline term edits', () => {
     const contributor = await login('contributor', 'Contributor Blocked');
     const editor = await login('editor', 'Editor Blocker');
     const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Blocked later.' }, submit: true });
-    put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
-    const blocked = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: roundOf(editor, created.body.id), decision: 'request-changes', comment: 'Not yet.' });
+    await put('changeRequests', { ...await crsMod.getCR(created.body.id), status: 'approved', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+    const blocked = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: await roundOf(editor, created.body.id), decision: 'request-changes', comment: 'Not yet.' });
     expect(blocked.body.status).toBe('needs-work');
     expect((await editor.post(`/api/change-requests/${created.body.id}/merge`)).status).toBe(409);
     expect((await contributor.get(termPath(`${VOL}Cause`))).body.comment).not.toBe('Blocked later.');
@@ -882,10 +1437,10 @@ describe('inline term edits', () => {
     const current = (await contributor.get(termPath(TC))).body.definition;
     // A definition rewording with no reviews, stored as approved by an older version (no approvedAs).
     const created = await edit(contributor, { termIri: TC, set: { definition: `${current} Legacy.` }, previous: { definition: current }, definitionIntent: 'same-meaning' });
-    const legacy = { ...crsMod.getCR(created.body.id), status: 'approved' as const };
+    const legacy = { ...await crsMod.getCR(created.body.id), status: 'approved' as const };
     delete legacy.approvedAs;
-    put('changeRequests', legacy, demoId);
-    const result = await crsMod.merge(crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Legacy')));
+    await put('changeRequests', legacy, demoId);
+    const result = await crsMod.merge(await crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Legacy')));
     expect(result.status).not.toBe('merged');
     expect((await contributor.get(termPath(TC))).body.definition).toBe(current);
   });
@@ -893,16 +1448,16 @@ describe('inline term edits', () => {
   it('never moves the working draft from a stale base', async () => {
     const { ontologyStore } = await import('../src/services/ontologyStore.js');
     const { getProject } = await import('../src/services/ontologies.js');
-    const project = getProject(demoId);
+    const project = (await getProject(demoId));
     const { graph, head } = await ontologyStore.workingAt(project);
-    const stale = ontologyStore.log(project, 2)[1].sha;
+    const stale = (await ontologyStore.log(project, 2))[1].sha;
     await expect(ontologyStore.commitWorking(project, graph, 'stale writer', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
     // Even a no-op against the stale base is refused, rather than reported as committed.
-    const staleGraph = await ontologyStore.at(project, 'working').then(() => import('@concord/core')).then(async ({ OntologyGraph }) => OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project, stale)));
+    const staleGraph = await ontologyStore.at(project, 'working').then(() => import('@concord/core')).then(async ({ OntologyGraph }) => OntologyGraph.fromTurtle(await ontologyStore.readWorkingText(project, stale)));
     await expect(ontologyStore.commitWorking(project, staleGraph, 'stale no-op', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
     await expect(ontologyStore.writeRelease(project, '9.9.9', graph, {}, 'stale release', { name: 'Stale' }, stale)).rejects.toMatchObject({ status: 409 });
-    expect(ontologyStore.head(project)).toBe(head);
-    expect(ontologyStore.versions(project)).not.toContain('9.9.9');
+    expect(await ontologyStore.head(project)).toBe(head);
+    expect(await ontologyStore.versions(project)).not.toContain('9.9.9');
   });
 
   it('never lands a merge if the request changed after it was checked, even by a writer that ignored the lock', async () => {
@@ -916,30 +1471,30 @@ describe('inline term edits', () => {
     const steward = await userOf(await login('steward', 'Steward Fenced'));
     const editorId = (await userOf(editor)).id;
     // What another process does after this merger's lease lapsed: it only touches the database.
-    const meddle: Record<string, (id: string) => void> = {
-      withdraw: (id) => put('changeRequests', { ...crsMod.getCR(id), status: 'withdrawn', rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId),
-      'request changes': (id) => {
-        put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorId, roles: ['editor'], decision: 'request-changes', at: new Date().toISOString() }, id);
-        put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+    const meddle: Record<string, (id: string) => Promise<unknown>> = {
+      withdraw: async (id) => (await put('changeRequests', { ...await crsMod.getCR(id), status: 'withdrawn', rev: ((await crsMod.getCR(id)).rev ?? 0) + 1 }, demoId)),
+      'request changes': async (id) => {
+        await put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorId, roles: ['editor'], decision: 'request-changes', at: new Date().toISOString() }, id);
+        await put('changeRequests', { ...await crsMod.getCR(id), rev: ((await crsMod.getCR(id)).rev ?? 0) + 1 }, demoId);
       },
-      patch: (id) => put('changeRequests', { ...crsMod.getCR(id), ops: [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Unreviewed.' } }], rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId),
+      patch: async (id) => (await put('changeRequests', { ...await crsMod.getCR(id), ops: [{ op: 'updateAnnotations', iri: SKILL, set: { comment: 'Unreviewed.' } }], rev: ((await crsMod.getCR(id)).rev ?? 0) + 1 }, demoId)),
     };
     for (const [what, fn] of Object.entries(meddle)) {
       const created = await edit(contributor, { termIri: `${VOL}Role`, set: { examples: [`fenced ${what}`] }, submit: true });
       await approveForReal(created.body.id);
-      const head = ontologyStore.head(getProject(demoId));
+      const head = await ontologyStore.head((await getProject(demoId)));
       const original = ontologyStore.commitWorking;
       const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async function (this: typeof ontologyStore, ...args) {
-        fn(created.body.id); // lands just before the merge's commit
+        await fn(created.body.id); // lands just before the merge's commit
         return original.apply(ontologyStore, args);
       });
       try {
-        await expect(crsMod.merge(crsMod.getCR(created.body.id), steward), what).rejects.toMatchObject({ status: 409 });
+        await expect(crsMod.merge(await crsMod.getCR(created.body.id), steward), what).rejects.toMatchObject({ status: 409 });
       } finally {
         spy.mockRestore();
       }
-      expect(ontologyStore.head(getProject(demoId)), what).toBe(head);
-      expect(crsMod.getCR(created.body.id).status, what).not.toBe('merged');
+      expect(await ontologyStore.head((await getProject(demoId))), what).toBe(head);
+      expect((await crsMod.getCR(created.body.id)).status, what).not.toBe('merged');
     }
   });
 
@@ -951,15 +1506,15 @@ describe('inline term edits', () => {
     const contributor = await login('contributor', 'Contributor Flaky');
     const created = await edit(contributor, { termIri: `${VOL}Role`, set: { comment: 'Checked or not at all.' }, submit: true });
     await approveForReal(created.body.id);
-    const head = ontologyStore.head(getProject(demoId));
+    const head = await ontologyStore.head((await getProject(demoId)));
     const spy = vi.spyOn(ontologyStore, 'working').mockRejectedValueOnce(new Error('transient read failure'));
     try {
-      const result = await crsMod.merge(crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Flaky')));
+      const result = await crsMod.merge(await crsMod.getCR(created.body.id), await userOf(await login('steward', 'Steward Flaky')));
       expect(result.status).not.toBe('merged');
     } finally {
       spy.mockRestore();
     }
-    expect(ontologyStore.head(getProject(demoId))).toBe(head);
+    expect(await ontologyStore.head((await getProject(demoId)))).toBe(head);
   });
 
   it('sends an approved request to a vote when a late objection asks for one', async () => {
@@ -967,31 +1522,30 @@ describe('inline term edits', () => {
     const { getProject, updateProject } = await import('../src/services/ontologies.js');
     const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
     const { put } = await import('../src/db.js');
-    const project = getProject(demoId);
+    const project = (await getProject(demoId));
     const saved = project.governance;
-    updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
+    await updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
     try {
       const contributor = await login('contributor', 'Contributor Objected');
       const editor = await login('editor', 'Editor Objector');
       const created = await edit(contributor, { termIri: `${VOL}Role`, set: { editorialNote: 'Objected to later.' } });
-      put('changeRequests', { ...crsMod.getCR(created.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false } }, demoId);
-      const objected = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: roundOf(editor, created.body.id), decision: 'object', comment: 'Let us vote on it.' });
+      await put('changeRequests', { ...await crsMod.getCR(created.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false } }, demoId);
+      const objected = await editor.post(`/api/change-requests/${created.body.id}/reviews`).send({ round: await roundOf(editor, created.body.id), decision: 'object', comment: 'Let us vote on it.' });
       expect(objected.body.status).toBe('voting');
       expect((await editor.post(`/api/change-requests/${created.body.id}/merge`)).status).toBe(409);
       // A request already approved by a vote is not sent to another one by the same rule.
       const voted = await edit(contributor, { termIri: `${VOL}Role`, set: { comment: 'Voted through.' } });
-      put('changeRequests', { ...crsMod.getCR(voted.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
-      await editor.post(`/api/change-requests/${voted.body.id}/reviews`).send({ round: roundOf(editor, voted.body.id), decision: 'object' });
-      expect(crsMod.getCR(voted.body.id).status).not.toBe('voting');
+      await put('changeRequests', { ...await crsMod.getCR(voted.body.id), status: 'approved', reviewStartedAt: '2000-01-01T00:00:00Z', approvedAs: { level: 'patch', confirmation: false, voted: true } }, demoId);
+      await editor.post(`/api/change-requests/${voted.body.id}/reviews`).send({ round: await roundOf(editor, voted.body.id), decision: 'object' });
+      expect((await crsMod.getCR(voted.body.id)).status).not.toBe('voting');
     } finally {
-      updateProject({ ...getProject(demoId), governance: saved });
+      await updateProject({ ...(await getProject(demoId)), governance: saved });
     }
   });
 
   it('publishes a release from the draft as it is once nothing else is changing it, so a merge just before is kept', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const releases = await import('../src/services/releases.js');
-    const { withWorkingDraftLock } = await import('../src/services/repoLock.js');
     const { put, list } = await import('../src/db.js');
     const steward = await login('steward', 'Steward Release');
     const stewardUser = await userOf(steward);
@@ -999,19 +1553,19 @@ describe('inline term edits', () => {
     const created = await edit(contributor, { termIri: `${VOL}Agent`, set: { comment: 'Merged while the release waited.' } });
     await approveForReal(created.body.id);
     await steward.post(`/api/ontologies/${demoId}/releases`).send({});
-    const pending = list<{ id: string; status: string; ontologyId: string }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
+    const pending = (await list<{ id: string; status: string; ontologyId: string }>('releases', demoId)).find((r) => r.status === 'draft' || r.status === 'voting')!;
     // Treated as ready to publish (its vote, if it needs one, is beside the point here).
-    const draft = put('releases', { ...pending, status: 'draft' }, demoId);
+    const draft = (await put('releases', { ...pending, status: 'draft' }, demoId));
 
-    // A merge is under way (holding the lock) when the release is asked for.
+    // A merge is under way (holding the ontology's locks, consent then working draft, as a merge does) when the release is asked for.
     let finish!: () => void;
     const finishing = new Promise<void>((resolve) => (finish = resolve));
     let started!: () => void;
     const inside = new Promise<void>((resolve) => (started = resolve));
-    const merging = withWorkingDraftLock({ id: demoId }, async () => {
+    const merging = crsMod.withOntologyLocks(demoId, async () => {
       started();
       await finishing;
-      return crsMod.merge(crsMod.getCR(created.body.id), stewardUser);
+      return crsMod.merge(await crsMod.getCR(created.body.id), stewardUser);
     });
     await inside;
     const publishing = releases.publishRelease(draft as never, stewardUser);
@@ -1031,10 +1585,12 @@ describe('inline term edits', () => {
     const path = await import('node:path');
     const fs = await import('node:fs');
     const { config } = await import('../src/config.js');
-    const project = getProject(demoId);
+    const project = (await getProject(demoId));
     // The repository as it is on disk, without the repair that reads through ontologyStore do first.
     const raw = path.join(config.dataDir, 'ontologies', project.slug);
-    const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8' }).trim();
+    // CI runners have no git identity, so commits made here name one (as the store does).
+    const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@localhost', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@localhost' };
+    const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
     const rawFile = (name: string) => fs.readFileSync(path.join(raw, name), 'utf8');
     return { ontologyStore, project, rawGit, rawFile, raw };
   };
@@ -1058,7 +1614,7 @@ describe('inline term edits', () => {
     const child = spawnSync(process.execPath, ['--no-warnings', '--import', 'tsx', script, op, id, userId], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', env: process.env, timeout: 90_000 });
     expect(child.signal, `${child.stdout}\n${child.stderr}`).toBe('SIGKILL');
     // The dead process's working-draft lease would lapse in a minute; let the test go on without waiting.
-    remove('kv', `working-draft-lock:${demoId}`);
+    await remove('kv', `working-draft-lock:${demoId}`);
   };
   /** No pins are left: the draft (and through it all its history) is held by refs/concord/draft alone. */
   const onlyDraftPins = (rawGit: (...args: string[]) => string, head: string) => {
@@ -1070,29 +1626,53 @@ describe('inline term edits', () => {
     rawGit('reflog', 'expire', '--expire=now', '--all');
     rawGit('gc', '-q', '--prune=now');
   };
-  /** A writer in another process committing a draft with one more triple; with afterPin it is killed, or stopped until SIGCONT, right after pinning its commit. */
-  const writerProcess = async (label: string, afterPin?: 'kill' | 'stop') => {
+  /**
+   * A writer in another process (see writerProcess.ts): `advance <label>` commits a draft with one more
+   * triple, `prune` cleans up pins. With `at`, it is killed, or paused until resume(), at that point.
+   * Always stop() it in a finally block.
+   */
+  const writerProcess = async (args: string[], opts: { at?: 'pin' | 'draft-read'; then?: 'kill' | 'pause' } = {}) => {
     const { spawn } = await import('node:child_process');
     const { fileURLToPath } = await import('node:url');
     const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
     const { project } = await repo();
-    const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', fileURLToPath(new URL('./writerProcess.ts', import.meta.url)), 'advance', label], {
+    const resumeFile = path.join(os.tmpdir(), `concord-resume-${Math.random().toString(36).slice(2)}`);
+    const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', fileURLToPath(new URL('./writerProcess.ts', import.meta.url)), ...args], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
-      env: { ...process.env, WRITER_AFTER_PIN: afterPin ?? '', WRITER_SLUG: project.slug },
+      env: { ...process.env, WRITER_AT: opts.at ?? '', WRITER_DO: opts.then ?? '', WRITER_RESUME: resumeFile, WRITER_SLUG: project.slug },
     });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
-    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
-    const stopped = async () => {
-      for (let i = 0; i < 1200; i++) {
-        const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
-        if (stat.slice(stat.lastIndexOf(')') + 2).startsWith('T')) return;
-        await sleep(50);
-      }
-      throw new Error(`writer never stopped: ${out}`);
+    let done = false;
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+      child.on('exit', (code, signal) => {
+        done = true;
+        resolve({ code, signal });
+      }),
+    );
+    return {
+      exited,
+      output: () => out.replace(/^paused\n/, '').trim(),
+      /** Resolves once it is waiting at its pause point. */
+      paused: async () => {
+        for (let i = 0; i < 1200 && !out.startsWith('paused\n'); i++) {
+          if (done) throw new Error(`writer exited instead of pausing: ${out}`);
+          await sleep(50);
+        }
+        if (!out.startsWith('paused\n')) throw new Error(`writer never paused: ${out}`);
+      },
+      resume: async () => {
+        fs.writeFileSync(resumeFile, '');
+        return exited;
+      },
+      stop: () => {
+        if (!done) child.kill('SIGKILL');
+        fs.rmSync(resumeFile, { force: true });
+      },
     };
-    return { child, exited, stopped, output: () => out.trim() };
   };
 
   it('never lets a copy read before a merge be saved over it', async () => {
@@ -1101,14 +1681,14 @@ describe('inline term edits', () => {
     const id = await approvedEdit('Contributor Stale Copy', `${VOL}Cause`, { examples: ['stale copy'] });
     // A writer holding a copy, paused before saving while a merge recorded itself: its save is refused.
     await expect(
-      crsMod.updateCR(crsMod.getCR(id), (c) => {
-        put('changeRequests', { ...crsMod.getCR(id), status: 'merged', mergedCommit: 'abc', rev: (c.rev ?? 0) + 1 }, demoId);
+      crsMod.updateCR(await crsMod.getCR(id), async (c) => {
+        await put('changeRequests', { ...await crsMod.getCR(id), status: 'merged', mergedCommit: 'abc', rev: (c.rev ?? 0) + 1 }, demoId);
         c.status = 'withdrawn';
       }),
     ).rejects.toMatchObject({ status: 409 });
-    expect(crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: 'abc' });
+    expect(await crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: 'abc' });
     // And a copy that is already out of date is refused before anything is written.
-    const old = { ...crsMod.getCR(id), rev: 0 };
+    const old = { ...await crsMod.getCR(id), rev: 0 };
     await expect(crsMod.updateCR(old, (c) => (c.title = 'Overwritten'))).rejects.toMatchObject({ status: 409 });
   });
 
@@ -1124,27 +1704,27 @@ describe('inline term edits', () => {
     const iso = clock.iso.bind(clock);
     let calls = 0;
     const spy = vi.spyOn(clock, 'iso').mockImplementation(() => {
-      if (++calls === 2) put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+      if (++calls === 2) bumpRevElsewhere(id);
       return iso();
     });
     try {
-      expect((await editor.post(`/api/change-requests/${id}/reviews`).send({ round: roundOf(editor, id), decision: 'request-changes', comment: 'Lost with its save.' })).status).toBe(409);
+      expect((await editor.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(editor, id), decision: 'request-changes', comment: 'Lost with its save.' })).status).toBe(409);
     } finally {
       spy.mockRestore();
     }
-    expect(list<{ comment?: string }>('reviews', id).some((r) => r.comment === 'Lost with its save.')).toBe(false);
+    expect((await list<{ comment?: string }>('reviews', id)).some((r) => r.comment === 'Lost with its save.')).toBe(false);
   });
 
   it('keeps a committed merge if the process dies before git is updated, and repairs git on the next read', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { ontologyStore, project, rawGit, rawFile } = await repo();
     const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
-    const before = ontologyStore.head(project);
+    const before = await ontologyStore.head(project);
     await killedAfterCommit('merge', id, (await userOf(await login('steward', 'Steward Crash'))).id);
     // The merge and its bookkeeping landed together in the database...
-    const merged = ontologyStore.head(project);
+    const merged = await ontologyStore.head(project);
     expect(merged).not.toBe(before);
-    expect(crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: merged });
+    expect(await crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: merged });
     // ...while git was never touched.
     expect(rawGit('rev-parse', 'HEAD')).toBe(before);
     // The commit only the database names survives garbage collection.
@@ -1169,32 +1749,32 @@ describe('inline term edits', () => {
       throw new Error('disk full');
     });
     try {
-      expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Checkout')))).status).toBe('merged');
+      expect((await crsMod.merge(await crsMod.getCR(id), await userOf(await login('steward', 'Steward Checkout')))).status).toBe('merged');
     } finally {
       spy.mockRestore();
     }
     await ontologyStore.working(project);
     expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
-    expect(rawFile('ontology.ttl')).toBe(ontologyStore.readWorkingText(project, ontologyStore.head(project)));
+    expect(rawFile('ontology.ttl')).toBe(await ontologyStore.readWorkingText(project, await ontologyStore.head(project)));
 
     // An older sync (from another process) put the previous draft's files back and recorded that it had.
-    const head = ontologyStore.head(project);
+    const head = await ontologyStore.head(project);
     const older = rawGit('rev-parse', `${head}~1`);
     rawGit('read-tree', '--reset', '-u', older);
     const stamp = path.join(raw, '.git', 'concord-synced');
     fs.writeFileSync(stamp, fs.readFileSync(stamp, 'utf8').replace(head, older));
-    ontologyStore.versions(project);
+    await ontologyStore.versions(project);
     expect(rawFile('ontology.ttl')).toContain('Checked out eventually.');
     // A branch ahead of the database is put back too.
     rawGit('update-ref', 'HEAD', rawGit('commit-tree', `${head}^{tree}`, '-p', head, '-m', 'stray'));
-    ontologyStore.log(project);
+    await ontologyStore.log(project);
     expect(rawGit('rev-parse', 'HEAD')).toBe(head);
   });
 
   it('restores release tags from the published releases, including ones from before', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { list } = await import('../src/db.js');
-    const published = list<{ version: string; status: string; commit?: string }>('releases', demoId).filter((r) => r.status === 'published' && r.commit);
+    const published = (await list<{ version: string; status: string; commit?: string }>('releases', demoId)).filter((r) => r.status === 'published' && r.commit);
     expect(published.length).toBeGreaterThan(0);
     for (const r of published) rawGit('tag', '-d', `v${r.version}`);
     await ontologyStore.at(project, published[0].version);
@@ -1204,9 +1784,9 @@ describe('inline term edits', () => {
   it('drops the pin of an advance that was refused', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const graph = await ontologyStore.working(project);
-    const stale = rawGit('rev-parse', `${ontologyStore.head(project)}~1`);
+    const stale = rawGit('rev-parse', `${await ontologyStore.head(project)}~1`);
     await expect(ontologyStore.commitWorking(project, graph, 'refused', { name: 'Refused' }, stale)).rejects.toMatchObject({ status: 409 });
-    onlyDraftPins(rawGit, ontologyStore.head(project));
+    onlyDraftPins(rawGit, await ontologyStore.head(project));
   });
 
   it('records a release atomically, survives dying before its tag, and refuses a second publisher', async () => {
@@ -1218,28 +1798,28 @@ describe('inline term edits', () => {
     const steward = await login('steward', 'Steward Atomic');
     const stewardUser = await userOf(steward);
     const id = await approvedEdit('Contributor Atomic', `${VOL}Cause`, { examples: ['released atomically'] });
-    expect((await crsMod.merge(crsMod.getCR(id), stewardUser)).status).toBe('merged');
+    expect((await crsMod.merge(await crsMod.getCR(id), stewardUser)).status).toBe('merged');
     await steward.post(`/api/ontologies/${demoId}/releases`).send({});
-    const pending = list<{ id: string; status: string; version: string; changeRequestIds: string[] }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
-    const draft = put('releases', { ...pending, status: 'draft' }, demoId);
+    const pending = (await list<{ id: string; status: string; version: string; changeRequestIds: string[] }>('releases', demoId)).find((r) => r.status === 'draft' || r.status === 'voting')!;
+    const draft = (await put('releases', { ...pending, status: 'draft' }, demoId));
     const tag = `v${draft.version}`;
 
     // The publisher's process is killed the moment its transaction commits.
     await killedAfterCommit('publish', draft.id, stewardUser.id);
     // Everything the release records landed with the commit.
-    const stored = list<{ id: string; status: string; commit?: string }>('releases', demoId).find((r) => r.id === draft.id)!;
+    const stored = (await list<{ id: string; status: string; commit?: string }>('releases', demoId)).find((r) => r.id === draft.id)!;
     expect(stored.status).toBe('published');
-    expect(stored.commit).toBe(ontologyStore.head(project));
-    expect(getProject(demoId).currentVersion).toBe(draft.version);
-    for (const crId of draft.changeRequestIds) expect(crsMod.getCR(crId).status).toBe('released');
+    expect(stored.commit).toBe(await ontologyStore.head(project));
+    expect((await getProject(demoId)).currentVersion).toBe(draft.version);
+    for (const crId of draft.changeRequestIds) expect((await crsMod.getCR(crId)).status).toBe('released');
     // The tag follows from the database on the next ordinary read.
     expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
     expect((await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=${draft.version}`)).status).toBe(200);
     expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
     // Publishing again (from a copy read before) is refused rather than rewriting the version.
-    const released = ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
+    const released = await ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
     await expect(releases.publishRelease({ ...draft } as never, stewardUser)).rejects.toMatchObject({ status: 409 });
-    expect(ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl')).toBe(released);
+    expect(await ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl')).toBe(released);
   });
 
   it('does not publish a release that was rejected or redrafted while it was being published', async () => {
@@ -1254,14 +1834,14 @@ describe('inline term edits', () => {
       ['redrafted', (r: { id: string; notes: string }) => ({ ...r, notes: `${r.notes}\n\nRedrafted.` })],
     ] as const) {
       const id = await approvedEdit(`Contributor ${what}`, `${VOL}Cause`, { examples: [`release ${what}`] });
-      expect((await crsMod.merge(crsMod.getCR(id), stewardUser)).status).toBe('merged');
+      expect((await crsMod.merge(await crsMod.getCR(id), stewardUser)).status).toBe('merged');
       await steward.post(`/api/ontologies/${demoId}/releases`).send({});
-      const pending = list<{ id: string; status: string; version: string; notes: string }>('releases', demoId).find((r) => r.status === 'draft' || r.status === 'voting')!;
-      const draft = put('releases', { ...pending, status: 'draft' }, demoId);
-      const head = ontologyStore.head(project);
+      const pending = (await list<{ id: string; status: string; version: string; notes: string }>('releases', demoId)).find((r) => r.status === 'draft' || r.status === 'voting')!;
+      const draft = (await put('releases', { ...pending, status: 'draft' }, demoId));
+      const head = await ontologyStore.head(project);
       const original = ontologyStore.writeRelease;
       const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async function (this: typeof ontologyStore, ...args) {
-        put('releases', change(list<typeof draft>('releases', demoId).find((r) => r.id === draft.id)! as never), demoId);
+        await put('releases', change((await list<typeof draft>('releases', demoId)).find((r) => r.id === draft.id)! as never), demoId);
         return original.apply(ontologyStore, args);
       });
       try {
@@ -1269,11 +1849,11 @@ describe('inline term edits', () => {
       } finally {
         spy.mockRestore();
       }
-      expect(ontologyStore.head(project), what).toBe(head);
-      expect(list<{ id: string; status: string }>('releases', demoId).find((r) => r.id === draft.id)!.status, what).not.toBe('published');
+      expect(await ontologyStore.head(project), what).toBe(head);
+      expect((await list<{ id: string; status: string }>('releases', demoId)).find((r) => r.id === draft.id)!.status, what).not.toBe('published');
       expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/v${draft.version}`), what).toThrow();
       // Leave nothing pending for the next round.
-      put('releases', { ...list<typeof draft>('releases', demoId).find((r) => r.id === draft.id)!, status: 'rejected' }, demoId);
+      await put('releases', { ...(await list<typeof draft>('releases', demoId)).find((r) => r.id === draft.id)!, status: 'rejected' }, demoId);
     }
   });
 
@@ -1283,11 +1863,11 @@ describe('inline term edits', () => {
     const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
     const { put } = await import('../src/db.js');
     const { newId } = await import('../src/ids.js');
-    const project = getProject(demoId);
+    const project = (await getProject(demoId));
     const saved = project.governance;
     const lazy = GOVERNANCE_TEMPLATES['lazy-consensus'];
     // Lazy consensus where one yes vote passes, so the test can hold a real, completed vote.
-    updateProject({ ...project, governance: { ...lazy, changes: { ...lazy.changes, patch: { ...lazy.changes.patch, vote: { ...lazy.changes.patch.vote!, quorum: 0, threshold: 0.5 } } } } });
+    await updateProject({ ...project, governance: { ...lazy, changes: { ...lazy.changes, patch: { ...lazy.changes.patch, vote: { ...lazy.changes.patch.vote!, quorum: 0, threshold: 0.5 } } } } });
     try {
       const contributor = await login('contributor', 'Contributor Legacy Vote');
       const editor = await login('editor', 'Editor Legacy Vote');
@@ -1295,10 +1875,10 @@ describe('inline term edits', () => {
       const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Voted through long ago.' } });
       const id = created.body.id;
       // Objected to, voted on (and passed), then approved, all by an older version: approvedAs has no `voted`.
-      put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorUser.id, roles: ['editor'], decision: 'object', at: '2000-01-01T12:00:00Z' }, id);
-      put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: editorUser.id, roles: ['editor'], choice: 'yes', at: '2000-01-03T00:00:00Z' }, id);
-      const cr = crsMod.getCR(id);
-      put(
+      await put('reviews', { id: newId('rev'), changeRequestId: id, userId: editorUser.id, roles: ['editor'], decision: 'object', at: '2000-01-01T12:00:00Z' }, id);
+      await put('votes', { id: newId('vote'), subjectType: 'change-request', subjectId: id, userId: editorUser.id, roles: ['editor'], choice: 'yes', at: '2000-01-03T00:00:00Z' }, id);
+      const cr = await crsMod.getCR(id);
+      await put(
         'changeRequests',
         {
           ...cr,
@@ -1310,10 +1890,10 @@ describe('inline term edits', () => {
         },
         demoId,
       );
-      const merged = await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Legacy Vote')));
+      const merged = await crsMod.merge(await crsMod.getCR(id), await userOf(await login('steward', 'Steward Legacy Vote')));
       expect(merged.status).toBe('merged');
     } finally {
-      updateProject({ ...getProject(demoId), governance: saved });
+      await updateProject({ ...(await getProject(demoId)), governance: saved });
     }
   });
 
@@ -1323,30 +1903,34 @@ describe('inline term edits', () => {
     const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
     const { clock } = await import('../src/clock.js');
     const { put, list } = await import('../src/db.js');
-    const project = getProject(demoId);
+    const project = (await getProject(demoId));
     const saved = project.governance;
-    updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
+    await updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
     try {
       const contributor = await login('contributor', 'Contributor Atomic Vote');
       const editor = await login('editor', 'Editor Atomic Vote');
       const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Voted on atomically.' } });
       const id = created.body.id;
-      put('changeRequests', { ...crsMod.getCR(id), status: 'voting', statusSince: clock.iso() }, demoId);
+      await put('changeRequests', { ...await crsMod.getCR(id), status: 'voting', statusSince: clock.iso() }, demoId);
       // Someone else keeps writing the request while the vote is being made: the vote and its save are refused together.
       const iso = clock.iso.bind(clock);
       const spy = vi.spyOn(clock, 'iso').mockImplementation(() => {
-        put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+        try {
+          bumpRevElsewhere(id);
+        } catch {
+          /* busy: this process is inside its own write just now */
+        }
         return iso();
       });
       try {
-        expect((await editor.post(`/api/change-requests/${id}/votes`).send({ round: roundOf(editor, id), choice: 'no', comment: 'Lost with its save.' })).status).toBe(409);
+        expect((await editor.post(`/api/change-requests/${id}/votes`).send({ round: await roundOf(editor, id), choice: 'no', comment: 'Lost with its save.' })).status).toBe(409);
       } finally {
         spy.mockRestore();
       }
-      expect(list<{ comment?: string }>('votes', id).some((v) => v.comment === 'Lost with its save.')).toBe(false);
-      put('changeRequests', { ...crsMod.getCR(id), status: 'withdrawn' }, demoId);
+      expect((await list<{ comment?: string }>('votes', id)).some((v) => v.comment === 'Lost with its save.')).toBe(false);
+      await put('changeRequests', { ...await crsMod.getCR(id), status: 'withdrawn' }, demoId);
     } finally {
-      updateProject({ ...getProject(demoId), governance: saved });
+      await updateProject({ ...(await getProject(demoId)), governance: saved });
     }
   });
 
@@ -1357,21 +1941,21 @@ describe('inline term edits', () => {
     const voter = await userOf(await login('editor', 'Editor Release Race'));
     const now = new Date().toISOString();
     // A major release whose vote has closed without quorum: anyone looking at this copy would reject it.
-    const stale = put(
+    const stale = (await put(
       'releases',
       { id: newId('rel'), ontologyId: demoId, version: '99.0.0', level: 'major' as const, status: 'voting' as const, changeRequestIds: [], notes: 'Raced.', versionIRI: 'https://example.org/raced/99.0.0', createdBy: voter.id, createdAt: now, statusSince: '2000-01-01T00:00:00Z' },
       demoId,
-    );
+    ));
     try {
-      expect(releases.releaseGovernance(stale).outcome).toBe('rejected');
+      expect((await releases.releaseGovernance(stale)).outcome).toBe('rejected');
       // Another process publishes it after the vote (and the clock) read it.
-      put('releases', { ...stale, status: 'published', commit: 'c0ffee', publishedAt: now, statusSince: now, rev: 1 }, demoId);
+      await put('releases', { ...stale, status: 'published', commit: 'c0ffee', publishedAt: now, statusSince: now, rev: 1 }, demoId);
       await expect(releases.voteOnRelease({ ...stale }, voter, 'no')).rejects.toMatchObject({ status: 409 });
-      expect(list('votes', stale.id)).toHaveLength(0);
+      expect((await list('votes', stale.id))).toHaveLength(0);
       expect(await releases.advanceRelease({ ...stale })).toMatchObject({ status: 'published', commit: 'c0ffee' });
-      expect(mustGet('releases', stale.id)).toMatchObject({ status: 'published', commit: 'c0ffee', publishedAt: now, rev: 1 });
+      expect((await mustGet('releases', stale.id))).toMatchObject({ status: 'published', commit: 'c0ffee', publishedAt: now, rev: 1 });
     } finally {
-      remove('releases', stale.id);
+      await remove('releases', stale.id);
     }
   });
 
@@ -1383,10 +1967,10 @@ describe('inline term edits', () => {
     };
     const later = Date.now() + 24 * 3600_000;
     const { OntologyGraph } = await import('@concord/core');
-    const withLabel = (label: string) => OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`);
+    const withLabel = async (label: string) => OntologyGraph.fromTurtle(`${await ontologyStore.readWorkingText(project)}\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`);
     // A newer draft recorded while git still shows the older one, then a sync that read the older draft, a day later.
-    const older = ontologyStore.head(project);
-    const sync = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => undefined);
+    const older = await ontologyStore.head(project);
+    const sync = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(async () => undefined);
     let newer: string;
     try {
       newer = await ontologyStore.commitWorking(project, await withLabel('newer'), 'newer draft', { name: 'Newer' });
@@ -1395,10 +1979,10 @@ describe('inline term edits', () => {
     }
     expect(rawGit('rev-parse', 'HEAD')).toBe(older);
     // (It read the older draft both for the branch and for pruning; only the reclaim's own transaction reads the database afresh.)
-    const head = vi.spyOn(ontologyStore, 'head').mockReturnValueOnce(older).mockReturnValueOnce(older);
+    const head = vi.spyOn(ontologyStore, 'head').mockResolvedValueOnce(older).mockResolvedValueOnce(older);
     const now = vi.spyOn(Date, 'now').mockReturnValue(later);
     try {
-      ontologyStore.sync(project);
+      await ontologyStore.sync(project);
     } finally {
       head.mockRestore();
       now.mockRestore();
@@ -1406,21 +1990,21 @@ describe('inline term edits', () => {
     gc();
     expect(rawGit('cat-file', '-t', newer)).toBe('commit');
     // And reads put git back on the newer draft, leaving only its own pins.
-    ontologyStore.log(project);
-    expect(rawGit('rev-parse', 'HEAD')).toBe(ontologyStore.head(project));
-    onlyDraftPins(rawGit, ontologyStore.head(project));
+    await ontologyStore.log(project);
+    expect(rawGit('rev-parse', 'HEAD')).toBe(await ontologyStore.head(project));
+    onlyDraftPins(rawGit, await ontologyStore.head(project));
 
     // Once git holds the newer draft (and its pin is gone), a sync that read the older draft can't move what holds it back.
-    const stale = vi.spyOn(ontologyStore, 'head').mockReturnValueOnce(older).mockReturnValueOnce(older);
+    const stale = vi.spyOn(ontologyStore, 'head').mockResolvedValueOnce(older).mockResolvedValueOnce(older);
     try {
-      ontologyStore.sync(project);
+      await ontologyStore.sync(project);
     } finally {
       stale.mockRestore();
     }
     collectGarbage(rawGit);
     expect(rawGit('cat-file', '-t', newer)).toBe('commit');
     expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(newer);
-    ontologyStore.log(project);
+    await ontologyStore.log(project);
     expect(rawGit('rev-parse', 'HEAD')).toBe(newer);
   });
 
@@ -1431,104 +2015,448 @@ describe('inline term edits', () => {
     const { get, put, remove } = await import('../src/db.js');
     const stamp = path.join(raw, '.git', 'concord-synced');
     const lease = `git-sync:${project.slug}`;
-    ontologyStore.ensureSynced(project);
-    const head = ontologyStore.head(project);
+    await ontologyStore.ensureSynced(project);
+    const head = await ontologyStore.head(project);
     // Files an overtaken sync put back after its successor finished: branch and record of the sync both look right.
     const stampBefore = fs.readFileSync(stamp, 'utf8');
     rawGit('read-tree', '--reset', '-u', `${head}~1`);
     expect(fs.readFileSync(stamp, 'utf8')).toBe(stampBefore);
-    ontologyStore.log(project);
+    await ontologyStore.log(project);
     expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
-    expect(rawFile('ontology.ttl')).toBe(ontologyStore.readWorkingText(project, head));
+    expect(rawFile('ontology.ttl')).toBe(await ontologyStore.readWorkingText(project, head));
 
     // A sync presumed dead and replaced mid-way: it stops, leaves no record of a sync, and leaves its successor's lease alone.
-    const checkout = vi.spyOn(ontologyStore, 'checkout').mockImplementationOnce(() => {
-      put('kv', { id: lease, token: 'successor', until: Date.now() + 60_000 });
+    const checkout = vi.spyOn(ontologyStore, 'checkout').mockImplementationOnce(async () => {
+      await put('kv', { id: lease, token: 'successor', until: Date.now() + 60_000 });
     });
     try {
-      expect(() => ontologyStore.sync(project)).toThrow('another sync took over');
+      await expect(ontologyStore.sync(project)).rejects.toThrow('another sync took over');
     } finally {
       checkout.mockRestore();
     }
-    expect(get<{ token: string }>('kv', lease)?.token).toBe('successor');
+    expect((await get<{ token: string }>('kv', lease))?.token).toBe('successor');
     expect(fs.existsSync(stamp)).toBe(false);
     // While the successor holds the lease, others leave the job to it.
-    ontologyStore.ensureSynced(project);
+    await ontologyStore.ensureSynced(project);
     expect(fs.existsSync(stamp)).toBe(false);
     // Once it is gone, the next read finishes the job.
-    remove('kv', lease);
-    ontologyStore.versions(project);
+    await remove('kv', lease);
+    await ontologyStore.versions(project);
     expect(fs.existsSync(stamp)).toBe(true);
-    expect(get('kv', lease)).toBeUndefined();
+    expect((await get('kv', lease))).toBeUndefined();
   });
 
   it('keeps a slow writer’s pin, and reclaims a stalled one’s only by refusing its commit', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
-    // Slow: stopped right after pinning; meanwhile another process syncs and collects garbage, within the grace period.
-    const slow = await writerProcess('slow', 'stop');
-    await slow.stopped();
-    const [slowCommit] = pinnedCommits(rawGit);
-    ontologyStore.sync(project);
-    collectGarbage(rawGit);
-    expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
-    slow.child.kill('SIGCONT');
-    await slow.exited;
-    expect(slow.output()).toBe(`committed ${slowCommit}`);
-    expect(ontologyStore.head(project)).toBe(slowCommit);
-    collectGarbage(rawGit);
-    expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+    // Slow: paused right after pinning; meanwhile another process syncs and collects garbage, within the grace period.
+    const slow = await writerProcess(['advance', 'slow'], { at: 'pin', then: 'pause' });
+    try {
+      await slow.paused();
+      const [slowCommit] = pinnedCommits(rawGit);
+      await ontologyStore.sync(project);
+      collectGarbage(rawGit);
+      expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+      await slow.resume();
+      expect(slow.output()).toBe(`committed ${slowCommit}`);
+      expect(await ontologyStore.head(project)).toBe(slowCommit);
+      collectGarbage(rawGit);
+      expect(rawGit('cat-file', '-t', slowCommit)).toBe('commit');
+    } finally {
+      slow.stop();
+    }
 
     // Stalled past the grace period: its pin is reclaimed, and when it resumes its commit is refused, so nothing points at a lost commit.
-    const stalled = await writerProcess('stalled', 'stop');
-    await stalled.stopped();
-    const [stalledCommit] = pinnedCommits(rawGit);
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+    const before = await ontologyStore.head(project);
+    const stalled = await writerProcess(['advance', 'stalled'], { at: 'pin', then: 'pause' });
     try {
-      ontologyStore.sync(project);
+      await stalled.paused();
+      const [stalledCommit] = pinnedCommits(rawGit);
+      const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+      try {
+        await ontologyStore.prunePins(project);
+      } finally {
+        now.mockRestore();
+      }
+      collectGarbage(rawGit);
+      expect(() => rawGit('cat-file', '-t', stalledCommit)).toThrow();
+      await stalled.resume();
+      expect(stalled.output()).toBe('refused 409');
+      expect(await ontologyStore.head(project)).toBe(before);
+      expect(pinnedCommits(rawGit)).toEqual([]);
     } finally {
-      now.mockRestore();
+      stalled.stop();
     }
-    collectGarbage(rawGit);
-    expect(() => rawGit('cat-file', '-t', stalledCommit)).toThrow();
-    stalled.child.kill('SIGCONT');
-    await stalled.exited;
-    expect(stalled.output()).toBe('refused 409');
-    expect(ontologyStore.head(project)).toBe(slowCommit);
-    expect(pinnedCommits(rawGit)).toEqual([]);
   });
 
-  it('reclaims the pins of writers that died, and keeps no pins for a draft that did not change', async () => {
+  it('reclaims the pins of writers that died through ordinary reads, and makes no pins for a draft that did not change', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
     const { OntologyGraph } = await import('@concord/core');
-    for (const label of ['crashed-1', 'crashed-2', 'crashed-3']) expect((await (await writerProcess(label, 'kill')).exited).signal).toBe('SIGKILL');
+    for (const label of ['crashed-1', 'crashed-2', 'crashed-3']) {
+      const crashed = await writerProcess(['advance', label], { at: 'pin', then: 'kill' });
+      try {
+        expect((await crashed.exited).signal).toBe('SIGKILL');
+      } finally {
+        crashed.stop();
+      }
+    }
     const abandoned = pinnedCommits(rawGit);
     expect(abandoned).toHaveLength(3);
-    // Within the grace period they are left alone (their writers might only be slow), even as others commit.
-    const graph = await OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:after-crash> <http://www.w3.org/2000/01/rdf-schema#label> "after crash" .\n`);
+    // Within the grace period they are left alone (their writers might only be slow), even as others commit and read.
+    const graph = await OntologyGraph.fromTurtle(`${await ontologyStore.readWorkingText(project)}\n<urn:concord-test:after-crash> <http://www.w3.org/2000/01/rdf-schema#label> "after crash" .\n`);
     await ontologyStore.commitWorking(project, graph, 'after the crashes', { name: 'Survivor' });
+    await ontologyStore.working(project);
     expect(pinnedCommits(rawGit).sort()).toEqual([...abandoned].sort());
-    // Past it, the next sync reclaims them, and their commits can be collected.
-    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + PIN_GRACE_MS + 60_000);
+    // Past it, ordinary reads (with git already in line, so no sync runs) reclaim them, and their commits can be collected.
+    const sync = vi.spyOn(ontologyStore, 'sync');
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 365 * 24 * 3600_000);
     try {
-      ontologyStore.sync(project);
+      await ontologyStore.log(project);
+      await ontologyStore.working(project);
+      expect(sync).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+      sync.mockRestore();
+    }
+    collectGarbage(rawGit);
+    for (const sha of abandoned) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
+    const head = await ontologyStore.head(project);
+    onlyDraftPins(rawGit, head);
+
+    // Advances and commits that change nothing make no pins at all (looked at with syncing, and so cleanup, off).
+    const off = vi.spyOn(ontologyStore, 'sync').mockImplementation(async () => undefined);
+    try {
+      for (let i = 0; i < 20; i++) await ontologyStore.advanceTo(project, head, head);
+      for (let i = 0; i < 3; i++) expect(await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'nothing new', { name: 'Same' })).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+    } finally {
+      off.mockRestore();
+    }
+    // And an ordinary merge leaves none once synced.
+    const id = await approvedEdit('Contributor Pinless', `${VOL}Cause`, { comment: 'Merged without a pin left behind.' });
+    expect((await crsMod.merge(await crsMod.getCR(id), await userOf(await login('steward', 'Steward Pinless')))).status).toBe('merged');
+    expect(await ontologyStore.head(project)).not.toBe(head);
+    onlyDraftPins(rawGit, await ontologyStore.head(project));
+  });
+
+  it('never reclaims pins named by an earlier version, whose writers do not check for reclaims, until the draft holds them', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const head = await ontologyStore.head(project);
+    // Commits only pins hold, named as earlier versions named them (<time>-<sha> and <sha>-<writer>).
+    const tree = rawGit('rev-parse', `${head}^{tree}`);
+    const oldStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by an earlier version');
+    const newerStyle = rawGit('commit-tree', tree, '-p', head, '-m', 'pinned by the previous version');
+    const held = rawGit('rev-parse', `${head}~1`);
+    rawGit('update-ref', `refs/concord/commits/${Date.now() - 3600_000}-${oldStyle}`, oldStyle);
+    rawGit('update-ref', `refs/concord/commits/${newerStyle}-12345678-1234-4123-8123-123456789abc`, newerStyle);
+    rawGit('update-ref', `refs/concord/commits/${held}-87654321-1234-4123-8123-123456789abc`, held);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 365 * 24 * 3600_000);
+    try {
+      await ontologyStore.prunePins(project);
     } finally {
       now.mockRestore();
     }
     collectGarbage(rawGit);
-    for (const sha of abandoned) expect(() => rawGit('cat-file', '-t', sha)).toThrow();
-    const head = ontologyStore.head(project);
-    onlyDraftPins(rawGit, head);
+    // A year on, the ones the draft doesn't hold are still there (and so are their commits); the one it holds is gone.
+    expect(pinnedCommits(rawGit).sort()).toEqual([oldStyle, newerStyle].sort());
+    for (const sha of [oldStyle, newerStyle]) expect(rawGit('cat-file', '-t', sha)).toBe('commit');
+    for (const ref of rawGit('for-each-ref', '--format=%(refname)', 'refs/concord/commits/').split('\n')) rawGit('update-ref', '-d', ref);
+  });
 
-    // Advances and commits that change nothing add no pins, and neither does an ordinary merge, once synced.
-    for (let i = 0; i < 20; i++) ontologyStore.advanceTo(project, head, head);
-    for (let i = 0; i < 3; i++) expect(await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'nothing new', { name: 'Same' })).toBe(head);
-    onlyDraftPins(rawGit, head);
-    const id = await approvedEdit('Contributor Pinless', `${VOL}Cause`, { comment: 'Merged without a pin left behind.' });
-    expect((await crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Pinless')))).status).toBe('merged');
-    expect(ontologyStore.head(project)).not.toBe(head);
-    onlyDraftPins(rawGit, ontologyStore.head(project));
+  it('lets one server at a time change the repositories, and stops one that lost its hold from changing anything', async () => {
+    const { ontologyStore, project, rawGit, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+    const { get, put, remove } = await import('../src/db.js');
+    const { OntologyGraph } = await import('@concord/core');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const withLabel = async (label: string) => OntologyGraph.fromTurtle(`${await ontologyStore.readWorkingText(project)}\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`);
+    // A live server (here, of another version) holds the repositories: this one won't start, and changes nothing.
+    await put('kv', { id: 'git-store', owner: 'other', version: STORE_VERSION + 1, until: Date.now() + 60_000 });
+    try {
+      await expect(claimGitStore({ waitMs: 1_500 })).rejects.toThrow('Another Concord server');
+      const head = await ontologyStore.head(project);
+      await expect(ontologyStore.commitWorking(project, await withLabel('blocked'), 'while another holds it', { name: 'Blocked' })).rejects.toMatchObject({ status: 503 });
+      expect(await ontologyStore.head(project)).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+    } finally {
+      await remove('kv', 'git-store');
+    }
+
+    // Once the other stops (its claim lapses), this one starts and works.
+    await put('kv', { id: 'git-store', owner: 'other', version: STORE_VERSION + 1, until: Date.now() + 1_000 });
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 5_000, onLost: lost });
+    try {
+      expect((await get<{ owner: string }>('kv', 'git-store'))?.owner).not.toBe('other');
+      await store.renew();
+      await ontologyStore.commitWorking(project, await withLabel('claimed'), 'while holding it', { name: 'Holder' });
+      expect(lost).not.toHaveBeenCalled();
+
+      // It stalls, and another server takes over: now it changes nothing, by any path, and reports the loss (once).
+      const head = await ontologyStore.head(project);
+      await put('kv', { id: 'git-store', owner: 'successor', version: STORE_VERSION, until: Date.now() + 60_000 });
+      rawGit('read-tree', '--reset', '-u', `${head}~1`);
+      await ontologyStore.log(project);
+      expect(rawGit('status', '--porcelain', '--untracked-files=no')).not.toBe('');
+      expect(lost).toHaveBeenCalledTimes(1);
+      await expect(ontologyStore.commitWorking(project, await withLabel('stale'), 'after losing it', { name: 'Stale' })).rejects.toMatchObject({ status: 503 });
+      expect(await ontologyStore.head(project)).toBe(head);
+      expect(pinnedCommits(rawGit)).toEqual([]);
+      await expect(ontologyStore.prunePins(project)).rejects.toThrow('lost its hold');
+      const fresh = { ...project, slug: `claim-lost-${Date.now()}`, title: 'Never created' };
+      await expect(ontologyStore.init(fresh as never, '', '')).rejects.toMatchObject({ status: 503 });
+      expect(fs.existsSync(path.join(path.dirname(raw), fresh.slug))).toBe(false);
+      // Nor does it build commits, publish to a remote (or even record one), or wipe anything.
+      const objects = rawGit('count-objects', '-v');
+      await expect(ontologyStore.updateReleaseFiles(project, { '1.0.0': { 'NOTE.md': 'stale' } }, 'stale release files')).rejects.toThrow('lost its hold');
+      expect(rawGit('count-objects', '-v')).toBe(objects);
+      const remotes = rawGit('remote', '-v');
+      await expect(ontologyStore.push(project as never, path.join(path.dirname(raw), 'nowhere.git'))).rejects.toThrow('lost its hold');
+      expect(rawGit('remote', '-v')).toBe(remotes);
+      const simulation = await import('../src/services/simulation.js');
+      await expect(simulation.resetAll()).rejects.toMatchObject({ status: 503 });
+      expect((await get('ontologies', demoId))).toBeDefined();
+      expect(fs.existsSync(raw)).toBe(true);
+      await store.renew();
+      expect(lost).toHaveBeenCalledTimes(1);
+      // Shutting down gives up only its own claim, never the successor's.
+      await store.release();
+      expect((await get<{ owner: string }>('kv', 'git-store'))?.owner).toBe('successor');
+    } finally {
+      await store.release();
+      await remove('kv', 'git-store');
+    }
+    // With no server holding them, git is put back in line.
+    await ontologyStore.log(project);
+    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
+  });
+
+  it('never moves the draft ref back when two cleanups race', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const { OntologyGraph } = await import('@concord/core');
+    const text = await ontologyStore.readWorkingText(project);
+    const triple = (label: string) => `\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`;
+    const first = await OntologyGraph.fromTurtle(text + triple('race-1'));
+    const second = await OntologyGraph.fromTurtle(text + triple('race-1') + triple('race-2'));
+    // A draft recorded while git lags behind it.
+    const lagging = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(async () => undefined);
+    let h1: string;
+    try {
+      h1 = await ontologyStore.commitWorking(project, first, 'first', { name: 'Racer' });
+    } finally {
+      lagging.mockRestore();
+    }
+    const behind = rawGit('rev-parse', 'refs/concord/draft');
+    expect(behind).not.toBe(h1);
+    // A cleanup in another process reads the draft ref (still behind), then pauses before moving it to h1...
+    const cleanup = await writerProcess(['prune'], { at: 'draft-read', then: 'pause' });
+    try {
+      await cleanup.paused();
+      // ...while a newer draft is committed and git brought fully in line.
+      const h2 = await ontologyStore.commitWorking(project, second, 'second', { name: 'Racer' });
+      expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(h2);
+      await cleanup.resume();
+      expect(cleanup.output()).toMatch(/^refused/);
+      expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(h2);
+    } finally {
+      cleanup.stop();
+    }
+  });
+
+  it('refuses a write when another server takes over just before the hold is renewed', async () => {
+    const { ontologyStore, project, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+    const { get, put, remove } = await import('../src/db.js');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 0, onLost: lost });
+    // The next check finds the hold due for renewal, and a successor takes over at that very moment.
+    const realNow = Date.now.bind(Date);
+    let tookOver = false;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => {
+      if (!tookOver) {
+        tookOver = true;
+        putKvElsewhere({ id: 'git-store', owner: 'successor', version: STORE_VERSION, until: realNow() + 60_000 });
+      }
+      return realNow() + 10_000;
+    });
+    try {
+      const fresh = { ...project, slug: `renew-race-${realNow()}`, title: 'Never created' };
+      await expect(ontologyStore.init(fresh as never, '', '')).rejects.toMatchObject({ status: 503 });
+      expect(tookOver).toBe(true);
+      expect(fs.existsSync(path.join(path.dirname(raw), fresh.slug))).toBe(false);
+      expect(lost).toHaveBeenCalledTimes(1);
+      expect((await get<{ owner: string }>('kv', 'git-store'))?.owner).toBe('successor');
+    } finally {
+      now.mockRestore();
+      await store.release();
+      await remove('kv', 'git-store');
+    }
+  });
+
+  it('puts back the repositories a crash left moved aside mid-reset, and never deletes or guesses otherwise', async () => {
+    const { ontologyStore, project, raw } = await repo();
+    const { list, put, remove } = await import('../src/db.js');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { config } = await import('../src/config.js');
+    const repos = path.dirname(raw);
+    const text = await ontologyStore.readWorkingText(project);
+    const aside = (name: string) => path.join(config.dataDir, `.ontologies-deleted-${name}`);
+    // The crash came after the move but before the transaction committed: the rows are back, the repositories aren't.
+    fs.renameSync(repos, aside('crashed'));
+    await ontologyStore.recoverWipe();
+    expect(fs.existsSync(aside('crashed'))).toBe(false);
+    expect(await ontologyStore.readWorkingText(project)).toBe(text);
+
+    // The reset committed (no ontologies left in the database): nothing is moved back, and nothing deleted.
+    const rows = (await list<{ id: string }>('ontologies'));
+    fs.renameSync(repos, aside('committed'));
+    for (const r of rows) (await remove('ontologies', r.id));
+    try {
+      await ontologyStore.recoverWipe();
+      expect(fs.existsSync(repos)).toBe(false);
+      expect(fs.existsSync(aside('committed'))).toBe(true);
+    } finally {
+      for (const r of rows) (await put('ontologies', r));
+    }
+    // Several left aside: which one is the draft's is a guess, so none is moved back or deleted.
+    fs.mkdirSync(path.join(aside('older'), 'old'), { recursive: true });
+    await ontologyStore.recoverWipe();
+    expect(fs.existsSync(repos)).toBe(false);
+    expect(fs.existsSync(aside('committed'))).toBe(true);
+    expect(fs.existsSync(aside('older'))).toBe(true);
+    // A leftover beside the repositories is left alone too.
+    fs.renameSync(aside('committed'), repos);
+    await ontologyStore.recoverWipe();
+    expect(fs.existsSync(aside('older'))).toBe(true);
+    expect(await ontologyStore.readWorkingText(project)).toBe(text);
+    fs.rmSync(aside('older'), { recursive: true, force: true });
+  });
+
+  it('keeps the server’s hold on the repositories through a demo reset', async () => {
+    const { claimGitStore } = await import('../src/services/ontologyStore.js');
+    const simulation = await import('../src/services/simulation.js');
+    const { get, remove } = await import('../src/db.js');
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 0, onLost: lost });
+    try {
+      const owner = (await get<{ owner: string }>('kv', 'git-store'))?.owner;
+      const demo = await simulation.resetAll();
+      // The reset wiped everything else, but not the hold, so reseeding (and everything after) still works.
+      expect(lost).not.toHaveBeenCalled();
+      expect((await get<{ owner: string }>('kv', 'git-store'))?.owner).toBe(owner);
+      expect(demo).toBeDefined();
+      demoId = demo!.id;
+      const { ontologyStore, project } = await repo();
+      const head = await ontologyStore.head(project);
+      await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'after the reset', { name: 'After' });
+      expect(await ontologyStore.head(project)).toBe(head);
+      expect((await (await login('member', 'Reader After Reset')).get(`/api/ontologies/${demoId}/source?format=turtle`)).status).toBe(200);
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      await store.release();
+      await remove('kv', 'git-store');
+    }
+  });
+});
+
+describe('release approval provenance', () => {
+  const release = (over: Partial<Release>): Release => ({
+    id: 'rel_test',
+    ontologyId: demoId,
+    version: '9.9.9',
+    level: 'minor',
+    status: 'draft',
+    changeRequestIds: ['cr_test'],
+    notes: '',
+    versionIRI: 'https://example.org/9.9.9',
+    createdBy: 'system',
+    createdAt: '2026-11-01T00:00:00Z',
+    statusSince: '2026-11-01T00:00:00Z',
+    ...over,
+  });
+
+  it('labels every decided release, rejected as well as published', async () => {
+    expect((await releaseApproval(release({ status: 'voting' }))).approvalSource).toBe('live');
+    expect((await releaseApproval(release({ status: 'rejected' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published', changeRequestIds: [] }))).approvalSource).toBe('bootstrap');
+    const saved = { ...(await releaseGovernance(release({ status: 'voting' }))), requiredApprovals: 42 };
+    for (const status of ['published', 'rejected'] as const) {
+      const shown = await releaseApproval(release({ status, approval: saved }));
+      expect(shown.approvalSource).toBe('recorded');
+      expect(shown.governance.requiredApprovals).toBe(42);
+    }
+  });
+
+  it('re-evaluates an unrecorded decision with only the votes cast before it, each person’s last vote counting', async () => {
+    const decidedAt = '2026-11-02T12:00:00Z';
+    const probe = await releaseGovernance(release({ id: 'rel_votes', level: 'major', status: 'voting' }));
+    const voterRoles = probe.rule.vote?.voterRoles ?? [];
+    expect(voterRoles.length, 'the demo policy votes on major releases').toBeGreaterThan(0);
+    const voters = (await members(demoId)).filter((m) => m.roles.some((r) => voterRoles.includes(r)));
+    expect(voters.length).toBeGreaterThanOrEqual(2);
+    const [a, b] = voters;
+    const vote = (id: string, userId: string, choice: Vote['choice'], at: string): Vote => ({ id, subjectType: 'release', subjectId: 'rel_votes', userId, roles: ['member'], choice, at });
+    // a changes their mind before the decision (no, then yes); b only votes after it.
+    for (const v of [vote('v_a1', a.userId, 'no', '2026-11-01T09:00:00Z'), vote('v_a2', a.userId, 'yes', '2026-11-02T09:00:00Z'), vote('v_b', b.userId, 'no', '2026-11-03T09:00:00Z')])
+      await put('votes', v, 'rel_votes');
+    for (const status of ['published', 'rejected'] as const) {
+      const { governance, approvalSource } = await releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
+      expect(approvalSource).toBe('current-policy');
+      expect(governance.vote).toMatchObject({ cast: 1, yes: 1, no: 0 });
+    }
+  });
+
+  it('records the approval that allowed publishing, even if the policy changes while the release is written', async () => {
+    // The snapshot used to be a second evaluation taken after the check that let the release through, so a policy
+    // change in between was recorded as if it had applied (and might not even say "approved"). The last check runs
+    // in the transaction that publishes; a change made after it must not reach the record.
+    const project = await getProject(demoId);
+    const original = structuredClone(project.governance);
+    const now = new Date().toISOString();
+    const r: Release = {
+      id: 'rel_snapshot', ontologyId: demoId, version: '1.1.1', level: 'patch', status: 'draft', changeRequestIds: [],
+      notes: 'Snapshot test', versionIRI: `${project.ontologyIRI}/1.1.1`, createdBy: 'system', createdAt: now, statusSince: now,
+    };
+    await put('releases', r, demoId);
+    const before = await releaseGovernance(r);
+    // Between the first check and the last one (while the files are built), the policy changes once: the last
+    // check sees that, and it's what is recorded.
+    const working = ontologyStore.working.bind(ontologyStore);
+    const between = vi.spyOn(ontologyStore, 'working').mockImplementationOnce(async (p) => {
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 2;
+      changed.governance.releases.patch.reviewPeriodDays = 33;
+      await updateProject(changed);
+      return working(p);
+    });
+    const write = ontologyStore.writeRelease.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+      const commit = await write(...args);
+      // Right after the publishing transaction (and its check) committed.
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 5;
+      changed.governance.releases.patch.reviewPeriodDays = 77;
+      await updateProject(changed);
+      return commit;
+    });
+    try {
+      const published = await publishRelease(r, undefined);
+      expect(between).toHaveBeenCalled();
+      expect(spy).toHaveBeenCalled();
+      expect(published.approval?.requiredApprovals).toBe(before.requiredApprovals + 2);
+      expect(published.approval?.rule.reviewPeriodDays).toBe(33);
+      expect((await releaseApproval(published)).approvalSource).toBe('recorded');
+    } finally {
+      between.mockRestore();
+      spy.mockRestore();
+      const restored = await getProject(demoId);
+      restored.governance = original;
+      await updateProject(restored);
+    }
   });
 });

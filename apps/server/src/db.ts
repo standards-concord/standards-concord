@@ -1,12 +1,13 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { config } from './config.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { type DocStore, openStore, type StoreOptions } from './store/index.js';
 
 /**
- * A small JSON document store on SQLite. Platform metadata (users, roles,
- * change requests, votes) lives here; ontologies themselves live in git, and
- * people's private data (interview transcripts) lives in their Solid pods.
+ * Platform metadata (users, roles, change requests, votes) as JSON documents. Ontologies themselves live in
+ * git, and people's private data (interview transcripts) in their Solid pods.
+ *
+ * Every call is async and goes to the store the environment picks (store/index.ts): Postgres when
+ * DATABASE_URL is set (Neon on Vercel), PGlite with CONCORD_STORE=pglite, SQLite otherwise. Calls made inside
+ * transaction(fn), however deep, join that transaction.
  */
 export type Collection =
   | 'users'
@@ -17,6 +18,8 @@ export type Collection =
   | 'interviews'
   | 'meetings'
   | 'changeRequests'
+  | 'publicReports'
+  | 'reportNonces'
   | 'reviews'
   | 'votes'
   | 'releases'
@@ -28,159 +31,117 @@ export type Collection =
   | 'oauthGrants'
   | 'oauthTokens'
   | 'feedback'
+  | 'requirementsDocs'
+  | 'feedbackPublications'
   | 'activity'
   | 'kv';
 
-let db: DatabaseSync | undefined;
+let store: Promise<DocStore> | undefined;
 
-export function openDb(file = path.join(config.dataDir, 'concord.sqlite')): DatabaseSync {
-  if (db) return db;
-  if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
-  db = new DatabaseSync(file);
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA busy_timeout = 5000;
-    PRAGMA secure_delete = ON;
-    CREATE TABLE IF NOT EXISTS docs (
-      collection TEXT NOT NULL,
-      id TEXT NOT NULL,
-      parent TEXT,
-      data TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      PRIMARY KEY (collection, id)
-    );
-    CREATE INDEX IF NOT EXISTS docs_parent ON docs (collection, parent);
-  `);
-  return db;
-}
-
-/**
- * Remove every old copy of rewritten or deleted rows: VACUUM rebuilds the database file without its free
- * space (secure_delete only zeroes what is freed from now on, not what older versions left behind), then the
- * write-ahead log is copied in and emptied. Returns false, leaving the job to be retried, if another
- * connection blocked either step.
- */
-export function scrubFreeSpace(): boolean {
-  const c = conn();
-  try {
-    c.exec('VACUUM');
-    const r = c.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number; log: number; checkpointed: number };
-    return r.busy === 0 && r.log === r.checkpointed;
-  } catch {
-    return false;
+/** Open the store (once; later calls return the same one). */
+export function openDb(opts?: StoreOptions): Promise<DocStore> {
+  if (!store) {
+    store = openStore(opts);
+    store.catch(() => (store = undefined)); // A failed open (database unreachable) is retried on the next call.
   }
+  return store;
 }
 
-/**
- * Run fn without waiting on other connections' locks (busy_timeout 0): anything blocked throws SQLITE_BUSY
- * at once instead of stalling the request thread. For background work that can simply be retried later.
- */
-export function withoutWaiting<T>(fn: () => T): T {
-  const c = conn();
-  c.exec('PRAGMA busy_timeout = 0');
-  try {
-    return fn();
-  } finally {
-    c.exec('PRAGMA busy_timeout = 5000');
-  }
+export async function closeDb() {
+  const s = store;
+  store = undefined;
+  if (s) await (await s).close();
 }
 
-export function closeDb() {
-  db?.close();
-  db = undefined;
-}
-
-function conn() {
-  return db ?? openDb();
-}
+const conn = () => openDb();
 
 /** `parent` is the indexed foreign key used for listing (usually an ontology id). */
-export function put<T extends { id: string }>(collection: Collection, doc: T, parent?: string): T {
-  const createdAt = (doc as { createdAt?: string }).createdAt ?? new Date().toISOString();
-  conn()
-    .prepare(
-      `INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(collection, id) DO UPDATE SET parent = excluded.parent, data = excluded.data`,
-    )
-    .run(collection, doc.id, parent ?? null, JSON.stringify(doc), createdAt);
-  return doc;
+export async function put<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<T> {
+  return (await conn()).put(collection, doc, parent);
 }
 
-export function get<T>(collection: Collection, id: string): T | undefined {
-  const row = conn().prepare('SELECT data FROM docs WHERE collection = ? AND id = ?').get(collection, id) as
-    | { data: string }
-    | undefined;
-  return row ? (JSON.parse(row.data) as T) : undefined;
+export async function get<T>(collection: Collection, id: string): Promise<T | undefined> {
+  return (await conn()).get<T>(collection, id);
 }
 
-export function mustGet<T>(collection: Collection, id: string): T {
-  const doc = get<T>(collection, id);
+export async function mustGet<T>(collection: Collection, id: string): Promise<T> {
+  const doc = await get<T>(collection, id);
   if (!doc) throw new HttpError(404, `${collection.replace(/s$/, '')} ${id} not found`);
   return doc;
 }
 
-export function list<T>(collection: Collection, parent?: string): T[] {
-  const rows = (
-    parent === undefined
-      ? conn().prepare('SELECT data FROM docs WHERE collection = ? ORDER BY created_at').all(collection)
-      : conn().prepare('SELECT data FROM docs WHERE collection = ? AND parent = ? ORDER BY created_at').all(collection, parent)
-  ) as { data: string }[];
-  return rows.map((r) => JSON.parse(r.data) as T);
+export async function list<T>(collection: Collection, parent?: string): Promise<T[]> {
+  return (await conn()).list<T>(collection, parent);
 }
 
-export function remove(collection: Collection, id: string) {
-  conn().prepare('DELETE FROM docs WHERE collection = ? AND id = ?').run(collection, id);
+export async function remove(collection: Collection, id: string): Promise<void> {
+  await (await conn()).remove(collection, id);
 }
 
-/** Delete a document and return it, in one statement: of several callers racing for it, only one gets it. */
-export function take<T>(collection: Collection, id: string): T | undefined {
-  const row = conn().prepare('DELETE FROM docs WHERE collection = ? AND id = ? RETURNING data').get(collection, id) as { data: string } | undefined;
-  return row ? (JSON.parse(row.data) as T) : undefined;
+/** Delete a document and return it, atomically: of several callers racing for it, only one gets it. */
+export async function take<T>(collection: Collection, id: string): Promise<T | undefined> {
+  return (await conn()).take<T>(collection, id);
 }
 
 /**
- * Set `field` to `value` on a document only if it is not set yet, in one
- * statement, and return the document as it was. Undefined means it doesn't
- * exist or someone else set the field first.
+ * Set `field` to `value` on a document only if it is not set yet, atomically, and return the document as it
+ * was. Undefined means it doesn't exist or someone else set the field first.
  */
-export function claim<T>(collection: Collection, id: string, field: string, value: string | number): T | undefined {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`Bad field name ${field}`);
-  const row = conn()
-    .prepare(`UPDATE docs SET data = json_set(data, '$.${field}', ?) WHERE collection = ? AND id = ? AND json_extract(data, '$.${field}') IS NULL RETURNING data`)
-    .get(value, collection, id) as { data: string } | undefined;
-  if (!row) return undefined;
-  const doc = JSON.parse(row.data) as Record<string, unknown>;
-  delete doc[field];
-  return doc as T;
+export async function claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined> {
+  return (await conn()).claim<T>(collection, id, field, value);
 }
 
-export function clearAll() {
-  conn().exec('DELETE FROM docs');
+/** Insert a document only if none has its id, in one statement: true if this call inserted it. */
+export async function insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean> {
+  return (await conn()).insertOnce(collection, doc, parent);
+}
+
+/** Delete the documents in a collection whose `field` is a number at or below `max`; returns how many. */
+export async function removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number> {
+  return (await conn()).removeWhereAtMost(collection, field, max);
+}
+
+export async function clearAll(): Promise<void> {
+  await (await conn()).clearAll();
 }
 
 /**
- * Run fn in one transaction. BEGIN IMMEDIATE takes the write lock before fn
- * reads anything, so read-then-write steps can't interleave with another
- * writer (another process on the same database waits, up to busy_timeout).
- * fn must be synchronous; a nested call joins the outer transaction.
+ * Run fn in one transaction: writers take turns, so read-then-write steps inside can't interleave with another
+ * writer, in this process or any other. A nested call joins the outer transaction. Keep fn short: no network
+ * calls (LLM, GitHub, pods) inside, because every other writer waits for it. Await every store call that
+ * belongs to it: the transaction waits for statements already running when fn returns, but a call made later
+ * (after a timer, say) runs outside it.
  */
-let inTransaction = false;
-export function transaction<T>(fn: () => T): T {
-  // A nested call joins the transaction already open.
-  if (inTransaction) return fn();
-  const c = conn();
-  c.exec('BEGIN IMMEDIATE');
-  inTransaction = true;
-  try {
-    const out = fn();
-    c.exec('COMMIT');
-    return out;
-  } catch (e) {
-    c.exec('ROLLBACK');
-    throw e;
-  } finally {
-    inTransaction = false;
-  }
+export async function transaction<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).transaction(async () => insideTransaction.run(true, fn));
+}
+
+const insideTransaction = new AsyncLocalStorage<boolean>();
+/**
+ * True inside transaction(fn) (and not inside detached(fn) started from one). Code that waits for an in-memory
+ * lock checks this: waiting for it while holding the writer lock deadlocks against a holder that needs to write.
+ */
+export const inTransaction = () => insideTransaction.getStore() === true;
+
+/**
+ * Run fn without waiting on other connections' locks: anything blocked throws at once instead of stalling.
+ * For background work that can simply be retried later.
+ */
+export async function withoutWaiting<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).withoutWaiting(async () => fn());
+}
+
+/**
+ * Run fn outside any transaction the caller is in: for background work (timers, notifications) started from
+ * inside one, which would otherwise inherit it and be refused once it rolls back or while it commits.
+ */
+export async function detached<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).detached(async () => insideTransaction.run(false, fn));
+}
+
+/** Rewrite storage so old copies of rewritten or deleted rows are gone. False if blocked: retry later. */
+export async function scrubFreeSpace(): Promise<boolean> {
+  return (await conn()).scrubFreeSpace();
 }
 
 export class HttpError extends Error {
@@ -190,4 +151,38 @@ export class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * Takes one from each counter (kv documents `{ id, count }`) if none is at its limit, all or nothing. It runs in
+ * one transaction, which holds the writer lock from its first read to COMMIT, so separate connections or
+ * processes can't both take the last one.
+ */
+export async function reserveCounters(
+  counters: { id: string; max: number }[],
+  parent?: string,
+  /** Tests only: hooks between the steps, to prove the steps can't interleave or half-apply. */
+  test?: { afterRead?: () => void | Promise<void>; beforeWrite?: (index: number) => void | Promise<void> },
+): Promise<boolean> {
+  return transaction(async () => {
+    const used: number[] = [];
+    for (const k of counters) used.push(Number((await get<{ count?: number }>('kv', k.id))?.count ?? 0));
+    await test?.afterRead?.();
+    if (counters.some((k, i) => used[i] >= k.max)) return false;
+    for (const [i, k] of counters.entries()) {
+      await test?.beforeWrite?.(i);
+      await put('kv', { id: k.id, count: used[i] + 1 }, parent);
+    }
+    return true;
+  });
+}
+
+/** Gives back what reserveCounters took (never below zero), all or nothing. */
+export async function releaseCounters(ids: string[], parent?: string): Promise<void> {
+  await transaction(async () => {
+    for (const id of ids) {
+      const doc = await get<{ id: string; count?: number }>('kv', id);
+      if (doc) await put('kv', { ...doc, count: Math.max(0, Number(doc.count ?? 0) - 1) }, parent);
+    }
+  });
 }

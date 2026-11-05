@@ -1,4 +1,4 @@
-import { compactIRI, expandIRI, FORMAT_INFO, serialize } from '@concord/core';
+import { compactIRI, DATA_FORMATS, expandIRI, FORMAT_INFO, serialize, type DataFormat } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, User } from '@concord/shared';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,10 +7,15 @@ import type { Request, Response } from 'express';
 import * as z from 'zod';
 import { config } from './config.js';
 import { list } from './db.js';
-import { reportGap, sparql, validateData } from './services/agents.js';
+import { reportGap, sparql } from './services/agents.js';
+import { admit } from './services/validationPool.js';
+import { validateDataAgainst } from './services/dataValidation.js';
+import { latestVersion } from './public/routes.js';
+import { PUBLIC_BASE } from './public/w3id.js';
 import { createChangeRequest, detail, getCR } from './services/changeRequests.js';
 import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
+import { crForViewer } from './services/useCases.js';
 import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
 
 /**
@@ -33,8 +38,8 @@ const fail = (t: string) => ({ content: [{ type: 'text' as const, text: t }], is
 
 const link = (path: string) => `${config.webUrl}${path}`;
 
-function resolve(ref: string): OntologyProject | undefined {
-  return findProject(ref) ?? list<OntologyProject>('ontologies').find((o) => o.prefix === ref || o.ontologyIRI === ref || o.title.toLowerCase() === ref.toLowerCase());
+async function resolve(ref: string): Promise<OntologyProject | undefined> {
+  return await findProject(ref) ?? (await list<OntologyProject>('ontologies')).find((o) => o.prefix === ref || o.ontologyIRI === ref || o.title.toLowerCase() === ref.toLowerCase());
 }
 
 function buildServer(user: User, agentName: string) {
@@ -47,7 +52,7 @@ function buildServer(user: User, agentName: string) {
   );
   const ontologyArg = z.string().describe('Ontology slug, prefix or IRI, from list_ontologies');
   const withProject = async <T>(ref: string, fn: (p: OntologyProject) => Promise<T>) => {
-    const p = resolve(ref);
+    const p = await resolve(ref);
     if (!p) return fail(`No ontology called "${ref}". Call list_ontologies to see what exists.`);
     try {
       return (await fn(p)) as never;
@@ -61,7 +66,7 @@ function buildServer(user: User, agentName: string) {
     { title: 'List ontologies', description: 'List the ontologies on Concord with their prefix, namespace, version and size.', inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => {
       const rows = await Promise.all(
-        list<OntologyProject>('ontologies').map(async (p) => {
+        (await list<OntologyProject>('ontologies')).map(async (p) => {
           const v = (await ontologyStore.working(p)).view();
           return { slug: p.slug, title: p.title, prefix: p.prefix, namespace: p.namespace, version: p.currentVersion, stage: p.stage, classes: v.classes.length, properties: v.objectProperties.length + v.datatypeProperties.length, url: link(`/o/${p.id}`) };
         }),
@@ -116,18 +121,40 @@ function buildServer(user: User, agentName: string) {
   server.registerTool(
     'sparql_query',
     { title: 'SPARQL query', description: 'Run a read-only SPARQL query over the ontology itself (not instance data).', inputSchema: { ontology: ontologyArg, query: z.string(), version: z.string().optional() }, annotations: { readOnlyHint: true } },
-    ({ ontology, query, version }) => withProject(ontology, async (p) => json(await sparql(p, query, version))),
+    ({ ontology, query, version }) => withProject(ontology, async (p) => json(await sparql(p, query, version, user))),
   );
 
   server.registerTool(
     'validate_data',
     {
       title: 'Validate instance data',
-      description: 'Check Turtle instance data against the ontology: undefined or deprecated terms, and logical contradictions (e.g. disjoint types, wrong ranges).',
-      inputSchema: { ontology: ontologyArg, turtle: z.string().describe('Instance data in Turtle, with prefixes') },
+      description:
+        'Check instance data against the ontology: the SHACL shapes derived from it (missing required properties, wrong value types, too many values), terms it does not define or has deprecated, and logical contradictions. The same check runs for POST <ontology IRI> on the website.',
+      inputSchema: {
+        ontology: ontologyArg,
+        data: z.string().optional().describe('The instance data, in the given format'),
+        turtle: z.string().optional().describe('Older name for data, as Turtle'),
+        format: z.enum(Object.keys(DATA_FORMATS) as [DataFormat, ...DataFormat[]]).default('turtle'),
+        version: z.string().optional().describe('Released version such as 1.2.0, "draft" for the working draft, or "latest"; default is the latest release, as for POST to the ontology IRI'),
+      },
       annotations: { readOnlyHint: true },
     },
-    ({ ontology, turtle }) => withProject(ontology, async (p) => json(await validateData(p, turtle))),
+    ({ ontology, data, turtle, format, version }) =>
+      withProject(ontology, async (p) => {
+        const text = data ?? turtle;
+        if (!text) return fail('Pass the data to validate as data.');
+        const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (await latestVersion(p) ?? 'draft') : version;
+        if (v !== 'draft' && !(await ontologyStore.versions(p)).includes(v)) return fail(`${p.title} has no version "${version}".`);
+        // Shares the validator's places with POSTs to the ontology IRI (validationPool.ts).
+        const place = admit(`user:${user.id}`, data ? format : 'turtle');
+        if (!place.ok) return fail(place.message);
+        try {
+          const { body } = await validateDataAgainst(p, v, text, { format: data ? format : 'turtle', shapesUrl: `${config.publicUrl}${PUBLIC_BASE}/${encodeURIComponent(p.slug)}/${v}.shacl.ttl` });
+          return json(body);
+        } finally {
+          place.release();
+        }
+      }),
   );
 
   server.registerTool(
@@ -171,7 +198,7 @@ function buildServer(user: User, agentName: string) {
     ({ ontology, title, description }) =>
       withProject(ontology, async (p) => {
         const cr = await createChangeRequest(p, user, { title, description, naturalLanguage: `${title}\n\n${description}`, kind: 'feature', origin: { type: 'agent', agentName }, submit: true });
-        return json(summariseCR(cr.id, p));
+        return json(await summariseCR(cr.id, p, user));
       }),
   );
 
@@ -180,8 +207,8 @@ function buildServer(user: User, agentName: string) {
     { title: 'Get change request', description: 'Status, classification, validation and governance state of a change request.', inputSchema: { id: z.string() }, annotations: { readOnlyHint: true } },
     async ({ id }) => {
       try {
-        const cr = getCR(id);
-        return json(summariseCR(cr.id, resolve(cr.ontologyId)!));
+        const cr = await getCR(id);
+        return json(await summariseCR(cr.id, (await resolve(cr.ontologyId))!, user));
       } catch {
         return fail(`No change request ${id}`);
       }
@@ -191,8 +218,9 @@ function buildServer(user: User, agentName: string) {
   return server;
 }
 
-function summariseCR(id: string, p: OntologyProject) {
-  const d = detail(getCR(id));
+async function summariseCR(id: string, p: OntologyProject, viewer: User) {
+  // The same projection as the web API: a request based on a use case this user may not see is withheld.
+  const d = await crForViewer(await detail(await getCR(id)), viewer);
   return {
     id: d.id,
     number: d.number,

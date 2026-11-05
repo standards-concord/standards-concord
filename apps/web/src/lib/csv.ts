@@ -13,7 +13,10 @@ export function csvField(s: string): string {
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/** Query results as CSV, with readable headings where there are labels. Headings are escaped like cells. */
-export function toCsv(vars: string[], rows: Record<string, string>[], labels?: Record<string, string>): string {
-  return [vars.map((v) => csvField(labels?.[v] ?? v)).join(','), ...rows.map((r) => vars.map((v) => csvField(r[v] ?? '')).join(','))].join('\n');
+/**
+ * Query results as CSV, with readable headings where there are labels. Headings are escaped like cells.
+ * Rows and headings are by position, never by variable name, so a variable called __proto__ is just a name.
+ */
+export function toCsv(vars: string[], rows: (string | null)[][], headings?: (string | undefined)[]): string {
+  return [vars.map((v, i) => csvField(headings?.[i] ?? v)).join(','), ...rows.map((r) => vars.map((_, i) => csvField(r[i] ?? '')).join(','))].join('\n');
 }

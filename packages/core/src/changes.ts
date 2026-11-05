@@ -7,7 +7,7 @@
  */
 import type { Store, Term } from 'n3';
 import type { ChangeOp, IRI, PropertyCharacteristic, Restriction, TermAnnotations } from './types.js';
-import { NS, RDF_TYPE, expandIRI, isBuiltinDatatype, isValidLocalName, isWellKnown, today } from './ns.js';
+import { NS, RDF_TYPE, expandIRI, isBuiltinDatatype, isSafeNamespace, isSafePrefix, isValidLocalName, isWellKnown, today } from './ns.js';
 import {
   blankNode, canonical, defaultGraph, langLit, literal, nn, objects, readList, removeBlankSubtree, subjects, typedLit, writeList,
   RDF_FIRST, RDF_REST,
@@ -610,7 +610,9 @@ export function isXsdDateOrDateTime(v: string): boolean {
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
   if (day > days) return false;
-  if (h !== undefined && (Number(h) > 23 || Number(mi) > 59 || Number(sec) > 59)) return false;
+  // 24:00:00 is XSD's end-of-day notation (the first instant of the next day).
+  const midnight = h === '24' && mi === '00' && sec === '00' && !/\.\d*[1-9]/.test(v);
+  if (h !== undefined && !midnight && (Number(h) > 23 || Number(mi) > 59 || Number(sec) > 59)) return false;
   if (tz && tz !== 'Z' && (Number(tm) > 59 || Number(th) * 60 + Number(tm) > 14 * 60)) return false;
   return true;
 }
@@ -619,15 +621,28 @@ export function setMetadata(g: OntologyGraph, set: Record<string, unknown>): voi
   const s = g.store;
   const o = g.ontologyIRI;
   const used: string[] = [];
+  // The prefix and namespace are written into every serialisation's prefix
+  // declarations and JSON-LD context, so they are checked before anything is
+  // changed. An empty one is refused too: these fields are never cleared.
+  for (const [field, value] of Object.entries(set)) {
+    if (value === undefined || (field !== 'preferredPrefix' && field !== 'preferredNamespace')) continue;
+    const vs = (Array.isArray(value) ? value : [value]).map(String);
+    if (vs.length !== 1) fail(`${field} takes exactly one value`);
+    for (const v of vs) {
+      if (field === 'preferredPrefix' && !isSafePrefix(v)) fail(`preferredPrefix must be a prefix name such as vol (starting with a letter; letters, digits, _, - and inner dots), not "${v.slice(0, 40)}"`);
+      if (field === 'preferredNamespace' && !isSafeNamespace(v)) fail(`preferredNamespace must be an absolute IRI such as https://w3id.org/odi/vol#, not "${v.slice(0, 60)}"`);
+    }
+  }
   for (const [field, value] of Object.entries(set)) {
     const spec = METADATA_PREDICATES[field];
     if (!spec) fail(`unknown metadata field "${field}"`);
     if (value === undefined) continue;
+    const given = (Array.isArray(value) ? value : [value]).map(String);
     for (const q of s.getQuads(nn(o), nn(spec.p), null, null)) {
       s.removeQuad(q);
       removeBlankSubtree(s, q.object as Term);
     }
-    const values = (Array.isArray(value) ? value : [value]).map(String).filter((v) => v !== '');
+    const values = given.filter((v) => v !== '');
     for (const v of values) {
       let term: Term;
       switch (spec.kind) {

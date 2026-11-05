@@ -60,6 +60,35 @@ test.describe('feedback', () => {
     await expect(page).toHaveURL(/\/$/);
   });
 
+  test('an answer edited in the panel while a reply is on its way is kept', async ({ page }) => {
+    // The reply used to be merged into the answers as they were when the message was sent, undoing the edit.
+    await signIn(page, { name: `Feedback editor ${uniq()}`, role: 'contributor' });
+    await page.goto('/feedback');
+    await page.getByRole('button', { name: /Guided feedback/ }).click();
+    await expect(page.getByRole('heading', { name: 'Your answers so far' })).toBeVisible();
+    await settle(page);
+    await expect(box(page)).toBeEnabled({ timeout: 20_000 });
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let sent!: () => void;
+    const replySent = new Promise<void>((r) => (sent = r));
+    await page.route('**/api/feedback/chat', async (route) => {
+      const response = await route.fetch();
+      sent();
+      await released;
+      await route.fulfill({ response });
+    });
+    // Answer the first question by typing, then change it in the panel before the reply comes back.
+    await box(page).fill('Developer');
+    await box(page).press('Enter');
+    await replySent;
+    const role = page.getByRole('combobox', { name: 'Which best describes your work with data standards?' });
+    await role.selectOption('Policy or research');
+    release();
+    await expect(box(page)).toBeEnabled({ timeout: 20_000 });
+    await expect(role).toHaveValue('Policy or research');
+  });
+
   test('feedback can be spoken', async ({ page }) => {
     await fakeSpeech(page, 'I would like to see who else is reviewing');
     await page.goto('/feedback');

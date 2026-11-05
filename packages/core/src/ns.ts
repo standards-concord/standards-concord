@@ -1,6 +1,7 @@
 /**
  * Namespaces, well-known vocabularies and IRI helpers.
  */
+import { Parser } from 'n3';
 
 export const NS = {
   owl: 'http://www.w3.org/2002/07/owl#',
@@ -31,6 +32,112 @@ export const XSD: Record<string, string> = Object.fromEntries(
     'anyURI', 'hexBinary', 'base64Binary',
   ].map((n) => [n, NS.xsd + n]),
 );
+
+/**
+ * A namespace prefix that is safe everywhere it is written: a Turtle and
+ * SPARQL prefix name (starting with a letter, never ending in a dot), and a
+ * JSON-LD term that is not a keyword (`@import`, `@context`) and has no colon.
+ * Anything else from editable metadata is refused or ignored, so it can't
+ * change what a serialisation means or make JSON-LD processing load a context.
+ */
+export const isSafePrefix = (p: string): boolean =>
+  /^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(p) &&
+  // A term named like an Object method (hasOwnProperty, constructor) breaks the JSON-LD processor.
+  !(p in Object.prototype);
+
+// Node's require, looked up only when Oxigraph is first needed. No static import of node:module,
+// so the module also loads in a browser (the in-browser reasoner imports it through graph.ts).
+type NodeModule = { createRequire(url: string): (id: string) => unknown };
+const nodeRequire = (id: string): unknown => {
+  const mod = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule?.('node:module') as NodeModule | undefined;
+  if (!mod) throw new Error('Oxigraph is only available in Node');
+  return mod.createRequire(import.meta.url)(id);
+};
+type Oxigraph = { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> };
+let oxigraph: Oxigraph | undefined;
+let loadOxigraph = (): Oxigraph => nodeRequire('oxigraph') as Oxigraph;
+let loadFailureReported = false;
+
+/** For tests: how many namespace verdicts are cached, and their total length. */
+export function namespaceCacheForTests(): { entries: number; chars: number } {
+  return { entries: verdicts.size, chars: verdictChars };
+}
+
+/** For tests: replaces how Oxigraph is loaded, and forgets the loaded copy (cached verdicts are kept). */
+export function setOxigraphLoaderForTests(load: () => Oxigraph): void {
+  loadOxigraph = load;
+  oxigraph = undefined;
+}
+
+/** Characters that could break out of the IRI in the Turtle check itself, or that JSON-LD refuses (any Unicode space). */
+const PRE_FILTER = /[\s\u0000-\u001f\u007f-\u009f<>"{}|\\^`]/u;
+
+/** Longest namespace checked; longer ones are refused without being parsed or cached. */
+const MAX_NAMESPACE = 4096;
+const verdicts = new Map<string, boolean>();
+let verdictChars = 0;
+/** The cache is emptied when it would hold more than this many characters of namespaces in all. */
+const MAX_CACHED_CHARS = 1_000_000;
+
+/**
+ * A namespace IRI safe to write as a Turtle prefix and a JSON-LD context
+ * entry. Rather than restate the IRI grammar, it asks the parsers that read
+ * our output: a one-triple Turtle document declaring the namespace as a
+ * prefix and using it must be read back, to the same IRIs, by both N3 and
+ * Oxigraph (which checks RFC 3987 strictly, hosts and code points included).
+ * A cheap filter first refuses spaces (Unicode ones too, which JSON-LD
+ * refuses), controls and the characters that end an IRI in Turtle. Starting
+ * with a scheme, it can never be a JSON-LD keyword such as `@import`.
+ *
+ * Verdicts are cached, within a bound on the characters held; namespaces over
+ * 4,096 characters are refused before the cache. If Oxigraph can't be loaded
+ * the namespace is refused (failing closed) but not cached, and the failure
+ * is reported once, so a later call can succeed.
+ */
+export function isSafeNamespace(iri: string): boolean {
+  if (iri.length > MAX_NAMESPACE) return false;
+  const known = verdicts.get(iri);
+  if (known !== undefined) return known;
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:./s.test(iri) || PRE_FILTER.test(iri)) return remember(iri, false);
+  const verdict = parsersAgree(iri);
+  return verdict === 'unavailable' ? false : remember(iri, verdict);
+}
+
+function remember(iri: string, ok: boolean): boolean {
+  if (verdicts.size >= 10_000 || verdictChars + iri.length > MAX_CACHED_CHARS) {
+    verdicts.clear();
+    verdictChars = 0;
+  }
+  // A copy, not the string itself: a parser's substring would keep its whole source document alive in the cache.
+  verdicts.set(Buffer.from(iri, 'utf8').toString('utf8'), ok);
+  verdictChars += iri.length;
+  return ok;
+}
+
+function parsersAgree(iri: string): boolean | 'unavailable' {
+  const doc = `@prefix ns: <${iri}> .\nns:Thing <urn:concord:check> <${iri}> .\n`;
+  const same = (quads: Array<{ subject: { value: string }; object: { value: string } }>) =>
+    quads.length === 1 && quads[0].subject.value === iri + 'Thing' && quads[0].object.value === iri;
+  try {
+    if (!same(new Parser({ format: 'text/turtle' }).parse(doc))) return false;
+  } catch {
+    return false;
+  }
+  if (!oxigraph) {
+    try {
+      oxigraph = loadOxigraph();
+    } catch (err) {
+      if (!loadFailureReported) console.error(`Namespace checks are refusing every namespace: Oxigraph could not be loaded (${(err as Error).message}).`);
+      loadFailureReported = true;
+      return 'unavailable';
+    }
+  }
+  try {
+    return same(oxigraph.parse(doc, { format: 'text/turtle' }));
+  } catch {
+    return false;
+  }
+}
 
 export const RDF_TYPE = NS.rdf + 'type';
 export const RDF_LANGSTRING = NS.rdf + 'langString';
@@ -65,8 +172,8 @@ export function isBuiltinDatatype(iri: string): boolean {
 
 /**
  * The OWL 2 datatype map (OWL 2 Structural Specification §4). Other XSD types such as
- * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL and are rejected
- * by reasoners like HermiT.
+ * xsd:date, xsd:time, xsd:gYear and xsd:duration are not part of OWL 2 DL, so DL reasoners
+ * (sparq included) do not decide them.
  */
 export const OWL2_DATATYPES = new Set<string>([
   NS.rdf + 'PlainLiteral', NS.rdf + 'XMLLiteral', NS.rdf + 'langString', NS.rdfs + 'Literal', NS.owl + 'real', NS.owl + 'rational',

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import type { Page } from '@playwright/test';
 import { test, expect, demoOntology, expectNoCrash, settle, signInAsPersona, uniq } from './fixtures';
 
 /**
@@ -18,38 +19,51 @@ Aisha Rahman: And coordinators need to know which shifts next week still need vo
 Gareth Lewis: Our CRM already exports shifts, but without recurrence. Migration would be painful.
 Priya Shah: Let's capture that as a requirement and propose the change.`;
 
+/** Opens one way of adding a meeting: from the three cards on an empty list, or the "Add meeting" menu once there are meetings. */
+async function addMeeting(page: Page, card: 'Upload' | 'Start simulation' | 'Invite to a Meet', menuItem: RegExp) {
+  await settle(page);
+  const add = page.getByRole('button', { name: 'Add meeting' });
+  if (await add.isVisible()) {
+    await add.click();
+    await page.getByRole('menu', { name: 'Add meeting' }).getByRole('menuitem', { name: menuItem }).click();
+  } else await page.getByRole('button', { name: card }).click();
+}
+
 test.describe('meetings', () => {
   test('an uploaded transcript is analysed and turned into use cases and a change request', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Priya Shah');
     await page.goto(`/o/${demo.id}/meetings`);
-    await page.getByRole('button', { name: 'Upload' }).click();
+    await addMeeting(page, 'Upload', /Upload a transcript/);
     const d = page.getByRole('dialog', { name: 'Upload a meeting transcript' });
-    await expect(d.getByRole('button', { name: /Upload/ }).last()).toBeDisabled();
+    await expect(d.getByRole('button', { name: 'Upload and analyse' })).toBeDisabled();
     const title = `Recurring shifts call ${uniq()}`;
     await d.getByLabel('Title').fill(title);
-    await d.getByLabel('…or paste it here').fill(TRANSCRIPT);
-    await d.getByRole('button', { name: /Upload/ }).last().click();
+    await d.getByRole('radio', { name: 'Paste text' }).click();
+    await d.getByRole('textbox', { name: 'Transcript' }).fill(TRANSCRIPT);
+    await d.getByRole('button', { name: 'Upload and analyse' }).click();
 
     await expect(page).toHaveURL(/\/meetings\/[^/]+$/, { timeout: 30_000 });
     await settle(page);
     await expectNoCrash(page);
     await expect(page.getByRole('heading', { name: title })).toBeVisible();
+
+    // An upload is analysed straight away (the button is there if it hasn't been yet), and an
+    // analysed call opens on its summary, with the transcript one view away.
+    const analyse = page.getByRole('button', { name: 'Analyse transcript' });
+    if (await analyse.isVisible()) await analyse.click();
+    const views = page.getByRole('radiogroup', { name: 'Meeting views' });
+    await expect(views).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible();
+    await expect(page.getByText(/A call with 4 participants/)).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Decisions' })).toBeVisible();
+    await views.getByRole('radio', { name: /Transcript/ }).click();
     await expect(page.getByRole('heading', { name: 'Transcript' })).toBeVisible();
     await expect(page.getByText('6 lines')).toBeVisible();
     await expect(page.getByText(/every Tuesday from 10 to 2/)).toBeVisible();
-
-    // An upload is analysed straight away (the button is there if it hasn't been yet).
-    const analyse = page.getByRole('button', { name: 'Analyse transcript' });
-    if (await analyse.isVisible()) await analyse.click();
-    await expect(page.getByRole('heading', { name: 'Analysis' })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText('Analysed', { exact: true })).toBeVisible();
-    await expect(page.getByText(/A call with 4 participants/)).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Decisions' })).toBeVisible();
-    await page.getByRole('button', { name: 'Turn into use cases and a change request' }).click();
-    // With proposed changes it opens the new change request; otherwise it says which use cases it made.
-    await expect(page.getByRole('button', { name: /^Status: / }).or(page.getByText(/^Created \d+ use cases?\./))).toBeVisible({ timeout: 30_000 });
-    if (/\/changes\//.test(page.url())) await expect(page.getByRole('link', { name: 'view meeting' })).toBeVisible();
+    // A call's use cases are shared with the working group. Change requests are public, so none is drafted from them here.
+    await page.getByRole('button', { name: 'Turn into use cases' }).click();
+    await expect(page.getByText(/^Created \d+ use cases?, shared with the working group\./)).toBeVisible({ timeout: 30_000 });
 
     // The meeting is listed, with its source.
     await page.goto(`/o/${demo.id}/meetings`);
@@ -63,12 +77,15 @@ test.describe('meetings', () => {
     const file = path.join(os.tmpdir(), `meeting-${uniq()}.vtt`);
     fs.writeFileSync(file, `WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n<v Aisha Rahman>We need to record DBS checks.\n\n00:00:05.000 --> 00:00:08.000\n<v Tom Okafor>That could be a Credential class.\n`);
     await page.goto(`/o/${demo.id}/meetings`);
-    await page.getByRole('button', { name: 'Upload' }).click();
+    await addMeeting(page, 'Upload', /Upload a transcript/);
     const d = page.getByRole('dialog', { name: 'Upload a meeting transcript' });
     await d.getByLabel('Transcript file').setInputFiles(file);
-    await expect(d.getByLabel('…or paste it here')).toHaveValue(/DBS checks/);
-    await d.getByRole('button', { name: /Upload/ }).last().click();
+    await expect(d.getByText(/: \d+ lines read$/)).toBeVisible();
+    await d.getByRole('button', { name: 'Upload and analyse' }).click();
     await expect(page).toHaveURL(/\/meetings\/[^/]+$/, { timeout: 30_000 });
+    const views = page.getByRole('radiogroup', { name: 'Meeting views' });
+    await expect(views).toBeVisible({ timeout: 30_000 });
+    await views.getByRole('radio', { name: /Transcript/ }).click();
     await expect(page.getByText(/We need to record DBS checks/)).toBeVisible();
   });
 
@@ -76,7 +93,7 @@ test.describe('meetings', () => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Priya Shah');
     await page.goto(`/o/${demo.id}/meetings`);
-    await page.getByRole('button', { name: 'Start simulation' }).click();
+    await addMeeting(page, 'Start simulation', /Run a simulated meeting/);
     await expect(page).toHaveURL(/\/meetings\/[^/]+$/, { timeout: 30_000 });
     await settle(page).catch(() => {});
     await expectNoCrash(page);
@@ -92,9 +109,10 @@ test.describe('meetings', () => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Priya Shah');
     await page.goto(`/o/${demo.id}/meetings`);
-    await page.getByRole('button', { name: 'Invite to a Meet' }).click();
-    const d = page.getByRole('dialog', { name: 'Invite the co-lead bot to a Google Meet' });
-    const invite = d.getByRole('button', { name: /Invite|Send the bot/ }).last();
+    await addMeeting(page, 'Invite to a Meet', /Invite the co-lead bot/);
+    const d = page.getByRole('dialog', { name: 'Bring the co-lead bot to a Google Meet' });
+    await d.getByRole('radio', { name: 'Join a call now' }).click();
+    const invite = d.getByRole('button', { name: 'Send the bot now' });
     await d.getByLabel('Meet link').fill('https://zoom.us/j/123');
     await expect(invite).toBeDisabled();
     await d.getByLabel('Meet link').fill('https://meet.google.com/abc-defg-hij');

@@ -186,7 +186,7 @@ export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc:
 export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseCase; highlight?: boolean; /** Question and status first; example, terms and test on request. */ compact?: boolean; bare?: boolean }) {
   return (
     <section>
-      {!bare && <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Competency questions ({uc.competencyQuestions.length})</h3>}
+      {!bare && <h3 className="mb-2 text-sm font-semibold">Competency questions ({uc.competencyQuestions.length})</h3>}
       {uc.competencyQuestions.length ? (
         <ul className={cx('divide-y divide-line rounded-lg border border-line', highlight && 'border-accent')}>
           {uc.competencyQuestions.map((q) => (
@@ -223,7 +223,7 @@ export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseC
 export function ElicitedTerms({ uc, highlight, bare }: { uc: UseCase; highlight?: boolean; bare?: boolean }) {
   return (
     <section>
-      {!bare && <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Terms mentioned ({uc.terms.length})</h3>}
+      {!bare && <h3 className="mb-2 text-sm font-semibold">Terms mentioned ({uc.terms.length})</h3>}
       {uc.terms.length ? (
         <ul className={cx('grid gap-2 sm:grid-cols-2', highlight && 'rounded-lg ring-2 ring-accent/30')}>
           {uc.terms.map((t, i) => (
@@ -308,7 +308,7 @@ function GroupSection({
   if (!collapsible)
     return (
       <section>
-        <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">{title}</h3>
+        <h3 className="mb-2 text-sm font-semibold">{title}</h3>
         {children}
       </section>
     );
@@ -316,7 +316,7 @@ function GroupSection({
     <section>
       <Disclosure
         heading={3}
-        title={<span className="text-xs font-semibold tracking-wide text-muted uppercase">{title}</span>}
+        title={<span className="text-sm font-semibold">{title}</span>}
         summary={filled !== undefined && total !== undefined ? `${filled} of ${total} filled` : undefined}
         defaultOpen={defaultOpen}
         keepMounted

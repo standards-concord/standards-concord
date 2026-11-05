@@ -6,7 +6,7 @@ import { useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { relativeTime, titleCase } from '../../lib/format';
 import { Markdown } from '../../components/Markdown';
-import { ConnectAgent } from '../../components/ConnectAgent';
+import { AgentHub } from '../Connect';
 import { Badge, Card, cx, EmptyState, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -17,7 +17,7 @@ const REC: Record<NonNullable<NonNullable<AgentReport['analysis']>['recommendati
   'needs-discussion': { label: 'Needs discussion', tone: 'warn' },
 };
 
-/** Explore → Connect an agent: set up Claude, Claude Code, Codex or an editor to work with this ontology. */
+/** Explore → Connect an agent: the same agent hub as the account menu's page (setup, connected agents, tokens), inside this ontology. */
 export function ConnectAgentTab() {
   const { id, ontology } = useOntology();
   return (
@@ -33,12 +33,13 @@ export function ConnectAgentTab() {
           <Bot className="size-4" aria-hidden /> See agent reports
         </Link>
       </div>
-      <Card className="space-y-4 p-5">
-        <ConnectAgent />
-        <p className="text-xs text-muted">
-          Then ask your agent, e.g. <em>“Use the concord MCP server to check whether our volunteer schema fits {ontology.title}, and report anything that’s missing.”</em>
-        </p>
-      </Card>
+      <AgentHub
+        example={
+          <p className="text-xs text-muted">
+            Then ask your agent, e.g. <em>“Use the concord MCP server to check whether our volunteer schema fits {ontology.title}, and report anything that’s missing.”</em>
+          </p>
+        }
+      />
     </div>
   );
 }

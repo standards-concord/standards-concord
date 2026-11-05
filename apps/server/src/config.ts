@@ -9,6 +9,13 @@ function bool(v: string | undefined, dflt: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 }
 
+/** A non-negative dollar amount from the environment; anything else (unset, blank, "abc", -1) gives the default. */
+function usd(v: string | undefined, dflt: number): number {
+  if (v === undefined || v.trim() === '') return dflt;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+}
+
 /** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly). */
 const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -25,7 +32,14 @@ export const config = {
   webDist: path.join(repoRoot, 'apps/web/dist'),
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',
   demoMode: bool(process.env.DEMO_MODE, true),
-  /** Comma-separated emails of deployment administrators (reset the demo, read all feedback). */
+  /**
+   * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
+   * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
+   * Someone who signs in with their own WebID (Solid) has that WebID. Listed WebIDs are also given
+   * read access to each tester's feedback folder in their pod, and are shown to testers.
+   */
+  adminWebIds: (process.env.ADMIN_WEBIDS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
+  /** Older alternative to ADMIN_WEBIDS: the verified email of a Google or GitHub account. */
   adminEmails: (process.env.ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
 
   llm: {
@@ -35,6 +49,19 @@ export const config = {
       | 'simulated',
     model: process.env.LLM_MODEL ?? 'claude-opus-5-5',
     effort: (process.env.LLM_EFFORT ?? 'high') as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+    /** Questions the query assistant may send to Claude each day; beyond these the offline helper answers. */
+    queryAssistant: {
+      perDay: Number(process.env.QUERY_ASSISTANT_DAILY_LIMIT ?? 300),
+      perUserPerDay: Number(process.env.QUERY_ASSISTANT_PER_USER_DAILY_LIMIT ?? 40),
+      perOntologyPerDay: Number(process.env.QUERY_ASSISTANT_PER_ONTOLOGY_DAILY_LIMIT ?? 150),
+    },
+    /**
+     * Most this deployment may spend on Claude per UTC day and per UTC month, in US dollars, estimated from each
+     * response's token usage (llm/budget.ts). Once a limit is reached, AI features use their offline fallbacks
+     * until the next day or month. 0 turns real AI calls off.
+     */
+    dailyBudgetUsd: usd(process.env.LLM_DAILY_BUDGET_USD, 5),
+    monthlyBudgetUsd: usd(process.env.LLM_MONTHLY_BUDGET_USD, 40),
   },
 
   google: {
@@ -58,11 +85,57 @@ export const config = {
     spawnPort: Number(process.env.SOLID_SPAWN_PORT ?? 3000),
   },
 
+  solidOidc: {
+    /** Let people sign in with their own WebID (Solid-OIDC). On unless SOLID_OIDC=off. */
+    enabled: bool(process.env.SOLID_OIDC, true),
+    /**
+     * Solid providers the operator trusts enough to reach on a private address or over plain http
+     * (a local Community Solid Server in development and tests). Everything else must be public https.
+     */
+    trustedIssuers: (process.env.SOLID_TRUSTED_ISSUERS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
+  },
+  feedbackIssues: {
+    /**
+     * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers
+     * can choose to post a short summary of their feedback as an issue labelled "feedback".
+     */
+    token: process.env.FEEDBACK_GITHUB_TOKEN || undefined,
+    repo: process.env.FEEDBACK_GITHUB_REPO || 'standards-concord/standards-concord',
+    /** Overridable for tests. */
+    apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
+    /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
+    perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
+    /**
+     * Bearer token for the triage routine's endpoints (/api/feedback/triage/...). The routine
+     * comments and labels only through them, so each comment's id is recorded for withdrawal.
+     */
+    triageToken: process.env.FEEDBACK_TRIAGE_TOKEN || undefined,
+  },
+
   meetBot: {
     /** Recall.ai API key enables real Google Meet bots. */
     recallApiKey: process.env.RECALL_API_KEY,
     recallRegion: process.env.RECALL_REGION ?? 'us-west-2',
+    /** Override the Recall.ai API base URL (tests point this at a stub). */
+    recallApiBase: process.env.RECALL_API_BASE?.replace(/\/$/, ''),
     botName: process.env.MEET_BOT_NAME ?? 'Concord co-facilitator',
+    /**
+     * The bot's own address, e.g. concord.odi@gmail.com. Adding it to a calendar
+     * invite (one call or a recurring series) brings the bot into those calls.
+     */
+    inviteEmail: process.env.MEET_BOT_EMAIL?.trim() || undefined,
+    /**
+     * The bot account's calendar as an iCal feed. For a Google account this is
+     * Calendar settings > the calendar > "Secret address in iCal format".
+     * file:// URLs work too, for local testing.
+     */
+    calendarIcsUrl: process.env.MEET_BOT_ICS_URL?.trim() || undefined,
+    /** How often to re-read the calendar feed. */
+    calendarPollMs: Number(process.env.MEET_BOT_POLL_SECONDS ?? 60) * 1000,
+    /** Ontology (slug or id) for invites that don't say which ontology they're about. */
+    defaultOntology: process.env.MEET_BOT_DEFAULT_ONTOLOGY?.trim() || undefined,
+    /** Whether calls that arrive by invite post the bot's prompts into the Meet chat. */
+    postToChatDefault: bool(process.env.MEET_BOT_POST_TO_CHAT, false),
   },
 
   stt: {

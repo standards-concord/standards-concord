@@ -156,3 +156,25 @@ export const PersonaActionSchema = z.object({
   comment: str,
   vote: z.enum(['yes', 'no', 'abstain']),
 });
+
+export const QueryChatSchema = z.object({
+  reply: str.describe('One to three plain sentences for a non-technical reader: what the query finds and any choice you made. No SPARQL here.'),
+  query: str.describe('The complete SPARQL 1.1 query, with every PREFIX it uses declared at the top'),
+  target: z.enum(['ontology', 'data']).describe('"data" when it asks about records (instances), "ontology" when it asks about the model itself'),
+  columns: z.array(z.object({ variable: str.describe('A projected variable, without "?"'), label: str.describe('A short readable column heading') })),
+});
+
+export const AnonymisedDraftSchema = z.object({
+  sections: SectionsSchema.describe('The anonymised use case, against the same template sections. Leave out notes and references.'),
+  competencyQuestions: z.array(z.object({ question: str, exampleAnswer: opt(str) })),
+  terms: z.array(ElicitedTermSchema.omit({ evidence: true })),
+  changes: z.array(str).describe('What was changed to anonymise it, in plain words, without repeating the removed details.'),
+});
+
+export const RequirementsDraftSchema = z.object({
+  title: str,
+  intro: str.describe('Markdown. Sets the scene and introduces the fictional cast.'),
+  sections: z.array(z.object({ heading: str, markdown: str.describe('Markdown with [UC-n] (and optionally [Rn]) citations.'), useCaseRefs: z.array(str).describe('Refs cited, e.g. ["UC-2","UC-5"].') })),
+  requirements: z.array(z.object({ text: str, useCaseRefs: z.array(str), terms: z.array(str).describe('Labels or CURIEs of ontology terms that meet it; empty if none yet.') })),
+});
+export type RequirementsDraft = z.infer<typeof RequirementsDraftSchema>;

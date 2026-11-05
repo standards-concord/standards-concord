@@ -190,20 +190,20 @@ describe('review rounds', () => {
     const { owner, author, b, crId, ops } = await setUp({ vote: { voterRoles: ['member'], threshold: 0.5, quorum: 0.5, durationDays: 5 } });
     const ontologyId = (await get(owner, crId)).ontologyId;
     await step(ontologyId, undefined, 0); // makes sure the personas exist
-    const gareth = personas().find((u) => u.name === 'Gareth Lewis')!;
+    const gareth = (await personas()).find((u) => u.name === 'Gareth Lewis')!;
     expect((await owner.agent.put(`/api/ontologies/${ontologyId}/members/${gareth.id}`).send({ roles: ['member'] })).status).toBe(200);
     expect((await review(b, crId, 'approve')).body.status).toBe('voting');
-    await addVote(getCR(crId), gareth, 'no', 'Not yet.', getCR(crId).round ?? 1);
+    await addVote(await getCR(crId), gareth, 'no', 'Not yet.', (await getCR(crId)).round ?? 1);
     await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...ops[0], definition: 'A scheduled block of volunteering time.' }] });
     expect((await review(b, crId, 'approve')).body.status).toBe('voting');
     expect((await get(b, crId)).governance.vote.no).toBe(1);
     await step(ontologyId, undefined, 10);
-    const garethsVotes = () => getCRVotes(crId).filter((v) => v.userId === gareth.id);
-    const onNewEdits = garethsVotes().filter((v) => v.editsVersion === 2);
+    const garethsVotes = async () => (await getCRVotes(crId)).filter((v) => v.userId === gareth.id);
+    const onNewEdits = (await garethsVotes()).filter((v) => v.editsVersion === 2);
     expect(onNewEdits).toHaveLength(1);
     // Asked once: another beat doesn't ask again.
     await step(ontologyId, undefined, 10);
-    expect(garethsVotes().filter((v) => v.editsVersion === 2)).toHaveLength(1);
+    expect((await garethsVotes()).filter((v) => v.editsVersion === 2)).toHaveLength(1);
   });
 
   // A resubmission of the same edits used to erase the ballot, "no" votes included.
@@ -307,9 +307,9 @@ describe('review rounds', () => {
     const { b, crId } = await setUp();
     await review(b, crId, 'comment', { comment: 'Reading it now.' });
     const crs = await import('../src/services/changeRequests.js');
-    const cr = crs.getCR(crId);
-    expect(crs.hasCurrentReview(cr, b.id)).toBe(false);
-    expect(crs.hasRespondedThisRound(cr, b.id)).toBe(true);
+    const cr = await crs.getCR(crId);
+    expect(await crs.hasCurrentReview(cr, b.id)).toBe(false);
+    expect(await crs.hasRespondedThisRound(cr, b.id)).toBe(true);
   });
 
   // A veto recorded on an approved request left it approved, and it could still be merged.

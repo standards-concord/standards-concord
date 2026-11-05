@@ -6,6 +6,8 @@ import { Page } from '../components/Shell';
 import { Stepper, StepBody } from '../components/Walkthrough';
 import { Button, Card } from '../components/ui';
 import { STEPS, useWalkthrough } from '../lib/walkthrough';
+import { TesterStatus } from '../components/TesterStatus';
+import { APP_VERSION } from '@concord/shared';
 
 export function AlphaPage() {
   const w = useWalkthrough();
@@ -22,13 +24,14 @@ export function AlphaPage() {
   return (
     <Page>
       <div className="mb-6">
-        <div className="mb-1 text-xs font-medium tracking-wide text-muted uppercase">Alpha testing · about 5 minutes</div>
+        <div className="mb-1 text-sm font-medium text-muted">Alpha testing · version {APP_VERSION} · about 5 minutes</div>
         <h1 className="text-2xl font-semibold tracking-tight">Guided walkthrough</h1>
         <p className="mt-1 max-w-2xl text-sm text-muted">
           Follow these steps to try Concord as one of the people who would use it. Your progress is saved in this browser, and you can reopen this guide from the
           “Walkthrough” button at the bottom of any page.
         </p>
       </div>
+      <TesterStatus className="mb-6" compact={w.step > 0} />
       <Stepper current={w.step} onPick={w.setStep} />
       <Card className="mt-6 p-6">
         <h2 className="mb-4 text-lg font-semibold">

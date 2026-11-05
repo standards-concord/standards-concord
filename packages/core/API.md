@@ -40,7 +40,7 @@ export function stampRelease(graph: OntologyGraph, opts: { version: string; vers
 export function lint(graph: OntologyGraph, opts?: { strict?: boolean }): Issue[];
 export function fairCheck(graph: OntologyGraph): FairReport;
 export function structuralReasoner(graph: OntologyGraph): ReasonerResult;  // pure TS: subclass closure, disjointness violations, unsatisfiable via disjoint ancestors, domain/range conflicts with disjointness, individuals typed with disjoint classes, cycles in subClassOf (warning, implies equivalence)
-export function owlReasoner(graph: OntologyGraph, opts?: { python?: string; timeoutMs?: number; engine?: 'hermit' | 'pellet' }): Promise<ReasonerResult>; // spawns `python3 toolkit/reason.py` (owlready2 + HermiT); falls back to structuralReasoner with available:false if python/owlready2/java missing
+export function owlReasoner(graph: OntologyGraph, opts?: { budget?: { maxSteps?: number; maxNodes?: number } }): Promise<ReasonerResult>; // sparq's OWL 2 DL reasoner (checkOwlDl, WebAssembly; Node and browser): consistency, unsatisfiable classes, direct inferred subclasses, profile notes; falls back to structuralReasoner with available:false and the reason when sparq gives no verdict
 export function runCompetencyQuestions(graph: OntologyGraph, cqs: { question: string; sparql: string; exampleData?: string }[]): Promise<CompetencyQuestionResult[]>; // oxigraph in-memory, loads ontology + optional example Turtle data
 export function validate(graph: OntologyGraph, opts?: { cqs?: {question:string; sparql:string; exampleData?: string}[]; reasoner?: 'owl' | 'structural' }): Promise<ValidationReport>;
 

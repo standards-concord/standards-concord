@@ -109,60 +109,64 @@ describe('responses that are refused or too slow', () => {
     expect(await until(() => open.size === 0)).toBe(true);
   });
 
-  it('frees its slot only after the connection is gone, so the concurrency cap holds', async () => {
-    // Four slow fetches fill every slot; a fifth is turned away.
+  it('frees its slot only after the connection is gone, so the concurrency cap holds; others wait their turn', async () => {
+    // Four slow fetches fill every slot; a fifth waits instead of connecting (or failing).
     const slow = [1, 2, 3, 4].map(() => fetchFrom('/200', { timeoutMs: 300, maxBytes: 10 * 1024 * 1024 }).catch((e: FetchError) => e));
     await until(() => open.size === 4);
-    await expect(fetchFrom('/200')).rejects.toMatchObject({ kind: 'busy' });
+    let fifthDone = false;
+    const fifth = fetchFrom('/404').catch((e: FetchError) => e).finally(() => (fifthDone = true));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open.size).toBe(4);
+    expect(fifthDone).toBe(false);
     const results = await Promise.all(slow);
     expect(results.every((e) => e instanceof FetchError && e.kind === 'unavailable')).toBe(true);
+    // Once a slot is free the fifth runs (its own deadline starts then).
+    expect(await fifth).toMatchObject({ kind: 'not-found' });
     expect(await until(() => open.size === 0)).toBe(true);
-    // Every slot is free again.
-    await expect(fetchFrom('/404')).rejects.toMatchObject({ kind: 'not-found' });
   });
 });
 
 describe('single-use writes with more than one database connection', () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'concord-db-')), 'test.sqlite');
   let other: DatabaseSync;
-  beforeAll(() => {
-    closeDb();
-    openDb(file);
+  beforeAll(async () => {
+    await closeDb();
+    await openDb({ kind: 'sqlite', file });
     // A second connection to the same file stands in for another server process.
     other = new DatabaseSync(file);
     other.exec('PRAGMA busy_timeout = 5000');
   });
-  afterAll(() => {
+  afterAll(async () => {
     other.close();
-    closeDb();
+    await closeDb();
   });
 
-  it('lets only one writer consume a token, whichever connection gets there first', () => {
-    put('oauthTokens', { id: 'tok1', grantId: 'g', kind: 'refresh', expiresAt: 0 }, 'g');
+  it('lets only one writer consume a token, whichever connection gets there first', async () => {
+    await put('oauthTokens', { id: 'tok1', grantId: 'g', kind: 'refresh', expiresAt: 0 }, 'g');
     // The other process consumes it first...
     const changed = other.prepare(`UPDATE docs SET data = json_set(data, '$.consumedAt', 1) WHERE collection = 'oauthTokens' AND id = 'tok1' AND json_extract(data, '$.consumedAt') IS NULL`).run();
     expect(changed.changes).toBe(1);
     // ...so this one loses, even though it never saw the change before trying.
-    expect(claim('oauthTokens', 'tok1', 'consumedAt', 2)).toBeUndefined();
-    put('oauthTokens', { id: 'tok2', grantId: 'g', kind: 'refresh', expiresAt: 0 }, 'g');
-    expect(claim('oauthTokens', 'tok2', 'consumedAt', 2)).toMatchObject({ id: 'tok2' });
-    expect(claim('oauthTokens', 'tok2', 'consumedAt', 3)).toBeUndefined();
+    expect(await claim('oauthTokens', 'tok1', 'consumedAt', 2)).toBeUndefined();
+    await put('oauthTokens', { id: 'tok2', grantId: 'g', kind: 'refresh', expiresAt: 0 }, 'g');
+    expect(await claim('oauthTokens', 'tok2', 'consumedAt', 2)).toMatchObject({ id: 'tok2' });
+    expect(await claim('oauthTokens', 'tok2', 'consumedAt', 3)).toBeUndefined();
   });
 
-  it('hands an authorization code to one caller only', () => {
-    put('oauthCodes', { id: 'code1' });
-    expect(take('oauthCodes', 'code1')).toMatchObject({ id: 'code1' });
-    expect(take('oauthCodes', 'code1')).toBeUndefined();
+  it('hands an authorization code to one caller only', async () => {
+    await put('oauthCodes', { id: 'code1' });
+    expect(await take('oauthCodes', 'code1')).toMatchObject({ id: 'code1' });
+    expect(await take('oauthCodes', 'code1')).toBeUndefined();
   });
 
-  it('takes the write lock before reading, so another writer waits for the whole step', () => {
-    put('kv', { id: 'counter', n: 0 });
-    transaction(() => {
+  it('takes the write lock before reading, so another writer waits for the whole step', async () => {
+    await put('kv', { id: 'counter', n: 0 });
+    await transaction(async () => {
       // While this transaction is open, the other connection cannot start writing.
       other.exec('PRAGMA busy_timeout = 0');
       expect(() => other.exec('BEGIN IMMEDIATE')).toThrow(/locked|busy/i);
       other.exec('PRAGMA busy_timeout = 5000');
-      put('kv', { id: 'counter', n: 1 });
+      await put('kv', { id: 'counter', n: 1 });
     });
     other.exec('BEGIN IMMEDIATE');
     other.exec('COMMIT');

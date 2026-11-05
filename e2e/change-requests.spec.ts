@@ -196,6 +196,7 @@ test.describe('change requests', () => {
     await page.goto(url);
     await actions(page).getByRole('button', { name: 'Approve' }).click();
     // Her approval is recorded, but she is told it doesn't count towards the threshold.
+    await expect(actions(page).getByText('You previously chose “approve”.')).toBeVisible();
     await expect(actions(page).getByText(/Your approval is recorded but only .* approvals count/)).toBeVisible();
     await actions(page).getByRole('textbox').fill('Coordinators call these "slots".');
     await actions(page).getByRole('button', { name: 'Comment' }).click();
@@ -203,6 +204,36 @@ test.describe('change requests', () => {
     // Shown once, as her comment (it used to appear a second time in the timeline).
     await expect(page.getByText('Coordinators call these "slots".')).toHaveCount(1);
     await expect(page.getByText('Commented', { exact: true })).toBeVisible();
+  });
+
+  test('a comment typed while an approval is being saved is kept, not wiped when it lands', async ({ page, request }) => {
+    // Used to go wrong: when any review or vote came back, the comment box was emptied, including text typed
+    // after clicking. So a reviewer who approved and started typing a comment lost it (and the e2e that does
+    // just that was flaky on slower servers).
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    const url = await newChangeRequest(page, demo.id, { title: `Keep my comment ${uniq()}`, ask: `Add a class Kept${uniq()}.` });
+    await actions(page).getByRole('button', { name: 'Submit for review' }).click();
+    await expect(status(page)).toContainText('In review');
+
+    await signInAsPersona(page, 'Mei Chen');
+    await page.goto(url);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/change-requests\/[^/]+\/reviews$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await actions(page).getByRole('button', { name: 'Approve' }).click();
+    await actions(page).getByRole('textbox').fill('Typed while it saved.');
+    release();
+    await expect(actions(page).getByText('You previously chose “approve”.')).toBeVisible();
+    await expect(actions(page).getByRole('textbox')).toHaveValue('Typed while it saved.');
+    await actions(page).getByRole('button', { name: 'Comment' }).click();
+    // Once sent, the box empties.
+    await expect(actions(page).getByRole('textbox')).toHaveValue('');
+    await page.getByRole('tab', { name: /^Discussion/ }).click();
+    await expect(page.getByText('Typed while it saved.')).toHaveCount(1);
   });
 
   test('anyone can report a bug, and it becomes a change request', async ({ page, request }) => {
@@ -221,6 +252,34 @@ test.describe('change requests', () => {
     await expectNoCrash(page);
     await expect(page.getByRole('heading', { level: 2, name: new RegExp(title) })).toBeVisible();
     await expect(page.getByText('Bug', { exact: true }).first()).toBeVisible();
+  });
+
+  test('typing in a dialog stays in the field you are typing in when the page behind it reloads', async ({ page, request }) => {
+    // Used to go wrong: the dialog moved focus back to its first field whenever the page behind it re-rendered
+    // (its onClose prop is a new function each render), so text typed into "Describe the change" landed in
+    // Title once the change request list finished loading. Slow backends made the governance e2e flaky.
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    let release!: () => void;
+    const listHeld = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/change-requests(\?|$)/, async (route) => {
+      await listHeld;
+      await route.continue();
+    });
+    await page.goto(`/o/${demo.id}/changes`);
+    await page.getByRole('button', { name: 'New change request' }).click();
+    const d = page.getByRole('dialog', { name: 'New change request' });
+    await expect(d.getByLabel('Title')).toBeFocused();
+    const describe = d.getByLabel('Describe the change in plain language');
+    await describe.click();
+    await page.keyboard.type('Add a class ');
+    await expect(page.getByText('Loading…')).toBeVisible(); // The list behind the dialog is still loading.
+    release();
+    await expect(page.getByText('Loading…')).toHaveCount(0);
+    await page.keyboard.type('Shift.');
+    await expect(describe).toBeFocused();
+    await expect(describe).toHaveValue('Add a class Shift.');
+    await expect(d.getByLabel('Title')).toHaveValue('');
   });
 
   test('the dialogs can be cancelled and closed with Escape', async ({ page, request }) => {
