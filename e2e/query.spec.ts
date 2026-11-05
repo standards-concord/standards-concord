@@ -1,4 +1,4 @@
-import { test, expect, signIn, demoOntology, type Page } from './fixtures';
+import { test, expect, signIn, demoOntology, uniq, type Page } from './fixtures';
 
 /**
  * The Query tab: sparq (WebAssembly) loads in the browser, the query assistant
@@ -151,27 +151,46 @@ test.describe('Query tab', () => {
     expect(await editorText(page)).toBe(start);
   });
 
-  test('if the account check fails, the question goes back in the box to retry', async ({ page, consoleGuard }) => {
-    // The box is cleared on send and the question is kept only once the account check passes. When that check
-    // failed (a 503 from /api/session), the error handler dropped the pending copy too, and the question was lost.
+  test('if the account check fails, the question is kept to send again, and a newer draft is kept too', async ({ page, consoleGuard }) => {
+    // The box is cleared on send and a question is saved only once the account check passes. When that check failed
+    // (a 503 from /api/session), the error handler dropped the pending question, so it was lost; putting it back in
+    // the box only worked if nothing new had been typed there meanwhile.
     consoleGuard.allow(/status of 503/);
-    const question = 'List every volunteering opportunity';
+    const question = `List every volunteering opportunity ${uniq()}`;
+    const draft = 'and only the ones in Leeds';
     const box = chat(page).getByLabel('Describe what you want to find…');
-    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    const users = chat(page).getByTestId('chat-message-user');
+    const unsent = page.getByTestId('query-unsent');
+    let fail!: () => void;
+    const held = new Promise<void>((resolve) => (fail = resolve));
+    await page.route(/\/api\/session$/, async (r) => {
+      await held;
+      await r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) });
+    });
     await box.fill(question);
     await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(box).toHaveValue('');
+    // The next draft is typed while the check is still waiting, then the check fails.
+    await box.fill(draft);
+    fail();
     await expect(chat(page).getByRole('alert')).toContainText('Service unavailable');
-    await expect(box).toHaveValue(question);
-    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
-    // Once the server is back, sending it again works.
+    await expect(unsent).toContainText('wasn’t sent');
+    await expect(users).toHaveCount(1);
+    await expect(users).toContainText(question);
+    await expect(box).toHaveValue(draft);
+    // Once the server is back, Send again sends it, and the draft is still there.
     await page.unroute(/\/api\/session$/);
     const replies = chat(page).getByTestId('chat-message-assistant');
     const before = await replies.count();
-    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await unsent.getByRole('button', { name: 'Send again' }).click();
     await expect(replies).toHaveCount(before + 1);
-    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(unsent).toHaveCount(0);
+    await expect(users).toHaveCount(1);
+    await expect(users).toContainText(question);
+    await expect(box).toHaveValue(draft);
+    // It was saved this time: it survives a reload.
+    await page.reload();
     await expect(chat(page).getByTestId('chat-message-user')).toContainText(question);
-    await expect(box).toHaveValue('');
   });
 
   test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {

@@ -238,8 +238,11 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   // Where the offline helper's last query came from, so it can keep refining it however long the chat gets.
   const [offlineState, setOfflineState] = useLocalStorage<unknown>(`${storageKey}.offlineState`, null);
   const [asking, setAsking] = useState(false);
-  // The message being sent, before it is saved.
-  const [pending, setPending] = useState<ChatMessage>();
+  // The messages being sent, before they are saved.
+  const [pending, setPending] = useState<ChatMessage[]>([]);
+  // Messages that failed before they could be saved (the account check couldn't be made): shown, and sent with
+  // the next message or by Send again. They stay in this page only, since nobody confirmed whose they are.
+  const [unsent, setUnsent] = useState<ChatMessage[]>([]);
   const [chatError, setChatError] = useState<unknown>();
 
   // Autocomplete: every term as a prefixed name, findable by its label too. Accepting
@@ -336,15 +339,17 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     }
   };
 
-  /** Asks the assistant. Resolves to false when the question failed before it was kept, so the box can offer it again. */
-  const ask = async (text: string): Promise<boolean | undefined> => {
-    const mine: ChatMessage = { id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() };
-    const history = [...chat, mine];
+  /** Asks the assistant: sends any unsent messages, then text if given. */
+  const ask = async (text?: string) => {
+    const asked = [...unsent, ...(text ? [{ id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() } satisfies ChatMessage] : [])];
+    if (!asked.length) return;
+    const history = [...chat, ...asked];
     // Whose conversation this is, as of now: nothing is saved unless it still is, now and when the answer arrives.
     const token = accountToken();
-    if (!stillCurrent(token, account)) return undefined;
+    if (!stillCurrent(token, account)) return;
     // Shown at once, but saved only after the server confirms the account.
-    setPending(mine);
+    setPending(asked);
+    setUnsent([]);
     setAsking(true);
     setChatError(undefined);
     let kept = false;
@@ -354,13 +359,13 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
       // The server refuses it too if the session changes after this check.
       const now = await api.session();
       if ((now.user?.id ?? 'guest') !== account || !stillCurrent(token, account)) {
-        setPending(undefined);
+        setPending([]);
         otherAccount = true;
         if (stillCurrent(token, account)) setSession(now);
         throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
       }
       setChat(history);
-      setPending(undefined);
+      setPending([]);
       kept = true;
       const r = await api.queryChat(id, {
         messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
@@ -371,7 +376,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         account,
       });
       // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
-      if (!stillCurrent(token, account)) return undefined;
+      if (!stillCurrent(token, account)) return;
       setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
       // The editor is read-only while the assistant works, so its answer never replaces newer edits.
       // It isn't run until the person has looked at it and pressed Run.
@@ -383,22 +388,22 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         setWroteKey(keyFor(r.query, r.target));
       }
     } catch (e) {
-      setPending(undefined);
-      if (!stillCurrent(token, account)) return undefined;
+      setPending([]);
+      if (!stillCurrent(token, account)) return;
       setChatError(e);
-      // Failed before the question was kept (the session check couldn't be made): hand it back to retry, rather than
-      // lose it. Never into a box that now belongs to someone else.
-      if (!kept && !otherAccount) return false;
+      // Failed before the messages were kept (the account check couldn't be made): keep them to send again, rather
+      // than lose them. Not when the account has changed: they belong to someone else.
+      if (!kept && !otherAccount) setUnsent(asked);
     } finally {
       setAsking(false);
     }
-    return undefined;
   };
 
   /** The refresh button: clears the conversation and puts the starting query back. */
   const startOver = () => {
     runnerRef.current?.cancel();
     setChat([]);
+    setUnsent([]);
     setColumns([]);
     setOfflineState(null);
     setChatError(undefined);
@@ -493,16 +498,29 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 />
                 <ChatView
                   className="h-[440px] px-4 pb-4"
-                  messages={[greeting, ...chat, ...(pending ? [pending] : [])]}
+                  messages={[greeting, ...chat, ...pending, ...unsent]}
                   pending={asking}
                   onSend={(text) => ask(text)}
+                  notice={
+                    unsent.length && !asking ? (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted" data-testid="query-unsent">
+                        <span>{unsent.length === 1 ? 'Your last message wasn’t sent.' : `Your last ${unsent.length} messages weren’t sent.`}</span>
+                        <Button size="sm" variant="secondary" onClick={() => void ask()} disabled={!ready}>
+                          Send again
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setUnsent([])}>
+                          Discard
+                        </Button>
+                      </div>
+                    ) : null
+                  }
                   disabled={!ready}
                   userName={session?.user?.name}
                   placeholder="Describe what you want to find…"
                   error={chatError}
                   plainText
                   quickReplies={
-                    chat.length === 0 && suggestions.length ? (
+                    chat.length === 0 && !unsent.length && suggestions.length ? (
                       <div className="flex flex-wrap gap-1.5" data-testid="query-suggestions">
                         {suggestions.map((q) => (
                           <button key={q} type="button" onClick={() => void ask(q)} disabled={!ready || asking} className="rounded-full border border-line-strong bg-surface px-2.5 py-1 text-left text-xs hover:border-accent hover:text-accent disabled:opacity-50">

@@ -40,8 +40,7 @@ function Bubble({ m, userName, plainText, children }: { m: ChatMessage; userName
 export interface ChatViewProps {
   messages: ChatMessage[];
   pending?: boolean;
-  /** Return false when the message wasn't taken (it failed before being kept anywhere): the text goes back in the box to retry. */
-  onSend: (text: string, viaVoice: boolean) => void | boolean | Promise<void | boolean>;
+  onSend: (text: string, viaVoice: boolean) => void | Promise<void>;
   /** Rendered beneath the latest assistant message (quick replies). */
   quickReplies?: ReactNode;
   disabled?: boolean;
@@ -50,13 +49,15 @@ export interface ChatViewProps {
   voice?: boolean;
   bigMic?: boolean;
   error?: unknown;
+  /** Shown just above the input, with the error (for example, messages that weren't sent and a way to retry them). */
+  notice?: ReactNode;
   /** Show the assistant's messages as plain text rather than Markdown (for replies built from untrusted input). */
   plainText?: boolean;
   footer?: ReactNode;
   className?: string;
 }
 
-export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, voice = true, bigMic, error, footer, className, plainText }: ChatViewProps) {
+export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, voice = true, bigMic, error, notice, footer, className, plainText }: ChatViewProps) {
   const [text, setText] = useState('');
   const [voiceUsed, setVoiceUsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -85,9 +86,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
     setText('');
     const v = voiceUsed;
     setVoiceUsed(false);
-    const taken = await onSend(value, v);
-    // Put it back unless something new has been typed meanwhile.
-    if (taken === false) setText((t) => t || value);
+    await onSend(value, v);
   };
 
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
@@ -112,6 +111,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
       </div>
       <div className="border-t border-line pt-3">
         {error ? <div className="mb-2"><InlineError error={error} /></div> : null}
+        {notice ? <div className="mb-2">{notice}</div> : null}
         {dict.error && <p className="mb-2 text-xs text-warn">{dict.error}</p>}
         <div className="flex items-end gap-2">
           {voice && dict.supported && <MicButton listening={dict.listening} transcribing={dict.transcribing} onClick={dict.toggle} size={bigMic ? 'lg' : 'md'} disabled={disabled} />}
