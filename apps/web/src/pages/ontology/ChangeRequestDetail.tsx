@@ -418,7 +418,8 @@ export function ChangeRequestPage() {
                 {[
                   ...cr.reviews.map((r) => ({ at: r.at, kind: 'review' as const, r })),
                   ...cr.votes.map((v) => ({ at: v.at, kind: 'vote' as const, v })),
-                  ...cr.timeline.filter((e) => e.type !== 'review' && e.type !== 'vote').map((e) => ({ at: e.at, kind: 'event' as const, e })),
+                  // Reviews (comments included) and votes are listed from their own records above, so skip their timeline copies.
+                  ...cr.timeline.filter((e) => e.type !== 'review' && e.type !== 'vote' && e.type !== 'comment').map((e) => ({ at: e.at, kind: 'event' as const, e })),
                 ]
                   .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
                   .map((item, i) => (
