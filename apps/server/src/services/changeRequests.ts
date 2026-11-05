@@ -241,8 +241,8 @@ export function heuristicProposal(graph: OntologyGraph, text: string): Proposal 
 /* Triage: apply, diff, classify, validate, analyse                         */
 /* ------------------------------------------------------------------------ */
 
-export async function preview(project: OntologyProject, ops: ChangeOp[], tests: ChangeRequest['tests'], author?: User) {
-  const before = await ontologyStore.working(project);
+export async function preview(project: OntologyProject, ops: ChangeOp[], tests: ChangeRequest['tests'], author?: User, base = ontologyStore.head(project)) {
+  const before = await ontologyStore.graphAt(project, base);
   const { graph: after, warnings } = applyChangeOps(before, ops, { author: author?.name, date: clock.iso().slice(0, 10) });
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
@@ -255,14 +255,16 @@ function validationPassed(v: ValidationReport | undefined) {
   return !!v && v.passed;
 }
 
-export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
+export async function triage(cr: ChangeRequest, depth = 0): Promise<ChangeRequest> {
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
   // The edits being checked: the results are only saved onto a request that still has them.
   const checked = JSON.stringify([cr.ops, cr.tests]);
+  // ...against this version of the draft.
+  const head = ontologyStore.head(project);
   let apply: (target: ChangeRequest) => void;
   try {
-    const p = await preview(project, cr.ops, cr.tests, author);
+    const p = await preview(project, cr.ops, cr.tests, author, head);
     const event = ev(
       'triaged',
       `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
@@ -278,6 +280,7 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
       Object.assign(target, derived);
       target.warnings = [...new Set([...(target.warnings ?? []), ...p.warnings])];
       target.timeline.push(event);
+      target.triagedHead = head;
       if (analysis) target.analysis = analysis;
     };
   } catch (err) {
@@ -293,18 +296,26 @@ export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
     apply = (target) => {
       target.validation = validation;
       target.timeline.push(event);
+      target.triagedHead = head;
     };
   }
   // Checking is slow, so the request may have been saved meanwhile (a review, a comment, a
-  // simulated member). Put the results on the latest copy rather than refusing them, unless
-  // its edits have changed too: then these results are out of date, and whoever changed the
-  // edits checks them again.
+  // simulated member, another check). Put the results on the latest copy rather than refusing
+  // them, but only while they are still current: if its edits have changed, whoever changed them
+  // checks them again; if the draft has moved, the results are out of date too, so the request
+  // is checked again against the draft as it is now, unless that has been done already.
   for (let attempt = 0; ; attempt++) {
-    const target = attempt === 0 ? cr : get<ChangeRequest>('changeRequests', cr.id);
-    if (!target) throw new HttpError(404, 'Change request not found');
     if (attempt > 0) {
-      adopt(cr, target);
+      const stored = get<ChangeRequest>('changeRequests', cr.id);
+      if (!stored) throw new HttpError(404, 'Change request not found');
+      adopt(cr, stored);
       if (JSON.stringify([cr.ops, cr.tests]) !== checked) return cr;
+      const now = ontologyStore.head(project);
+      if (now !== head) {
+        if (cr.triagedHead === now) return cr;
+        if (depth >= 3) throw new HttpError(409, `Change request #${cr.number} was changed by someone else at the same time. Reload it and try again.`);
+        return triage(cr, depth + 1);
+      }
     }
     const before = structuredClone(cr);
     apply(cr);
@@ -424,7 +435,15 @@ export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?:
   return advance(cr);
 }
 
-export async function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string) {
+/**
+ * `once` records it only if `actor` has not already reviewed (or voted on) these edits, checked
+ * in the same transaction as the write, so two simulated reactions can't both be recorded.
+ */
+type Once = { once?: boolean };
+const alreadyReacted = (kind: 'reviews' | 'votes', cr: ChangeRequest, actor: User) =>
+  list<{ userId: string; at: string }>(kind, cr.id).some((r) => r.userId === actor.id && r.at >= (cr.opsUpdatedAt ?? ''));
+
+export async function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string, opts: Once = {}) {
   if (!OPEN.includes(cr.status) && decision !== 'comment') throw new HttpError(409, `This request is ${cr.status}`);
   const roles = rolesFor(cr.ontologyId, actor.id);
   if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
@@ -432,6 +451,7 @@ export async function addReview(cr: ChangeRequest, actor: User, decision: Review
   const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
   // The review only counts if the request records it: both are saved or neither is.
   transaction(() => {
+    if (opts.once && alreadyReacted('reviews', cr, actor)) throw new HttpError(409, `${actor.name} has already reviewed these edits`);
     put('reviews', review, cr.id);
     cr.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
     try {
@@ -445,7 +465,7 @@ export async function addReview(cr: ChangeRequest, actor: User, decision: Review
   return advance(cr);
 }
 
-export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string) {
+export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, opts: Once = {}) {
   if (cr.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
   const g = governanceFor(cr);
   const roles = rolesFor(cr.ontologyId, actor.id);
@@ -453,6 +473,7 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
     throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
   const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
   transaction(() => {
+    if (opts.once && alreadyReacted('votes', cr, actor)) throw new HttpError(409, `${actor.name} has already voted on these edits`);
     put('votes', vote, cr.id);
     cr.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
     try {

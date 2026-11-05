@@ -11,7 +11,7 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { addReview, createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from '../src/services/changeRequests.js';
+import { addReview, createChangeRequest, getCR, merge, saveChangeRequest, triage, updateOps } from '../src/services/changeRequests.js';
 import { llm } from '../src/llm/provider.js';
 import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
@@ -1066,7 +1066,9 @@ describe('ninth review', () => {
     /** Move the checkout behind HEAD, so it shows whether an update ran. */
     const behind = async () => {
       const before = ontologyStore.head(p());
-      await upstream([addClass(`Lock${Date.now()}`, 'lock check')]);
+      // A label of its own each time: a shared one would make every later request fail lint.
+      const n = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      await upstream([addClass(`Lock${n}`, `lock check ${n}`)]);
       git('read-tree', '-u', '--reset', before);
     };
     const current = () => fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8') === ontologyStore.readAt(p(), 'HEAD');
@@ -1207,6 +1209,66 @@ describe('saves that race a slow step', () => {
     for (const id of commented) expect(getCR(id).timeline.some((e) => e.message.includes('while a member was reacting'))).toBe(true);
     // Members still reacted, on top of the comments.
     expect(reactions(ids)).toBeGreaterThan(before + commented.length);
+  });
+
+  it('an older re-check never replaces the results of a newer one made against a later draft', async () => {
+    // Used to: a re-check retried after losing its save to a newer one put its own results back
+    // because the edits were the same, though it had checked them against an older draft.
+    const { crId } = await proposeFork('Older re-check', 'OlderRecheck');
+    const original = ontologyStore.graphAt;
+    let moved = false;
+    // After the first re-check has read the draft: the draft moves (the class now exists upstream,
+    // so the edit can no longer be applied) and a second re-check runs to completion.
+    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      const g = await original.apply(this, args);
+      if (!moved) {
+        moved = true;
+        await upstream([addClass('OlderRecheck', 'older recheck added upstream')]);
+        await triage(getCR(crId));
+      }
+      return g;
+    };
+    try {
+      await triage(getCR(crId));
+    } finally {
+      ontologyStore.graphAt = original;
+    }
+    expect(moved).toBe(true);
+    const cr = getCR(crId);
+    // The newer check's result stands: against the current draft the edit can't be applied.
+    expect(cr.validation?.passed).toBe(false);
+    expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
+  });
+
+  it('two overlapping simulation steps record each member reaction once', async () => {
+    // Used to: whether a member had already reacted was checked before the slow LLM call, so a
+    // second step that ran meanwhile recorded the same member's reaction a second time.
+    const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
+    // Members only react to requests in review.
+    expect(getCR(crId).status).toBe('review');
+    const original = llm.json;
+    let nested = false;
+    llm.json = (async (...args: Parameters<typeof original>) => {
+      if (!nested && args[0].task === 'persona') {
+        nested = true;
+        await step(p().id, undefined, 50);
+      }
+      return original(...args);
+    }) as typeof original;
+    try {
+      await step(p().id, undefined, 50);
+    } finally {
+      llm.json = original;
+    }
+    expect(nested).toBe(true);
+    for (const cr of list<ChangeRequest>('changeRequests', p().id)) {
+      const since = cr.opsUpdatedAt ?? '';
+      for (const kind of ['reviews', 'votes'] as const) {
+        const by = new Map<string, number>();
+        for (const r of list<{ userId: string; at: string }>(kind, cr.id)) if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
+        expect([...by.values()].filter((n) => n > 1), `${kind} on #${cr.number}`).toEqual([]);
+      }
+    }
   });
 
   it('a review that cannot be saved leaves nothing behind', async () => {

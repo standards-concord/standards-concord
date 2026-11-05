@@ -705,6 +705,8 @@ export interface ChangeRequest {
   analysis?: AiAnalysis;
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
+  /** The working draft version its edits were last checked against (git commit). */
+  triagedHead?: string;
   mergedCommit?: string;
   /**
    * Where what a merge would publish looks like it names a private use case

@@ -300,7 +300,8 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       const g = governanceFor(cr);
       const roles = rolesFor(ontologyId, u.id);
       // A reaction takes a while (an LLM call), so it is recorded on the request as it is by then,
-      // and only if it is still about the same edits at the same stage.
+      // only if it is still about the same edits at the same stage, and only once per member
+      // (another step may have run meanwhile; addReview/addVote check that atomically).
       const latest = () => {
         const now = getCR(cr.id);
         return now.status === cr.status && now.opsUpdatedAt === cr.opsUpdatedAt ? now : undefined;
@@ -311,7 +312,7 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
           const r = await personaReaction(p, cr, compact);
           const now = latest();
           if (!now) continue;
-          await addVote(now, u, r.vote, r.comment);
+          await addVote(now, u, r.vote, r.comment, { once: true });
           actions++;
         } else {
           const reviewed = list<{ userId: string; at: string }>('reviews', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
@@ -319,7 +320,7 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
           const r = await personaReaction(p, cr, compact);
           const now = latest();
           if (!now) continue;
-          await addReview(now, u, r.decision, r.comment);
+          await addReview(now, u, r.decision, r.comment, { once: true });
           actions++;
         }
       } catch (err) {
