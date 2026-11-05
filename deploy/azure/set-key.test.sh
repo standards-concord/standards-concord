@@ -117,10 +117,15 @@ cat > "$work/srvbin/mv" <<EOF
 [[ -z "\${MV_FAIL:-}" ]] || exit 1
 exec "$(command -v mv)" "\$@"
 EOF
-# grep writes the existing keys into the new file, so record how private that file is right then.
+# grep writes the existing keys into the new file, so record how private that file is right then:
+# the mode of every file in the directory except keys.env itself. (Statting /dev/stdout instead
+# gave the descriptor's mode on macOS, not the file's.)
 cat > "$work/srvbin/grep" <<EOF
 #!/bin/bash
-{ stat -L -c '%a' /dev/stdout 2>/dev/null || stat -L -f '%Lp' /dev/stdout; } > "$work/srv-grep-mode"
+for f in "$work/srv"/* "$work/srv"/.[!.]*; do
+  [[ -f "\$f" && "\${f##*/}" != keys.env ]] || continue
+  { stat -c '%a' "\$f" 2>/dev/null || stat -f '%Lp' "\$f"; }
+done > "$work/srv-grep-mode"
 exec "$(command -v grep)" "\$@"
 EOF
 printf '#!/bin/sh\necho "$@" > "%s"\n' "$work/srv-systemctl" > "$work/srvbin/systemctl"
