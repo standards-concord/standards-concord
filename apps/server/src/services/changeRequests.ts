@@ -1201,10 +1201,12 @@ let sweeping = false;
  * their checks say what Concord runs now rather than "HermiT". Closed ones keep the report they
  * were decided on. Each is re-checked once: afterwards its report names sparq (or no verdict).
  *
- * One sweep at a time (the governance tick doesn't wait for the last one, and a sweep can take
- * longer than a tick). Each request is read again just before its check, and the result is only
- * written if, under the lock, the request is still the revision that was checked: one merged,
- * closed or changed meanwhile keeps its newer report. Returns how many were written.
+ * One sweep at a time (a sweep can take longer than the minute between ticks). Each request is
+ * read again just before its check, and the result is only written if, under the lock, the
+ * request is still open with the very report that was selected: one merged, closed or checked
+ * again meanwhile keeps its newer report. Other writes don't stop it (the governance tick saves
+ * requests it doesn't move on, so a revision check would lose a slow re-check every time).
+ * Returns how many were written.
  * `beforeCheck` (tests only) runs after a request is read and before it is checked.
  */
 export async function recheckRetiredReasonerReports(opts: { beforeCheck?: (cr: ChangeRequest) => Promise<void> } = {}): Promise<number> {
@@ -1215,10 +1217,10 @@ export async function recheckRetiredReasonerReports(opts: { beforeCheck?: (cr: C
     for (const { id } of (await list<ChangeRequest>('changeRequests')).filter(checkedByRetiredReasoner)) {
       const cr = await get<ChangeRequest>('changeRequests', id);
       if (!cr || !checkedByRetiredReasoner(cr)) continue;
-      const rev = cr.rev ?? 0;
+      const selected = JSON.stringify(cr.validation);
       await opts.beforeCheck?.(cr);
       let current = false;
-      await triage(cr, { analyse: false, onlyIf: (latest) => (current = (latest.rev ?? 0) === rev && checkedByRetiredReasoner(latest)) });
+      await triage(cr, { analyse: false, onlyIf: (latest) => (current = checkedByRetiredReasoner(latest) && JSON.stringify(latest.validation) === selected) });
       if (current) written++;
     }
     return written;
@@ -1227,8 +1229,23 @@ export async function recheckRetiredReasonerReports(opts: { beforeCheck?: (cr: C
   }
 }
 
-/** Periodic sweep: time-based transitions (review periods ending, votes closing). */
-export async function tick(): Promise<number> {
+let ticking: Promise<number> | undefined;
+let queued: Promise<number> | undefined;
+
+/**
+ * Periodic sweep: time-based transitions (review periods ending, votes closing). One runs at a
+ * time: the timer doesn't wait for the last tick, and a sweep can take longer than a minute. A
+ * call while one is running waits for it and then runs one more, shared by everyone who called
+ * meanwhile, so a caller that just moved the clock still gets a tick that saw the new time.
+ */
+export function tick(): Promise<number> {
+  const start = () => (ticking = tickOnce().finally(() => { ticking = undefined; }));
+  if (!ticking) return start();
+  const after = () => { queued = undefined; return start(); };
+  return (queued ??= ticking.then(after, after));
+}
+
+async function tickOnce(): Promise<number> {
   await recheckRetiredReasonerReports();
   let changed = 0;
   for (const cr of (await list<ChangeRequest>('changeRequests')).filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {

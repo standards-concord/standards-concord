@@ -2530,6 +2530,49 @@ describe('reports from the retired HermiT reasoner', () => {
     expect((await getCR(open)).validation?.reasoner.engine).toBe('sparq');
   });
 
+  // Used to go wrong: the re-check was only written if the request was still at the revision it
+  // was read at, but the governance tick saves requests it doesn't move on, so a re-check slower
+  // than a tick was thrown away every time and the HermiT report never went.
+  it('keeps a slow re-check when the request is saved meanwhile without changing', async () => {
+    const editor = await login('editor', 'Editor Kit');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Saved during its check',
+      description: 'Checked before the move to sparq.',
+      kind: 'feature',
+      ops: [{ op: 'addClass', localName: `Slow${Math.random().toString(36).slice(2, 8)}`, label: 'saved during its check', definition: 'A class added to test a slow re-check.' }],
+      submit: true,
+    });
+    const cr = await getCR(res.body.id);
+    await put('changeRequests', { ...cr, validation: { ...cr.validation!, reasoner: { ...cr.validation!.reasoner, engine: 'hermit' } } }, demoId);
+    await crsMod.recheckRetiredReasonerReports({
+      beforeCheck: async (c) => {
+        if (c.id !== cr.id) return;
+        const rev = (await getCR(cr.id)).rev;
+        await crsMod.advance(await getCR(cr.id)); // what an overlapping tick does
+        expect((await getCR(cr.id)).rev).not.toBe(rev);
+      },
+    });
+    expect((await getCR(cr.id)).validation?.reasoner.engine).toBe('sparq');
+  });
+
+  it('runs one governance tick at a time', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    // One running and one queued behind it, however many callers there are meanwhile.
+    const a = crsMod.tick();
+    const b = crsMod.tick();
+    const c = crsMod.tick();
+    expect(b).not.toBe(a);
+    expect(c).toBe(b);
+    let aDone = false;
+    void a.then(() => { aDone = true; });
+    // The queued tick runs once the running one has finished.
+    await b.then(() => expect(aDone).toBe(true));
+    const next = crsMod.tick();
+    expect(next).not.toBe(b);
+    await next;
+  });
+
   // Used to go wrong: the governance tick runs every minute without waiting for the last one, so
   // two sweeps could both re-check the same requests.
   it('runs one sweep at a time', async () => {
