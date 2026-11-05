@@ -2,6 +2,7 @@
  * Boots a fresh, offline Concord (API + web app) for a recording, the same way the
  * Playwright tests do, plus a small static server for the sample app and the terminal.
  */
+import { pathToFileURL } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
@@ -32,7 +33,7 @@ export interface Concord {
   stop(): void;
 }
 
-export async function startConcord(opts: { apiPort: number; webPort: number; mode: 'dev' | 'preview'; env?: Record<string, string> }): Promise<Concord> {
+export async function startConcord(opts: { apiPort: number; webPort: number; mode: 'dev' | 'preview'; epoch: string; env?: Record<string, string> }): Promise<Concord> {
   const dataDir = path.join(os.tmpdir(), `concord-walkthrough-${process.pid}`);
   const procs: ChildProcess[] = [];
   const logs: string[] = ['', ''];
@@ -56,6 +57,12 @@ export async function startConcord(opts: { apiPort: number; webPort: number; mod
     SOLID_SERVER_URL: '',
     GOOGLE_CLIENT_ID: '',
     GITHUB_CLIENT_ID: '',
+    // No lookups on the internet: the FAIR "resolvable IRI" checks show as not checked.
+    FAIR_RESOLVE: '0',
+    // The same dates and ids on every recording (see deterministic.mjs).
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(import.meta.dirname, 'deterministic.mjs')).href}`.trim(),
+    WALKTHROUGH_EPOCH: opts.epoch,
+    WALKTHROUGH_SEED: 'concord-walkthrough',
     ...opts.env,
   });
   if (opts.mode === 'preview' && !existsSync(path.join(ROOT, 'apps/web/dist/index.html'))) throw new Error('No production build: run `pnpm --filter @concord/web build` first, or use --web dev');
