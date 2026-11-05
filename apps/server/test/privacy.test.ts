@@ -13,7 +13,7 @@ import { clock } from '../src/clock.js';
 import { acquireProcessLock } from '../src/processLock.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { completingRelease, derivedStatus } from '../src/services/traceability.js';
-import { createUseCase, getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, validationForViewer, withConsentLock, withdrawUseCase } from '../src/services/useCases.js';
+import { addLink, createUseCase, declineAnonymised, getUseCase, heuristicAnonymise, proposeAnonymised, publishAnonymised, removeLink, identifyingWarnings, restrictDraft, synthesise, updateUseCase, validationForViewer, withConsentLock, withdrawUseCase } from '../src/services/useCases.js';
 import { requirementsFor, toPublishedRequirements } from '../src/public/requirements.js';
 
 /**
@@ -1416,5 +1416,49 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
     } finally {
       fs.writeFileSync(snap, original);
     }
+  });
+});
+
+describe('async store review: writes read the record they change inside their transaction', () => {
+  const publicCase = async (who: string, name: string) => {
+    const agent = await login('contributor', who);
+    return { agent, id: await useCaseVia(agent, name, 'public') };
+  };
+
+  // The link routes read the use case before the link's transaction, so a link edit saved that copy's
+  // visibility back over a change the author made in between (from public to group, here).
+  it('a link added or removed from a copy read before the author changed who may see it keeps their choice', async () => {
+    const { agent, id } = await publicCase('Link Race Author', 'Link race case');
+    const author = await userNamed('Link Race Author');
+    const stale = await getUseCase(id);
+    expect((await agent.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'group' })).status).toBe(200);
+    await addLink(stale, author, { type: 'url', url: 'https://example.org/link-race', relation: 'related' });
+    let now = (await get<UseCase>('useCases', id))!;
+    expect(now.visibility).toBe('group');
+    expect(now.links?.map((l) => l.url)).toContain('https://example.org/link-race');
+    expect((await agent.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'public' })).status).toBe(200);
+    await removeLink({ ...stale, visibility: 'group' }, author, 'https://example.org/link-race');
+    now = (await get<UseCase>('useCases', id))!;
+    expect(now.visibility).toBe('public');
+    expect(now.links?.map((l) => l.url) ?? []).not.toContain('https://example.org/link-race');
+  });
+
+  // Publishing checked the copy the route read before the transaction, so two requests at once both saw
+  // "proposed" and each published a public copy; only the last one stayed tracked for withdrawal.
+  it('two publications of one anonymised draft at once make one public copy, and a stale decline is refused', async () => {
+    const author = await login('contributor', 'Anon Race Author');
+    const id = await useCaseVia(author, 'Anon race case', 'private');
+    const user = await userNamed('Anon Race Author');
+    await proposeAnonymised(await getUseCase(id), user);
+    const proposed = await getUseCase(id);
+    expect(proposed.anonymisation?.status).toBe('proposed');
+    const results = await Promise.allSettled([publishAnonymised(structuredClone(proposed), user), publishAnonymised(structuredClone(proposed), user)]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find((r) => r.status === 'rejected')).toMatchObject({ reason: { status: 409 } });
+    const copies = (await listDocs<UseCase>('useCases', demoId)).filter((u) => u.anonymous && u.authorId === user.id);
+    expect(copies).toHaveLength(1);
+    expect((await getUseCase(id)).anonymisation?.publishedId).toBe(copies[0].id);
+    await expect(declineAnonymised(structuredClone(proposed), user)).rejects.toMatchObject({ status: 409 });
+    expect((await getUseCase(id)).anonymisation?.status).toBe('published');
   });
 });

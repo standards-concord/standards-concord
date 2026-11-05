@@ -430,10 +430,7 @@ async function mirrorToPod(u: UseCase) {
   schema:text """${esc(JSON.stringify({ sections: u.sections, competencyQuestions: u.competencyQuestions, terms: u.terms }))}""" .
 `;
     const stored = await solid.write(u.authorId, `use-cases/${u.id}.ttl`, turtle);
-    if (stored.url && u.podUrl !== stored.url) {
-      const fresh = await get<UseCase>('useCases', u.id);
-      if (fresh) await put('useCases', { ...fresh, podUrl: stored.url }, u.ontologyId);
-    }
+    if (stored.url && u.podUrl !== stored.url) await patchStored(u.id, { podUrl: stored.url });
   } catch (err) {
     console.warn(`[use case] could not copy ${u.id} to the pod: ${(err as Error).message}`);
   }
@@ -625,8 +622,23 @@ export async function triageUseCase(u: UseCase, actor: User, status: UseCaseStat
   return u;
 }); }
 
+/**
+ * The use case as stored now. Writes that start from a record the caller read earlier read it again
+ * inside their transaction, so nothing saved in between (who may see it, a withdrawal) is written over.
+ */
+const current = (ref: UseCase | string) => getUseCase(typeof ref === 'string' ? ref : ref.id);
+
+/** Set fields on the use case as stored now, in one transaction: for what is learnt after network work (pod locations). */
+async function patchStored(id: string, fields: Partial<UseCase>) {
+  await transaction(async () => {
+    const fresh = await get<UseCase>('useCases', id);
+    if (fresh) await put('useCases', { ...fresh, ...fields }, fresh.ontologyId);
+  });
+}
+
 /** Add a related link (use case, meeting, change request or URL). */
-export async function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, 'at' | 'addedBy'>) { return transaction(async () => {
+export async function addLink(ref: UseCase | string, actor: User, link: Omit<UseCaseLink, 'at' | 'addedBy'>) { return transaction(async () => {
+  const u = await current(ref);
   if (!await canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (!isAuthor(u, actor) && !await isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can link use cases');
   if (!['use-case', 'meeting', 'change-request', 'url'].includes(link.type)) throw new HttpError(400, 'Unknown link type');
@@ -648,7 +660,8 @@ export async function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, '
   return await saveUseCase(u);
 }); }
 
-export async function removeLink(u: UseCase, actor: User, target: string) { return transaction(async () => {
+export async function removeLink(ref: UseCase | string, actor: User, target: string) { return transaction(async () => {
+  const u = await current(ref);
   if (!await canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (!isAuthor(u, actor) && !await isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can unlink use cases');
   u.links = (u.links ?? []).filter((l) => (l.id ?? l.url) !== target);
@@ -931,7 +944,9 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
  * edits) as a new public use case with no name attached. The client sends the
  * whole draft it showed; the server cuts it to the same allowlist.
  */
-export async function publishAnonymised(u: UseCase, actor: User, edited?: Partial<AnonymisedDraft>): Promise<{ original: UseCase; published: UseCase }> { return transaction(async () => {
+export async function publishAnonymised(ref: UseCase | string, actor: User, edited?: Partial<AnonymisedDraft>): Promise<{ original: UseCase; published: UseCase }> { return transaction(async () => {
+  // Checked on the record as stored now: of two publications at once, the second finds it published.
+  const u = await current(ref);
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (u.visibility !== 'private' || u.anonymous) throw new HttpError(409, 'Only private use cases get an anonymised version');
   const draft = u.anonymisation?.draft;
@@ -961,7 +976,8 @@ export async function publishAnonymised(u: UseCase, actor: User, edited?: Partia
   return { original: u, published };
 }); }
 
-export async function declineAnonymised(u: UseCase, actor: User) { return transaction(async () => {
+export async function declineAnonymised(ref: UseCase | string, actor: User) { return transaction(async () => {
+  const u = await current(ref);
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (!u.anonymisation) throw new HttpError(409, 'There is no anonymised version to decline');
   if (u.anonymisation.status === 'published') throw new HttpError(409, 'The anonymised version is already published; withdraw it instead');
@@ -1153,10 +1169,11 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
     u.transcriptUrl = storage.url;
     // Other changes (a withdrawal, a newer turn) may have been saved while the pod write ran: only
     // the transcript's location is written, onto the records as they are now.
-    const freshCase = await get<UseCase>('useCases', u.id);
-    if (freshCase && freshCase.transcriptUrl !== storage.url) await put('useCases', { ...freshCase, transcriptUrl: storage.url }, freshCase.ontologyId);
-    const freshSession = await get<InterviewSession>('interviews', session.id);
-    if (freshSession) await put('interviews', { ...freshSession, storage }, freshSession.ontologyId);
+    await patchStored(u.id, { transcriptUrl: storage.url });
+    await transaction(async () => {
+      const freshSession = await get<InterviewSession>('interviews', session.id);
+      if (freshSession) await put('interviews', { ...freshSession, storage }, freshSession.ontologyId);
+    });
   } catch (err) {
     console.warn(`[interview] could not store transcript: ${(err as Error).message}`);
   }

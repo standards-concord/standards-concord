@@ -367,12 +367,12 @@ export function apiRouter(): Router {
   r.post('/use-cases/:id/links', async (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};
-    await useCases.addLink(await useCases.getUseCaseFor(String(req.params.id), user), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
+    await useCases.addLink(String(req.params.id), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
     res.json(await useCaseDetail(String(req.params.id), user));
   });
   r.delete('/use-cases/:id/links/:target', async (req, res) => {
     const user = requireUser(req);
-    await useCases.removeLink(await useCases.getUseCaseFor(String(req.params.id), user), user, String(req.params.target));
+    await useCases.removeLink(String(req.params.id), user, String(req.params.target));
     res.json(await useCaseDetail(String(req.params.id), user));
   });
   r.post('/use-cases/:id/anonymise', async (req, res) => {
@@ -382,12 +382,12 @@ export function apiRouter(): Router {
   });
   r.post('/use-cases/:id/anonymise/publish', async (req, res) => {
     const user = requireUser(req);
-    const out = await useCases.publishAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.draft);
+    const out = await useCases.publishAnonymised(String(req.params.id), user, req.body?.draft);
     res.json({ original: await useCaseDetail(out.original.id, user), published: await useCaseDetail(out.published.id, user) });
   });
   r.post('/use-cases/:id/anonymise/decline', async (req, res) => {
     const user = requireUser(req);
-    await useCases.declineAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user);
+    await useCases.declineAnonymised(String(req.params.id), user);
     res.json(await useCaseDetail(String(req.params.id), user));
   });
 
