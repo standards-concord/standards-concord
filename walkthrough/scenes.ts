@@ -751,8 +751,10 @@ async function landChange(c: Ctx, crId: string) {
     if (['merged', 'released', 'accepted'].includes(s)) break;
     for (const p of personas) {
       await as(p.id);
-      await api.post(`${c.hub}/api/change-requests/${crId}/reviews`, { data: { decision: 'approve' } }).catch(() => {});
-      await api.post(`${c.hub}/api/change-requests/${crId}/votes`, { data: { choice: 'yes' } }).catch(() => {});
+      // Decisions name the review round they were made on.
+      const r = ((await cr()).round as number | undefined) ?? 1;
+      await api.post(`${c.hub}/api/change-requests/${crId}/reviews`, { data: { decision: 'approve', round: r } }).catch(() => {});
+      await api.post(`${c.hub}/api/change-requests/${crId}/votes`, { data: { choice: 'yes', round: r } }).catch(() => {});
     }
     await api.post(`${c.hub}/api/simulation/clock`, { data: { advanceDays: 8 } }).catch(() => {});
     const steward = personas.find((p) => p.roles.includes('steward')) ?? personas[0];

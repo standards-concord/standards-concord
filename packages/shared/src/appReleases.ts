@@ -53,6 +53,32 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.27.0',
+    date: '2026-11-05',
+    title: 'Review rounds: Resubmit asks reviewers again',
+    pr: 47,
+    changes: [
+      {
+        id: 'review-rounds',
+        type: 'feat',
+        title: 'Resubmitting or changing the edits starts a new review round',
+        detail:
+          'Approvals and requests for changes from an earlier round are marked as such and no longer count, and reviewers are asked to look again. Objections, and votes against, stand until the person changes them. Reviewers can approve straight from Needs work.',
+        roles: ['steward', 'member'],
+        to: '{o}/changes',
+        ask: 'When a change request came back to you after being resubmitted or edited, was it clear that you needed to review it again?',
+      },
+      {
+        id: 'resubmit-works',
+        type: 'fix',
+        title: 'Resubmit no longer bounces straight back to Needs work',
+        detail: 'After a reviewer asked for changes, Resubmit used to do nothing because the old request for changes still counted. Now the request goes back to review.',
+        roles: ['contributor'],
+        to: '{o}/changes',
+      },
+    ],
+  },
+  {
     version: '0.26.1',
     date: '2026-11-05',
     title: 'Links that look like buttons take one Tab',
