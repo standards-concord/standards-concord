@@ -71,6 +71,23 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.17.1',
+    date: '2026-11-05',
+    title: 'Every app on the Connect page has its logo',
+    pr: 65,
+    changes: [
+      {
+        id: 'connect-agent-logos',
+        type: 'fix',
+        title: 'Every app on the Connect page shows its own logo',
+        detail:
+          'ChatGPT, Claude Code, Codex, Cursor and VS Code now show their real logos beside Claude’s, instead of lettered placeholders, so you can spot your app at a glance.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+    ],
+  },
+  {
     version: '0.17.0',
     date: '2026-11-05',
     title: 'A privacy policy',
@@ -99,7 +116,7 @@ export const APP_RELEASES: AppRelease[] = [
         type: 'feat',
         title: 'Optionally post a short public summary of your feedback',
         detail:
-          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers. You can withdraw it from the thank-you screen right after sending, or email the alpha team later.',
         roles: [],
         to: '/feedback',
         ask: 'Was it clear what would be made public, and would you tick the box?',

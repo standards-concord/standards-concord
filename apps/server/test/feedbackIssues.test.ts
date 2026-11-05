@@ -190,7 +190,7 @@ const TRIAGE_TOKEN = 'triage-token-not-real-but-long-enough-0123456789';
 const LEASE_MS = 2 * 60_000;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await new Promise<void>((r) => stub.listen(0, '127.0.0.1', r));
   config.feedbackIssues.apiUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}`;
 });
@@ -199,7 +199,7 @@ afterAll(() => {
   setNow();
   stub.close();
 });
-beforeEach(() => {
+beforeEach(async () => {
   issues.length = 0;
   comments.length = 0;
   failDeletes = 0;
@@ -222,8 +222,8 @@ beforeEach(() => {
   t += 10 * HOUR;
   setNow(() => t);
   resetFeedbackIssueState();
-  for (const p of list<Publication>('feedbackPublications')) remove('feedbackPublications', p.id);
-  for (const k of list<{ id: string }>('kv')) if (k.id.startsWith('feedback-issues:')) remove('kv', k.id);
+  for (const p of await list<Publication>('feedbackPublications')) await remove('feedbackPublications', p.id);
+  for (const k of await list<{ id: string }>('kv')) if (k.id.startsWith('feedback-issues:')) await remove('kv', k.id);
 });
 
 let seq = 0;
@@ -236,22 +236,22 @@ const later = async (ms: number) => {
   t += ms;
   await processOutstanding();
 };
-const stateOf = (res: request.Response) => publicationFor(res.body.id)?.state;
+const stateOf = async (res: request.Response) => (await publicationFor(res.body.id))?.state;
 const triage = (issue: number, body: Record<string, unknown> = {}, token = TRIAGE_TOKEN) =>
   request(app)
     .post(`/api/feedback/triage/${issue}`)
     .set('Authorization', `Bearer ${token}`)
     .send({ kind: 'ux', size: 'size:small', comment: 'Likely location: apps/web/src/pages/Diff.tsx. Suggested next step: add colours.', ...body });
 /** An administrator's decision, made on the record as it is now. */
-const resolve = (id: string, a: AdminAction) => resolvePublication(id, a, attentionRef(publicationFor(id)!));
-const adopt = (res: request.Response, issue: number) => resolve(res.body.id, { action: 'adopt', issue });
+const resolve = async (id: string, a: AdminAction) => resolvePublication(id, a, attentionRef((await publicationFor(id))!));
+const adopt = async (res: request.Response, issue: number) => await resolve(res.body.id, { action: 'adopt', issue });
 function gate() {
   let open!: (status: number) => void;
   const hold = new Promise<number>((r) => (open = r));
   return { hold, open };
 }
-const until = async (cond: () => boolean) => {
-  for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+const until = async (cond: () => boolean | Promise<boolean>) => {
+  for (let i = 0; i < 200 && !(await cond()); i++) await new Promise((r) => setTimeout(r, 10));
 };
 
 describe('the public summary text', () => {
@@ -288,9 +288,9 @@ describe('opting in', () => {
   it('refuses to post when the option is switched off, before storing anything', async () => {
     config.feedbackIssues.token = undefined;
     expect((await request(app).get('/api/feedback/publishing')).body.enabled).toBe(false);
-    const before = list('feedback').length;
+    const before = (await list('feedback')).length;
     expect((await submit('The diff view needs colours')).status).toBe(409);
-    expect(list('feedback').length).toBe(before);
+    expect((await list('feedback')).length).toBe(before);
   });
 
   it('refuses a summary that is not exactly what the preview showed', async () => {
@@ -336,7 +336,7 @@ describe('delivery', () => {
   it('keeps the cap in the database, per repository', async () => {
     config.feedbackIssues.perHour = 1;
     await submit('Cap shared one');
-    expect(get<{ value: number[] }>('kv', `feedback-issues:rate:${REPO}`)?.value).toHaveLength(1);
+    expect((await get<{ value: number[] }>('kv', `feedback-issues:rate:${REPO}`))?.value).toHaveLength(1);
     resetFeedbackIssueState(); // as if another process
     await submit('Cap shared two');
     expect(posts).toBe(1);
@@ -365,27 +365,27 @@ describe('delivery', () => {
   it('backs off exponentially on 429s that give no time', async () => {
     next.push({ status: 429 }, { status: 429 }, { status: 429 });
     const res = await submit('Headerless limits');
-    const pause = () => get<{ value: { until: number; streak: number } }>('kv', `feedback-issues:pause:${REPO}`)!.value;
-    expect(pause()).toEqual({ until: t + 60_000, streak: 1 });
+    const pause = async () => (await get<{ value: { until: number; streak: number } }>('kv', `feedback-issues:pause:${REPO}`))!.value;
+    expect(await pause()).toEqual({ until: t + 60_000, streak: 1 });
     await later(60_000);
-    expect(pause()).toEqual({ until: t + 2 * 60_000, streak: 2 });
+    expect(await pause()).toEqual({ until: t + 2 * 60_000, streak: 2 });
     await later(2 * 60_000);
-    expect(pause()).toEqual({ until: t + 4 * 60_000, streak: 3 });
+    expect(await pause()).toEqual({ until: t + 4 * 60_000, streak: 3 });
     await later(4 * 60_000);
-    expect(stateOf(res)).toBe('filed');
-    expect(pause().streak).toBe(0);
+    expect(await stateOf(res)).toBe('filed');
+    expect((await pause()).streak).toBe(0);
   });
 
   it('checks the pause before every request, including listing candidates', async () => {
     next.push({ drop: true });
     const res = await submit('Paused search');
-    expect(stateOf(res)).toBe('needs-admin');
-    put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + 3 * HOUR, streak: 1 } });
+    expect(await stateOf(res)).toBe('needs-admin');
+    await put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + 3 * HOUR, streak: 1 } });
     await resolve(res.body.id, { action: 'check' });
     requests.length = 0;
     await later(HOUR);
     expect(requests).toEqual([]);
-    expect(stateOf(res)).toBe('unknown');
+    expect(await stateOf(res)).toBe('unknown');
   });
 
   // An issue used to be adopted automatically when a search found its marker, so a copied marker could redirect it.
@@ -393,14 +393,14 @@ describe('delivery', () => {
     next.push({ drop: true });
     const res = await submit('Lost answer');
     expect(res.body.publication.state).toBe('needs-admin');
-    expect(publicationFor(res.body.id)).toMatchObject({ candidates: [{ number: 1 }] });
-    expect(publicationFor(res.body.id)?.issue).toBeUndefined();
+    expect(await publicationFor(res.body.id)).toMatchObject({ candidates: [{ number: 1 }] });
+    expect((await publicationFor(res.body.id))?.issue).toBeUndefined();
     expect(requests.some((r) => r.includes('labels='))).toBe(false);
     await later(7 * HOUR);
     expect(posts).toBe(1);
-    expect(stateOf(res)).toBe('needs-admin');
+    expect(await stateOf(res)).toBe('needs-admin');
     await adopt(res, 1);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'filed', issue: { number: 1 } });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'filed', issue: { number: 1 } });
   });
 
   it('lists only the token account’s recent issues as candidates, and a copied marker changes nothing by itself', async () => {
@@ -409,17 +409,17 @@ describe('delivery', () => {
     const mine = issues[0];
     // The original loses its marker; someone else copies it; the bot's account has another issue carrying the marker.
     mine.body = mine.body.replace(/<!--.*?-->/, '');
-    issues.push({ ...mine, number: 2, creator: 'someone-else', body: issueBody({ pubId: publicationFor(res.body.id)!.pubId, summary: 'x' }) });
-    issues.push({ ...mine, number: 3, title: 'Unrelated', body: `Different text ${issueBody({ pubId: publicationFor(res.body.id)!.pubId, summary: 'y' })}` });
+    issues.push({ ...mine, number: 2, creator: 'someone-else', body: issueBody({ pubId: (await publicationFor(res.body.id))!.pubId, summary: 'x' }) });
+    issues.push({ ...mine, number: 3, title: 'Unrelated', body: `Different text ${issueBody({ pubId: (await publicationFor(res.body.id))!.pubId, summary: 'y' })}` });
     await resolve(res.body.id, { action: 'check' });
     await processPublication(res.body.id);
-    expect(publicationFor(res.body.id)?.candidates?.map((c) => c.number).sort()).toEqual([1, 3]);
+    expect((await publicationFor(res.body.id))?.candidates?.map((c) => c.number).sort()).toEqual([1, 3]);
     // The tester withdraws: nothing is touched until an administrator says which issue it is.
     expect((await withdraw(res)).body.state).toBe('withdrawing');
     expect(issues.every((i) => i.state === 'open')).toBe(true);
     await adopt(res, 1);
     await processPublication(res.body.id);
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
     expect(issues.map((i) => i.state)).toEqual(['closed', 'open', 'open']);
   });
 
@@ -427,10 +427,10 @@ describe('delivery', () => {
   it('treats a 403 secondary rate limit as a rate limit and pauses the queue', async () => {
     next.push({ status: 403, body: JSON.stringify({ message: 'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.' }) });
     const res = await submit('Secondary rate limit');
-    expect(get<{ value: { until: number; streak: number } }>('kv', `feedback-issues:pause:${REPO}`)?.value).toEqual({ until: t + 60_000, streak: 1 });
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'queued', attempts: 0 });
+    expect((await get<{ value: { until: number; streak: number } }>('kv', `feedback-issues:pause:${REPO}`))?.value).toEqual({ until: t + 60_000, streak: 1 });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'queued', attempts: 0 });
     await later(60_000);
-    expect(stateOf(res)).toBe('filed');
+    expect(await stateOf(res)).toBe('filed');
   });
 
   it('posts again only when an administrator says none of the candidates is ours', async () => {
@@ -439,22 +439,22 @@ describe('delivery', () => {
     issues.length = 0; // GitHub didn't keep it after all
     await resolve(res.body.id, { action: 'check' });
     await processPublication(res.body.id);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'needs-admin', candidates: [] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'needs-admin', candidates: [] });
     expect(posts).toBe(1);
     await resolve(res.body.id, { action: 'repost' });
     await processPublication(res.body.id);
-    expect(stateOf(res)).toBe('filed');
+    expect(await stateOf(res)).toBe('filed');
     expect(posts).toBe(2);
   });
 
   it('asks an administrator about a send whose worker vanished, once its claim runs out', async () => {
     const res = await submit('Crashed mid-send');
-    const pub = publicationFor(res.body.id)!;
-    put('feedbackPublications', { ...pub, state: 'sending', issue: undefined, claim: 'gone', claimUntil: t + 60_000 });
+    const pub = (await publicationFor(res.body.id))!;
+    await put('feedbackPublications', { ...pub, state: 'sending', issue: undefined, claim: 'gone', claimUntil: t + 60_000 });
     await processOutstanding();
-    expect(stateOf(res)).toBe('sending');
+    expect(await stateOf(res)).toBe('sending');
     await later(HOUR);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'needs-admin', candidates: [{ number: 1 }] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'needs-admin', candidates: [{ number: 1 }] });
     expect(posts).toBe(1);
   });
 
@@ -462,11 +462,11 @@ describe('delivery', () => {
     for (let i = 0; i < MAX_ATTEMPTS; i++) next.push({ status: 422 });
     const res = await submit('Keeps failing');
     for (let i = 1; i < MAX_ATTEMPTS; i++) await later(7 * HOUR);
-    expect(stateOf(res)).toBe('needs-admin');
+    expect(await stateOf(res)).toBe('needs-admin');
     expect(posts).toBe(MAX_ATTEMPTS);
     await resolve(res.body.id, { action: 'check' });
     await processPublication(res.body.id);
-    expect(stateOf(res)).toBe('filed');
+    expect(await stateOf(res)).toBe('filed');
   });
 
   it('keeps the destination the tester agreed to, even if the configuration changes', async () => {
@@ -485,11 +485,11 @@ describe('delivery', () => {
     config.feedbackIssues.perHour = 1;
     await submit('Fills the cap again');
     const res = await submit('Deleted before posting');
-    remove('feedback', res.body.id);
+    await remove('feedback', res.body.id);
     await later(2 * HOUR);
     expect(issues).toHaveLength(1);
-    expect(get('feedback', res.body.id)).toBeUndefined();
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await get('feedback', res.body.id)).toBeUndefined();
+    expect(await stateOf(res)).toBe('withdrawn');
   });
 
   // Only filed records used to be withdrawn when their feedback was deleted, so a needs-admin issue stayed up;
@@ -497,16 +497,16 @@ describe('delivery', () => {
   it('withdraws a summary waiting for an administrator when its feedback is deleted, and keeps it on the admin list', async () => {
     next.push({ drop: true });
     const res = await submit('Deleted while waiting for an admin');
-    expect(stateOf(res)).toBe('needs-admin');
-    remove('feedback', res.body.id);
+    expect(await stateOf(res)).toBe('needs-admin');
+    await remove('feedback', res.body.id);
     await later(60_000);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true });
-    expect(publicationsNeedingAdmin()).toEqual([expect.objectContaining({ id: res.body.id, state: 'withdrawing', feedbackDeleted: true, candidates: [expect.objectContaining({ number: 1 })] })]);
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true });
+    expect(await publicationsNeedingAdmin()).toEqual([expect.objectContaining({ id: res.body.id, state: 'withdrawing', feedbackDeleted: true, candidates: [expect.objectContaining({ number: 1 })] })]);
     await adopt(res, 1);
     await processPublication(res.body.id);
     expect(issues[0]).toMatchObject({ state: 'closed', title: 'Withdrawn feedback' });
-    expect(stateOf(res)).toBe('withdrawn');
-    expect(publicationsNeedingAdmin()).toEqual([]);
+    expect(await stateOf(res)).toBe('withdrawn');
+    expect(await publicationsNeedingAdmin()).toEqual([]);
     expect(posts).toBe(1);
   });
 
@@ -517,10 +517,10 @@ describe('delivery', () => {
 
   it('takes back a posted summary when its feedback is deleted', async () => {
     const res = await submit('Deleted after posting');
-    remove('feedback', res.body.id);
+    await remove('feedback', res.body.id);
     await later(60_000);
     expect(issues[0].state).toBe('closed');
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
   });
 
   it('never logs the token', async () => {
@@ -573,7 +573,7 @@ describe('withdrawing', () => {
       { id: 3, repo: REPO, issue: 1, body: `Posted with the same account by hand.${FOOTER}`, user: BOT },
       { id: 4, repo: REPO, issue: 1, body: `My manual review quotes this signature: _Generated by [Claude Code](https://claude.ai/code)_`, user: 'jeswr' },
     );
-    expect(publicationFor(res.body.id)?.comments).toEqual([mine]);
+    expect((await publicationFor(res.body.id))?.comments).toEqual([mine]);
     expect((await withdraw(res)).body.state).toBe('withdrawn');
     expect(comments.map((c) => c.id)).toEqual([2, 3, 4]);
     expect(requests.some((r) => r.startsWith('GET') && r.includes('/comments'))).toBe(false);
@@ -590,7 +590,7 @@ describe('withdrawing', () => {
     g.open(201);
     expect((await posting).status).toBe(409); // withdrawn while commenting: no labels
     await later(5 * 60_000);
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
     expect(comments).toEqual([]);
   });
 
@@ -598,11 +598,11 @@ describe('withdrawing', () => {
     const res = await submit('Unknown comment');
     nextComment.push({ drop: true });
     expect((await triage(1)).status).toBe(502);
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
-    expect(publicationFor(res.body.id)?.comments ?? []).toEqual([]);
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.comments ?? []).toEqual([]);
     expect((await withdraw(res)).body.state).toBe('withdrawing');
     expect(issues[0].state).toBe('closed');
-    expect(publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, lastError: expect.stringMatching(/triage comment may have been posted on issue #1/) });
+    expect(await publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, lastError: expect.stringMatching(/triage comment may have been posted on issue #1/) });
     expect(comments).toHaveLength(1); // never deleted by guesswork
     expect((await resolve(res.body.id, { action: 'confirm' })).state).toBe('withdrawn');
   });
@@ -611,12 +611,12 @@ describe('withdrawing', () => {
     next.push({ drop: true });
     const res = await submit('Withdrawn while unknown');
     expect((await withdraw(res)).body.state).toBe('withdrawing');
-    expect(publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, candidates: [{ number: 1 }] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, candidates: [{ number: 1 }] });
     expect(issues[0].state).toBe('open');
     await adopt(res, 1);
     await processPublication(res.body.id);
     expect(issues[0].state).toBe('closed');
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
     expect(posts).toBe(1);
   });
 
@@ -627,7 +627,7 @@ describe('withdrawing', () => {
     const res = await submit('Withdrawn mid-send');
     expect(res.body.publication.state).toBe('sending');
     const w = withdraw(res).then((r) => r);
-    await until(() => stateOf(res) === 'withdrawing');
+    await until(async () => await stateOf(res) === 'withdrawing');
     g.open(201);
     expect((await w).body.state).toBe('withdrawn');
     expect(issues[0]).toMatchObject({ state: 'closed', title: 'Withdrawn feedback' });
@@ -639,15 +639,15 @@ describe('withdrawing', () => {
     next.push({ hold: g.hold });
     const sending = submit('Stalled worker').then((r) => r);
     await until(() => posts === 1);
-    const fid = list<Publication>('feedbackPublications').find((p) => p.summary === 'Stalled worker')!.id;
+    const fid = (await list<Publication>('feedbackPublications')).find((p) => p.summary === 'Stalled worker')!.id;
     // Worker A is stuck waiting for GitHub. Its claim runs out; another process (B) takes over.
     t += 5 * 60_000;
     resetFeedbackIssueState();
     await processPublication(fid);
     // B doesn't know what A's POST did: an administrator picks the issue.
-    expect(publicationFor(fid)).toMatchObject({ state: 'needs-admin', candidates: [{ number: 1 }] });
+    expect(await publicationFor(fid)).toMatchObject({ state: 'needs-admin', candidates: [{ number: 1 }] });
     await resolve(fid, { action: 'adopt', issue: 1 });
-    expect(publicationFor(fid)?.state).toBe('filed');
+    expect((await publicationFor(fid))?.state).toBe('filed');
     const res = await Promise.race([sending, new Promise<undefined>((r) => setTimeout(() => r(undefined), 4500))]);
     expect(res).toBeDefined();
     // The tester withdraws; B retracts the issue.
@@ -656,16 +656,16 @@ describe('withdrawing', () => {
     // A finally hears back with an error: it must not change anything.
     g.open(502);
     await new Promise((r) => setTimeout(r, 50));
-    expect(publicationFor(fid)?.state).toBe('withdrawn');
+    expect((await publicationFor(fid))?.state).toBe('withdrawn');
     await later(7 * HOUR);
     expect(posts).toBe(1);
-    expect(publicationFor(fid)?.state).toBe('withdrawn');
+    expect((await publicationFor(fid))?.state).toBe('withdrawn');
   });
 
   it('withdraws a summary waiting for an administrator once they say which issue it is', async () => {
     next.push({ drop: true });
     const res = await submit('Needs admin then withdrawn');
-    expect(stateOf(res)).toBe('needs-admin');
+    expect(await stateOf(res)).toBe('needs-admin');
     expect((await withdraw(res)).body.state).toBe('withdrawing');
     expect(issues[0].state).toBe('open');
     await adopt(res, 1);
@@ -679,7 +679,7 @@ describe('withdrawing', () => {
     issues.length = 0; // GitHub's list doesn't show it (it may be lagging)
     expect((await withdraw(res)).body.state).toBe('withdrawing');
     await later(7 * HOUR);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true, candidates: [] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true, candidates: [] });
     await expect(resolve(res.body.id, { action: 'repost' })).rejects.toThrow();
     expect((await resolve(res.body.id, { action: 'confirm' })).state).toBe('withdrawn');
     expect(posts).toBe(1);
@@ -690,11 +690,11 @@ describe('withdrawing', () => {
     const res = await submit('Turns up later');
     const created = issues.pop()!;
     await withdraw(res);
-    expect(publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, candidates: [] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ adminNeeded: true, candidates: [] });
     issues.push(created);
     await resolve(res.body.id, { action: 'check' });
     await processPublication(res.body.id);
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true, candidates: [{ number: 1 }] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true, candidates: [{ number: 1 }] });
     expect(issues[0].state).toBe('open');
   });
 
@@ -705,11 +705,11 @@ describe('withdrawing', () => {
     const cid = comments[0].id;
     failDeletes = 1;
     expect((await withdraw(res)).body.state).toBe('withdrawing');
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', issue: { number: 1 }, patched: true, comments: [cid] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', issue: { number: 1 }, patched: true, comments: [cid] });
     expect(issues[0].state).toBe('closed');
     requests.length = 0;
     await later(HOUR);
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
     expect(comments).toEqual([]);
     expect(requests.filter((r) => !r.startsWith('DELETE'))).toEqual([]);
   });
@@ -734,6 +734,19 @@ describe('triage through the server', () => {
     expect(q.body.triaged.map((p: { issue: number }) => p.issue)).toEqual([1]);
   });
 
+  // With the store async, the queue's check ran inside filter(), which took every check's promise as a yes: withdrawn
+  // summaries, and ones whose feedback had been deleted, were offered for triage.
+  it('leaves out summaries that are withdrawn or whose feedback is gone', async () => {
+    await submit('Still filed');
+    const withdrawn = await submit('Withdrawn before triage');
+    const deleted = await submit('Feedback deleted before triage');
+    expect((await withdraw(withdrawn)).status).toBe(200);
+    const { remove } = await import('../src/db.js');
+    await remove('feedback', deleted.body.id);
+    const q = await request(app).get('/api/feedback/triage/queue').set('Authorization', `Bearer ${TRIAGE_TOKEN}`);
+    expect(q.body.pending.map((p: { summary: string }) => p.summary)).toEqual(['Still filed']);
+  });
+
   it('posts one comment with the footer and applies only the fixed labels', async () => {
     await submit('Triage first');
     const res = await submit('Triage labels');
@@ -743,7 +756,7 @@ describe('triage through the server', () => {
     expect(issues[1].labels.sort()).toEqual(['bug', 'feedback', 'needs-jesse', 'possible-duplicate', 'size:large', 'triaged']);
     expect(comments).toHaveLength(2);
     expect(comments[1].body).toBe(`Flagged for the maintainer to review.\n\nPossibly a duplicate of #1.${FOOTER}`);
-    expect(publicationFor(res.body.id)).toMatchObject({ comments: [comments[1].id], triagedAt: expect.any(String) });
+    expect(await publicationFor(res.body.id)).toMatchObject({ comments: [comments[1].id], triagedAt: expect.any(String) });
     expect((await triage(2, { kind: 'bug', size: 'size:large', needsJesse: true, possibleDuplicateOf: 1, comment: TRIAGE_NEUTRAL })).status).toBe(409);
     expect(comments).toHaveLength(2);
   });
@@ -780,11 +793,11 @@ describe('triage through the server', () => {
     const res = await submit('Cut-off comment answer');
     nextComment.push({ cutOff: true });
     expect((await triage(1)).status).toBe(502);
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
     expect((await triage(1)).status).toBe(409);
     expect(comments).toHaveLength(1);
     expect((await withdraw(res)).body.state).toBe('withdrawing');
-    expect(publicationFor(res.body.id)?.adminNeeded).toBe(true);
+    expect((await publicationFor(res.body.id))?.adminNeeded).toBe(true);
     expect(comments).toHaveLength(1);
   });
 
@@ -793,8 +806,8 @@ describe('triage through the server', () => {
     const res = await submit('No comment id');
     nextComment.push({ created: '{}' });
     expect((await triage(1)).status).toBe(502);
-    expect(publicationFor(res.body.id)).toMatchObject({ commentUnknown: expect.any(String) });
-    expect(publicationFor(res.body.id)?.comments ?? []).toEqual([]);
+    expect(await publicationFor(res.body.id)).toMatchObject({ commentUnknown: expect.any(String) });
+    expect((await publicationFor(res.body.id))?.comments ?? []).toEqual([]);
     expect((await withdraw(res)).body.state).toBe('withdrawing');
   });
 
@@ -816,13 +829,13 @@ describe('triage through the server', () => {
     t += 6 * 60_000;
     expect((await triage(1)).status).toBe(409);
     expect(comments).toHaveLength(1);
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
     g.open(201);
     await first;
-    expect(publicationFor(res.body.id)?.comments).toEqual([comments[0].id]);
+    expect((await publicationFor(res.body.id))?.comments).toEqual([comments[0].id]);
     await withdraw(res);
     expect(comments).toEqual([]); // the recorded id is deleted...
-    expect(publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true }); // ...and an administrator still checks
+    expect(await publicationFor(res.body.id)).toMatchObject({ state: 'withdrawing', adminNeeded: true }); // ...and an administrator still checks
   });
 
   // Only angle brackets used to be escaped, so links, images and character references rendered.
@@ -840,31 +853,31 @@ describe('triage through the server', () => {
     const c = await submit('Deleted feedback');
     issues[0].state = 'closed';
     issues[1].labels = ['feedback'];
-    remove('feedback', c.body.id);
+    await remove('feedback', c.body.id);
     expect((await triage(1)).status).toBe(409);
     // Issue 2 is now the oldest pending: still refused because GitHub no longer labels it for triage.
     expect((await triage(2)).status).toBe(409);
     expect((await triage(3)).status).toBe(409);
     expect(comments).toEqual([]);
-    expect([a, b].map((r) => publicationFor(r.body.id)?.triagedAt)).toEqual([undefined, undefined]);
+    expect((await Promise.all([a, b].map(async (r) => (await publicationFor(r.body.id))?.triagedAt)))).toEqual([undefined, undefined]);
   });
 
   // Label work used to carry on after a withdrawal and record the summary as triaged.
   it('stops before the next write when the summary is withdrawn mid-triage', async () => {
     const res = await submit('Withdrawn mid-triage');
     // The tester withdraws while the labels are being added (as requestWithdrawal records it).
-    onLabels = () => put('feedbackPublications', { ...publicationFor(res.body.id)!, state: 'withdrawing', nextAttemptAt: t });
+    onLabels = async () => await put('feedbackPublications', { ...(await publicationFor(res.body.id))!, state: 'withdrawing', nextAttemptAt: t });
     expect((await triage(1)).status).toBe(409);
     expect(requests.some((r) => r.includes('/labels/needs-triage'))).toBe(false);
-    expect(publicationFor(res.body.id)?.triagedAt).toBeUndefined();
+    expect((await publicationFor(res.body.id))?.triagedAt).toBeUndefined();
     await later(5 * 60_000);
-    expect(stateOf(res)).toBe('withdrawn');
+    expect(await stateOf(res)).toBe('withdrawn');
     expect(comments).toEqual([]);
   });
 
   it('checks the pause before every request, including the last label change', async () => {
     await submit('Paused label');
-    onLabels = () => put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + HOUR, streak: 1 } });
+    onLabels = async () => await put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + HOUR, streak: 1 } });
     expect((await triage(1)).status).toBe(503);
     expect(requests.some((r) => r.includes('/labels/needs-triage'))).toBe(false);
   });
@@ -913,7 +926,7 @@ describe('triage through the server', () => {
     expect((await triage(1)).status).toBe(502);
     expect(issues[0].labels).not.toContain('needs-triage');
     expect((await triage(1)).status).toBe(200);
-    expect(publicationFor(res.body.id)?.triagedAt).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.triagedAt).toEqual(expect.any(String));
     expect(comments).toHaveLength(1);
   });
 
@@ -925,7 +938,7 @@ describe('triage through the server', () => {
     const q = await request(app).get('/api/feedback/triage/queue').set('Authorization', `Bearer ${TRIAGE_TOKEN}`);
     expect(q.body.pending.map((x: { issue: number }) => x.issue)).toEqual([11]);
     expect((await triage(11)).status).toBe(200);
-    const parked = publicationsNeedingAdmin().filter((x) => x.kind === 'triage-parked');
+    const parked = (await publicationsNeedingAdmin()).filter((x) => x.kind === 'triage-parked');
     expect(parked).toHaveLength(10);
     issues[0].state = 'open';
     await resolve(parked[0].id, { action: 'check' });
@@ -939,10 +952,10 @@ describe('triage through the server', () => {
     nextComment.push({ cutOff: true }, { status: 422 });
     expect((await triage(1)).status).toBe(502);
     expect((await triage(2)).status).toBe(502);
-    expect(publicationFor(b.body.id)?.commentUnknown).toBeFalsy(); // a definite refusal posted nothing
-    expect(publicationsNeedingAdmin().map((x) => [x.id, x.kind])).toEqual([[a.body.id, 'comment-unknown']]);
+    expect((await publicationFor(b.body.id))?.commentUnknown).toBeFalsy(); // a definite refusal posted nothing
+    expect((await publicationsNeedingAdmin()).map((x) => [x.id, x.kind])).toEqual([[a.body.id, 'comment-unknown']]);
     await resolve(a.body.id, { action: 'comment', comment: comments[0].id });
-    expect(publicationFor(a.body.id)).toMatchObject({ comments: [comments[0].id] });
+    expect(await publicationFor(a.body.id)).toMatchObject({ comments: [comments[0].id] });
     expect((await triage(1)).status).toBe(200);
     expect(comments).toHaveLength(1); // not posted again
     // The other way: the administrator found no comment, so the routine may post it.
@@ -952,7 +965,7 @@ describe('triage through the server', () => {
     comments.pop();
     await resolve(c.body.id, { action: 'confirm' });
     expect((await triage(3)).status).toBe(200);
-    expect(publicationsNeedingAdmin()).toEqual([]);
+    expect(await publicationsNeedingAdmin()).toEqual([]);
   });
 
   // Verification used to be skipped after a 404 and to check only conflicts seen at the start.
@@ -984,15 +997,15 @@ describe('triage through the server', () => {
     const res = await submit('Stale confirmation');
     nextComment.push({ status: 502 }); // ambiguous, though nothing was created
     expect((await triage(1)).status).toBe(502);
-    const firstRef = attentionRef(publicationFor(res.body.id)!);
+    const firstRef = attentionRef((await publicationFor(res.body.id))!);
     const second = resolvePublication(res.body.id, { action: 'confirm' }, firstRef); // e.g. a second tab
     await resolvePublication(res.body.id, { action: 'confirm' }, firstRef).catch(() => undefined);
     await second.catch(() => undefined);
-    expect(publicationFor(res.body.id)?.commentUnknown).toBeUndefined();
+    expect((await publicationFor(res.body.id))?.commentUnknown).toBeUndefined();
     nextComment.push({ cutOff: true }); // the retry posts, and its answer is lost
     expect((await triage(1)).status).toBe(502);
     await expect(resolvePublication(res.body.id, { action: 'confirm' }, firstRef)).rejects.toMatchObject({ status: 409 });
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
     expect((await triage(1)).status).toBe(409);
     expect(comments).toHaveLength(1);
   });
@@ -1007,9 +1020,9 @@ describe('triage through the server', () => {
     const real = comments.find((c) => c.issue === 2)!.id;
     comments.push({ id: 77, repo: REPO, issue: 2, body: `A person.${FOOTER}`, user: 'jeswr' }, { id: 78, repo: REPO, issue: 2, body: 'Bot, no footer', user: BOT });
     for (const id of [999999, comments[0].id, 77, 78]) await expect(resolve(res.body.id, { action: 'comment', comment: id })).rejects.toMatchObject({ status: 400 });
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
     await resolve(res.body.id, { action: 'comment', comment: real });
-    expect(publicationFor(res.body.id)).toMatchObject({ comments: [real] });
+    expect(await publicationFor(res.body.id)).toMatchObject({ comments: [real] });
   });
 
   // A saved decision whose duplicate target was later withdrawn used to be refused for good.
@@ -1042,11 +1055,11 @@ describe('triage through the server', () => {
   it('does not record triage done when the summary is withdrawn during the last label read', async () => {
     const res = await submit('Withdrawn at the end');
     let gets = 0;
-    onIssueGet = () => {
-      if (++gets === 2) put('feedbackPublications', { ...publicationFor(res.body.id)!, state: 'withdrawing', nextAttemptAt: t });
+    onIssueGet = async () => {
+      if (++gets === 2) await put('feedbackPublications', { ...(await publicationFor(res.body.id))!, state: 'withdrawing', nextAttemptAt: t });
     };
     expect((await triage(1)).status).toBe(409);
-    expect(publicationFor(res.body.id)?.triagedAt).toBeUndefined();
+    expect((await publicationFor(res.body.id))?.triagedAt).toBeUndefined();
   });
 
   // Checking a comment id used to ignore a rate limit, so the next triage posted straight away.
@@ -1058,7 +1071,7 @@ describe('triage through the server', () => {
     const real = comments[0].id;
     nextCommentGet.push({ status: 429, headers: { 'retry-after': '3600' } });
     await expect(resolve(res.body.id, { action: 'comment', comment: real })).rejects.toMatchObject({ status: 503 });
-    expect(get<{ value: { until: number } }>('kv', `feedback-issues:pause:${REPO}`)?.value.until).toBe(t + HOUR);
+    expect((await get<{ value: { until: number } }>('kv', `feedback-issues:pause:${REPO}`))?.value.until).toBe(t + HOUR);
     expect((await triage(2)).status).toBe(503);
     expect(comments).toHaveLength(1);
   });
@@ -1068,10 +1081,10 @@ describe('triage through the server', () => {
     const res = await submit('Pause before account lookup');
     nextComment.push({ cutOff: true });
     expect((await triage(1)).status).toBe(502);
-    onCommentGet = () => put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + HOUR, streak: 1 } });
+    onCommentGet = async () => await put('kv', { id: `feedback-issues:pause:${REPO}`, value: { until: t + HOUR, streak: 1 } });
     requests.length = 0;
     await expect(resolve(res.body.id, { action: 'comment', comment: comments[0].id })).rejects.toMatchObject({ status: 503 });
     expect(requests.some((r) => r.startsWith('GET /user'))).toBe(false);
-    expect(publicationFor(res.body.id)?.commentUnknown).toEqual(expect.any(String));
+    expect((await publicationFor(res.body.id))?.commentUnknown).toEqual(expect.any(String));
   });
 });

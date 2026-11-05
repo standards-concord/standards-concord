@@ -366,7 +366,7 @@ describe('reading a pod as the signed-in WebID', () => {
   });
 
   it('provisions a pod through the guarded transport (the account API, then client credentials)', async () => {
-    openDb(':memory:');
+    await openDb();
     const made = await solid.provision({ id: 'u-provision1', name: 'New Tester' });
     expect(made).toEqual({ webId: `${base}/newpod/profile/card#me`, podUrl: `${base}/newpod/` });
     expect(seen.filter((r) => r.includes('/.account/')).length).toBeGreaterThanOrEqual(5);
