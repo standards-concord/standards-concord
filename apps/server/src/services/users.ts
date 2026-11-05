@@ -84,12 +84,14 @@ export async function linkFederatedIdentity(p: FederatedIdentity, linkTo?: User)
       if (taken && existing?.id !== linkTo.id)
         throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
       if (!existing && linked && !linked.simulated) {
+        const demoPicture = demoAvatarFor(linked);
         linked.providers.push({ provider: p.provider, subject: p.subject });
         linked.name = p.name;
         // Signing in with their own WebID makes it the account's WebID.
         if (p.webId) linked.webId = p.webId;
         linked.email ??= p.email;
-        linked.avatarUrl ??= p.avatarUrl;
+        // Their own picture replaces the demo account's bundled one.
+        if (p.avatarUrl && (!linked.avatarUrl || linked.avatarUrl === demoPicture)) linked.avatarUrl = p.avatarUrl;
         // Sessions issued while it was a demo account (in any browser) end here.
         await destroyUserSessions(linked.id);
         return await put('users', linked);
@@ -216,7 +218,12 @@ export async function listActivity(ontologyId?: string, limit = 50): Promise<Act
   const items = ontologyId ? await list<ActivityItem>('activity', ontologyId) : await list<ActivityItem>('activity');
   // The picture is looked up when read, so older entries and changed pictures show too.
   const latest = items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
-  return await Promise.all(latest.map(async (a) => ({ ...a, actorAvatarUrl: a.actorId ? (await getUser(a.actorId))?.avatarUrl : undefined })));
+  const pictures = new Map<string, Promise<string | undefined>>();
+  const pictureOf = (id: string) => {
+    if (!pictures.has(id)) pictures.set(id, getUser(id).then((u) => u?.avatarUrl));
+    return pictures.get(id)!;
+  };
+  return await Promise.all(latest.map(async (a) => ({ ...a, actorAvatarUrl: a.actorId ? await pictureOf(a.actorId) : undefined })));
 }
 
 /** The author of reports sent from the public page by people without an account. */

@@ -57,7 +57,7 @@ test.describe('profile pictures', () => {
     await settle(page);
     // The seeded history has simulated members acting; their entries carry pictures too
     // (the feed used to pass only a name, so it always showed initials).
-    const feed = page.locator('text=Recent activity').locator('xpath=ancestor::div[contains(@class,"rounded-xl")][1]');
+    const feed = page.getByRole('region', { name: 'Recent activity' });
     const actor = feed.getByRole('img', { name: / \(simulated\)$/ }).first();
     await expect(actor).toBeVisible();
     await expectPicture(actor);

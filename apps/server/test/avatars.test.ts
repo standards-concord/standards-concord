@@ -9,14 +9,14 @@ import { openDb, put } from '../src/db.js';
 import { DEMO_AVATAR_COUNT, demoAvatarUrl, personaAvatarUrl } from '../src/services/avatars.js';
 import { PERSONAS } from '../src/services/personas.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { backfillDemoAvatars, createUser, getUser } from '../src/services/users.js';
+import { backfillDemoAvatars, createUser, getUser, upsertFederatedUser } from '../src/services/users.js';
 
 // The pictures are static files in the web app, so a URL the server hands out must name a file that exists.
 const publicDir = path.join(config.repoRoot, 'apps/web/public');
 const fileFor = (url: string) => path.join(publicDir, url);
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -52,8 +52,21 @@ describe('demo profile pictures', () => {
 
   it('backfills demo accounts made before pictures existed', async () => {
     const old = await createUser({ name: 'Old tester', provider: 'demo', subject: 'tester_old' });
-    put<User>('users', { ...old, avatarUrl: undefined });
-    expect(backfillDemoAvatars()).toBeGreaterThanOrEqual(1);
-    expect(getUser(old.id)?.avatarUrl).toBe(demoAvatarUrl(old.id));
+    await put<User>('users', { ...old, avatarUrl: undefined });
+    expect(await backfillDemoAvatars()).toBeGreaterThanOrEqual(1);
+    expect((await getUser(old.id))?.avatarUrl).toBe(demoAvatarUrl(old.id));
+  });
+
+  it("swaps the demo picture for a real sign-in's own picture when a tester links their account", async () => {
+    // A tester who signs in with GitHub from their demo account should see their GitHub picture, not the bundled one.
+    const demo = await createUser({ name: 'Linking tester', provider: 'demo', subject: 'tester_link' });
+    expect(demo.avatarUrl).toBe(demoAvatarUrl(demo.id));
+    const linked = await upsertFederatedUser({ provider: 'github', subject: 'gh-avatar-1', name: 'Linking tester', avatarUrl: 'https://avatars.example/u/1' }, demo);
+    expect(linked.id).toBe(demo.id);
+    expect(linked.avatarUrl).toBe('https://avatars.example/u/1');
+    // Without a picture of its own, the bundled one stays.
+    const other = await createUser({ name: 'No picture', provider: 'demo', subject: 'tester_link2' });
+    const kept = await upsertFederatedUser({ provider: 'github', subject: 'gh-avatar-2', name: 'No picture' }, other);
+    expect(kept.avatarUrl).toBe(demoAvatarUrl(other.id));
   });
 });
