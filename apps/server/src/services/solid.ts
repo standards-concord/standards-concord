@@ -114,11 +114,12 @@ const tmpFor = (file: string) => path.join(path.dirname(file), `.${path.basename
  * What this guarantees: no other write by this server can land between the
  * check and the rename, because everything from the read to the rename runs
  * synchronously on the one thread that does all of this server's writes to
- * these files. What it doesn't: these local files are the development fallback
- * for when there is no Solid server, and only Concord is meant to write them; a
- * program outside Concord editing a file in the instant between the check and
- * the rename can still lose that edit. (Pods get a real compare-and-swap through
- * If-Match.)
+ * these files (this assumes one server process per data directory, as deployed).
+ * What it doesn't: these local files are where private data goes when there is
+ * no Solid server, or for an account with no pod record, and only Concord is
+ * meant to write them; a program outside Concord editing a file in the instant
+ * between the check and the rename can still lose that edit. (Pods get a real
+ * compare-and-swap through If-Match.)
  */
 function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -141,9 +142,17 @@ function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
   if (localTag(current) !== when.ifMatch) throw new PreconditionFailed(`${file} changed`);
   const tmp = tmpFor(file);
   try {
-    fs.writeFileSync(tmp, bytes, { flag: 'w' });
-    const mode = modeOf(file);
-    if (mode !== undefined) fs.chmodSync(tmp, mode);
+    // Private from the start (even a leftover from a crash is made 0600 before anything is written to it),
+    // and given the original's permissions only once the content is complete.
+    const fd = fs.openSync(tmp, 'w', 0o600);
+    try {
+      fs.fchmodSync(fd, 0o600);
+      fs.writeSync(fd, bytes);
+      const mode = modeOf(file);
+      if (mode !== undefined) fs.fchmodSync(fd, mode);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(tmp, file);
   } catch (err) {
     fs.rmSync(tmp, { force: true });

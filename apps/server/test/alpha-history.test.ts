@@ -106,6 +106,27 @@ describe('the first copy in a tester’s pod', () => {
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
   });
 
+  // The temporary file used to be written with default permissions and only then narrowed, so a crash in between
+  // left the content world-readable.
+  it('never writes content into a temporary file anyone else could read', async () => {
+    const u = await tester('local-tmp-mode');
+    await solid.write(u.id, 'alpha/testing.jsonld', 'private', 'text/plain');
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    fs.chmodSync(path.join(dir, 'testing.jsonld'), 0o600);
+    // A leftover temporary file with loose permissions, as a crash might leave.
+    fs.writeFileSync(path.join(dir, '.testing.jsonld.concord-tmp'), 'old', { mode: 0o644 });
+    fs.chmodSync(path.join(dir, '.testing.jsonld.concord-tmp'), 0o644);
+    const modesAtWrite: number[] = [];
+    const write = fs.writeSync.bind(fs);
+    vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, ...rest: unknown[]) => {
+      modesAtWrite.push(fs.fstatSync(fd).mode & 0o777);
+      return (write as (...a: unknown[]) => number)(fd, ...rest);
+    }) as typeof fs.writeSync);
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBeUndefined();
+    expect(modesAtWrite.length).toBeGreaterThan(0);
+    expect(modesAtWrite.every((m) => (m & 0o077) === 0)).toBe(true);
+  });
+
   // A failed rename (or a crash before it) used to leave a new temporary file behind on every try.
   it('leaves no temporary file behind when replacing fails, and reuses one a crash left', async () => {
     const u = await tester('local-tmp');
