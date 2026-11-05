@@ -28,8 +28,8 @@ import type { CommitAuthor, OntologyStoreApi } from './ontologyStore.js';
  * The working draft is the commit named by the `draft-head:<slug>` row, moved only by `advanceTo`, as in the git
  * store. Objects are written before anything names them and never deleted, so there is nothing to pin, prune or
  * bring in line: no pins, no sync, no claim on the repositories. A fork's branch is a ref row, moved in the same
- * transaction as the fork's record. Release tags will be made when the history is published to GitHub, from the published releases' records, as
- * the git store makes them from the same records.
+ * transaction as the fork's record. Release tags are made when the history is published to GitHub (githubOutbox.ts), from the published releases'
+ * records, as the git store makes them from the same records.
  */
 
 const FILE = 'ontology.ttl';
@@ -271,8 +271,8 @@ export const dbStore = {
     return (await firstParentLog(head, { limit, exclude: [await this.head(project)] })).map(logEntry);
   },
 
-  /** Publishing from the database to GitHub is the next step (an outbox job; see docs/ontology-store.md). */
+  /** Publishing from the database store is a job recorded with each release (githubOutbox.ts), not a call. */
   async publish(project: OntologyProject): Promise<void> {
-    throw new Error(`${project.slug} was not published to GitHub: publishing from the database store isn't built yet.`);
+    throw new Error(`${project.slug}: with ONTOLOGY_STORE=db, releases are published to GitHub by the outbox (githubOutbox.ts).`);
   },
 } satisfies OntologyStoreApi;

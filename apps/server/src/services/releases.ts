@@ -20,6 +20,7 @@ import { markReleased, withOntologyLocks } from './changeRequests.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
+import { enqueueGitHubPublish, runGitHubPublish, runGitHubPublishes } from './githubOutbox.js';
 import { ontologyStore } from './ontologyStore.js';
 import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
 import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
@@ -332,6 +333,8 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     p.currentVersion = r.version;
     p.stage = 'released';
     await updateProject(p);
+    // With the database store, publishing to GitHub is a job recorded with the release (see githubOutbox.ts).
+    if (ontologyStore.kind === 'db') await enqueueGitHubPublish(p, r);
   });
   Object.assign(project, await getProject(r.ontologyId));
   // The requirements document is published with the version (it may need the model, so not in the transaction).
@@ -348,6 +351,12 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
  * approval, and an ontology from before approvals is never published: its history holds what nobody approved.
  */
 async function publishToGitHub(project: OntologyProject, r: Release): Promise<void> {
+  if (ontologyStore.kind === 'db') {
+    // The job (recorded with the release) checks the same things before every upload, and links the release once done.
+    await runGitHubPublish(project.id);
+    Object.assign(r, await mustGet<Release>('releases', r.id));
+    return;
+  }
   const token = config.github.publishToken;
   if (!project.github || !token) return;
   if ((await anyHeld(project)) || !(await historyApproved(project))) {
@@ -378,6 +387,8 @@ export async function releaseTick(): Promise<number> {
     await draftRelease(p, undefined);
     changed++;
   }
+  // Publishes to GitHub that paused (write limits) or are waiting to start (database store).
+  await runGitHubPublishes();
   return changed;
 }
 
