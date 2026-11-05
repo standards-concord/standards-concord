@@ -11,7 +11,7 @@ import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
-import { baselineRevision, createApp as createConnectedApp, reportAs, revisionOf, startRunAs } from './appChecks.js';
+import { baselineRevision, createApp as createConnectedApp, finishFollowUps, reportAs, revisionOf, startRunAs } from './appChecks.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
@@ -337,6 +337,8 @@ export async function advanceClock(days: number) {
 
 export async function runTick() {
   const changed = (await crTick()) + (await releaseTick());
+  // Finish what any app result that failed part way still had to do (its note, autopilot).
+  await finishFollowUps();
   return changed;
 }
 

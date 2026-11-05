@@ -13,7 +13,8 @@ import { createApp } from '../src/app.js';
 import { get as getDoc, insertOnce, openDb, put } from '../src/db.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
-import { appForToken, byToken, pending as startRun, report as reportResult, touchSeen } from '../src/services/appChecks.js';
+import { appForToken, applyAutopilot, byToken, finishFollowUps, pending as startRun, report as reportResult, touchSeen } from '../src/services/appChecks.js';
+import { withWorkingDraftLock } from '../src/services/repoLock.js';
 import { getCR, merge } from '../src/services/changeRequests.js';
 import { OntologyGraph } from '@concord/core';
 import { getProject } from '../src/services/ontologies.js';
@@ -995,6 +996,93 @@ describe('autopilot', () => {
     expect(d.reviews.filter((r) => r.userId === d.reviews.find((x) => x.decision === 'object')!.userId).map((r) => r.decision)).toEqual(['approve', 'object']);
   });
 
+  it('a person’s own request for changes that lands while autopilot waits for the lock wins', async () => {
+    const crId = await freshCR('Autopilot waiting while its owner objects');
+    const pia = await login('reviewer', 'Reviewer Pia');
+    const a = await connect(pia, 'Pia’s app');
+    await ci(a.token!, { [crId]: 'passed' });
+    // Autopilot is switched on behind the scenes, so it hasn't spoken yet.
+    const doc = getDoc('apps', a.id) as { ontologyId: string; autopilot: Record<string, unknown> };
+    put('apps', { ...doc, id: a.id, autopilot: { ...doc.autopilot, enabled: true } }, doc.ontologyId);
+    // Another request holds the change's lock. Autopilot decides to approve, then waits for it.
+    let release!: () => void;
+    const holding = withWorkingDraftLock({ id: demoId }, () => new Promise<void>((r) => (release = r)));
+    await new Promise((r) => setTimeout(r, 50));
+    const deciding = applyAutopilot(crId, a.ownerId);
+    // Meanwhile the holder records Pia's own request for changes.
+    put('reviews', { id: `rev_${randomUUID()}`, changeRequestId: crId, userId: a.ownerId, roles: ['reviewer'], decision: 'request-changes', comment: 'Not like this.', at: clock.iso() }, crId);
+    release();
+    await holding;
+    expect((await deciding).action).toBe('none');
+    const d = await detail(crId);
+    expect(autopilotSays(d, a.ownerId)).toHaveLength(0);
+    expect(d.governance.unmet.join(' ')).toMatch(/requested changes/);
+  });
+
+  it('an automatic approval recorded after a person’s request for changes never hides it', async () => {
+    const crId = await freshCR('Autopilot after its owner asked for changes');
+    const quo = await login('reviewer', 'Reviewer Quo');
+    await quo.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'request-changes', comment: 'Not like this.' });
+    let d = await detail(crId);
+    const quoId = d.reviews.find((r) => r.decision === 'request-changes')!.userId;
+    // A later automatic approval for the same person, as the race used to leave it: withdrawn,
+    // stale, or never valid, it must not take the person's own say with it.
+    const later = new Date(Date.parse(clock.iso()) + 1000).toISOString();
+    put('reviews', { id: `rev_${randomUUID()}`, changeRequestId: crId, userId: quoId, roles: ['reviewer'], decision: 'approve', comment: 'Autopilot', at: later, autopilot: { revision: d.revision, apps: [] } }, crId);
+    await (await login('reviewer', 'Reviewer Rae')).post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+    await (await login('steward', 'Steward Clock')).post('/api/simulation/clock').send({ advanceDays: 8 });
+    d = await detail(crId);
+    expect(d.governance.unmet.join(' ')).toMatch(/requested changes/);
+    expect(d.status).not.toBe('approved');
+  });
+
+  it('a result whose follow-up fails part way is finished by the same report sent again, or by the sweep', async () => {
+    const sam = await login('reviewer', 'Reviewer Sam');
+    const a = await connect(sam, 'Sam’s app', { enabled: true });
+    const failing = async (crId: string) => {
+      const run = await ciRun(a.token!);
+      await run.post('baseline', 'passed');
+      const body = { target: crId, revision: run.p.targets.find((t) => t.changeRequestId === crId)!.revision, attempt: run.p.attempt, outcome: 'passed' };
+      // The result is stored, then writing to the change fails (another process's trigger refuses it).
+      const other = new DatabaseSync(path.join(config.dataDir, 'concord.sqlite'));
+      other.prepare(`CREATE TRIGGER fail_follow_up BEFORE INSERT ON docs WHEN NEW.collection = 'changeRequests' AND NEW.id = '${crId}' BEGIN SELECT RAISE(ABORT, 'injected failure after the result'); END`).run();
+      try {
+        const res = await report(a.token!, body);
+        expect(res.status).toBeGreaterThanOrEqual(500);
+      } finally {
+        other.exec('DROP TRIGGER fail_follow_up');
+        other.close();
+      }
+      const d = await detail(crId);
+      expect(d.appChecks!.find((c) => c.appId === a.id)!.outcome).toBe('passed');
+      expect(standing(d, a.ownerId)).toHaveLength(0);
+      return body;
+    };
+    const notes = (d: ChangeRequestDetail) => d.timeline.filter((e) => e.type === 'app-check' && e.message.includes('Sam’s app passed'));
+
+    // Sent again: it is a replay, and it finishes the job.
+    const first = await freshCR('Autopilot and a retried result');
+    const body = await failing(first);
+    const again = await report(a.token!, body);
+    expect(again.status, again.text).toBe(200);
+    expect(again.body.replay).toBe(true);
+    expect(again.body.autopilot.action).toBe('approved');
+    let d = await detail(first);
+    expect(standing(d, a.ownerId)).toHaveLength(1);
+    expect(notes(d)).toHaveLength(1);
+    // A third time changes nothing.
+    expect((await report(a.token!, body)).body.autopilot).toBeUndefined();
+    expect(notes(await detail(first))).toHaveLength(1);
+
+    // Never sent again: the governance sweep finishes it.
+    const second = await freshCR('Autopilot and a result the sweep finishes');
+    await failing(second);
+    await finishFollowUps(0);
+    d = await detail(second);
+    expect(standing(d, a.ownerId)).toHaveLength(1);
+    expect(notes(d)).toHaveLength(1);
+  });
+
   it('votes in a vote, only for allowed levels; never for someone who objected; takes a no back without reviving an older yes', async () => {
     // Before the vote opens, a member objects in review.
     const obi = await login('reviewer', 'Member Obi');
@@ -1576,13 +1664,15 @@ wait
     const res = await runAction(dir, {
       CONCORD_APP_TOKEN: created.token!,
       CONCORD_TEST_COMMAND: 'sh test.sh',
-      CONCORD_TIMEOUT_MINUTES: '0.005',
+      // Three seconds: long enough for the script to start both processes and note their ids even
+      // on a loaded machine (at 0.3 s it could be stopped before it wrote them).
+      CONCORD_TIMEOUT_MINUTES: '0.05',
       CONCORD_MAX_CHANGES: '1',
       CONCORD_COMMIT: 'hanging-v1',
     });
     expect(res.code, res.out).toBe(1);
     expect(res.out).toMatch(/could not be tested/);
-    expect(res.out).toMatch(/timed out after 0\.01 minutes/);
+    expect(res.out).toMatch(/timed out after 0\.05 minutes/);
     const pids = fs.readFileSync(path.join(dir, 'pids'), 'utf8').trim().split('\n').map(Number);
     expect(pids.length).toBe(2);
     // Gone, or a zombie waiting to be reaped (the container's init may not reap promptly).

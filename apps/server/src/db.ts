@@ -25,6 +25,7 @@ export type Collection =
   | 'apps'
   | 'appChecks'
   | 'oidcTokens'
+  | 'appFollowUps'
   | 'oauthClients'
   | 'oauthRequests'
   | 'oauthCodes'

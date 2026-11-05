@@ -480,29 +480,87 @@ export async function report(appIn: AppDoc, input: ReportInput, by: ReportedBy =
   // overwritten by what was read before, and a report that fails leaves its proof unused.
   const proof = input.target === 'baseline' && input.oidc !== undefined ? await verifyGithubRun(input.oidc, runAudience(appId)) : undefined;
   const step = transaction(() => applyReport(appId, input, by, proof));
-  if (step.kind === 'done') return step.reply;
+  // What a stored result sets off (the change's timeline note, autopilot) runs after its
+  // transaction, from a follow-up recorded with it. If that fails part way (the database busy,
+  // the process stopped), the same report sent again finishes it, and so does the sweep.
+  const followUp = get<FollowUp>('appFollowUps', followUpId(appId, input.target));
+  if (step.kind === 'done') {
+    if (!followUp || !step.reply.replay) return step.reply;
+    const { autopilot } = await finishFollowUp(followUp);
+    return autopilot ? { ...step.reply, autopilot } : step.reply;
+  }
+  const { autopilot } = followUp ? await finishFollowUp(followUp) : { autopilot: undefined };
   if (step.kind === 'baseline') {
-    // The baseline decides whether this app's results mean anything, so re-decide everywhere.
-    await reconcile(step.ontologyId, [step.ownerId]);
     // Everything this result left without a result that counts gets tested in this same run.
     const app = get<AppDoc>('apps', appId);
     const run = app?.runs?.find((r) => r.attempt === step.attempt);
     return { ...step.reply, targets: app && run ? retestsFor(app, run, getProject(app.ontologyId)) : [] };
   }
-  // The note on the change's timeline is written as the request's own change (under its lock),
-  // after the result is stored: the result is what counts, and it never waits on a merge.
-  if (step.note) {
-    const note = step.note;
-    await changeCR(step.crId, (c) => void c.timeline.push(note)).catch((err) => console.warn(`app check note on ${step.crId}:`, (err as Error).message));
-  }
-  const autopilot = await applyAutopilot(step.crId, step.ownerId);
   return { ...step.reply, autopilot };
+}
+
+/** Work a stored result still has to set off. Removed only once all of it is done. */
+interface FollowUp {
+  id: string;
+  appId: string;
+  ontologyId: string;
+  ownerId: string;
+  /** For a change's result; absent for the working draft's. */
+  crId?: string;
+  /** The timeline note still to add to the change, if any. */
+  note?: TimelineEvent;
+  at: string;
+}
+
+const followUpId = (appId: string, target: unknown) => (target === 'baseline' ? `${appId}#baseline` : checkId(appId, String(target)));
+
+/**
+ * Finish a result's follow-up. Each step can safely run again: the note is added under the
+ * request's lock only if the follow-up still holds it, and autopilot and reconcile bring things
+ * to how they should be now. The follow-up goes only if no newer result replaced it meanwhile.
+ */
+async function finishFollowUp(f: FollowUp): Promise<{ autopilot?: AutopilotResult }> {
+  let autopilot: AutopilotResult | undefined;
+  if (f.crId && !get('changeRequests', f.crId)) {
+    remove('appFollowUps', f.id);
+    return {};
+  }
+  if (f.crId) {
+    const crId = f.crId;
+    if (f.note && get('changeRequests', crId))
+      await changeCR(crId, (c) => {
+        const now = get<FollowUp>('appFollowUps', f.id);
+        if (!now?.note || now.at !== f.at) return;
+        c.timeline.push(now.note);
+        put('appFollowUps', { ...now, note: undefined }, now.ontologyId);
+      });
+    autopilot = await applyAutopilot(crId, f.ownerId);
+  } else {
+    // The working draft's result decides whether this app's results mean anything, so re-decide everywhere.
+    await reconcile(f.ontologyId, [f.ownerId]);
+  }
+  transaction(() => {
+    if (get<FollowUp>('appFollowUps', f.id)?.at === f.at) remove('appFollowUps', f.id);
+  });
+  return { autopilot };
+}
+
+/** The sweep: finish follow-ups a failed or stopped request left (after a minute, so in-flight ones finish themselves). */
+export async function finishFollowUps(olderThanMs = 60_000) {
+  const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+  for (const f of list<FollowUp>('appFollowUps').filter((x) => x.at < cutoff)) {
+    try {
+      await finishFollowUp(f);
+    } catch (err) {
+      console.warn(`app check follow-up ${f.id}:`, (err as Error).message);
+    }
+  }
 }
 
 type Step =
   | { kind: 'done'; reply: Record<string, unknown> }
   | { kind: 'baseline'; reply: Record<string, unknown>; ontologyId: string; ownerId: string; attempt: number }
-  | { kind: 'change'; reply: Record<string, unknown>; crId: string; ownerId: string; note?: TimelineEvent };
+  | { kind: 'change'; reply: Record<string, unknown>; crId: string; ownerId: string };
 
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -574,6 +632,7 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
     const order = ordering(app.baseline, { revision, attempt, outcome, verified }, baselineRevision(project));
     if (order === 'stale') return { kind: 'done', reply: { stale: true, verified, ...keyReply, targets: [] } };
     if (order === 'replay') return { kind: 'done', reply: { stale: false, replay: true, verified, ...keyReply, targets: retestsFor(app, run, project) } };
+    put('appFollowUps', { id: followUpId(app.id, 'baseline'), appId: app.id, ontologyId: app.ontologyId, ownerId: app.ownerId, at: new Date().toISOString() } satisfies FollowUp, app.ontologyId);
     const before = app.baseline?.revision === revision ? app.baseline.outcome : undefined;
     // Still passing the same draft with the same app: earlier results for changes still count.
     const unbroken = outcome === 'passed' && app.baseline?.revision === revision && app.baseline.outcome === 'passed' && app.baseline.commit === commit;
@@ -636,7 +695,8 @@ function applyReport(appId: string, input: ReportInput, by: ReportedBy, proof: V
     if (outcome === 'failed')
       logActivity({ ontologyId: cr.ontologyId, actorId: app.ownerId, type: 'app.failed', message: `reports that their app ${app.name} breaks with #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
-  return { kind: 'change', reply: { check, stale: false }, crId: cr.id, ownerId: app.ownerId, note };
+  put('appFollowUps', { id: followUpId(app.id, cr.id), appId: app.id, ontologyId: app.ontologyId, ownerId: app.ownerId, crId: cr.id, note, at: new Date().toISOString() } satisfies FollowUp, app.ontologyId);
+  return { kind: 'change', reply: { check, stale: false }, crId: cr.id, ownerId: app.ownerId };
 }
 
 /** Report a result as an app, without its token (the demo's simulated CI, which is trusted). */
@@ -803,10 +863,18 @@ export async function applyAutopilot(crId: string, userId: string, depth = 0): P
   const wrong = inForce.filter((x) => !autopilotStands(x, cr, revision, spoke) && !replaced(x));
   if (wrong.length && depth < 3) {
     const at = clock.iso();
-    // The withdrawals and the note are saved together, as the request's own change.
+    // The withdrawals and the note are saved together, as the request's own change, and only
+    // for says that, read again under the lock, still don't stand.
     await changeCR(cr.id, (c) => {
-      for (const x of wrong) put('decision' in x ? 'reviews' : 'votes', { ...x, withdrawnAt: at }, c.id);
-      c.timeline.push({ at, type: 'app-check', message: `Autopilot withdrew ${user.name}’s ${wrong.some(isYes) ? 'yes' : 'no'}: ${d.why}.` });
+      const rev = revisionOf(c);
+      const who = peopleWhoSpoke(c);
+      const still = wrong.filter((x) => {
+        const now = get<Say>('decision' in x ? 'reviews' : 'votes', x.id);
+        return now && !now.withdrawnAt && !autopilotStands(now, c, rev, who);
+      });
+      if (!still.length) return;
+      for (const x of still) put('decision' in x ? 'reviews' : 'votes', { ...x, withdrawnAt: at }, c.id);
+      c.timeline.push({ at, type: 'app-check', message: `Autopilot withdrew ${user.name}’s ${still.some(isYes) ? 'yes' : 'no'}: ${d.why}.` });
     });
     // Withdrawing can move the change (an approval that no longer holds goes back a stage),
     // so decide again from where it ends up.
@@ -819,11 +887,22 @@ export async function applyAutopilot(crId: string, userId: string, depth = 0): P
   const latest = latestIn(sayIn);
   if (latest && matches(latest, d, revision)) return none(`Autopilot already ${d.say === 'yes' ? (sayIn === 'vote' ? 'voted yes' : 'approved this') : 'voted no'}.`);
   const mark: AutopilotMark = { revision, apps: d.apps.map((a) => ({ id: a.id, name: a.name, runUrl: latestCheck(a.id, cr.id)?.runUrl })) };
+  // Decided before getting the request's lock: decide again under it, on the latest copy, and
+  // write only if autopilot would still say the same (the person may have spoken themselves).
+  let changed = false;
+  const stillMeant = (c: ChangeRequest) => {
+    const ok = c.status === stage && revisionOf(c) === revision && decide(c, userId, stage, peopleWhoSpoke(c)).say === d.say;
+    if (!ok) changed = true;
+    return ok;
+  };
+  const again = () => (depth < 3 ? applyAutopilot(crId, userId, depth + 1) : Promise.resolve(none('The change kept changing; autopilot will look again.')));
   if (sayIn === 'vote') {
-    await addVote(cr, user, d.say === 'yes' ? 'yes' : 'no', `Autopilot: ${d.why}.`, mark);
+    await addVote(cr, user, d.say === 'yes' ? 'yes' : 'no', `Autopilot: ${d.why}.`, mark, stillMeant);
+    if (changed) return again();
     return { action: d.say === 'yes' ? 'voted-yes' : 'voted-no', message: `Voted ${d.say}. ${why}.` };
   }
-  await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, mark);
+  await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, mark, stillMeant);
+  if (changed) return again();
   return { action: 'approved', message: `Approved. ${why}.` };
 }
 

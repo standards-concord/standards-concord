@@ -71,7 +71,8 @@ test.describe('app checks', () => {
     // A reviewer (whose approvals count for minor changes) connects their app.
     await signIn(page, { name: 'Ravi Reviewer', role: 'reviewer' });
     await page.goto(`/o/${demo.id}/changes`);
-    await page.getByRole('link', { name: 'App checks' }).click();
+    // Exactly the tab: change requests other tests opened may mention app checks in their titles.
+    await page.getByRole('link', { name: 'App checks', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/apps$`));
     await expect(page.getByRole('heading', { name: 'App checks', level: 2 })).toBeVisible();
     await expect(page.getByText('CharityBase volunteer export')).toBeVisible();
@@ -107,7 +108,8 @@ test.describe('app checks', () => {
     expect((await unverified.json()).autopilot.message).toMatch(/verified run/);
 
     // The owner reports a run themselves, signed in, which counts like one GitHub vouches for.
-    const appId = ((await (await page.request.get(`/api/ontologies/${demo.id}/apps`)).json()) as { id: string; name: string }[]).find((a) => a.name === 'Family finder')!.id;
+    // This app's id, from its own run (other runs may have connected apps with the same name).
+    const appId = (pending as { app: { id: string } }).app.id;
     const own = await (await page.request.get(`/api/app-checks/pending?all=1&appId=${appId}`)).json();
     await page.request.post('/api/app-checks', { data: { appId, target: 'baseline', revision: own.baseline.revision, attempt: own.attempt, outcome: 'passed' } });
     const res = await page.request.post('/api/app-checks', {

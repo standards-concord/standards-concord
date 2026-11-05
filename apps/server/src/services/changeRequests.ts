@@ -402,14 +402,21 @@ export const reviewsFor = (crId: string) => list<Review>('reviews', crId);
 export const votesFor = (subjectId: string) => list<Vote>('votes', subjectId);
 
 /**
- * Each person's latest say, as governance counts it. A withdrawn say, or one autopilot made
- * that no longer stands (see autopilotStands), leaves that person with no say: an older
- * review or vote never comes back into force.
+ * Each person's say, as governance counts it. What a person said themselves always wins over
+ * autopilot, whichever came later: their latest own say counts, and nothing autopilot did (in
+ * force, withdrawn or no longer standing) can hide it. Only someone who hasn't spoken
+ * themselves is represented by autopilot, by its latest say, if that is not withdrawn and still
+ * stands (see autopilotStands); otherwise they have no say, and an older one never comes back
+ * into force.
  */
 export function effectiveSay<T extends Review | Vote>(items: T[], cr: ChangeRequest, revision: string, spoke = peopleWhoSpoke(cr)): T[] {
-  const latest = new Map<string, T>();
-  for (const x of [...items].sort((a, b) => a.at.localeCompare(b.at))) latest.set(x.userId, x);
-  return [...latest.values()].filter((x) => !x.withdrawnAt && autopilotStands(x, cr, revision, spoke));
+  const own = new Map<string, T>();
+  const auto = new Map<string, T>();
+  for (const x of [...items].sort((a, b) => a.at.localeCompare(b.at))) (x.autopilot ? auto : own).set(x.userId, x);
+  const out: T[] = [];
+  for (const x of own.values()) if (!x.withdrawnAt) out.push(x);
+  for (const [userId, x] of auto) if (!own.has(userId) && !x.withdrawnAt && autopilotStands(x, cr, revision, spoke)) out.push(x);
+  return out;
 }
 
 export function governanceFor(cr: ChangeRequest, opts: { status?: ChangeRequest['status']; voteClosed?: boolean } = {}) {
@@ -548,8 +555,21 @@ async function updateOpsNow(
   return advance(cr, actor);
 }
 
-export async function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string, autopilot?: AutopilotMark) {
+/**
+ * `stillMeant`, for a say autopilot makes: checked on the latest copy, under the lock, just before
+ * writing. Autopilot decides before it gets the lock, and someone may have spoken meanwhile; if
+ * it returns false, nothing is written.
+ */
+export async function addReview(
+  cr: ChangeRequest,
+  actor: User,
+  decision: Review['decision'],
+  comment?: string,
+  autopilot?: AutopilotMark,
+  stillMeant?: (c: ChangeRequest) => boolean,
+) {
   const out = await locked(cr, (c) => {
+    if (stillMeant && !stillMeant(c)) return c;
     if (!OPEN.includes(c.status) && decision !== 'comment') throw new HttpError(409, `This request is ${c.status}`);
     const roles = rolesFor(c.ontologyId, actor.id);
     if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
@@ -569,8 +589,16 @@ export async function addReview(cr: ChangeRequest, actor: User, decision: Review
   return out;
 }
 
-export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, autopilot?: AutopilotMark) {
+export async function addVote(
+  cr: ChangeRequest,
+  actor: User,
+  choice: Vote['choice'],
+  comment?: string,
+  autopilot?: AutopilotMark,
+  stillMeant?: (c: ChangeRequest) => boolean,
+) {
   const out = await locked(cr, (c) => {
+    if (stillMeant && !stillMeant(c)) return c;
     if (c.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
     const g = governanceFor(c);
     const roles = rolesFor(c.ontologyId, actor.id);
