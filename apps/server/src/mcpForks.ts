@@ -49,7 +49,7 @@ const WRITES = { readOnlyHint: false, destructiveHint: false, idempotentHint: fa
 const howToImport = (f: ForkSummary) =>
   `Import the fork instead of the released ontology while you develop: use ${f.urls.iri} (Turtle unless you ask for another format) or a file URL such as ${f.urls.formats.turtle}. Terms use the standard's own namespace, so nothing else in your code changes. Call check_forks at the start of each session to find out when you can switch back.`;
 
-export function registerForkTools(server: McpServer, user: User, resolveOntology: (ref: string) => OntologyProject | undefined) {
+export function registerForkTools(server: McpServer, user: User, resolveOntology: (ref: string) => Promise<OntologyProject | undefined>) {
   const forkArg = z.string().describe('Fork id (frk_…) or "<ontology-slug>/<fork-slug>", as returned by create_fork or list_forks');
   const guard = async (fn: () => Promise<Text>): Promise<Text> => {
     try {
@@ -58,11 +58,11 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
       return fail(err instanceof HttpError || err instanceof Error ? err.message : String(err));
     }
   };
-  const withFork = (ref: string, fn: (f: NonNullable<ReturnType<typeof findFork>>) => Promise<Text>) =>
+  const withFork = (ref: string, fn: (f: NonNullable<Awaited<ReturnType<typeof findFork>>>) => Promise<Text>) =>
     guard(async () => {
-      const f = findFork(ref);
+      const f = await findFork(ref);
       if (!f) return fail(`No fork called "${ref}". Call list_forks to see yours.`);
-      return fn(f);
+      return await fn(f);
     });
 
   server.registerTool(
@@ -80,7 +80,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
     },
     ({ ontology, name, purpose }) =>
       guard(async () => {
-        const p = resolveOntology(ontology);
+        const p = await resolveOntology(ontology);
         if (!p) return fail(`No ontology called "${ontology}". Call list_ontologies to see what exists.`);
         const f = await forkSummary(await createFork(p, user, { name, purpose }));
         return json({ ...brief(f), howToImport: howToImport(f), next: 'Add the terms you need with edit_fork.' });
@@ -98,11 +98,11 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
     ({ ontology }) =>
       guard(async () => {
         if (ontology) {
-          const p = resolveOntology(ontology);
+          const p = await resolveOntology(ontology);
           if (!p) return fail(`No ontology called "${ontology}".`);
-          return json(await Promise.all(listForks(p.id).map(async (f) => brief(await forkSummary(f)))));
+          return json(await Promise.all((await listForks(p.id)).map(async (f) => brief(await forkSummary(f)))));
         }
-        return json(await Promise.all(forksOwnedBy(user.id).map(async (f) => brief(await forkSummary(f)))));
+        return json(await Promise.all((await forksOwnedBy(user.id)).map(async (f) => brief(await forkSummary(f)))));
       }),
   );
 
@@ -174,7 +174,7 @@ export function registerForkTools(server: McpServer, user: User, resolveOntology
     },
     ({ fork }) =>
       guard(async () => {
-        const targets = fork ? [findFork(fork)].filter((f) => !!f) : forksOwnedBy(user.id).filter((f) => f.status !== 'closed');
+        const targets = fork ? [await findFork(fork)].filter((f) => !!f) : (await forksOwnedBy(user.id)).filter((f) => f.status !== 'closed');
         if (fork && !targets.length) return fail(`No fork called "${fork}".`);
         if (!targets.length) return text('You have no forks in use. If an ontology is missing a term you need, create_fork lets you add it and keep building.');
         const checks = await Promise.all(targets.map((f) => checkFork(f)));

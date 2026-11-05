@@ -38,8 +38,8 @@ const fail = (t: string) => ({ content: [{ type: 'text' as const, text: t }], is
 
 const link = (path: string) => `${config.webUrl}${path}`;
 
-function resolve(ref: string): OntologyProject | undefined {
-  return findProject(ref) ?? list<OntologyProject>('ontologies').find((o) => o.prefix === ref || o.ontologyIRI === ref || o.title.toLowerCase() === ref.toLowerCase());
+async function resolve(ref: string): Promise<OntologyProject | undefined> {
+  return await findProject(ref) ?? (await list<OntologyProject>('ontologies')).find((o) => o.prefix === ref || o.ontologyIRI === ref || o.title.toLowerCase() === ref.toLowerCase());
 }
 
 function buildServer(user: User, agentName: string) {
@@ -53,7 +53,7 @@ function buildServer(user: User, agentName: string) {
   );
   const ontologyArg = z.string().describe('Ontology slug, prefix or IRI, from list_ontologies');
   const withProject = async <T>(ref: string, fn: (p: OntologyProject) => Promise<T>) => {
-    const p = resolve(ref);
+    const p = await resolve(ref);
     if (!p) return fail(`No ontology called "${ref}". Call list_ontologies to see what exists.`);
     try {
       return (await fn(p)) as never;
@@ -67,7 +67,7 @@ function buildServer(user: User, agentName: string) {
     { title: 'List ontologies', description: 'List the ontologies on Concord with their prefix, namespace, version and size.', inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => {
       const rows = await Promise.all(
-        list<OntologyProject>('ontologies').map(async (p) => {
+        (await list<OntologyProject>('ontologies')).map(async (p) => {
           const v = (await ontologyStore.working(p)).view();
           return { slug: p.slug, title: p.title, prefix: p.prefix, namespace: p.namespace, version: p.currentVersion, stage: p.stage, classes: v.classes.length, properties: v.objectProperties.length + v.datatypeProperties.length, url: link(`/o/${p.id}`) };
         }),
@@ -144,7 +144,7 @@ function buildServer(user: User, agentName: string) {
       withProject(ontology, async (p) => {
         const text = data ?? turtle;
         if (!text) return fail('Pass the data to validate as data.');
-        const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (latestVersion(p) ?? 'draft') : version;
+        const v = version === 'draft' || version === 'working' ? 'draft' : !version || version === 'latest' ? (await latestVersion(p) ?? 'draft') : version;
         if (v !== 'draft' && !ontologyStore.versions(p).includes(v)) return fail(`${p.title} has no version "${version}".`);
         // Shares the validator's places with POSTs to the ontology IRI (validationPool.ts).
         const place = admit(`user:${user.id}`, data ? format : 'turtle');
@@ -199,7 +199,7 @@ function buildServer(user: User, agentName: string) {
     ({ ontology, title, description }) =>
       withProject(ontology, async (p) => {
         const cr = await createChangeRequest(p, user, { title, description, naturalLanguage: `${title}\n\n${description}`, kind: 'feature', origin: { type: 'agent', agentName }, submit: true });
-        return json(summariseCR(cr.id, p));
+        return json(await summariseCR(cr.id, p));
       }),
   );
 
@@ -208,8 +208,8 @@ function buildServer(user: User, agentName: string) {
     { title: 'Get change request', description: 'Status, classification, validation and governance state of a change request.', inputSchema: { id: z.string() }, annotations: { readOnlyHint: true } },
     async ({ id }) => {
       try {
-        const cr = getCR(id);
-        return json(summariseCR(cr.id, resolve(cr.ontologyId)!));
+        const cr = await getCR(id);
+        return json(await summariseCR(cr.id, (await resolve(cr.ontologyId))!));
       } catch {
         return fail(`No change request ${id}`);
       }
@@ -221,8 +221,8 @@ function buildServer(user: User, agentName: string) {
   return server;
 }
 
-function summariseCR(id: string, p: OntologyProject) {
-  const d = detail(getCR(id));
+async function summariseCR(id: string, p: OntologyProject) {
+  const d = await detail(await getCR(id));
   return {
     id: d.id,
     number: d.number,

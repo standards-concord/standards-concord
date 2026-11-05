@@ -10,15 +10,15 @@ import { ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import { syncFeedbackSharing } from './services/feedback.js';
 
-openDb();
-const secrets = migrateClientSecrets();
+await openDb();
+const secrets = await migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
 // A process that stopped mid-update may have left a checkout behind HEAD (only people browsing the repository see it).
-for (const p of list<OntologyProject>('ontologies')) ontologyStore.syncCheckout(p);
+for (const p of await list<OntologyProject>('ontologies')) ontologyStore.syncCheckout(p);
 // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
 await refreshReleasePages().catch((err) => console.error('[public] refresh failed', err));
 

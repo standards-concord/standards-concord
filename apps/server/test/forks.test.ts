@@ -53,7 +53,7 @@ const activityTerms = [
 let reader: Agent;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
   reader = await login('reviewer', 'Reader Rhi');
 });

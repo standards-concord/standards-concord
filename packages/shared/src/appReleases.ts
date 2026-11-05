@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.18.0',
+    version: '0.20.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,

@@ -1,6 +1,6 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
-import type { ChangeRequest, OntologyFork } from '@concord/shared';
+import type { ChangeRequest, OntologyFork, OntologyProject } from '@concord/shared';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -39,7 +39,7 @@ async function login(role: string, name: string): Promise<Agent> {
 
 /** Commit straight to the main ontology, as a merged change request would. */
 async function upstream(ops: ChangeOp[], message = 'Upstream change') {
-  const p = findProject('volunteering')!;
+  const p = (await findProject('volunteering'))!;
   const g = applyChangeOps(await ontologyStore.working(p), ops, { author: 'Steward', date: '2026-11-04' }).graph;
   await ontologyStore.commitWorking(p, g, message, { name: 'Steward', email: 'steward@example.org' });
 }
@@ -53,6 +53,8 @@ const addClass = (localName: string, label: string, extra: Partial<Extract<Chang
 });
 
 let dev: Agent;
+/** The demo ontology (its slug and id are all these tests use). */
+let vol: OntologyProject;
 /** Fork details need a signed-in user, like the rest of the API's private reads. */
 let reader: Agent;
 async function newFork(name: string) {
@@ -62,8 +64,9 @@ async function newFork(name: string) {
 }
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
+  vol = (await findProject('volunteering'))!;
   dev = await login('contributor', 'Rebase Rae');
   reader = await login('reviewer', 'Reader Rhi');
 });
@@ -235,19 +238,19 @@ describe('second review', () => {
 
   it('a slow read never writes back an old version of the fork', async () => {
     const path = await newFork('Stale reads');
-    const stale = structuredClone(get<OntologyFork>('forks', (await fork(path)).id)!);
+    const stale = structuredClone((await get<OntologyFork>('forks', (await fork(path)).id))!);
     await dev.post(`${path}/edits`).send({ ops: [addClass('AfterTheRead', 'after the read')] });
     await forkSummary(stale);
     await forkDetail(stale);
-    const now = get<OntologyFork>('forks', stale.id)!;
+    const now = (await get<OntologyFork>('forks', stale.id))!;
     expect(now.revision).toBe(1);
     expect(now.ops).toHaveLength(1);
-    expect(now.head).toBe(ontologyStore.forkHead(findProject('volunteering')!, now.slug));
+    expect(now.head).toBe(ontologyStore.forkHead((await findProject('volunteering'))!, now.slug));
   });
 
   it('an edit prepared before the fork changed elsewhere is refused, in git and in the database', async () => {
     const path = await newFork('Other process');
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const before = await fork(path);
     // Another server process moves the branch: this process's next edit must not build on the old head.
     const g = await ontologyStore.forkGraph(p, before.slug);
@@ -256,15 +259,15 @@ describe('second review', () => {
     expect(edit.status).toBe(409);
     // And a database record changed elsewhere (closed, here) is not overwritten.
     const path2 = await newFork('Closed elsewhere');
-    const rec = get<OntologyFork>('forks', (await fork(path2)).id)!;
+    const rec = (await get<OntologyFork>('forks', (await fork(path2)).id))!;
     const closedElsewhere = { ...rec, status: 'closed' as const, head: 'f'.repeat(40) };
-    put('forks', closedElsewhere, rec.ontologyId);
+    await put('forks', closedElsewhere, rec.ontologyId);
     expect((await dev.post(`${path2}/edits`).send({ ops: [addClass('NotAfterClose', 'not after close')] })).status).toBe(409);
   });
 
   it('closing moves the branch, so an edit prepared before the close fails, and closing twice is refused', async () => {
     const path = await newFork('Close race');
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const before = await fork(path);
     expect((await dev.post(`${path}/close`)).status).toBe(200);
     const g = await ontologyStore.forkGraph(p, before.slug);
@@ -312,7 +315,7 @@ describe('second review', () => {
   });
 
   it('an edit that was undone drops out, so it can not conflict later', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const path = await newFork('Undone');
     const original = (await ontologyStore.forkGraph(p, (await fork(path)).slug)).term(`${VOL}AccessibilityFeature`)!.definition!;
     await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: 'Temporarily reworded.' } }] });
@@ -368,19 +371,19 @@ describe('third review', () => {
 
   it('saves are an atomic compare-and-swap on the record version, and a lost save undoes its commit', async () => {
     const path = await newFork('Atomic save');
-    const p = findProject('volunteering')!;
-    const f = get<OntologyFork>('forks', (await fork(path)).id)!;
+    const p = (await findProject('volunteering'))!;
+    const f = (await get<OntologyFork>('forks', (await fork(path)).id))!;
     const snapshot = { seq: f.seq };
     // Another process closes the fork after this one read it.
-    expect(putIf('forks', { ...f, status: 'closed', seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
-    expect(putIf('forks', { ...f, status: 'active' }, 'seq', f.seq)).toBe(false);
+    expect(await putIf('forks', { ...f, status: 'closed', seq: (f.seq ?? 0) + 1 }, 'seq', f.seq, f.ontologyId)).toBe(true);
+    expect(await putIf('forks', { ...f, status: 'active' }, 'seq', f.seq, f.ontologyId)).toBe(false);
     const before = ontologyStore.forkHead(p, f.slug);
     const graph = await ontologyStore.forkGraph(p, f.slug);
     await expect(
-      forTests.commitAndSave(p, f, snapshot, () => ontologyStore.commitFork(p, f.slug, graph, 'Racing edit', { name: 'Racer', email: 'r@example.org' }, { expectedParent: before })),
+      forTests.commitAndSave(p, f, snapshot, async () => await ontologyStore.commitFork(p, f.slug, graph, 'Racing edit', { name: 'Racer', email: 'r@example.org' }, { expectedParent: before })),
     ).rejects.toThrow(/changed/);
     expect(ontologyStore.forkHead(p, f.slug)).toBe(before);
-    expect(get<OntologyFork>('forks', f.id)!.status).toBe('closed');
+    expect((await get<OntologyFork>('forks', f.id))!.status).toBe('closed');
   });
 
   it('two proposals at once open one change request', async () => {
@@ -393,7 +396,7 @@ describe('third review', () => {
   });
 
   it('a header edit partly undone does not overwrite upstream on sync', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const path = await newFork('Header undo');
     const title = (await ontologyStore.working(p)).metadata().title;
     await dev.post(`${path}/edits`).send({ ops: [{ op: 'setMetadata', set: { title: 'Temporary title', description: 'Fork description kept' } }] });
@@ -471,9 +474,9 @@ describe('fourth review', () => {
   it('a proposal in progress elsewhere holds the fork until it finishes or its lease runs out', async () => {
     const path = await newFork('Lease');
     await dev.post(`${path}/edits`).send({ ops: [addClass('LeasedTerm', 'leased term')] });
-    const f = get<OntologyFork>('forks', (await fork(path)).id)!;
+    const f = (await get<OntologyFork>('forks', (await fork(path)).id))!;
     // Another server process has started proposing the fork.
-    expect(putIf('forks', { ...f, proposing: { until: Date.now() + 60_000 }, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
+    expect(await putIf('forks', { ...f, proposing: { until: Date.now() + 60_000 }, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq, f.ontologyId)).toBe(true);
     for (const [route, body] of [
       ['edits', { ops: [addClass('WhileProposing', 'while proposing')] }],
       ['propose', {}],
@@ -486,12 +489,12 @@ describe('fourth review', () => {
       expect(res.body.error, route).toMatch(/being proposed/);
     }
     // That process stopped without finishing: once the lease has run out the fork is usable again.
-    const held = get<OntologyFork>('forks', f.id)!;
-    expect(putIf('forks', { ...held, proposing: { until: Date.now() - 1 }, seq: (held.seq ?? 0) + 1 }, 'seq', held.seq)).toBe(true);
+    const held = (await get<OntologyFork>('forks', f.id))!;
+    expect(await putIf('forks', { ...held, proposing: { until: Date.now() - 1 }, seq: (held.seq ?? 0) + 1 }, 'seq', held.seq, held.ontologyId)).toBe(true);
     expect((await dev.post(`${path}/edits`).send({ ops: [addClass('AfterLease', 'after lease')] })).status).toBe(200);
     const proposed = await dev.post(`${path}/propose`).send({});
     expect(proposed.status).toBe(200);
-    expect(get<OntologyFork>('forks', f.id)!.proposing).toBeUndefined();
+    expect((await get<OntologyFork>('forks', f.id))!.proposing).toBeUndefined();
   });
 
   it.each([
@@ -516,8 +519,8 @@ describe('fourth review', () => {
   });
 
   it('a source naming a real change request is generated only where that request created the term', async () => {
-    const p = findProject('volunteering')!;
-    const open = list<{ number: number; status: string }>('changeRequests', p.id).find((cr) => !['merged', 'released'].includes(cr.status));
+    const p = (await findProject('volunteering'))!;
+    const open = (await list<{ number: number; status: string }>('changeRequests', p.id)).find((cr) => !['merged', 'released'].includes(cr.status));
     expect(open).toBeDefined();
     const path = await newFork('Cites a request');
     await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}Role`, set: { source: [`volunteering#${open!.number}`] } }] });
@@ -529,14 +532,14 @@ describe('fourth review', () => {
   });
 
   it('discarding everything also drops header-only edits', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const issued = (await ontologyStore.working(p)).metadata().issued;
     const path = await newFork('Discard header too');
     await dev.post(`${path}/edits`).send({ ops: [addClass('WithHeader', 'with header'), { op: 'setMetadata', set: { issued: '2026-03-03' } }] });
     const all = await dev.post(`${path}/discard`).send({ all: true });
     expect(all.status).toBe(200);
     expect(all.body.ops).toEqual([]);
-    const f = get<OntologyFork>('forks', all.body.id)!;
+    const f = (await get<OntologyFork>('forks', all.body.id))!;
     expect((await ontologyStore.forkGraph(p, f.slug)).metadata().issued).toEqual(issued);
     expect((await dev.post(`${path}/discard`).send({ all: true })).body.error).toMatch(/no changes to discard/);
   });
@@ -554,11 +557,11 @@ describe('fourth review', () => {
 
 describe('fifth review', () => {
   const fork = async (path: string) => (await reader.get(path)).body;
-  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
+  const record = async (path: string) => (await get<OntologyFork>('forks', (await fork(path)).id))!;
   /** Change the stored fork as another server process would (a conditional save). */
-  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+  const elsewhere = async (f: OntologyFork, patch: Partial<OntologyFork>) => {
     const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
-    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    expect(await putIf('forks', next, 'seq', f.seq, f.ontologyId)).toBe(true);
     return next;
   };
 
@@ -567,35 +570,35 @@ describe('fifth review', () => {
     await dev.post(`${path}/edits`).send({ ops: [addClass('FencedOne', 'fenced one')] });
     const f = await record(path);
     // Process A takes the lease, then stalls past its expiry.
-    const a = elsewhere(f, { proposing: { until: Date.now() - 1 } });
+    const a = await elsewhere(f, { proposing: { until: Date.now() - 1 } });
     // Process B proposes meanwhile, with an extra edit.
     await dev.post(`${path}/edits`).send({ ops: [addClass('FencedTwo', 'fenced two')] });
     const b = await dev.post(`${path}/propose`).send({ title: 'B’s proposal' });
     expect(b.status).toBe(200);
     const crId = b.body.changeRequest.id;
-    expect(getCR(crId).ops).toHaveLength(2);
+    expect((await getCR(crId)).ops).toHaveLength(2);
     // A wakes up and writes its (older) edits to the request: refused, and nothing changes.
-    const fence = () => {
-      if (get<OntologyFork>('forks', f.id)?.seq !== a.seq) throw new HttpError(409, 'lost the lease');
+    const fence = async () => {
+      if ((await get<OntologyFork>('forks', f.id))?.seq !== a.seq) throw new HttpError(409, 'lost the lease');
     };
-    const owner = getUser(f.ownerId)!;
-    await expect(withFence(fence, () => updateOps(getCR(crId), owner, { ops: [addClass('FencedOne', 'fenced one')], title: 'A’s proposal' }))).rejects.toThrow(/lost the lease/);
-    expect(getCR(crId).ops).toHaveLength(2);
-    expect(getCR(crId).title).toBe('B’s proposal');
+    const owner = (await getUser(f.ownerId))!;
+    await expect(withFence(fence, async () => await updateOps(await getCR(crId), owner, { ops: [addClass('FencedOne', 'fenced one')], title: 'A’s proposal' }))).rejects.toThrow(/lost the lease/);
+    expect((await getCR(crId)).ops).toHaveLength(2);
+    expect((await getCR(crId)).title).toBe('B’s proposal');
   });
 
   it('proposing again after an interrupted proposal picks up its request instead of opening another', async () => {
     const path = await newFork('Interrupted');
     await dev.post(`${path}/edits`).send({ ops: [addClass('Interrupted', 'interrupted')] });
     const f = await record(path);
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     // The proposing process created and submitted the request, then stopped before recording it.
-    const orphan = await createChangeRequest(p, getUser(f.ownerId)!, { title: 'Interrupted', description: 'x', kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: f.ops, submit: true });
+    const orphan = await createChangeRequest(p, (await getUser(f.ownerId))!, { title: 'Interrupted', description: 'x', kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: f.ops, submit: true });
     expect((await fork(path)).changeRequestIds).toEqual([orphan.id]);
     const again = await dev.post(`${path}/propose`).send({});
     expect(again.status).toBe(200);
     expect(again.body.changeRequest.id).toBe(orphan.id);
-    const open = list<{ status: string; origin: { forkId?: string } }>('changeRequests', p.id).filter((cr) => cr.origin.forkId === f.id && cr.status !== 'withdrawn');
+    const open = (await list<{ status: string; origin: { forkId?: string } }>('changeRequests', p.id)).filter((cr) => cr.origin.forkId === f.id && cr.status !== 'withdrawn');
     expect(open).toHaveLength(1);
   });
 
@@ -604,17 +607,17 @@ describe('fifth review', () => {
     await dev.post(`${path}/edits`).send({ ops: [addClass('LegacySetter', 'legacy setter')] });
     const f = await record(path);
     // Stored before such edits were refused.
-    elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9', priorVersion: 'https://example.org/x', modified: '2020-01-01', versionIRI: 'https://example.org/y' } }] });
+    await elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9', priorVersion: 'https://example.org/x', modified: '2020-01-01', versionIRI: 'https://example.org/y' } }] });
     const proposed = await dev.post(`${path}/propose`).send({});
     expect(proposed.status).toBe(200);
-    expect(JSON.stringify(getCR(proposed.body.changeRequest.id).ops)).not.toMatch(/versionInfo|priorVersion|modified|versionIRI/);
+    expect(JSON.stringify((await getCR(proposed.body.changeRequest.id)).ops)).not.toMatch(/versionInfo|priorVersion|modified|versionIRI/);
   });
 
   it('discarding everything also drops stored edits that have nothing to compare', async () => {
     const path = await newFork('Discard legacy');
     await dev.post(`${path}/edits`).send({ ops: [addClass('DiscardLegacy', 'discard legacy')] });
     const f = await record(path);
-    elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
+    await elsewhere(f, { ops: [...f.ops, { op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
     const all = await dev.post(`${path}/discard`).send({ all: true });
     expect(all.status).toBe(200);
     expect(all.body.ops).toEqual([]);
@@ -631,7 +634,7 @@ describe('fifth review', () => {
   });
 
   it('a source re-added after upstream removed it is still an edit', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     await upstream([addClass('ReSourced', 'resourced', { source: ['volunteering#1'] })]);
     await upstream([{ op: 'updateAnnotations', iri: `${VOL}ReSourced`, set: { source: [] } }]);
     expect((await ontologyStore.working(p)).term(`${VOL}ReSourced`)!.source ?? []).toEqual([]);
@@ -646,7 +649,7 @@ describe('fifth review', () => {
     const ops: ChangeOp[] = [addClass('BeforeRename', 'renamed term'), { op: 'renameTerm', iri: `${VOL}BeforeRename`, newLocalName: 'AfterRename' }];
     expect((await dev.post(`${path}/edits`).send({ ops })).status).toBe(200);
     // Upstream merges the same edits through a change request, which stamps its own provenance.
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     // Same day as the fork's edit: a rename records its date, so a rename on another day is different content.
     const g = applyChangeOps(await ontologyStore.working(p), ops, { author: 'Steward', date: clock.iso().slice(0, 10), provenance: 'volunteering#999' }).graph;
     await ontologyStore.commitWorking(p, g, 'Merge the same edits', { name: 'Steward', email: 'steward@example.org' });
@@ -672,10 +675,10 @@ describe('fifth review', () => {
 
 describe('sixth review', () => {
   const fork = async (path: string) => (await reader.get(path)).body;
-  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
-  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+  const record = async (path: string) => (await get<OntologyFork>('forks', (await fork(path)).id))!;
+  const elsewhere = async (f: OntologyFork, patch: Partial<OntologyFork>) => {
     const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
-    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    expect(await putIf('forks', next, 'seq', f.seq, f.ontologyId)).toBe(true);
     return next;
   };
 
@@ -692,24 +695,24 @@ describe('sixth review', () => {
   it('discarding everything clears a fork whose only stored edit has nothing to replay', async () => {
     const path = await newFork('Legacy only');
     const f = await record(path);
-    elsewhere(f, { ops: [{ op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
+    await elsewhere(f, { ops: [{ op: 'setMetadata', set: { versionInfo: '9.9.9' } }] });
     const all = await dev.post(`${path}/discard`).send({ all: true });
     expect(all.status).toBe(200);
     expect(all.body.ops).toEqual([]);
-    expect(get<OntologyFork>('forks', f.id)!.ops).toEqual([]);
+    expect((await get<OntologyFork>('forks', f.id))!.ops).toEqual([]);
   });
 
   it('a change request saved from an old copy is refused, whoever saves it', async () => {
     const path = await newFork('Request editor race');
     await dev.post(`${path}/edits`).send({ ops: [addClass('EditorRace', 'editor race')] });
     const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id;
-    const stale = getCR(crId); // a slow writer (a proposal's triage, say) holds this copy
+    const stale = await getCR(crId); // a slow writer (a proposal's triage, say) holds this copy
     // Someone edits the request through the ordinary request editor.
     const edited = await dev.patch(`/api/change-requests/${crId}`).send({ title: 'Edited in the request editor' });
     expect(edited.status).toBe(200);
-    const owner = getUser(get<OntologyFork>('forks', (await fork(path)).id)!.ownerId)!;
+    const owner = (await getUser((await get<OntologyFork>('forks', (await fork(path)).id))!.ownerId))!;
     await expect(updateOps(stale, owner, { title: 'Stale title' })).rejects.toThrow(/changed by someone else/);
-    expect(getCR(crId).title).toBe('Edited in the request editor');
+    expect((await getCR(crId)).title).toBe('Edited in the request editor');
   });
 
   it('the proposal fence refuses a proposal’s writes once the fork has moved on', async () => {
@@ -718,28 +721,28 @@ describe('sixth review', () => {
     const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id;
     const f = await record(path);
     const fence = forTests.proposalFence(f.id, { seq: f.seq });
-    const owner = getUser(f.ownerId)!;
-    elsewhere(f, {});
-    await expect(withFence(fence, () => updateOps(getCR(crId), owner, { title: 'From a stalled proposal' }))).rejects.toThrow(/lost its hold/);
-    expect(getCR(crId).title).not.toBe('From a stalled proposal');
+    const owner = (await getUser(f.ownerId))!;
+    await elsewhere(f, {});
+    await expect(withFence(fence, async () => await updateOps(await getCR(crId), owner, { title: 'From a stalled proposal' }))).rejects.toThrow(/lost its hold/);
+    expect((await getCR(crId)).title).not.toBe('From a stalled proposal');
   });
 });
 
 describe('seventh review', () => {
   const fork = async (path: string) => (await reader.get(path)).body;
-  const record = async (path: string) => get<OntologyFork>('forks', (await fork(path)).id)!;
-  const elsewhere = (f: OntologyFork, patch: Partial<OntologyFork>) => {
+  const record = async (path: string) => (await get<OntologyFork>('forks', (await fork(path)).id))!;
+  const elsewhere = async (f: OntologyFork, patch: Partial<OntologyFork>) => {
     const next = { ...f, ...patch, seq: (f.seq ?? 0) + 1 };
-    expect(putIf('forks', next, 'seq', f.seq)).toBe(true);
+    expect(await putIf('forks', next, 'seq', f.seq, f.ontologyId)).toBe(true);
     return next;
   };
   /** Runs `during` once, the first time a read of the draft happens while `when` holds. */
-  async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
+  async function interleave<T>(when: () => boolean | Promise<boolean>, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
     // Every read of the draft (working, and a merge's read at its exact base) goes through graphAt.
     const original = ontologyStore.graphAt;
     let done = false;
     ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
-      if (!done && when()) {
+      if (!done && (await when())) {
         done = true;
         await during();
       }
@@ -757,10 +760,10 @@ describe('seventh review', () => {
     const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
     return { path, crId };
   };
-  const approve = (id: string) => {
-    const c = getCR(id);
+  const approve = async (id: string) => {
+    const c = await getCR(id);
     c.status = 'approved';
-    saveChangeRequest(c);
+    await saveChangeRequest(c);
   };
 
   it('a proposal that loses its lease mid-way writes nothing (the production fence)', async () => {
@@ -768,69 +771,69 @@ describe('seventh review', () => {
     await dev.post(`${path}/edits`).send({ ops: [addClass('LeaseLost', 'lease lost')] });
     const f = await record(path);
     const res = await interleave(
-      () => !!get<OntologyFork>('forks', f.id)?.proposing,
-      () => {
+      async () => !!(await get<OntologyFork>('forks', f.id))?.proposing,
+      async () => {
         // The lease runs out and another process changes the fork.
-        elsewhere(get<OntologyFork>('forks', f.id)!, { proposing: undefined });
+        await elsewhere((await get<OntologyFork>('forks', f.id))!, { proposing: undefined });
       },
       () => dev.post(`${path}/propose`).send({}),
     );
     expect(res.status).toBe(409);
-    const p = findProject('volunteering')!;
-    expect(list<{ origin: { forkId?: string } }>('changeRequests', p.id).filter((cr) => cr.origin.forkId === f.id)).toEqual([]);
+    const p = (await findProject('volunteering'))!;
+    expect((await list<{ origin: { forkId?: string } }>('changeRequests', p.id)).filter((cr) => cr.origin.forkId === f.id)).toEqual([]);
   });
 
   it('a merge from an out-of-date copy of a request changes nothing', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const { crId } = await proposeFrom('Stale merge', 'StaleMerge');
-    approve(crId);
-    const stale = getCR(crId);
+    await approve(crId);
+    const stale = await getCR(crId);
     // Someone saves an edit to the request after the merge read it.
-    const edited = getCR(crId);
+    const edited = await getCR(crId);
     edited.title = 'Edited before the merge finished';
-    saveChangeRequest(edited);
+    await saveChangeRequest(edited);
     const head = ontologyStore.head(p);
     await expect(merge(stale, undefined)).rejects.toThrow(/changed by someone else/);
     expect(ontologyStore.head(p)).toBe(head);
     expect((await ontologyStore.working(p)).term(`${VOL}StaleMerge`)).toBeUndefined();
-    expect(getCR(crId).status).toBe('approved');
+    expect((await getCR(crId)).status).toBe('approved');
   });
 
   it('while a merge holds a request, other saves are refused, and the merge records exactly what it committed', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const { crId } = await proposeFrom('Held merge', 'HeldMerge');
-    approve(crId);
-    const owner = getUser(getCR(crId).authorId)!;
+    await approve(crId);
+    const owner = (await getUser((await getCR(crId)).authorId))!;
     let refused: unknown;
     const merged = await interleave(
-      () => !!getCR(crId).merging,
+      async () => !!(await getCR(crId)).merging,
       async () => {
-        refused = await updateOps(getCR(crId), owner, { ops: [addClass('Replacement', 'replacement')] }).catch((e: Error) => e);
+        refused = await updateOps(await getCR(crId), owner, { ops: [addClass('Replacement', 'replacement')] }).catch((e: Error) => e);
       },
-      () => merge(getCR(crId), undefined),
+      async () => merge(await getCR(crId), undefined),
     );
     expect(String(refused)).toMatch(/being merged/);
     expect(merged.status).toBe('merged');
-    expect(getCR(crId).merging).toBeUndefined();
-    expect(JSON.stringify(getCR(crId).ops)).toMatch(/HeldMerge/);
+    expect((await getCR(crId)).merging).toBeUndefined();
+    expect(JSON.stringify((await getCR(crId)).ops)).toMatch(/HeldMerge/);
     expect((await ontologyStore.working(p)).term(`${VOL}HeldMerge`)).toBeDefined();
     expect((await ontologyStore.working(p)).term(`${VOL}Replacement`)).toBeUndefined();
   });
 
   it('a merge whose draft moved underneath it commits nothing and gives the request back', async () => {
-    const p = findProject('volunteering')!;
+    const p = (await findProject('volunteering'))!;
     const { crId } = await proposeFrom('Draft moved', 'DraftMoved');
-    approve(crId);
+    await approve(crId);
     await expect(
       interleave(
-        () => !!getCR(crId).merging,
-        () => upstream([addClass('MovedUnderneath', 'moved underneath')]),
-        () => merge(getCR(crId), undefined),
-      ),
+                async () => !!(await getCR(crId)).merging,
+                () => upstream([addClass('MovedUnderneath', 'moved underneath')]),
+                async () => merge(await getCR(crId), undefined),
+              ),
     ).rejects.toThrow(/working draft changed/);
     expect((await ontologyStore.working(p)).term(`${VOL}DraftMoved`)).toBeUndefined();
-    expect(getCR(crId).merging).toBeUndefined();
-    expect(getCR(crId).status).toBe('approved');
+    expect((await getCR(crId)).merging).toBeUndefined();
+    expect((await getCR(crId)).status).toBe('approved');
   });
 
   it.each([
@@ -854,7 +857,7 @@ describe('seventh review', () => {
 
   it('a fork from before dcterms:provenance is refused, not converted', async () => {
     const path = await newFork('Legacy refused');
-    elsewhere(await record(path), { provenanceFormat: undefined });
+    await elsewhere(await record(path), { provenanceFormat: undefined });
     const res = await dev.post(`${path}/edits`).send({ ops: [addClass('NotOnLegacy', 'not on legacy')] });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/earlier version of Concord/);
@@ -863,11 +866,11 @@ describe('seventh review', () => {
 });
 
 /** Runs `during` once, the first time the draft is read (by any route) while `when` holds. */
-async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
+async function interleave<T>(when: () => boolean | Promise<boolean>, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
   const originals = { working: ontologyStore.working, graphAt: ontologyStore.graphAt };
   let done = false;
   const hook = async () => {
-    if (!done && when()) {
+    if (!done && (await when())) {
       done = true;
       await during();
     }
@@ -888,7 +891,7 @@ async function interleave<T>(when: () => boolean, during: () => Promise<void> | 
 }
 
 describe('eighth review', () => {
-  const p = () => findProject('volunteering')!;
+  const p = () => vol;
   const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
   /** Replace a store method for the length of `fn`. */
   async function stubbed<K extends 'advanceWorking'>(key: K, impl: (original: (typeof ontologyStore)[K]) => (typeof ontologyStore)[K], fn: () => Promise<unknown>) {
@@ -905,10 +908,10 @@ describe('eighth review', () => {
     await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
     return (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
   };
-  const approve = (id: string) => {
-    const c = getCR(id);
+  const approve = async (id: string) => {
+    const c = await getCR(id);
     c.status = 'approved';
-    saveChangeRequest(c);
+    await saveChangeRequest(c);
   };
   const stop = () => {
     throw new Error('the merging process stopped');
@@ -918,25 +921,25 @@ describe('eighth review', () => {
     // Used to: the stalled merge resumed after someone replaced the edits, committed the old ones
     // (the draft hadn't moved, so the branch update went through), and only then failed.
     const crId = await proposeFrom('Expired merge', 'ExpiredMerge');
-    approve(crId);
+    await approve(crId);
     const head = ontologyStore.head(p());
     await expect(
       interleave(
-        () => !!getCR(crId).merging,
-        () => {
-          const held = getCR(crId);
-          expect(putIf('changeRequests', { ...held, merging: { ...held.merging!, until: Date.now() - 1 }, rev: held.rev! + 1 }, 'rev', held.rev)).toBe(true);
-          const edited = getCR(crId);
-          edited.ops = [addClass('ReplacedWhileStalled', 'replaced while stalled')];
-          saveChangeRequest(edited);
-        },
-        () => merge(getCR(crId), undefined),
-      ),
+                async () => !!(await getCR(crId)).merging,
+                async () => {
+                  const held = await getCR(crId);
+                  expect(await putIf('changeRequests', { ...held, merging: { ...held.merging!, until: Date.now() - 1 }, rev: held.rev! + 1 }, 'rev', held.rev, held.ontologyId)).toBe(true);
+                  const edited = await getCR(crId);
+                  edited.ops = [addClass('ReplacedWhileStalled', 'replaced while stalled')];
+                  await saveChangeRequest(edited);
+                },
+                async () => merge(await getCR(crId), undefined),
+              ),
     ).rejects.toThrow(/changed by someone else/);
     expect(ontologyStore.head(p())).toBe(head);
     expect(await has('ExpiredMerge')).toBe(false);
-    expect(JSON.stringify(getCR(crId).ops)).toMatch(/ReplacedWhileStalled/);
-    expect(getCR(crId).merging).toBeUndefined();
+    expect(JSON.stringify((await getCR(crId)).ops)).toMatch(/ReplacedWhileStalled/);
+    expect((await getCR(crId)).merging).toBeUndefined();
   });
 
   it('reads the draft from its commit, so a checkout that lags behind loses nothing', async () => {
@@ -947,8 +950,8 @@ describe('eighth review', () => {
     const checkout = nodePath.join(ontologyStore.dir(p()), 'ontology.ttl');
     fs.writeFileSync(checkout, before);
     const crId = await proposeFrom('Lagging checkout', 'MergedOnTop');
-    approve(crId);
-    expect((await merge(getCR(crId), undefined)).status).toBe('merged');
+    await approve(crId);
+    expect((await merge(await getCR(crId), undefined)).status).toBe('merged');
     expect(await has('CommittedFirst')).toBe(true);
     expect(await has('MergedOnTop')).toBe(true);
     // The merge brought the checkout up to the commit it made.
@@ -959,14 +962,14 @@ describe('eighth review', () => {
     // Used to: the request stayed approved with no mergedCommit, and the retry failed because the
     // term already existed, moving the request to needs-work.
     const crId = await proposeFrom('Stopped after commit', 'StoppedAfterCommit');
-    approve(crId);
-    await expect(stubbed('advanceWorking', (original) => (...args) => (original(...args), stop()), () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
-    const stuck = getCR(crId);
+    await approve(crId);
+    await expect(stubbed('advanceWorking', (original) => (...args) => (original(...args), stop()), async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    const stuck = await getCR(crId);
     expect(stuck.status).toBe('approved');
     expect(stuck.merging?.commit).toBeTruthy();
     expect(await has('StoppedAfterCommit')).toBe(true);
     const head = ontologyStore.head(p());
-    const done = await merge(getCR(crId), undefined);
+    const done = await merge(await getCR(crId), undefined);
     expect(done.status).toBe('merged');
     expect(done.mergedCommit).toBe(stuck.merging!.commit);
     expect(done.merging).toBeUndefined();
@@ -975,23 +978,23 @@ describe('eighth review', () => {
 
   it('a merge that stopped after deciding its commit is finished by the next save, which is then refused', async () => {
     const crId = await proposeFrom('Stopped before commit', 'StoppedBeforeCommit');
-    approve(crId);
-    await expect(stubbed('advanceWorking', () => stop, () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    await approve(crId);
+    await expect(stubbed('advanceWorking', () => stop, async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
     expect(await has('StoppedBeforeCommit')).toBe(false);
-    const late = getCR(crId);
+    const late = await getCR(crId);
     late.title = 'An edit after the merge decided';
-    expect(() => saveChangeRequest(late)).toThrow(/has just been merged/);
-    expect(getCR(crId).status).toBe('merged');
-    expect(getCR(crId).title).not.toBe('An edit after the merge decided');
+    await expect(saveChangeRequest(late)).rejects.toThrow(/has just been merged/);
+    expect((await getCR(crId)).status).toBe('merged');
+    expect((await getCR(crId)).title).not.toBe('An edit after the merge decided');
     expect(await has('StoppedBeforeCommit')).toBe(true);
   });
 
   it('a decided merge whose draft moved first is given back, and the retry applies it to the new draft once', async () => {
     const crId = await proposeFrom('Decided then moved', 'DecidedThenMoved');
-    approve(crId);
-    await expect(stubbed('advanceWorking', () => stop, () => merge(getCR(crId), undefined))).rejects.toThrow(/stopped/);
+    await approve(crId);
+    await expect(stubbed('advanceWorking', () => stop, async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
     await upstream([addClass('MovedFirst', 'moved first')]);
-    const done = await merge(getCR(crId), undefined);
+    const done = await merge(await getCR(crId), undefined);
     expect(done.status).toBe('merged');
     expect(await has('MovedFirst')).toBe(true);
     expect(await has('DecidedThenMoved')).toBe(true);
@@ -1003,8 +1006,8 @@ describe('eighth review', () => {
     const path = await newFork('Legacy guidance');
     await dev.post(`${path}/edits`).send({ ops: [addClass('LegacyGuided', 'legacy guided')] });
     const id = (await reader.get(path)).body.id as string;
-    const f = get<OntologyFork>('forks', id)!;
-    expect(putIf('forks', { ...f, provenanceFormat: undefined, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq)).toBe(true);
+    const f = (await get<OntologyFork>('forks', id))!;
+    expect(await putIf('forks', { ...f, provenanceFormat: undefined, seq: (f.seq ?? 0) + 1 }, 'seq', f.seq, f.ontologyId)).toBe(true);
     const check = (await dev.get(`${path}/check`)).body;
     expect(check.outcome).toBe('recreate-fork');
     expect(check.steps.join(' ')).toMatch(/create_fork/);
@@ -1014,7 +1017,7 @@ describe('eighth review', () => {
 });
 
 describe('ninth review', () => {
-  const p = () => findProject('volunteering')!;
+  const p = () => vol;
   const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
   const dir = () => ontologyStore.dir(p());
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir(), encoding: 'utf8' }).trim();
@@ -1108,7 +1111,7 @@ describe('ninth review', () => {
       const g = applyChangeOps(await ontologyStore.working(project), [addClass(`Newer${Date.now()}`, 'newer')], { date: '2026-11-05' }).graph;
       const newer = await ontologyStore.prepareWorkingCommit(project, g, 'Newer draft', { name: 'Steward' }, read);
       let fired = false;
-      checkoutTestHooks.beforeWrite = () => {
+      checkoutTestHooks.beforeWrite = async () => {
         if (fired) return;
         fired = true;
         // Another process takes the lock over, moves main on, writes the newer checkout and lets go.
@@ -1131,7 +1134,7 @@ describe('ninth review', () => {
 });
 
 describe('saves that race a slow step', () => {
-  const p = () => findProject('volunteering')!;
+  const p = () => vol;
   const proposeFork = async (name: string, localName: string) => {
     const path = await newFork(name);
     await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
@@ -1139,9 +1142,9 @@ describe('saves that race a slow step', () => {
     expect(res.status).toBe(200);
     return { path, crId: res.body.changeRequest.id as string };
   };
-  const commentOn = (crId: string, text: string) => {
-    const cr = getCR(crId);
-    return addReview(cr, getUser(cr.authorId)!, 'comment', text);
+  const commentOn = async (crId: string, text: string) => {
+    const cr = await getCR(crId);
+    return await addReview(cr, (await getUser(cr.authorId))!, 'comment', text);
   };
 
   it('updating a proposal keeps a comment made while its edits were being re-checked', async () => {
@@ -1151,14 +1154,14 @@ describe('saves that race a slow step', () => {
     const { path, crId } = await proposeFork('Commented while updating', 'CommentedWhileUpdating');
     await dev.post(`${path}/edits`).send({ ops: [addClass('CommentedLater', 'commented later')] });
     const res = await interleave(
-      () => getCR(crId).ops.length === 2,
+      async () => (await getCR(crId)).ops.length === 2,
       async () => {
         await commentOn(crId, 'A comment while the edits were re-checked');
       },
       () => dev.post(`${path}/propose`).send({}),
     );
     expect(res.status).toBe(200);
-    const cr = getCR(crId);
+    const cr = await getCR(crId);
     expect(cr.ops).toHaveLength(2);
     expect(cr.timeline.some((e) => e.message.includes('A comment while the edits were re-checked'))).toBe(true);
     // The re-check describes the new edits.
@@ -1167,15 +1170,15 @@ describe('saves that race a slow step', () => {
 
   it('a re-check of edits that were replaced meanwhile does not put the old results back', async () => {
     const { crId } = await proposeFork('Replaced while re-checked', 'ReplacedWhileRechecked');
-    const author = getUser(getCR(crId).authorId)!;
+    const author = (await getUser((await getCR(crId)).authorId))!;
     await interleave(
-      () => getCR(crId).ops.length === 2,
+      async () => (await getCR(crId)).ops.length === 2,
       async () => {
-        await updateOps(getCR(crId), author, { ops: [addClass('ReplacementEdit', 'replacement edit')] });
+        await updateOps(await getCR(crId), author, { ops: [addClass('ReplacementEdit', 'replacement edit')] });
       },
-      () => updateOps(getCR(crId), author, { ops: [addClass('FirstEdit', 'first edit'), addClass('SecondEdit', 'second edit')] }),
+      async () => updateOps(await getCR(crId), author, { ops: [addClass('FirstEdit', 'first edit'), addClass('SecondEdit', 'second edit')] }),
     );
-    const cr = getCR(crId);
+    const cr = await getCR(crId);
     expect(cr.ops).toEqual([addClass('ReplacementEdit', 'replacement edit')]);
     expect(cr.kgcl!.join('\n')).toContain('ReplacementEdit');
     expect(cr.kgcl!.join('\n')).not.toContain('SecondEdit');
@@ -1186,16 +1189,20 @@ describe('saves that race a slow step', () => {
     // copy read before it, so a comment saved meanwhile made the whole simulation step fail with a 409.
     const { crId } = await proposeFork('Commented during a reaction', 'CommentedDuringReaction');
     // Its own request is open for members to react to, whatever earlier tests left behind.
-    expect(getCR(crId).status).toBe('review');
-    const open = () => list<ChangeRequest>('changeRequests', p().id).filter((x) => ['review', 'voting'].includes(x.status));
-    const reactions = (ids: string[]) => ids.reduce((n, id) => n + list('reviews', id).length + list('votes', id).length, 0);
-    const ids = open().map((c) => c.id);
-    const before = reactions(ids);
+    expect((await getCR(crId)).status).toBe('review');
+    const open = async () => (await list<ChangeRequest>('changeRequests', p().id)).filter((x) => ['review', 'voting'].includes(x.status));
+    const reactions = async (ids: string[]) => {
+      let n = 0;
+      for (const id of ids) n += (await list('reviews', id)).length + (await list('votes', id)).length;
+      return n;
+    };
+    const ids = (await open()).map((c) => c.id);
+    const before = await reactions(ids);
     const commented: string[] = [];
     const original = llm.json;
     llm.json = (async (...args: Parameters<typeof original>) => {
       if (!commented.length && args[0].task === 'persona') {
-        for (const c of open()) {
+        for (const c of await open()) {
           commented.push(c.id);
           await commentOn(c.id, `Commented on #${c.number} while a member was reacting`);
         }
@@ -1208,9 +1215,9 @@ describe('saves that race a slow step', () => {
       llm.json = original;
     }
     expect(commented).toContain(crId);
-    for (const id of commented) expect(getCR(id).timeline.some((e) => e.message.includes('while a member was reacting'))).toBe(true);
+    for (const id of commented) expect((await getCR(id)).timeline.some((e) => e.message.includes('while a member was reacting'))).toBe(true);
     // Members still reacted, on top of the comments.
-    expect(reactions(ids)).toBeGreaterThan(before + commented.length);
+    expect(await reactions(ids)).toBeGreaterThan(before + commented.length);
   });
 
   it('an older re-check never replaces the results of a newer one made against a later draft', async () => {
@@ -1226,17 +1233,17 @@ describe('saves that race a slow step', () => {
       if (!moved) {
         moved = true;
         await upstream([addClass('OlderRecheck', 'older recheck added upstream')]);
-        await triage(getCR(crId));
+        await triage(await getCR(crId));
       }
       return g;
     };
     try {
-      await triage(getCR(crId));
+      await triage(await getCR(crId));
     } finally {
       ontologyStore.graphAt = original;
     }
     expect(moved).toBe(true);
-    const cr = getCR(crId);
+    const cr = await getCR(crId);
     // The newer check's result stands: against the current draft the edit can't be applied.
     expect(cr.validation?.passed).toBe(false);
     expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
@@ -1247,7 +1254,7 @@ describe('saves that race a slow step', () => {
     // second step that ran meanwhile recorded the same member's reaction a second time.
     const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
     // Members only react to requests in review.
-    expect(getCR(crId).status).toBe('review');
+    expect((await getCR(crId)).status).toBe('review');
     const original = llm.json;
     let nested = false;
     llm.json = (async (...args: Parameters<typeof original>) => {
@@ -1263,11 +1270,11 @@ describe('saves that race a slow step', () => {
       llm.json = original;
     }
     expect(nested).toBe(true);
-    for (const cr of list<ChangeRequest>('changeRequests', p().id)) {
+    for (const cr of await list<ChangeRequest>('changeRequests', p().id)) {
       const since = cr.opsUpdatedAt ?? '';
       for (const kind of ['reviews', 'votes'] as const) {
         const by = new Map<string, number>();
-        for (const r of list<{ userId: string; at: string }>(kind, cr.id)) if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
+        for (const r of await list<{ userId: string; at: string }>(kind, cr.id)) if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
         expect([...by.values()].filter((n) => n > 1), `${kind} on #${cr.number}`).toEqual([]);
       }
     }
@@ -1277,10 +1284,10 @@ describe('saves that race a slow step', () => {
     // Used to: the review was stored before the request's save was refused, so it counted towards
     // approval although the request never recorded it.
     const { crId } = await proposeFork('Stale review', 'StaleReview');
-    const stale = getCR(crId);
+    const stale = await getCR(crId);
     await commentOn(crId, 'Saved first');
-    const before = list('reviews', crId).length;
-    await expect(addReview(stale, getUser(stale.authorId)!, 'comment', 'Saved on an old copy')).rejects.toThrow(/changed by someone else/);
-    expect(list('reviews', crId)).toHaveLength(before);
+    const before = (await list('reviews', crId)).length;
+    await expect(addReview(stale, (await getUser(stale.authorId))!, 'comment', 'Saved on an old copy')).rejects.toThrow(/changed by someone else/);
+    expect(await list('reviews', crId)).toHaveLength(before);
   });
 });

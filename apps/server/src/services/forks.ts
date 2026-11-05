@@ -82,10 +82,10 @@ type Snapshot = Pick<OntologyFork, 'seq'>;
  * processes sharing the database. Reads never write, so a slow read can't put
  * back an old version. Returns the new snapshot, for a change saved in steps.
  */
-function save(f: OntologyFork, from: Snapshot): Snapshot {
+async function save(f: OntologyFork, from: Snapshot): Promise<Snapshot> {
   f.seq = (from.seq ?? 0) + 1;
   f.updatedAt = clock.iso();
-  if (!putIf('forks', f, 'seq', from.seq)) throw new HttpError(409, 'The fork changed while this edit was being made. Reload it and try again.');
+  if (!await putIf('forks', f, 'seq', from.seq, f.ontologyId)) throw new HttpError(409, 'The fork changed while this edit was being made. Reload it and try again.');
   return { seq: f.seq };
 }
 
@@ -99,7 +99,7 @@ async function commitAndSave(p: OntologyProject, f: OntologyFork, from: Snapshot
   const head = await commit();
   f.head = head;
   try {
-    return save(f, from);
+    return await save(f, from);
   } catch (err) {
     ontologyStore.rewindFork(p, f.slug, before, head);
     f.head = before;
@@ -109,8 +109,8 @@ async function commitAndSave(p: OntologyProject, f: OntologyFork, from: Snapshot
 
 /** A proposal's writes hold only while the fork record is still at the version its lease was saved with. */
 function proposalFence(id: string, claimed: Snapshot) {
-  return () => {
-    if (get<OntologyFork>('forks', id)?.seq !== claimed.seq)
+  return async () => {
+    if ((await get<OntologyFork>('forks', id))?.seq !== claimed.seq)
       throw new HttpError(409, 'The fork changed while it was being proposed (this proposal took too long and lost its hold on the fork). Reload it and propose again if needed.');
   };
 }
@@ -118,25 +118,25 @@ function proposalFence(id: string, claimed: Snapshot) {
 /** Internals exercised by the concurrency tests. */
 export const forTests = { save, commitAndSave, proposalFence };
 
-export const listForks = (ontologyId: string) => list<OntologyFork>('forks', ontologyId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-export const forksOwnedBy = (userId: string) => list<OntologyFork>('forks').filter((f) => f.ownerId === userId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+export const listForks = async (ontologyId: string) => (await list<OntologyFork>('forks', ontologyId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+export const forksOwnedBy = async (userId: string) => (await list<OntologyFork>('forks')).filter((f) => f.ownerId === userId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
 /** A fork by id (frk_…), "<ontology>/<fork-slug>", or a fork slug within `project`. */
-export function findFork(ref: string, project?: OntologyProject): OntologyFork | undefined {
-  const byId = get<OntologyFork>('forks', ref);
+export async function findFork(ref: string, project?: OntologyProject): Promise<OntologyFork | undefined> {
+  const byId = await get<OntologyFork>('forks', ref);
   if (byId) return byId;
   const slash = ref.indexOf('/');
   if (slash > 0) {
-    const p = findProject(ref.slice(0, slash));
-    return p ? listForks(p.id).find((f) => f.slug === ref.slice(slash + 1)) : undefined;
+    const p = await findProject(ref.slice(0, slash));
+    return p ? (await listForks(p.id)).find((f) => f.slug === ref.slice(slash + 1)) : undefined;
   }
-  if (project) return listForks(project.id).find((f) => f.slug === ref);
-  const matches = list<OntologyFork>('forks').filter((f) => f.slug === ref);
+  if (project) return (await listForks(project.id)).find((f) => f.slug === ref);
+  const matches = (await list<OntologyFork>('forks')).filter((f) => f.slug === ref);
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-export function mustFindFork(ref: string, project?: OntologyProject): OntologyFork {
-  const f = findFork(ref, project);
+export async function mustFindFork(ref: string, project?: OntologyProject): Promise<OntologyFork> {
+  const f = await findFork(ref, project);
   if (!f) throw new HttpError(404, `No fork called “${ref}”`);
   return f;
 }
@@ -157,8 +157,8 @@ async function locked<T>(id: string, fn: (f: OntologyFork, from: Snapshot) => Pr
   const prev = locks.get(id) ?? Promise.resolve();
   const run = prev
     .catch(() => undefined)
-    .then(() => {
-      const f = mustGet<OntologyFork>('forks', id);
+    .then(async () => {
+      const f = await mustGet<OntologyFork>('forks', id);
       if (f.proposing && f.proposing.until > Date.now()) throw new HttpError(409, 'The fork is being proposed upstream right now. Try again in a moment.');
       delete f.proposing; // a lease that ran out (its process stopped) no longer holds anything
       return fn(f, { seq: f.seq });
@@ -469,8 +469,8 @@ function requireOpen(f: OntologyFork) {
     throw new HttpError(409, 'This fork was made by an earlier version of Concord and can no longer be changed. It still resolves; create a new fork, redo its changes there, and close this one.');
 }
 
-function uniqueForkSlug(ontologyId: string, base: string) {
-  const taken = new Set(listForks(ontologyId).map((f) => f.slug));
+async function uniqueForkSlug(ontologyId: string, base: string) {
+  const taken = new Set((await listForks(ontologyId)).map((f) => f.slug));
   let s = base;
   for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
   return s;
@@ -479,7 +479,7 @@ function uniqueForkSlug(ontologyId: string, base: string) {
 export async function createFork(p: OntologyProject, owner: User, input: { name: string; purpose?: string }): Promise<OntologyFork> {
   const name = input.name.trim();
   if (!name) throw new HttpError(400, 'Give the fork a name');
-  const slug = uniqueForkSlug(p.id, slugify(name).replace(/^-+|-+$/g, '') || 'fork');
+  const slug = await uniqueForkSlug(p.id, slugify(name).replace(/^-+|-+$/g, '') || 'fork');
   const now = clock.iso();
   const fork: OntologyFork = {
     id: newId('frk'),
@@ -504,8 +504,8 @@ export async function createFork(p: OntologyProject, owner: User, input: { name:
   const graph = stamp(await ontologyStore.working(p), p, fork);
   fork.head = await ontologyStore.commitFork(p, slug, graph, `Fork ${p.title} ${p.currentVersion} as “${name}”${fork.purpose ? `\n\n${fork.purpose}` : ''}`, { name: owner.name, email: owner.email }, { expectedParent: fork.baseCommit });
   fork.seq = 1;
-  put('forks', fork, fork.ontologyId);
-  logActivity({ ontologyId: p.id, actorId: owner.id, type: 'fork.created', message: `forked ${p.title} as “${name}”`, link: `/o/${p.slug}/forks/${slug}` });
+  await put('forks', fork, fork.ontologyId);
+  await logActivity({ ontologyId: p.id, actorId: owner.id, type: 'fork.created', message: `forked ${p.title} as “${name}”`, link: `/o/${p.slug}/forks/${slug}` });
   return fork;
 }
 
@@ -540,7 +540,7 @@ function validationBrief(v: ValidationReport) {
 
 /** Strict OWL: a fork may never serve an inconsistent ontology or an unsatisfiable class. */
 async function requireConsistent(p: OntologyProject, graph: OntologyGraph, what: string) {
-  const report = await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) });
+  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) });
   const brief = validationBrief(report);
   if (!report.reasoner.available) {
     // The fallback structural check misses whole classes of inconsistency (cardinalities, for one).
@@ -560,7 +560,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
   requireOwner(fork, user, 'edit it');
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
-    const p = getProject(f.ontologyId);
+    const p = await getProject(f.ontologyId);
     const head = f.head;
     const current = await ontologyStore.forkGraph(p, f.slug);
     if (ontologyStore.forkHead(p, f.slug) !== head) throw new HttpError(409, 'The fork changed while this edit was being prepared. Reload it and try again.');
@@ -594,8 +594,8 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
     const subject = (message || input.description?.split('\n')[0] || 'Edit the fork').slice(0, 120);
     // Keep only the edits that still make a difference (an edit undone later drops out).
     f.ops = outstanding(await ontologyStore.graphAt(p, f.baseCommit), after, [...f.ops, ...ops]).ops;
-    await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, stamp(after, p, f), subject, { name: user.name, email: user.email }, { expectedParent: head }));
-    logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.edited', message: `edited the fork “${f.title}”: ${subject}`, link: `/o/${p.slug}/forks/${f.slug}` });
+    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, stamp(after, p, f), subject, { name: user.name, email: user.email }, { expectedParent: head }));
+    await logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.edited', message: `edited the fork “${f.title}”: ${subject}`, link: `/o/${p.slug}/forks/${f.slug}` });
     const summary = await forkSummary(f);
     const edited = new Set(keysPerOp(current, ops).flat());
     return { fork: summary, ops, terms: summary.terms.filter((t) => edited.has(t.iri)), warnings, validation };
@@ -609,19 +609,19 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
  * is never orphaned, and proposing again picks it up instead of opening
  * another.
  */
-function forkCRs(f: OntologyFork): ChangeRequest[] {
+async function forkCRs(f: OntologyFork): Promise<ChangeRequest[]> {
   const out = new Map<string, ChangeRequest>();
   for (const id of f.changeRequestIds) {
-    const cr = get<ChangeRequest>('changeRequests', id);
+    const cr = await get<ChangeRequest>('changeRequests', id);
     if (cr) out.set(cr.id, cr);
   }
-  for (const cr of list<ChangeRequest>('changeRequests', f.ontologyId)) if (cr.origin.type === 'fork' && cr.origin.forkId === f.id) out.set(cr.id, cr);
+  for (const cr of await list<ChangeRequest>('changeRequests', f.ontologyId)) if (cr.origin.type === 'fork' && cr.origin.forkId === f.id) out.set(cr.id, cr);
   return [...out.values()].sort((a, b) => a.number - b.number);
 }
 
 /** The open change request a fork has upstream, if any. */
-const openCR = (f: OntologyFork) => forkCRs(f).findLast((cr) => OPEN_CR.includes(cr.status));
-const latestCR = (f: OntologyFork) => forkCRs(f).at(-1);
+const openCR = async (f: OntologyFork) => (await forkCRs(f)).findLast((cr) => OPEN_CR.includes(cr.status));
+const latestCR = async (f: OntologyFork) => (await forkCRs(f)).at(-1);
 
 const conflictText = (c: ForkConflict[]) => c.map((x) => x.message).join(' ');
 
@@ -636,7 +636,7 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
   requireOwner(fork, user, 'propose it upstream');
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
-    const p = getProject(f.ontologyId);
+    const p = await getProject(f.ontologyId);
     const plan = await rebasePlan(p, f, user.name);
     if (plan.conflicts.length) throw new HttpError(409, `Resolve the fork's conflicts with the latest draft first (sync it, then discard or redo the conflicting edits). ${conflictText(plan.conflicts)}`);
     if (!plan.remaining.length) throw new HttpError(409, f.ops.length ? 'Everything in this fork is already in the working draft.' : 'The fork has no edits to propose yet.');
@@ -659,37 +659,37 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
     // Take a lease on the fork first (a conditional save), so no edit, sync, close or other
     // proposal, in this process or another, starts while the change request is being made.
     f.proposing = { until: Date.now() + PROPOSE_LEASE_MS };
-    const claimed = save(f, from);
+    const claimed = await save(f, from);
     // Every write to the change request is fenced on that lease: if it runs out (this process
     // stalled) and anything else changes the fork, this proposal's writes are refused, so it can
     // never overwrite newer work. Nothing is ever rolled back.
     const fence = proposalFence(f.id, claimed);
-    const release = () => {
+    const release = async () => {
       // Give the lease back if nothing else has changed the fork since.
-      const cur = get<OntologyFork>('forks', f.id);
+      const cur = await get<OntologyFork>('forks', f.id);
       if (cur && cur.seq === claimed.seq && cur.proposing) {
         delete cur.proposing;
         try {
-          save(cur, claimed);
+          await save(cur, claimed);
         } catch {
           // Changed in the meantime: the lease is no longer this proposal's to give back.
         }
       }
     };
-    if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
+    if (!(await rolesFor(p.id, user.id)).length) await setRoles(p.id, user.id, ['contributor']);
     // An open request from this fork, including one an interrupted proposal created but never
     // recorded on the fork: it is updated, not duplicated.
-    const existing = openCR(f);
+    const existing = await openCR(f);
     let cr: ChangeRequest;
     try {
       cr = await withFence(fence, async () => {
-        if (!existing) return createChangeRequest(p, user, { title, description, kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: plan.remaining, submit: true });
+        if (!existing) return await createChangeRequest(p, user, { title, description, kind: 'feature', origin: { type: 'fork', forkId: f.id, forkSlug: f.slug }, ops: plan.remaining, submit: true });
         const updated = await updateOps(existing, user, { ops: plan.remaining, title: input.title?.trim() || undefined, description: input.description?.trim() || undefined });
         // Interrupted before it was submitted: submit it now.
         return updated.status === 'draft' ? submit(updated, user) : updated;
       });
     } catch (err) {
-      release();
+      await release();
       throw err;
     }
     if (!f.changeRequestIds.includes(cr.id)) f.changeRequestIds.push(cr.id);
@@ -698,9 +698,9 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
     delete f.proposing;
     // Can only fail if the lease ran out and something else changed the fork after the request
     // was written; the request stays linked to the fork through its origin either way.
-    save(f, claimed);
-    if (!existing) logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.proposed', message: `proposed the fork “${f.title}” upstream as #${cr.number}`, link: `/o/${p.slug}/changes/${cr.id}` });
-    return { fork: await forkSummary(f), changeRequest: getCR(cr.id) };
+    await save(f, claimed);
+    if (!existing) await logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.proposed', message: `proposed the fork “${f.title}” upstream as #${cr.number}`, link: `/o/${p.slug}/changes/${cr.id}` });
+    return { fork: await forkSummary(f), changeRequest: await getCR(cr.id) };
   });
 }
 
@@ -714,10 +714,10 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
   requireOwner(fork, user, 'sync it');
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
-    const p = getProject(f.ontologyId);
+    const p = await getProject(f.ontologyId);
     const behind = ontologyStore.commitsSince(p, f.baseCommit);
     if (!behind) return { synced: false, fork: await forkSummary(f), conflicts: [], message: 'Already up to date with upstream.' };
-    const plan = await rebasePlan(p, f, getUser(f.ownerId)?.name);
+    const plan = await rebasePlan(p, f, (await getUser(f.ownerId))?.name);
     if (plan.conflicts.length || !plan.result)
       return {
         synced: false,
@@ -746,8 +746,8 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
       for (const k of plan.landed) if (!landed.has(k)) landed.set(k, { key: k, change: changeKind(describe(before, k), describe(fork, k)) });
       f.landed = [...landed.values()];
     }
-    await commitAndSave(p, f, from, () =>
-      ontologyStore.commitFork(p, f.slug, stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, { name: user.name, email: user.email }, { expectedParent: head, extraParents: [plan.upstreamHead] }),
+    await commitAndSave(p, f, from, async () =>
+      await ontologyStore.commitFork(p, f.slug, stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, { name: user.name, email: user.email }, { expectedParent: head, extraParents: [plan.upstreamHead] }),
     );
     const landed = plan.landed.map((k) => keyLabel(k, result.prefixes));
     return {
@@ -772,7 +772,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
   requireOwner(fork, user, 'change it');
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
-    const p = getProject(f.ontologyId);
+    const p = await getProject(f.ontologyId);
     const base = await ontologyStore.graphAt(p, f.baseCommit);
     const out = outstanding(base, await ontologyStore.forkGraph(p, f.slug), f.ops);
     const drop = terms === 'all' ? undefined : new Set(terms.map((t) => toKey(t, base.prefixes)));
@@ -813,7 +813,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     f.revision += 1;
     f.ops = keep;
     const head = f.head;
-    await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, stamp(graph, p, f), `Discard the fork's changes to ${named}`, { name: user.name, email: user.email }, { expectedParent: head }));
+    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, stamp(graph, p, f), `Discard the fork's changes to ${named}`, { name: user.name, email: user.email }, { expectedParent: head }));
     return forkSummary(f);
   });
 }
@@ -832,14 +832,14 @@ export async function closeFork(fork: OntologyFork, user: User | undefined) {
   requireOwner(fork, user, 'close it');
   return locked(fork.id, async (f, from) => {
     if (f.status === 'closed') throw new HttpError(409, 'This fork is already closed.');
-    const p = getProject(f.ontologyId);
+    const p = await getProject(f.ontologyId);
     // Closing moves the branch too, so an edit prepared before the close (here or in
     // another server process) fails its compare-and-swap instead of reopening the fork.
     const graph = await ontologyStore.forkGraph(p, f.slug);
     const head = f.head;
     f.status = 'closed';
-    await commitAndSave(p, f, from, () => ontologyStore.commitFork(p, f.slug, graph, 'Close the fork', { name: user.name, email: user.email }, { expectedParent: head }));
-    logActivity({ ontologyId: f.ontologyId, actorId: user.id, type: 'fork.closed', message: `closed the fork “${f.title}”`, link: `/o/${getProject(f.ontologyId).slug}/forks/${f.slug}` });
+    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, graph, 'Close the fork', { name: user.name, email: user.email }, { expectedParent: head }));
+    await logActivity({ ontologyId: f.ontologyId, actorId: user.id, type: 'fork.closed', message: `closed the fork “${f.title}”`, link: `/o/${p.slug}/forks/${f.slug}` });
     return forkSummary(f);
   });
 }
@@ -853,7 +853,7 @@ async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTe
   const fork = await ontologyStore.forkGraph(p, f.slug);
   const working = await ontologyStore.working(p);
   const released = p.currentVersion !== '0.0.0' && ontologyStore.versions(p).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
-  const cr = latestCR(f);
+  const cr = await latestCR(f);
   const crOpen = cr && OPEN_CR.includes(cr.status);
   let proposed: OntologyGraph | undefined;
   if (crOpen) {
@@ -891,25 +891,25 @@ async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTe
   });
 }
 
-function computeStatus(f: OntologyFork, terms: ForkTerm[]): ForkStatus {
+async function computeStatus(f: OntologyFork, terms: ForkTerm[]): Promise<ForkStatus> {
   if (f.status === 'closed') return 'closed';
   if (terms.length && terms.every((t) => t.upstream === 'released')) return 'released';
   if (terms.length && terms.every((t) => t.upstream === 'released' || t.upstream === 'merged')) return 'merged';
-  if (openCR(f)) return 'proposed';
+  if (await openCR(f)) return 'proposed';
   return 'active';
 }
 
 export async function forkSummary(f: OntologyFork): Promise<ForkSummary> {
-  const p = getProject(f.ontologyId);
+  const p = await getProject(f.ontologyId);
   const terms = await termStatuses(f, p);
   // Derived on every read and never written back, so a slow read can't overwrite a newer edit.
-  const status = computeStatus(f, terms);
-  const cr = latestCR(f);
+  const status = await computeStatus(f, terms);
+  const cr = await latestCR(f);
   return {
     ...f,
-    changeRequestIds: forkCRs(f).map((c) => c.id),
+    changeRequestIds: (await forkCRs(f)).map((c) => c.id),
     status,
-    owner: publicUser(getUser(f.ownerId)),
+    owner: publicUser(await getUser(f.ownerId)),
     ontology: { id: p.id, slug: p.slug, title: p.title, prefix: p.prefix, currentVersion: p.currentVersion },
     version: forkVersion(f),
     urls: forkUrls(p, f),
@@ -920,7 +920,7 @@ export async function forkSummary(f: OntologyFork): Promise<ForkSummary> {
 }
 
 export async function forkDetail(f: OntologyFork) {
-  const p = getProject(f.ontologyId);
+  const p = await getProject(f.ontologyId);
   return { ...(await forkSummary(f)), history: ontologyStore.forkLog(p, f.slug, 30) };
 }
 
@@ -950,7 +950,7 @@ async function notIn(p: OntologyProject, f: OntologyFork): Promise<{ release: st
  */
 export async function checkFork(f: OntologyFork): Promise<ForkCheck> {
   const fork = await forkSummary(f);
-  const p = getProject(f.ontologyId);
+  const p = await getProject(f.ontologyId);
   // Version IRIs give their documentation page to clients that don't ask for RDF; the fork IRI gave Turtle.
   const wildcard = (target: string) =>
     `If your code fetches ${fork.urls.iri} without asking for an RDF format (fetch or curl with no Accept header), switch it to ${target}.ttl rather than ${target}: the version IRI answers such requests with its HTML page, where the fork IRI answered with Turtle. RDF tools that send an Accept header can use ${target} as it is.`;

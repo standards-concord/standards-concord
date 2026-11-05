@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { OntologyGraph } from '@concord/core';
 import type { ChangeRequest, OntologyProject, PublicHold, PublicHoldReview, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, put } from '../db.js';
+import { transaction, get, HttpError, list, put, remove } from '../db.js';
 import { getUser } from '../services/users.js';
 import { requireRole, updateProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -35,12 +35,12 @@ type Checked = Pick<OntologyProject, 'id' | 'slug' | 'publishedWithApproval'>;
  * check and has no hold record yet (holding it failed, or hasn't run) has
  * every version held, until holdLegacy records it.
  */
-export function holdOf(project: Checked): PublicHold | undefined {
-  const saved = get<PublicHold>('kv', key(project.id));
+export async function holdOf(project: Checked): Promise<PublicHold | undefined> {
+  const saved = await get<PublicHold>('kv', key(project.id));
   if (saved || project.publishedWithApproval) return saved;
   return { id: key(project.id), ontologyId: project.id, versions: ['draft', ...ontologyStore.versions(project)], since: clock.iso() };
 }
-export const isHeld = (project: Checked, version: string) => !!holdOf(project)?.versions.includes(version);
+export const isHeld = async (project: Checked, version: string) => !!(await holdOf(project))?.versions.includes(version);
 /**
  * Whether everything in this ontology's history was published under the
  * approval rules: true only for ontologies created since. An older one keeps
@@ -48,9 +48,9 @@ export const isHeld = (project: Checked, version: string) => !!holdOf(project)?.
  * git history still holds what was never approved (a draft repaired since,
  * say), so its repository is never pushed anywhere as it is.
  */
-export const historyApproved = (project: Checked) => !!project.publishedWithApproval && !get<PublicHold>('kv', key(project.id));
+export const historyApproved = async (project: Checked) => !!project.publishedWithApproval && !await get<PublicHold>('kv', key(project.id));
 /** Anything of this ontology waiting for approval (then nothing of it leaves Concord, such as a push to GitHub). */
-export const anyHeld = (project: Checked) => (holdOf(project)?.versions.length ?? 0) > 0;
+export const anyHeld = async (project: Checked) => ((await holdOf(project))?.versions.length ?? 0) > 0;
 
 /**
  * Holds every version of an ontology that predates the check, once. The
@@ -58,22 +58,48 @@ export const anyHeld = (project: Checked) => (holdOf(project)?.versions.length ?
  * stops in between holds it again (the same versions) next time; until the
  * record exists, holdOf holds everything anyway.
  */
-export function holdLegacy(project: OntologyProject) {
+export async function holdLegacy(project: OntologyProject) { return await transaction(async () => {
   if (project.publishedWithApproval) return;
-  if (!get<PublicHold>('kv', key(project.id))) {
-    const hold = holdOf(project)!;
-    put('kv', hold);
+  if (!await get<PublicHold>('kv', key(project.id))) {
+    const hold = (await holdOf(project))!;
+    await put('kv', hold);
     console.log(`[public] holding ${project.slug} (${hold.versions.join(', ')}) until a steward approves what it publishes`);
   }
-  updateProject({ ...project, publishedWithApproval: true });
-}
+  await updateProject({ ...project, publishedWithApproval: true });
+}); }
 
 /** A release published while the working draft is held carries what's held: it's held too. */
-export function holdReleaseIfDraftHeld(project: OntologyProject, version: string) {
-  const hold = holdOf(project);
-  if (!hold?.versions.includes('draft') || hold.versions.includes(version)) return;
-  put('kv', { ...hold, versions: [...hold.versions, version] });
-}
+const claimsKey = (ontologyId: string, version: string) => `public-hold-claims:${ontologyId}:${version}`;
+
+/**
+ * Hold `version` before a publish writes it, if the working draft is held. Every publish that does takes a claim
+ * on the hold, so one that fails can't take back a hold another one still relies on. True if this call took a
+ * claim: the caller must then call dropHoldClaim once it's done, whatever happened.
+ */
+export async function holdReleaseIfDraftHeld(project: OntologyProject, version: string): Promise<boolean> { return await transaction(async () => {
+  const hold = await holdOf(project);
+  if (!hold?.versions.includes('draft')) return false;
+  if (!hold.versions.includes(version)) await put('kv', { ...hold, versions: [...hold.versions, version] });
+  const k = claimsKey(project.id, version);
+  await put('kv', { id: k, value: ((await get<{ id: string; value: number }>('kv', k))?.value ?? 0) + 1 });
+  return true;
+}); }
+
+/**
+ * A publish is done with its claim. The hold is taken back only when this publish wrote nothing, no other publish
+ * still has a claim, and the version has no files at all: a publish that failed part-way may have left files the
+ * public pages would serve as that version. Anything else keeps it held until a steward approves it.
+ */
+export async function dropHoldClaim(project: OntologyProject, version: string, wrote: boolean) { return await transaction(async () => {
+  const k = claimsKey(project.id, version);
+  const left = Math.max(0, ((await get<{ id: string; value: number }>('kv', k))?.value ?? 1) - 1);
+  if (left) await put('kv', { id: k, value: left });
+  else await remove('kv', k);
+  if (wrote || left || ontologyStore.versions(project).includes(version)) return;
+  const hold = await holdOf(project);
+  if (!hold?.versions.includes(version)) return;
+  await put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version) });
+}); }
 
 /** The version a reference names, as the public sees versions: 'draft' or a release. Anything else (a commit, a tag) isn't public. */
 export function publicVersion(project: OntologyProject, ref: string | undefined): string | undefined {
@@ -91,21 +117,21 @@ export async function readOntology(project: OntologyProject, ref: string | undef
   if (viewer) return ontologyStore.at(project, ref);
   const version = publicVersion(project, ref);
   if (!version) throw new HttpError(404, `${project.title} has no published version “${ref}”`);
-  if (isHeld(project, version)) throw new HttpError(503, HELD_MESSAGE);
+  if (await isHeld(project, version)) throw new HttpError(503, HELD_MESSAGE);
   return ontologyStore.at(project, version === 'draft' ? 'working' : version);
 }
 export const HELD_MESSAGE = 'This version is being reviewed before it is published. Please check back later.';
 
 /** Exactly what a version publishes: its Turtle (every download is made from it), its release notes and its use case snapshot. */
-function content(project: OntologyProject, version: string) {
+async function content(project: OntologyProject, version: string) {
   if (version === 'draft') return { turtle: ontologyStore.readWorkingText(project), notes: '', snapshot: '' };
   // Read from the commit, never the checkout (ontologyStore.ts).
   const read = (name: string) => ontologyStore.releaseFile(project, version, name) ?? '';
   // The record the public page shows, not a rejected attempt at the same version.
-  const release = publishedRelease(project.id, version);
+  const release = await publishedRelease(project.id, version);
   return { turtle: read('ontology.ttl'), notes: release?.notes ?? '', snapshot: read('requirements.json') };
 }
-const fingerprintOf = (c: ReturnType<typeof content>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
+const fingerprintOf = (c: Awaited<ReturnType<typeof content>>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
 
 /**
  * What a steward reviews: everything the version publishes (its Turtle, its
@@ -115,11 +141,11 @@ const fingerprintOf = (c: ReturnType<typeof content>) => createHash('sha256').up
  * there to read, and approving sends back the fingerprint of what was shown.
  */
 export async function reviewHold(project: OntologyProject, version: string): Promise<PublicHoldReview> {
-  const c = content(project, version);
+  const c = await content(project, version);
   const review: PublicHoldReview = { version, fingerprint: fingerprintOf(c), statements: 0, hints: [], turtle: c.turtle, notes: c.notes, snapshot: c.snapshot };
-  const ucs = list<UseCase>('useCases', project.id);
-  const people = [...new Set(list<ChangeRequest>('changeRequests', project.id).map((cr) => getUser(cr.authorId)?.name).filter((n): n is string => !!n))];
-  const secrets = secretsFor(ucs, { people });
+  const ucs = await list<UseCase>('useCases', project.id);
+  const people = [...new Set((await Promise.all((await list<ChangeRequest>('changeRequests', project.id)).map(async (cr) => (await getUser(cr.authorId))?.name))).filter((n): n is string => !!n))];
+  const secrets = await secretsFor(ucs, { people });
   for (const line of c.notes.split('\n')) {
     const kind = findSecrets(line, secrets)[0];
     if (kind) review.hints.push({ subject: 'release notes', predicate: '', object: line, kind });
@@ -145,7 +171,7 @@ export async function reviewHold(project: OntologyProject, version: string): Pro
 }
 
 export async function listHolds(project: OntologyProject): Promise<PublicHoldReview[]> {
-  const hold = holdOf(project);
+  const hold = await holdOf(project);
   if (!hold) return [];
   return Promise.all(
     hold.versions.map((v) =>
@@ -155,11 +181,11 @@ export async function listHolds(project: OntologyProject): Promise<PublicHoldRev
 }
 
 /** An owner or steward approves exactly what they reviewed; if it changed since, nothing is approved. */
-export function approveHold(project: OntologyProject, actor: User, version: string, fingerprint: unknown) {
-  requireRole(project.id, actor, ['owner', 'steward'], 'approve what a version publishes');
-  const hold = holdOf(project);
+export async function approveHold(project: OntologyProject, actor: User, version: string, fingerprint: unknown) { return await transaction(async () => {
+  await requireRole(project.id, actor, ['owner', 'steward'], 'approve what a version publishes');
+  const hold = await holdOf(project);
   if (!hold?.versions.includes(version)) throw new HttpError(404, `${version} isn’t waiting for approval`);
-  if (typeof fingerprint !== 'string' || !fingerprint || fingerprint !== fingerprintOf(content(project, version)))
+  if (typeof fingerprint !== 'string' || !fingerprint || fingerprint !== fingerprintOf(await content(project, version)))
     throw new HttpError(409, 'This version changed after you reviewed it. Review what it publishes again.');
-  put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version), approved: [...(hold.approved ?? []), { version, by: actor.id, at: clock.iso(), fingerprint }] });
-}
+  await put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version), approved: [...(hold.approved ?? []), { version, by: actor.id, at: clock.iso(), fingerprint }] });
+}); }

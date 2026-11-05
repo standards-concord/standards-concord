@@ -10,7 +10,7 @@ import type {
 } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { transaction, get, HttpError, list, mustGet, put } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
@@ -27,9 +27,9 @@ import { logActivity } from './users.js';
 /* Use cases                                                                 */
 /* ------------------------------------------------------------------------ */
 
-export const getUseCase = (id: string) => mustGet<UseCase>('useCases', id);
-export const listUseCases = (ontologyId: string) =>
-  list<UseCase>('useCases', ontologyId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+export const getUseCase = async (id: string) => await mustGet<UseCase>('useCases', id);
+export const listUseCases = async (ontologyId: string) =>
+  (await list<UseCase>('useCases', ontologyId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
 /** Weighted completeness against Kendall's template (competency questions count most). */
 export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'>): number {
@@ -56,24 +56,24 @@ export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'
   return Math.round((checks.reduce((n, [ok, w]) => n + (ok ? w : 0), 0) / total) * 100) / 100;
 }
 
-function saveUseCase(u: UseCase) {
+async function saveUseCase(u: UseCase) { return transaction(async () => {
   // A renamed use case keeps its old titles, so redaction still recognises them.
-  const before = get<UseCase>('useCases', u.id)?.sections.name?.trim();
+  const before = (await get<UseCase>('useCases', u.id))?.sections.name?.trim();
   if (before && before !== u.sections.name?.trim() && !u.formerTitles?.includes(before)) u.formerTitles = [...(u.formerTitles ?? []), before];
   u.completeness = completeness(u);
   u.updatedAt = clock.iso();
-  return put('useCases', u, u.ontologyId);
-}
+  return await put('useCases', u, u.ontologyId);
+}); }
 
-export function createUseCase(
+export async function createUseCase(
   project: OntologyProject,
   author: User,
   init: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'terms' | 'source' | 'sourceRef' | 'status'>>,
-): UseCase {
+): Promise<UseCase> { return transaction(async () => {
   const now = clock.iso();
   // Anyone describing a use case becomes a contributor.
-  if (!rolesFor(project.id, author.id).length) setRoles(project.id, author.id, ['contributor']);
-  return saveUseCase({
+  if (!(await rolesFor(project.id, author.id)).length) await setRoles(project.id, author.id, ['contributor']);
+  return await saveUseCase({
     id: newId('uc'),
     ontologyId: project.id,
     authorId: author.id,
@@ -87,17 +87,19 @@ export function createUseCase(
     createdAt: now,
     updatedAt: now,
   });
-}
+}); }
 
-export function updateUseCase(u: UseCase, actor: User, patch: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'status' | 'terms'>>) {
-  if (u.authorId !== actor.id && !rolesFor(u.ontologyId, actor.id).some((r) => ['editor', 'steward', 'owner'].includes(r)))
+/** Reads the use case inside the transaction, so edits made at the same time to different sections both survive. */
+export async function updateUseCase(id: string, actor: User, patch: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'status' | 'terms'>>) { return transaction(async () => {
+  const u = await getUseCase(id);
+  if (u.authorId !== actor.id && !(await rolesFor(u.ontologyId, actor.id)).some((r) => ['editor', 'steward', 'owner'].includes(r)))
     throw new HttpError(403, 'Only the author or an editor can change this use case');
   if (patch.sections) u.sections = { ...u.sections, ...patch.sections };
   if (patch.competencyQuestions) u.competencyQuestions = patch.competencyQuestions.map((q) => ({ ...q, id: q.id || newId('cq'), status: q.status ?? 'draft' }));
   if (patch.terms) u.terms = patch.terms;
   if (patch.status) u.status = patch.status;
-  return saveUseCase(u);
-}
+  return await saveUseCase(u);
+}); }
 
 function mergeTurn(u: UseCase, turn: Pick<InterviewTurn, 'sectionUpdates' | 'newCompetencyQuestions' | 'newTerms'>) {
   for (const [k, v] of Object.entries(turn.sectionUpdates ?? {})) {
@@ -128,10 +130,10 @@ function mergeTurn(u: UseCase, turn: Pick<InterviewTurn, 'sectionUpdates' | 'new
 /* Interviews                                                                */
 /* ------------------------------------------------------------------------ */
 
-export const getInterview = (id: string) => mustGet<InterviewSession>('interviews', id);
-const saveInterview = (s: InterviewSession) => {
+export const getInterview = async (id: string) => await mustGet<InterviewSession>('interviews', id);
+const saveInterview = async (s: InterviewSession) => {
   s.updatedAt = clock.iso();
-  return put('interviews', s, s.ontologyId);
+  return await put('interviews', s, s.ontologyId);
 };
 const msg = (role: ChatMessage['role'], content: string, targets?: ChatMessage['targets']): ChatMessage => ({
   id: newId('msg'),
@@ -251,7 +253,7 @@ function candidateTerms(text: string): InterviewTurn['newTerms'] {
 }
 
 export async function startInterview(project: OntologyProject, user: User, useCaseId?: string): Promise<InterviewSession> {
-  const u = useCaseId ? getUseCase(useCaseId) : createUseCase(project, user, { source: 'chat' });
+  const u = useCaseId ? await getUseCase(useCaseId) : await createUseCase(project, user, { source: 'chat' });
   const first = SCRIPT[0];
   let opening = first.ask(project);
   if (useCaseId && u.sections.goal) opening = `Welcome back. Last time we covered “${u.sections.name ?? u.sections.goal}”. What would you like to add or change?`;
@@ -267,7 +269,7 @@ export async function startInterview(project: OntologyProject, user: User, useCa
     createdAt: now,
     updatedAt: now,
   };
-  saveInterview(session);
+  await saveInterview(session);
   await persistTranscript(session, u);
   return session;
 }
@@ -278,8 +280,8 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
     const turtle = transcriptToTurtle(session.id, `Requirements interview: ${u.sections.name ?? 'use case'}`, session.messages);
     session.storage = await solid.write(session.userId, `interviews/${session.id}.ttl`, turtle);
     u.transcriptUrl = session.storage.url;
-    put('useCases', u, u.ontologyId);
-    put('interviews', session, session.ontologyId);
+    await put('useCases', u, u.ontologyId);
+    await put('interviews', session, session.ontologyId);
   } catch (err) {
     console.warn(`[interview] could not store transcript: ${(err as Error).message}`);
   }
@@ -287,8 +289,8 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
 
 export async function interviewTurn(session: InterviewSession, user: User, content: string) {
   if (session.userId !== user.id) throw new HttpError(403, 'This interview belongs to someone else');
-  const project = getProject(session.ontologyId);
-  const u = getUseCase(session.useCaseId);
+  const project = await getProject(session.ontologyId);
+  const u = await getUseCase(session.useCaseId);
   session.messages.push(msg('user', content));
   const graph = await ontologyStore.working(project);
   const { value: turn } = await llm.json<InterviewTurn>({
@@ -311,21 +313,21 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
     session.done = true;
     if (u.status === 'eliciting') u.status = 'ready';
   }
-  saveUseCase(u);
-  saveInterview(session);
+  await saveUseCase(u);
+  await saveInterview(session);
   await persistTranscript(session, u);
-  if (turn.done) logActivity({ ontologyId: project.id, actorId: user.id, type: 'usecase.ready', message: `described a use case: ${u.sections.name ?? 'untitled'}`, link: `/o/${project.id}/use-cases/${u.id}` });
+  if (turn.done) await logActivity({ ontologyId: project.id, actorId: user.id, type: 'usecase.ready', message: `described a use case: ${u.sections.name ?? 'untitled'}`, link: `/o/${project.id}/use-cases/${u.id}` });
   return { session, useCase: u };
 }
 
 export async function finishInterview(session: InterviewSession, user: User) {
   if (session.userId !== user.id) throw new HttpError(403, 'This interview belongs to someone else');
-  const u = getUseCase(session.useCaseId);
+  const u = await getUseCase(session.useCaseId);
   session.done = true;
   if (u.status === 'eliciting') u.status = 'ready';
-  saveInterview(session);
-  saveUseCase(u);
-  logActivity({ ontologyId: session.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described a use case: ${u.sections.name ?? 'untitled'}`, link: `/o/${session.ontologyId}/use-cases/${u.id}` });
+  await saveInterview(session);
+  await saveUseCase(u);
+  await logActivity({ ontologyId: session.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described a use case: ${u.sections.name ?? 'untitled'}`, link: `/o/${session.ontologyId}/use-cases/${u.id}` });
   return { useCase: u };
 }
 
@@ -334,7 +336,7 @@ export async function finishInterview(session: InterviewSession, user: User) {
 /* ------------------------------------------------------------------------ */
 
 export async function synthesise(project: OntologyProject, actor: User, useCaseIds?: string[]) {
-  const ucs = (useCaseIds?.length ? useCaseIds.map(getUseCase) : listUseCases(project.id).filter((u) => u.status === 'ready')).filter(
+  const ucs = (useCaseIds?.length ? (await Promise.all(useCaseIds.map(getUseCase))) : (await listUseCases(project.id)).filter((u) => u.status === 'ready')).filter(
     (u) => u.ontologyId === project.id,
   );
   if (!ucs.length) throw new HttpError(409, 'No use cases are ready to synthesise. Finish an interview or mark a use case as ready first.');
@@ -375,7 +377,7 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
       }
     }
     u.status = 'synthesised';
-    saveUseCase(u);
+    await saveUseCase(u);
   }
   return cr;
 }

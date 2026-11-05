@@ -228,12 +228,12 @@ export async function submitFeedback(user: User | undefined, input: Omit<Feedbac
     createdAt: clock.iso(),
   };
   if (!tester) {
-    put('feedback', sub);
+    await put('feedback', sub);
     return { ...sub, savedTo: undefined };
   }
   // A tester's feedback is stored together with its place in their testing record (or not at all, with a 409, if
   // the record can't take it), then copied to their pod with the version they tested.
-  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, () => put('feedback', sub));
+  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, async () => await put('feedback', sub));
   // The pod's feedback folder is shared read-only with the admins' WebIDs (testers are told this).
   if (savedTo.kind === 'solid') await shareFeedbackFolder(tester.id);
   return { ...sub, savedTo };
@@ -252,25 +252,25 @@ export const FEEDBACK_FOLDER = 'feedback/';
 export async function shareFeedbackFolder(userId: string, opts: { create?: boolean; force?: boolean } = {}) {
   try {
     const r = await solid.shareRead(userId, FEEDBACK_FOLDER, config.adminWebIds, opts);
-    if (r === 'shared' || r === 'unchanged') remove('kv', shareErrorKey(userId));
+    if (r === 'shared' || r === 'unchanged') await remove('kv', shareErrorKey(userId));
     return r;
   } catch (err) {
     const message = (err as Error).message.slice(0, 300);
     console.warn(`[solid] could not share the feedback folder of ${userId}: ${message}`);
     // Shown to the admins beside that tester's folder.
-    put('kv', { id: shareErrorKey(userId), value: message, at: clock.iso() });
+    await put('kv', { id: shareErrorKey(userId), value: message, at: clock.iso() });
     return 'error' as const;
   }
 }
 
 const shareErrorKey = (userId: string) => `share-error:${userId}`;
-const sharingError = (userId: string) => get_<{ value: string }>('kv', shareErrorKey(userId))?.value;
+const sharingError = async (userId: string) => (await get_<{ value: string }>('kv', shareErrorKey(userId)))?.value;
 
 /** Bring every tester's feedback folder in line with ADMIN_WEBIDS (run at start-up: the list may have changed). */
 export async function syncFeedbackSharing() {
   if (!solid.enabled) return { shared: 0, unchanged: 0, missing: 0, failed: 0 };
   const counts = { shared: 0, unchanged: 0, missing: 0, failed: 0 };
-  for (const pod of solid.pods()) {
+  for (const pod of await solid.pods()) {
     const r = await shareFeedbackFolder(pod.userId);
     if (r === 'shared') counts.shared++;
     else if (r === 'unchanged') counts.unchanged++;
@@ -332,8 +332,8 @@ export function feedbackMembers(folder: string, turtle: string): string[] {
 }
 
 async function readFolder(get: PodGet, testerId: string, url: string): Promise<PodFeedbackFolder> {
-  const testerName = get_<User>('users', testerId)?.name ?? testerId;
-  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[], sharingError: sharingError(testerId) };
+  const testerName = (await get_<User>('users', testerId))?.name ?? testerId;
+  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[], sharingError: await sharingError(testerId) };
   let res: Response;
   try {
     res = await get(url, 'text/turtle');
@@ -375,7 +375,10 @@ async function readFolder(get: PodGet, testerId: string, url: string): Promise<P
  */
 export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
   if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
-  const pods = solid.pods().filter((p) => !get_<User>('users', p.userId)?.simulated);
+  // Looked up first, then filtered: filter() itself would take each async lookup's promise as a yes.
+  const all = await solid.pods();
+  const real = await Promise.all(all.map(async (p) => !(await get_<User>('users', p.userId))?.simulated));
+  const pods = all.filter((_, i) => real[i]);
   const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
   // A few folders at a time keeps the transport's queue short (each folder queues up to MAX_POD_ITEMS reads).
   const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
@@ -383,10 +386,10 @@ export async function readPodFeedback(as: { webId: string; get: PodGet }): Promi
   return { readAs: as.webId, readers: config.adminWebIds, folders: read.filter((f) => f.status !== 'missing') };
 }
 
-export const listFeedback = () => list<FeedbackSubmission>('feedback').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export const listFeedback = async () => (await list<FeedbackSubmission>('feedback')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 export async function summariseFeedback() {
-  const subs = listFeedback();
+  const subs = await listFeedback();
   if (!subs.length) return { summary: 'No feedback yet.', themes: [], count: 0, tallies: {} };
   const tallies: Record<string, Record<string, number>> = {};
   // Questions about specific changes ("new:<change id>") are tallied alongside the standard ones.

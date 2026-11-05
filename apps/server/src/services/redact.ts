@@ -113,10 +113,10 @@ function toSecrets(values: (string | undefined)[], keep: (v: string) => boolean)
  * them. Titles made only of common words are left out (they reveal nothing);
  * names never are, however ordinary: they're matched as written instead.
  */
-export function secretsFor(useCases: UseCase[], extra: { titles?: string[]; people?: string[] } = {}): Secrets {
+export async function secretsFor(useCases: UseCase[], extra: { titles?: string[]; people?: string[] } = {}): Promise<Secrets> {
   return {
     titles: toSecrets([...useCases.flatMap((u) => [u.sections.name, ...(u.formerTitles ?? [])]), ...(extra.titles ?? [])], distinctive),
-    people: toSecrets([...useCases.map((u) => getUser(u.authorId)?.name), ...(extra.people ?? [])], () => true),
+    people: toSecrets([...(await Promise.all(useCases.map(async (u) => (await getUser(u.authorId))?.name))), ...(extra.people ?? [])], () => true),
   };
 }
 
@@ -125,12 +125,12 @@ export function secretsFor(useCases: UseCase[], extra: { titles?: string[]; peop
  * use cases it was synthesised from (or, when an older request didn't record
  * them, every use case in its ontology). Other requests are members' own words.
  */
-export function secretsOf(cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>): Secrets | undefined {
+export async function secretsOf(cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>): Promise<Secrets | undefined> {
   if (cr.origin.type !== 'synthesis') return undefined;
   const ucs = cr.origin.useCaseIds.length
-    ? cr.origin.useCaseIds.map((id) => get<UseCase>('useCases', id)).filter((u): u is UseCase => !!u)
-    : list<UseCase>('useCases', cr.ontologyId);
-  return secretsFor(ucs);
+    ? (await Promise.all(cr.origin.useCaseIds.map(async (id) => await get<UseCase>('useCases', id)))).filter((u): u is UseCase => !!u)
+    : await list<UseCase>('useCases', cr.ontologyId);
+  return await secretsFor(ucs);
 }
 
 const PLACEHOLDERS = [

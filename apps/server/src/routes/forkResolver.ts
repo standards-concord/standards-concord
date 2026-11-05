@@ -24,10 +24,10 @@ function plain(res: Response, status: number, message: string) {
 async function serve(req: Request, res: Response) {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Expose-Headers', 'Link, Content-Type');
-  const project = findProject(String(req.params.slug));
+  const project = await findProject(String(req.params.slug));
   if (!project) return plain(res, 404, `There is no ontology called “${req.params.slug}”.`);
   const seg = splitExtension(String(req.params.fork));
-  const fork = findFork(seg.base, project);
+  const fork = await findFork(seg.base, project);
   if (!fork || fork.ontologyId !== project.id) return plain(res, 404, `${project.title} has no fork called “${seg.base}”.`);
   const urls = forkUrls(project, fork);
 

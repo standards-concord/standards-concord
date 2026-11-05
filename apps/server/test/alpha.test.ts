@@ -12,7 +12,7 @@ import { solid } from '../src/services/solid.js';
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -241,7 +241,7 @@ describe('alpha tester records', () => {
     const existing = await upsertFederatedUser({ provider: 'github', subject: 'gh-existing-1', name: 'Existing' });
     await recordVersion(existing, { version: '0.6.0', feedbackId: 'fb_old' });
     const demo = await createUser({ name: 'Alpha tester', provider: 'demo', subject: 'tester_merge' });
-    put('feedback', { id: 'fb_new', pathway: 'general', answers: {}, transcript: [], createdAt: new Date().toISOString() });
+    await put('feedback', { id: 'fb_new', pathway: 'general', answers: {}, transcript: [], createdAt: new Date().toISOString() });
     await recordVersion(demo, { version: '0.8.0', role: 'agent', feedbackId: 'fb_new' });
     await mergeTesterRecords(demo, existing);
     const after = (await recordVersion(existing, { version: '0.6.0' })).versions;
