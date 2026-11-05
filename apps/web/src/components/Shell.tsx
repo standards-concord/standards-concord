@@ -8,7 +8,7 @@ import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
-import { Avatar, Button, cx } from './ui';
+import { Avatar, Button, buttonClasses, cx, LinkButton } from './ui';
 import { WalkthroughDock } from './Walkthrough';
 import { Popover } from './Disclosure';
 
@@ -78,11 +78,9 @@ function UserMenu() {
   const testerRole = isDemo && user && w.demo ? testerRoleFor(user, w.myRoles).title : undefined;
   if (!user)
     return (
-      <Link to={loginHref(loc)}>
-        <Button size="sm" variant="primary">
-          Sign in
-        </Button>
-      </Link>
+      <LinkButton to={loginHref(loc)} size="sm" variant="primary">
+        Sign in
+      </LinkButton>
     );
   const logout = async () => {
     try {
@@ -239,11 +237,10 @@ export function Shell({ children }: { children: ReactNode }) {
           </Link>
           <div className="flex-1" />
           <OntologySwitcher />
-          <NavLink to="/feedback" className={({ isActive }) => cx(isActive && 'pointer-events-none opacity-60')}>
-            <Button size="sm" variant="subtle" icon={MessageSquareHeart} className="ui-button-header">
-              <span className="hidden sm:inline">Give feedback</span>
-              <span className="sm:hidden">Feedback</span>
-            </Button>
+          <NavLink to="/feedback" className={({ isActive }) => buttonClasses('subtle', 'sm', cx('ui-button-header', isActive && 'pointer-events-none opacity-60'))}>
+            <MessageSquareHeart className="size-3.5" aria-hidden />
+            <span className="hidden sm:inline">Give feedback</span>
+            <span className="sm:hidden">Feedback</span>
           </NavLink>
           <UserMenu />
         </div>

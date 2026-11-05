@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import { ArrowLeftRight, BookOpen, FileSearch, MessageSquarePlus, ShieldCheck } from 'lucide-react';
 import { api } from '../api';
 import { Logo } from '../components/badges';
-import { Avatar, Button, Card, ErrorCard, InlineError, Loading } from '../components/ui';
+import { Avatar, Button, Card, ErrorCard, InlineError, Loading, LinkButton } from '../components/ui';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 
@@ -96,11 +96,9 @@ export function OAuthAuthorizePage() {
           {!user ? (
             <div className="mt-6 space-y-3 text-center">
               <p className="text-sm text-muted">Sign in to Concord to continue.</p>
-              <Link to={`/login?next=${encodeURIComponent(here)}`} className="block">
-                <Button variant="primary" size="lg" className="w-full" data-testid="oauth-sign-in">
+              <LinkButton to={`/login?next=${encodeURIComponent(here)}`} variant="primary" size="lg" data-testid="oauth-sign-in" className="flex w-full">
                   Sign in
-                </Button>
-              </Link>
+                </LinkButton>
             </div>
           ) : (
             <>

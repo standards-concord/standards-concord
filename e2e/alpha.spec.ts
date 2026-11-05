@@ -81,7 +81,7 @@ test('a tester can go through the whole walkthrough', async ({ page, request }) 
 
   // 5. Feedback
   await expect(page.getByRole('heading', { name: '5. Give feedback' })).toBeVisible();
-  await page.getByRole('main').getByRole('button', { name: 'Give feedback' }).click();
+  await page.getByRole('main').getByRole('link', { name: 'Give feedback' }).click();
   await expect(page).toHaveURL(/\/feedback$/);
   await settle(page);
   await expectNoCrash(page);

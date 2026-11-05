@@ -10,7 +10,7 @@ import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
-import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea } from '../components/ui';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea, LinkButton } from '../components/ui';
 
 function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const nav = useNavigate();
@@ -134,11 +134,9 @@ export function HubPage() {
           <div className="text-sm">
             <strong>Alpha tester?</strong> The guided walkthrough helps you pick a role and try the main flows in about 5 minutes.
           </div>
-          <Link to="/alpha">
-            <Button size="sm" variant="primary" icon={Compass}>
+          <LinkButton to="/alpha" size="sm" variant="primary" icon={Compass}>
               Open walkthrough
-            </Button>
-          </Link>
+            </LinkButton>
         </Card>
       )}
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">

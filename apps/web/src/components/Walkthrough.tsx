@@ -9,7 +9,7 @@ import { useDemoOntology } from '../lib/ontologies';
 import { STEPS, TESTER_ROLES, tasksFor, testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { formatDate, roleLabel } from '../lib/format';
 import { ActivityList } from './ActivityFeed';
-import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx } from './ui';
+import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx, LinkButton } from './ui';
 import { Disclosure, Popover } from './Disclosure';
 import { changeIsFor } from '@concord/shared';
 import { changeLink, useTester } from '../lib/tester';
@@ -207,11 +207,9 @@ function TourStep({ compact }: { compact?: boolean }) {
           </Link>
           <p className="mt-0.5 text-xs text-muted">{nextTask.detail}</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <Link to={nextTask.to}>
-              <Button size="sm" variant="primary" icon={ArrowRight}>
+            <LinkButton to={nextTask.to} size="sm" variant="primary" icon={ArrowRight}>
                 Go
-              </Button>
-            </Link>
+              </LinkButton>
             <Button size="sm" variant="ghost" icon={Check} onClick={() => w.toggleTask(nextTask.id)}>
               I’ve done this
             </Button>
@@ -331,11 +329,9 @@ function FeedbackStep({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="space-y-3 text-sm">
       <p>Thank you for trying Concord. When you’re ready, tell us what worked and what didn’t — by typing or just talking. It takes about 8 minutes, or you can leave a quick note.</p>
-      <Link to="/feedback" onClick={onNavigate}>
-        <Button variant="primary" icon={MessageSquareHeart}>
+      <LinkButton to="/feedback" onClick={onNavigate} variant="primary" icon={MessageSquareHeart}>
           Give feedback
-        </Button>
-      </Link>
+        </LinkButton>
     </div>
   );
 }

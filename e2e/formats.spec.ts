@@ -92,7 +92,7 @@ test.describe('Formats tab', () => {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('@prefix');
 
     const download = page.waitForEvent('download');
-    await page.getByRole('button', { name: 'Download' }).click();
+    await page.getByRole('link', { name: 'Download' }).click();
     expect((await download).suggestedFilename()).toMatch(/\.ttl$/);
   });
 
