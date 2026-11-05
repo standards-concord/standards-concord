@@ -230,7 +230,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
                 ok={h.consistent && reasonerRan}
                 warn={h.consistent && !reasonerRan}
                 label="Reasoner"
-                value={!h.consistent ? 'Inconsistent' : reasonerRan ? 'Consistent' : 'Not run (structural checks only)'}
+                value={!h.consistent ? 'Inconsistent' : reasonerRan ? 'Consistent' : h.reasonerChecked === 'consistency' ? 'Consistent, not every class checked' : "No verdict, so validation can't pass"}
               />
               <HealthRow ok={h.fairScore >= 0.8} warn={h.fairScore >= 0.5 && h.fairScore < 0.8} label="FAIR score" value={pct(h.fairScore)} />
               <HealthRow

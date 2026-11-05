@@ -181,8 +181,15 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
         fairScore: v.fair.score,
         consistent: v.reasoner.consistent && v.reasoner.unsatisfiable.length === 0,
         reasoner: v.reasoner.available ? v.reasoner.engine : 'structural',
+        reasonerChecked: v.reasoner.checked ?? (v.reasoner.available ? 'complete' : 'none'),
         // Required checks that could not run. FAIR checks that need the network are left out of the score instead.
-        incomplete: v.reasoner.available ? [] : [`OWL reasoner gave no verdict, so validation can't pass${v.reasoner.error ? `: ${v.reasoner.error}` : ''}`],
+        incomplete: v.reasoner.available
+          ? []
+          : [
+              v.reasoner.checked === 'consistency'
+                ? `OWL reasoner showed the draft is consistent but couldn't check every class, so validation can't pass${v.reasoner.error ? `: ${v.reasoner.error}` : ''}`
+                : `OWL reasoner gave no verdict, so validation can't pass${v.reasoner.error ? `: ${v.reasoner.error}` : ''}`,
+            ],
       };
     } catch (err) {
       console.warn(`[validate] ${p.slug}: ${(err as Error).message}`);

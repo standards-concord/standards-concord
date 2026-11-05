@@ -193,6 +193,8 @@ export interface OntologySummary extends OntologyProject {
     incomplete?: string[];
     /** Which reasoner produced `consistent`; 'structural' means the OWL DL reasoner did not run. */
     reasoner?: string;
+    /** How far the OWL reasoner got: everything, consistency only, or no verdict. Absent on older summaries. */
+    reasonerChecked?: 'complete' | 'consistency' | 'none';
   };
 }
 

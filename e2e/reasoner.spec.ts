@@ -92,6 +92,33 @@ test.describe('OWL reasoning with sparq', () => {
     await expect(page.getByRole('button', { name: 'Check again in this browser' })).toHaveCount(0);
   });
 
+  // Used to go wrong: when the reasoner timed out or crashed, the health popover said "Not run
+  // (structural checks only)", but since the timeout fix no structural checks run in that case.
+  for (const [checked, error, row, note] of [
+    ['none', 'the OWL reasoner took longer than 60 s and was stopped', "No verdict, so validation can't pass", 'OWL reasoner gave no verdict'],
+    ['consistency', 'classification ran out of budget', 'Consistent, not every class checked', "OWL reasoner showed the draft is consistent but couldn't check every class"],
+  ] as const) {
+    test(`the health chip describes a reasoner result of "${checked}" without claiming other checks ran`, async ({ page, request }) => {
+      const demo = await demoOntology(request);
+      await signIn(page, { name: `Reasoner health ${uniq()}`, role: 'steward' });
+      // The server's own reasoner finishes on the demo, so the summary is given the result of one that didn't.
+      await page.route(new RegExp(`/api/ontologies/${demo.id}(\\?.*)?$`), async (route) => {
+        const res = await route.fetch();
+        const o = await res.json();
+        o.health = { ...o.health, consistent: true, reasoner: 'structural', reasonerChecked: checked, incomplete: [`${note}, so validation can't pass: ${error}`] };
+        await route.fulfill({ response: res, json: o });
+      });
+      await page.goto(`/o/${demo.id}`);
+      const chip = page.getByRole('button', { name: /^Health: / });
+      await chip.click();
+      const panel = page.getByRole('dialog', { name: /^Health: / });
+      const reasonerRow = panel.getByRole('listitem').filter({ hasText: 'Reasoner' });
+      await expect(reasonerRow).toContainText(row);
+      await expect(panel).not.toContainText('structural checks only');
+      await expect(panel.getByRole('note')).toContainText(error);
+    });
+  }
+
   test('a signed-out visitor gets no validation report and no reasoner panel', async ({ page, request }) => {
     const demo = await demoOntology(request);
     expect((await page.request.get(`/api/ontologies/${demo.id}/validation`)).status()).toBe(401);
