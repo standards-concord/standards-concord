@@ -219,19 +219,26 @@ describe.each(backends)('document store on $name', (backend) => {
     expect(await store.claim('oauthCodes', 'r', 'usedAt', 2)).toBeUndefined();
   });
 
-  it('work a committed transaction started without awaiting runs outside it afterwards, waiting its turn', async () => {
-    // Async code inherits the context it started in. Without care, a fire-and-forget task started inside a
-    // transaction would keep using the transaction's connection after COMMIT (on Postgres, a connection already
-    // back in the pool and possibly in someone else's transaction).
+  it('work a committed transaction started without awaiting cannot write afterwards unless it was detached', async () => {
+    // Async code inherits the context it started in. A fire-and-forget task started inside a transaction used
+    // to run as ordinary calls after COMMIT, so accidentally un-awaited work saved writes of its own after the
+    // transaction had reported success (Astra, PR #53 re-review 4). Now it is refused; background work says so
+    // with detached(), and then waits its turn rather than joining another transaction.
     const later = gate();
+    let leftover: Promise<unknown> | undefined;
     let background: Promise<unknown> | undefined;
     await store.transaction(async () => {
       await store.put('kv', { id: 'in-tx' });
-      background = (async () => {
+      leftover = (async () => {
+        await later.opened;
+        await store.put('kv', { id: 'leftover' });
+      })();
+      leftover.catch(() => {});
+      background = store.detached(async () => {
         await later.opened;
         await store.put('kv', { id: 'after-tx' });
         return store.transaction(async () => store.put('kv', { id: 'own-tx' }));
-      })();
+      });
     });
     const g = gate();
     const other = store.transaction(async () => {
@@ -241,11 +248,12 @@ describe.each(backends)('document store on $name', (backend) => {
     });
     await sleep(20);
     later.open();
+    await expect(leftover).rejects.toBeInstanceOf(TransactionEndedError);
     await sleep(20);
     g.open();
     await expect(other).rejects.toThrow('roll back');
     await background;
-    // The background writes waited for the other transaction rather than joining it, so its rollback kept them.
+    // The detached writes waited for the other transaction rather than joining it, so its rollback kept them.
     expect((await store.list<Doc>('kv')).map((d) => d.id).sort()).toEqual(['after-tx', 'in-tx', 'own-tx']);
   });
 

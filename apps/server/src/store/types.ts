@@ -23,11 +23,11 @@ import type { Collection } from '../db.js';
  *   transaction waits for any statement still running on its behalf (say, one fn started but didn't await, or
  *   a `claim` halfway between its read and its write), and those count: if one fails, nothing is saved and it
  *   rejects with TransactionAbortedError. Then it commits or rolls back. Work fn started that calls the store
- *   later still can't use the transaction: while COMMIT is in flight, and after a rollback, its calls reject
- *   with TransactionEndedError (so the leftovers of a failed transaction, such as the other branches of a
- *   rejected Promise.all, can't save half of it); after a successful commit they run as ordinary calls on
- *   their own. So await everything that belongs to the transaction, and start background work with
- *   `detached(fn)`.
+ *   later can't use the transaction, and doesn't quietly run on its own either: once the transaction is
+ *   ending, committed or rolled back, its calls reject with TransactionEndedError. So the leftovers of a failed
+ *   transaction (say, the other branches of a rejected Promise.all) can't save half of it, and un-awaited work
+ *   can't save writes of its own after the transaction reported success. Await everything that belongs to the
+ *   transaction, and start background work with `detached(fn)`.
  * - **`list` order** is creation time, then insertion order for ties.
  */
 export interface DocStore {
@@ -48,8 +48,8 @@ export interface DocStore {
   clearAll(): Promise<void>;
   /**
    * Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer
-   * transaction. Await every call that is meant to be part of it: one that is still waiting on something else
-   * when fn returns ends up outside it (see above).
+   * transaction. Await every call that is meant to be part of it: one still waiting on something else when fn
+   * returns is refused when it gets to the store (see above).
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>;
   /**
@@ -85,7 +85,7 @@ export class TransactionAbortedError extends Error {
   }
 }
 
-/** Work started inside a transaction tried to use it while it was ending (COMMIT or ROLLBACK in flight), or after it rolled back. */
+/** Work started inside a transaction called the store once the transaction was ending or over, without detached(). */
 export class TransactionEndedError extends Error {
   constructor() {
     super('This work belongs to a transaction that has ended: await it inside the transaction, or start it with detached()');
@@ -106,12 +106,11 @@ export interface TxState {
 
 /**
  * The transaction a store call should use, from the context it inherited: that one while it is open or
- * finishing; none once it has committed (the call is leftover work and runs on its own); an error while it is
- * ending or after it rolled back.
+ * finishing; an error once it is ending or over (the call is leftover work: it should have been awaited, or
+ * started with detached()).
  */
 export function liveTransaction<T extends { state: TxState }>(tx: T | undefined): T | undefined {
-  if (!tx || tx.state.status === 'committed') return undefined;
-  if (tx.state.status === 'open' || tx.state.status === 'finishing') return tx;
+  if (!tx || tx.state.status === 'open' || tx.state.status === 'finishing') return tx;
   throw new TransactionEndedError();
 }
 
