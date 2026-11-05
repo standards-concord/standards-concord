@@ -448,4 +448,13 @@ describe('review regressions', () => {
     expect(shared.unlocated).toMatch(/described in the ontology/);
     expect(shared.unlocated).not.toMatch(/more than one/);
   });
+
+  // Review 4. A node-level result for a record that only appears as a value (sh:targetObjectsOf) said "couldn't find this".
+  it('a node-level finding for a record only used as a value points to where it’s used', () => {
+    const text = '@prefix ex: <http://e/> .\nex:a ex:p _:__ttl_anon_user .\n';
+    const shapes = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\nex:S sh:targetObjectsOf ex:p ; sh:nodeKind sh:IRI .\n`;
+    const [f] = describeFindings([{ focusNode: '_:__ttl_anon_user', value: '_:__ttl_anon_user', sourceConstraintComponent: sh('NodeKind'), message: 'Value does not have node kind IRI' }], exCtx(text, shapes));
+    expect(f.ranges.map((r) => text.slice(r.from, r.to))).toEqual(['_:__ttl_anon_user']);
+    expect(f.at?.line).toBe(2);
+  });
 });

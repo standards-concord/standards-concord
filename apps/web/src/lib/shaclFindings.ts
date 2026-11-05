@@ -351,6 +351,23 @@ function writtenLabels(doc: TurtleDoc): Set<string> {
   return labels;
 }
 
+/** Where each term is used as an object. */
+const objectCache = new WeakMap<TurtleDoc, Map<string, Placed[]>>();
+function objectPlaces(doc: TurtleDoc): Map<string, Placed[]> {
+  let places = objectCache.get(doc);
+  if (!places) {
+    places = new Map();
+    for (const t of doc.triples) {
+      const k = termKey(t.o.term);
+      const list = places.get(k);
+      if (list) list.push(t.o);
+      else places.set(k, [t.o]);
+    }
+    objectCache.set(doc, places);
+  }
+  return places;
+}
+
 const textOf = (ps: Part[]) => ps.map((p) => (typeof p === 'string' ? p : 'code' in p ? p.code : p.strong)).join('');
 
 /** Shape properties that say nothing about the value, so an alternative can still be described fully without them. */
@@ -458,7 +475,11 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   if (withValue.length) ranges = withValue.map((t) => ({ from: t.o.from, to: t.o.to }));
   else if (component === 'MaxCount' && withPath.length) ranges = withPath.map((t) => ({ from: t.p.from, to: t.o.to }));
   // Node-level results (no path) report the record itself as the value.
-  else if (subjectSpan && (!value || (!pathIri && termKey(value) === focusKey))) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
+  else if (!value || (!pathIri && termKey(value) === focusKey)) {
+    if (subjectSpan) ranges = [{ from: subjectSpan.from, to: subjectSpan.to }];
+    // A record that's only ever a value (sh:targetObjectsOf) is pointed to where it's used.
+    else if (findable(focus) && !shared) ranges = (objectPlaces(ctx.doc).get(focusKey!) ?? []).map((o) => ({ from: o.from, to: o.to }));
+  }
   // A [ … ] subject can be long: underline just its opening bracket.
   ranges = ranges.map((r) => (subjectSpan && focus?.kind === 'blank' && r.from === subjectSpan.from && r.to === subjectSpan.to && r.to - r.from > 1 && /^\[/.test(ctx.text.slice(r.from, r.from + 1)) ? { from: r.from, to: r.from + 1 } : r));
   let unlocated: string | undefined;

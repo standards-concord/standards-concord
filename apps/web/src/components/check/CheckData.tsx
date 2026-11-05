@@ -16,26 +16,42 @@ const sparqModule = () => import('@sparq-org/sparq');
 /** Problems shown per page, so a very broken file never renders thousands of rows at once. */
 const PAGE_SIZE = 50;
 
-/** The page of a list to show, kept in range as the list shrinks or grows. */
+/**
+ * The page of a list to show. A list of a different length (an edit, a new
+ * check) starts again at page 1, so an old page never comes back.
+ */
 function usePage<T>(items: T[]) {
-  const [page, setPage] = useState(0);
+  const [state, setState] = useState({ page: 0, total: items.length });
+  // Reset during render (React's pattern for state derived from props), so no stale page is ever drawn.
+  if (state.total !== items.length) setState({ page: 0, total: items.length });
+  const page = state.total === items.length ? state.page : 0;
   const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const current = Math.min(page, pages - 1);
-  return { start: current * PAGE_SIZE, items: items.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE), page: current, pages, setPage, total: items.length };
+  const listRef = useRef<HTMLOListElement>(null);
+  const goTo = (p: number) => {
+    setState({ page: p, total: items.length });
+    // Keyboard and screen-reader users land on the new results, not on the button.
+    requestAnimationFrame(() => listRef.current?.focus());
+  };
+  return { start: current * PAGE_SIZE, items: items.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE), page: current, pages, goTo, reset: () => setState({ page: 0, total: items.length }), total: items.length, listRef };
 }
 
-function Pager({ label, pager }: { label: string; pager: ReturnType<typeof usePage> }) {
+type Paging = ReturnType<typeof usePage>;
+
+/** "51–100 of 600", which a list's label carries too, so it's read out when focus moves to the new page. */
+const rangeText = ({ start, total }: Paging) => `${(start + 1).toLocaleString()}–${Math.min(start + PAGE_SIZE, total).toLocaleString()} of ${total.toLocaleString()}`;
+const listLabel = (name: string, pager: Paging) => (pager.pages > 1 ? `${name}, ${rangeText(pager)}` : name);
+
+function Pager({ label, pager }: { label: string; pager: Paging }) {
   if (pager.pages < 2) return null;
-  const { start, page, pages, setPage, total } = pager;
+  const { page, pages, goTo } = pager;
   return (
     <nav aria-label={label} className="flex items-center gap-2 text-xs text-muted">
-      <Button size="sm" variant="ghost" disabled={page === 0} onClick={() => setPage(page - 1)}>
+      <Button size="sm" variant="ghost" disabled={page === 0} onClick={() => goTo(page - 1)}>
         Previous
       </Button>
-      <span>
-        {(start + 1).toLocaleString()}–{Math.min(start + PAGE_SIZE, total).toLocaleString()} of {total.toLocaleString()}
-      </span>
-      <Button size="sm" variant="ghost" disabled={page >= pages - 1} onClick={() => setPage(page + 1)}>
+      <span aria-live="polite">{rangeText(pager)}</span>
+      <Button size="sm" variant="ghost" disabled={page >= pages - 1} onClick={() => goTo(page + 1)}>
         Next
       </Button>
     </nav>
@@ -255,7 +271,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
   const check = () => {
     const s = store();
     if (!s || !shapes) return;
-    reportPage.setPage(0);
+    reportPage.reset();
     // The analysis catches up at once, so the new underlines line up with what was checked.
     setSettled(data);
     try {
@@ -361,7 +377,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
         </p>
         {live.length > 0 && (
           <div className="space-y-1" data-testid="data-lint">
-            <ol className="space-y-1" aria-label="Problems in the Turtle" start={livePage.start + 1}>
+            <ol ref={livePage.listRef} tabIndex={-1} className="space-y-1 outline-none" aria-label={listLabel('Problems in the Turtle', livePage)} start={livePage.start + 1}>
               {livePage.items.map((l, i) => (
                 <li key={livePage.start + i}>
                   <ProblemItem finding={l} onReveal={reveal} />
@@ -395,7 +411,7 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
               )}
             </p>
             {findings.length > 0 && (
-              <ol className="space-y-1" aria-label="Problems found" start={reportPage.start + 1}>
+              <ol ref={reportPage.listRef} tabIndex={-1} className="space-y-1 outline-none" aria-label={listLabel('Problems found', reportPage)} start={reportPage.start + 1}>
                 {reportPage.items.map((f, i) => (
                   <li key={reportPage.start + i}>
                     <ProblemItem finding={f} onReveal={reportStale ? undefined : reveal} />

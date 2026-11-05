@@ -135,13 +135,37 @@ ex:helper a vol:Role .
     const pages = page.getByRole('navigation', { name: 'Pages of problems found' });
     await expect(pages).toContainText('1–50 of 60');
     await expect(pages.getByRole('button', { name: 'Previous' })).toBeDisabled();
-    await pages.getByRole('button', { name: 'Next' }).click();
+    // Used to go wrong: focus stayed on Next and nothing said what changed, so Tab skipped the new results.
+    await pages.getByRole('button', { name: 'Next' }).press('Enter');
     await expect(list.getByRole('listitem')).toHaveCount(10);
+    await expect(list).toBeFocused();
+    await expect(list).toHaveAccessibleName('Problems found, 51–60 of 60');
+    await page.keyboard.press('Tab');
+    await expect(list.getByRole('button').first()).toBeFocused();
     await expect(pages).toContainText('51–60 of 60');
     await expect(pages.getByRole('button', { name: 'Next' })).toBeDisabled();
     // The items on later pages still jump to their place.
     await list.getByRole('button', { name: /ex:org\d+ requires/ }).first().click();
     await expect.poll(() => selection(page)).toMatch(/^ex:org\d+$/);
+  });
+
+  // Used to go wrong: after paging the live list and editing, an old page came back
+  // (60 warnings opened at 51–60 instead of 1–50).
+  test('a changed list of Turtle problems starts again at the first page', async ({ page }) => {
+    await signIn(page, { name: 'E2E check live pages', role: 'editor' });
+    await openCheck(page, id);
+    const typos = (n: number) => `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/data/> .\n\n${Array.from({ length: n }, (_, i) => `ex:r${i} vol:titel "x" .`).join('\n')}\n`;
+    const pages = page.getByRole('navigation', { name: 'Pages of problems in the Turtle' });
+    await setData(page, typos(60));
+    await expect(pages).toContainText('1–50 of 60');
+    await pages.getByRole('button', { name: 'Next' }).click();
+    await expect(pages).toContainText('51–60 of 60');
+    // 12, not 10: page 2 of 60 also shows 10, which would pass before the edit is read.
+    await setData(page, typos(12));
+    await expect(page.getByRole('list', { name: 'Problems in the Turtle' }).getByRole('listitem')).toHaveCount(12);
+    await expect(pages).toHaveCount(0);
+    await setData(page, typos(60));
+    await expect(pages).toContainText('1–50 of 60');
   });
 
   // Used to go wrong: problems showed full <https://…> IRIs because sparq wraps IRIs in
