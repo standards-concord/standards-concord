@@ -200,7 +200,10 @@ export function Shell({ children }: { children: ReactNode }) {
       <DemoBanner />
       <main className="flex-1">{children}</main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data lives in your own Solid pod.
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data lives in your own Solid pod. ·{' '}
+        <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
+          Privacy policy
+        </Link>
       </footer>
       <WalkthroughDock />
     </div>

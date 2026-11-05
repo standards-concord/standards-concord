@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'A privacy policy',
+    changes: [
+      {
+        id: 'privacy-policy',
+        type: 'feat',
+        title: 'A privacy policy explains what Concord keeps about you',
+        detail:
+          'A new Privacy policy page, linked from the footer of every page and from the sign-in card, says what Google and GitHub sign-in share, where your contributions are kept, which services process them, and how to have your data deleted.',
+        roles: [],
+        to: '/privacy',
+        ask: 'Does the privacy policy tell you what you’d want to know before signing in?',
+      },
+    ],
+  },
+  {
     version: '0.14.0',
     date: '2026-11-05',
     title: 'Check data explains what’s wrong and where',
