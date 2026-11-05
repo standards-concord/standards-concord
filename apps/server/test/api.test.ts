@@ -2558,19 +2558,29 @@ describe('reports from the retired HermiT reasoner', () => {
 
   it('runs one governance tick at a time', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
-    // One running and one queued behind it, however many callers there are meanwhile.
+    crsMod.tickState.most = 0;
+    // Callers before a tick starts share it; one asked for after it starts runs after it.
     const a = crsMod.tick();
-    const b = crsMod.tick();
-    const c = crsMod.tick();
-    expect(b).not.toBe(a);
-    expect(c).toBe(b);
+    expect(crsMod.tick()).toBe(a);
     let aDone = false;
     void a.then(() => { aDone = true; });
-    // The queued tick runs once the running one has finished.
+    const b = a.then(() => undefined).then(() => crsMod.tick());
     await b.then(() => expect(aDone).toBe(true));
-    const next = crsMod.tick();
-    expect(next).not.toBe(b);
-    await next;
+    expect(crsMod.tick()).not.toBe(a);
+    await crsMod.tick();
+    expect(crsMod.tickState.most).toBe(1);
+  });
+
+  // Used to go wrong: a caller that ticked again as soon as one tick finished (before the queued
+  // tick took over) started its own, and the queued one started too, so two ran at once.
+  it('never runs two governance ticks at once, even when one is asked for as the last finishes', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    crsMod.tickState.most = 0;
+    const a = crsMod.tick();
+    const again = a.then(() => crsMod.tick());
+    const b = crsMod.tick();
+    await Promise.all([a, b, again]);
+    expect(crsMod.tickState.most).toBe(1);
   });
 
   // Used to go wrong: the governance tick runs every minute without waiting for the last one, so

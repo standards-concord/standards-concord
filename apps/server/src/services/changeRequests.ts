@@ -1229,8 +1229,11 @@ export async function recheckRetiredReasonerReports(opts: { beforeCheck?: (cr: C
   }
 }
 
-let ticking: Promise<number> | undefined;
+/** Ticks run one after another on this chain; `queued` is the next one while it hasn't started. */
+let chain: Promise<unknown> = Promise.resolve();
 let queued: Promise<number> | undefined;
+/** Tests only: how many ticks are running, and the most that ever were at once. */
+export const tickState = { running: 0, most: 0 };
 
 /**
  * Periodic sweep: time-based transitions (review periods ending, votes closing). One runs at a
@@ -1239,13 +1242,26 @@ let queued: Promise<number> | undefined;
  * meanwhile, so a caller that just moved the clock still gets a tick that saw the new time.
  */
 export function tick(): Promise<number> {
-  const start = () => (ticking = tickOnce().finally(() => { ticking = undefined; }));
-  if (!ticking) return start();
-  const after = () => { queued = undefined; return start(); };
-  return (queued ??= ticking.then(after, after));
+  if (queued) return queued;
+  const run: Promise<number> = chain.then(() => {
+    if (queued === run) queued = undefined;
+    return tickOnce();
+  });
+  queued = run;
+  chain = run.catch(() => undefined);
+  return run;
 }
 
 async function tickOnce(): Promise<number> {
+  tickState.most = Math.max(tickState.most, ++tickState.running);
+  try {
+    return await tickBody();
+  } finally {
+    tickState.running--;
+  }
+}
+
+async function tickBody(): Promise<number> {
   await recheckRetiredReasonerReports();
   let changed = 0;
   for (const cr of (await list<ChangeRequest>('changeRequests')).filter((c) => ['review', 'voting', 'approved'].includes(c.status))) {
