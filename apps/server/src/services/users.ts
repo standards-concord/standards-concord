@@ -58,27 +58,34 @@ export async function findByProvider(provider: AuthProvider, subject: string): P
  * identity is new it is attached to that account, so what they saved stays theirs.
  */
 export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string; webId?: string }, linkTo?: User) {
-  const existing = await findByProvider(p.provider, p.subject);
-  if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
-    const linked = await get<User>('users', linkTo.id);
-    if (linked) {
-      linked.providers.push({ provider: p.provider, subject: p.subject });
-      linked.name = p.name;
-      // Signing in with their own WebID makes it the account's WebID.
-      if (p.webId) linked.webId = p.webId;
-      linked.email ??= p.email;
-      linked.avatarUrl ??= p.avatarUrl;
-      // Sessions issued while it was a demo account (in any browser) end here.
-      await destroyUserSessions(linked.id);
-      return await put('users', linked);
+  // Looked up and attached in one transaction, so two sign-ins at once can't both find the identity unattached
+  // (and attach it to two accounts), nor both attach to one account from copies read before the other saved.
+  const found = await transaction(async () => {
+    const existing = await findByProvider(p.provider, p.subject);
+    if (!existing && linkTo) {
+      // Re-read: whether it is still a demo-only account is decided on the stored copy, not the caller's.
+      const linked = await get<User>('users', linkTo.id);
+      if (linked && !linked.simulated && linked.providers.every((x) => x.provider === 'demo')) {
+        linked.providers.push({ provider: p.provider, subject: p.subject });
+        linked.name = p.name;
+        // Signing in with their own WebID makes it the account's WebID.
+        if (p.webId) linked.webId = p.webId;
+        linked.email ??= p.email;
+        linked.avatarUrl ??= p.avatarUrl;
+        // Sessions issued while it was a demo account (in any browser) end here.
+        await destroyUserSessions(linked.id);
+        return await put('users', linked);
+      }
     }
-  }
-  if (existing) {
-    if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
-    existing.avatarUrl ??= p.avatarUrl;
-    return await put('users', existing);
-  }
-  return createUser({ ...p });
+    if (existing) {
+      if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
+      existing.avatarUrl ??= p.avatarUrl;
+      return await put('users', existing);
+    }
+    return undefined;
+  });
+  // A new account is made outside it: making one provisions a pod over the network.
+  return found ?? createUser({ ...p });
 }
 
 export const getUser = async (id: string) => await get<User>('users', id);

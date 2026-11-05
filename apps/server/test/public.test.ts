@@ -1042,6 +1042,54 @@ describe('versions published before approval existed', () => {
     expect(page.text).not.toContain('Legacy Hold Person');
   });
 
+  // The hold added before writing used to be taken back on any failure, even one after the release's files were
+  // written, which the public pages serve as that version: unapproved content went public.
+  it('keeps a release held when publishing fails after its files were written (r9 review)', async () => {
+    const project = await legacy();
+    const { vi } = await import('vitest');
+    const { setRoles } = await import('../src/services/ontologies.js');
+    const owner = await createUser({ name: 'Ninth fail owner', provider: 'github', subject: 'ninth-fail' });
+    await setRoles(project.id, owner.id, ['owner', 'steward']);
+    await drafted8(project);
+    const release = await draftRelease((await findProject('volunteering'))!, owner);
+    // As writeRelease does up to a failing commit: the check passes, the release's files are written, then git fails.
+    const { ONTOLOGY_FILE } = await import('../src/services/ontologyStore.js');
+    const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
+    const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (_p, _v, graph, _f, _n, _a, beforeWrite) => {
+      const turtle = await graph.toTurtle();
+      beforeWrite?.();
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, ONTOLOGY_FILE), turtle);
+      throw new Error('commit failed');
+    });
+    try {
+      await expect(publishRelease((await (await import('../src/db.js')).get('releases', release.id))!, owner)).rejects.toThrow('commit failed');
+      expect(ontologyStore.versions(project)).toContain(release.version);
+      expect((await holdOf(project))!.versions).toContain(release.version);
+      const page = await request(app).get(`/def/volunteering/${release.version}.ttl`);
+      expect(page.text).not.toContain('Legacy Hold Person');
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // One publish failing before it wrote anything used to take back a hold another publish of the same version relied on.
+  it('takes a hold back only when no publish still relies on it and nothing was written (r9 review)', async () => {
+    const project = await legacy();
+    const { holdReleaseIfDraftHeld, dropHoldClaim } = await import('../src/public/holds.js');
+    expect(await holdReleaseIfDraftHeld(project, '9.9.1')).toBe(true);
+    expect(await holdReleaseIfDraftHeld(project, '9.9.1')).toBe(true);
+    await dropHoldClaim(project, '9.9.1', false);
+    expect((await holdOf(project))!.versions).toContain('9.9.1');
+    await dropHoldClaim(project, '9.9.1', false);
+    expect((await holdOf(project))!.versions).not.toContain('9.9.1');
+    // A publish that got as far as writing keeps it held.
+    expect(await holdReleaseIfDraftHeld(project, '9.9.2')).toBe(true);
+    await dropHoldClaim(project, '9.9.2', true);
+    expect((await holdOf(project))!.versions).toContain('9.9.2');
+  });
+
   it('pushes nothing to GitHub while a version is held (eighth review)', async () => {
     const project = await legacy();
     const { vi } = await import('vitest');

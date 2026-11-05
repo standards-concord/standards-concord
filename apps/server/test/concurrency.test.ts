@@ -8,6 +8,7 @@ import { createProject, getProject, members, transferOwnership } from '../src/se
 import { draftRelease, listReleases } from '../src/services/releases.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { createUseCase, getUseCase, updateUseCase } from '../src/services/useCases.js';
+import { createUser, findByProvider, getUser, upsertFederatedUser } from '../src/services/users.js';
 
 /**
  * Requests that arrive at the same time. Since the store became async, a request can pause between reading a
@@ -135,5 +136,24 @@ describe('requests made at the same time', () => {
     await Promise.all([updateUseCase(uc.id, user, { sections: { goal: 'goal edited' } }), updateUseCase(uc.id, user, { sections: { actors: 'actors edited' } })]);
     const now = await getUseCase(uc.id);
     expect(now.sections).toMatchObject({ name: 'Race', goal: 'goal edited', actors: 'actors edited' });
+  });
+
+  // Signing in looked the identity up and attached it in separate steps (r9 review): two sign-ins at once could
+  // attach one GitHub identity to two demo accounts, or two identities to one account with one overwriting the other.
+  it('attaches an identity to one account, and keeps both identities attached to one account', async () => {
+    const demo = (n: string) => createUser({ name: `Demo ${n}`, provider: 'demo', subject: `race-demo-${n}` });
+    const [a, b] = await Promise.all([demo('a'), demo('b')]);
+    const id = { provider: 'github' as const, subject: 'race-gh-1', name: 'Racer' };
+    await Promise.all([upsertFederatedUser(id, a), upsertFederatedUser(id, b)]);
+    const holders = [await getUser(a.id), await getUser(b.id)].filter((u) => u!.providers.some((p) => p.subject === 'race-gh-1'));
+    expect(holders).toHaveLength(1);
+
+    const c = await demo('c');
+    const [one, two] = await Promise.all([
+      upsertFederatedUser({ provider: 'github', subject: 'race-gh-2', name: 'Racer two' }, c),
+      upsertFederatedUser({ provider: 'google', subject: 'race-go-2', name: 'Racer two' }, c),
+    ]);
+    expect(await findByProvider('github', 'race-gh-2')).toMatchObject({ id: one.id });
+    expect(await findByProvider('google', 'race-go-2')).toMatchObject({ id: two.id });
   });
 });

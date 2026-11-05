@@ -70,6 +70,10 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 - **Moving Concord's public address** (the domain people and agents use): add the domain in Vercel, set `PUBLIC_URL` to it with `set-key.sh`, run `node scripts/public-url.mjs https://<new-origin>` and merge so the plugins and MCP Registry entry follow. Keep the old domain serving Concord for a few weeks: installed plugins only move when they update, and every agent has to sign in again at the new address, because OAuth tokens are tied to the address they were issued for.
 - **Removing it:** `az group delete -n concord` deletes the VM, its IP address, disk and snapshots.
 
+## Before the backend runs on more than one instance
+
+The backend assumes one process. Changes to one meeting (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) are serialised by locks held in that process ([locks.ts](../apps/server/src/locks.ts)), and the Meet bot's clock runs in it. That is correct on the single server above. Serverless functions (Vercel) run several instances at once, so before the backend moves there, the meeting and calendar locks must also take the database's writer lock (a transaction) around each read and write, and the bot's per-minute tick needs its own trigger. Until then, run one backend instance.
+
 ## Alternative: AWS
 
 [deploy/aws/concord.yaml](../deploy/aws/concord.yaml) is a CloudFormation template for the same server on a t3.small EC2 instance (about $20 a month), with keys in Secrets Manager. Upload it in CloudFormation, set `PublicUrl` and any keys, and use its `BackendUrl` output as above.

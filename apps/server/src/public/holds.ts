@@ -4,7 +4,7 @@ import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
 import type { ChangeRequest, OntologyProject, PublicHold, PublicHoldReview, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
-import { transaction, get, HttpError, list, put } from '../db.js';
+import { transaction, get, HttpError, list, put, remove } from '../db.js';
 import { getUser } from '../services/users.js';
 import { requireRole, updateProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -71,16 +71,33 @@ export async function holdLegacy(project: OntologyProject) { return transaction(
 }); }
 
 /** A release published while the working draft is held carries what's held: it's held too. */
-/** Hold `version` if the working draft is held. True if this call added the hold. */
+const claimsKey = (ontologyId: string, version: string) => `public-hold-claims:${ontologyId}:${version}`;
+
+/**
+ * Hold `version` before a publish writes it, if the working draft is held. Every publish that does takes a claim
+ * on the hold, so one that fails can't take back a hold another one still relies on. True if this call took a
+ * claim: the caller must then call dropHoldClaim once it's done, whatever happened.
+ */
 export async function holdReleaseIfDraftHeld(project: OntologyProject, version: string): Promise<boolean> { return transaction(async () => {
   const hold = await holdOf(project);
-  if (!hold?.versions.includes('draft') || hold.versions.includes(version)) return false;
-  await put('kv', { ...hold, versions: [...hold.versions, version] });
+  if (!hold?.versions.includes('draft')) return false;
+  if (!hold.versions.includes(version)) await put('kv', { ...hold, versions: [...hold.versions, version] });
+  const k = claimsKey(project.id, version);
+  await put('kv', { id: k, value: ((await get<{ id: string; value: number }>('kv', k))?.value ?? 0) + 1 });
   return true;
 }); }
 
-/** Take back a hold added for a version that was then never written. */
-export async function unholdVersion(project: OntologyProject, version: string) { return transaction(async () => {
+/**
+ * A publish is done with its claim. The hold is taken back only when this publish wrote nothing, no other publish
+ * still has a claim, and the version has no files at all: a publish that failed part-way may have left files the
+ * public pages would serve as that version. Anything else keeps it held until a steward approves it.
+ */
+export async function dropHoldClaim(project: OntologyProject, version: string, wrote: boolean) { return transaction(async () => {
+  const k = claimsKey(project.id, version);
+  const left = Math.max(0, ((await get<{ id: string; value: number }>('kv', k))?.value ?? 1) - 1);
+  if (left) await put('kv', { id: k, value: left });
+  else await remove('kv', k);
+  if (wrote || left || ontologyStore.versions(project).includes(version)) return;
   const hold = await holdOf(project);
   if (!hold?.versions.includes(version)) return;
   await put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version) });

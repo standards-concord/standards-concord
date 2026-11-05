@@ -13,7 +13,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, mustGet, put } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
-import { anyHeld, historyApproved, holdReleaseIfDraftHeld, unholdVersion } from '../public/holds.js';
+import { anyHeld, dropHoldClaim, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -227,16 +227,18 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   // Made from a working draft still waiting for approval: it waits too, from before its files exist, so the
   // public never sees it unheld. Recorded first because writeRelease's check below has to be synchronous.
   const held = await holdReleaseIfDraftHeld(project, r.version);
+  // From the moment the check passes, files may be written: after that a failure must never take the hold back.
+  let writing = false;
   try {
     r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, () => {
       // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
       // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
       if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
         throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
+      writing = true;
     });
-  } catch (err) {
-    if (held) await unholdVersion(project, r.version);
-    throw err;
+  } finally {
+    if (held) await dropHoldClaim(project, r.version, writing);
   }
   r.status = 'published';
   r.publishedAt = clock.iso();

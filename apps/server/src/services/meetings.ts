@@ -21,7 +21,13 @@ export const listMeetings = async (ontologyId: string) => (await list<Meeting>('
 export const saveMeeting = async (m: Meeting) => await put('meetings', m, m.ontologyId);
 const save = saveMeeting;
 
-/** Serialises changes to one meeting (bookings, webhooks, posting, skipping). */
+/**
+ * Serialises changes to one meeting (bookings, webhooks, posting, skipping), within this process. That is enough
+ * while the backend is one server (the VM). Known limit: on several instances (Vercel Functions) two of them could
+ * still interleave a meeting's read and write, so before the backend runs there, every meetingLock and the
+ * calendar lock must also hold the database's writer lock (a transaction) for their read-modify-write. See
+ * docs/deploy.md, "Before the backend runs on more than one instance".
+ */
 export const meetingLock = <T>(id: string, fn: () => Promise<T> | T) => withLock(`meeting:${id}`, fn);
 
 /** Applies a change to the latest stored copy of a meeting, under its lock, so concurrent updates aren't lost. */
