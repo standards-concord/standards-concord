@@ -19,16 +19,15 @@ import { findProject } from '../src/services/ontologies.js';
 import { checkoutTestHooks, ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo, step } from '../src/services/simulation.js';
 
-// The OWL reasoner (sparq, in its worker) giving no verdict, as when it times out or crashes: only while `down` is set.
-const reasoner = vi.hoisted(() => ({ down: false }));
+// The OWL reasoner (sparq, in its worker) failing, with the pool's own fault injection: while `down` is 'owl' it falls
+// back to the structural checks; while it is 'both' those fail too and nothing is checked.
+const reasoner = vi.hoisted(() => ({ down: false as false | 'owl' | 'both' }));
 vi.mock('../src/reasoner/pool.js', async (real) => {
   const pool = await real<typeof import('../src/reasoner/pool.js')>();
   return {
     ...pool,
-    reasonInWorker: (...args: Parameters<typeof pool.reasonInWorker>) =>
-      reasoner.down
-        ? Promise.resolve({ engine: 'structural' as const, available: false, checked: 'none' as const, consistent: true, unsatisfiable: [], inferredSubClassOf: [], error: 'the OWL reasoner took longer than 60 s and was stopped', durationMs: 0 })
-        : pool.reasonInWorker(...args),
+    reasonInWorker: (graph: Parameters<typeof pool.reasonInWorker>[0], opts: Parameters<typeof pool.reasonInWorker>[1] = {}) =>
+      pool.reasonInWorker(graph, reasoner.down ? { ...opts, faults: { owl: 'throw', ...(reasoner.down === 'both' ? { structural: 'throw' as const } : {}) } } : opts),
   };
 });
 
@@ -344,7 +343,7 @@ describe('second review', () => {
     const path = await newFork('No reasoner');
     const prev = config.requireFullReasoner;
     config.requireFullReasoner = true;
-    reasoner.down = true;
+    reasoner.down = 'owl';
     try {
       const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('Unchecked', 'unchecked')] });
       expect(edit.status).toBe(503);
@@ -359,18 +358,24 @@ describe('second review', () => {
     expect(edit.status).toBe(200);
     expect(edit.body.validation.reasoner).toBe('owl');
     // Where the reasoner is optional and gives no verdict, the edit goes through and says how it was checked.
-    reasoner.down = true;
+    reasoner.down = 'owl';
     try {
       const fallback = await dev.post(`${path}/edits`).send({ ops: [addClass('Fallback', 'fallback')] });
       expect(fallback.status).toBe(200);
       expect(fallback.body.validation.reasoner).toBe('structural');
-      expect(fallback.body.validation.warnings[0]).toMatch(/structural reasoner only.*took longer than/);
-      // r15: a no-verdict result says "consistent, nothing unsatisfiable", and was taken at its word, so an inconsistent
-      // change went through with only a warning. The structural check has to run on it instead.
+      expect(fallback.body.validation.warnings[0]).toMatch(/structural reasoner only.*OWL reasoner/);
+      // r15: a no-verdict result said "consistent, nothing unsatisfiable", and was taken at its word, so an inconsistent
+      // change went through with only a warning. The structural checks' verdict has to decide instead.
       const revision = (await fork(path)).revision;
       const bad = await dev.post(`${path}/edits`).send({ ops: [{ op: 'setSuperClasses', iri: `${VOL}Skill`, superClasses: [`${VOL}Cause`] }] });
       expect(bad.status, JSON.stringify(bad.body)).toBe(422);
       expect(bad.body.error).toMatch(/inconsistent/);
+      expect((await fork(path)).revision).toBe(revision);
+      // And when the structural checks can't finish either, nothing is known: refused as "try again", not as inconsistent.
+      reasoner.down = 'both';
+      const unknown = await dev.post(`${path}/edits`).send({ ops: [addClass('Unknown', 'unknown')] });
+      expect(unknown.status, JSON.stringify(unknown.body)).toBe(503);
+      expect(unknown.body.error).toMatch(/no verdict/);
       expect((await fork(path)).revision).toBe(revision);
     } finally {
       reasoner.down = false;
@@ -455,7 +460,7 @@ describe('third review', () => {
     await upstream([addClass('MeanwhileUpstream', 'meanwhile upstream')]);
     const prev = config.requireFullReasoner;
     config.requireFullReasoner = true;
-    reasoner.down = true;
+    reasoner.down = 'owl';
     try {
       const sync = await dev.post(`${path}/sync`);
       expect(sync.status).toBe(503);

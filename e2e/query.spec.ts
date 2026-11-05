@@ -1,9 +1,10 @@
-import { test, expect, signIn, demoOntology, type Page } from './fixtures';
+import { test, expect, signIn, demoOntology, uniq, type Page } from './fixtures';
 
 /**
- * The Query tab: sparq (WebAssembly) loads in the browser, the visual builder
- * builds and runs queries over the ontology plus sample data, the SPARQL editor
- * highlights, autocompletes and runs every query form, and SHACL checks run.
+ * The Query tab: sparq (WebAssembly) loads in the browser, the query assistant
+ * writes and refines SPARQL from a chat (the offline helper in tests), which
+ * runs when the person presses Run, the SPARQL editor highlights, autocompletes and runs every query form,
+ * and SHACL checks run.
  */
 
 async function setEditor(page: Page, testId: string, text: string) {
@@ -15,7 +16,31 @@ async function setEditor(page: Page, testId: string, text: string) {
 const results = (page: Page) => page.getByTestId('query-results');
 const run = (page: Page) => page.getByRole('button', { name: 'Run', exact: true }).click();
 const toggle = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
-const moreOptions = (page: Page) => page.getByTestId('builder-options').locator('summary').click();
+const chat = (page: Page) => page.getByTestId('query-chat');
+const editorText = (page: Page) => page.getByTestId('sparql-editor').evaluate((el) => (el as HTMLElement).innerText.replace(/\u00a0/g, ' '));
+
+/** Sends a message to the query assistant and waits for its reply. */
+async function ask(page: Page, text: string) {
+  const replies = chat(page).getByTestId('chat-message-assistant');
+  await expect(replies.first()).toBeVisible();
+  const before = await replies.count();
+  await chat(page).getByLabel('Describe what you want to find…').fill(text);
+  await chat(page).getByRole('button', { name: 'Send' }).click();
+  await expect(replies).toHaveCount(before + 1);
+}
+
+/** Runs the query the assistant just wrote: it never runs without this click. */
+async function runWritten(page: Page) {
+  const prompt = page.getByTestId('query-run-prompt');
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole('button', { name: 'Run this query' }).click();
+  await expect(prompt).toHaveCount(0);
+}
+
+async function askAndRun(page: Page, text: string) {
+  await ask(page, text);
+  await runWritten(page);
+}
 
 test.describe('Query tab', () => {
   test.beforeEach(async ({ page, request }) => {
@@ -32,88 +57,490 @@ test.describe('Query tab', () => {
     await expect(page.getByText(/magic word|WebAssembly.instantiate/)).toHaveCount(0);
   });
 
-  test('the visual builder runs its starting query over the sample data', async ({ page }) => {
-    await expect(toggle(page, 'Visual builder')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByLabel('Class to find')).toHaveValue(/VolunteeringOpportunity$/);
-    await expect(page.getByTestId('query-diagram')).toContainText('volunteering opportunity');
-    await run(page);
+  test('a suggestion writes the query, runs it over the sample data and labels the columns', async ({ page }) => {
+    const suggestions = page.getByTestId('query-suggestions');
+    await expect(suggestions.getByRole('button')).toHaveCount(3);
+    await suggestions.getByRole('button', { name: /^List every volunteering opportunity/ }).click();
+    await expect(chat(page)).toContainText('This lists volunteering opportunity records');
+    // The conversation has started, so the suggestions make way.
+    await expect(suggestions).toHaveCount(0);
+    await expect(page.getByTestId('query-chat-offline')).toBeVisible();
+    expect(await editorText(page)).toContain('vol:VolunteeringOpportunity');
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
+    // Nothing runs until the person has looked at the query and pressed Run.
+    await expect(page.getByTestId('query-run-prompt')).toContainText('The assistant wrote a query');
+    await expect(results(page)).toHaveCount(0);
+    await runWritten(page);
     await expect(results(page)).toContainText('2 rows');
-    await expect(results(page)).toContainText('Saturday food bank shift');
     await expect(results(page)).toContainText('Park clean-up');
+    // Readable headings from the assistant, with the variable behind each one on hover.
+    await expect(results(page).locator('th').first()).toHaveText('volunteering opportunity');
+    await expect(results(page).locator('th', { hasText: 'title' })).toHaveAttribute('title', '?title');
   });
 
-  test('following a relationship, filtering, sorting and counting', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    await expect(page.getByTestId('builder-step')).toHaveCount(3);
-    const diagram = page.getByTestId('query-diagram');
-    await expect(diagram).toContainText('organisation');
-    await expect(diagram).toContainText('?offeredBy_label');
-    await page.getByText('The SPARQL this builds').click();
-    await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).toContainText('?offeredBy rdfs:label ?offeredBy_label');
+  test('each message refines the query: more columns, a number filter, then a count', async ({ page }) => {
+    await askAndRun(page, 'List every volunteering opportunity');
+    await expect(results(page)).toContainText('2 rows');
 
-    await run(page);
+    await askAndRun(page, 'Also show the minimum age and who offers it');
+    let q = await editorText(page);
+    expect(q).toContain('vol:minimumAge');
+    expect(q).toContain('vol:offeredBy');
+    await expect(results(page).locator('th')).toContainText(['minimum age', 'offered by › label']);
     await expect(results(page)).toContainText('Northvale Food Bank');
-    // Builder results use readable headings, and show missing values as a dash.
-    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by', 'offered by › label']);
 
-    // Filter the title: a filtered property becomes required.
-    const title = page.getByTestId('builder-step').filter({ hasText: 'title' }).first();
-    await title.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await title.getByLabel('Filter value').fill('PARK');
-    await expect(title.getByRole('switch', { name: 'Keep records without it' })).toBeDisabled();
-    await run(page);
+    // The Saturday shift's age is the text "sixteen", so only the park clean-up is under 15.
+    await askAndRun(page, 'Only those with a minimum age under 15');
+    q = await editorText(page);
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    expect(q).toContain('vol:offeredBy');
     await expect(results(page)).toContainText('1 row');
     await expect(results(page)).toContainText('Park clean-up');
-    await expect(results(page)).not.toContainText('Saturday');
 
-    // Hide a column.
-    await page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first().getByRole('switch', { name: 'Show in results' }).first().click();
-    await run(page);
-    await expect(results(page).locator('th')).toHaveText(['volunteering opportunity', 'title', 'offered by › label']);
-
-    // Remove the filter, sort descending, then count.
-    await title.getByLabel('Filter', { exact: true }).selectOption('');
-    await moreOptions(page);
-    await page.getByLabel('Sort by').selectOption({ label: 'title' });
-    await page.getByRole('switch', { name: 'Descending' }).click();
-    await run(page);
-    await expect(results(page).locator('tbody tr').first()).toContainText('Saturday food bank shift');
-    await page.getByRole('switch', { name: /Just count/ }).click();
-    await run(page);
-    await expect(results(page).locator('th')).toHaveText(['Number of volunteering opportunity records']);
-    await expect(results(page).locator('tbody td')).toHaveText('2');
-
-    // Removing a step removes it from the query.
-    await page.getByRole('button', { name: 'Remove offered by' }).click();
-    await expect(page.getByTestId('builder-step')).toHaveCount(1);
+    await askAndRun(page, 'How many organisations are there?');
+    expect(await editorText(page)).toContain('COUNT(DISTINCT');
+    await expect(results(page).locator('th')).toHaveText([/Number of organisation/i]);
+    await expect(results(page).locator('tbody td')).toHaveText(['1']);
   });
 
-  test('a filter on a linked thing only returns records that match it', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
-    await name.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await name.getByLabel('Filter value').fill('nothing matches this');
-    // The whole path to the condition is now required.
-    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
+  test('questions about the model itself run against the ontology', async ({ page }) => {
+    await page.getByTestId('query-suggestions').getByRole('button', { name: 'Which classes have no definition?' }).click();
+    // The starting query already runs against the ontology, so wait for the reply before checking.
+    await expect(chat(page).getByTestId('chat-message-assistant')).toHaveCount(2);
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    expect(await editorText(page)).toContain('FILTER NOT EXISTS');
+    await runWritten(page);
+    await expect(results(page)).toBeVisible();
+  });
+
+  test('Start over clears the conversation and puts the starting query back', async ({ page }) => {
+    const start = await editorText(page);
+    await askAndRun(page, 'List every volunteering opportunity');
+    await expect(results(page)).toBeVisible();
+    expect(await editorText(page)).not.toBe(start);
+    await chat(page).getByRole('button', { name: 'Start over' }).click();
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    await expect(page.getByTestId('query-suggestions')).toBeVisible();
+    expect(await editorText(page)).toBe(start);
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    await expect(results(page)).toHaveCount(0);
+  });
+
+  test('the conversation, query and headings survive leaving the page', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity with its minimum age');
+    const url = page.url();
+    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
+    await page.goto(url);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(chat(page).getByTestId('chat-message-user')).toContainText('List every volunteering opportunity with its minimum age');
+    await expect(chat(page)).toContainText('This lists volunteering opportunity records');
+    expect(await editorText(page)).toContain('vol:minimumAge');
+    await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
-    await expect(results(page)).toContainText('0 rows');
-    await name.getByLabel('Filter value').fill('northvale');
+    await expect(results(page).locator('th')).toContainText(['minimum age']);
+  });
+
+  test('if the assistant fails, the question stays, unsent, with the error', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/status of 500/);
+    await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
+    const start = await editorText(page);
+    await chat(page).getByLabel('Describe what you want to find…').fill('List every volunteering opportunity');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(page.getByTestId('query-unsent')).toContainText('wasn’t sent');
+    expect(await editorText(page)).toBe(start);
+  });
+
+  test('if the account check fails, the question is kept to send again, and a newer draft is kept too', async ({ page, consoleGuard }) => {
+    // The box is cleared on send and a question is saved only once the account check passes. When that check failed
+    // (a 503 from /api/session), the error handler dropped the pending question, so it was lost; putting it back in
+    // the box only worked if nothing new had been typed there meanwhile.
+    consoleGuard.allow(/status of 503/);
+    const question = `List every volunteering opportunity ${uniq()}`;
+    const draft = 'and only the ones in Leeds';
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    const users = chat(page).getByTestId('chat-message-user');
+    const unsent = page.getByTestId('query-unsent');
+    let fail!: () => void;
+    const held = new Promise<void>((resolve) => (fail = resolve));
+    await page.route(/\/api\/session$/, async (r) => {
+      await held;
+      await r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) });
+    });
+    await box.fill(question);
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(box).toHaveValue('');
+    // The next draft is typed while the check is still waiting, then the check fails.
+    await box.fill(draft);
+    fail();
+    await expect(chat(page).getByRole('alert')).toContainText('Service unavailable');
+    await expect(unsent).toContainText('wasn’t sent');
+    await expect(users).toHaveCount(1);
+    await expect(users).toContainText(question);
+    await expect(box).toHaveValue(draft);
+    // Once the server is back, Send again sends it, and the draft is still there.
+    await page.unroute(/\/api\/session$/);
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const before = await replies.count();
+    await unsent.getByRole('button', { name: 'Send again' }).click();
+    await expect(replies).toHaveCount(before + 1);
+    await expect(unsent).toHaveCount(0);
+    await expect(users).toHaveCount(1);
+    await expect(users).toContainText(question);
+    await expect(box).toHaveValue(draft);
+    // It was saved this time: it survives a reload.
+    await page.reload();
+    await expect(chat(page).getByTestId('chat-message-user')).toContainText(question);
+  });
+
+  test('a new message sent after one that wasn’t sends both in turn, and both change the query', async ({ page, consoleGuard }) => {
+    // Sending a message while an earlier one was unsent used to send them together as one request, and only the
+    // last was acted on: the earlier one's change was skipped though it showed as sent.
+    consoleGuard.allow(/status of 503/);
+    await ask(page, 'List every volunteering opportunity');
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const unsent = page.getByTestId('query-unsent');
+    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    await box.fill('Also show the minimum age and who offers it');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(unsent).toContainText('wasn’t sent');
+    await page.unroute(/\/api\/session$/);
+    const before = await replies.count();
+    await box.fill('Only those with a minimum age under 15');
+    await chat(page).getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(replies).toHaveCount(before + 2);
+    await expect(unsent).toHaveCount(0);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(3);
+    const q = await editorText(page);
+    expect(q).toContain('vol:offeredBy');
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    await runWritten(page);
+    await expect(results(page)).toContainText('1 row');
+    await expect(results(page)).toContainText('Northvale Food Bank');
+  });
+
+  test('if the assistant fails after the account check passes, every message waiting stays unsent', async ({ page, consoleGuard }) => {
+    // A message was counted as kept once its account check passed, before the assistant answered: when the
+    // assistant then failed, that message was dropped and only the ones after it stayed unsent.
+    consoleGuard.allow(/status of 503/, /status of 500/);
+    await ask(page, 'List every volunteering opportunity');
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const users = chat(page).getByTestId('chat-message-user');
+    const unsent = page.getByTestId('query-unsent');
+    // A is left unsent by a failed account check.
+    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    await box.fill('Also show the minimum age and who offers it');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(unsent).toContainText('wasn’t sent');
+    await page.unroute(/\/api\/session$/);
+    // Sending B: A's account check passes, then the assistant fails on A.
+    const before = await replies.count();
+    await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
+    await box.fill('Only those with a minimum age under 15');
+    await chat(page).getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
+    await expect(unsent).toContainText('Your last 2 messages weren’t sent');
+    await expect(users).toHaveCount(3);
+    await expect(replies).toHaveCount(before);
+    // Send again applies both, in order.
+    await page.unroute(/\/query-chat$/);
+    await unsent.getByRole('button', { name: 'Send again' }).click();
+    await expect(replies).toHaveCount(before + 2);
+    await expect(unsent).toHaveCount(0);
+    await expect(users).toHaveCount(3);
+    const q = await editorText(page);
+    expect(q).toContain('vol:offeredBy');
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    // Saved: they survive a reload.
+    await page.reload();
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(3);
+  });
+
+  test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {
+    const start = await editorText(page);
+    await ask(page, 'List every volunteering opportunity');
+    expect(await editorText(page)).not.toBe(start);
+    await signIn(page, { name: 'E2E query, second person', role: 'editor' });
+    await page.reload();
+    await expect(page.getByTestId('sparq-ready')).toBeVisible({ timeout: 30_000 });
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    expect(await editorText(page)).toBe(start);
+  });
+
+  test('replies are plain text: no links or images load from them', async ({ page }) => {
+    const external: string[] = [];
+    page.on('request', (r) => r.url().includes('evil.example') && external.push(r.url()));
+    await page.route(/\/query-chat$/, (r) =>
+      r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'Done ![x](https://evil.example/x.png) [here](https://evil.example/)', query: 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 3', target: 'ontology', columns: [], simulated: false }) }),
+    );
+    await ask(page, 'List three classes');
+    await expect(chat(page)).toContainText('Done ![x](https://evil.example/x.png)');
+    await expect(chat(page).locator('img, a[href*="evil.example"]')).toHaveCount(0);
+    expect(external).toEqual([]);
+  });
+
+  test('the editor is locked while the assistant works, so its answer never replaces newer edits', async ({ page }) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/query-chat$/, async (r) => {
+      await held;
+      await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'Here you go.', query: 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 3 # assistant', target: 'ontology', columns: [], simulated: false }) });
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('List three classes');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('editor-locked')).toBeVisible();
+    await expect(page.getByLabel('Run against')).toBeDisabled();
+    await page.getByTestId('sparql-editor').click();
+    await page.keyboard.insertText('# typed while waiting');
+    expect(await editorText(page)).not.toContain('typed while waiting');
+    release();
+    await expect(page.getByTestId('editor-locked')).toHaveCount(0);
+    expect(await editorText(page)).toContain('# assistant');
+    await runWritten(page);
+    await expect(results(page)).toContainText('3 rows');
+  });
+
+  test('when the assistant can’t change the query, the editor and results stay as they are', async ({ page }) => {
+    await run(page);
+    const before = await editorText(page);
+    await page.route(/\/query-chat$/, (r) =>
+      r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'The offline helper can only change queries it wrote itself.', query: 'SELECT * WHERE { ?s ?p ?o }', target: 'data', columns: [], simulated: true, unchanged: true, offlineReason: 'not-member' }) }),
+    );
+    await ask(page, 'Also show the title');
+    await expect(chat(page)).toContainText('can only change queries it wrote itself');
+    await expect(page.getByTestId('query-chat-offline')).toContainText('members of this ontology');
+    expect(await editorText(page)).toBe(before);
+    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
+    await expect(results(page)).toBeVisible();
+  });
+
+  test('results cut off by LIMIT say so, with a way to see them all', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    await expect(results(page)).toContainText('1 row');
+    const limited = page.getByTestId('result-limited');
+    await expect(limited).toContainText('there may be more');
+    await limited.getByRole('button', { name: 'Show all rows' }).click();
+    await expect(results(page)).toContainText('2 rows');
+    await expect(limited).toHaveCount(0);
+    expect(await editorText(page)).not.toContain('LIMIT');
+  });
+
+  test('queries run in the background: Cancel stops one, and one that runs too long is stopped', async ({ page }) => {
+    // The worker reads the time limit when it is first used.
+    await page.evaluate(() => ((window as unknown as { __concordQueryTimeLimitMs: number }).__concordQueryTimeLimitMs = 1500));
+    // Nested NOT EXISTS over every triple: slow, but checked row by row in a few MB, so the time limit is what stops
+    // it. (A three-way join used to be used here: on CI it reached the memory cap before the time limit, even with
+    // the cap raised to 2048 MB, so the test depended on which limit the machine hit first.)
+    const slow = 'SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c FILTER NOT EXISTS { ?d ?e ?f FILTER NOT EXISTS { ?g ?h ?i FILTER(STR(?i) = CONCAT(STR(?c), STR(?f))) } } }';
+    await setEditor(page, 'sparql-editor', slow);
+    await run(page);
+    await expect(page.getByTestId('query-running')).toBeVisible();
+    // The page stays responsive while it runs.
+    await page.getByLabel('Example queries').focus();
+    await page.getByTestId('query-cancel').click();
+    await expect(page.getByRole('alert')).toContainText('cancelled');
+    await expect(page.getByTestId('query-running')).toHaveCount(0);
+
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('took too long', { timeout: 10_000 });
+    // A fresh worker answers the next query.
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
     await run(page);
     await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('a LIMIT hidden behind a comment still counts as a limit', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT # one row\n1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    await expect(page.getByTestId('result-limited')).toBeVisible();
+  });
+
+  test('Show all rows is disabled while the assistant is answering', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
+    await page.getByLabel('Run against').selectOption('data');
+    await run(page);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/query-chat$/, async (r) => {
+      await held;
+      await r.fulfill({ contentType: 'application/json', body: JSON.stringify({ reply: 'No change.', query: '', target: 'data', columns: [], simulated: true, unchanged: true }) });
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the title');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('result-limited').getByRole('button', { name: 'Show all rows' })).toBeDisabled();
+    release();
+    await expect(page.getByTestId('result-limited').getByRole('button', { name: 'Show all rows' })).toBeEnabled();
+  });
+
+  test('signing out removes this account’s drafts and chats from the browser', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity');
+    const mine = () => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect((await mine()).length).toBeGreaterThan(0);
+    await page.locator('.app-user-button').click();
+    await page.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+    expect(await mine()).toEqual([]);
+  });
+
+  test('a reply that arrives after signing out is dropped, not saved', async ({ page }) => {
+    await ask(page, 'List every volunteering opportunity');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let body: { account?: string } = {};
+    await page.route(/\/query-chat$/, async (r) => {
+      body = r.request().postDataJSON() as { account?: string };
+      // The server has answered; the answer is held on its way back.
+      const answer = await r.fetch();
+      await held;
+      await r.fulfill({ response: answer });
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect.poll(() => body.account).toBeTruthy();
+    // The request names the account it belongs to, so the server can refuse it under any other.
+    const me = await page.evaluate(() => fetch('/api/session').then((r) => r.json()) as Promise<{ user: { id: string } }>);
+    expect(body.account).toBe(me.user.id);
+    await page.locator('.app-user-button').click();
+    await page.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(page).toHaveURL(/\/login/);
+    release();
+    // Give the late reply time to arrive: nothing of the old account comes back.
+    await page.waitForTimeout(1000);
+    const left = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(left).toEqual([]);
+  });
+
+  test('a reply that arrives after signing out in another tab is dropped, not saved', async ({ page, context }) => {
+    // Used to come back: the other tab cleared the drafts, then this tab's held reply wrote chat, query and state again.
+    await ask(page, 'List every volunteering opportunity');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let arrived = false;
+    await page.route(/\/query-chat$/, async (r) => {
+      const answer = await r.fetch();
+      await held;
+      await r.fulfill({ response: answer });
+      arrived = true;
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByTestId('editor-locked')).toBeVisible();
+    const other = await context.newPage();
+    await other.goto('/');
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(other).toHaveURL(/\/login/);
+    const mine = (p: Page) => p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(await mine(other)).toEqual([]);
+    release();
+    await expect.poll(() => arrived).toBe(true);
+    await page.waitForTimeout(500);
+    expect(await mine(page)).toEqual([]);
+    await other.close();
+  });
+
+  test('a message sent while another tab is still signing out is cleared once the sign-out finishes', async ({ page, context }) => {
+    // Used to come back: the other tab announced the sign-out before the server had ended the session, so this tab
+    // asked the server, was told it was still signed in, and saved the whole conversation again.
+    await ask(page, 'List every volunteering opportunity');
+    const other = await context.newPage();
+    await other.goto('/');
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let loggedOut = false;
+    await other.route(/\/api\/auth\/logout$/, async (r) => {
+      await held;
+      await r.continue();
+      loggedOut = true;
+    });
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    // Meanwhile, here, the session is still live: a new message goes through and is saved.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await ask(page, 'Also show the minimum age');
+    const mine = (p: Page) => p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    release();
+    await expect.poll(() => loggedOut).toBe(true);
+    await expect(other).toHaveURL(/\/login/);
+    // This tab signs out too, at once, and nothing of the account is left.
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(await mine(page)).toEqual([]);
+    await other.close();
+  });
+
+  test('a session answer from before another tab signed out can’t sign this tab back in', async ({ page, context }) => {
+    // Used to happen: a slow "still signed in" answer arrived after the sign-out and restored the account here,
+    // and the next message saved its chat again.
+    await ask(page, 'List every volunteering opportunity');
+    let releaseOld!: () => void;
+    const old = new Promise<void>((r) => (releaseOld = r));
+    let held = false;
+    let oldDone = false;
+    await page.route(/\/api\/session$/, async (r) => {
+      if (held) return r.continue();
+      held = true;
+      const answer = await r.fetch();
+      await old;
+      await r.fulfill({ response: answer });
+      oldDone = true;
+    });
+    // A routine session check starts here and is held, still signed in.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await expect.poll(() => held).toBe(true);
+    const other = await context.newPage();
+    await other.goto('/');
+    await other.locator('.app-user-button').click();
+    await other.getByRole('button', { name: /sign out|log out/i }).click();
+    await expect(other).toHaveURL(/\/login/);
+    // This tab has signed out too.
+    await expect(page.locator('.app-user-button')).toHaveCount(0);
+    releaseOld();
+    await expect.poll(() => oldDone).toBe(true);
+    await page.waitForTimeout(500);
+    await expect(page.locator('.app-user-button')).toHaveCount(0);
+    const mine = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
+    expect(mine).toEqual([]);
+    await other.close();
+  });
+
+  test('a conversation is never sent on under an account signed in from another tab', async ({ page, context }) => {
+    await ask(page, 'List every volunteering opportunity');
+    // Another tab signs in as someone else (the session cookie is shared).
+    const other = await context.newPage();
+    await signIn(other, { name: 'E2E query, other tab', role: 'editor' });
+    await other.close();
+    let sent = 0;
+    await page.route(/\/query-chat$/, (r) => {
+      sent++;
+      return r.continue();
+    });
+    await chat(page).getByLabel('Describe what you want to find…').fill('Also show the minimum age');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    // The page notices, drops to the new account's own (empty) workspace, and nothing was sent.
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    expect(sent).toBe(0);
+    // Nor was it saved to the first account's conversation before the check (it used to be).
+    const saved = await page.evaluate(() => Object.entries(localStorage).filter(([k, v]) => k.endsWith('.chat') && v.includes('Also show the minimum age')));
+    expect(saved).toEqual([]);
   });
 
   test('changing the question marks the old answer as stale', async ({ page }) => {
-    await run(page);
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('2 rows');
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
+    await page.getByTestId('sparql-editor').click();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.insertText('\n# edited by hand');
     await expect(page.getByTestId('result-stale')).toBeVisible();
     await page.getByTestId('result-stale').getByRole('button', { name: 'Run again' }).click();
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
-    await expect(results(page).locator('th')).toContainText(['minimum age']);
 
     // The SHACL report goes stale when the data changes.
     await toggle(page, 'Check data').click();
@@ -125,36 +552,20 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('report-stale')).toBeVisible();
   });
 
-  test('drafts survive leaving the page', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
-    await toggle(page, 'SPARQL').click();
-    await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a ?y } LIMIT 1');
+  test('a hand-written query keeps its dataset after leaving the page', async ({ page }) => {
+    await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> } # mine');
+    await page.getByLabel('Run against').selectOption('data');
     const url = page.url();
     await page.getByRole('link', { name: 'Source & export', exact: true }).click();
     await page.goto(url);
-    await expect(page.getByTestId('sparql-editor')).toContainText('SELECT ?x WHERE { ?x a ?y } LIMIT 1');
-    await toggle(page, 'Visual builder').click();
-    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(1);
-    // Start over sits with the builder's controls, not inside the generated code.
-    await page.getByTestId('query-builder').getByRole('button', { name: 'Start over' }).click();
-    await expect(page.getByTestId('builder-step').filter({ hasText: 'minimum age' })).toHaveCount(0);
-  });
-
-  test('a restored SPARQL draft keeps its dataset', async ({ page }) => {
-    await page.getByText('The SPARQL this builds').click();
-    await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
-    const url = page.url();
-    await page.getByRole('link', { name: 'Source & export', exact: true }).click();
-    await page.goto(url);
+    expect(await editorText(page)).toContain('# mine');
     await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
+    await expect(results(page)).toContainText('2 rows');
   });
 
   test('each ontology keeps its own drafts, even when the page is reused', async ({ page }) => {
     const draftA = 'SELECT ?a WHERE { ?a ?b ?c } # draft A';
-    await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', draftA);
     const a = new URL(page.url()).pathname;
     const created = await page.request.post('/api/ontologies', { data: { title: `E2E second ${Date.now()}`, prefix: 'sec', description: 'Second ontology for draft isolation' } });
@@ -164,7 +575,7 @@ test.describe('Query tab', () => {
     await page.evaluate((to) => {
       history.pushState(null, '', to);
       dispatchEvent(new PopStateEvent('popstate'));
-    }, `/o/${b.id}/query?mode=sparql`);
+    }, `/o/${b.id}/query`);
     await expect(page).toHaveURL(new RegExp(`/o/${b.id}/query`));
     const editor = page.getByTestId('sparql-editor');
     await expect(editor).not.toContainText('draft A');
@@ -178,9 +589,14 @@ test.describe('Query tab', () => {
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${a}`));
     await expect(editor).toContainText('draft A');
-    const stored = await page.evaluate(([idA, idB]) => [localStorage.getItem(`concord.query.${idA}.sparql`), localStorage.getItem(`concord.query.${idB}.sparql`)], [a.split('/')[2], b.id]);
-    expect(stored[0]).toContain('draft A');
-    expect(stored[1]).toContain('draft B');
+    // Drafts are kept per account and ontology.
+    const stored = await page.evaluate(
+      ([idA, idB]) => [idA, idB].map((o) => Object.keys(localStorage).filter((k) => k.endsWith(`.${o}.sparql`)).map((k) => localStorage.getItem(k))),
+      [a.split('/')[2], b.id],
+    );
+    expect(stored[0]).toHaveLength(1);
+    expect(stored[0][0]).toContain('draft A');
+    expect(stored[1][0]).toContain('draft B');
   });
 
   test('switching to an ontology that fails to load shows the error, not endless loading', async ({ page, consoleGuard }) => {
@@ -195,60 +611,16 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('sparq-ready')).toHaveCount(0);
   });
 
-  test('requiring a nested property requires the path to it', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'offered by →' });
-    await page.getByLabel('Add a property of offered by').selectOption({ label: 'label' });
-    const org = page.getByTestId('builder-step').filter({ hasText: 'offered by' }).first();
-    const name = page.getByTestId('builder-step').filter({ hasText: 'label' }).last();
-    await name.getByRole('switch', { name: 'Keep records without it' }).click();
-    // The label's own control stays editable; the relationship above it is now required.
-    await expect(name.getByRole('switch', { name: 'Keep records without it' })).toBeEnabled();
-    await expect(org.getByRole('switch', { name: 'Keep records without it' }).first()).toBeDisabled();
-    await page.getByText('The SPARQL this builds').click();
-    await expect(page.getByText('The SPARQL this builds').locator('..').locator('..')).not.toContainText('OPTIONAL {\n    ?volunteeringOpportunity vol:offeredBy');
-    // Sorting names each column by its path.
-    await moreOptions(page);
-    await expect(page.getByLabel('Sort by').locator('option', { hasText: 'offered by › label' })).toHaveCount(1);
-  });
-
-  test('changing the condition never leaves a hidden value in the query', async ({ page }) => {
-    await page.getByLabel('Add a property', { exact: true }).selectOption({ label: 'minimum age' });
-    const age = page.getByTestId('builder-step').filter({ hasText: 'minimum age' });
-    await age.getByLabel('Filter', { exact: true }).selectOption('contains');
-    await age.getByLabel('Filter value').fill('sixteen');
-    await page.getByText('The SPARQL this builds').click();
-    const sparql = page.getByText('The SPARQL this builds').locator('..').locator('..');
-    await expect(sparql).toContainText('CONTAINS(LCASE(STR(?minimumAge)), "sixteen")');
-    // A number condition shows a number field: the leftover text is cleared, and nothing hidden runs.
-    await age.getByLabel('Filter', { exact: true }).selectOption('lt');
-    await expect(age.getByLabel('Filter value')).toHaveAttribute('type', 'number');
-    await expect(age.getByLabel('Filter value')).toHaveValue('');
-    await expect(sparql).not.toContainText('FILTER');
-    await age.getByLabel('Filter value').fill('15');
-    await expect(sparql).toContainText('FILTER(?minimumAge < 15)');
-    await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
-  });
-
   test('the query shows which data it runs over, with a shortcut to edit it', async ({ page }) => {
+    await expect(page.getByTestId('dataset-summary')).toHaveCount(0);
+    await page.getByLabel('Run against').selectOption('data');
     await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
     await page.getByTestId('dataset-summary').getByRole('button', { name: 'Edit sample data' }).click();
     await expect(toggle(page, 'Check data')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('data-editor')).toBeVisible();
   });
 
-  test('the builder hands its query to the SPARQL editor', async ({ page }) => {
-    await page.getByText('The SPARQL this builds').click();
-    await page.getByRole('button', { name: 'Edit as SPARQL' }).click();
-    await expect(page).toHaveURL(/mode=sparql/);
-    await expect(page.getByTestId('sparql-editor')).toContainText('a/rdfs:subClassOf* vol:VolunteeringOpportunity');
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
-    await run(page);
-    await expect(results(page)).toContainText('Park clean-up');
-  });
-
   test('the SPARQL editor highlights, autocompletes and runs with Ctrl/⌘-Enter', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
     const editor = page.getByTestId('sparql-editor');
     await expect(editor.locator('.tok-keyword', { hasText: 'SELECT' })).toBeVisible();
     await expect(editor.locator('.tok-variable').first()).toBeVisible();
@@ -292,8 +664,6 @@ test.describe('Query tab', () => {
   });
 
   test('every query form: ASK, CONSTRUCT, examples and errors', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
-
     await page.getByLabel('Example queries').selectOption({ label: 'Does every class have a label?' });
     await run(page);
     await expect(page.getByTestId('query-answer')).toHaveText(/Answer: (yes|no)/);
@@ -324,7 +694,7 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('data-editor')).toHaveCount(0);
     await toggle(page, 'Check data').click();
     await expect(page).toHaveURL(/view=check/);
-    await expect(page.getByTestId('query-builder')).toHaveCount(0);
+    await expect(page.getByTestId('query-chat')).toHaveCount(0);
     const data = page.getByTestId('data-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
     await page.getByRole('button', { name: 'Check', exact: true }).click();
@@ -337,17 +707,62 @@ test.describe('Query tab', () => {
     await toggle(page, 'Check data').click();
     await expect(report).toContainText('saturday-shift');
 
-    // Editing the data changes what the builder finds.
+    // Editing the data changes what queries find.
     await data.click();
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
     await toggle(page, 'Query ontology').click();
-    await run(page);
+    await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');
   });
+  test('very long values are shortened in the results', async ({ page }) => {
+    const x10 = (v: string) => `CONCAT(${Array(10).fill(v).join(', ')})`;
+    await setEditor(
+      page,
+      'sparql-editor',
+      `SELECT ?e WHERE { BIND("xxxxxxxxxx" AS ?a) BIND(${x10('?a')} AS ?b) BIND(${x10('?b')} AS ?c) BIND(${x10('?c')} AS ?d) BIND(CONCAT(?d, ?d) AS ?e) }`,
+    );
+    await run(page);
+    await expect(results(page)).toContainText('very long values are shortened');
+    const cell = await results(page).locator('tbody td').first().getAttribute('title');
+    expect(cell!.length).toBeLessThanOrEqual(10_001);
+    expect(cell!.endsWith('…')).toBe(true);
+  });
+
+  test('a query that would build enormous values is refused before it runs', async ({ page }) => {
+    // Used to be accepted: about 840 characters of doubling CONCATs built a 64 MiB value and 500 MB of engine memory.
+    const steps = Array.from({ length: 26 }, (_, i) => `BIND(CONCAT(?v${i}, ?v${i}) AS ?v${i + 1})`).join(' ');
+    await setEditor(page, 'sparql-editor', `SELECT ?v26 WHERE { BIND("x" AS ?v0) ${steps} }`);
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('could build values of 67,108,864 characters');
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('a query that needs more memory than allowed is stopped, and the next one runs', async ({ page }) => {
+    // The engine's memory used to be able to grow towards 4 GB. Lower the cap so a plain cross join reaches it.
+    await page.evaluate(() => ((window as unknown as { __concordQueryMemoryMiB: number }).__concordQueryMemoryMiB = 24));
+    await setEditor(page, 'sparql-editor', 'SELECT * WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i }');
+    await run(page);
+    await expect(page.getByRole('alert')).toContainText('needed more memory than a query here may use (24 MB)', { timeout: 20_000 });
+    await setEditor(page, 'sparql-editor', 'SELECT ?c WHERE { ?c a <http://www.w3.org/2002/07/owl#Class> } LIMIT 2');
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+  });
+
+  test('variables named like JavaScript built-ins show their values', async ({ page }) => {
+    // ?__proto__ used to lose its value and crash the page.
+    await setEditor(page, 'sparql-editor', 'SELECT ("ok" AS ?__proto__) ("fine" AS ?constructor) WHERE {}');
+    await run(page);
+    await expect(results(page).locator('th')).toHaveText(['?__proto__', '?constructor']);
+    await expect(results(page).locator('tbody td')).toHaveText(['ok', 'fine']);
+    const csv = await results(page).getByRole('link', { name: 'CSV' }).getAttribute('href');
+    expect(decodeURIComponent(csv!.split(',').slice(1).join(','))).toBe('__proto__,constructor\nok,fine');
+  });
+
   test('long results are paginated', async ({ page }) => {
-    await toggle(page, 'SPARQL').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
     await run(page);
     const table = results(page);

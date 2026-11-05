@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.25.0',
+    version: '0.26.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,
@@ -67,6 +67,32 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'agent'],
         to: '{o}/forks',
         ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
+      },
+    ],
+  },
+  {
+    version: '0.25.0',
+    date: '2026-11-05',
+    title: 'Ask for a query in plain words',
+    pr: 38,
+    changes: [
+      {
+        id: 'query-chat',
+        type: 'feat',
+        title: 'Describe what you want and the assistant writes the SPARQL',
+        detail:
+          'The visual query builder is replaced by a chat beside the SPARQL editor: describe what you want to find, and each message writes or refines the query. Read it, then press Run. Start over clears the chat and puts the starting query back.',
+        roles: [],
+        to: '{o}/query',
+        ask: 'Did the assistant write the query you meant? Where did you have to rephrase or fix it by hand?',
+      },
+      {
+        id: 'query-runs-safely',
+        type: 'fix',
+        title: 'Big or slow queries can be cancelled and no longer freeze the page',
+        detail: 'Queries run in the background with a Cancel button, a time limit and a memory cap. Queries that would build enormous values are refused before they run, and very long values are shortened in the results.',
+        roles: [],
+        to: '{o}/query',
       },
     ],
   },

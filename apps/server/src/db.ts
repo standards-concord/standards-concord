@@ -209,3 +209,37 @@ export class HttpError extends Error {
     super(message);
   }
 }
+
+/**
+ * Takes one from each counter (kv documents `{ id, count }`) if none is at its limit, all or nothing. It runs in
+ * one transaction, which holds the writer lock from its first read to COMMIT, so separate connections or
+ * processes can't both take the last one.
+ */
+export async function reserveCounters(
+  counters: { id: string; max: number }[],
+  parent?: string,
+  /** Tests only: hooks between the steps, to prove the steps can't interleave or half-apply. */
+  test?: { afterRead?: () => void | Promise<void>; beforeWrite?: (index: number) => void | Promise<void> },
+): Promise<boolean> {
+  return transaction(async () => {
+    const used: number[] = [];
+    for (const k of counters) used.push(Number((await get<{ count?: number }>('kv', k.id))?.count ?? 0));
+    await test?.afterRead?.();
+    if (counters.some((k, i) => used[i] >= k.max)) return false;
+    for (const [i, k] of counters.entries()) {
+      await test?.beforeWrite?.(i);
+      await put('kv', { id: k.id, count: used[i] + 1 }, parent);
+    }
+    return true;
+  });
+}
+
+/** Gives back what reserveCounters took (never below zero), all or nothing. */
+export async function releaseCounters(ids: string[], parent?: string): Promise<void> {
+  await transaction(async () => {
+    for (const id of ids) {
+      const doc = await get<{ id: string; count?: number }>('kv', id);
+      if (doc) await put('kv', { ...doc, count: Math.max(0, Number(doc.count ?? 0) - 1) }, parent);
+    }
+  });
+}
