@@ -113,6 +113,8 @@ describe('unreadable app text', () => {
       expect(tokenize('i++ / 2; const s = "/";').some(([c]) => c === 'tk-r')).toBe(false);
       expect(cls('i++ / 2; const s = "/";', 'const')).toBe('tk-k');
       expect(cls('x = ++i; y = /a/.test(s);', '/a/')).toBe('tk-r');
+      // A line break before ++ makes it the next statement's prefix operator (review r3).
+      expect(cls('a\n++/re/.lastIndex', '/re/')).toBe('tk-r');
       expect(cls('export default /["]/;\nconst n = 1;', '/["]/')).toBe('tk-r');
       expect(cls('export default /["]/;\nconst n = 1;', 'const')).toBe('tk-k');
       const crlf = 'const s = "first \\\r\nsecond";\r\nconst t = 2;';

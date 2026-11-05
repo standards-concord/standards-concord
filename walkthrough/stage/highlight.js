@@ -141,8 +141,9 @@ function tokenize(text) {
         while (j < n && /\s/.test(text[j])) j++;
         push('', text.slice(i, j));
         i = j;
-      } else if ((c === '+' || c === '-') && d === c && last === 'value') {
-        // Postfix ++ or --: what follows comes after a value, so a / there divides.
+      } else if ((c === '+' || c === '-') && d === c && last === 'value' && !/\n/.test(tokens[tokens.length - 1]?.[1] ?? '')) {
+        // Postfix ++ or --: what follows comes after a value, so a / there divides. (After a line
+        // break it is the next statement's prefix operator instead.)
         push('', c + d);
         i += 2;
       } else {
