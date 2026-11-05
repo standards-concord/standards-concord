@@ -324,7 +324,7 @@ export function AppsTab() {
             </ol>
             <p className="border-t border-line px-5 py-3 text-xs text-muted">
               Not on GitHub? The action is one Node script with no dependencies:{' '}
-              <a className="text-accent hover:underline" href="https://github.com/jeswr/standards-concord/tree/main/actions/app-check" target="_blank" rel="noreferrer">
+              <a className="text-accent hover:underline" href="https://github.com/standards-concord/standards-concord/tree/main/actions/app-check" target="_blank" rel="noreferrer">
                 run it in any CI
               </a>
               .

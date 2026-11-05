@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: jeswr/standards-concord/actions/app-check@main
+      - uses: standards-concord/standards-concord/actions/app-check@main
         with:
           concord-url: ${JSON.stringify(concordUrl)}
           token: \${{ secrets.CONCORD_APP_TOKEN }}

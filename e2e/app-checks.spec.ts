@@ -112,7 +112,7 @@ test.describe('app checks', () => {
     await page.getByRole('button', { name: 'Connect app' }).click();
     const token = (await page.getByTestId('app-token').innerText()).trim();
     expect(token).toMatch(/^cna_/);
-    await expect(page.getByText('jeswr/standards-concord/actions/app-check@main')).toBeVisible();
+    await expect(page.getByText('standards-concord/standards-concord/actions/app-check@main')).toBeVisible();
     await expect(page.getByRole('link', { name: /Create it in example\/family-finder/ })).toHaveAttribute('href', /github\.com\/example\/family-finder\/new\/main\?filename=/);
     await expect(page.getByRole('link', { name: /Open example\/family-finder’s secrets/ })).toBeVisible();
 

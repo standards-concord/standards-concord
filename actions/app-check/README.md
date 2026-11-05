@@ -56,7 +56,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: jeswr/standards-concord/actions/app-check@main
+      - uses: standards-concord/standards-concord/actions/app-check@main
         with:
           concord-url: https://standards-concord.vercel.app
           token: ${{ secrets.CONCORD_APP_TOKEN }}
