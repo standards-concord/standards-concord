@@ -17,7 +17,7 @@ const app = createApp();
 const realFetch = globalThis.fetch;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 afterEach(() => vi.restoreAllMocks());
@@ -87,7 +87,7 @@ describe('a demo account that signs in with GitHub', () => {
         expect((await request(app).get('/api/feedback').set('Cookie', `concord_session=${demoToken}`)).status).toBe(401);
         // And a session that wasn't signed in with Google or GitHub never counts, whatever the account.
         for (const method of ['demo', undefined] as const) {
-          const s = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demoId, method)}`);
+          const s = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demoId, method)}`);
           expect(s.status).toBe(403);
         }
       } finally {
@@ -113,7 +113,7 @@ describe('a demo account that signs in with GitHub', () => {
       // Another browser still holding the demo account's session is signed out, and the old record takes no more changes.
       const device2 = () => request(app).post('/api/alpha/visit').set('Cookie', `concord_session=${demoToken}`).send({ version: '0.8.0' });
       expect((await device2()).status).toBe(401);
-      await expect(recordVersion((await import('../src/services/users.js')).getUser(demoId)!, { version: '0.8.0' })).rejects.toMatchObject({ status: 409 });
+      await expect(recordVersion((await (await import('../src/services/users.js')).getUser(demoId))!, { version: '0.8.0' })).rejects.toMatchObject({ status: 409 });
       // Moving again (say, a retried sign-in) changes nothing.
       expect((await device1.get('/api/alpha/me')).body.versions.map((v: { version: string }) => v.version)).toEqual(['0.7.0', '0.6.0']);
     }));

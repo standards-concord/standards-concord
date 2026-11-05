@@ -10,6 +10,7 @@
     "start": "pnpm --filter @concord/server start",
     "test:e2e": "playwright test -c e2e --project=local",
     "test:e2e:live": "playwright test -c e2e --project=live",
+    "test:e2e:solid": "playwright test -c e2e/solid.config.ts",
     "walkthrough": "pnpm --filter @concord/walkthrough record"
   },
   "packageManager": "pnpm@10.0.0",
@@ -22,6 +23,7 @@
     "@playwright/test": "1.63.0",
     "@vercel/functions": "3.10.1",
     "ajv": "8.20.0",
-    "ajv-formats": "3.0.1"
+    "ajv-formats": "3.0.1",
+    "ts-morph": "28.0.0"
   }
 }

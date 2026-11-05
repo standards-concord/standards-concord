@@ -1,4 +1,9 @@
 @import 'tailwindcss';
+/* The Solid Suite's shared sign-in card (packages/suite-ui) and the bridge onto Concord's looks. */
+@import '@jeswr/suite-ui/styles/components.css';
+@import '@jeswr/suite-ui/styles/sign-in.css';
+@import './suite-bridge.css';
+@source '../../../packages/suite-ui/src';
 
 /*
  * Design tokens. Everything visual is a CSS variable so a whole "look" swaps in one
@@ -599,6 +604,22 @@
   --color-danger-fg: var(--danger-fg);
   --color-control: var(--control-line);
   --color-switch-thumb: var(--switch-thumb);
+  /* Suite component colours (suite-bridge.css maps them onto the look). */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-overlay: var(--overlay);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --radius-xs: var(--r-xs);
   --radius-sm: var(--r-sm);
   --radius-md: var(--r-md);

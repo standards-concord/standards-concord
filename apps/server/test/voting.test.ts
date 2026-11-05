@@ -31,24 +31,24 @@ async function stage(voterRoles: Role[]) {
   const governance: GovernancePolicy = { ...base, odiPrivilege: 'none', changes: { ...base.changes, major: voting(voterRoles) }, releases: { ...base.releases, major: voting(voterRoles) } };
   const id = `ont-votes-${voterRoles.join('-') || 'none'}`;
   const now = clock.iso();
-  put('ontologies', { id, slug: id, title: id, governance, ownerIds: [], createdAt: now, updatedAt: now } as unknown as OntologyProject);
+  await put('ontologies', { id, slug: id, title: id, governance, ownerIds: [], createdAt: now, updatedAt: now } as unknown as OntologyProject);
   const author = await createUser({ name: 'Author', provider: 'demo', subject: `${id}-author` });
-  setRoles(id, author.id, ['steward']);
+  await setRoles(id, author.id, ['steward']);
   // An eligible member who never votes, so neither vote closes early because everyone has voted.
   const silent = await createUser({ name: 'Silent', provider: 'demo', subject: `${id}-silent` });
-  setRoles(id, silent.id, ROLES);
+  await setRoles(id, silent.id, ROLES);
   const voters = [];
   for (const roles of MEMBERSHIPS) {
     const u = await createUser({ name: roles.join('+'), provider: 'demo', subject: `${id}-${roles.join('+')}` });
-    setRoles(id, u.id, roles);
+    await setRoles(id, u.id, roles);
     voters.push({ u, roles });
   }
-  const cr = put(
+  const cr = await put(
     'changeRequests',
     { id: `${id}-cr`, number: 1, ontologyId: id, title: 'A major change', description: '', kind: 'change', origin: 'manual', authorId: author.id, ops: [], status: 'voting', classification: { level: 'major' }, validation: { passed: true }, timeline: [], createdAt: now, updatedAt: now, statusSince: now, reviewStartedAt: now } as unknown as ChangeRequest,
     id,
   );
-  const release = put('releases', { id: `${id}-rel`, ontologyId: id, version: '2.0.0', level: 'major', status: 'voting', changeRequestIds: [], notes: '', versionIRI: '', createdBy: author.id, createdAt: now, statusSince: now } as Release, id);
+  const release = await put('releases', { id: `${id}-rel`, ontologyId: id, version: '2.0.0', level: 'major', status: 'voting', changeRequestIds: [], notes: '', versionIRI: '', createdBy: author.id, createdAt: now, statusSince: now } as Release, id);
   return { voters, cr, release };
 }
 
@@ -62,8 +62,8 @@ const accepts = async (fn: () => Promise<unknown>) => {
   }
 };
 
-beforeAll(() => {
-  openDb();
+beforeAll(async () => {
+  await openDb();
 });
 
 describe('vote eligibility', () => {
@@ -80,20 +80,20 @@ describe('vote eligibility', () => {
       for (const { u, roles } of voters) {
         const who = `${roles.join('+')} under [${voterRoles.join(', ')}]`;
         // A change request vote: accepted by addVote, counted by the evaluator.
-        const crBefore = governanceFor(getCR(cr.id)).vote!.cast;
-        const crAccepted = await accepts(() => addVote(getCR(cr.id), u, 'yes'));
-        const crCounted = governanceFor(getCR(cr.id)).vote!.cast === crBefore + 1;
+        const crBefore = (await governanceFor(await getCR(cr.id))).vote!.cast;
+        const crAccepted = await accepts(async () => addVote(await getCR(cr.id), u, 'yes'));
+        const crCounted = (await governanceFor(await getCR(cr.id))).vote!.cast === crBefore + 1;
         if (crAccepted !== crCounted) mismatches.push(`change: ${who} accepted=${crAccepted} counted=${crCounted}`);
         // A release vote: accepted by voteOnRelease, counted by the evaluator.
-        const relBefore = releaseGovernance(release).vote!.cast;
+        const relBefore = (await releaseGovernance(release)).vote!.cast;
         const relAccepted = await accepts(() => voteOnRelease(release, u, 'yes'));
-        const relCounted = releaseGovernance(release).vote!.cast === relBefore + 1;
+        const relCounted = (await releaseGovernance(release)).vote!.cast === relBefore + 1;
         if (relAccepted !== relCounted) mismatches.push(`release: ${who} accepted=${relAccepted} counted=${relCounted}`);
         // The simulation and the app ask exactly the people whose votes are accepted.
         if (canVote(voting(voterRoles), roles) !== crAccepted) mismatches.push(`ask: ${who}`);
       }
       // Both stayed open for the whole run, so every vote above was a real attempt.
-      expect(getCR(cr.id).status, `change under [${voterRoles.join(', ')}]`).toBe('voting');
+      expect((await getCR(cr.id)).status, `change under [${voterRoles.join(', ')}]`).toBe('voting');
       expect(release.status, `release under [${voterRoles.join(', ')}]`).toBe('voting');
     }
     expect(mismatches).toEqual([]);

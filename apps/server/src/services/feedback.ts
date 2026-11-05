@@ -1,13 +1,16 @@
-import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, type ChatMessage, type FeedbackQuestion, type FeedbackSubmission, type TesterRoleKey, type User } from '@concord/shared';
+import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, type ChatMessage, type FeedbackQuestion, type FeedbackSubmission, type PodFeedbackFolder, type PodFeedbackReport, type TesterRoleKey, type User } from '@concord/shared';
+import { Parser } from 'n3';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, put } from '../db.js';
+import { get as get_, HttpError, list, put, remove } from '../db.js';
+import * as oauth from 'oauth4webapi';
 import { newId } from '../ids.js';
 import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
 import { acceptVersion, recordFeedback } from './alpha.js';
+import { solid } from './solid.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
   id,
@@ -225,19 +228,168 @@ export async function submitFeedback(user: User | undefined, input: Omit<Feedbac
     createdAt: clock.iso(),
   };
   if (!tester) {
-    put('feedback', sub);
+    await put('feedback', sub);
     return { ...sub, savedTo: undefined };
   }
   // A tester's feedback is stored together with its place in their testing record (or not at all, with a 409, if
   // the record can't take it), then copied to their pod with the version they tested.
-  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, () => put('feedback', sub));
+  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, async () => await put('feedback', sub));
+  // The pod's feedback folder is shared read-only with the admins' WebIDs (testers are told this).
+  if (savedTo.kind === 'solid') await shareFeedbackFolder(tester.id);
   return { ...sub, savedTo };
 }
 
-export const listFeedback = () => list<FeedbackSubmission>('feedback').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+/* ------------------------------------------------------------------------ */
+/* Administrators read testers' feedback in their pods                       */
+/* ------------------------------------------------------------------------ */
+
+export const FEEDBACK_FOLDER = 'feedback/';
+
+/**
+ * Share a tester's pod feedback folder read-only with the administrators'
+ * WebIDs (ADMIN_WEBIDS). Testers are told this on the feedback page.
+ */
+export async function shareFeedbackFolder(userId: string, opts: { create?: boolean; force?: boolean } = {}) {
+  try {
+    const r = await solid.shareRead(userId, FEEDBACK_FOLDER, config.adminWebIds, opts);
+    if (r === 'shared' || r === 'unchanged') await remove('kv', shareErrorKey(userId));
+    return r;
+  } catch (err) {
+    const message = (err as Error).message.slice(0, 300);
+    console.warn(`[solid] could not share the feedback folder of ${userId}: ${message}`);
+    // Shown to the admins beside that tester's folder.
+    await put('kv', { id: shareErrorKey(userId), value: message, at: clock.iso() });
+    return 'error' as const;
+  }
+}
+
+const shareErrorKey = (userId: string) => `share-error:${userId}`;
+const sharingError = async (userId: string) => (await get_<{ value: string }>('kv', shareErrorKey(userId)))?.value;
+
+/** Bring every tester's feedback folder in line with ADMIN_WEBIDS (run at start-up: the list may have changed). */
+export async function syncFeedbackSharing() {
+  if (!solid.enabled) return { shared: 0, unchanged: 0, missing: 0, failed: 0 };
+  const counts = { shared: 0, unchanged: 0, missing: 0, failed: 0 };
+  for (const pod of await solid.pods()) {
+    const r = await shareFeedbackFolder(pod.userId);
+    if (r === 'shared') counts.shared++;
+    else if (r === 'unchanged') counts.unchanged++;
+    else if (r === 'missing' || r === 'local') counts.missing++;
+    else counts.failed++;
+  }
+  return counts;
+}
+
+const LDP_CONTAINS = 'http://www.w3.org/ns/ldp#contains';
+const MAX_POD_ITEMS = 100;
+
+/** Keep only what looks like a feedback submission (the pod is read over the network, so check its shape). */
+function asSubmission(doc: unknown): FeedbackSubmission | undefined {
+  if (!doc || typeof doc !== 'object') return undefined;
+  const d = doc as Record<string, unknown>;
+  if (typeof d.id !== 'string' || typeof d.createdAt !== 'string' || !d.answers || typeof d.answers !== 'object' || Array.isArray(d.answers)) return undefined;
+  return { ...(d as unknown as FeedbackSubmission), transcript: Array.isArray(d.transcript) ? (d.transcript as FeedbackSubmission['transcript']) : [] };
+}
+
+/** Run `fn` over `items`, a few at a time. */
+async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(size, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]!);
+      }
+    }),
+  );
+  return out;
+}
+
+type PodGet = (url: string, accept: string) => Promise<Response>;
+
+/**
+ * The feedback documents a folder listing may name: direct children of the
+ * folder, named by Concord (<id>.json), after URL normalisation. A listing is
+ * read over the network, so `..`, encoded slashes and anything else are ignored.
+ */
+export function feedbackMembers(folder: string, turtle: string): string[] {
+  const quads = new Parser({ baseIRI: folder, format: 'text/turtle' }).parse(turtle);
+  const out = new Set<string>();
+  for (const q of quads) {
+    if (q.predicate.value !== LDP_CONTAINS || q.subject.termType !== 'NamedNode' || q.subject.value !== folder || q.object.termType !== 'NamedNode') continue;
+    let url: URL;
+    try {
+      url = new URL(q.object.value);
+    } catch {
+      continue;
+    }
+    if (url.search || url.hash || !url.href.startsWith(folder)) continue;
+    if (!/^[\w-]{1,64}\.json$/.test(url.href.slice(folder.length))) continue;
+    out.add(url.href);
+  }
+  return [...out];
+}
+
+async function readFolder(get: PodGet, testerId: string, url: string): Promise<PodFeedbackFolder> {
+  const testerName = (await get_<User>('users', testerId))?.name ?? testerId;
+  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[], sharingError: await sharingError(testerId) };
+  let res: Response;
+  try {
+    res = await get(url, 'text/turtle');
+  } catch (err) {
+    // oauth4webapi raises the pod's 401 challenge as an error.
+    return { ...base, status: err instanceof oauth.WWWAuthenticateChallengeError ? 'forbidden' : 'error' };
+  }
+  if (res.status === 401 || res.status === 403) return { ...base, status: 'forbidden' };
+  if (res.status === 404) return { ...base, status: 'missing' };
+  // Redirects are never followed (they could point outside the folder).
+  if (!res.ok) return { ...base, status: 'error' };
+  let members: string[];
+  try {
+    members = feedbackMembers(url, await res.text());
+  } catch {
+    return { ...base, status: 'error' };
+  }
+  // Requests queue for the transport's few connections (see safeRequest), so this needn't be throttled; what fails is counted, never dropped silently.
+  const read = await Promise.all(
+    members.slice(0, MAX_POD_ITEMS).map(async (m) => {
+      try {
+        const r = await get(m, 'application/json');
+        return r.ok ? asSubmission(await r.json()) : undefined;
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  const items = read.filter((x): x is FeedbackSubmission => !!x).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // Documents that failed, and any beyond the first MAX_POD_ITEMS (not read at all), are both counted.
+  const unread = members.length - items.length;
+  return { ...base, status: unread ? 'partial' : 'ok', items, ...(unread ? { unread } : {}) };
+}
+
+/**
+ * Read every tester's feedback folder straight from their pod, as the
+ * administrator's own WebID (their DPoP-bound Solid login). What comes back is
+ * exactly what the pods' access control lets that WebID read.
+ */
+export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
+  if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
+  // Looked up first, then filtered: filter() itself would take each async lookup's promise as a yes.
+  const all = await solid.pods();
+  const real = await Promise.all(all.map(async (p) => !(await get_<User>('users', p.userId))?.simulated));
+  const pods = all.filter((_, i) => real[i]);
+  const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
+  // A few folders at a time keeps the transport's queue short (each folder queues up to MAX_POD_ITEMS reads).
+  const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
+  // Testers who never sent feedback have no folder: leave them out.
+  return { readAs: as.webId, readers: config.adminWebIds, folders: read.filter((f) => f.status !== 'missing') };
+}
+
+export const listFeedback = async () => (await list<FeedbackSubmission>('feedback')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 export async function summariseFeedback() {
-  const subs = listFeedback();
+  const subs = await listFeedback();
   if (!subs.length) return { summary: 'No feedback yet.', themes: [], count: 0, tallies: {} };
   const tallies: Record<string, Record<string, number>> = {};
   // Questions about specific changes ("new:<change id>") are tallied alongside the standard ones.
