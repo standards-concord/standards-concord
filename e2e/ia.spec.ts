@@ -357,6 +357,9 @@ test.describe('progressive disclosure', () => {
     // Patch and minor only go to a vote if someone objects; major always does.
     await expect(changes.getByRole('listitem').nth(0)).toContainText('a vote only if someone objects');
     await expect(changes.getByRole('listitem').nth(2)).not.toContainText('only if someone objects');
+    // Silence only decides patch and minor changes; a major change still needs its sign-offs and vote.
+    await expect(changes.getByRole('listitem').nth(0)).toContainText('accepted if nobody objects');
+    await expect(changes.getByRole('listitem').nth(2)).not.toContainText('accepted if nobody objects');
     await page.getByRole('button', { name: /ODI stewarded/ }).click();
     await expect(changes.getByRole('listitem').nth(2)).toContainText('ODI oversight must approve');
     await expect(changes.getByRole('listitem').nth(0)).toContainText(/ODI oversight can block it/);
@@ -431,6 +434,17 @@ test.describe('progressive disclosure', () => {
     await page.reload();
     await settle(page);
     await expect(page.getByRole('tab', { name: /Discussion/ })).toHaveAttribute('aria-selected', 'true');
+    // Keyboard: one tab stop, and the arrow keys, Home and End move between views.
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('tabindex', '-1');
+    await tabs.getByRole('tab', { name: /Discussion/ }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toBeFocused();
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('End');
+    await expect(tabs.getByRole('tab', { name: /Discussion/ })).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(tabs.getByRole('tab', { name: /Checks/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(page).toHaveURL(/view=checks/);
     // No raw ISO timestamps leak into the page.
     await expect(page.locator('main')).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
@@ -652,13 +666,25 @@ test.describe('progressive disclosure', () => {
     await latest.getByRole('link').first().click();
     await settle(page);
     await expectNoCrash(page);
-    const how = page.getByRole('button', { name: /How this was approved/ });
+    const releaseId = new URL(page.url()).pathname.split('/').pop()!;
+    const { approvalSource } = (await (await page.request.get(`/api/releases/${releaseId}`)).json()) as { approvalSource: string };
+    const how = page.getByRole('button', { name: approvalSource === 'current-policy' ? /Approval, checked against today’s policy/ : /How this was approved/ });
     await expect(how).toHaveAttribute('aria-expanded', 'false');
     await how.click();
-    await expect(page.getByText('Next:', { exact: true })).toBeVisible();
-    // One click reveals the approval history: no second "Approval details" click needed.
-    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.getByText(/Rules for a .* release/)).toBeVisible();
+    if (approvalSource === 'bootstrap') {
+      // The set-up release had no approval rules, so there's no evaluation to show, only that explanation.
+      await expect(page.getByTestId('approval-source')).toContainText('No approval rules applied to it');
+      await expect(page.getByRole('heading', { name: 'Approval details' })).toHaveCount(0);
+      await page.getByRole('button', { name: /Technical details/ }).click();
+      await expect(page.getByText('Version IRI:')).toBeVisible();
+      return;
+    }
+    // One click reveals the read-only record: no further toggles, and nothing about what happens next.
+    const record = page.getByTestId('approval-record');
+    await expect(record).toContainText('Approved');
+    await expect(record.getByText(/Rules applied to this/)).toBeVisible();
+    await expect(page.getByText('Next:', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
     await page.getByRole('button', { name: /Technical details/ }).click();
     await expect(page.getByText('Version IRI:')).toBeVisible();
   });

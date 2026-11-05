@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { ExternalLink, Package } from 'lucide-react';
 import { CHATGPT_PLUGINS_URL, claudeCodeCommand, claudeCodePluginCommands, claudeConnectorLink, codexCommand, codexLoginCommand, codexPluginCommand, cursorLink, mcpUrl, vscodeLink } from '../lib/install';
+import { useSession } from '../lib/session';
 import { ClaudeCodeLogo, ClaudeLogo, CodexLogo, CursorLogo, OpenAILogo, VSCodeLogo } from './AgentLogos';
 import { CopyButton, cx } from './ui';
 
@@ -158,6 +159,7 @@ function ClientSteps({ client, url }: { client: ClientId; url: string }) {
  */
 export function ConnectAgent() {
   const url = mcpUrl(origin());
+  const signedIn = !!useSession().session?.user;
   const [client, setClient] = useState<ClientId>(remembered);
   const choose = (c: ClientId) => {
     setClient(c);
@@ -177,9 +179,20 @@ export function ConnectAgent() {
           {CLIENTS.map((c) => (
             <button
               key={c.id}
+              type="button"
               role="radio"
               aria-checked={client === c.id}
+              tabIndex={client === c.id ? 0 : -1}
               onClick={() => choose(c.id)}
+              onKeyDown={(e) => {
+                // A radio group: one tab stop, and the arrow keys move and select, like the Appearance picker.
+                const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+                if (!step) return;
+                e.preventDefault();
+                const i = (CLIENTS.findIndex((x) => x.id === client) + step + CLIENTS.length) % CLIENTS.length;
+                choose(CLIENTS[i].id);
+                (e.currentTarget.parentElement?.children[i] as HTMLElement | undefined)?.focus();
+              }}
               className={cx(
                 'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors',
                 client === c.id ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong hover:bg-surface-2',
@@ -227,9 +240,9 @@ export function ConnectAgent() {
           <div className="space-y-1.5">
             <div className="text-xs font-medium text-fg">Agents that can’t open a browser</div>
             <p className="text-xs">
-              For CI jobs and other headless agents, create a personal token in{' '}
-              <Link to="/settings#tokens" className="text-accent hover:underline">
-                Settings
+              For CI jobs and other headless agents, create a{' '}
+              <Link to={signedIn ? '/connect#tokens' : `/login?next=${encodeURIComponent('/connect#tokens')}`} className="text-accent hover:underline">
+                personal token
               </Link>{' '}
               and send it as an <code className="font-mono">Authorization: Bearer</code> header.
             </p>

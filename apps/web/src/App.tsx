@@ -11,6 +11,7 @@ import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
 import { WelcomePage } from './pages/Welcome';
 import { SettingsPage } from './pages/Settings';
+import { AppearancePage } from './pages/Appearance';
 import { NotFound } from './pages/NotFound';
 import { PrivacyPage } from './pages/Privacy';
 import { OntologyLayout } from './pages/ontology/Layout';
@@ -70,8 +71,21 @@ function RequireUser({ children }: { children: ReactNode }) {
         <p className="mt-4 text-sm text-muted">Concord needs its API server to be running. If you’re developing locally, start it with <code className="font-mono">pnpm --filter @concord/server dev</code>.</p>
       </Page>
     );
-  if (!session.user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
+  if (!session.user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search + loc.hash)}`} replace />;
   return <>{children}</>;
+}
+
+/** Agents, tokens and appearance used to live in Settings. Old links go straight to their public pages, signed in or not. */
+const MOVED_FROM_SETTINGS: Record<string, string> = { '#agents': '/connect#agents', '#tokens': '/connect#tokens', '#appearance': '/appearance' };
+function SettingsRoute() {
+  const { hash } = useLocation();
+  const moved = MOVED_FROM_SETTINGS[hash];
+  if (moved) return <Navigate to={moved} replace />;
+  return (
+    <RequireUser>
+      <SettingsPage />
+    </RequireUser>
+  );
 }
 
 function Routed() {
@@ -86,9 +100,10 @@ function Routed() {
           <Route path="/feedback" element={<FeedbackPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/appearance" element={<AppearancePage />} />
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
-          <Route path="/settings" element={<RequireUser><SettingsPage /></RequireUser>} />
+          <Route path="/settings" element={<SettingsRoute />} />
           <Route path="/admin/feedback" element={<RequireUser><AdminFeedbackPage /></RequireUser>} />
           <Route path="/o/:id" element={<RequireUser><OntologyLayout /></RequireUser>}>
             <Route index element={<OverviewTab />} />

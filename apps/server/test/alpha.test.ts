@@ -101,7 +101,8 @@ describe('feedback about what changed', () => {
     expect(qs.map((q) => q.id)).toEqual(expect.arrayContaining(['new:other', 'overall', 'missing', 'comments']));
     // Nothing from the full questionnaire about the whole app (e.g. governance) is asked again.
     expect(qs.some((q) => q.id.startsWith('gov_'))).toBe(false);
-    expect(qs.find((q) => q.id === 'new:mcp-oauth')?.text).toMatch(/connect your coding agent/);
+    // A change's own question is used (pinned to 0.19.0, so later agent releases don't push this one past the first six).
+    expect(changeQuestions('0.6.0', 'agent', '0.19.0').find((q) => q.id === 'new:mcp-oauth')?.text).toMatch(/connect your coding agent/);
   });
 
   it('falls back to the full questionnaire when nothing has changed', () => {

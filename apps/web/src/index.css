@@ -662,10 +662,10 @@
   outline-color: var(--header-focus);
 }
 /* Menus that drop out of the masthead sit on the page surface, so they use page colours. */
-.app-header [role='menu'] {
+.app-header :is([role='menu'], .app-dropdown) {
   color: var(--fg);
 }
-.app-header [role='menu'] :focus-visible {
+.app-header :is([role='menu'], .app-dropdown) :focus-visible {
   outline-color: var(--focus);
 }
 .page-title {

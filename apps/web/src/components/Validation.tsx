@@ -15,6 +15,13 @@ const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string
   info: { icon: Info, cls: 'text-muted', label: 'Suggestions' },
 };
 
+/** One-word-ish verdict that never claims more than was checked: without the reasoner, a pass covers only the checks that ran. */
+export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'reasoner'>, style: 'title' | 'inline' = 'title'): string {
+  if (!report.passed) return style === 'title' ? 'Failing' : 'failing';
+  if (!report.reasoner.available) return style === 'title' ? 'Available checks passed, reasoning incomplete' : 'passing, reasoner not run';
+  return style === 'title' ? 'Passed' : 'passing';
+}
+
 export function ValidationSummary({ report }: { report: ValidationReport }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
@@ -22,7 +29,7 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
   const r = report.reasoner;
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      <SummaryTile ok={report.passed} title={report.passed ? 'Passed' : 'Failing'} sub="Overall validation" />
+      <SummaryTile ok={report.passed} warn={report.passed && !r.available} title={validationVerdict(report)} sub="Overall validation" />
       <SummaryTile
         ok={checkedOf(r) === 'complete' && r.consistent && !r.unsatisfiable.length}
         title={checkedOf(r) === 'consistency' && r.consistent ? 'Partly checked' : !r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'}
@@ -351,6 +358,9 @@ export function CqResults({ report }: { report: ValidationReport }) {
 }
 
 /** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
+/** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
+const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
+
 export function ValidationDetails({
   report,
   label,
@@ -382,11 +392,11 @@ export function ValidationDetails({
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} checkInBrowser={checkInBrowser} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
           <FairChecks report={report} showAll />
         </Disclosure>
         <Disclosure
@@ -395,6 +405,7 @@ export function ValidationDetails({
           title="Competency questions"
           summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
           defaultOpen={cqOk < report.competencyQuestions.length}
+          failures={report.competencyQuestions.filter((q) => !q.satisfied).map((q) => q.question)}
           keepMounted
         >
           <CqResults report={report} />

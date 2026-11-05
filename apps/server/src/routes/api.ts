@@ -190,7 +190,8 @@ export function apiRouter(): Router {
       user = await createUser({ name: optStr(name) ?? 'Alpha tester', provider: 'demo', subject: newId('tester') });
       const chosen: Role = ROLES.includes(role) ? role : 'contributor';
       const roles: Role[] =
-        chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
+        // A tester who picks steward runs the ontology, as the walkthrough's steward tasks (including changing governance) expect.
+        chosen === 'steward' ? ['owner', 'steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
