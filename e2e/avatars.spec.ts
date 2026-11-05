@@ -50,17 +50,21 @@ test.describe('profile pictures', () => {
     await expect(page.locator('header').getByRole('img', { name, exact: true }).locator('img')).toHaveAttribute('src', src!);
   });
 
-  test('the activity feed shows who acted with their picture', async ({ page, request }) => {
+  test('the activity feed shows who acted with their picture', async ({ page }) => {
     await signInAsPersona(page, 'Tom Okafor');
-    const demo = await demoOntology(request);
-    await page.goto(`/o/${demo.id}`);
+    // Tom makes his own ontology, so his "created" entry is the newest in its feed. (This used to read the
+    // shared demo ontology's feed, which shows only the latest three entries: once earlier specs' testers
+    // had acted there, no simulated member was left in view and the test failed in the full suite.)
+    const created = await page.request.post('/api/ontologies', { data: { title: `Avatar feed ${uniq()}`, prefix: 'avf', description: 'Activity feed pictures' } });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const { id } = (await created.json()) as { id: string };
+    await page.goto(`/o/${id}`);
     await settle(page);
-    // The seeded history has simulated members acting; their entries carry pictures too
-    // (the feed used to pass only a name, so it always showed initials).
+    // The feed used to pass only a name, so it always showed initials.
     const feed = page.getByRole('region', { name: 'Recent activity' });
-    const actor = feed.getByRole('img', { name: / \(simulated\)$/ }).first();
-    await expect(actor).toBeVisible();
-    await expectPicture(actor);
+    const tom = feed.getByRole('img', { name: 'Tom Okafor (simulated)' }).first();
+    await expect(tom).toBeVisible();
+    await expectPicture(tom);
   });
 
   test('falls back to initials when a picture cannot load', async ({ page, request, consoleGuard }) => {
