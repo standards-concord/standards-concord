@@ -54,6 +54,16 @@ export interface OntologyPageInput {
   releases: PageRelease[];
   latestVersion?: string;
   downloads: PageDownload[];
+  /** Where the generated JavaScript classes are, for the "Use in code" section. */
+  code?: {
+    moduleUrl: string;
+    packageUrl: string;
+    packageName: string;
+    datasetClass: string;
+    exampleClass?: string;
+    exampleGetter?: string;
+    exampleProperty?: string;
+  };
   /** Absolute URL of this page. */
   pageUrl: string;
   links: { latest: string; draft: string; app?: string; versionBase: string };
@@ -393,6 +403,7 @@ curl -L -H 'Accept: application/ld+json' ${esc(exampleTarget)}
 curl -L -H 'Accept: application/rdf+xml' ${esc(exampleTarget)}</code></pre>
   ${turtle ? `<p>Or add an extension to this page’s address, for example <a href="${esc(turtle.href)}"><code>${esc(turtle.href)}</code></a>.</p>` : ''}
 </section>
+${input.code ? codeSection(input.code) : ''}
 <section class="block">
   <h2>Cite this ${input.kind === 'release' ? 'version' : 'draft'}</h2>
   <pre class="code cite"><code>${esc(citation)}</code></pre>
@@ -618,5 +629,25 @@ ${story}
         ? '<p class="muted snapshot-missing">The use cases for this release were not recorded when it was published, so none are shown. The working draft has the current ones.</p>'
         : '<p class="muted">No public use cases yet. Use cases shared privately or with the working group only are not shown here.</p>'
   }
+</section>`;
+}
+
+/** How to use the generated classes from JavaScript or TypeScript. */
+function codeSection(code: NonNullable<OntologyPageInput['code']>): string {
+  const loop = code.exampleGetter
+    ? `\nfor (const item of data.${code.exampleGetter}) {\n  console.log(item.value${code.exampleProperty ? `, item.${code.exampleProperty}` : ''});\n}`
+    : '';
+  return `
+<section class="block" id="sec-code">
+  <h2>Use in JavaScript and TypeScript</h2>
+  <p>Every SHACL shape is also a class, generated with <a href="https://github.com/theodi/shacl-shape-converter-typescript" rel="noreferrer">the ODI SHACL converter</a> over <a href="https://github.com/rdfjs/wrapper" rel="noreferrer">@rdfjs/wrapper</a>. Its accessors read and write RDF in any RDF/JS dataset, such as an N3.js store.</p>
+  <h3>In a browser, with no build step</h3>
+  <pre class="code"><code>import { ${esc(code.datasetClass)} } from &quot;${esc(code.moduleUrl)}&quot;;
+
+const data = new ${esc(code.datasetClass)}(store, DataFactory);${esc(loop)}</code></pre>
+  <h3>With npm and a bundler</h3>
+  <pre class="code"><code>npm install ${esc(code.packageUrl)}</code></pre>
+  <pre class="code"><code>import { ${esc(code.datasetClass)}${code.exampleClass ? `, ${esc(code.exampleClass)}` : ''} } from &quot;${esc(code.packageName)}&quot;;</code></pre>
+  <p class="muted small">The package name stays the same for every version and fork, so moving an app from a fork to a release only changes the URL in <code>package.json</code>. The TypeScript source and declarations are at <a href="${esc(code.moduleUrl.replace(/\.js$/, '.ts'))}"><code>.ts</code></a> and <a href="${esc(code.moduleUrl.replace(/\.js$/, '.d.ts'))}"><code>.d.ts</code></a>.</p>
 </section>`;
 }
