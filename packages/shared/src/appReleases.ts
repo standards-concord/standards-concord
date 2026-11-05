@@ -71,6 +71,23 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.17.1',
+    date: '2026-11-05',
+    title: 'Every app on the Connect page has its logo',
+    pr: 65,
+    changes: [
+      {
+        id: 'connect-agent-logos',
+        type: 'fix',
+        title: 'Every app on the Connect page shows its own logo',
+        detail:
+          'ChatGPT, Claude Code, Codex, Cursor and VS Code now show their real logos beside Claude’s, instead of lettered placeholders, so you can spot your app at a glance.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+    ],
+  },
+  {
     version: '0.17.0',
     date: '2026-11-05',
     title: 'A privacy policy',
