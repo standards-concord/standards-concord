@@ -28,6 +28,8 @@ export const config = {
   /**
    * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
    * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
+   * Someone who signs in with their own WebID (Solid) has that WebID. Listed WebIDs are also given
+   * read access to each tester's feedback folder in their pod, and are shown to testers.
    */
   adminWebIds: (process.env.ADMIN_WEBIDS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
   /** Older alternative to ADMIN_WEBIDS: the verified email of a Google or GitHub account. */
@@ -63,6 +65,15 @@ export const config = {
     spawnPort: Number(process.env.SOLID_SPAWN_PORT ?? 3000),
   },
 
+  solidOidc: {
+    /** Let people sign in with their own WebID (Solid-OIDC). On unless SOLID_OIDC=off. */
+    enabled: bool(process.env.SOLID_OIDC, true),
+    /**
+     * Solid providers the operator trusts enough to reach on a private address or over plain http
+     * (a local Community Solid Server in development and tests). Everything else must be public https.
+     */
+    trustedIssuers: (process.env.SOLID_TRUSTED_ISSUERS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
+  },
   feedbackIssues: {
     /**
      * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers

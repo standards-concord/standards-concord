@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.15.0',
+    version: '0.16.0',
     date: '2026-11-05',
     title: 'Share a public summary of your feedback',
     pr: 44,
@@ -67,6 +67,34 @@ export const APP_RELEASES: AppRelease[] = [
         roles: [],
         to: '/feedback',
         ask: 'Was it clear what would be made public, and would you tick the box?',
+      },
+    ],
+  },
+  {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'Sign in with your WebID',
+    pr: 46,
+    changes: [
+      {
+        id: 'solid-signin',
+        type: 'feat',
+        title: 'Sign in with your own WebID (Solid)',
+        detail:
+          'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
+        roles: [],
+        to: '/login',
+        ask: 'If you have a WebID, how easy was it to sign in with it?',
+      },
+      {
+        id: 'feedback-readers',
+        type: 'feat',
+        title: 'See who can read your feedback',
+        detail:
+          'The feedback page says who can read what you send: the alpha team. The copy saved in your pod is shared read-only with the team’s WebID, and they read it there as that WebID.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Is it clear who can read your feedback?',
       },
     ],
   },

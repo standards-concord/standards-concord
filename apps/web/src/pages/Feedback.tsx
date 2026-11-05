@@ -9,6 +9,7 @@ import { useWalkthrough } from '../lib/walkthrough';
 import { useDemoOntology, useOntologies } from '../lib/ontologies';
 import { useTester } from '../lib/tester';
 import { VersionLine } from '../components/TesterStatus';
+import { FeedbackPrivacy } from '../components/FeedbackPrivacy';
 import { dictationSupport } from '../lib/speech';
 import { Page } from '../components/Shell';
 import { ChatView } from '../components/ChatView';
@@ -328,6 +329,7 @@ export function FeedbackPage() {
               ? `A copy is saved to ${submitted.savedTo.kind === 'solid' ? 'your Solid pod' : 'your private storage'}, with the version you tested (${submitted.appVersion}).`
               : `Sign in next time and we’ll keep a copy in your own pod, with the version you tested (${submitted.appVersion}).`}
           </p>
+          <FeedbackPrivacy className="mt-3 justify-center text-left" />
           {submitted.publication && <PublicationNote feedbackId={submitted.id} publication={submitted.publication} />}
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/">
@@ -385,6 +387,7 @@ export function FeedbackPage() {
             </Card>
           </button>
         </div>
+        <FeedbackPrivacy className="mx-auto mt-6 max-w-3xl" />
         {voice && (
           <p className="mt-6 flex items-center justify-center gap-1.5 text-xs text-muted">
             <Mic className="size-3.5" /> Voice input works in this browser.
@@ -469,6 +472,7 @@ export function FeedbackPage() {
               {done ? 'Submit feedback' : 'Submit what I’ve said so far'}
             </Button>
             <InlineError error={submit.error} />
+            <FeedbackPrivacy />
             {usedVoice && <p className="text-xs text-muted">Thanks for using voice — it helps us test it.</p>}
           </Card>
         </div>
