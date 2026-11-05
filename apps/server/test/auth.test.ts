@@ -9,7 +9,7 @@ import { createUser, upsertFederatedUser } from '../src/services/users.js';
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -64,9 +64,9 @@ describe('reading feedback', () => {
       // A demo account with the same address is not an administrator.
       const demo = await createUser({ name: 'Pretend admin', email: 'admin@example.org', provider: 'demo', subject: 'demo-admin' });
       const { createSession } = await import('../src/services/users.js');
-      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`);
+      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(admin.id)}`);
       expect(asAdmin.status).toBe(200);
-      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id)}`);
+      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demo.id)}`);
       expect(asDemo.status).toBe(403);
     } finally {
       config.adminEmails.splice(0, config.adminEmails.length, ...saved);

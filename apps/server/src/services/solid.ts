@@ -36,7 +36,7 @@ const json = async (r: Response) => {
 };
 
 async function platformAccountToken(base: string): Promise<string> {
-  const saved = get<Kv<string>>('kv', 'solid-account-token');
+  const saved = await get<Kv<string>>('kv', 'solid-account-token');
   if (saved) {
     // Check it still works; CSS account tokens expire with the cookie lifetime.
     const r = await fetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${saved.value}` } });
@@ -44,7 +44,7 @@ async function platformAccountToken(base: string): Promise<string> {
     if (body?.controls?.account?.pod) return saved.value;
   }
   // Create a platform account with a password so we can log back in.
-  const creds = get<Kv<{ email: string; password: string }>>('kv', 'solid-account-login');
+  const creds = await get<Kv<{ email: string; password: string }>>('kv', 'solid-account-login');
   let { controls } = await json(await fetch(`${base}/.account/`));
   let authorization: string;
   if (creds) {
@@ -66,9 +66,9 @@ async function platformAccountToken(base: string): Promise<string> {
         body: JSON.stringify(login),
       }),
     );
-    put('kv', { id: 'solid-account-login', value: login });
+    await put('kv', { id: 'solid-account-login', value: login });
   }
-  put('kv', { id: 'solid-account-token', value: authorization });
+  await put('kv', { id: 'solid-account-token', value: authorization });
   return authorization;
 }
 
@@ -95,7 +95,7 @@ export const solid = {
   /** Provision a pod + WebID for a user. Idempotent. Returns {webId, podUrl}. */
   async provision(user: Pick<User, 'id' | 'name'>): Promise<{ webId: string; podUrl?: string }> {
     if (!this.enabled) return { webId: this.localWebId(user.id), podUrl: `${config.publicUrl}/people/${user.id}/` };
-    const existing = get<PodRecord>('kv', `pod:${user.id}`);
+    const existing = await get<PodRecord>('kv', `pod:${user.id}`);
     if (existing) return { webId: existing.webId, podUrl: existing.podUrl };
     const base = config.solid.serverUrl!;
     const token = await platformAccountToken(base);
@@ -109,13 +109,13 @@ export const solid = {
       await fetch(controls.account.clientCredentials, { method: 'POST', headers, body: JSON.stringify({ name: `concord-${user.id}`, webId }) }),
     );
     const rec: PodRecord = { id: `pod:${user.id}`, podUrl, webId, clientId: cc.id, clientSecret: cc.secret };
-    put('kv', rec);
+    await put('kv', rec);
     return { webId, podUrl };
   },
 
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
   async write(userId: string, relPath: string, body: string, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const s = await sessionFor({ ...rec, id: userId });
@@ -134,7 +134,7 @@ export const solid = {
   },
 
   async read(userId: string, relPath: string): Promise<string | undefined> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const s = await sessionFor({ ...rec, id: userId });

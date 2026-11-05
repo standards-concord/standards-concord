@@ -167,16 +167,16 @@ export async function submitFeedback(user: User | undefined, input: Omit<Feedbac
     name: input.name ?? user?.name,
     createdAt: clock.iso(),
   };
-  put('feedback', sub);
+  await put('feedback', sub);
   // Testers' own copy of what they said goes in their pod too.
   if (user) await solid.write(user.id, `feedback/${sub.id}.json`, JSON.stringify(sub, null, 2), 'application/json').catch(() => undefined);
   return sub;
 }
 
-export const listFeedback = () => list<FeedbackSubmission>('feedback').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export const listFeedback = async () => (await list<FeedbackSubmission>('feedback')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 export async function summariseFeedback() {
-  const subs = listFeedback();
+  const subs = await listFeedback();
   if (!subs.length) return { summary: 'No feedback yet.', themes: [], count: 0, tallies: {} };
   const tallies: Record<string, Record<string, number>> = {};
   for (const q of FEEDBACK_QUESTIONS.filter((x) => x.type !== 'text')) {

@@ -13,9 +13,9 @@ import { ontologyStore } from './ontologyStore.js';
 import { proposalToOps } from './proposals.js';
 import { logActivity } from './users.js';
 
-export const getAgentReport = (id: string) => mustGet<AgentReport>('agentReports', id);
-export const listAgentReports = (ontologyId: string) =>
-  list<AgentReport>('agentReports', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export const getAgentReport = async (id: string) => await mustGet<AgentReport>('agentReports', id);
+export const listAgentReports = async (ontologyId: string) =>
+  (await list<AgentReport>('agentReports', ontologyId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 /**
  * A coding agent says the ontology is missing something or does not fit.
@@ -28,7 +28,7 @@ export async function reportGap(
   user: User,
   input: { agentName: string; kind: AgentReport['kind']; summary: string; details: string; context?: string },
 ): Promise<AgentReport> {
-  if (!rolesFor(project.id, user.id).length) setRoles(project.id, user.id, ['contributor']);
+  if (!(await rolesFor(project.id, user.id)).length) await setRoles(project.id, user.id, ['contributor']);
   const graph = await ontologyStore.working(project);
   const hits = graph.search(`${input.summary} ${input.details}`, 8);
   const c = (iri: string) => compactIRI(iri, graph.prefixes);
@@ -93,8 +93,8 @@ export async function reportGap(
     report.changeRequestId = cr.id;
     report.status = 'converted';
   }
-  put('agentReports', report, project.id);
-  logActivity({ ontologyId: project.id, actorId: user.id, type: 'agent.report', message: `${input.agentName} reported: ${input.summary}`, link: `/o/${project.id}/agents` });
+  await put('agentReports', report, project.id);
+  await logActivity({ ontologyId: project.id, actorId: user.id, type: 'agent.report', message: `${input.agentName} reported: ${input.summary}`, link: `/o/${project.id}/agents` });
   return report;
 }
 

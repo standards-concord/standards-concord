@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { ChangeRequest, Meeting, MeetingAnalysis, OntologyProject, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { transaction, get, HttpError, list, mustGet, put } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -13,9 +13,9 @@ import { getProject } from './ontologies.js';
 import { createUseCase, synthesise } from './useCases.js';
 import { logActivity } from './users.js';
 
-export const getMeeting = (id: string) => mustGet<Meeting>('meetings', id);
-export const listMeetings = (ontologyId: string) => list<Meeting>('meetings', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-const save = (m: Meeting) => put('meetings', m, m.ontologyId);
+export const getMeeting = async (id: string) => await mustGet<Meeting>('meetings', id);
+export const listMeetings = async (ontologyId: string) => (await list<Meeting>('meetings', ontologyId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+const save = async (m: Meeting) => await put('meetings', m, m.ontologyId);
 
 /** Live updates for the meeting page (SSE). */
 export const meetingEvents = new EventEmitter();
@@ -97,9 +97,9 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
-  const project = getProject(m.ontologyId);
+  const project = await getProject(m.ontologyId);
   m.status = 'processing';
-  save(m);
+  await save(m);
   emit(m, { type: 'status', status: m.status });
   const graph = await ontologyStore.working(project);
   const { value } = await llm.json<MeetingAnalysis>({
@@ -117,9 +117,9 @@ export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   });
   m.analysis = value;
   m.status = 'analysed';
-  save(m);
+  await save(m);
   emit(m, { type: 'status', status: m.status });
-  logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
+  await logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   return m;
 }
 
@@ -164,12 +164,12 @@ export function heuristicAnalysis(transcript: TranscriptLine[], existingLabels: 
 export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[]; changeRequest?: ChangeRequest }> {
   if (!m.analysis) m = await analyseMeeting(m);
   const a = m.analysis!;
-  const project = getProject(m.ontologyId);
+  const project = await getProject(m.ontologyId);
   const ucs: UseCase[] = [];
   const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
-  groups.forEach((g, i) => {
+  for (const [i, g] of groups.entries()) {
     ucs.push(
-      createUseCase(project, actor, {
+      await createUseCase(project, actor, {
         source: 'meeting',
         sourceRef: m.id,
         status: 'ready',
@@ -180,12 +180,12 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
         terms: i === 0 ? a.terms : [],
       }),
     );
-  });
+  }
   let changeRequest: ChangeRequest | undefined;
   try {
     changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
     changeRequest.origin = { type: 'meeting', meetingId: m.id };
-    put('changeRequests', changeRequest, changeRequest.ontologyId);
+    await put('changeRequests', changeRequest, changeRequest.ontologyId);
   } catch (err) {
     console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
   }
@@ -196,8 +196,8 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
 /* Creating meetings                                                         */
 /* ------------------------------------------------------------------------ */
 
-function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Meeting {
-  return save({
+async function newMeeting(project: OntologyProject, user: User, title: string, source: Meeting['source'], extra: Partial<Meeting> = {}): Promise<Meeting> { return transaction(async () => {
+  return await save({
     id: newId('mtg'),
     ontologyId: project.id,
     title: title || 'Working group call',
@@ -209,13 +209,13 @@ function newMeeting(project: OntologyProject, user: User, title: string, source:
     createdBy: user.id,
     ...extra,
   });
-}
+}); }
 
 export async function uploadTranscript(project: OntologyProject, user: User, title: string, raw: string) {
   const transcript = parseTranscript(raw);
   if (!transcript.length) throw new HttpError(400, 'Could not find any speaker turns in that transcript. Expected “Name: text” lines, a Google Meet transcript, or a .vtt/.srt file.');
-  const m = newMeeting(project, user, title, 'upload', { transcript, status: 'processing' });
-  logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.uploaded', message: `uploaded the transcript of “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
+  const m = await newMeeting(project, user, title, 'upload', { transcript, status: 'processing' });
+  await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.uploaded', message: `uploaded the transcript of “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return analyseMeeting(m);
 }
 
@@ -228,7 +228,7 @@ const lastPromptAt = new Map<string, number>();
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
 export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGapLines?: number } = {}) {
   m.transcript.push(line);
-  save(m);
+  await save(m);
   emit(m, { type: 'line', line });
   const n = m.transcript.length;
   const gap = opts.minGapLines ?? 4;
@@ -236,18 +236,18 @@ export async function onLiveLine(m: Meeting, line: TranscriptLine, opts: { minGa
   const prompt = await facilitate(m);
   if (!prompt) return;
   lastPromptAt.set(m.id, n);
-  const fresh = getMeeting(m.id);
+  const fresh = await getMeeting(m.id);
   const entry = { at: clock.iso(), t: line.t, text: prompt, posted: false };
   if (fresh.bot?.provider === 'recall' && fresh.bot.botId) entry.posted = await recall.sendChat(fresh.bot.botId, prompt);
   fresh.facilitatorPrompts.push(entry);
   // keep the in-memory object in sync for the caller
   m.facilitatorPrompts = fresh.facilitatorPrompts;
-  save(fresh);
+  await save(fresh);
   emit(fresh, { type: 'prompt', text: prompt, t: line.t });
 }
 
 async function facilitate(m: Meeting): Promise<string | undefined> {
-  const project = getProject(m.ontologyId);
+  const project = await getProject(m.ontologyId);
   const recent = m.transcript.slice(-14);
   const { value } = await llm.json({
     task: 'facilitate',
@@ -339,8 +339,8 @@ const recall = {
 export async function inviteBot(project: OntologyProject, user: User, title: string, meetingUrl: string) {
   if (!/^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(meetingUrl)) throw new HttpError(400, 'That does not look like a Google Meet link (https://meet.google.com/abc-defg-hij)');
   const secret = newToken();
-  const m = newMeeting(project, user, title, 'google-meet-bot', { meetingUrl, bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' } });
-  put('kv', { id: `meeting-secret:${m.id}`, secret });
+  const m = await newMeeting(project, user, title, 'google-meet-bot', { meetingUrl, bot: { provider: recall.enabled() ? 'recall' : 'simulated', status: 'scheduled' } });
+  await put('kv', { id: `meeting-secret:${m.id}`, secret });
   if (recall.enabled()) {
     try {
       const bot = await recall.createBot(m, meetingUrl, secret);
@@ -351,16 +351,16 @@ export async function inviteBot(project: OntologyProject, user: User, title: str
   } else {
     m.bot = { provider: 'simulated', status: 'error', error: 'No meeting-bot provider is configured on this server (set RECALL_API_KEY). Use “Simulate a call” to see how the co-facilitator works, or upload the transcript afterwards.' };
   }
-  save(m);
-  logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
+  await save(m);
+  await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.bot', message: `invited the co-facilitator to “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return m;
 }
 
 /** Recall.ai real-time transcript webhook. */
 export async function recallWebhook(meetingId: string, secret: string, body: unknown) {
-  const stored = get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`);
+  const stored = await get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`);
   if (!stored || stored.secret !== secret) throw new HttpError(401, 'Bad webhook secret');
-  const m = getMeeting(meetingId);
+  const m = await getMeeting(meetingId);
   const evt = body as { event?: string; data?: { data?: { words?: { text: string; start_timestamp?: { relative?: number } }[]; participant?: { name?: string } } } };
   if (evt.event === 'transcript.data' && evt.data?.data?.words?.length) {
     if (m.bot) m.bot.status = 'in-call';
@@ -372,7 +372,7 @@ export async function recallWebhook(meetingId: string, secret: string, body: unk
 export async function endLiveMeeting(m: Meeting) {
   if (m.bot?.provider === 'recall' && m.bot.botId) await recall.leave(m.bot.botId);
   if (m.bot) m.bot.status = 'done';
-  save(m);
+  await save(m);
   emit(m, { type: 'status', status: m.status, bot: m.bot });
   return m.transcript.length ? analyseMeeting(m) : m;
 }
@@ -402,7 +402,7 @@ const runningSimulations = new Set<string>();
 
 /** Replays the scripted call line by line so testers can watch the co-facilitator work. */
 export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number } = {}) {
-  const m = newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
+  const m = await newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
     bot: { provider: 'simulated', status: 'in-call' },
   });
@@ -412,19 +412,19 @@ export async function simulateCall(project: OntologyProject, user: User, title: 
     for (const line of SIMULATED_CALL) {
       if (!runningSimulations.has(m.id)) return;
       if (delay) await new Promise((r) => setTimeout(r, delay));
-      await onLiveLine(getMeeting(m.id), { ...line, t: getMeeting(m.id).transcript.length * 20 }, { minGapLines: 4 });
+      await onLiveLine(await getMeeting(m.id), { ...line, t: (await getMeeting(m.id)).transcript.length * 20 }, { minGapLines: 4 });
     }
     runningSimulations.delete(m.id);
-    const done = getMeeting(m.id);
+    const done = await getMeeting(m.id);
     done.bot = { provider: 'simulated', status: 'done' };
-    save(done);
+    await save(done);
     emit(done, { type: 'status', status: done.status, bot: done.bot });
     await analyseMeeting(done);
   };
   if (delay) void run().catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
   else await run();
-  logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.simulated', message: `started a simulated call “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
-  return getMeeting(m.id);
+  await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.simulated', message: `started a simulated call “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
+  return await getMeeting(m.id);
 }
 
 export function stopSimulation(id: string) {

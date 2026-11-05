@@ -24,8 +24,8 @@ export function createApp(): express.Express {
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
   // Auto-provisioned WebID profiles, used when no Solid server is configured.
-  app.get('/people/:id', (req, res) => {
-    const user = getUser(String(req.params.id));
+  app.get('/people/:id', async (req, res) => {
+    const user = await getUser(String(req.params.id));
     if (!user) throw new HttpError(404, 'No such person');
     res.type('text/turtle').send(solid.profileDocument(user));
   });

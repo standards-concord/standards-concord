@@ -18,7 +18,7 @@ async function login(role: string, name = `Tester ${role}`): Promise<Agent> {
 let demoId: string;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
 });

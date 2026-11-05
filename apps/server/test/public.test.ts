@@ -18,7 +18,7 @@ import type { OntologyView } from '@concord/core/types';
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -38,7 +38,7 @@ describe('public ontology pages', () => {
   it('gives every term an anchor that matches its IRI fragment', async () => {
     const res = await request(app).get('/def/volunteering/1.0.0');
     expect(res.status).toBe(200);
-    const view = (await ontologyStore.at(findProject('volunteering')!, '1.0.0')).view();
+    const view = (await ontologyStore.at((await findProject('volunteering'))!, '1.0.0')).view();
     for (const c of view.classes) {
       const fragment = c.iri.split('#').pop()!;
       expect(res.text, fragment).toContain(`id="${fragment}"`);
@@ -119,8 +119,8 @@ describe('public ontology pages', () => {
     expect(res.text).toMatch(/<link rel="alternate" type="text\/turtle"/);
   });
 
-  it('writes the page into each release for the copy on GitHub', () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'index.html');
+  it('writes the page into each release for the copy on GitHub', async () => {
+    const file = path.join(ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0', 'index.html');
     expect(fs.existsSync(file)).toBe(true);
     const html = fs.readFileSync(file, 'utf8');
     expect(html).toContain('href="ontology.jsonld"');
@@ -137,15 +137,15 @@ describe('use cases on the public page', () => {
   });
 
   it('never shows use cases written by real people on the public page', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const tester = await createUser({ name: 'Real Tester', provider: 'demo', subject: 'real-tester' });
-    createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'My confidential charity workflow' } });
+    await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'My confidential charity workflow' } });
     const res = await request(app).get('/def/volunteering');
     expect(res.text).not.toContain('My confidential charity workflow');
   });
 
   it('renders a requirements document with links to its use cases, and escapes contributed text', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.requirements = {
       document: {
@@ -174,7 +174,7 @@ describe('use cases on the public page', () => {
   });
 
   it('says plainly when there is nothing public yet', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.requirements = { useCases: [] };
     const html = renderOntologyPage(input);
@@ -201,7 +201,7 @@ describe('ontologies without a release', () => {
 
 describe('superseded versions', () => {
   it('says when a newer release exists and links to it', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.latestVersion = '2.0.0';
     const html = renderOntologyPage(input);
@@ -229,7 +229,7 @@ describe('mapping the use case data onto the page', () => {
     expect(mapped.useCases[0].origin?.href).toBeUndefined();
     expect(mapped.useCases[0].addressedIn).toBe('1.0.0');
     expect(mapped.useCases[1].attribution).toBeUndefined();
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.requirements = mapped;
     const html = renderOntologyPage(input);
     expect(html).not.toContain('Should not show');
@@ -242,7 +242,7 @@ describe('mapping the use case data onto the page', () => {
 
 describe('review fixes', () => {
   it('escapes dates that are not dates (stored XSS)', async () => {
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.view = { ...input.view, metadata: { ...input.view.metadata, modified: '<img src=x onerror=alert(1)>', issued: '"><script>alert(2)</script>' } };
     input.release = undefined;
     const html = renderOntologyPage(input);
@@ -252,11 +252,11 @@ describe('review fixes', () => {
   });
 
   it('never publishes a demo use case that someone edited, even as a simulated persona', async () => {
-    const project = findProject('volunteering')!;
-    const seeded = listUseCases(project.id).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
-    const author = getUser(seeded.authorId)!;
+    const project = (await findProject('volunteering'))!;
+    const seeded = (await listUseCases(project.id)).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
+    const author = (await getUser(seeded.authorId))!;
     expect(author.simulated).toBe(true);
-    updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
+    await updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
     for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
       const res = await request(app).get(url);
       expect(res.text, url).not.toContain('07700 900123');
@@ -310,7 +310,7 @@ describe('review fixes', () => {
     expect(new Set(a.values()).size).toBe(a.size);
 
     // The page's own ids step aside: #main and #sec-classes are the terms.
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.project = { ...input.project, namespace: NS };
     input.view = view;
     const html = renderOntologyPage(input);
@@ -345,7 +345,7 @@ describe('review fixes', () => {
   });
 
   it('renders a release from the snapshot stored with it, not from today\'s data', async () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
+    const file = path.join(ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0', 'requirements.json');
     expect(fs.existsSync(file)).toBe(true);
     const original = fs.readFileSync(file, 'utf8');
     const snap = JSON.parse(original);
@@ -365,9 +365,9 @@ describe('review fixes', () => {
 
 describe('re-review fixes', () => {
   it('synthesis never copies a use case title or its author into the ontology', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const tester = await createUser({ name: 'Morgan Secretname', provider: 'github', subject: 'synth-privacy' });
-    const uc = createUseCase(project, tester, {
+    const uc = await createUseCase(project, tester, {
       source: 'chat',
       status: 'ready',
       sections: { name: 'CONFIDENTIAL_PERSON_NAME_AND_CASE' },
@@ -384,11 +384,11 @@ describe('re-review fixes', () => {
     expect(cr.description).toContain('CONFIDENTIAL_PERSON_NAME_AND_CASE');
   });
 
-  it('redacts titles and names the model quoted', () => {
-    const project = findProject('volunteering')!;
-    const author = getUser(listUseCases(project.id)[0].authorId)!;
-    const uc = { ...listUseCases(project.id)[0], sections: { name: 'Secret Pilot' } };
-    const [t] = redactUseCases(
+  it('redacts titles and names the model quoted', async () => {
+    const project = (await findProject('volunteering'))!;
+    const author = (await getUser((await listUseCases(project.id))[0].authorId))!;
+    const uc = { ...(await listUseCases(project.id))[0], sections: { name: 'Secret Pilot' } };
+    const [t] = await redactUseCases(
       [{ action: 'add', kind: 'class', localName: 'X', label: 'x', definition: 'From the secret pilot case.', reason: `Asked for by ${author.name} in “Secret Pilot”` }],
       [uc],
     );
@@ -406,7 +406,7 @@ describe('re-review fixes', () => {
   });
 
   it('says so when a release has no use case snapshot, instead of showing current data', async () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'requirements.json');
+    const file = path.join(ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0', 'requirements.json');
     const original = fs.readFileSync(file, 'utf8');
     try {
       for (const broken of [undefined, '{not json', '{"useCases": "nope"}']) {
@@ -422,7 +422,7 @@ describe('re-review fixes', () => {
   });
 
   it('regenerates release pages written by an older renderer and backfills missing snapshots', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const dir = path.join(ontologyStore.dir(project), 'releases', '1.0.0');
     const page = path.join(dir, 'index.html');
     const snap = path.join(dir, 'requirements.json');

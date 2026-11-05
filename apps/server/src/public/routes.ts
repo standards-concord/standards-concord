@@ -88,16 +88,16 @@ function splitExtension(segment: string): { base: string; format?: PublicFormat 
   return { base: segment };
 }
 
-export const publishedReleases = (ontologyId: string) =>
-  list<Release>('releases', ontologyId)
+export const publishedReleases = async (ontologyId: string) =>
+  (await list<Release>('releases', ontologyId))
     .filter((r) => r.status === 'published')
     .sort((a, b) => (b.publishedAt ?? b.createdAt).localeCompare(a.publishedAt ?? a.createdAt));
 
 /** The latest released version, if any, that exists in the repository. */
-export function latestVersion(project: OntologyProject): string | undefined {
+export async function latestVersion(project: OntologyProject): Promise<string | undefined> {
   const versions = ontologyStore.versions(project);
   if (project.currentVersion !== '0.0.0' && versions.includes(project.currentVersion)) return project.currentVersion;
-  return publishedReleases(project.id).find((r) => versions.includes(r.version))?.version;
+  return (await publishedReleases(project.id)).find((r) => versions.includes(r.version))?.version;
 }
 
 /**
@@ -114,11 +114,11 @@ export async function pageInput(
   const isDraft = version === 'draft';
   const graph = opts.graph ?? (await ontologyStore.at(project, isDraft ? 'working' : version));
   const root = `${base}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}`;
-  const releases = publishedReleases(project.id);
+  const releases = await publishedReleases(project.id);
   // A release being published now is the newest, though it isn't stored yet.
   if (opts.release && !releases.some((r) => r.version === opts.release!.version)) releases.unshift({ ...opts.release, publishedAt: opts.release.publishedAt ?? clock.iso() });
   const release = opts.release ?? releases.find((r) => r.version === version);
-  const latest = opts.release ? opts.release.version : latestVersion(project);
+  const latest = opts.release ? opts.release.version : await latestVersion(project);
   const downloads = DOWNLOAD_ORDER.map((format) => {
     const info = FORMAT_INFO[format];
     return {
@@ -197,11 +197,11 @@ export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.str
  * ontology's repository, so they go out with its next push to GitHub.
  */
 export async function refreshReleasePages(): Promise<void> {
-  for (const project of list<OntologyProject>('ontologies')) {
+  for (const project of await list<OntologyProject>('ontologies')) {
     try {
       const versions = new Set(ontologyStore.versions(project));
       const changed: Record<string, Record<string, string>> = {};
-      for (const release of publishedReleases(project.id).filter((r) => versions.has(r.version))) {
+      for (const release of (await publishedReleases(project.id)).filter((r) => versions.has(r.version))) {
         const dir = path.join(ontologyStore.dir(project), 'releases', release.version);
         const page = path.join(dir, 'index.html');
         const current = fs.existsSync(page) && fs.readFileSync(page, 'utf8').includes(PAGE_GENERATOR);
@@ -250,13 +250,13 @@ async function serve(req: Request, res: Response) {
   const slug = versionSeg === undefined ? last.base : slugSeg;
   const requested = versionSeg === undefined ? undefined : last.base;
 
-  const project = findProject(slug);
+  const project = await findProject(slug);
   if (!project) return notFound(res, `There is no ontology called “${slug}”.`);
   const base = origin(req);
   const root = `${base}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}`;
 
   let version: string;
-  const latest = latestVersion(project);
+  const latest = await latestVersion(project);
   if (requested === undefined || requested === 'latest') version = latest ?? 'draft';
   else if (requested === 'draft' || requested === 'working') version = 'draft';
   else if (ontologyStore.versions(project).includes(requested)) version = requested;

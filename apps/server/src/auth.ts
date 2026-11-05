@@ -2,7 +2,7 @@ import * as arctic from 'arctic';
 import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
-import { HttpError } from './db.js';
+import { transaction, HttpError } from './db.js';
 import { createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
 
 export const SESSION_COOKIE = 'concord_session';
@@ -16,8 +16,8 @@ declare global {
   }
 }
 
-export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
+export async function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
+  const user = await sessionUser(req.cookies?.[SESSION_COOKIE]);
   // ADMIN_EMAILS makes people who sign in with Google or GitHub administrators of the deployment.
   const federated = user?.providers.some((p) => p.provider === 'google' || p.provider === 'github');
   req.user = user && federated && !user.simulated && user.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
@@ -29,15 +29,15 @@ export function requireUser(req: Request): User {
   return req.user;
 }
 
-export function setSessionCookie(res: Response, userId: string) {
-  res.cookie(SESSION_COOKIE, createSession(userId), {
+export async function setSessionCookie(res: Response, userId: string) { return transaction(async () => {
+  res.cookie(SESSION_COOKIE, await createSession(userId), {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.publicUrl.startsWith('https://'),
     maxAge: 30 * 24 * 60 * 60 * 1000,
     path: '/',
   });
-}
+}); }
 
 const google = () =>
   config.google.clientId && config.google.clientSecret ? new arctic.Google(config.google.clientId, config.google.clientSecret, `${config.publicUrl}/auth/google/callback`) : undefined;
@@ -66,10 +66,10 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string) {
-  destroySession(req.cookies?.[SESSION_COOKIE]);
-  setSessionCookie(res, userId);
-}
+async function signInAs(req: Request, res: Response, userId: string) { return transaction(async () => {
+  await destroySession(req.cookies?.[SESSION_COOKIE]);
+  await setSessionCookie(res, userId);
+}); }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/');
 
 /**
@@ -97,7 +97,7 @@ export function mountAuth(router: Router) {
     // Only a verified address counts (ADMIN_EMAILS matches on it).
     const email = claims.email_verified === true ? claims.email : undefined;
     const user = await upsertFederatedUser({ provider: 'google', subject: claims.sub, name: claims.name ?? email ?? 'Google user', email, avatarUrl: claims.picture });
-    signInAs(req, res, user.id);
+    await signInAs(req, res, user.id);
     res.redirect(`${config.webUrl}${returnTo}`);
   });
 
@@ -121,7 +121,7 @@ export function mountAuth(router: Router) {
     const emails = (await (await fetch('https://api.github.com/user/emails', { headers })).json().catch(() => [])) as { email: string; primary: boolean; verified: boolean }[];
     const email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
     const user = await upsertFederatedUser({ provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
-    signInAs(req, res, user.id);
+    await signInAs(req, res, user.id);
     res.redirect(`${config.webUrl}${returnTo}`);
   });
 }
