@@ -9,12 +9,14 @@
  */
 import { readFile } from 'node:fs/promises';
 import type { Locator } from '@playwright/test';
+import { DataFactory, Parser, Quad, Store } from 'n3';
 import { sleep } from './lib/director.ts';
 import { SAMPLE, signInAs } from './features.ts';
 import { apiJson, ringAround, type Ctx } from './scenes.ts';
 
 type Action = (ctx: Ctx, ...args: string[]) => Promise<void>;
 
+const VOL = 'https://w3id.org/odi/volunteering#';
 const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
 
 /** The first answer in the interview: short enough to read in full as the use case's name. */
@@ -53,9 +55,41 @@ interface ApiReport {
 const isTheReport = (r: ApiReport | undefined) =>
   r?.conforms === false && r.summary?.violations === 1 && !!r.results?.some((x) => x.severity === 'Violation' && /minimumAge$/.test(x.path ?? ''));
 
+const SH = 'http://www.w3.org/ns/shacl#';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+/**
+ * The sample's report in Turtle, parsed: one sh:ValidationReport that doesn't conform, whose
+ * only violation is on the shift's minimum age. Malformed Turtle is not the report.
+ */
+export function isTheTurtleReport(turtle: string | undefined): boolean {
+  if (!turtle) return false;
+  let store: Store;
+  try {
+    store = new Store(new Parser().parse(turtle));
+  } catch {
+    return false;
+  }
+  const reports = store.getSubjects(RDF_TYPE, `${SH}ValidationReport`, null);
+  if (reports.length !== 1) return false;
+  const [report] = reports;
+  const conforms = store.getObjects(report, `${SH}conforms`, null);
+  if (conforms.length !== 1 || conforms[0].termType !== 'Literal' || conforms[0].value !== 'false') return false;
+  const violations = store.getObjects(report, `${SH}result`, null).filter((r) => store.has(new Quad(r as Quad['subject'], DataFactory.namedNode(`${SH}resultSeverity`), DataFactory.namedNode(`${SH}Violation`))));
+  if (violations.length !== 1) return false;
+  const [v] = violations;
+  return (
+    store.getObjects(v, `${SH}resultPath`, null).some((o) => o.value === `${VOL}minimumAge`) &&
+    store.getObjects(v, `${SH}focusNode`, null).some((o) => o.value === 'https://example.org/data/saturday-shift')
+  );
+}
+
 /** Clicks a download button and returns what was downloaded, as text. */
 async function download(c: Ctx, button: Locator, what: string): Promise<string | undefined> {
   const started = c.d.page.waitForEvent('download', { timeout: 15_000 });
+  // Handled on every path: if the click fails (or throws in strict mode) the waiter is left to
+  // time out unawaited, and an unhandled rejection would end the recording.
+  started.catch(() => {});
   if (!(await c.d.click(button, what, { settle: false }))) return undefined;
   try {
     const file = await (await started).path();
@@ -116,10 +150,7 @@ export const clipActions: Record<string, Action> = {
     c.d.claim(isTheReport(report), 'the JSON download is the report, with the minimum age violation');
     await sleep(400);
     const turtle = await download(c, c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
-    c.d.claim(
-      !!turtle && /sh:ValidationReport/.test(turtle) && /sh:conforms\s+false/.test(turtle) && /minimumAge/.test(turtle),
-      'the Turtle download is a SHACL validation report of the same problem',
-    );
+    c.d.claim(isTheTurtleReport(turtle), 'the Turtle download is a SHACL validation report of the same problem');
     await c.d.highlight(c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
   },
   async 'c-validate-api'(c) {

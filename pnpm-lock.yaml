@@ -336,6 +336,9 @@ importers:
       '@rdfjs/wrapper':
         specifier: 0.34.0
         version: 0.34.0
+      '@types/n3':
+        specifier: ^1.26.4
+        version: 1.26.4
       '@types/node':
         specifier: ^26.6.5
         version: 26.6.5
