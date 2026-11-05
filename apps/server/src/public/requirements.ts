@@ -144,9 +144,9 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
  * prepared but not yet frozen, so `releasing` lets the page written into the
  * release include it.
  */
-export function publishedRequirements(project: OntologyProject, version?: string, opts: { releasing?: boolean } = {}): PublishedRequirements {
-  const doc = version ? (opts.releasing ? releasingDocument(project.id, version) : requirementsDocument(project.id, version)) : undefined;
-  return toPublishedRequirements(doc, doc?.useCases ?? publicUseCases(project.id));
+export async function publishedRequirements(project: OntologyProject, version?: string, opts: { releasing?: boolean } = {}): Promise<PublishedRequirements> {
+  const doc = version ? (opts.releasing ? await releasingDocument(project.id, version) : await requirementsDocument(project.id, version)) : undefined;
+  return toPublishedRequirements(doc, doc?.useCases ?? await publicUseCases(project.id));
 }
 
 /**
@@ -157,7 +157,7 @@ export function publishedRequirements(project: OntologyProject, version?: string
  * release without a readable snapshot says so instead of showing today's data
  * as its history.
  */
-export function requirementsFor(project: OntologyProject, raw: PublishedRequirements | undefined): PublishedRequirements {
+export async function requirementsFor(project: OntologyProject, raw: PublishedRequirements | undefined): Promise<PublishedRequirements> {
   const snapshot = validSnapshot(raw);
   if (!snapshot || snapshot.snapshotMissing) return { useCases: [], snapshotMissing: true };
   // A use case that may no longer be published (withdrawn, archived, made private or group-only) is no
@@ -167,7 +167,7 @@ export function requirementsFor(project: OntologyProject, raw: PublishedRequirem
   // in services/requirements.ts.
   const d = snapshot.document;
   const cited = [...snapshot.useCases.map((u) => u.id), ...(d?.requirements ?? []).flatMap((r) => r.useCaseIds), ...(d?.sections ?? []).flatMap((x) => x.useCaseIds ?? [])];
-  const gone = withdrawnSince(project.id, [...new Set(cited)]);
+  const gone = await withdrawnSince(project.id, [...new Set(cited)]);
   const useCases = snapshot.useCases.filter((u) => !gone.has(u.id));
   if (!d || !gone.size) return { document: d, useCases, ...(gone.size ? { withdrawn: gone.size } : {}) };
   const citesGone = (md = '') => [...gone].some((id) => md.includes(`#uc-${id}`));

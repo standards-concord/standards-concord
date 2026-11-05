@@ -1,3 +1,4 @@
+import path from 'node:path';
 import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
@@ -6,7 +7,8 @@ import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put } from '../db.js';
+import { detached, transaction, get, HttpError, list, put } from '../db.js';
+import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
@@ -31,6 +33,7 @@ import {
   type AdminAction,
 } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
+import { mediaFile, mediaIndex, MEDIA_TYPES } from '../services/media.js';
 import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -42,6 +45,7 @@ import {
   requireRole,
   rolesFor,
   setGovernance,
+  transferOwnership,
   setRoles,
   summary,
   updateProject,
@@ -70,7 +74,7 @@ const str = (v: unknown, name: string, max = 20000) => {
 };
 const optStr = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
-function sessionInfo(user?: User): SessionInfo {
+async function sessionInfo(user?: User): Promise<SessionInfo> {
   return {
     user,
     providers: providers(),
@@ -78,7 +82,7 @@ function sessionInfo(user?: User): SessionInfo {
     serverTranscription: config.stt.provider === 'openai' && config.stt.openaiKey ? 'openai' : null,
     llm: { provider: llm.provider, model: llm.model },
     solid: { enabled: !!config.solid.serverUrl, serverUrl: config.solid.serverUrl },
-    meetBot: meetBot.meetBotInfo(),
+    meetBot: await meetBot.meetBotInfo(),
     clockOffsetMs: clock.offsetMs,
     now: clock.iso(),
   };
@@ -108,12 +112,12 @@ function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
   return out;
 }
 
-const project = (req: Request) => mustFindProject(String(req.params.id));
+const project = async (req: Request) => await mustFindProject(String(req.params.id));
 
 /** Change request detail plus the use cases it addresses that the viewer may see. */
-const crOut = (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...useCases.crForViewer(crs.detail(c), req.user), useCases: useCasesForCR(c, req.user) });
+const crOut = async (c: import('@concord/shared').ChangeRequest, req: Request) => ({ ...await useCases.crForViewer(await crs.detail(c), req.user), useCases: await useCasesForCR(c, req.user) });
 /** Release detail plus the use cases it closes and its requirements document. */
-const relOut = (req: Request, r: import('@concord/shared').Release) => ({ ...releases.releaseDetail(r, req.user), ...releaseTrace(r, req.user) });
+const relOut = async (req: Request, r: import('@concord/shared').Release) => ({ ...await releases.releaseDetail(r, req.user), ...await releaseTrace(r, req.user) });
 /** GET routes anyone may call without signing in. */
 const PUBLIC_READS = [
   /^\/ontologies$/,
@@ -147,11 +151,22 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ auth ------------------------------ */
-  r.get('/session', (req, res) => res.json(sessionInfo(req.user)));
+  r.get('/session', async (req, res) => res.json(await sessionInfo(req.user)));
+
+  // Walkthrough videos for the alpha landing page (public; see services/media.ts).
+  r.get('/media/index.json', async (_req, res) => {
+    const index = await mediaIndex().catch(() => ({ release: null, files: [], unavailable: true }));
+    res.set('cache-control', 'public, max-age=300').json(index);
+  });
+  r.get('/media/:file', async (req, res) => {
+    const file = await mediaFile(String(req.params.file));
+    if (!file) throw new HttpError(404, 'No such video for the current release');
+    res.sendFile(file, { headers: { 'content-type': MEDIA_TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'public, max-age=3600' } });
+  });
 
   r.get('/personas', async (_req, res) => {
     await seedDemo();
-    const ps = personas();
+    const ps = await personas();
     res.json(
       PERSONAS.map((spec) => ({ ...ps.find((u) => u.name === spec.name), roles: spec.roles, playable: spec.playable, key: spec.key })).filter((p) => p.id),
     );
@@ -164,10 +179,10 @@ export function apiRouter(): Router {
   r.post('/auth/demo', async (req, res) => {
     demoOnly();
     const { userId, name, role } = req.body ?? {};
-    const testerBefore = testerFor(req);
+    const testerBefore = await testerFor(req);
     let user: User | undefined;
     if (userId) {
-      user = getUser(String(userId));
+      user = await getUser(String(userId));
       if (!user?.simulated) throw new HttpError(404, 'No such persona');
     } else {
       const demo = await seedDemo();
@@ -175,18 +190,18 @@ export function apiRouter(): Router {
       const chosen: Role = ROLES.includes(role) ? role : 'contributor';
       const roles: Role[] =
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
-      if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
+      if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
-    setSessionCookie(res, user.id, 'demo');
-    rememberTester(req, res, testerBefore, user);
-    res.json(sessionInfo(user));
+    await setSessionCookie(res, user.id, 'demo');
+    await rememberTester(req, res, testerBefore, user);
+    res.json(await sessionInfo(user));
   });
 
   r.post('/auth/logout', async (req, res) => {
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
-    clearTesterCookie(req, res);
-    destroySession(req.cookies?.[SESSION_COOKIE]);
+    await clearTesterCookie(req, res);
+    await destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
 
@@ -210,14 +225,14 @@ export function apiRouter(): Router {
    * The summary a caller may see. For someone signed out, whether the working draft is held is decided before it is
    * read: a summary read first and checked after could count a draft that was replaced and approved meanwhile.
    */
-  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => forCaller(req, await summary(p, { withGraph: !!req.user || !isHeld(p, 'draft'), viewer: req.user }));
+  const summaryFor = async (req: Request, p: import('@concord/shared').OntologyProject) => await forCaller(req, await summary(p, { withGraph: !!req.user || !await isHeld(p, 'draft'), viewer: req.user }));
   /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
-  const forCaller = (req: Request, s: OntologySummary) => {
+  const forCaller = async (req: Request, s: OntologySummary) => {
     if (req.user) return s;
     const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
     // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
     // (summaryFor doesn't read it then; this also covers a hold that began while the summary was being made.)
-    if (isHeld(s, 'draft')) {
+    if (await isHeld(s, 'draft')) {
       const { classes: _cl, properties: _p, individuals: _i, ...rest } = stats;
       return { ...s, ownerIds: [], stats: rest, health: undefined };
     }
@@ -225,7 +240,7 @@ export function apiRouter(): Router {
   };
 
   r.get('/ontologies', async (req, res) => {
-    const all = list<import('@concord/shared').OntologyProject>('ontologies');
+    const all = await list<import('@concord/shared').OntologyProject>('ontologies');
     res.json(await Promise.all(all.map((p) => summaryFor(req, p))));
   });
 
@@ -242,18 +257,18 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...(await summaryFor(req, p)), members: signedIn ? membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
+    res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, ontologyStore.log(p, 30)) : [] });
   });
 
   r.get('/ontologies/:id/view', async (req, res) => {
-    res.json((await readOntology(project(req), optStr(req.query.ref), req.user)).view());
+    res.json((await readOntology(await project(req), optStr(req.query.ref), req.user)).view());
   });
 
   r.get('/ontologies/:id/terms/:iri', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const g = await readOntology(p, optStr(req.query.ref), req.user);
     const iri = expandIRI(String(req.params.iri), g.prefixes);
     const t = g.term(iri);
@@ -264,11 +279,11 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id/search', async (req, res) => {
-    res.json((await readOntology(project(req), 'working', req.user)).search(String(req.query.q ?? ''), 30));
+    res.json((await readOntology(await project(req), 'working', req.user)).search(String(req.query.q ?? ''), 30));
   });
 
   r.get('/ontologies/:id/source', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const format = (FORMATS.includes(req.query.format as OutputFormat) ? req.query.format : 'turtle') as OutputFormat;
     const ref = optStr(req.query.ref);
     const text = await serialize(await readOntology(p, ref, req.user), format, { name: p.slug });
@@ -279,208 +294,199 @@ export function apiRouter(): Router {
   });
 
   r.get('/ontologies/:id/validation', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const ref = optStr(req.query.ref);
     // Each competency question result names the use case it came from, and is shown only if the
     // viewer may see that use case now: a report that was running when one was withdrawn drops it.
-    if (!ref || ref === 'working') return void res.json(useCases.validationForViewer(await workingValidation(p), req.user));
+    if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(useCases.validationForViewer(await validate(graph, { cqs: competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }), req.user));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
-    const out = await sparql(project(req), str(req.body?.query, 'query'), optStr(req.body?.ref), req.user);
+    const out = await sparql(await project(req), str(req.body?.query, 'query'), optStr(req.body?.ref), req.user);
     if (out.error) throw new HttpError(400, out.error);
     res.json(out);
   });
 
   /* ------------------------ members & governance --------------------- */
-  r.put('/ontologies/:id/members/:userId', (req, res) => {
-    const p = project(req);
-    requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
+  r.put('/ontologies/:id/members/:userId', async (req, res) => {
+    const p = await project(req);
+    await requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
     const roles = (Array.isArray(req.body?.roles) ? req.body.roles : []).filter((x: Role) => ROLES.includes(x)) as Role[];
-    if (roles.includes('owner') && !rolesFor(p.id, req.user!.id).includes('owner') && !req.user!.isPlatformAdmin) throw new HttpError(403, 'Only an owner can make someone an owner; use ownership transfer');
-    if (!getUser(String(req.params.userId))) throw new HttpError(404, 'No such user');
-    res.json(setRoles(p.id, String(req.params.userId), roles));
+    if (roles.includes('owner') && !(await rolesFor(p.id, req.user!.id)).includes('owner') && !req.user!.isPlatformAdmin) throw new HttpError(403, 'Only an owner can make someone an owner; use ownership transfer');
+    if (!await getUser(String(req.params.userId))) throw new HttpError(404, 'No such user');
+    res.json(await setRoles(p.id, String(req.params.userId), roles));
   });
 
-  r.delete('/ontologies/:id/members/:userId', (req, res) => {
-    const p = project(req);
-    requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
-    removeMember(p.id, String(req.params.userId));
+  r.delete('/ontologies/:id/members/:userId', async (req, res) => {
+    const p = await project(req);
+    await requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
+    await removeMember(p.id, String(req.params.userId));
     res.status(204).end();
   });
 
   r.get('/governance/templates', (_req, res) => res.json(listTemplates()));
 
   r.put('/ontologies/:id/governance', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const user = requireUser(req);
-    requireRole(p.id, user, ['owner'], 'change the governance policy');
+    await requireRole(p.id, user, ['owner'], 'change the governance policy');
     const policy = req.body?.policy as GovernancePolicy;
     if (!policy?.changes?.major || !policy.releases?.major) throw new HttpError(400, 'policy is incomplete');
-    res.json(await summary(setGovernance(p, policy, user), { viewer: user }));
+    res.json(await summary(await setGovernance(p, policy, user), { viewer: user }));
   });
 
   r.post('/ontologies/:id/ownership-transfer', async (req, res) => {
-    const p = project(req);
-    const user = requireUser(req);
-    requireRole(p.id, user, ['owner'], 'transfer ownership');
-    const to = getUser(str(req.body?.toUserId, 'toUserId'));
-    if (!to) throw new HttpError(404, 'No such user');
-    const transfer = p.governance.ownership.transfer;
-    if (transfer === 'owner-decides' || user.isPlatformAdmin) {
-      const keepGroup = p.governance.ownership.model === 'group';
-      p.ownerIds = keepGroup ? [...new Set([...p.ownerIds, to.id])] : [to.id];
-      if (!keepGroup) setRoles(p.id, user.id, rolesFor(p.id, user.id).filter((x) => x !== 'owner'));
-      setRoles(p.id, to.id, [...rolesFor(p.id, to.id), 'owner']);
-      updateProject(p);
-      return void res.json({ status: 'transferred' });
-    }
-    const id = newId('xfer');
-    put('kv', { id, kind: 'ownership-transfer', ontologyId: p.id, from: user.id, to: to.id, needs: transfer, at: clock.iso() });
-    res.json({ status: transfer === 'member-vote' ? 'vote-opened' : 'awaiting-odi-approval', voteId: id });
+    res.json(await transferOwnership((await project(req)).id, requireUser(req), str(req.body?.toUserId, 'toUserId')));
   });
 
   /* ------------------------- use cases & interviews ------------------ */
-  r.get('/ontologies/:id/use-cases', (req, res) => res.json(useCases.listUseCases(project(req).id, req.user)));
-  r.get('/ontologies/:id/public-use-cases', (req, res) => res.json(requirements.publicUseCases(project(req).id)));
-  r.get('/use-cases/:id', (req, res) => res.json(useCaseDetail(String(req.params.id), req.user)));
+  r.get('/ontologies/:id/use-cases', async (req, res) => res.json(await useCases.listUseCases((await project(req)).id, req.user)));
+  r.get('/ontologies/:id/public-use-cases', async (req, res) => res.json(await requirements.publicUseCases((await project(req)).id)));
+  r.get('/use-cases/:id', async (req, res) => res.json(await useCaseDetail(String(req.params.id), req.user)));
   // Changes that can take consent away (edits, visibility, withdrawal, archiving, triage) wait for any
   // release or drafted change request being committed from the ontology's use cases (withConsentLock).
-  const consentChange = (req: Request, fn: (u: UseCase, user: User) => void) => {
+  // The consent lock is taken outside any transaction (a transaction waiting on it could hold up its holder).
+  const consentChange = async (req: Request, fn: (u: UseCase, user: User) => Promise<unknown>) => {
     const user = requireUser(req);
     const id = String(req.params.id);
-    const ontologyId = useCases.getUseCaseFor(id, user).ontologyId;
-    return useCases.withConsentLock(ontologyId, () => {
-      fn(useCases.getUseCaseFor(id, user), user);
-      return useCaseDetail(id, user);
+    const ontologyId = (await useCases.getUseCaseFor(id, user)).ontologyId;
+    return useCases.withConsentLock(ontologyId, async () => {
+      await transaction(async () => {
+        await fn(await useCases.getUseCaseFor(id, user), user);
+      });
+      return await useCaseDetail(id, user);
     });
   };
   r.patch('/use-cases/:id', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.updateUseCase(u, user, req.body ?? {}))));
   r.post('/use-cases/:id/visibility', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.setVisibility(u, user, req.body?.visibility))));
   r.post('/use-cases/:id/withdraw', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.withdrawUseCase(u, user))));
-  r.post('/use-cases/:id/submit', (req, res) => {
-    const user = requireUser(req);
-    useCases.submitUseCase(useCases.getUseCaseFor(String(req.params.id), user), user);
-    res.json(useCaseDetail(String(req.params.id), user));
-  });
+  r.post('/use-cases/:id/submit', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.submitUseCase(u, user))));
   r.post('/use-cases/:id/triage', async (req, res) => res.json(await consentChange(req, (u, user) => useCases.triageUseCase(u, user, req.body?.status, optStr(req.body?.note)))));
-  r.post('/use-cases/:id/links', (req, res) => {
+  r.post('/use-cases/:id/links', async (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};
-    useCases.addLink(useCases.getUseCaseFor(String(req.params.id), user), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
-    res.json(useCaseDetail(String(req.params.id), user));
+    await useCases.addLink(await useCases.getUseCaseFor(String(req.params.id), user), user, { type: b.type, id: optStr(b.id), url: optStr(b.url), label: optStr(b.label), relation: b.relation ?? 'related' });
+    res.json(await useCaseDetail(String(req.params.id), user));
   });
-  r.delete('/use-cases/:id/links/:target', (req, res) => {
+  r.delete('/use-cases/:id/links/:target', async (req, res) => {
     const user = requireUser(req);
-    useCases.removeLink(useCases.getUseCaseFor(String(req.params.id), user), user, String(req.params.target));
-    res.json(useCaseDetail(String(req.params.id), user));
+    await useCases.removeLink(await useCases.getUseCaseFor(String(req.params.id), user), user, String(req.params.target));
+    res.json(await useCaseDetail(String(req.params.id), user));
   });
   r.post('/use-cases/:id/anonymise', async (req, res) => {
     const user = requireUser(req);
-    await useCases.proposeAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user);
-    res.json(useCaseDetail(String(req.params.id), user));
+    await useCases.proposeAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(await useCaseDetail(String(req.params.id), user));
   });
-  r.post('/use-cases/:id/anonymise/publish', (req, res) => {
+  r.post('/use-cases/:id/anonymise/publish', async (req, res) => {
     const user = requireUser(req);
-    const out = useCases.publishAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.draft);
-    res.json({ original: useCaseDetail(out.original.id, user), published: useCaseDetail(out.published.id, user) });
+    const out = await useCases.publishAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user, req.body?.draft);
+    res.json({ original: await useCaseDetail(out.original.id, user), published: await useCaseDetail(out.published.id, user) });
   });
-  r.post('/use-cases/:id/anonymise/decline', (req, res) => {
+  r.post('/use-cases/:id/anonymise/decline', async (req, res) => {
     const user = requireUser(req);
-    useCases.declineAnonymised(useCases.getUseCaseFor(String(req.params.id), user), user);
-    res.json(useCaseDetail(String(req.params.id), user));
+    await useCases.declineAnonymised(await useCases.getUseCaseFor(String(req.params.id), user), user);
+    res.json(await useCaseDetail(String(req.params.id), user));
   });
 
   /* ------------------------ requirements documents ------------------- */
-  r.get('/ontologies/:id/requirements', (req, res) => res.json(requirements.listDocuments(project(req).id, req.user)));
-  r.get('/ontologies/:id/requirements/:version', async (req, res) => res.json(await requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user)));
+  r.get('/ontologies/:id/requirements', async (req, res) => res.json(await requirements.listDocuments((await project(req)).id, req.user)));
+  r.get('/ontologies/:id/requirements/:version', async (req, res) => res.json(await requirements.documentFor((await project(req)).id, String(req.params.version).replace(/^v/, ''), req.user)));
   r.get('/ontologies/:id/requirements/:version/markdown', async (req, res) => {
-    const doc = await requirements.documentFor(project(req).id, String(req.params.version).replace(/^v/, ''), req.user);
+    const doc = await requirements.documentFor((await project(req)).id, String(req.params.version).replace(/^v/, ''), req.user);
     res.type('text/markdown; charset=utf-8').send(requirements.renderMarkdown(doc));
   });
   r.post('/releases/:id/requirements', async (req, res) => {
     const user = requireUser(req);
-    const rel = releases.getRelease(String(req.params.id));
-    res.status(201).json(await requirements.generateRequirements(mustFindProject(rel.ontologyId), { version: rel.version, release: rel, actor: user }));
+    const rel = await releases.getRelease(String(req.params.id));
+    res.status(201).json(await requirements.generateRequirements(await mustFindProject(rel.ontologyId), { version: rel.version, release: rel, actor: user }));
   });
 
   r.post('/ontologies/:id/interviews', async (req, res) => {
-    res.status(201).json(await useCases.startInterview(project(req), requireUser(req), optStr(req.body?.useCaseId)));
+    res.status(201).json(await useCases.startInterview(await project(req), requireUser(req), optStr(req.body?.useCaseId)));
   });
-  r.get('/interviews/:id', (req, res) => {
-    const s = useCases.getInterview(String(req.params.id));
+  r.get('/interviews/:id', async (req, res) => {
+    const s = await useCases.getInterview(String(req.params.id));
     if (s.userId !== req.user?.id) throw new HttpError(404, `interview ${s.id} not found`);
-    res.json({ ...s, useCase: useCaseDetail(s.useCaseId, req.user) });
+    res.json({ ...s, useCase: await useCaseDetail(s.useCaseId, req.user) });
   });
   r.post('/interviews/:id/messages', async (req, res) => {
-    const s = useCases.getInterview(String(req.params.id));
+    const s = await useCases.getInterview(String(req.params.id));
     const user = requireUser(req);
     const out = await useCases.interviewTurn(s, user, str(req.body?.content, 'content', 8000));
-    res.json({ session: out.session, useCase: useCaseDetail(out.useCase.id, user) });
+    res.json({ session: out.session, useCase: await useCaseDetail(out.useCase.id, user) });
   });
   r.post('/interviews/:id/finish', async (req, res) => {
     const user = requireUser(req);
-    const out = await useCases.finishInterview(useCases.getInterview(String(req.params.id)), user);
-    res.json({ useCase: useCaseDetail(out.useCase.id, user) });
+    const out = await useCases.finishInterview(await useCases.getInterview(String(req.params.id)), user);
+    res.json({ useCase: await useCaseDetail(out.useCase.id, user) });
   });
   r.post('/ontologies/:id/synthesise', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const user = requireUser(req);
     const cr = await useCases.synthesise(p, user, Array.isArray(req.body?.useCaseIds) ? req.body.useCaseIds : undefined);
-    res.status(201).json(crOut(cr, req));
+    res.status(201).json(await crOut(cr, req));
   });
 
   /* ------------------------------ meetings --------------------------- */
   // Meetings are working group business: members, whoever recorded one, and facilitators see them; to anyone else
   // they don't exist. Pending invites, Meet links and organisers are for facilitators only (meetings.meetingView).
-  const meetingFor = (req: Request) => {
-    const m = meetings.meetingView(meetings.getMeeting(String(req.params.id)), req.user);
+  const meetingFor = async (req: Request) => {
+    const m = await meetings.meetingView(await meetings.getMeeting(String(req.params.id)), req.user);
     if (!m) throw new HttpError(404, 'No such meeting');
     return m;
   };
-  r.get('/ontologies/:id/meetings', (req, res) => res.json(meetings.listMeetings(project(req).id).flatMap((m) => meetings.meetingView(m, req.user) ?? [])));
+  r.get('/ontologies/:id/meetings', async (req, res) => {
+    // A loop, not flatMap(): flatMap would return each async check's promise instead of the meeting.
+    const shown: Meeting[] = [];
+    for (const m of await meetings.listMeetings((await project(req)).id)) {
+      const v = await meetings.meetingView(m, req.user);
+      if (v) shown.push(v);
+    }
+    res.json(shown);
+  });
   r.post('/ontologies/:id/meetings/upload', async (req, res) => {
-    res.status(201).json(await meetings.uploadTranscript(project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
+    res.status(201).json(await meetings.uploadTranscript(await project(req), requireUser(req), optStr(req.body?.title) ?? 'Uploaded call', str(req.body?.transcript, 'transcript', 2_000_000)));
   });
   r.post('/ontologies/:id/meetings/bot', async (req, res) => {
-    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'send the co-lead bot into a call');
+    await requireRole((await project(req)).id, requireUser(req), meetings.FACILITATOR_ROLES, 'send the co-lead bot into a call');
     res
       .status(201)
       .json(
-        await meetings.inviteBot(project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300), {
+        await meetings.inviteBot(await project(req), requireUser(req), optStr(req.body?.title) ?? 'Working group call', str(req.body?.meetingUrl, 'meetingUrl', 300), {
           postPromptsToChat: req.body?.postPromptsToChat === true,
         }),
       );
   });
   r.post('/ontologies/:id/meetings/calendar', async (req, res) => {
-    requireRole(project(req).id, requireUser(req), meetings.FACILITATOR_ROLES, 'schedule the co-lead bot');
-    res.status(201).json(await meetBot.scheduleFromInvite(project(req), requireUser(req), str(req.body?.ics, 'ics', 2_000_000), { postPromptsToChat: req.body?.postPromptsToChat === true }));
+    await requireRole((await project(req)).id, requireUser(req), meetings.FACILITATOR_ROLES, 'schedule the co-lead bot');
+    res.status(201).json(await meetBot.scheduleFromInvite(await project(req), requireUser(req), str(req.body?.ics, 'ics', 2_000_000), { postPromptsToChat: req.body?.postPromptsToChat === true }));
   });
-  r.get('/meet-bot', (_req, res) => res.json(meetBot.meetBotInfo()));
+  r.get('/meet-bot', async (_req, res) => res.json(await meetBot.meetBotInfo()));
   r.post('/meet-bot/sync', async (req, res) => {
     const user = requireUser(req);
-    const anywhere = user.isPlatformAdmin || list<{ ontologyId: string; userId: string; roles: Role[] }>('memberships').some((ms) => ms.userId === user.id && ms.roles.some((x) => meetings.FACILITATOR_ROLES.includes(x)));
+    const anywhere = user.isPlatformAdmin || (await list<{ ontologyId: string; userId: string; roles: Role[] }>('memberships')).some((ms) => ms.userId === user.id && ms.roles.some((x) => meetings.FACILITATOR_ROLES.includes(x)));
     if (!anywhere) throw new HttpError(403, 'Only owners, stewards and editors can re-read the bot’s calendar');
     await meetBot.syncCalendar();
     await meetBot.dispatchDue();
-    res.json(meetBot.meetBotInfo());
+    res.json(await meetBot.meetBotInfo());
   });
   r.post('/ontologies/:id/meetings/simulate', async (req, res) => {
     const delay = Number(req.query.delayMs ?? req.body?.delayMs);
     res.status(201).json(
-      await meetings.simulateCall(project(req), requireUser(req), optStr(req.body?.title) ?? '', {
+      await meetings.simulateCall(await project(req), requireUser(req), optStr(req.body?.title) ?? '', {
         ...(Number.isFinite(delay) ? { delayMs: delay } : {}),
         postPromptsToChat: req.body?.postPromptsToChat === true,
       }),
     );
   });
-  const visible = (req: Request) => {
+  const visible = async (req: Request) => {
     requireUser(req);
-    return meetingFor(req);
+    return await meetingFor(req);
   };
-  r.get('/meetings/:id', (req, res) => res.json(visible(req)));
+  r.get('/meetings/:id', async (req, res) => res.json(await visible(req)));
   r.patch('/meetings/:id', async (req, res) => {
     const b = req.body ?? {};
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
@@ -490,45 +496,62 @@ export function apiRouter(): Router {
     res.json(await meetings.dismissBooking(String(req.params.id), requireUser(req)));
   });
   r.post('/meetings/:id/prompts/:index/post', async (req, res) => {
-    const m = meetings.getMeeting(String(req.params.id));
-    meetings.requireFacilitator(m, requireUser(req), 'post in the call’s chat');
+    const m = await meetings.getMeeting(String(req.params.id));
+    await meetings.requireFacilitator(m, requireUser(req), 'post in the call’s chat');
     res.json(await meetings.postPrompt(m.id, Number(req.params.index)));
   });
   r.post('/meetings/:id/analyse', async (req, res) => {
     const user = requireUser(req);
-    meetingFor(req);
-    const m = meetings.getMeeting(String(req.params.id));
-    meetings.requireAnalyst(m, user);
-    res.json(meetings.meetingView(await meetings.analyseMeeting(m), user));
+    await meetingFor(req);
+    const m = await meetings.getMeeting(String(req.params.id));
+    await meetings.requireAnalyst(m, user);
+    res.json(await meetings.meetingView(await meetings.analyseMeeting(m), user));
   });
   r.post('/meetings/:id/end', async (req, res) => {
-    const m = meetings.getMeeting(String(req.params.id));
-    meetings.requireFacilitator(m, requireUser(req), 'end this call');
+    const m = await meetings.getMeeting(String(req.params.id));
+    await meetings.requireFacilitator(m, requireUser(req), 'end this call');
     meetings.stopSimulation(m.id);
     res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
     const user = requireUser(req);
-    meetingFor(req);
-    const m = meetings.getMeeting(String(req.params.id));
+    await meetingFor(req);
+    const m = await meetings.getMeeting(String(req.params.id));
     // Analysing first is only for those who may analyse it.
-    if (!m.analysis) meetings.requireAnalyst(m, user);
+    if (!m.analysis) await meetings.requireAnalyst(m, user);
     const out = await meetings.proposeFromMeeting(m, user);
-    res.json({ useCases: out.useCases.filter((u) => useCases.canSee(u, user)).map((u) => useCases.present(u, user)) });
+    const shown = await filterAsync(out.useCases, (u) => useCases.canSee(u, user));
+    res.json({ useCases: await Promise.all(shown.map((u) => useCases.present(u, user))) });
   });
-  r.get('/meetings/:id/stream', (req, res) => {
+  r.get('/meetings/:id/stream', async (req, res) => {
     const user = requireUser(req);
-    const m = visible(req);
+    const m = await visible(req);
     const show = (x: Meeting) => meetings.meetingView(x, user);
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     send('meeting', { type: 'meeting', meeting: m });
+    // An EventEmitter listener: nothing awaits it, so its database reads can't be allowed to reject. It runs in
+    // the context of whoever emitted, possibly inside their transaction, so it reads detached from it: what it
+    // sends is committed, and it isn't refused once that transaction has ended. Events go out one at a time, in
+    // the order they were emitted, even when one needs a read and the next doesn't.
+    let queue: Promise<void> = Promise.resolve();
+    const inOrder = (step: () => Promise<void> | void) => {
+      queue = queue.then(step).catch(() => {});
+    };
     const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: show(meetings.getMeeting(m.id)) });
-      else if (e.type === 'meeting') {
-        const x = show(e.meeting as Meeting);
-        if (x) send('meeting', { type: 'meeting', meeting: x });
-      } else send(e.type, e);
+      if (e.type === 'status')
+        inOrder(() =>
+          detached(async () => await show(await meetings.getMeeting(m.id))).then(
+            (meeting) => void send('status', { type: 'status', status: e.status, meeting }),
+            () => void send('status', { type: 'status', status: e.status }),
+          ),
+        );
+      else if (e.type === 'meeting')
+        inOrder(async () => {
+          const x = await detached(() => show(e.meeting as Meeting));
+          if (x) send('meeting', { type: 'meeting', meeting: x });
+        });
+      else inOrder(() => void send(e.type, e));
     };
     meetings.meetingEvents.on(m.id, onEvent);
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
@@ -544,26 +567,26 @@ export function apiRouter(): Router {
 
   /* ------------------- reports from the public page ------------------ */
   // Held for review: only editors, stewards and owners see them, and nothing happens until one of them acts.
-  const moderator = (req: Request) => {
-    const p = project(req);
+  const moderator = async (req: Request) => {
+    const p = await project(req);
     const user = requireUser(req);
-    requireRole(p.id, user, ['editor', 'steward', 'owner'], 'review reports from the public page');
+    await requireRole(p.id, user, ['editor', 'steward', 'owner'], 'review reports from the public page');
     return { p, user };
   };
-  r.get('/ontologies/:id/public-reports', (req, res) => {
-    res.json(listPublicReports(moderator(req).p.id));
+  r.get('/ontologies/:id/public-reports', async (req, res) => {
+    res.json(await listPublicReports((await moderator(req)).p.id));
   });
   r.post('/ontologies/:id/public-reports/:reportId/accept', async (req, res) => {
-    const { p, user } = moderator(req);
+    const { p, user } = await moderator(req);
     const reportId = String(req.params.reportId);
-    const opened = () => crs.listCRs(p.id).find((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
-    const already = opened();
+    const opened = async () => (await crs.listCRs(p.id)).find((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
+    const already = await opened();
     if (already) {
-      removePublicReport(reportId);
-      return void res.json(crs.detail(already));
+      await removePublicReport(reportId);
+      return void res.json(await crs.detail(already));
     }
-    if (!getPublicReport(p.id, reportId)) throw new HttpError(404, 'That report has already been reviewed');
-    const mine = claimPublicReport(p.id, reportId);
+    if (!await getPublicReport(p.id, reportId)) throw new HttpError(404, 'That report has already been reviewed');
+    const mine = await claimPublicReport(p.id, reportId);
     if (!mine) throw new HttpError(409, 'Someone is opening this report right now');
     const report = mine.report;
     let cr;
@@ -575,67 +598,67 @@ export function apiRouter(): Router {
         origin: { type: 'public-report', termIri: report.termIri, version: report.version, reportId },
         ops: [],
         // Saved only if this claim still holds the report, and the report leaves the queue in the same step.
-        atSave: () => convertPublicReport(mine),
+        atSave: async () => transaction(async () => await convertPublicReport(mine)),
       });
     } catch (err) {
-      releasePublicReport(mine);
+      await releasePublicReport(mine);
       throw err;
     }
-    res.status(201).json(crs.detail(cr));
+    res.status(201).json(await crs.detail(cr));
   });
-  r.post('/ontologies/:id/public-reports/:reportId/dismiss', (req, res) => {
-    const { p } = moderator(req);
-    dismissPublicReport(p.id, String(req.params.reportId));
+  r.post('/ontologies/:id/public-reports/:reportId/dismiss', async (req, res) => {
+    const { p } = await moderator(req);
+    await dismissPublicReport(p.id, String(req.params.reportId));
     res.json({ ok: true });
   });
 
   /* --------------- versions waiting for publication approval ------------- */
   // Published before anyone approved what goes public: owners and stewards review each and approve exactly what it publishes.
-  const steward = (req: Request) => {
-    const p = project(req);
+  const steward = async (req: Request) => {
+    const p = await project(req);
     const user = requireUser(req);
-    requireRole(p.id, user, ['owner', 'steward'], 'review versions waiting for approval');
+    await requireRole(p.id, user, ['owner', 'steward'], 'review versions waiting for approval');
     return { p, user };
   };
   r.get('/ontologies/:id/public-holds', async (req, res) => {
-    res.set('Cache-Control', 'no-store').json(await listHolds(steward(req).p));
+    res.set('Cache-Control', 'no-store').json(await listHolds((await steward(req)).p));
   });
 
-  r.post('/ontologies/:id/public-holds/:version/approve', (req, res) => {
-    const { p, user } = steward(req);
-    approveHold(p, user, String(req.params.version), req.body?.fingerprint);
+  r.post('/ontologies/:id/public-holds/:version/approve', async (req, res) => {
+    const { p, user } = await steward(req);
+    await approveHold(p, user, String(req.params.version), req.body?.fingerprint);
     res.json({ ok: true });
   });
 
   /* ---------------------------- change requests ---------------------- */
-  r.get('/ontologies/:id/change-requests', (req, res) => {
+  r.get('/ontologies/:id/change-requests', async (req, res) => {
     const status = optStr(req.query.status);
-    res.json(crs.listCRs(project(req).id).filter((c) => !status || c.status === status).map((c) => useCases.crForViewer(c, req.user)));
+    res.json((await Promise.all((await crs.listCRs((await project(req)).id)).filter((c) => !status || c.status === status).map(async (c) => await useCases.crForViewer(c, req.user)))));
   });
 
   // A request drafted from use cases is published only as an editor approved it: what it would publish, then the approval of exactly that.
   r.get('/change-requests/:id/publication', async (req, res) => {
-    const cr = crs.getCR(String(req.params.id));
+    const cr = await crs.getCR(String(req.params.id));
     // Withheld from this viewer (a use case it came from isn't shared with them): so is what it would publish.
-    if (useCases.crWithheld(cr, requireUser(req))) throw new HttpError(404, 'No such change request');
+    if (await useCases.crWithheld(cr, requireUser(req))) throw new HttpError(404, 'No such change request');
     if (!crs.needsPublicationApproval(cr)) throw new HttpError(404, 'This request doesn’t need its publication approved');
     res.set('Cache-Control', 'no-store').json(await crs.publicationPreview(cr));
   });
   r.post('/change-requests/:id/approve-publication', async (req, res) => {
-    const cr = await crs.approvePublication(crs.getCR(String(req.params.id)), requireUser(req), req.body?.fingerprint);
-    res.json(crOut(cr, req));
+    const cr = await crs.approvePublication(await crs.getCR(String(req.params.id)), requireUser(req), req.body?.fingerprint);
+    res.json(await crOut(cr, req));
   });
 
   r.post('/ontologies/:id/change-requests', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const user = requireUser(req);
     const b = req.body ?? {};
     const kind: ChangeRequestKind = ['feature', 'bug', 'gap', 'editorial', 'deprecation'].includes(b.kind) ? b.kind : 'feature';
-    if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
+    if (!(await rolesFor(p.id, user.id)).length) await setRoles(p.id, user.id, ['contributor']);
     // Check cited use cases before creating anything: the same rule linking applies, so a draft,
     // archived or withdrawn use case is refused here rather than after the change request exists.
     const useCaseIds: string[] = Array.isArray(b.useCaseIds) ? b.useCaseIds.map(String) : [];
-    useCases.assertCitable(useCaseIds, user, p.id);
+    await useCases.assertCitable(useCaseIds, user, p.id);
     const cr = await crs.createChangeRequest(p, user, {
       title: optStr(b.title) ?? '',
       description: optStr(b.description) ?? '',
@@ -650,19 +673,19 @@ export function apiRouter(): Router {
       commit: useCaseIds.length
         ? (draft, store) =>
             useCases.withConsentLock(p.id, async () => {
-              useCases.assertCitable(useCaseIds, user, p.id);
-              store();
-              useCases.linkChangeRequest(draft, useCaseIds, user);
+              await useCases.assertCitable(useCaseIds, user, p.id);
+              await store();
+              await useCases.linkChangeRequest(draft, useCaseIds, user);
             })
         : undefined,
     });
-    res.status(201).json(crOut(crs.getCR(cr.id), req));
+    res.status(201).json(await crOut(await crs.getCR(cr.id), req));
   });
 
   r.post('/ontologies/:id/bug-reports', async (req, res) => {
-    const p = project(req);
+    const p = await project(req);
     const user = requireUser(req);
-    if (!rolesFor(p.id, user.id).length) setRoles(p.id, user.id, ['contributor']);
+    if (!(await rolesFor(p.id, user.id)).length) await setRoles(p.id, user.id, ['contributor']);
     const title = str(req.body?.title, 'title', 300);
     const description = optStr(req.body?.description) ?? '';
     const termIri = optStr(req.body?.termIri);
@@ -673,75 +696,75 @@ export function apiRouter(): Router {
       origin: { type: 'bug-report' },
       naturalLanguage: `Bug report${termIri ? ` about <${termIri}>` : ''}: ${title}\n\n${description}`,
     });
-    res.status(201).json(crOut(cr, req));
+    res.status(201).json(await crOut(cr, req));
   });
 
-  const cr = (req: Request) => crs.getCR(String(req.params.id));
-  r.get('/change-requests/:id', (req, res) => res.json(crOut(cr(req), req)));
-  r.patch('/change-requests/:id', async (req, res) => res.json(crOut(await crs.updateOps(cr(req), requireUser(req), req.body ?? {}), req)));
-  r.post('/change-requests/:id/submit', async (req, res) => res.json(crOut(await crs.submit(cr(req), requireUser(req)), req)));
+  const cr = async (req: Request) => await crs.getCR(String(req.params.id));
+  r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
+  r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
+  r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {
     const decision = req.body?.decision;
     if (!['approve', 'request-changes', 'object', 'comment'].includes(decision)) throw new HttpError(400, 'decision must be approve, request-changes, object or comment');
-    res.json(crOut(await crs.addReview(cr(req), requireUser(req), decision, optStr(req.body?.comment)), req));
+    res.json(await crOut(await crs.addReview(await cr(req), requireUser(req), decision, optStr(req.body?.comment)), req));
   });
   r.post('/change-requests/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(crOut(await crs.addVote(cr(req), requireUser(req), choice, optStr(req.body?.comment)), req));
+    res.json(await crOut(await crs.addVote(await cr(req), requireUser(req), choice, optStr(req.body?.comment)), req));
   });
-  r.post('/change-requests/:id/merge', async (req, res) => res.json(crOut(await crs.merge(cr(req), requireUser(req)), req)));
-  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(crOut(await crs.withdraw(cr(req), requireUser(req)), req)));
-  r.post('/change-requests/:id/revise', async (req, res) => res.json(crOut(await crs.revise(cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)), req)));
+  r.post('/change-requests/:id/merge', async (req, res) => res.json(await crOut(await crs.merge(await cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/withdraw', async (req, res) => res.json(await crOut(await crs.withdraw(await cr(req), requireUser(req)), req)));
+  r.post('/change-requests/:id/revise', async (req, res) => res.json(await crOut(await crs.revise(await cr(req), requireUser(req), str(req.body?.instruction, 'instruction', 4000)), req)));
   r.post('/change-requests/:id/retriage', async (req, res) => {
     requireUser(req);
-    res.json(crOut(await crs.advance(await crs.triage(cr(req))), req));
+    res.json(await crOut(await crs.advance(await crs.triage(await cr(req))), req));
   });
 
   /* ------------------------------ releases --------------------------- */
-  r.get('/ontologies/:id/releases', (req, res) => res.json(releases.listReleases(project(req).id).map((r) => releases.releaseForViewer(r, req.user))));
+  r.get('/ontologies/:id/releases', async (req, res) => res.json((await Promise.all((await releases.listReleases((await project(req)).id)).map(async (r) => await releases.releaseForViewer(r, req.user))))));
   r.post('/ontologies/:id/releases', async (req, res) => {
-    res.status(201).json(relOut(req, await releases.draftRelease(project(req), requireUser(req), optStr(req.body?.notes))));
+    res.status(201).json(await relOut(req, await releases.draftRelease(await project(req), requireUser(req), optStr(req.body?.notes))));
   });
-  r.get('/releases/:id', (req, res) => res.json(relOut(req, releases.getRelease(String(req.params.id)))));
+  r.get('/releases/:id', async (req, res) => res.json(await relOut(req, await releases.getRelease(String(req.params.id)))));
   r.post('/releases/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(relOut(req, await releases.voteOnRelease(releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
+    res.json(await relOut(req, await releases.voteOnRelease(await releases.getRelease(String(req.params.id)), requireUser(req), choice, optStr(req.body?.comment))));
   });
   r.post('/releases/:id/publish', async (req, res) => {
-    res.json(relOut(req, await releases.publishRelease(releases.getRelease(String(req.params.id)), requireUser(req))));
+    res.json(await relOut(req, await releases.publishRelease(await releases.getRelease(String(req.params.id)), requireUser(req))));
   });
 
   /* ------------------------------- agents ---------------------------- */
   /* ----------------------- OAuth for MCP clients ----------------------- */
   // The consent page: an MCP client sent the person here to approve the connection.
   r.get('/oauth/requests/:id', async (req, res) => res.json(await describeRequest(String(req.params.id))));
-  r.post('/oauth/requests/:id/approve', (req, res) => {
+  r.post('/oauth/requests/:id/approve', async (req, res) => {
     // A JSON body forces a CORS preflight, so another site can't approve on someone's behalf with a form post.
     if (!req.is('application/json')) throw new HttpError(415, 'Send JSON');
-    res.json(approveRequest(String(req.params.id), requireUser(req)));
+    res.json(await approveRequest(String(req.params.id), requireUser(req)));
   });
-  r.post('/oauth/requests/:id/deny', (req, res) => res.json(denyRequest(String(req.params.id))));
-  r.get('/oauth/connections', (req, res) => res.json(listConnections(requireUser(req).id)));
-  r.delete('/oauth/connections/:id', (req, res) => {
-    disconnect(requireUser(req).id, String(req.params.id));
+  r.post('/oauth/requests/:id/deny', async (req, res) => res.json(await denyRequest(String(req.params.id))));
+  r.get('/oauth/connections', async (req, res) => res.json(await listConnections(requireUser(req).id)));
+  r.delete('/oauth/connections/:id', async (req, res) => {
+    await disconnect(requireUser(req).id, String(req.params.id));
     res.status(204).end();
   });
 
-  r.get('/agent-tokens', (req, res) => res.json(listAgentTokens(requireUser(req).id)));
-  r.post('/agent-tokens', (req, res) => res.status(201).json(createAgentToken(requireUser(req).id, optStr(req.body?.name) ?? 'My agent')));
-  r.delete('/agent-tokens/:id', (req, res) => {
-    deleteAgentToken(requireUser(req).id, String(req.params.id));
+  r.get('/agent-tokens', async (req, res) => res.json(await listAgentTokens(requireUser(req).id)));
+  r.post('/agent-tokens', async (req, res) => res.status(201).json(await createAgentToken(requireUser(req).id, optStr(req.body?.name) ?? 'My agent')));
+  r.delete('/agent-tokens/:id', async (req, res) => {
+    await deleteAgentToken(requireUser(req).id, String(req.params.id));
     res.status(204).end();
   });
-  r.get('/ontologies/:id/agent-reports', (req, res) => res.json(listAgentReports(project(req).id)));
-  r.get('/agent-reports/:id', (req, res) => res.json(getAgentReport(String(req.params.id))));
+  r.get('/ontologies/:id/agent-reports', async (req, res) => res.json(await listAgentReports((await project(req)).id)));
+  r.get('/agent-reports/:id', async (req, res) => res.json(await getAgentReport(String(req.params.id))));
   r.post('/ontologies/:id/agent-reports', async (req, res) => {
     const b = req.body ?? {};
     const kind = ['missing-concept', 'does-not-fit', 'bug', 'question'].includes(b.kind) ? b.kind : 'missing-concept';
     res.status(201).json(
-      await reportGap(project(req), requireUser(req), { agentName: optStr(b.agentName) ?? 'Web form', kind, summary: str(b.summary, 'summary', 300), details: optStr(b.details) ?? '', context: optStr(b.context) }),
+      await reportGap(await project(req), requireUser(req), { agentName: optStr(b.agentName) ?? 'Web form', kind, summary: str(b.summary, 'summary', 300), details: optStr(b.details) ?? '', context: optStr(b.context) }),
     );
   });
 
@@ -752,7 +775,7 @@ export function apiRouter(): Router {
     requireUser(req);
     const id = optStr(req.body?.ontologyId) ?? DEMO_SLUG;
     // The same projection as the activity feed: nothing about use cases or calls this tester may not see.
-    res.json({ events: useCases.visibleActivity(await step(mustFindProject(id).id, req.user?.id), req.user) });
+    res.json({ events: await useCases.visibleActivity(await step((await mustFindProject(id)).id, req.user?.id), req.user) });
   });
   r.post('/simulation/clock', async (req, res) => {
     demoOnly();
@@ -760,7 +783,7 @@ export function apiRouter(): Router {
     const days = Number(req.body?.advanceDays);
     if (!Number.isFinite(days) || days <= 0 || days > 60) throw new HttpError(400, 'advanceDays must be between 0 and 60');
     await advanceClock(days);
-    res.json(sessionInfo(req.user));
+    res.json(await sessionInfo(req.user));
   });
   r.post('/simulation/reset', async (req, res) => {
     demoOnly();
@@ -770,21 +793,27 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ activity --------------------------- */
-  r.get('/activity', (req, res) => {
+  r.get('/activity', async (req, res) => {
     const id = optStr(req.query.ontologyId);
-    const all = useCases.visibleActivity(listActivity(id ? mustFindProject(id).id : undefined, 300), req.user);
+    const all = await useCases.visibleActivity(await listActivity(id ? (await mustFindProject(id)).id : undefined, 300), req.user);
     // Meetings are working group business, and so is what happens to them; a call waiting for
     // approval (and what's been said about it) is for facilitators only.
-    const hidden = (a: (typeof all)[number]) => {
+    const hidden = async (a: (typeof all)[number]) => {
       if (!a.type.startsWith('meeting.')) return false;
       if (!req.user) return true;
       const mid = /\/meetings\/(mtg_[\w-]+)/.exec(a.link ?? '')?.[1];
-      const m = mid ? get<Meeting>('meetings', mid) : undefined;
-      if (m) return !meetings.meetingView(m, req.user);
+      const m = mid ? await get<Meeting>('meetings', mid) : undefined;
+      if (m) return !await meetings.meetingView(m, req.user);
       // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened to it.
-      return !!mid && !meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
+      return !!mid && !await meetings.canFacilitate({ ontologyId: a.ontologyId ?? '' }, req.user);
     };
-    res.json(all.filter((a) => !hidden(a)).slice(0, 100));
+    // One at a time with a loop: filter() would take each async check's promise as true and show everything.
+    const shown: typeof all = [];
+    for (const a of all) {
+      if (shown.length >= 100) break;
+      if (!(await hidden(a))) shown.push(a);
+    }
+    res.json(shown);
   });
 
   /* ------------------------------ feedback --------------------------- */
@@ -827,13 +856,13 @@ export function apiRouter(): Router {
         appCommit: optStr(b.appCommit),
         sinceVersion: optStr(b.sinceVersion),
       },
-      testerForSaving(req, res),
+      await testerForSaving(req, res),
     );
     if (summary === undefined) return void res.status(201).json(sub);
     // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
-    const { withdrawToken } = queuePublication(sub.id, summary);
+    const { withdrawToken } = await queuePublication(sub.id, summary);
     await processWithin(sub.id);
-    res.status(201).json({ ...sub, publication: { ...status(publicationFor(sub.id)!), withdrawToken } });
+    res.status(201).json({ ...sub, publication: { ...status((await publicationFor(sub.id))!), withdrawToken } });
   });
   r.post('/feedback/:id/publication/withdraw', async (req, res) => {
     res.json(await withdrawPublication(String(req.params.id), req.body?.token));
@@ -854,18 +883,18 @@ export function apiRouter(): Router {
     res.json(await resolvePublication(String(req.params.id), a, ref));
   });
   // Public summaries waiting for an administrator, listed apart from feedback (whose row may be deleted).
-  r.get('/feedback/publications/attention', (req, res) => {
+  r.get('/feedback/publications/attention', async (req, res) => {
     feedbackAdmin(req);
-    res.json(publicationsNeedingAdmin());
+    res.json(await publicationsNeedingAdmin());
   });
   // The hourly triage routine: reads its queue and writes only through these, with its own token.
   const triageAuth = (req: Request) => {
     if (!triageEnabled()) throw new HttpError(404, 'Triage is not switched on');
     if (!triageTokenMatches(req.header('authorization'))) throw new HttpError(401, 'Triage token required');
   };
-  r.get('/feedback/triage/queue', (req, res) => {
+  r.get('/feedback/triage/queue', async (req, res) => {
     triageAuth(req);
-    res.json(triageQueue());
+    res.json(await triageQueue());
   });
   r.post('/feedback/triage/:issue', async (req, res) => {
     triageAuth(req);
@@ -877,7 +906,7 @@ export function apiRouter(): Router {
   /* ------------------------------ alpha testing ------------------------ */
   r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
   r.post('/alpha/visit', async (req, res) => {
-    const tester = testerForSaving(req, res);
+    const tester = await testerForSaving(req, res);
     if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
     const b = req.body ?? {};
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
@@ -888,13 +917,13 @@ export function apiRouter(): Router {
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');
   };
-  r.get('/feedback', (req, res) => {
+  r.get('/feedback', async (req, res) => {
     feedbackAdmin(req);
     res.json(
-      listFeedback().map((s) => {
-        const pub = publicationFor(s.id);
+      (await Promise.all((await listFeedback()).map(async (s) => {
+        const pub = await publicationFor(s.id);
         return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, adminNeeded: pub.adminNeeded } } : s;
-      }),
+      }))),
     );
   });
   r.get('/feedback/summary', async (req, res) => {

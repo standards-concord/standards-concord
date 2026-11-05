@@ -5,15 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
-import { get, list as listDocs, openDb, put } from '../src/db.js';
+import { detached, get, list as listDocs, openDb, put, transaction } from '../src/db.js';
 import { findDocument, generateRequirements, markPublished, renderMarkdown, requirementsDocument, toPublic } from '../src/services/requirements.js';
-import { findProject } from '../src/services/ontologies.js';
+import { findProject, workingValidation } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { clock } from '../src/clock.js';
 import { acquireProcessLock } from '../src/processLock.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { completingRelease, derivedStatus } from '../src/services/traceability.js';
-import { createUseCase, getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, withConsentLock, withdrawUseCase } from '../src/services/useCases.js';
+import { createUseCase, getUseCase, heuristicAnonymise, identifyingWarnings, restrictDraft, synthesise, updateUseCase, validationForViewer, withConsentLock, withdrawUseCase } from '../src/services/useCases.js';
 import { requirementsFor, toPublishedRequirements } from '../src/public/requirements.js';
 
 /**
@@ -50,7 +50,7 @@ const meetingId = async () => {
 };
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   demoId = (await seedDemo())!.id;
 });
 
@@ -76,19 +76,19 @@ describe('meetings are for the working group', () => {
     expect(out.status).toBe(200);
     expect(out.body.changeRequest).toBeUndefined();
     const uc = out.body.useCases[0] as UseCase;
-    const raw = getUseCase(uc.id);
-    put('useCases', { ...raw, visibility: 'private' }, raw.ontologyId);
+    const raw = await getUseCase(uc.id);
+    await put('useCases', { ...raw, visibility: 'private' }, raw.ontologyId);
     const again = await member.post(`/api/meetings/${id}/propose`).send({});
     expect(again.body.useCases.some((u: UseCase) => u.id === uc.id)).toBe(false);
-    put('useCases', raw, raw.ontologyId);
+    await put('useCases', raw, raw.ontologyId);
   });
 
   it('a use case seen by an outsider does not reveal the call or its transcript lines (finding 2)', async () => {
     const steward = await login('steward');
     const list = (await steward.get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
     const fromCall = list.find((u) => u.sections.name === 'Publish recurring shifts once')!;
-    const raw = getUseCase(fromCall.id);
-    put('useCases', { ...raw, visibility: 'public' }, raw.ontologyId);
+    const raw = await getUseCase(fromCall.id);
+    await put('useCases', { ...raw, visibility: 'public' }, raw.ontologyId);
     const seen = await request(app).get(`/api/use-cases/${fromCall.id}`);
     expect(seen.status).toBe(200);
     expect(seen.body.sourceRef).toBeUndefined();
@@ -96,7 +96,7 @@ describe('meetings are for the working group', () => {
     expect(seen.body.trace.source.lines).toBeUndefined();
     expect(seen.body.trace.source.id).toBeUndefined();
     expect(JSON.stringify(seen.body)).not.toMatch(/Working group call: recurring shifts/);
-    put('useCases', raw, raw.ontologyId);
+    await put('useCases', raw, raw.ontologyId);
   });
 });
 
@@ -112,31 +112,31 @@ describe('change requests and validation are public, so they only use public use
     const all = await member.post(`/api/ontologies/${demoId}/synthesise`).send({});
     if (all.status === 201) expect(JSON.stringify(all.body)).not.toMatch(/Group only pipeline/);
     // Raw ids on a change request are filtered for the viewer.
-    const someCr = list<ChangeRequest>(demoId)[0];
-    put('changeRequests', { ...someCr, useCaseIds: [...(someCr.useCaseIds ?? []), id] }, demoId);
+    const someCr = (await list<ChangeRequest>(demoId))[0];
+    await put('changeRequests', { ...someCr, useCaseIds: [...(someCr.useCaseIds ?? []), id] }, demoId);
     const outsider = await login('contributor');
     const anon = await outsider.get(`/api/change-requests/${someCr.id}`);
     expect(anon.status).toBe(200);
     expect(anon.body.useCaseIds ?? []).not.toContain(id);
     const listed = (await outsider.get(`/api/ontologies/${demoId}/change-requests`)).body as ChangeRequest[];
     expect(listed.find((c) => c.id === someCr.id)?.useCaseIds ?? []).not.toContain(id);
-    put('changeRequests', someCr, demoId);
+    await put('changeRequests', someCr, demoId);
   });
 
   it('keeps group-only competency questions out of public validation, and a withdrawn one out of every result read afterwards (finding 4)', async () => {
     const { triage } = await import('../src/services/changeRequests.js');
     const member = await login('member');
     const id = await useCaseVia(member, 'Hidden question case', 'group');
-    const raw = getUseCase(id);
+    const raw = await getUseCase(id);
     raw.competencyQuestions[0].sparql = 'SELECT * WHERE { ?s ?p ?o } LIMIT 1';
-    put('useCases', raw, raw.ontologyId);
+    await put('useCases', raw, raw.ontologyId);
     const v = await request(app).get(`/api/ontologies/${demoId}/validation`);
     expect(JSON.stringify(v.body)).not.toMatch(/Hidden question case/);
     // Once public its question runs, and its results name it as their source.
-    put('useCases', { ...raw, visibility: 'public', status: 'triage' }, raw.ontologyId);
-    const cr = list<ChangeRequest>(demoId).find((c) => !c.useCaseIds?.length && c.origin.type !== 'synthesis' && c.origin.type !== 'chat')!;
-    await triage(get<ChangeRequest>('changeRequests', cr.id)!);
-    const result = get<ChangeRequest>('changeRequests', cr.id)!.validation!.competencyQuestions.find((r) => r.question.includes('Hidden question case'));
+    await put('useCases', { ...raw, visibility: 'public', status: 'triage' }, raw.ontologyId);
+    const cr = (await list<ChangeRequest>(demoId)).find((c) => !c.useCaseIds?.length && c.origin.type !== 'synthesis' && c.origin.type !== 'chat')!;
+    await triage((await get<ChangeRequest>('changeRequests', cr.id))!);
+    const result = (await get<ChangeRequest>('changeRequests', cr.id))!.validation!.competencyQuestions.find((r) => r.question.includes('Hidden question case'));
     expect(result?.source).toBe(id);
     const outsider = await login('contributor');
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).text).toMatch(/Hidden question case/);
@@ -164,20 +164,20 @@ describe('requirements documents (findings 6 and 11)', () => {
     const steward = await login('steward');
     const author = await login('contributor');
     const id = await useCaseVia(author, 'Withdrawn later case', 'public');
-    const project = findProject(demoId)!;
+    const project = (await findProject(demoId))!;
     const doc = await generateRequirements(project, { version: '9.9.9' });
     expect(doc.useCases.some((u) => u.id === id)).toBe(true);
     expect(Object.keys(doc.unpublished ?? {})).toEqual(['group']);
     expect((await author.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'private' })).status).toBe(200);
     // The draft that drew on it is emptied at once, and the next read writes a fresh one without it.
-    const stored = findDocument(demoId, '9.9.9')!;
+    const stored = (await findDocument(demoId, '9.9.9'))!;
     expect(stored.invalidated).toBe(true);
     expect(JSON.stringify(stored)).not.toMatch(/Withdrawn later case/);
     const read = await steward.get(`/api/ontologies/${demoId}/requirements/9.9.9`);
     expect(read.status).toBe(200);
     expect(read.body.useCases.length).toBeGreaterThan(0);
     expect(JSON.stringify(read.body)).not.toMatch(/Withdrawn later case/);
-    expect(findDocument(demoId, '9.9.9')!.invalidated).toBeUndefined();
+    expect((await findDocument(demoId, '9.9.9'))!.invalidated).toBeUndefined();
   });
 
   it('shows the group-only count to the group only', async () => {
@@ -199,9 +199,9 @@ describe('requirements documents (findings 6 and 11)', () => {
   it('numbers a use case only when it is shared, so gaps do not reveal private drafts (finding 11)', async () => {
     const author = await login('contributor');
     const id = await useCaseVia(author, 'Numbered on sharing', 'private');
-    expect(getUseCase(id).number).toBe(0);
+    expect((await getUseCase(id)).number).toBe(0);
     await author.post(`/api/use-cases/${id}/visibility`).send({ visibility: 'public' });
-    expect(getUseCase(id).number).toBeGreaterThan(0);
+    expect((await getUseCase(id)).number).toBeGreaterThan(0);
   });
 
   it('marks a requirement met only when its terms are in that version (finding 12)', async () => {
@@ -290,33 +290,33 @@ describe('withdrawal and links (findings 9 and 10)', () => {
 });
 
 describe('closure and the public projection (findings 13, 14, 15)', () => {
-  it('closes in the release that completed the work, not the one attached to the last change request', () => {
+  it('closes in the release that completed the work, not the one attached to the last change request', async () => {
     const r1 = { id: 'rel_a', ontologyId: demoId, version: '1.0.0', createdAt: '2026-01-01T00:00:00Z', status: 'published', publishedAt: '2026-01-01T00:00:00Z', changeRequestIds: [] } as unknown as Release;
     const r2 = { ...r1, id: 'rel_b', version: '2.0.0', publishedAt: '2026-03-01T00:00:00Z' } as Release;
-    put('releases', r1, demoId);
-    put('releases', r2, demoId);
+    await put('releases', r1, demoId);
+    await put('releases', r2, demoId);
     const cr1 = { id: 'cr_1', number: 1, releaseId: 'rel_b' } as ChangeRequest;
     const cr2 = { id: 'cr_2', number: 2, releaseId: 'rel_a' } as ChangeRequest;
-    expect(completingRelease([cr1, cr2])?.version).toBe('2.0.0');
-    expect(completingRelease([cr1, { ...cr2, releaseId: 'rel_missing' }])).toBeUndefined();
+    expect((await completingRelease([cr1, cr2]))?.version).toBe('2.0.0');
+    expect(await completingRelease([cr1, { ...cr2, releaseId: 'rel_missing' }])).toBeUndefined();
   });
 
   it('reading a closed use case does not rewrite its closure time', async () => {
     const list = (await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
     const closed = list.find((u) => u.status === 'closed' && u.resolution?.releaseId)!;
-    const before = get<UseCase>('useCases', closed.id)!;
+    const before = (await get<UseCase>('useCases', closed.id))!;
     await request(app).get(`/api/use-cases/${closed.id}`);
     await request(app).get(`/api/use-cases/${closed.id}`);
-    const after = get<UseCase>('useCases', closed.id)!;
+    const after = (await get<UseCase>('useCases', closed.id))!;
     expect(after.resolution?.at).toBe(before.resolution?.at);
     expect(after.updatedAt).toBe(before.updatedAt);
   });
 
-  it('refuses to project a private use case for the public, and gives anonymised ones no attribution', () => {
-    const priv = list<UseCase>(demoId, 'useCases').find((u) => u.visibility === 'private')!;
-    expect(() => toPublic(priv)).toThrow();
-    const anon = list<UseCase>(demoId, 'useCases').find((u) => u.anonymous && u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived')!;
-    const p = toPublic(anon);
+  it('refuses to project a private use case for the public, and gives anonymised ones no attribution', async () => {
+    const priv = (await list<UseCase>(demoId, 'useCases')).find((u) => u.visibility === 'private')!;
+    await expect(toPublic(priv)).rejects.toThrow(/not public/);
+    const anon = (await list<UseCase>(demoId, 'useCases')).find((u) => u.anonymous && u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived')!;
+    const p = await toPublic(anon);
     expect(p.anonymised).toBe(true);
     expect('attribution' in p).toBe(false);
     expect(p.origin?.kind).toBe('synthetic');
@@ -343,7 +343,7 @@ describe('use case reads', () => {
     const author = await login('member');
     const priv = await useCaseVia(author, 'Secret pantry rota', 'private');
     const group = await useCaseVia(author, 'Group pantry rota', 'group');
-    const slug = findProject(demoId)!.slug;
+    const slug = (await findProject(demoId))!.slug;
     for (const id of [priv, group]) {
       const res = await request(app).get(`/api/use-cases/${id}`);
       expect(res.status).toBe(404);
@@ -355,71 +355,85 @@ describe('use case reads', () => {
       expect(res.text).not.toMatch(/pantry rota/);
       expect((res.body as UseCase[]).every((u) => u.visibility === 'public')).toBe(true);
     }
-    const cr = list<ChangeRequest>(demoId)[0];
-    put('changeRequests', { ...cr, useCaseIds: [...(cr.useCaseIds ?? []), priv, group] }, demoId);
+    const cr = (await list<ChangeRequest>(demoId))[0];
+    await put('changeRequests', { ...cr, useCaseIds: [...(cr.useCaseIds ?? []), priv, group] }, demoId);
     const res = await request(app).get(`/api/change-requests/${cr.id}`);
     expect(res.text).not.toMatch(/pantry rota/);
     expect(res.text).not.toContain(priv);
     expect(res.text).not.toContain(group);
-    put('changeRequests', cr, demoId);
+    await put('changeRequests', cr, demoId);
     // The author still sees both.
     expect((await author.get(`/api/use-cases/${priv}`)).status).toBe(200);
   });
 });
 
-const userNamed = (name: string) => listDocs<User>('users').find((u) => u.name === name)!;
+const userNamed = async (name: string) => (await listDocs<User>('users')).find((u) => u.name === name)!;
 
 describe('second review: races, published documents, validation, numbering and coverage', () => {
   it('drafting that is already running never undoes a withdrawal (finding 17)', async () => {
     const author = await login('contributor', 'Race Author A');
     const id = await useCaseVia(author, 'Race to withdraw', 'public');
     await login('editor', 'Race Editor A');
-    const other = userNamed('Race Editor A');
-    const running = synthesise(findProject(demoId)!, other, [id]);
-    withdrawUseCase(getUseCase(id), userNamed('Race Author A'));
-    await expect(running).rejects.toMatchObject({ status: 409 });
-    const u = get<UseCase>('useCases', id)!;
+    const other = await userNamed('Race Editor A');
+    // The withdrawal lands while the model is drafting (the store is async now, so it is made to land there).
+    const { llm } = await import('../src/llm/provider.js');
+    const real = llm.json.bind(llm);
+    let landed = false;
+    const spy = vi.spyOn(llm, 'json').mockImplementation(async (opts: Parameters<typeof llm.json>[0]) => {
+      if (opts.task === 'synthesise' && !landed) {
+        landed = true;
+        await withdrawUseCase(await getUseCase(id), await userNamed('Race Author A'));
+      }
+      return real(opts as never);
+    });
+    try {
+      await expect(synthesise((await findProject(demoId))!, other, [id])).rejects.toMatchObject({ status: 409 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(landed).toBe(true);
+    const u = (await get<UseCase>('useCases', id))!;
     expect(u.withdrawnAt).toBeTruthy();
     expect(u.visibility).toBe('private');
     expect((await request(app).get(`/api/use-cases/${id}`)).status).toBe(404);
     // A stale copy saved afterwards (an interview turn, say) can't bring it back either.
     const stale = { ...u, withdrawnAt: undefined, visibility: 'public' as const, status: 'accepted' as const };
-    updateUseCase(stale, userNamed('Race Author A'), { sections: { name: 'Race to withdraw (edited)' } });
-    expect(get<UseCase>('useCases', id)!.withdrawnAt).toBeTruthy();
-    expect(get<UseCase>('useCases', id)!.visibility).toBe('private');
+    await updateUseCase(stale, await userNamed('Race Author A'), { sections: { name: 'Race to withdraw (edited)' } });
+    expect((await get<UseCase>('useCases', id))!.withdrawnAt).toBeTruthy();
+    expect((await get<UseCase>('useCases', id))!.visibility).toBe('private');
   });
 
   it('a document being written when a use case is withdrawn is written again without it (finding 18)', async () => {
     const author = await login('contributor', 'Race Author B');
     const id = await useCaseVia(author, 'Withdrawn mid-writing', 'public');
-    const writing = generateRequirements(findProject(demoId)!, { version: '9.8.0' });
-    withdrawUseCase(getUseCase(id), userNamed('Race Author B'));
+    const writing = generateRequirements((await findProject(demoId))!, { version: '9.8.0' });
+    await withdrawUseCase(await getUseCase(id), await userNamed('Race Author B'));
     const doc = await writing;
     expect(JSON.stringify(doc)).not.toMatch(/Withdrawn mid-writing/);
     expect(doc.sourceIds).not.toContain(id);
-    expect(JSON.stringify(findDocument(demoId, '9.8.0'))).not.toMatch(/Withdrawn mid-writing/);
+    expect(JSON.stringify(await findDocument(demoId, '9.8.0'))).not.toMatch(/Withdrawn mid-writing/);
   });
 
   it('a published document stops serving anything written from a use case withdrawn afterwards (findings 6, 15)', async () => {
     const author = await login('contributor', 'Published Author');
     const id = await useCaseVia(author, 'Published then withdrawn', 'public');
-    const project = findProject(demoId)!;
+    const project = (await findProject(demoId))!;
     const release = { id: 'rel_pub', ontologyId: demoId, version: '9.7.0', createdAt: '2026-01-01T00:00:00Z', status: 'published', changeRequestIds: [] } as unknown as Release;
     const doc = await markPublished(await generateRequirements(project, { version: '9.7.0', release }), release);
     expect(JSON.stringify(doc)).toMatch(/Published then withdrawn/);
-    withdrawUseCase(getUseCase(id), userNamed('Published Author'));
+    await withdrawUseCase(await getUseCase(id), await userNamed('Published Author'));
     const reads = [
       JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/requirements/9.7.0`)).body),
       (await request(app).get(`/api/ontologies/${demoId}/requirements/9.7.0/markdown`)).text,
-      JSON.stringify(requirementsDocument(demoId, '9.7.0')),
-      renderMarkdown(requirementsDocument(demoId, '9.7.0')!),
+      JSON.stringify(await requirementsDocument(demoId, '9.7.0')),
+      renderMarkdown((await requirementsDocument(demoId, '9.7.0'))!),
     ];
     for (const text of reads) {
       expect(text).not.toMatch(/Published then withdrawn/);
       expect(text).not.toContain(id);
       expect(text).toMatch(/withdrawn/i);
     }
-    const served = requirementsDocument(demoId, '9.7.0')!;
+    const served = (await requirementsDocument(demoId, '9.7.0'))!;
     expect(served.sourceIds).toBeUndefined();
     expect(served.intro).toBe('');
   });
@@ -427,10 +441,10 @@ describe('second review: races, published documents, validation, numbering and c
   it('a change request drafted from a use case shows nothing of it once withdrawn: tests, results, text (finding 4)', async () => {
     const author = await login('contributor', 'Question Author');
     const id = await useCaseVia(author, 'Edited question case', 'public');
-    const original = getUseCase(id).competencyQuestions[0].question;
-    const base = list<ChangeRequest>(demoId)[0];
+    const original = (await getUseCase(id)).competencyQuestions[0].question;
+    const base = (await list<ChangeRequest>(demoId))[0];
     const cr = { ...structuredClone(base), id: 'cr_from_edited_question', number: 7001, origin: { type: 'synthesis' as const, useCaseIds: [id] }, useCaseIds: [id], title: 'Drafted from Edited question case', tests: [{ question: original, sparql: 'SELECT * WHERE { ?s ?p ?o }', exampleData: '<urn:SECRET-EXAMPLE> a <urn:x> .' }] };
-    put('changeRequests', cr, demoId);
+    await put('changeRequests', cr, demoId);
     expect((await author.patch(`/api/use-cases/${id}`).send({ competencyQuestions: [{ question: 'A reworded question?' }] })).status).toBe(200);
     expect((await author.post(`/api/use-cases/${id}/withdraw`)).status).toBe(200);
     const outsider = await login('contributor');
@@ -449,29 +463,29 @@ describe('second review: races, published documents, validation, numbering and c
     const a = await useCaseVia(author, 'Numbered public A', 'public');
     const g = await useCaseVia(author, 'Numbered group', 'group');
     const b = await useCaseVia(author, 'Numbered public B', 'public');
-    expect(getUseCase(b).number).toBe(getUseCase(a).number + 1);
-    expect(getUseCase(g).number).toBe(0);
-    expect(getUseCase(g).groupNumber).toBeGreaterThan(0);
+    expect((await getUseCase(b)).number).toBe((await getUseCase(a)).number + 1);
+    expect((await getUseCase(g)).number).toBe(0);
+    expect((await getUseCase(g)).groupNumber).toBeGreaterThan(0);
     const outsider = (await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
     expect(outsider.some((u) => u.groupNumber)).toBe(false);
   });
 
-  it('never closes a use case automatically when one of its changes was rejected (finding 12)', () => {
+  it('never closes a use case automatically when one of its changes was rejected (finding 12)', async () => {
     const rel = { id: 'rel_c', ontologyId: demoId, version: '3.0.0', createdAt: '2026-01-01T00:00:00Z', status: 'published', publishedAt: '2026-05-01T00:00:00Z', changeRequestIds: [] } as unknown as Release;
-    put('releases', rel, demoId);
+    await put('releases', rel, demoId);
     const u = { id: 'uc_mixed', ontologyId: demoId, status: 'addressed', changeRequestIds: ['cr_rel', 'cr_rej'] } as unknown as UseCase;
     const crs = [{ id: 'cr_rel', number: 101, status: 'released', releaseId: 'rel_c' }, { id: 'cr_rej', number: 102, status: 'rejected' }] as ChangeRequest[];
-    expect(derivedStatus(u, crs)?.status ?? u.status).toBe('addressed');
-    expect(derivedStatus({ ...u, changeRequestIds: ['cr_rel'] } as UseCase, [crs[0]])?.status).toBe('closed');
+    expect((await derivedStatus(u, crs))?.status ?? u.status).toBe('addressed');
+    expect((await derivedStatus({ ...u, changeRequestIds: ['cr_rel'] } as UseCase, [crs[0]]))?.status).toBe('closed');
   });
 
   it('a requirement needing a term the ontology lacks is never met (finding 12)', async () => {
-    const met = findDocument(demoId, '1.0.0')!.requirements.find((r) => r.status === 'met')!;
-    const tom = getUseCase(met.useCaseIds[0]);
+    const met = (await findDocument(demoId, '1.0.0'))!.requirements.find((r) => r.status === 'met')!;
+    const tom = await getUseCase(met.useCaseIds[0]);
     const release = { id: 'rel_terms', ontologyId: demoId, version: '9.6.0', createdAt: '2026-01-01T00:00:00Z', status: 'published', changeRequestIds: [] } as unknown as Release;
-    const base = { ...findDocument(demoId, '1.0.0')!, id: 'reqdoc_terms', version: '9.6.0', status: 'draft' as const, sourceIds: [tom.id], useCases: [toPublic(tom)] };
-    put('requirementsDocs', { ...base, requirements: [{ ...met, missingTerms: ['schedule'] }] }, demoId);
-    const doc = await markPublished(findDocument(demoId, '9.6.0')!, release);
+    const base = { ...(await findDocument(demoId, '1.0.0'))!, id: 'reqdoc_terms', version: '9.6.0', status: 'draft' as const, sourceIds: [tom.id], useCases: [await toPublic(tom)] };
+    await put('requirementsDocs', { ...base, requirements: [{ ...met, missingTerms: ['schedule'] }] }, demoId);
+    const doc = await markPublished((await findDocument(demoId, '9.6.0'))!, release);
     expect(doc.requirements[0].status).toBe('partial');
   });
 
@@ -490,20 +504,20 @@ describe('second review: races, published documents, validation, numbering and c
 describe('third review: open reads, published passages, commits and caching', () => {
   it('never says who triaged an anonymous use case, and keeps drafts and drafted SPARQL for the group (findings 1, 2)', async () => {
     const editor = await login('editor', 'Triaging Editor');
-    const project = findProject(demoId)!;
-    const anon = createUseCase(project, userNamed('Triaging Editor'), { source: 'chat', visibility: 'public', anonymous: true, status: 'triage', sections: { name: 'Anonymous triaged case' }, competencyQuestions: [{ id: 'cq_x', question: 'Which ones?', sparql: 'SELECT ?secretSparql WHERE {}', exampleData: '<urn:secret-data> a <urn:x> .', status: 'draft' }] });
+    const project = (await findProject(demoId))!;
+    const anon = await createUseCase(project, await userNamed('Triaging Editor'), { source: 'chat', visibility: 'public', anonymous: true, status: 'triage', sections: { name: 'Anonymous triaged case' }, competencyQuestions: [{ id: 'cq_x', question: 'Which ones?', sparql: 'SELECT ?secretSparql WHERE {}', exampleData: '<urn:secret-data> a <urn:x> .', status: 'draft' }] });
     expect((await editor.post(`/api/use-cases/${anon.id}/triage`).send({ status: 'accepted', note: 'ok' })).status).toBe(200);
     const outsider = await login('contributor');
     for (const agent of [request(app), outsider]) {
       const detail = await agent.get(`/api/use-cases/${anon.id}`);
       expect(detail.status).toBe(200);
       expect(detail.body.resolution?.by).toBeUndefined();
-      expect(JSON.stringify(detail.body)).not.toContain(userNamed('Triaging Editor').id);
+      expect(JSON.stringify(detail.body)).not.toContain((await userNamed('Triaging Editor')).id);
       expect(JSON.stringify(detail.body)).not.toMatch(/secretSparql|secret-data/);
-      expect(JSON.stringify((await agent.get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toContain(userNamed('Triaging Editor').id);
+      expect(JSON.stringify((await agent.get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toContain((await userNamed('Triaging Editor')).id);
     }
     // A public use case its author hasn't submitted yet is not shown to others.
-    const draft = createUseCase(project, userNamed('Triaging Editor'), { source: 'form', visibility: 'public', status: 'draft', sections: { name: 'Unsubmitted public draft' } });
+    const draft = await createUseCase(project, await userNamed('Triaging Editor'), { source: 'form', visibility: 'public', status: 'draft', sections: { name: 'Unsubmitted public draft' } });
     expect((await outsider.get(`/api/use-cases/${draft.id}`)).status).toBe(404);
     expect(JSON.stringify((await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body)).not.toMatch(/Unsubmitted public draft/);
   });
@@ -511,7 +525,7 @@ describe('third review: open reads, published passages, commits and caching', ()
   it('shows signed-out visitors no change request titles through a use case (finding 5)', async () => {
     const steward = await login('steward');
     const withCr = (await steward.get(`/api/ontologies/${demoId}/use-cases`)).body.find((u: UseCase) => u.visibility === 'public' && u.changeRequestIds?.length) as UseCase;
-    const crTitle = get<ChangeRequest>('changeRequests', withCr.changeRequestIds![0])!.title;
+    const crTitle = (await get<ChangeRequest>('changeRequests', withCr.changeRequestIds![0]))!.title;
     const anon = await request(app).get(`/api/use-cases/${withCr.id}`);
     expect(anon.body.trace.changeRequests).toEqual([]);
     expect(anon.text).not.toContain(crTitle);
@@ -522,14 +536,14 @@ describe('third review: open reads, published passages, commits and caching', ()
     const author = await login('contributor', 'Two Case Author');
     const a = await useCaseVia(author, 'Shared passage A', 'public');
     const b = await useCaseVia(author, 'Shared passage B', 'public');
-    const project = findProject(demoId)!;
+    const project = (await findProject(demoId))!;
     const release = { id: 'rel_pass', ontologyId: demoId, version: '9.5.0', createdAt: '2026-01-01T00:00:00Z', status: 'published', changeRequestIds: [] } as unknown as Release;
     const doc = await markPublished(await generateRequirements(project, { version: '9.5.0', release }), release);
     // One requirement cites both, with a title that quotes A.
-    put('requirementsDocs', { ...doc, title: 'Mentions Shared passage A', requirements: [...doc.requirements, { id: 'R99', text: 'From Shared passage A and B', useCaseIds: [a, b], termIris: [], status: 'open' as const }] }, demoId);
+    await put('requirementsDocs', { ...doc, title: 'Mentions Shared passage A', requirements: [...doc.requirements, { id: 'R99', text: 'From Shared passage A and B', useCaseIds: [a, b], termIris: [], status: 'open' as const }] }, demoId);
     // Archiving counts as no longer publishable, just like withdrawal.
     expect((await author.patch(`/api/use-cases/${a}`).send({ status: 'archived' })).status).toBe(200);
-    const served = requirementsDocument(demoId, '9.5.0')!;
+    const served = (await requirementsDocument(demoId, '9.5.0'))!;
     const text = JSON.stringify(served) + renderMarkdown(served);
     expect(text).not.toMatch(/Shared passage A/);
     expect(served.requirements.some((r) => r.id === 'R99')).toBe(false);
@@ -539,7 +553,7 @@ describe('third review: open reads, published passages, commits and caching', ()
     expect(listed.coverage).toEqual(served.coverage);
     // The public page's snapshot: a section that draws on A goes even without an inline link, and so does one with no recorded sources.
     const snap = toPublishedRequirements({ ...doc, sections: [{ id: 's1', heading: 'About A', markdown: 'no link here', useCaseIds: [a] }, { id: 's2', heading: 'Unknown', markdown: 'old snapshot', useCaseIds: undefined as never }, { id: 's3', heading: 'About B', markdown: 'b', useCaseIds: [b] }] }, doc.useCases);
-    const view = requirementsFor(project, snap);
+    const view = await requirementsFor(project, snap);
     expect(view.document!.sections!.map((x) => x.id)).toEqual(['s3']);
     expect(JSON.stringify(view)).not.toMatch(/Shared passage A/);
     expect(view.withdrawn).toBe(1);
@@ -554,27 +568,27 @@ describe('third review: open reads, published passages, commits and caching', ()
     const withdrawal = author.post(`/api/use-cases/${id}/withdraw`).then((res) => { order.push('withdraw'); return res; });
     await new Promise((r) => setTimeout(r, 50));
     expect(order).toEqual([]);
-    expect(getUseCase(id).withdrawnAt).toBeUndefined();
+    expect((await getUseCase(id)).withdrawnAt).toBeUndefined();
     release();
     await held;
     expect((await withdrawal).status).toBe(200);
     expect(order).toEqual(['commit', 'withdraw']);
-    expect(getUseCase(id).withdrawnAt).toBeTruthy();
+    expect((await getUseCase(id)).withdrawnAt).toBeTruthy();
   });
 
   it('results a retriage saved from a use case, before or while it was withdrawn, are not shown (finding 4)', async () => {
     const { triage } = await import('../src/services/changeRequests.js');
     const author = await login('contributor', 'Retriage Author');
     const id = await useCaseVia(author, 'Retriage race', 'public');
-    const u = getUseCase(id);
-    put('useCases', { ...u, competencyQuestions: [{ ...u.competencyQuestions[0], sparql: 'SELECT ?x WHERE { ?x a <urn:RetriageKind> }', exampleData: '<urn:RETRIAGE-SECRET> a <urn:RetriageKind> .' }] }, demoId);
-    const cr = list<ChangeRequest>(demoId).find((c) => !c.useCaseIds?.length && c.origin.type === 'direct') ?? list<ChangeRequest>(demoId)[0];
+    const u = await getUseCase(id);
+    await put('useCases', { ...u, competencyQuestions: [{ ...u.competencyQuestions[0], sparql: 'SELECT ?x WHERE { ?x a <urn:RetriageKind> }', exampleData: '<urn:RETRIAGE-SECRET> a <urn:RetriageKind> .' }] }, demoId);
+    const cr = (await list<ChangeRequest>(demoId)).find((c) => !c.useCaseIds?.length && c.origin.type === 'direct') ?? (await list<ChangeRequest>(demoId))[0];
     // A retriage that captured the questions before the withdrawal saves results that include them...
-    await triage(get<ChangeRequest>('changeRequests', cr.id)!);
-    expect(JSON.stringify(get<ChangeRequest>('changeRequests', cr.id)!.validation)).toContain('RETRIAGE-SECRET');
+    await triage((await get<ChangeRequest>('changeRequests', cr.id))!);
+    expect(JSON.stringify((await get<ChangeRequest>('changeRequests', cr.id))!.validation)).toContain('RETRIAGE-SECRET');
     const outsider = await login('contributor');
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).text).toContain('RETRIAGE-SECRET');
-    withdrawUseCase(getUseCase(id), userNamed('Retriage Author'));
+    await withdrawUseCase(await getUseCase(id), await userNamed('Retriage Author'));
     // ...tagged with their source, so once it is withdrawn no reader is shown them.
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).text).not.toContain('RETRIAGE-SECRET');
     expect((await outsider.get(`/api/ontologies/${demoId}/change-requests`)).text).not.toContain('RETRIAGE-SECRET');
@@ -583,9 +597,9 @@ describe('third review: open reads, published passages, commits and caching', ()
   it('a requirement keeps a term the ontology lacks through regeneration, so it is not met (finding 8)', async () => {
     const author = await login('contributor', 'Missing Term Author');
     const id = await useCaseVia(author, 'Needs a missing term', 'public');
-    const u = getUseCase(id);
-    put('useCases', { ...u, terms: [{ label: 'Opportunity', kind: 'class' }, { label: 'Zzschedule', kind: 'class' }] }, demoId);
-    const doc = await generateRequirements(findProject(demoId)!, { version: '9.4.0' });
+    const u = await getUseCase(id);
+    await put('useCases', { ...u, terms: [{ label: 'Opportunity', kind: 'class' }, { label: 'Zzschedule', kind: 'class' }] }, demoId);
+    const doc = await generateRequirements((await findProject(demoId))!, { version: '9.4.0' });
     const mine = doc.requirements.filter((r) => r.useCaseIds.includes(id));
     expect(mine.length).toBeGreaterThan(0);
     expect(mine.every((r) => r.missingTerms?.includes('Zzschedule'))).toBe(true);
@@ -596,7 +610,7 @@ describe('third review: open reads, published passages, commits and caching', ()
     const res = await request(app).get(`/api/ontologies/${demoId}/use-cases`);
     expect(res.headers['cache-control']).toBe('private, no-store');
     expect(res.headers.vary).toMatch(/Cookie/);
-    const page = await request(app).get(`/def/${findProject(demoId)!.slug}/1.0.0`).set('Accept', 'text/html');
+    const page = await request(app).get(`/def/${(await findProject(demoId))!.slug}/1.0.0`).set('Accept', 'text/html');
     expect(page.headers['cache-control']).toBe('no-cache');
   });
 });
@@ -676,8 +690,8 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     const author = await login('contributor', 'Release Race Author');
     const id = await useCaseVia(author, 'Release race case', 'public');
     await login('steward', 'Release Race Steward');
-    const steward = userNamed('Release Race Steward');
-    const r = await draftRelease(findProject(demoId)!, steward, 'race');
+    const steward = await userNamed('Release Race Steward');
+    const r = await draftRelease((await findProject(demoId))!, steward, 'race');
     let resume!: () => void;
     let committed: Record<string, string> = {};
     const real = ontologyStore.writeRelease.bind(ontologyStore);
@@ -698,7 +712,7 @@ describe('fourth review: one process, retriage, change request copies, simulatio
       expect((await withdrawal).status).toBe(200);
       // What was committed is what was consented to when it was committed; the served copy drops it now.
       expect(committed['USE_CASES.md']).toMatch(/Release race case/);
-      expect(JSON.stringify(requirementsDocument(demoId, r.version))).not.toMatch(/Release race case/);
+      expect(JSON.stringify(await requirementsDocument(demoId, r.version))).not.toMatch(/Release race case/);
     } finally {
       spy.mockRestore();
     }
@@ -717,7 +731,7 @@ describe('fourth review: one process, retriage, change request copies, simulatio
       return real(p);
     });
     try {
-      const drafting = synthesise(findProject(demoId)!, userNamed('Synthesis Lock Editor'), [id]);
+      const drafting = synthesise((await findProject(demoId))!, await userNamed('Synthesis Lock Editor'), [id]);
       while (!resume) await new Promise((ok) => setTimeout(ok, 10));
       let withdrawn = false;
       const withdrawal = author.post(`/api/use-cases/${id}/withdraw`).then((res) => ((withdrawn = true), res));
@@ -744,21 +758,21 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     const ida = await useCaseVia(a, 'Same question source A', 'public');
     const idb = await useCaseVia(b, 'Same question source B', 'public');
     const q = 'Which sessions are secret?';
-    const withQ = (id: string, data?: string) => {
-      const u = getUseCase(id);
-      put('useCases', { ...u, competencyQuestions: [{ id: `cq_${id}`, question: q, status: 'answerable', sparql: 'SELECT ?s WHERE { ?s a <urn:SecretKind> }', ...(data ? { exampleData: data } : {}) }] }, demoId);
+    const withQ = async (id: string, data?: string) => {
+      const u = await getUseCase(id);
+      await put('useCases', { ...u, competencyQuestions: [{ id: `cq_${id}`, question: q, status: 'answerable', sparql: 'SELECT ?s WHERE { ?s a <urn:SecretKind> }', ...(data ? { exampleData: data } : {}) }] }, demoId);
     };
-    withQ(ida, '<urn:OLD_SECRET> a <urn:SecretKind> .');
-    withQ(idb);
-    const cr = list<ChangeRequest>(demoId)[0];
+    await withQ(ida, '<urn:OLD_SECRET> a <urn:SecretKind> .');
+    await withQ(idb);
+    const cr = (await list<ChangeRequest>(demoId))[0];
     const saved = structuredClone(cr);
     // Without a withdrawal the result does carry A's example data, so the check below means something.
-    expect(JSON.stringify((await triage(get<ChangeRequest>('changeRequests', cr.id)!)).validation)).toContain('OLD_SECRET');
-    const running = triage(get<ChangeRequest>('changeRequests', cr.id)!);
-    withdrawUseCase(getUseCase(ida), userNamed('Same Question A'));
+    expect(JSON.stringify((await triage((await get<ChangeRequest>('changeRequests', cr.id))!)).validation)).toContain('OLD_SECRET');
+    const running = triage((await get<ChangeRequest>('changeRequests', cr.id))!);
+    await withdrawUseCase(await getUseCase(ida), await userNamed('Same Question A'));
     await running;
-    expect(JSON.stringify(get<ChangeRequest>('changeRequests', cr.id)!.validation)).not.toContain('OLD_SECRET');
-    put('changeRequests', saved, demoId);
+    expect(JSON.stringify((await get<ChangeRequest>('changeRequests', cr.id))!.validation)).not.toContain('OLD_SECRET');
+    await put('changeRequests', saved, demoId);
   });
 
   it('the simulation returns only activity the tester may see (finding 4)', async () => {
@@ -782,12 +796,12 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     const s = await author.post(`/api/ontologies/${demoId}/interviews`).send({});
     const id = s.body.useCaseId as string;
     await author.patch(`/api/use-cases/${id}`).send({ sections: { name: 'Unsubmitted draft case' }, competencyQuestions: [{ question: 'Which drafts leak?', exampleAnswer: 'none' }] });
-    const u = getUseCase(id);
-    put('useCases', { ...u, visibility: 'public', number: 900, competencyQuestions: [{ ...u.competencyQuestions[0], sparql: 'SELECT ?x WHERE { ?x a <urn:DraftKind> }', exampleData: '<urn:DRAFT_SECRET> a <urn:DraftKind> .' }] }, demoId);
-    expect(getUseCase(id).status).toBe('draft');
+    const u = await getUseCase(id);
+    await put('useCases', { ...u, visibility: 'public', number: 900, competencyQuestions: [{ ...u.competencyQuestions[0], sparql: 'SELECT ?x WHERE { ?x a <urn:DraftKind> }', exampleData: '<urn:DRAFT_SECRET> a <urn:DraftKind> .' }] }, demoId);
+    expect((await getUseCase(id)).status).toBe('draft');
     await login('editor', 'Draft Editor');
-    await expect(synthesise(findProject(demoId)!, userNamed('Draft Editor'), [id])).rejects.toMatchObject({ status: 409 });
-    expect(getUseCase(id).status).toBe('draft');
+    await expect(synthesise((await findProject(demoId))!, await userNamed('Draft Editor'), [id])).rejects.toMatchObject({ status: 409 });
+    expect((await getUseCase(id)).status).toBe('draft');
     const outsider = await login('contributor');
     for (const url of [`/api/ontologies/${demoId}/validation`, `/api/ontologies/${demoId}/validation?ref=1.0.0`]) {
       const res = await outsider.get(url);
@@ -800,13 +814,13 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     const list = (await request(app).get(`/api/ontologies/${demoId}/use-cases`)).body as UseCase[];
     expect(list.length).toBeGreaterThan(0);
     expect(list.every((u) => u.changeRequestIds === undefined)).toBe(true);
-    const withCr = listDocs<UseCase>('useCases', demoId).find((u) => u.visibility === 'public' && u.status !== 'draft' && !u.withdrawnAt && u.changeRequestIds?.length)!;
+    const withCr = (await listDocs<UseCase>('useCases', demoId)).find((u) => u.visibility === 'public' && u.status !== 'draft' && !u.withdrawnAt && u.changeRequestIds?.length)!;
     expect((await request(app).get(`/api/use-cases/${withCr.id}`)).body.changeRequestIds).toBeUndefined();
   });
 });
 
-function list<T>(ontologyId: string, collection: 'changeRequests' | 'useCases' = 'changeRequests'): T[] {
-  return listDocs<T>(collection, ontologyId);
+async function list<T>(ontologyId: string, collection: 'changeRequests' | 'useCases' = 'changeRequests'): Promise<T[]> {
+  return await listDocs<T>(collection, ontologyId);
 }
 
 describe('fifth and sixth reviews: draft triage, citations, discarded requests', () => {
@@ -821,8 +835,8 @@ describe('fifth and sixth reviews: draft triage, citations, discarded requests',
     const s = await author.post(`/api/ontologies/${demoId}/interviews`).send({});
     const id = s.body.useCaseId as string;
     await author.patch(`/api/use-cases/${id}`).send({ sections: { name } });
-    put('useCases', { ...getUseCase(id), visibility: 'public', number: 800 + Math.floor(Math.random() * 99) }, demoId);
-    expect(getUseCase(id).status).toBe('draft');
+    await put('useCases', { ...await getUseCase(id), visibility: 'public', number: 800 + Math.floor(Math.random() * 99) }, demoId);
+    expect((await getUseCase(id)).status).toBe('draft');
     return { author, id };
   };
 
@@ -836,7 +850,7 @@ describe('fifth and sixth reviews: draft triage, citations, discarded requests',
     expect((await editor.post(`/api/use-cases/${id}/submit`)).status).toBe(403);
     expect((await editor.patch(`/api/use-cases/${id}`).send({ status: 'triage' })).status).toBe(403);
     expect((await editor.patch(`/api/use-cases/${id}`).send({ status: 'accepted' })).status).toBe(409);
-    expect(getUseCase(id).status).toBe('draft');
+    expect((await getUseCase(id)).status).toBe('draft');
     // Once the author submits it, the editor can triage it.
     expect((await author.post(`/api/use-cases/${id}/submit`)).status).toBe(200);
     expect((await editor.post(`/api/use-cases/${id}/triage`).send({ status: 'accepted' })).status).toBe(200);
@@ -844,25 +858,25 @@ describe('fifth and sixth reviews: draft triage, citations, discarded requests',
 
   it('citing a draft or archived use case is refused before any change request is saved (new finding)', async () => {
     const { author, id } = await publicDraft('Cite Draft Owner', 'Cite draft case');
-    const before = list<ChangeRequest>(demoId).length;
+    const before = (await list<ChangeRequest>(demoId)).length;
     const res = await author.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Cites a draft', naturalLanguage: 'Add a Shift class', useCaseIds: [id] });
     expect(res.status).toBe(409);
-    expect(list<ChangeRequest>(demoId).length).toBe(before);
-    put('useCases', { ...getUseCase(id), status: 'archived' }, demoId);
+    expect((await list<ChangeRequest>(demoId)).length).toBe(before);
+    await put('useCases', { ...await getUseCase(id), status: 'archived' }, demoId);
     expect((await author.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Cites archived', naturalLanguage: 'Add a Shift class', useCaseIds: [id] })).status).toBe(409);
-    expect(list<ChangeRequest>(demoId).length).toBe(before);
+    expect((await list<ChangeRequest>(demoId)).length).toBe(before);
   });
 
   it('a triage never writes back a request that is not stored (finding 3)', async () => {
     const { triage } = await import('../src/services/changeRequests.js');
-    const ghost = { ...structuredClone(list<ChangeRequest>(demoId)[0]), id: 'cr_never_stored', title: 'Ghost request' };
+    const ghost = { ...structuredClone((await list<ChangeRequest>(demoId))[0]), id: 'cr_never_stored', title: 'Ghost request' };
     await triage(ghost);
-    expect(get('changeRequests', 'cr_never_stored')).toBeUndefined();
+    expect(await get('changeRequests', 'cr_never_stored')).toBeUndefined();
   });
 
   it('a change request citing a use case withdrawn while it is drafted is never stored or shown (finding 3)', async () => {
     const { agent, id } = await publicCase('Uncommitted Author', 'Uncommitted cite case');
-    const before = list<ChangeRequest>(demoId).length;
+    const before = (await list<ChangeRequest>(demoId)).length;
     const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
@@ -870,13 +884,13 @@ describe('fifth and sixth reviews: draft triage, citations, discarded requests',
     const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
       if (++calls === 1) await new Promise<void>((ok) => (resume = ok));
       // Any later read (triage) would find what has been stored so far.
-      else storedDuring.push(list<ChangeRequest>(demoId).length);
+      else storedDuring.push((await list<ChangeRequest>(demoId)).length);
       return real(p);
     });
     try {
       const creating = agent.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Uncommitted cite request', naturalLanguage: 'Add a Berth class', useCaseIds: [id] }).then((r) => r);
       while (!resume) await new Promise((ok) => setTimeout(ok, 10));
-      withdrawUseCase(getUseCase(id), userNamed('Uncommitted Author'));
+      await withdrawUseCase(await getUseCase(id), await userNamed('Uncommitted Author'));
       resume();
       expect((await creating).status).toBe(409);
     } finally {
@@ -885,8 +899,8 @@ describe('fifth and sixth reviews: draft triage, citations, discarded requests',
     // Refused before the request was ever stored: drafting read the ontology once, and triage never started.
     expect(calls).toBe(1);
     expect(storedDuring).toEqual([]);
-    expect(list<ChangeRequest>(demoId).length).toBe(before);
-    expect(JSON.stringify(listDocs('activity', demoId))).not.toMatch(/Uncommitted cite request/);
+    expect((await list<ChangeRequest>(demoId)).length).toBe(before);
+    expect(JSON.stringify(await listDocs('activity', demoId))).not.toMatch(/Uncommitted cite request/);
   });
 });
 
@@ -897,10 +911,10 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   };
   const addClass = (label: string) => ({ op: 'addClass', localName: 'Consent' + Math.random().toString(36).slice(2, 8), label, definition: `A ${label} thing.` }) as unknown as ChangeRequest['ops'][number];
   /** A change request drafted from the use case (as synthesis does), stored directly. */
-  const derived = (useCaseId: string, fields: Partial<ChangeRequest>) => {
-    const base = list<ChangeRequest>(demoId)[0];
+  const derived = async (useCaseId: string, fields: Partial<ChangeRequest>) => {
+    const base = (await list<ChangeRequest>(demoId))[0];
     const cr = { ...structuredClone(base), id: `cr_seven_${Math.random().toString(36).slice(2, 8)}`, number: 6000 + Math.floor(Math.random() * 999), origin: { type: 'synthesis' as const, useCaseIds: [useCaseId] }, useCaseIds: [useCaseId], releaseId: undefined, mergedCommit: undefined, ...fields } as ChangeRequest;
-    put('changeRequests', cr, demoId);
+    await put('changeRequests', cr, demoId);
     return cr;
   };
 
@@ -922,7 +936,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     } finally {
       spy.mockRestore();
     }
-    const u = getUseCase(id);
+    const u = await getUseCase(id);
     expect(u.withdrawnAt).toBeDefined();
     expect(u.visibility).toBe('private');
     const outsider = await login('contributor');
@@ -933,8 +947,8 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('an AI revision that finishes after a withdrawal is refused, and leaves the request as it was (finding 2)', async () => {
     const { id } = await publicCase('Revise Author', 'Revise race case');
     const editor = await login('editor', 'Revise Editor');
-    const cr = derived(id, { title: 'Model Revise race case', status: 'review', authorId: userNamed('Revise Editor').id, ops: [addClass('Revise race thing')] });
-    const before = get<ChangeRequest>('changeRequests', cr.id)!;
+    const cr = await derived(id, { title: 'Model Revise race case', status: 'review', authorId: (await userNamed('Revise Editor')).id, ops: [addClass('Revise race thing')] });
+    const before = (await get<ChangeRequest>('changeRequests', cr.id))!;
     const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
@@ -945,13 +959,13 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     try {
       const revising = editor.post(`/api/change-requests/${cr.id}/revise`).send({ instruction: 'Add a Berth class too' }).then((r) => r);
       while (!resume) await new Promise((ok) => setTimeout(ok, 10));
-      withdrawUseCase(getUseCase(id), userNamed('Revise Author'));
+      await withdrawUseCase(await getUseCase(id), await userNamed('Revise Author'));
       resume();
       expect((await revising).status).toBe(409);
     } finally {
       spy.mockRestore();
     }
-    expect(get<ChangeRequest>('changeRequests', cr.id)).toEqual(before);
+    expect(await get<ChangeRequest>('changeRequests', cr.id)).toEqual(before);
     // And once withdrawn, it can't be revised, edited or submitted at all.
     expect((await editor.post(`/api/change-requests/${cr.id}/revise`).send({ instruction: 'again' })).status).toBe(409);
     expect((await editor.patch(`/api/change-requests/${cr.id}`).send({ title: 'New title' })).status).toBe(409);
@@ -960,26 +974,26 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('merging a request whose use case was withdrawn sends it to needs-work and changes nothing in the ontology (finding 2)', async () => {
     const { id } = await publicCase('Merge Author', 'Merge withdrawn case');
     const editor = await login('editor', 'Merge Editor');
-    const cr = derived(id, { title: 'Model Merge withdrawn case', status: 'approved', ops: [addClass('Merge withdrawn secret')] });
-    withdrawUseCase(getUseCase(id), userNamed('Merge Author'));
+    const cr = await derived(id, { title: 'Model Merge withdrawn case', status: 'approved', ops: [addClass('Merge withdrawn secret')] });
+    await withdrawUseCase(await getUseCase(id), await userNamed('Merge Author'));
     const res = await editor.post(`/api/change-requests/${cr.id}/merge`);
     expect(res.status).toBe(200);
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.mergedCommit).toBeUndefined();
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('needs-work');
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.mergedCommit).toBeUndefined();
     expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Merge withdrawn secret/);
     // The governance clock doesn't bring it back: it stays where it is.
     const { advance } = await import('../src/services/changeRequests.js');
-    await advance(get<ChangeRequest>('changeRequests', cr.id)!);
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
+    await advance((await get<ChangeRequest>('changeRequests', cr.id))!);
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('needs-work');
   });
 
   it('a withdrawal waits while a merge is committing, and a merge waits for a withdrawal (finding 2)', async () => {
     const { id, agent } = await publicCase('Merge Race Author', 'Merge race case');
     const editor = await login('editor', 'Merge Race Editor');
-    const cr = derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
+    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
     // Drafted from a use case, so an editor approves exactly what it publishes before it can merge.
     const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
-    await approvePublication(get<ChangeRequest>('changeRequests', cr.id)!, userNamed('Merge Race Editor'), (await publicationPreview(get<ChangeRequest>('changeRequests', cr.id)!)).fingerprint);
+    await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Merge Race Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
     const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
@@ -1004,7 +1018,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     }
     expect((await withdrawal!).status).toBe(200);
     // The merge was consented to when it was committed; the request is withheld from outsiders now.
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('merged');
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('merged');
     const outsider = await login('contributor');
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
   });
@@ -1012,7 +1026,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('a request drafted from or citing a withdrawn use case is withheld on every read: API, list, activity, MCP, releases, use case pages (finding 3)', async () => {
     const { id, agent: author } = await publicCase('Withheld Author', 'Dock "Meridian" plan');
     const steward = await login('steward', 'Withheld Steward');
-    const cr = derived(id, {
+    const cr = await derived(id, {
       title: 'Support Dock "Meridian" plan',
       description: 'A confidential goal of the Meridian dock',
       status: 'merged',
@@ -1022,19 +1036,19 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
       // An editor approved what it publishes, so its title went into the release notes.
       privacyCleared: { by: 'someone', at: clock.iso(), fingerprint: 'approved', title: 'Support Dock "Meridian" plan', kgcl: ['create class :MeridianBerth'] },
     });
-    put('reviews', { id: `rv_${cr.id}`, changeRequestId: cr.id, userId: userNamed('Withheld Steward').id, roles: ['steward'], decision: 'comment', comment: 'Meridian review', at: clock.iso() }, cr.id);
-    put('votes', { id: `vt_${cr.id}`, subjectType: 'change-request', subjectId: cr.id, userId: userNamed('Withheld Steward').id, roles: ['steward'], choice: 'yes', comment: 'Meridian vote', at: clock.iso() }, cr.id);
-    put('activity', { id: `act_${cr.id}`, ontologyId: demoId, type: 'cr.created', message: 'opened Dock "Meridian" plan', link: `/o/${demoId}/changes/${cr.id}`, at: clock.iso(), createdAt: '2999-01-01T00:00:00.000Z' }, demoId);
+    await put('reviews', { id: `rv_${cr.id}`, changeRequestId: cr.id, userId: (await userNamed('Withheld Steward')).id, roles: ['steward'], decision: 'comment', comment: 'Meridian review', at: clock.iso() }, cr.id);
+    await put('votes', { id: `vt_${cr.id}`, subjectType: 'change-request', subjectId: cr.id, userId: (await userNamed('Withheld Steward')).id, roles: ['steward'], choice: 'yes', comment: 'Meridian vote', at: clock.iso() }, cr.id);
+    await put('activity', { id: `act_${cr.id}`, ontologyId: demoId, type: 'cr.created', message: 'opened Dock "Meridian" plan', link: `/o/${demoId}/changes/${cr.id}`, at: clock.iso(), createdAt: '2999-01-01T00:00:00.000Z' }, demoId);
     const { draftRelease } = await import('../src/services/releases.js');
-    const rel = await draftRelease(findProject(demoId)!, userNamed('Withheld Steward'));
+    const rel = await draftRelease((await findProject(demoId))!, await userNamed('Withheld Steward'));
     expect(rel.changeRequestIds).toContain(cr.id);
-    expect(get<Release>('releases', rel.id)!.notes).toMatch(/Meridian/);
-    const stored = JSON.stringify(get('changeRequests', cr.id));
+    expect((await get<Release>('releases', rel.id))!.notes).toMatch(/Meridian/);
+    const stored = JSON.stringify(await get('changeRequests', cr.id));
 
-    withdrawUseCase(getUseCase(id), userNamed('Withheld Author'));
+    await withdrawUseCase(await getUseCase(id), await userNamed('Withheld Author'));
 
     // Nothing stored was rewritten (so no status, IRI or literal can be damaged)...
-    expect(JSON.stringify(get('changeRequests', cr.id))).toBe(stored);
+    expect(JSON.stringify(await get('changeRequests', cr.id))).toBe(stored);
     // ...and no reader who may not see the use case gets any of it.
     const outsider = await login('contributor');
     const one = await outsider.get(`/api/change-requests/${cr.id}`);
@@ -1068,18 +1082,18 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('a requirements title naming a withdrawn use case is never shown, in release detail or listings (finding 4)', async () => {
     const { id } = await publicCase('Story Author', 'Tug berth story');
     const member = await login('member', 'Story Member');
-    const steward = userNamed('Withheld Steward');
-    const base = listDocs<RequirementsDocument>('requirementsDocs', demoId)[0];
-    const rel = { ...structuredClone(list<Release>(demoId, 'releases' as never)[0]), id: 'rel_story_title', version: '8.8.8', level: 'minor' as const, status: 'draft' as const, statusSince: clock.iso(), createdAt: clock.iso(), changeRequestIds: [], createdBy: steward.id };
-    put('releases', rel, demoId);
+    const steward = await userNamed('Withheld Steward');
+    const base = (await listDocs<RequirementsDocument>('requirementsDocs', demoId))[0];
+    const rel = { ...structuredClone((await list<Release>(demoId, 'releases' as never))[0]), id: 'rel_story_title', version: '8.8.8', level: 'minor' as const, status: 'draft' as const, statusSince: clock.iso(), createdAt: clock.iso(), changeRequestIds: [], createdBy: steward.id };
+    await put('releases', rel, demoId);
     const draft = { ...structuredClone(base), id: 'req_story_draft', version: '8.8.8', releaseId: rel.id, status: 'draft' as const, title: 'The Tug berth story release', sourceIds: [id], invalidated: undefined };
-    put('requirementsDocs', draft, demoId);
+    await put('requirementsDocs', draft, demoId);
     const pubRel = { ...rel, id: 'rel_story_pub', version: '8.8.9', status: 'published' as const };
-    put('releases', pubRel, demoId);
-    put('requirementsDocs', { ...draft, id: 'req_story_pub', version: '8.8.9', releaseId: pubRel.id, status: 'published' as const }, demoId);
+    await put('releases', pubRel, demoId);
+    await put('requirementsDocs', { ...draft, id: 'req_story_pub', version: '8.8.9', releaseId: pubRel.id, status: 'published' as const }, demoId);
     expect((await member.get(`/api/releases/${rel.id}`)).text).toMatch(/Tug berth story/);
 
-    withdrawUseCase(getUseCase(id), userNamed('Story Author'));
+    await withdrawUseCase(await getUseCase(id), await userNamed('Story Author'));
 
     const outsider = await login('contributor');
     const draftForOutsider = await outsider.get(`/api/releases/${rel.id}`);
@@ -1101,30 +1115,32 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
 
   it('a validation already running when a use case is withdrawn does not return its question (finding 5)', async () => {
     const { id } = await publicCase('Inflight Author', 'Inflight validation case');
-    const u = getUseCase(id);
+    const u = await getUseCase(id);
     const question = 'Which inflight berths are secret?';
-    put('useCases', { ...u, competencyQuestions: [{ id: 'cq_inflight', question, status: 'answerable', sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }] }, demoId);
-    const outsider = await login('contributor');
-    // The report has captured the questions (it is keyed by them) when the withdrawal lands.
+    await put('useCases', { ...u, competencyQuestions: [{ id: 'cq_inflight', question, status: 'answerable', sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }] }, demoId);
+    const outsider = await login('contributor', 'Inflight Outsider');
+    // The report has captured the questions (it is keyed by them) when the withdrawal lands. The store is
+    // async now, so the withdrawal starts there and the report is read through the viewer's projection
+    // once it has landed: what a request still running at that moment would send.
     const realHead = ontologyStore.head.bind(ontologyStore);
-    let fired = false;
+    let landing: Promise<unknown> | undefined;
     const spy = vi.spyOn(ontologyStore, 'head').mockImplementation((p) => {
       // The call that keys the report, after the questions were read (not the one inside the graph read).
-      if (!fired && new Error().stack?.includes('workingValidation') && !new Error().stack?.includes('.working (')) {
-        fired = true;
-        withdrawUseCase(getUseCase(id), userNamed('Inflight Author'));
+      if (!landing && new Error().stack?.includes('workingValidation') && !new Error().stack?.includes('.working (')) {
+        landing = (async () => withdrawUseCase(await getUseCase(id), await userNamed('Inflight Author')))();
       }
       return realHead(p);
     });
-    let res: request.Response;
+    let report: Awaited<ReturnType<typeof workingValidation>>;
     try {
-      res = await outsider.get(`/api/ontologies/${demoId}/validation`);
+      report = await workingValidation((await findProject(demoId))!);
     } finally {
       spy.mockRestore();
     }
-    expect(fired).toBe(true);
-    expect(res.status).toBe(200);
-    expect(res.text).not.toContain(question);
+    expect(landing).toBeDefined();
+    await landing;
+    expect(report.competencyQuestions.map((q) => q.question)).toContain(question);
+    expect(JSON.stringify(await validationForViewer(report, await userNamed('Inflight Outsider')))).not.toContain(question);
     for (const url of [`/api/ontologies/${demoId}/validation`, `/api/ontologies/${demoId}/validation?ref=1.0.0`]) expect((await outsider.get(url)).text).not.toContain(question);
   });
 
@@ -1132,10 +1148,10 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     const { publishRelease } = await import('../src/services/releases.js');
     const { id } = await publicCase('Notes Race Author', 'Pilot boat roster');
     await login('steward', 'Notes Race Steward');
-    const steward = userNamed('Notes Race Steward');
-    const cr = derived(id, { title: 'Support Pilot boat roster', status: 'merged', ops: [] });
-    const r: Release = { ...structuredClone(list<Release>(demoId, 'releases' as never)[0]), id: 'rel_notes_race', version: '9.9.9', level: 'minor', status: 'draft', statusSince: clock.iso(), createdAt: clock.iso(), notes: '- #1 Support Pilot boat roster', changeRequestIds: [cr.id], commit: undefined, publishedAt: undefined, githubUrl: undefined };
-    put('releases', r, demoId);
+    const steward = await userNamed('Notes Race Steward');
+    const cr = await derived(id, { title: 'Support Pilot boat roster', status: 'merged', ops: [] });
+    const r: Release = { ...structuredClone((await list<Release>(demoId, 'releases' as never))[0]), id: 'rel_notes_race', version: '9.9.9', level: 'minor', status: 'draft', statusSince: clock.iso(), createdAt: clock.iso(), notes: '- #1 Support Pilot boat roster', changeRequestIds: [cr.id], commit: undefined, publishedAt: undefined, githubUrl: undefined };
+    await put('releases', r, demoId);
     let committed: Record<string, string> = {};
     const realWrite = ontologyStore.writeRelease.bind(ontologyStore);
     const write = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
@@ -1150,9 +1166,9 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
       return realWorking(p);
     });
     try {
-      const publishing = publishRelease(get<Release>('releases', r.id)!, steward);
+      const publishing = publishRelease((await get<Release>('releases', r.id))!, steward);
       while (!resume) await new Promise((ok) => setTimeout(ok, 10));
-      withdrawUseCase(getUseCase(id), userNamed('Notes Race Author'));
+      await withdrawUseCase(await getUseCase(id), await userNamed('Notes Race Author'));
       read.mockRestore();
       resume();
       await publishing;
@@ -1162,7 +1178,7 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     }
     expect(committed['RELEASE_NOTES.md']).toBeDefined();
     expect(committed['RELEASE_NOTES.md']).not.toMatch(/Pilot boat roster/);
-    expect(get<Release>('releases', r.id)!.status).toBe('published');
+    expect((await get<Release>('releases', r.id))!.status).toBe('published');
     const outsider = await login('contributor');
     const res = await outsider.get(`/api/releases/${r.id}`);
     expect(res.status).toBe(200);
@@ -1177,30 +1193,30 @@ describe('eighth review: requests made from calls, interview saves, untagged res
   };
   const addClass = (label: string) => ({ op: 'addClass', localName: 'Eighth' + Math.random().toString(36).slice(2, 8), label, definition: `A ${label} thing.` }) as unknown as ChangeRequest['ops'][number];
   /** A call, stored directly, as the meeting workflow before this version left it. */
-  const legacyMeeting = () => {
-    const m = { ...structuredClone(listDocs<{ id: string; createdBy?: string }>('meetings', demoId)[0]), id: `mtg_legacy_${Math.random().toString(36).slice(2, 8)}` };
-    put('meetings', m, demoId);
+  const legacyMeeting = async () => {
+    const m = { ...structuredClone((await listDocs<{ id: string; createdBy?: string }>('meetings', demoId))[0]), id: `mtg_legacy_${Math.random().toString(36).slice(2, 8)}` };
+    await put('meetings', m, demoId);
     return m;
   };
   /** A change request as the meeting workflow before this version stored it: origin the call, no use case links. */
-  const legacyMeetingCR = (meetingId: string, fields: Partial<ChangeRequest>) => {
-    const base = list<ChangeRequest>(demoId)[0];
+  const legacyMeetingCR = async (meetingId: string, fields: Partial<ChangeRequest>) => {
+    const base = (await list<ChangeRequest>(demoId))[0];
     const cr = { ...structuredClone(base), id: `cr_mtg_${Math.random().toString(36).slice(2, 8)}`, number: 5000 + Math.floor(Math.random() * 999), origin: { type: 'meeting' as const, meetingId }, useCaseIds: undefined, releaseId: undefined, mergedCommit: undefined, ...fields } as ChangeRequest;
-    put('changeRequests', cr, demoId);
+    await put('changeRequests', cr, demoId);
     return cr;
   };
 
   it('a request made from a call before this version is withheld and refused once a use case from that call is withdrawn (finding 1)', async () => {
-    const m = legacyMeeting();
+    const m = await legacyMeeting();
     const { id } = await publicCase('Call Case Author', 'Legacy call case');
-    put('useCases', { ...getUseCase(id), source: 'meeting', sourceRef: m.id }, demoId);
-    const cr = legacyMeetingCR(m.id, { title: 'From the call: Legacy call case', status: 'approved', ops: [addClass('Legacy call secret')] });
+    await put('useCases', { ...await getUseCase(id), source: 'meeting', sourceRef: m.id }, demoId);
+    const cr = await legacyMeetingCR(m.id, { title: 'From the call: Legacy call case', status: 'approved', ops: [addClass('Legacy call secret')] });
     // Before the withdrawal, working group members see it (and outsiders don't: it came from a call).
     const member = await login('member', 'Call Member');
     expect((await member.get(`/api/change-requests/${cr.id}`)).text).toMatch(/Legacy call case/);
     const outsider = await login('contributor');
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
-    withdrawUseCase(getUseCase(id), userNamed('Call Case Author'));
+    await withdrawUseCase(await getUseCase(id), await userNamed('Call Case Author'));
     for (const reader of [member, outsider]) {
       const res = await reader.get(`/api/change-requests/${cr.id}`);
       expect(res.body.withheld).toBe(true);
@@ -1208,16 +1224,16 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     }
     const editor = await login('editor', 'Call Editor');
     expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('needs-work');
     expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Legacy call secret/);
   });
 
   it('a request made from a call whose use cases can no longer be found is never merged (finding 1)', async () => {
-    const m = legacyMeeting();
-    const cr = legacyMeetingCR(m.id, { title: 'Orphaned call request', status: 'approved', ops: [addClass('Orphaned call secret')] });
+    const m = await legacyMeeting();
+    const cr = await legacyMeetingCR(m.id, { title: 'Orphaned call request', status: 'approved', ops: [addClass('Orphaned call secret')] });
     const editor = await login('editor', 'Orphan Editor');
     expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
-    expect(get<ChangeRequest>('changeRequests', cr.id)!.status).toBe('needs-work');
+    expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('needs-work');
     expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Orphaned call secret/);
     // And someone who can't see the call can't read it.
     expect((await (await login('contributor')).get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
@@ -1244,7 +1260,7 @@ describe('eighth review: requests made from calls, interview saves, untagged res
       resume();
       expect((await turn).status).toBe(200);
       // ...and it stays private, with what the turn captured.
-      expect(getUseCase(id).visibility).toBe('private');
+      expect((await getUseCase(id)).visibility).toBe('private');
       expect((await outsider.get(`/api/use-cases/${id}`)).status).toBe(404);
     } finally {
       spy.mockRestore();
@@ -1273,7 +1289,7 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     } finally {
       spy.mockRestore();
     }
-    const u = getUseCase(id);
+    const u = await getUseCase(id);
     expect(u.visibility).toBe('public');
     expect(u.status).not.toBe('draft');
   });
@@ -1281,12 +1297,12 @@ describe('eighth review: requests made from calls, interview saves, untagged res
   it('competency results saved without a source are never shown, even when they share a question with the request\'s own test (finding 3)', async () => {
     const { triage } = await import('../src/services/changeRequests.js');
     const { id } = await publicCase('Untagged Author', 'Untagged results case');
-    const u = getUseCase(id);
-    put('useCases', { ...u, competencyQuestions: [{ id: 'cq_untagged', question: 'Which resources?', status: 'answerable', sparql: 'SELECT ?x WHERE { ?x a <urn:UntaggedKind> }', exampleData: '<urn:UNTAGGED-SECRET> a <urn:UntaggedKind> .' }] }, demoId);
-    const base = list<ChangeRequest>(demoId)[0];
+    const u = await getUseCase(id);
+    await put('useCases', { ...u, competencyQuestions: [{ id: 'cq_untagged', question: 'Which resources?', status: 'answerable', sparql: 'SELECT ?x WHERE { ?x a <urn:UntaggedKind> }', exampleData: '<urn:UNTAGGED-SECRET> a <urn:UntaggedKind> .' }] }, demoId);
+    const base = (await list<ChangeRequest>(demoId))[0];
     const cr = { ...structuredClone(base), id: 'cr_untagged', number: 4999, origin: { type: 'direct' as const }, useCaseIds: [], tests: [{ question: 'Which resources?', sparql: 'SELECT ?x WHERE { ?x a <urn:OwnKind> }', exampleData: '<urn:own-harmless> a <urn:OwnKind> .' }] };
-    put('changeRequests', cr, demoId);
-    await triage(get<ChangeRequest>('changeRequests', cr.id)!);
+    await put('changeRequests', cr, demoId);
+    await triage((await get<ChangeRequest>('changeRequests', cr.id))!);
     const outsider = await login('contributor');
     // Newly saved results say where they came from: the request's own test is shown.
     const fresh = await outsider.get(`/api/change-requests/${cr.id}`);
@@ -1296,9 +1312,9 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     expect(JSON.stringify(own?.rows)).toContain('own-harmless');
     expect(shown.some((r) => r.sparql.includes('UntaggedKind'))).toBe(true);
     // As saved before sources were recorded: no source on any result.
-    const saved = get<ChangeRequest>('changeRequests', cr.id)!;
-    put('changeRequests', { ...saved, validation: { ...saved.validation!, competencyQuestions: saved.validation!.competencyQuestions.map(({ source: _s, ...r }) => r) } }, demoId);
-    withdrawUseCase(getUseCase(id), userNamed('Untagged Author'));
+    const saved = (await get<ChangeRequest>('changeRequests', cr.id))!;
+    await put('changeRequests', { ...saved, validation: { ...saved.validation!, competencyQuestions: saved.validation!.competencyQuestions.map(({ source: _s, ...r }) => r) } }, demoId);
+    await withdrawUseCase(await getUseCase(id), await userNamed('Untagged Author'));
     const res = await outsider.get(`/api/change-requests/${cr.id}`);
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('UNTAGGED-SECRET');
@@ -1324,6 +1340,16 @@ describe('eighth review: requests made from calls, interview saves, untagged res
     await Promise.all([outer, after]);
     await detached;
     expect(most).toBe(1);
+  });
+
+  // With the async store, a transaction that waited for the consent lock held the store's writer lock while the
+  // lock's holder waited to write: both stalled until the store gave up. Now it is refused at once.
+  it('refuses to wait for the consent lock inside a transaction, and takes it outside one', async () => {
+    await expect(transaction(async () => withConsentLock('lock-test-3', async () => 1))).rejects.toThrow(/inside a transaction/);
+    // Background work started from a transaction runs outside it, so it may take the lock.
+    await expect(transaction(async () => detached(() => withConsentLock('lock-test-3', async () => 2)))).resolves.toBe(2);
+    // The order everything uses: the consent lock, then a transaction, which may write while the lock is held.
+    await expect(withConsentLock('lock-test-3', () => transaction(async () => { await put('kv', { id: 'lock-test-3' }); return 3; }))).resolves.toBe(3);
   });
 
   it('a context that outlives its holding queues like anyone else (finding 4)', async () => {
@@ -1352,19 +1378,19 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
   it('a use case links and quotes a call only for those the call exists for: not once it waits for approval again', async () => {
     // A call is shown to the working group, but one waiting for approval only to facilitators. Use case pages used to
     // check only the first rule, so members who can't facilitate still saw the link to a call waiting for approval.
-    const base = listDocs<{ id: string }>('meetings', demoId)[0];
+    const base = (await listDocs<{ id: string }>('meetings', demoId))[0];
     const m = { ...structuredClone(base), id: `mtg_pending_${Math.random().toString(36).slice(2, 8)}`, title: 'Pending approval call' } as { id: string } & Record<string, unknown>;
-    put('meetings', m, demoId);
+    await put('meetings', m, demoId);
     const author = await login('contributor', 'Pending Call Author');
     const id = await useCaseVia(author, 'Pending call case', 'public');
-    put('useCases', { ...getUseCase(id), source: 'meeting', sourceRef: m.id, sourceLines: [0], links: [{ type: 'meeting', id: m.id, relation: 'related', at: clock.iso() }] }, demoId);
+    await put('useCases', { ...await getUseCase(id), source: 'meeting', sourceRef: m.id, sourceLines: [0], links: [{ type: 'meeting', id: m.id, relation: 'related', at: clock.iso() }] }, demoId);
     const reviewer = await login('reviewer', 'Pending Call Reviewer');
     const steward = await login('steward', 'Pending Call Steward');
     const seen = async (a: Awaited<ReturnType<typeof login>>) => (await a.get(`/api/use-cases/${id}`)).body as UseCase;
     expect((await seen(reviewer)).sourceRef).toBe(m.id);
     expect((await seen(reviewer)).links?.some((l) => l.id === m.id)).toBe(true);
 
-    put('meetings', { ...m, calendar: { approval: 'pending', start: clock.iso(), end: clock.iso(), uid: 'pending-again', key: 'k' } }, demoId);
+    await put('meetings', { ...m, calendar: { approval: 'pending', start: clock.iso(), end: clock.iso(), uid: 'pending-again', key: 'k' } }, demoId);
     const now = await seen(reviewer);
     expect(now.sourceRef).toBeUndefined();
     expect(now.sourceLines).toBeUndefined();
@@ -1377,7 +1403,7 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
 
   it('a release snapshot whose section lists its use cases wrongly is shown as not recorded, not as an error', async () => {
     // Snapshot validation used to skip a section's useCaseIds, which the page then calls .some() on: a 500.
-    const project = findProject(demoId)!;
+    const project = (await findProject(demoId))!;
     const snap = path.join(ontologyStore.dir(project), 'releases', '1.0.0', 'requirements.json');
     const original = fs.readFileSync(snap, 'utf8');
     try {
@@ -1386,7 +1412,7 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
       const res = await request(app).get(`/def/${project.slug}/1.0.0`);
       expect(res.status).toBe(200);
       expect(res.text).toContain('were not recorded when it was published');
-      expect(requirementsFor(project, JSON.parse(fs.readFileSync(snap, 'utf8'))).snapshotMissing).toBe(true);
+      expect((await requirementsFor(project, JSON.parse(fs.readFileSync(snap, 'utf8')))).snapshotMissing).toBe(true);
     } finally {
       fs.writeFileSync(snap, original);
     }

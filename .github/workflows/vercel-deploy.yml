@@ -1,0 +1,69 @@
+name: Deploy to Vercel
+
+# Deploys main to the Concord project on the jeswr1 Vercel team with a token, instead of
+# Vercel's GitHub app: a GitHub account can be the login of only one Vercel account, and the
+# app would tie this repo to it. The token is the repository secret VERCEL_TOKEN, created in
+# that Vercel account (Account Settings → Tokens, scoped to jeswr1); until it exists this
+# workflow says so and stops. The IDs below aren't secret.
+#
+# Paths mirror scripts/vercel-ignore-build.sh: only the web app, the routing middleware and
+# what they build from need a new deployment.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'packages/**'
+      - 'middleware.ts'
+      - 'vercel.json'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
+      - '.github/workflows/vercel-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One production deployment at a time; a newer push supersedes one still building.
+concurrency:
+  group: vercel-production
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: team_Xa1bKtkWpjRv1TahgZAXMuub
+  VERCEL_PROJECT_ID: prj_yLRfsVnMssWRgXjL0Vigv6Ki18Yh
+  VERCEL_CLI: vercel@65.0.0
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check for the token
+        id: token
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::notice::No VERCEL_TOKEN secret yet, so nothing was deployed. Create one in the jeswr1 Vercel account and add it with: gh secret set VERCEL_TOKEN -R ${{ github.repository }}"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v4
+      - if: steps.token.outputs.present == 'true'
+        uses: ./.github/actions/setup
+      # Pulls the project's settings and Production environment variables, builds here with
+      # vercel.json's build command, and uploads the result.
+      - if: steps.token.outputs.present == 'true'
+        name: Build and deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          npx --yes "$VERCEL_CLI" pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes "$VERCEL_CLI" build --prod --token="$VERCEL_TOKEN"
+          url=$(npx --yes "$VERCEL_CLI" deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "Deployed: $url" >> "$GITHUB_STEP_SUMMARY"

@@ -1,7 +1,7 @@
 import type { ChangeRequest, Release, UseCase, UseCaseStatus } from '@concord/shared';
 import { useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, list, put } from '../db.js';
+import { transaction, get, list, put } from '../db.js';
 import { logActivity } from './users.js';
 
 /**
@@ -30,8 +30,8 @@ export function useCaseIdsForCR(cr: ChangeRequest): string[] {
 }
 
 /** Change requests linked to a use case, from either side of the link. */
-export function changeRequestsFor(u: UseCase, overrides: ChangeRequest[] = []): ChangeRequest[] {
-  const byId = new Map(list<ChangeRequest>('changeRequests', u.ontologyId).map((c) => [c.id, c]));
+export async function changeRequestsFor(u: UseCase, overrides: ChangeRequest[] = []): Promise<ChangeRequest[]> {
+  const byId = new Map((await list<ChangeRequest>('changeRequests', u.ontologyId)).map((c) => [c.id, c]));
   for (const o of overrides) byId.set(o.id, o);
   const linked = new Set(u.changeRequestIds ?? []);
   return [...byId.values()].filter((c) => linked.has(c.id) || useCaseIdsForCR(c).includes(u.id)).sort((a, b) => a.number - b.number);
@@ -50,18 +50,18 @@ const cmpVersion = (a: string, b: string) => {
  * release among those that shipped them (by version, then publication time),
  * not the one attached to the highest-numbered change request.
  */
-export function completingRelease(crs: ChangeRequest[]): Release | undefined {
-  const releases = crs.map((c) => (c.releaseId ? get<Release>('releases', c.releaseId) : undefined));
+export async function completingRelease(crs: ChangeRequest[]): Promise<Release | undefined> {
+  const releases = (await Promise.all(crs.map(async (c) => (c.releaseId ? await get<Release>('releases', c.releaseId) : undefined))));
   if (releases.some((r) => !r || r.status !== 'published')) return undefined;
   return (releases as Release[]).sort((a, b) => cmpVersion(a.version, b.version) || (a.publishedAt ?? '').localeCompare(b.publishedAt ?? '')).at(-1);
 }
 
 /** Work out the status a use case should have from its change requests. Returns undefined if unchanged. */
-export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick<UseCase, 'status' | 'resolution'> | undefined {
+export async function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Promise<Pick<UseCase, 'status' | 'resolution'> | undefined> {
   if (MANUAL.includes(u.status) || u.status === 'triage') return undefined;
   // Closed by hand (e.g. already covered by existing terms): keep it.
   if (u.status === 'closed' && u.resolution && !u.resolution.releaseId) return undefined;
-  const crs = changeRequestsFor(u, overrides);
+  const crs = await changeRequestsFor(u, overrides);
   if (!crs.length) return undefined;
   const live = crs.filter((c) => c.status !== 'rejected' && c.status !== 'withdrawn');
   let status: UseCaseStatus;
@@ -71,7 +71,7 @@ export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick
   const dropped = crs.length > live.length;
   if (!live.length) status = 'accepted';
   else if (live.every((c) => c.status === 'released')) {
-    const rel = dropped ? undefined : completingRelease(live);
+    const rel = dropped ? undefined : await completingRelease(live);
     if (rel) {
       status = 'closed';
       // Keep the original transition (and its timestamp) when nothing has really changed.
@@ -88,18 +88,18 @@ export function derivedStatus(u: UseCase, overrides: ChangeRequest[] = []): Pick
 }
 
 /** Apply derivedStatus and persist. Returns true if the use case changed. */
-export function syncUseCase(u: UseCase, overrides: ChangeRequest[] = []): boolean {
-  const next = derivedStatus(u, overrides);
+export async function syncUseCase(u: UseCase, overrides: ChangeRequest[] = []): Promise<boolean> { return transaction(async () => {
+  const next = await derivedStatus(u, overrides);
   if (!next) return false;
   // Never write over a withdrawal made since this copy was read.
-  if (get<UseCase>('useCases', u.id)?.withdrawnAt && !u.withdrawnAt) return false;
+  if ((await get<UseCase>('useCases', u.id))?.withdrawnAt && !u.withdrawnAt) return false;
   const before = u.status;
   u.status = next.status;
   u.resolution = next.resolution;
   u.updatedAt = clock.iso();
-  put('useCases', u, u.ontologyId);
+  await put('useCases', u, u.ontologyId);
   if (next.status === 'closed' && before !== 'closed' && u.visibility !== 'private') {
-    logActivity({
+    await logActivity({
       ontologyId: u.ontologyId,
       type: 'usecase.closed',
       message: `closed ${useCaseLabel(u)} ${u.sections.name ?? ''}${u.resolution?.version ? ` (covered in ${u.resolution.version})` : ''}`.trim(),
@@ -107,12 +107,12 @@ export function syncUseCase(u: UseCase, overrides: ChangeRequest[] = []): boolea
     });
   }
   return true;
-}
+}); }
 
 /** Call whenever a change request's status changes (pass the in-memory copy, which may not be saved yet). */
-export function syncUseCasesForCR(cr: ChangeRequest) {
+export async function syncUseCasesForCR(cr: ChangeRequest) { return transaction(async () => {
   for (const id of useCaseIdsForCR(cr)) {
-    const u = get<UseCase>('useCases', id);
-    if (u) syncUseCase(u, [cr]);
+    const u = await get<UseCase>('useCases', id);
+    if (u) await syncUseCase(u, [cr]);
   }
-}
+}); }

@@ -31,7 +31,7 @@ let demoId: string;
 const byName = (list: UC[], name: string) => list.find((u) => u.sections.name === name);
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   demoId = (await seedDemo())!.id;
 });
 

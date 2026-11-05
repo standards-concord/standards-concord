@@ -22,7 +22,8 @@ import type {
 import { USE_CASE_STATUS_INFO, useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { detached, get, HttpError, inTransaction, list, mustGet, put, transaction } from '../db.js';
+import { everyAsync, filterAsync, someAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { ANONYMISER, INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
@@ -44,27 +45,27 @@ const LEGACY_STATUS: Record<string, UseCaseStatus> = { eliciting: 'draft', ready
 const TRIAGE_ROLES: Role[] = ['editor', 'steward', 'owner'];
 
 export { isGroupMember };
-export const canTriage = (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || rolesFor(ontologyId, user.id).some((r) => TRIAGE_ROLES.includes(r)));
+export const canTriage = async (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || (await rolesFor(ontologyId, user.id)).some((r) => TRIAGE_ROLES.includes(r)));
 
 /**
  * Can this viewer see the use case at all? A withdrawn one is visible to its
  * author only, and an archived one to its author and the working group.
  */
-export function canSee(u: UseCase, viewer?: User): boolean {
+export async function canSee(u: UseCase, viewer?: User): Promise<boolean> {
   if (viewer && u.authorId === viewer.id) return true;
   if (u.withdrawnAt) return false;
   // Archived ones, and public ones the author hasn't submitted yet, are for the author and the working group.
-  if (u.status === 'archived' || u.status === 'draft') return u.visibility !== 'private' && isGroupMember(u.ontologyId, viewer);
+  if (u.status === 'archived' || u.status === 'draft') return u.visibility !== 'private' && await isGroupMember(u.ontologyId, viewer);
   if (u.visibility === 'public') return true;
-  if (u.visibility === 'group') return isGroupMember(u.ontologyId, viewer);
+  if (u.visibility === 'group') return await isGroupMember(u.ontologyId, viewer);
   return false;
 }
 
 /** A call's audience: meetings are working group business, so members, and whoever recorded one. */
-export const inMeetingAudience = (m: { ontologyId: string; createdBy?: string }, viewer?: User) => !!viewer && (isGroupMember(m.ontologyId, viewer) || m.createdBy === viewer.id);
+export const inMeetingAudience = async (m: { ontologyId: string; createdBy?: string }, viewer?: User) => !!viewer && (await isGroupMember(m.ontologyId, viewer) || m.createdBy === viewer.id);
 
 type MeetingRecord = { ontologyId: string; createdBy?: string };
-let meetingRule: (m: MeetingRecord, viewer?: User) => boolean = inMeetingAudience;
+let meetingRule: (m: MeetingRecord, viewer?: User) => Promise<boolean> = inMeetingAudience;
 /**
  * Set by services/meetings.ts to the whole rule (meetingView): the audience above, plus facilitators,
  * less a call that is waiting for approval or was withdrawn, which only facilitators see.
@@ -82,7 +83,7 @@ export const canSeeMeeting = (m: MeetingRecord, viewer?: User) => meetingRule(m,
  * derived from a use case point at it by id, and every read decides what to
  * show from its consent now (crForViewer, visibleCQResults, visibleActivity).
  */
-const noLongerPublic: ((u: UseCase) => void)[] = [];
+const noLongerPublic: ((u: UseCase) => void | Promise<void>)[] = [];
 
 const consentLocks = new Map<string, Promise<unknown>>();
 /** One holding of the lock. Work it starts that asks for the lock again queues on `inner`, behind its siblings. */
@@ -129,6 +130,9 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
     parent.inner = run.catch(() => undefined);
     return run;
   }
+  // Lock order is consent lock, then transaction: waiting here inside a transaction would hold the store's
+  // writer lock while the holder of this lock waits to write.
+  if (inTransaction()) return Promise.reject(new Error('withConsentLock called inside a transaction: take the consent lock first'));
   const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(runHeld);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);
@@ -137,7 +141,7 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
   });
   return run;
 }
-export const onNoLongerPublic = (fn: (u: UseCase) => void) => void noLongerPublic.push(fn);
+export const onNoLongerPublic = (fn: (u: UseCase) => void | Promise<void>) => void noLongerPublic.push(fn);
 /** Public, and fit to derive public material from: not withdrawn, archived, or a draft its author hasn't submitted. */
 const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => u.visibility === 'public' && !u.withdrawnAt && u.status !== 'archived' && u.status !== 'draft';
 
@@ -149,44 +153,44 @@ const isPublic = (u: Pick<UseCase, 'visibility' | 'withdrawnAt' | 'status'>) => 
  * The use cases a change request was drafted from or cites. Requests made from a call before this
  * version recorded only the call: its use cases are found through it.
  */
-export function crSources(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>): string[] {
+export async function crSources(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>): Promise<string[]> {
   const ids = [...(cr.useCaseIds ?? [])];
   if (cr.origin.type === 'synthesis') ids.push(...cr.origin.useCaseIds);
   if (cr.origin.type === 'chat' && cr.origin.useCaseId) ids.push(cr.origin.useCaseId);
-  if (cr.origin.type === 'meeting') ids.push(...meetingUseCases(cr.ontologyId, cr.origin.meetingId));
+  if (cr.origin.type === 'meeting') ids.push(...await meetingUseCases(cr.ontologyId, cr.origin.meetingId));
   return [...new Set(ids)];
 }
 
-const meetingUseCases = (ontologyId: string, meetingId: string) =>
-  list<UseCase>('useCases', ontologyId)
+const meetingUseCases = async (ontologyId: string, meetingId: string) =>
+  (await list<UseCase>('useCases', ontologyId))
     .filter((u) => u.source === 'meeting' && u.sourceRef === meetingId)
     .map((u) => u.id);
 
 /** A request made from a call whose use cases can't be found: where its content came from is unknown. */
-const provenanceUnknown = (cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>) => cr.origin.type === 'meeting' && !meetingUseCases(cr.ontologyId, cr.origin.meetingId).length;
+const provenanceUnknown = async (cr: Pick<ChangeRequest, 'origin' | 'ontologyId'>) => cr.origin.type === 'meeting' && !(await meetingUseCases(cr.ontologyId, cr.origin.meetingId)).length;
 
-const visibleTo = (id: string, viewer?: User) => {
-  const u = get<UseCase>('useCases', id);
-  return !!u && canSee(u, viewer);
+const visibleTo = async (id: string, viewer?: User) => {
+  const u = await get<UseCase>('useCases', id);
+  return !!u && await canSee(u, viewer);
 };
 
 /**
  * True when only the request's number and state may be shown to this viewer: they may not see one
  * of the use cases it came from or cites, or it was made from a call they may not see.
  */
-export function crWithheld(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>, viewer?: User) {
+export async function crWithheld(cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>, viewer?: User) {
   if (cr.origin.type === 'meeting') {
-    const m = get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId);
-    if (!m || !canSeeMeeting(m, viewer)) return true;
+    const m = await get<{ ontologyId: string; createdBy?: string }>('meetings', cr.origin.meetingId);
+    if (!m || !await canSeeMeeting(m, viewer)) return true;
   }
-  return crSources(cr).some((id) => !visibleTo(id, viewer));
+  return someAsync(await crSources(cr), async (id) => !await visibleTo(id, viewer));
 }
 
 /** Every use case it came from or cites is still public (and where it came from is known), so it may go into the ontology. */
-export const sourcesPublic = (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>) =>
-  !provenanceUnknown(cr) &&
-  crSources(cr).every((id) => {
-    const u = get<UseCase>('useCases', id);
+export const sourcesPublic = async (cr: Pick<ChangeRequest, 'origin' | 'useCaseIds' | 'ontologyId'>) =>
+  !await provenanceUnknown(cr) &&
+  await everyAsync(await crSources(cr), async (id) => {
+    const u = await get<UseCase>('useCases', id);
     return !!u && isPublic(u);
   });
 
@@ -203,17 +207,17 @@ export const OWN_TEST = '@request';
  * be told apart from one drawn from a withdrawn use case, so it is never shown; the next triage
  * records sources again.
  */
-export function visibleCQResults<R extends { question: string; source?: string }>(results: R[], viewer?: User): R[] {
-  return results.filter((r) => r.source === OWN_TEST || (!!r.source && visibleTo(r.source, viewer)));
+export function visibleCQResults<R extends { question: string; source?: string }>(results: R[], viewer?: User): Promise<R[]> {
+  return filterAsync(results, async (r) => r.source === OWN_TEST || (!!r.source && await visibleTo(r.source, viewer)));
 }
 
 /** A validation report as the viewer may see it. */
-export function validationForViewer<V extends { competencyQuestions: { question: string; source?: string }[] }>(v: V, viewer?: User): V {
-  return { ...v, competencyQuestions: visibleCQResults(v.competencyQuestions, viewer) };
+export async function validationForViewer<V extends { competencyQuestions: { question: string; source?: string }[] }>(v: V, viewer?: User): Promise<V> {
+  return { ...v, competencyQuestions: await visibleCQResults(v.competencyQuestions, viewer) };
 }
 
 /** Bring documents written before sharing modes existed up to date. */
-function normalise(u: UseCase): UseCase {
+async function normalise(u: UseCase): Promise<UseCase> {
   let dirty = false;
   if (LEGACY_STATUS[u.status as string]) {
     u.status = LEGACY_STATUS[u.status as string];
@@ -223,14 +227,14 @@ function normalise(u: UseCase): UseCase {
     u.visibility = 'group';
     dirty = true;
   }
-  if (dirty) put('useCases', u, u.ontologyId);
+  if (dirty) await put('useCases', u, u.ontologyId);
   // Follow the linked change requests (in-progress -> addressed -> closed).
-  syncUseCase(u);
+  await syncUseCase(u);
   return u;
 }
 
 /** Numbers are given when a use case is first shared, so gaps never reveal private drafts. */
-function ensureNumbers(ontologyId: string, all: UseCase[]) {
+async function ensureNumbers(ontologyId: string, all: UseCase[]) {
   // Fills in numbers missing from older records. Group-only ones numbered before group numbers existed keep theirs.
   let max = all.reduce((m, u) => Math.max(m, u.number ?? 0), 0);
   let maxGroup = all.reduce((m, u) => Math.max(m, u.groupNumber ?? 0), 0);
@@ -238,38 +242,46 @@ function ensureNumbers(ontologyId: string, all: UseCase[]) {
     if (u.visibility === 'public' && !u.number) u.number = ++max;
     else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = ++maxGroup;
     else continue;
-    put('useCases', u, ontologyId);
+    await put('useCases', u, ontologyId);
   }
 }
 
 /** The next number in the public (UC-n) or working group (WG-n) sequence. */
-const nextNumber = (ontologyId: string, field: 'number' | 'groupNumber' = 'number') => {
-  const all = list<UseCase>('useCases', ontologyId);
-  ensureNumbers(ontologyId, all);
+const nextNumber = async (ontologyId: string, field: 'number' | 'groupNumber' = 'number') => { return transaction(async () => {
+  const all = await list<UseCase>('useCases', ontologyId);
+  await ensureNumbers(ontologyId, all);
   return all.reduce((m, u) => Math.max(m, u[field] ?? 0), 0) + 1;
-};
+}); };
 
 const needsNumber = (u: UseCase) => (u.visibility === 'public' && !u.number) || (u.visibility === 'group' && !u.number && !u.groupNumber);
 
 /** Raw access for services (no visibility check). */
-export const getUseCase = (id: string) => {
-  const u = normalise(mustGet<UseCase>('useCases', id));
-  if (needsNumber(u)) ensureNumbers(u.ontologyId, list<UseCase>('useCases', u.ontologyId));
-  return mustGet<UseCase>('useCases', id);
+export const getUseCase = async (id: string) => {
+  const u = await normalise(await mustGet<UseCase>('useCases', id));
+  if (!needsNumber(u)) return u;
+  // Numbering reads every number in the ontology before writing one: in a transaction, so two can't take the same.
+  return transaction(async () => {
+    await ensureNumbers(u.ontologyId, await list<UseCase>('useCases', u.ontologyId));
+    return await mustGet<UseCase>('useCases', id);
+  });
 };
 
 /** Raw list for services (no visibility check). */
-export function allUseCases(ontologyId: string): UseCase[] {
-  const all = list<UseCase>('useCases', ontologyId);
-  ensureNumbers(ontologyId, all);
-  return all.map(normalise).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+export async function allUseCases(ontologyId: string): Promise<UseCase[]> {
+  let all = await list<UseCase>('useCases', ontologyId);
+  if (all.some(needsNumber)) {
+    all = await transaction(async () => {
+      const fresh = await list<UseCase>('useCases', ontologyId);
+      await ensureNumbers(ontologyId, fresh);
+      return fresh;
+    });
+  }
+  return (await Promise.all(all.map(normalise))).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 /** The use cases a viewer may see, redacted for them. */
-export const listUseCases = (ontologyId: string, viewer?: User) =>
-  allUseCases(ontologyId)
-    .filter((u) => canSee(u, viewer))
-    .map((u) => present(u, viewer));
+export const listUseCases = async (ontologyId: string, viewer?: User) =>
+  Promise.all((await filterAsync(await allUseCases(ontologyId), (u) => canSee(u, viewer))).map((u) => present(u, viewer)));
 
 /**
  * A use case as one viewer may see it. Authors get their own record. Everyone
@@ -278,25 +290,25 @@ export const listUseCases = (ontologyId: string, viewer?: User) =>
  * and for an anonymous use case nothing that points back at its author.
  * `present` is not an access check: callers filter with canSee first.
  */
-export function present(u: UseCase, viewer?: User): UseCase {
+export async function present(u: UseCase, viewer?: User): Promise<UseCase> {
   if (viewer && viewer.id === u.authorId) return u;
-  const meetingOk = (id?: string) => {
+  const meetingOk = async (id?: string) => {
     if (!id) return false;
-    const m = get<{ ontologyId: string; createdBy?: string }>('meetings', id);
-    return !!m && canSeeMeeting(m, viewer);
+    const m = await get<{ ontologyId: string; createdBy?: string }>('meetings', id);
+    return !!m && await canSeeMeeting(m, viewer);
   };
-  const linkOk = (l: UseCaseLink) => {
+  const linkOk = async (l: UseCaseLink) => {
     if (l.type === 'url' || l.type === 'change-request') return true;
-    if (l.type === 'meeting') return meetingOk(l.id);
-    const t = l.id ? get<UseCase>('useCases', l.id) : undefined;
-    return !!t && canSee(t, viewer);
+    if (l.type === 'meeting') return await meetingOk(l.id);
+    const t = l.id ? await get<UseCase>('useCases', l.id) : undefined;
+    return !!t && await canSee(t, viewer);
   };
-  const fromMeeting = u.source === 'meeting' && meetingOk(u.sourceRef);
-  const group = isGroupMember(u.ontologyId, viewer);
+  const fromMeeting = u.source === 'meeting' && await meetingOk(u.sourceRef);
+  const group = await isGroupMember(u.ontologyId, viewer);
   const out: UseCase = {
     id: u.id,
     number: u.number,
-    ...(u.groupNumber && isGroupMember(u.ontologyId, viewer) ? { groupNumber: u.groupNumber } : {}),
+    ...(u.groupNumber && await isGroupMember(u.ontologyId, viewer) ? { groupNumber: u.groupNumber } : {}),
     ontologyId: u.ontologyId,
     authorId: u.anonymous ? 'anonymous' : u.authorId,
     source: u.source,
@@ -310,7 +322,7 @@ export function present(u: UseCase, viewer?: User): UseCase {
     competencyQuestions: group ? u.competencyQuestions : u.competencyQuestions.map(({ id, question, exampleAnswer, status }) => ({ id, question, ...(exampleAnswer ? { exampleAnswer } : {}), status })),
     // Evidence quotes can name people: dropped for anonymous use cases, and for a call's use cases when the viewer can't see the call.
     terms: u.anonymous || (u.source === 'meeting' && !fromMeeting) ? u.terms.map(({ label, kind, definition, existingIri }) => ({ label, kind, definition, existingIri })) : u.terms,
-    links: (u.links ?? []).filter((l) => linkOk(l) && (l.type !== 'change-request' || !!viewer)).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
+    links: (await filterAsync(u.links ?? [], async (l) => await linkOk(l) && (l.type !== 'change-request' || !!viewer))).map((l) => (u.anonymous ? { type: l.type, id: l.id, url: l.url, label: l.label, relation: l.relation, at: l.at } : l)) as UseCaseLink[],
     // Change requests are behind sign-in, and so is which ones a use case led to.
     ...(viewer ? { changeRequestIds: u.changeRequestIds } : {}),
     // Who triaged an anonymous use case could be its author, so that is left out.
@@ -323,9 +335,9 @@ export function present(u: UseCase, viewer?: User): UseCase {
 }
 
 /** Fetch for a viewer: 404 rather than 403 for private ones, so their existence is not revealed. */
-export function getUseCaseFor(id: string, viewer?: User): UseCase {
-  const u = getUseCase(id);
-  if (!canSee(u, viewer)) throw new HttpError(404, `useCase ${id} not found`);
+export async function getUseCaseFor(id: string, viewer?: User): Promise<UseCase> {
+  const u = await getUseCase(id);
+  if (!await canSee(u, viewer)) throw new HttpError(404, `useCase ${id} not found`);
   return u;
 }
 
@@ -339,12 +351,10 @@ export const refOf = (u: UseCase): UseCaseRef => ({
   ...(u.anonymous ? { anonymous: true } : {}),
 });
 
-export function useCaseRefs(ids: string[], viewer?: User): UseCaseRef[] {
-  return ids
-    .map((id) => get<UseCase>('useCases', id))
-    .filter((u): u is UseCase => !!u && canSee(normalise(u), viewer))
-    .map((u) => refOf(normalise(u)))
-    .sort((a, b) => a.number - b.number);
+export async function useCaseRefs(ids: string[], viewer?: User): Promise<UseCaseRef[]> {
+  const found = (await Promise.all(ids.map((id) => get<UseCase>('useCases', id)))).filter((u): u is UseCase => !!u);
+  const current = await Promise.all(found.map(normalise));
+  return (await filterAsync(current, (u) => canSee(u, viewer))).map(refOf).sort((a, b) => a.number - b.number);
 }
 
 /** Weighted completeness against Kendall's template (competency questions count most). */
@@ -372,34 +382,35 @@ export function completeness(u: Pick<UseCase, 'sections' | 'competencyQuestions'
   return Math.round((checks.reduce((n, [ok, w]) => n + (ok ? w : 0), 0) / total) * 100) / 100;
 }
 
-function saveUseCase(u: UseCase) {
-  const before = get<UseCase>('useCases', u.id);
+async function saveUseCase(u: UseCase) { return transaction(async () => {
+  const before = await get<UseCase>('useCases', u.id);
   // A withdrawal is final: a save from work that started earlier (an interview turn, drafting) never undoes it.
   if (before?.withdrawnAt && !u.withdrawnAt) Object.assign(u, { withdrawnAt: before.withdrawnAt, visibility: before.visibility, status: before.status });
-  if (u.visibility === 'public' && !u.number) u.number = nextNumber(u.ontologyId);
-  else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = nextNumber(u.ontologyId, 'groupNumber');
+  if (u.visibility === 'public' && !u.number) u.number = await nextNumber(u.ontologyId);
+  else if (u.visibility === 'group' && !u.number && !u.groupNumber) u.groupNumber = await nextNumber(u.ontologyId, 'groupNumber');
   // A renamed use case keeps its old titles, so redaction still recognises them.
   const formerName = before?.sections.name?.trim();
   if (formerName && formerName !== u.sections.name?.trim() && !u.formerTitles?.includes(formerName)) u.formerTitles = [...(u.formerTitles ?? []), formerName];
   u.completeness = completeness(u);
   u.updatedAt = clock.iso();
-  put('useCases', u, u.ontologyId);
-  if (u.visibility === 'private') void mirrorToPod(u);
-  if (before && isPublic(before) && !isPublic(u)) for (const fn of noLongerPublic) fn(u);
+  await put('useCases', u, u.ontologyId);
+  // The pod copy is network work: it runs outside this transaction, after it.
+  if (u.visibility === 'private') void detached(() => mirrorToPod(u));
+  if (before && isPublic(before) && !isPublic(u)) for (const fn of noLongerPublic) await fn(u);
   return u;
-}
+}); }
 
 /**
  * Write only these fields of `u` onto the use case as it is stored now. For work that read the use
  * case before an await (an interview turn, an anonymised draft): anything else saved meanwhile,
  * above all who may see it and whether it was submitted or withdrawn, is kept.
  */
-function saveFields(u: UseCase, fields: (keyof UseCase)[]): UseCase {
-  const fresh = get<UseCase>('useCases', u.id);
+async function saveFields(u: UseCase, fields: (keyof UseCase)[]): Promise<UseCase> { return transaction(async () => {
+  const fresh = await get<UseCase>('useCases', u.id);
   if (!fresh) return u;
   for (const f of fields) (fresh as unknown as Record<string, unknown>)[f] = u[f];
-  return saveUseCase(fresh);
-}
+  return await saveUseCase(fresh);
+}); }
 
 /**
  * Private use cases are mirrored to the author's Solid pod, so the author keeps
@@ -420,8 +431,8 @@ async function mirrorToPod(u: UseCase) {
 `;
     const stored = await solid.write(u.authorId, `use-cases/${u.id}.ttl`, turtle);
     if (stored.url && u.podUrl !== stored.url) {
-      const fresh = get<UseCase>('useCases', u.id);
-      if (fresh) put('useCases', { ...fresh, podUrl: stored.url }, u.ontologyId);
+      const fresh = await get<UseCase>('useCases', u.id);
+      if (fresh) await put('useCases', { ...fresh, podUrl: stored.url }, u.ontologyId);
     }
   } catch (err) {
     console.warn(`[use case] could not copy ${u.id} to the pod: ${(err as Error).message}`);
@@ -430,22 +441,22 @@ async function mirrorToPod(u: UseCase) {
 
 const defaultVisibility = (source: UseCaseSource): UseCaseVisibility => (source === 'chat' ? 'private' : 'group');
 
-export function createUseCase(
+export async function createUseCase(
   project: OntologyProject,
   author: User,
   init: Partial<
     Pick<UseCase, 'sections' | 'competencyQuestions' | 'terms' | 'source' | 'sourceRef' | 'sourceLines' | 'status' | 'visibility' | 'anonymous' | 'resolution' | 'changeRequestIds'>
   >,
-): UseCase {
+): Promise<UseCase> { return transaction(async () => {
   const now = clock.iso();
   // Anyone describing a use case becomes a contributor.
-  if (!rolesFor(project.id, author.id).length) setRoles(project.id, author.id, ['contributor']);
+  if (!(await rolesFor(project.id, author.id)).length) await setRoles(project.id, author.id, ['contributor']);
   const source = init.source ?? 'chat';
   const visibility = init.visibility ?? defaultVisibility(source);
-  return saveUseCase({
+  return await saveUseCase({
     id: newId('uc'),
-    number: visibility === 'public' ? nextNumber(project.id) : 0,
-    ...(visibility === 'group' ? { groupNumber: nextNumber(project.id, 'groupNumber') } : {}),
+    number: visibility === 'public' ? await nextNumber(project.id) : 0,
+    ...(visibility === 'group' ? { groupNumber: await nextNumber(project.id, 'groupNumber') } : {}),
     ontologyId: project.id,
     authorId: author.id,
     source,
@@ -463,7 +474,7 @@ export function createUseCase(
     createdAt: now,
     updatedAt: now,
   });
-}
+}); }
 
 const isAuthor = (u: UseCase, actor: User) => u.authorId === actor.id;
 
@@ -475,75 +486,85 @@ const NOT_PUBLIC =
  * that thing's current visibility (read from the item's link, which covers items
  * written before this check existed). Anonymous use cases never show an actor.
  */
-export function visibleActivity(items: ActivityItem[], viewer?: User): ActivityItem[] {
-  return items.flatMap((a) => {
+export async function visibleActivity(items: ActivityItem[], viewer?: User): Promise<ActivityItem[]> {
+  // A loop, not flatMap(): each check reads the store.
+  const out: ActivityItem[] = [];
+  for (const a of items) {
     const uc = a.link?.match(/\/use-cases\/([^/?#]+)/)?.[1];
     if (uc) {
-      const u = get<UseCase>('useCases', uc);
-      if (!u || !canSee(u, viewer)) return [];
-      if (u.anonymous && !(viewer && viewer.id === u.authorId)) return [{ ...a, actorId: undefined, actorName: undefined }];
+      const u = await get<UseCase>('useCases', uc);
+      if (!u || !(await canSee(u, viewer))) continue;
+      if (u.anonymous && !(viewer && viewer.id === u.authorId)) {
+        out.push({ ...a, actorId: undefined, actorName: undefined });
+        continue;
+      }
     }
     const crId = a.link?.match(/\/changes\/([^/?#]+)/)?.[1];
     if (crId) {
       // Activity about a request quotes its title: shown only to those who may see the request in full.
-      const cr = get<ChangeRequest>('changeRequests', crId);
-      if (cr && crWithheld(cr, viewer)) return [];
+      const cr = await get<ChangeRequest>('changeRequests', crId);
+      if (cr && (await crWithheld(cr, viewer))) continue;
     }
     const mtg = a.link?.match(/\/meetings\/([^/?#]+)/)?.[1];
     if (mtg) {
-      const m = get<{ ontologyId: string; createdBy?: string }>('meetings', mtg);
-      if (m && !canSeeMeeting(m, viewer)) return [];
+      const m = await get<{ ontologyId: string; createdBy?: string }>('meetings', mtg);
+      if (m && !(await canSeeMeeting(m, viewer))) continue;
       // A call that's gone (withdrawn, perhaps while it waited for approval): only facilitators see what happened
       // to it (the same rule as meetings.canFacilitate).
-      const facilitates = (u?: User) =>
-        !!u && (!!u.isPlatformAdmin || config.adminEmails.includes(u.email?.toLowerCase() ?? '') || rolesFor(a.ontologyId ?? '', u.id).some((r) => ['owner', 'steward', 'editor'].includes(r)));
-      if (!m && !facilitates(viewer)) return [];
+      const facilitates = async (u?: User) =>
+        !!u && (!!u.isPlatformAdmin || config.adminEmails.includes(u.email?.toLowerCase() ?? '') || (await rolesFor(a.ontologyId ?? '', u.id)).some((r) => ['owner', 'steward', 'editor'].includes(r)));
+      if (!m && !(await facilitates(viewer))) continue;
     }
-    return [a];
-  });
+    out.push(a);
+  }
+  return out;
 }
 
-/** Author or editor edits the content. */
-export function updateUseCase(
-  u: UseCase,
+/**
+ * Author or editor edits the content. Given an id, the use case is read inside the transaction, so two
+ * edits at once each apply to the other's result; given a record, the caller read it in its transaction.
+ */
+export async function updateUseCase(
+  ref: UseCase | string,
   actor: User,
   patch: Partial<Pick<UseCase, 'sections' | 'competencyQuestions' | 'status' | 'terms' | 'visibility'>> & { links?: UseCaseLink[] },
-) {
-  if (!canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
-  const editor = canTriage(u.ontologyId, actor);
+) { return transaction(async () => {
+  const u = typeof ref === 'string' ? await getUseCase(ref) : ref;
+  if (!await canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
+  const editor = await canTriage(u.ontologyId, actor);
   if (!isAuthor(u, actor) && !editor) throw new HttpError(403, 'Only the author or an editor can change this use case');
   if (patch.sections) u.sections = { ...u.sections, ...patch.sections };
   if (patch.competencyQuestions) u.competencyQuestions = patch.competencyQuestions.map((q) => ({ ...q, id: q.id || newId('cq'), status: q.status ?? 'draft' }));
   if (patch.terms) u.terms = patch.terms;
   if (patch.links) u.links = patch.links;
-  if (patch.visibility && patch.visibility !== u.visibility) setVisibility(u, actor, patch.visibility, false);
+  if (patch.visibility && patch.visibility !== u.visibility) await setVisibility(u, actor, patch.visibility, false);
   if (patch.status && patch.status !== u.status) {
-    if (['accepted', 'deferred', 'out-of-scope', 'closed'].includes(patch.status)) return triageUseCase(u, actor, patch.status);
-    if (patch.status === 'triage') submitUseCase(u, actor, false);
+    if (['accepted', 'deferred', 'out-of-scope', 'closed'].includes(patch.status)) return await triageUseCase(u, actor, patch.status);
+    if (patch.status === 'triage') await submitUseCase(u, actor, false);
     else if (patch.status === 'archived') u.status = 'archived';
     else if (patch.status === 'draft' && isAuthor(u, actor)) u.status = 'draft';
     else throw new HttpError(409, `A use case can't be moved to ${patch.status} by hand`);
   }
-  return saveUseCase(u);
-}
+  return await saveUseCase(u);
+}); }
 
 /** Who can see it. Only the author decides. An anonymised version is public, or withdrawn. */
-export function setVisibility(u: UseCase, actor: User, visibility: UseCaseVisibility, save = true) {
+export async function setVisibility(u: UseCase, actor: User, visibility: UseCaseVisibility, save = true) { return transaction(async () => {
   if (!isAuthor(u, actor)) throw new HttpError(403, 'Only the author can change who sees a use case');
   if (!['private', 'group', 'public'].includes(visibility)) throw new HttpError(400, 'visibility must be private, group or public');
   if (u.anonymous && visibility === 'group') throw new HttpError(409, 'An anonymised use case is either public or withdrawn.');
-  if (u.anonymous && visibility === 'private') return withdrawUseCase(u, actor);
+  if (u.anonymous && visibility === 'private') return await withdrawUseCase(u, actor);
   const from = u.visibility;
   u.visibility = visibility;
   if (visibility !== 'private') u.withdrawnAt = undefined;
   // Sharing a finished private draft submits it for triage.
-  if (from === 'private' && visibility !== 'private' && u.status === 'draft' && interviewDone(u)) u.status = 'triage';
-  if (save) saveUseCase(u);
+  if (from === 'private' && visibility !== 'private' && u.status === 'draft' && await interviewDone(u)) u.status = 'triage';
+  if (save) await saveUseCase(u);
   if (from === 'private' && visibility !== 'private') {
-    logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared ${useCaseLabel(u)} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    await logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.shared', message: `shared ${useCaseLabel(u)} ${u.sections.name ?? ''} with ${visibility === 'public' ? 'everyone' : 'the working group'}`.trim(), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
   return u;
-}
+}); }
 
 /**
  * The author takes a shared, public or anonymised use case back. From then on
@@ -551,63 +572,63 @@ export function setVisibility(u: UseCase, actor: User, visibility: UseCaseVisibi
  * public page leaves it out, and its questions leave saved validation results.
  * Files already released to GitHub can't be recalled.
  */
-export function withdrawUseCase(u: UseCase, actor: User) {
+export async function withdrawUseCase(u: UseCase, actor: User) { return transaction(async () => {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   u.withdrawnAt = clock.iso();
   u.visibility = 'private';
   u.status = 'archived';
-  saveUseCase(u);
-  for (const fn of noLongerPublic) fn(u);
+  await saveUseCase(u);
+  for (const fn of noLongerPublic) await fn(u);
   if (u.anonymous) {
-    const original = list<UseCase>('useCases', u.ontologyId).find((o) => o.anonymisation?.publishedId === u.id);
+    const original = (await list<UseCase>('useCases', u.ontologyId)).find((o) => o.anonymisation?.publishedId === u.id);
     if (original) {
       original.anonymisation = { ...original.anonymisation!, status: 'withdrawn', decidedAt: clock.iso(), publishedId: undefined };
-      saveUseCase(original);
+      await saveUseCase(original);
     }
   }
   return u;
-}
+}); }
 
-const interviewDone = (u: UseCase) =>
-  u.source !== 'chat' || list<InterviewSession>('interviews', u.ontologyId).some((s) => s.useCaseId === u.id && s.done) || u.completeness >= 0.5;
+const interviewDone = async (u: UseCase) =>
+  u.source !== 'chat' || (await list<InterviewSession>('interviews', u.ontologyId)).some((s) => s.useCaseId === u.id && s.done) || u.completeness >= 0.5;
 
 /** The author submits a draft for triage. Private ones must be shared (or anonymised) first. */
-export function submitUseCase(u: UseCase, actor: User, save = true) {
+export async function submitUseCase(u: UseCase, actor: User, save = true) { return transaction(async () => {
   // Submitting is the author's consent to share a draft: nobody else can give it.
   if (!isAuthor(u, actor)) throw new HttpError(403, 'Only the author can submit this use case');
   if (u.visibility === 'private') throw new HttpError(409, 'Private use cases are not triaged. Share it with the working group, make it public, or publish an anonymised version.');
   if (u.status !== 'draft' && u.status !== 'archived' && u.status !== 'deferred') return u;
   u.status = 'triage';
   u.resolution = undefined;
-  if (save) saveUseCase(u);
+  if (save) await saveUseCase(u);
   return u;
-}
+}); }
 
 /** Editors and stewards decide what happens to a submitted use case. */
-export function triageUseCase(u: UseCase, actor: User, status: UseCaseStatus, note?: string) {
-  if (!canTriage(u.ontologyId, actor)) throw new HttpError(403, 'Only editors, stewards and owners triage use cases');
+export async function triageUseCase(u: UseCase, actor: User, status: UseCaseStatus, note?: string) { return transaction(async () => {
+  if (!await canTriage(u.ontologyId, actor)) throw new HttpError(403, 'Only editors, stewards and owners triage use cases');
   if (u.visibility === 'private') throw new HttpError(409, 'Private use cases are not triaged');
   // A draft (or one its author archived) isn't ready to share yet. Triaging it would publish it without the author.
   if (u.status === 'draft' || u.status === 'archived') throw new HttpError(409, `This use case is ${u.status === 'draft' ? "a draft the author hasn't submitted" : 'archived by its author'}, so it can't be triaged until they submit it`);
   if (!['accepted', 'deferred', 'out-of-scope', 'closed', 'triage'].includes(status)) throw new HttpError(400, 'status must be accepted, deferred, out-of-scope, closed or triage');
-  const project = getProject(u.ontologyId);
+  const project = await getProject(u.ontologyId);
   u.status = status;
   u.resolution =
     status === 'triage'
       ? undefined
       : { status, note: note?.trim() || undefined, by: actor.id, at: clock.iso(), ...(status === 'closed' ? { version: project.currentVersion !== '0.0.0' ? project.currentVersion : undefined } : {}) };
-  saveUseCase(u);
+  await saveUseCase(u);
   // Accepting a use case that already has changes in flight picks their status up straight away.
-  if (status === 'accepted') syncUseCase(u);
+  if (status === 'accepted') await syncUseCase(u);
   const label = USE_CASE_STATUS_INFO[status].label.toLowerCase();
-  logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked ${useCaseLabel(u)} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+  await logActivity({ ontologyId: u.ontologyId, actorId: actor.id, type: 'usecase.triaged', message: `marked ${useCaseLabel(u)} ${u.sections.name ?? ''} as ${label}`.replace('  ', ' '), link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   return u;
-}
+}); }
 
 /** Add a related link (use case, meeting, change request or URL). */
-export function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, 'at' | 'addedBy'>) {
-  if (!canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
-  if (!isAuthor(u, actor) && !isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can link use cases');
+export async function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, 'at' | 'addedBy'>) { return transaction(async () => {
+  if (!await canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
+  if (!isAuthor(u, actor) && !await isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can link use cases');
   if (!['use-case', 'meeting', 'change-request', 'url'].includes(link.type)) throw new HttpError(400, 'Unknown link type');
   if (!['related', 'duplicate-of', 'depends-on', 'refines'].includes(link.relation)) throw new HttpError(400, 'Unknown relation');
   if (link.type === 'url') {
@@ -616,56 +637,56 @@ export function addLink(u: UseCase, actor: User, link: Omit<UseCaseLink, 'at' | 
     if (!link.id) throw new HttpError(400, 'A link needs a target id');
     if (link.type === 'use-case') {
       if (link.id === u.id) throw new HttpError(400, 'A use case cannot link to itself');
-      const target = get<UseCase>('useCases', link.id);
-      if (!target || target.ontologyId !== u.ontologyId || !canSee(target, actor)) throw new HttpError(404, 'No such use case');
+      const target = await get<UseCase>('useCases', link.id);
+      if (!target || target.ontologyId !== u.ontologyId || !await canSee(target, actor)) throw new HttpError(404, 'No such use case');
     } else {
-      const target = get<{ ontologyId: string; createdBy?: string }>(link.type === 'meeting' ? 'meetings' : 'changeRequests', link.id);
-      if (!target || target.ontologyId !== u.ontologyId || (link.type === 'meeting' && !canSeeMeeting(target, actor))) throw new HttpError(404, `No such ${link.type.replace('-', ' ')}`);
+      const target = await get<{ ontologyId: string; createdBy?: string }>(link.type === 'meeting' ? 'meetings' : 'changeRequests', link.id);
+      if (!target || target.ontologyId !== u.ontologyId || (link.type === 'meeting' && !await canSeeMeeting(target, actor))) throw new HttpError(404, `No such ${link.type.replace('-', ' ')}`);
     }
   }
   u.links = [...(u.links ?? []).filter((l) => !(l.type === link.type && (l.id ?? l.url) === (link.id ?? link.url))), { ...link, addedBy: actor.id, at: clock.iso() }];
-  return saveUseCase(u);
-}
+  return await saveUseCase(u);
+}); }
 
-export function removeLink(u: UseCase, actor: User, target: string) {
-  if (!canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
-  if (!isAuthor(u, actor) && !isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can unlink use cases');
+export async function removeLink(u: UseCase, actor: User, target: string) { return transaction(async () => {
+  if (!await canSee(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
+  if (!isAuthor(u, actor) && !await isGroupMember(u.ontologyId, actor)) throw new HttpError(403, 'Only the author or working group members can unlink use cases');
   u.links = (u.links ?? []).filter((l) => (l.id ?? l.url) !== target);
-  return saveUseCase(u);
-}
+  return await saveUseCase(u);
+}); }
 
 /** Record that a change request addresses some use cases (both directions), and move them along. */
 /** Change requests are public records: they may only cite use cases that are public now (not drafts, archived or withdrawn). */
-export function assertCitable(useCaseIds: string[], actor: User, ontologyId: string) {
-  const ucs = useCaseIds.map((id) => getUseCaseFor(id, actor)).filter((u) => u.ontologyId === ontologyId);
+export async function assertCitable(useCaseIds: string[], actor: User, ontologyId: string) {
+  const ucs = (await Promise.all(useCaseIds.map((id) => getUseCaseFor(id, actor)))).filter((u) => u.ontologyId === ontologyId);
   if (ucs.some((u) => !isPublic(u))) throw new HttpError(409, NOT_PUBLIC);
   return ucs;
 }
 
-export function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor: User) {
-  const ucs = assertCitable(useCaseIds, actor, cr.ontologyId);
-  cr = { ...(get<ChangeRequest>('changeRequests', cr.id) ?? cr) };
+export async function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[], actor: User) { return transaction(async () => {
+  const ucs = await assertCitable(useCaseIds, actor, cr.ontologyId);
+  cr = { ...(await get<ChangeRequest>('changeRequests', cr.id) ?? cr) };
   cr.useCaseIds = [...new Set([...(cr.useCaseIds ?? []), ...ucs.map((u) => u.id)])];
-  put('changeRequests', cr, cr.ontologyId);
+  await put('changeRequests', cr, cr.ontologyId);
   for (const u of ucs) {
     u.changeRequestIds = [...new Set([...(u.changeRequestIds ?? []), cr.id])];
     if (['triage', 'draft'].includes(u.status)) u.status = 'accepted';
-    saveUseCase(u);
-    syncUseCase(u, [cr]);
+    await saveUseCase(u);
+    await syncUseCase(u, [cr]);
   }
   return cr;
-}
+}); }
 
 /**
  * A change request as a viewer may see it: use case ids (in its links and its
  * origin) are kept only for use cases the viewer can see.
  */
-export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
-  const ok = (id: string) => visibleTo(id, viewer);
+export async function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): Promise<T> {
+  const ok = async (id: string) => await visibleTo(id, viewer);
   // Drafted from, or citing, a use case this viewer may not see (one its author withdrew, say): its
   // text, edits, diff, checks, analysis, history, reviews and votes may all carry that use case's
   // words, so none of it is shown. Only what identifies it and where it stands.
-  if (crWithheld(cr, viewer)) {
+  if (await crWithheld(cr, viewer)) {
     const shown: ChangeRequest = {
       id: cr.id,
       number: cr.number,
@@ -687,19 +708,23 @@ export function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User): T {
     const d = cr as unknown as Partial<ChangeRequestDetail>;
     return { ...shown, ...('reviews' in d ? { reviews: [], votes: [], governance: d.governance, author: d.author } : {}) } as unknown as T;
   }
+  const meetingShown = async (meetingId: string) => {
+    const m = await get<MeetingRecord>('meetings', meetingId);
+    return !!m && await canSeeMeeting(m, viewer);
+  };
   const origin =
     cr.origin.type === 'synthesis'
-      ? { ...cr.origin, useCaseIds: cr.origin.useCaseIds.filter(ok) }
-      : cr.origin.type === 'chat' && cr.origin.useCaseId && !ok(cr.origin.useCaseId)
+      ? { ...cr.origin, useCaseIds: await filterAsync(cr.origin.useCaseIds, ok) }
+      : cr.origin.type === 'chat' && cr.origin.useCaseId && !await ok(cr.origin.useCaseId)
         ? { ...cr.origin, useCaseId: undefined }
-        : cr.origin.type === 'meeting' && !((m) => !!m && canSeeMeeting(m, viewer))(get<MeetingRecord>('meetings', cr.origin.meetingId))
+        : cr.origin.type === 'meeting' && !await meetingShown(cr.origin.meetingId)
           ? { type: 'meeting' as const, meetingId: '' }
           : cr.origin;
   return {
     ...cr,
     origin,
-    ...(cr.useCaseIds ? { useCaseIds: cr.useCaseIds.filter(ok) } : {}),
-    ...(cr.validation ? { validation: validationForViewer(cr.validation, viewer) } : {}),
+    ...(cr.useCaseIds ? { useCaseIds: await filterAsync(cr.useCaseIds, ok) } : {}),
+    ...(cr.validation ? { validation: await validationForViewer(cr.validation, viewer) } : {}),
   } as T;
 }
 
@@ -755,13 +780,13 @@ export function restrictDraft(d: Partial<AnonymisedDraft>): AnonymisedDraft {
 }
 
 /** Names that must never appear: the author, their organisation, and the people in this ontology's group. */
-function knownIdentifiers(ontologyId: string, author: User): string[] {
-  const people = members(ontologyId)
-    .map((m) => getUserName(m.userId))
+async function knownIdentifiers(ontologyId: string, author: User): Promise<string[]> {
+  const people = (await Promise.all((await members(ontologyId))
+    .map(async (m) => await getUserName(m.userId))))
     .filter((x): x is string => !!x);
   return [...new Set([author.name, author.organisation, ...people].filter((x): x is string => !!x && x.trim().length >= 2))];
 }
-const getUserName = (id: string) => get<User>('users', id)?.name;
+const getUserName = async (id: string) => (await get<User>('users', id))?.name;
 
 /**
  * Check every field of an anonymised version for things that may still identify
@@ -878,8 +903,8 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (u.visibility !== 'private') throw new HttpError(409, 'Only private use cases get an anonymised version; this one is already shared.');
   if (u.anonymous) throw new HttpError(409, 'This is already an anonymised version.');
-  const project = getProject(u.ontologyId);
-  const known = knownIdentifiers(project.id, actor);
+  const project = await getProject(u.ontologyId);
+  const known = await knownIdentifiers(project.id, actor);
   const { value } = await llm.json<AnonymisedDraft>({
     task: 'anonymise',
     system: ANONYMISER,
@@ -898,7 +923,7 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
   const draft = restrictDraft(value);
   draft.warnings = identifyingWarnings(draft, known);
   u.anonymisation = { status: 'proposed', draft, proposedAt: clock.iso() };
-  return saveFields(u, ['anonymisation']);
+  return await saveFields(u, ['anonymisation']);
 }
 
 /**
@@ -906,7 +931,7 @@ export async function proposeAnonymised(u: UseCase, actor: User): Promise<UseCas
  * edits) as a new public use case with no name attached. The client sends the
  * whole draft it showed; the server cuts it to the same allowlist.
  */
-export function publishAnonymised(u: UseCase, actor: User, edited?: Partial<AnonymisedDraft>): { original: UseCase; published: UseCase } {
+export async function publishAnonymised(u: UseCase, actor: User, edited?: Partial<AnonymisedDraft>): Promise<{ original: UseCase; published: UseCase }> { return transaction(async () => {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (u.visibility !== 'private' || u.anonymous) throw new HttpError(409, 'Only private use cases get an anonymised version');
   const draft = u.anonymisation?.draft;
@@ -918,9 +943,9 @@ export function publishAnonymised(u: UseCase, actor: User, edited?: Partial<Anon
     terms: edited?.terms ?? draft.terms,
     changes: draft.changes,
   });
-  final.warnings = identifyingWarnings(final, knownIdentifiers(u.ontologyId, actor));
-  const project = getProject(u.ontologyId);
-  const published = createUseCase(project, actor, {
+  final.warnings = identifyingWarnings(final, await knownIdentifiers(u.ontologyId, actor));
+  const project = await getProject(u.ontologyId);
+  const published = await createUseCase(project, actor, {
     source: u.source,
     visibility: 'public',
     anonymous: true,
@@ -930,19 +955,19 @@ export function publishAnonymised(u: UseCase, actor: User, edited?: Partial<Anon
     terms: final.terms,
   });
   u.anonymisation = { ...u.anonymisation!, status: 'published', draft: final, decidedAt: clock.iso(), publishedId: published.id };
-  saveUseCase(u);
+  await saveUseCase(u);
   // No actor on the activity item: naming the author would undo the anonymisation.
-  logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: ${useCaseLabel(published)} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
+  await logActivity({ ontologyId: u.ontologyId, type: 'usecase.anonymised', message: `An anonymised use case was published: ${useCaseLabel(published)} ${published.sections.name ?? ''}`.trim(), link: `/o/${u.ontologyId}/use-cases/${published.id}` });
   return { original: u, published };
-}
+}); }
 
-export function declineAnonymised(u: UseCase, actor: User) {
+export async function declineAnonymised(u: UseCase, actor: User) { return transaction(async () => {
   if (!isAuthor(u, actor)) throw new HttpError(404, `useCase ${u.id} not found`);
   if (!u.anonymisation) throw new HttpError(409, 'There is no anonymised version to decline');
   if (u.anonymisation.status === 'published') throw new HttpError(409, 'The anonymised version is already published; withdraw it instead');
   u.anonymisation = { ...u.anonymisation, status: 'declined', decidedAt: clock.iso() };
-  return saveUseCase(u);
-}
+  return await saveUseCase(u);
+}); }
 
 function mergeTurn(u: UseCase, turn: Pick<InterviewTurn, 'sectionUpdates' | 'newCompetencyQuestions' | 'newTerms'>) {
   for (const [k, v] of Object.entries(turn.sectionUpdates ?? {})) {
@@ -973,10 +998,10 @@ function mergeTurn(u: UseCase, turn: Pick<InterviewTurn, 'sectionUpdates' | 'new
 /* Interviews                                                                */
 /* ------------------------------------------------------------------------ */
 
-export const getInterview = (id: string) => mustGet<InterviewSession>('interviews', id);
-const saveInterview = (s: InterviewSession) => {
+export const getInterview = async (id: string) => await mustGet<InterviewSession>('interviews', id);
+const saveInterview = async (s: InterviewSession) => {
   s.updatedAt = clock.iso();
-  return put('interviews', s, s.ontologyId);
+  return await put('interviews', s, s.ontologyId);
 };
 const msg = (role: ChatMessage['role'], content: string, targets?: ChatMessage['targets']): ChatMessage => ({
   id: newId('msg'),
@@ -1096,7 +1121,7 @@ function candidateTerms(text: string): InterviewTurn['newTerms'] {
 }
 
 export async function startInterview(project: OntologyProject, user: User, useCaseId?: string): Promise<InterviewSession> {
-  const u = useCaseId ? getUseCase(useCaseId) : createUseCase(project, user, { source: 'chat' });
+  const u = useCaseId ? await getUseCase(useCaseId) : await createUseCase(project, user, { source: 'chat' });
   // Not found, rather than forbidden, so the answer doesn't reveal that someone else's use case exists.
   if (u.authorId !== user.id) throw new HttpError(404, `useCase ${useCaseId} not found`);
   const first = SCRIPT[0];
@@ -1114,7 +1139,7 @@ export async function startInterview(project: OntologyProject, user: User, useCa
     createdAt: now,
     updatedAt: now,
   };
-  saveInterview(session);
+  await saveInterview(session);
   await persistTranscript(session, u);
   return session;
 }
@@ -1128,10 +1153,10 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
     u.transcriptUrl = storage.url;
     // Other changes (a withdrawal, a newer turn) may have been saved while the pod write ran: only
     // the transcript's location is written, onto the records as they are now.
-    const freshCase = get<UseCase>('useCases', u.id);
-    if (freshCase && freshCase.transcriptUrl !== storage.url) put('useCases', { ...freshCase, transcriptUrl: storage.url }, freshCase.ontologyId);
-    const freshSession = get<InterviewSession>('interviews', session.id);
-    if (freshSession) put('interviews', { ...freshSession, storage }, freshSession.ontologyId);
+    const freshCase = await get<UseCase>('useCases', u.id);
+    if (freshCase && freshCase.transcriptUrl !== storage.url) await put('useCases', { ...freshCase, transcriptUrl: storage.url }, freshCase.ontologyId);
+    const freshSession = await get<InterviewSession>('interviews', session.id);
+    if (freshSession) await put('interviews', { ...freshSession, storage }, freshSession.ontologyId);
   } catch (err) {
     console.warn(`[interview] could not store transcript: ${(err as Error).message}`);
   }
@@ -1139,8 +1164,8 @@ async function persistTranscript(session: InterviewSession, u: UseCase) {
 
 export async function interviewTurn(session: InterviewSession, user: User, content: string) {
   if (session.userId !== user.id) throw new HttpError(404, `interview ${session.id} not found`);
-  const project = getProject(session.ontologyId);
-  const u = getUseCase(session.useCaseId);
+  const project = await getProject(session.ontologyId);
+  const u = await getUseCase(session.useCaseId);
   session.messages.push(msg('user', content));
   const graph = await ontologyStore.working(project);
   const { value: turn } = await llm.json<InterviewTurn>({
@@ -1160,20 +1185,20 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
   mergeTurn(u, turn);
   session.messages.push(msg('assistant', turn.reply, turn.targets as ChatMessage['targets']));
   // Only what the interview captured: a visibility or consent change made during the model call stands.
-  saveFields(u, ['sections', 'competencyQuestions', 'terms']);
-  if (turn.done) await completeInterview(session, getUseCase(u.id), user);
-  saveInterview(session);
+  await saveFields(u, ['sections', 'competencyQuestions', 'terms']);
+  if (turn.done) await completeInterview(session, await getUseCase(u.id), user);
+  await saveInterview(session);
   await persistTranscript(session, u);
-  return { session, useCase: getUseCase(u.id) };
+  return { session, useCase: await getUseCase(u.id) };
 }
 
 export async function finishInterview(session: InterviewSession, user: User) {
   if (session.userId !== user.id) throw new HttpError(404, `interview ${session.id} not found`);
-  const u = getUseCase(session.useCaseId);
+  const u = await getUseCase(session.useCaseId);
   if (!session.done) await completeInterview(session, u, user);
-  saveInterview(session);
+  await saveInterview(session);
   await persistTranscript(session, u);
-  return { useCase: getUseCase(u.id) };
+  return { useCase: await getUseCase(u.id) };
 }
 
 /**
@@ -1197,15 +1222,15 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
     );
   } else {
     // Finishing a shared interview submits it: a consent change, so under the lock, on the record as stored then.
-    await withConsentLock(u.ontologyId, () => {
-      const fresh = getUseCase(u.id);
+    await withConsentLock(u.ontologyId, async () => { return transaction(async () => {
+      const fresh = await getUseCase(u.id);
       if (fresh.status === 'draft' && fresh.visibility !== 'private' && !fresh.withdrawnAt) {
         fresh.status = 'triage';
-        saveUseCase(fresh);
+        await saveUseCase(fresh);
       }
       Object.assign(u, fresh);
-    });
-    logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
+    }); });
+    await logActivity({ ontologyId: u.ontologyId, actorId: user.id, type: 'usecase.ready', message: `described ${useCaseLabel(u)}: ${u.sections.name ?? 'untitled'}`, link: `/o/${u.ontologyId}/use-cases/${u.id}` });
   }
 }
 
@@ -1214,7 +1239,7 @@ async function completeInterview(session: InterviewSession, u: UseCase, user: Us
 /* ------------------------------------------------------------------------ */
 
 export async function synthesise(project: OntologyProject, actor: User, useCaseIds?: string[]) {
-  const picked = (useCaseIds?.length ? useCaseIds.map((id) => getUseCaseFor(id, actor)) : allUseCases(project.id).filter((u) => ['triage', 'accepted'].includes(u.status) && isPublic(u))).filter(
+  const picked = (useCaseIds?.length ? (await Promise.all(useCaseIds.map((id) => getUseCaseFor(id, actor)))) : (await allUseCases(project.id)).filter((u) => ['triage', 'accepted'].includes(u.status) && isPublic(u))).filter(
     (u) => u.ontologyId === project.id,
   );
   // A change request is public: its title, description, terms, definitions and tests are
@@ -1239,7 +1264,7 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
   // From the consent check to the change request being stored, no use case can be withdrawn (it waits).
   return withConsentLock(project.id, async () => {
     // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
-    if (ucs.some((u) => { const now = get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !canSee(now, actor); }))
+    if (await someAsync(ucs, async (u) => { const now = await get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !await canSee(now, actor); }))
       throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
     // The ontology is published, but use cases may be private: its annotations cite use cases only by
     // their (sign-in only) link. Nothing here is rewritten: the request is published only once an editor
@@ -1259,7 +1284,7 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
     // withdrawal made while drafting is never overwritten.
     const linked: string[] = [];
     for (const stale of ucs) {
-      const u = get<UseCase>('useCases', stale.id);
+      const u = await get<UseCase>('useCases', stale.id);
       if (!u || !isPublic(u)) continue;
       linked.push(u.id);
       for (const q of u.competencyQuestions) {
@@ -1271,11 +1296,11 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
       }
       u.changeRequestIds = [...new Set([...(u.changeRequestIds ?? []), cr.id])];
       if (['triage', 'accepted', 'draft'].includes(u.status)) u.status = 'accepted';
-      saveUseCase(u);
-      syncUseCase(u, [cr]);
+      await saveUseCase(u);
+      await syncUseCase(u, [cr]);
     }
     cr.useCaseIds = linked;
-    put('changeRequests', cr, cr.ontologyId);
+    await put('changeRequests', cr, cr.ontologyId);
     return cr;
   });
 }

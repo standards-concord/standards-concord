@@ -3,7 +3,8 @@ import type { TermView } from '@concord/core/types';
 import type { OntologyProject, PublicUseCase, Release, RequirementItem, RequirementsDocument, UseCase, User } from '@concord/shared';
 import { useCaseLabel } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, put } from '../db.js';
+import { filterAsync, someAsync } from '../asyncList.js';
+import { detached, get, HttpError, list, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { REQUIREMENTS_WRITER } from '../llm/prompts.js';
@@ -33,15 +34,15 @@ import { getUser, logActivity } from './users.js';
 /* Public view of use cases                                                  */
 /* ------------------------------------------------------------------------ */
 
-export const isPublishable = (u: UseCase) =>
-  u.visibility === 'public' && !u.withdrawnAt && !['draft', 'archived'].includes(u.status) && (!!u.demoSeed || !getUser(u.authorId)?.simulated);
+export const isPublishable = async (u: UseCase) =>
+  u.visibility === 'public' && !u.withdrawnAt && !['draft', 'archived'].includes(u.status) && (!!u.demoSeed || !(await getUser(u.authorId))?.simulated);
 
 /** What a use case's status will be once a given set of change requests is released. */
-function projectedStatus(u: UseCase, release?: { version: string; changeRequestIds: string[] }): { status: PublicUseCase['status']; coveredIn?: string } {
+async function projectedStatus(u: UseCase, release?: { version: string; changeRequestIds: string[] }): Promise<{ status: PublicUseCase['status']; coveredIn?: string }> {
   const status = u.status as PublicUseCase['status'];
   if (u.status === 'closed') return { status, coveredIn: u.resolution?.version };
   if (release && ['accepted', 'in-progress', 'addressed'].includes(u.status)) {
-    const all = changeRequestsFor(u);
+    const all = await changeRequestsFor(u);
     const live = all.filter((c) => c.status !== 'rejected' && c.status !== 'withdrawn');
     // As in traceability.ts: with a change dropped along the way, an editor decides whether it is covered.
     if (live.length && live.length === all.length && live.every((c) => c.status === 'released' || release.changeRequestIds.includes(c.id))) return { status: 'closed', coveredIn: release.version };
@@ -55,12 +56,12 @@ function projectedStatus(u: UseCase, release?: { version: string; changeRequestI
  * and no identifying origin. Meetings are working group business, so a meeting
  * is described without its title or a link.
  */
-export function toPublic(u: UseCase, release?: { version: string; changeRequestIds: string[] }): PublicUseCase {
-  if (!isPublishable(u)) throw new Error(`Use case ${u.id} is not public`);
+export async function toPublic(u: UseCase, release?: { version: string; changeRequestIds: string[] }): Promise<PublicUseCase> {
+  if (!await isPublishable(u)) throw new Error(`Use case ${u.id} is not public`);
   // A demo persona's use case is published as seeded, whatever testers have since typed into it.
   const s = u.demoSeed?.sections ?? u.sections;
   const questions = u.demoSeed?.competencyQuestions ?? u.competencyQuestions;
-  const { status, coveredIn } = projectedStatus(u, release);
+  const { status, coveredIn } = await projectedStatus(u, release);
   const str = (x: unknown) => (typeof x === 'string' && x.trim() ? x : undefined);
   const base = {
     id: u.id,
@@ -84,24 +85,22 @@ export function toPublic(u: UseCase, release?: { version: string; changeRequestI
         : u.source === 'chat'
           ? ({ kind: 'interview', label: 'From a requirements interview', date: day } as const)
           : ({ kind: 'form', label: 'Submitted by a participant', date: day } as const);
-  return { ...base, sourceKind: u.source, anonymised: false, attribution: getUser(u.authorId)?.name, origin };
+  return { ...base, sourceKind: u.source, anonymised: false, attribution: (await getUser(u.authorId))?.name, origin };
 }
 
 /** Public use cases of an ontology (public ones and anonymised versions only), oldest first. */
-export function publicUseCases(ontologyId: string): PublicUseCase[] {
-  const id = mustFindProject(ontologyId).id;
-  return allUseCases(id)
-    .filter(isPublishable)
-    .sort((a, b) => a.number - b.number)
-    .map((u) => toPublic(u));
+export async function publicUseCases(ontologyId: string): Promise<PublicUseCase[]> {
+  const id = (await mustFindProject(ontologyId)).id;
+  const shown = (await filterAsync(await allUseCases(id), isPublishable)).sort((a, b) => a.number - b.number);
+  return Promise.all(shown.map((u) => toPublic(u)));
 }
 
 /* ------------------------------------------------------------------------ */
 /* Documents                                                                 */
 /* ------------------------------------------------------------------------ */
 
-const docs = (ontologyId: string) => list<RequirementsDocument>('requirementsDocs', ontologyId);
-export const findDocument = (ontologyId: string, version: string) => docs(ontologyId).find((d) => d.version === version.replace(/^v/, ''));
+const docs = async (ontologyId: string) => await list<RequirementsDocument>('requirementsDocs', ontologyId);
+export const findDocument = async (ontologyId: string, version: string) => (await docs(ontologyId)).find((d) => d.version === version.replace(/^v/, ''));
 
 /**
  * The only way a document leaves the server: built field by field. Published
@@ -111,8 +110,8 @@ export const findDocument = (ontologyId: string, version: string) => docs(ontolo
  * introduction, which may summarise it. The note says so, and that the copy in
  * the released files on GitHub can't be recalled. The group-only count is for the group.
  */
-function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
-  const gone = withdrawnSince(d.ontologyId, [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])]);
+async function served(d: RequirementsDocument, viewer?: User): Promise<RequirementsDocument> {
+  const gone = await withdrawnSince(d.ontologyId, [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])]);
   const cites = (ids: string[], md = '') => ids.some((id) => gone.has(id)) || [...gone].some((id) => md.includes(`#uc-${id}`));
   // A requirement drawn from a withdrawn use case may quote it, so it goes, even if other use cases share it.
   const requirements = d.requirements
@@ -125,7 +124,7 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
     ...(d.releaseId ? { releaseId: d.releaseId } : {}),
     version: d.version,
     // The written title may echo a withdrawn use case: a plain one replaces it.
-    title: gone.size || d.invalidated ? plainTitle(d.ontologyId, d.version) : d.title,
+    title: gone.size || d.invalidated ? await plainTitle(d.ontologyId, d.version) : d.title,
     status: d.status,
     generatedAt: d.generatedAt,
     ...(d.simulated ? { simulated: true } : {}),
@@ -133,7 +132,7 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
     sections: d.sections.filter((x) => !cites(x.useCaseIds, x.markdown)).map((x) => ({ id: x.id, heading: x.heading, markdown: x.markdown, useCaseIds: x.useCaseIds })),
     requirements,
     useCases,
-    ...(d.unpublished && isGroupMember(d.ontologyId, viewer) ? { unpublished: { group: d.unpublished.group } } : {}),
+    ...(d.unpublished && await isGroupMember(d.ontologyId, viewer) ? { unpublished: { group: d.unpublished.group } } : {}),
     coverage: gone.size ? coverageOf(useCases) : d.coverage,
   };
   if (gone.size)
@@ -141,7 +140,7 @@ function served(d: RequirementsDocument, viewer?: User): RequirementsDocument {
   return out;
 }
 
-const plainTitle = (ontologyId: string, version: string) => `${getProject(ontologyId).title}: use cases and requirements for ${version}`;
+const plainTitle = async (ontologyId: string, version: string) => `${(await getProject(ontologyId)).title}: use cases and requirements for ${version}`;
 
 const coverageOf = (useCases: PublicUseCase[]) => ({
   total: useCases.length,
@@ -155,11 +154,11 @@ const coverageOf = (useCases: PublicUseCase[]) => ({
  * withdrawn, made private or group-only, or archived. The same predicate
  * (isPublishable) decides what goes into a document in the first place.
  */
-export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
+export async function withdrawnSince(ontologyId: string, ids: string[]): Promise<Set<string>> {
   return new Set(
-    ids.filter((id) => {
-      const u = get<UseCase>('useCases', id);
-      return !u || u.ontologyId !== ontologyId || !isPublishable(u);
+    await filterAsync(ids, async (id) => {
+      const u = await get<UseCase>('useCases', id);
+      return !u || u.ontologyId !== ontologyId || !await isPublishable(u);
     }),
   );
 }
@@ -169,25 +168,25 @@ export function withdrawnSince(ontologyId: string, ids: string[]): Set<string> {
  * longer public: it must be written again, not patched. Checked against every
  * source, not just the snapshots still in it.
  */
-const isStale = (d: RequirementsDocument) => {
+const isStale = async (d: RequirementsDocument) => {
   if (d.invalidated) return true;
-  const byId = new Map(allUseCases(d.ontologyId).map((u) => [u.id, u]));
-  return [...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])].some((id) => { const u = byId.get(id); return !u || !isPublishable(u); });
+  const byId = new Map((await allUseCases(d.ontologyId)).map((u) => [u.id, u]));
+  return someAsync([...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])], async (id) => { const u = byId.get(id); return !u || !await isPublishable(u); });
 };
 const dependsOn = (d: RequirementsDocument, id: string) => (d.sourceIds ?? []).includes(id) || d.useCases.some((x) => x.id === id);
 
 /** For the public spec pages: the published document for a version, if there is one. */
-export function requirementsDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
-  const p = mustFindProject(ontologyId);
-  const d = findDocument(p.id, version);
-  return d?.status === 'published' ? served(d) : undefined;
+export async function requirementsDocument(ontologyId: string, version: string): Promise<RequirementsDocument | undefined> {
+  const p = await mustFindProject(ontologyId);
+  const d = await findDocument(p.id, version);
+  return d?.status === 'published' ? await served(d) : undefined;
 }
 
 
 /** While a release is being published: its prepared (not yet frozen) document, as the public will see it. */
-export function releasingDocument(ontologyId: string, version: string): RequirementsDocument | undefined {
-  const d = findDocument(ontologyId, version);
-  return d && (d.status === 'published' || !isStale(d)) ? served(d) : undefined;
+export async function releasingDocument(ontologyId: string, version: string): Promise<RequirementsDocument | undefined> {
+  const d = await findDocument(ontologyId, version);
+  return d && (d.status === 'published' || !await isStale(d)) ? await served(d) : undefined;
 }
 
 /**
@@ -195,28 +194,27 @@ export function releasingDocument(ontologyId: string, version: string): Requirem
  * working group. Through the serving projection, so its title and counts are what the document
  * itself shows (a plain title once a use case it drew on is gone).
  */
-export function documentSummary(d: RequirementsDocument, viewer?: User) {
-  if (d.status !== 'published' && !isGroupMember(d.ontologyId, viewer)) return undefined;
-  const { id, version, status, generatedAt, title, releaseId, coverage } = served(d, viewer);
+export async function documentSummary(d: RequirementsDocument, viewer?: User) {
+  if (d.status !== 'published' && !await isGroupMember(d.ontologyId, viewer)) return undefined;
+  const { id, version, status, generatedAt, title, releaseId, coverage } = await served(d, viewer);
   return { id, version, status, generatedAt, title, releaseId, coverage };
 }
 
 /** Documents a viewer may read. */
-export function listDocuments(ontologyId: string, viewer?: User) {
-  return docs(ontologyId)
-    .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
-    .flatMap((d) => documentSummary(d, viewer) ?? []);
+export async function listDocuments(ontologyId: string, viewer?: User) {
+  const sorted = (await docs(ontologyId)).sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+  return (await Promise.all(sorted.map((d) => documentSummary(d, viewer)))).filter((x) => !!x);
 }
 
 export async function documentFor(ontologyId: string, version: string, viewer?: User): Promise<RequirementsDocument> {
-  let d = findDocument(ontologyId, version);
-  if (!d || (d.status !== 'published' && !isGroupMember(ontologyId, viewer))) throw new HttpError(404, `No use cases and requirements document for ${version}`);
+  let d = await findDocument(ontologyId, version);
+  if (!d || (d.status !== 'published' && !await isGroupMember(ontologyId, viewer))) throw new HttpError(404, `No use cases and requirements document for ${version}`);
   // A draft that was invalidated, or depends on a use case which is no longer public, is written again before anyone reads it.
-  if (d.status === 'draft' && isStale(d)) {
-    const release = d.releaseId ? get<Release>('releases', d.releaseId) : undefined;
-    d = await generateRequirements(getProject(ontologyId), { version: d.version, release });
+  if (d.status === 'draft' && await isStale(d)) {
+    const release = d.releaseId ? await get<Release>('releases', d.releaseId) : undefined;
+    d = await generateRequirements(await getProject(ontologyId), { version: d.version, release });
   }
-  return served(d, viewer);
+  return await served(d, viewer);
 }
 
 /**
@@ -224,11 +222,11 @@ export async function documentFor(ontologyId: string, version: string, viewer?: 
  * it, keeping only what is needed to write it again (on the next read, release
  * draft or publish). Its questions also leave saved validation results; see onNoLongerPublic.
  */
-onNoLongerPublic((u) => {
-  for (const d of docs(u.ontologyId))
+onNoLongerPublic(async (u) => { return transaction(async () => {
+  for (const d of await docs(u.ontologyId))
     if (d.status === 'draft' && dependsOn(d, u.id))
-      put('requirementsDocs', { ...d, invalidated: true, title: plainTitle(d.ontologyId, d.version), intro: '', sections: [], requirements: [], useCases: [], sourceIds: [], coverage: coverageOf([]) } satisfies RequirementsDocument, d.ontologyId);
-});
+      await put('requirementsDocs', { ...d, invalidated: true, title: await plainTitle(d.ontologyId, d.version), intro: '', sections: [], requirements: [], useCases: [], sourceIds: [], coverage: coverageOf([]) } satisfies RequirementsDocument, d.ontologyId);
+}); });
 
 const CAST = ['Sam', 'Priti', 'Jordan', 'Ada', 'Kofi', 'Morgan', 'Lena', 'Ravi'];
 const LOWERABLE = /^(A|An|The|This|That|These|Every|Each|Some|Many|Most|Our|We|They|People|Volunteers|Organisations|Let|Help|Make|Find|Publish|Record|Report|Show|Tell)\b/;
@@ -336,12 +334,14 @@ const termIris = (graph: OntologyGraph) => {
  * history, not proof that a later version still supports it.
  * Callers check isStale first: a use case that is no longer public is never kept.
  */
-function refreshStatuses(doc: RequirementsDocument, inGraph: Set<string>, release?: { version: string; changeRequestIds: string[] }) {
-  const byId = new Map(allUseCases(doc.ontologyId).map((u) => [u.id, u]));
-  doc.useCases = doc.useCases.flatMap((pu) => {
+async function refreshStatuses(doc: RequirementsDocument, inGraph: Set<string>, release?: { version: string; changeRequestIds: string[] }) {
+  const byId = new Map((await allUseCases(doc.ontologyId)).map((u) => [u.id, u]));
+  const current: PublicUseCase[] = [];
+  for (const pu of doc.useCases) {
     const u = byId.get(pu.id);
-    return u && isPublishable(u) ? [toPublic(u, release)] : [];
-  });
+    if (u && await isPublishable(u)) current.push(await toPublic(u, release));
+  }
+  doc.useCases = current;
   const status = new Map(doc.useCases.map((u) => [u.id, u.status]));
   doc.requirements = doc.requirements.map((r) => {
     const st = r.useCaseIds.map((id) => status.get(id));
@@ -362,7 +362,7 @@ function refreshStatuses(doc: RequirementsDocument, inGraph: Set<string>, releas
  * again from what is public now.
  */
 export async function generateRequirements(project: OntologyProject, opts: { version: string; release?: Release; actor?: User }): Promise<RequirementsDocument> {
-  if (opts.actor && !canTriage(project.id, opts.actor)) throw new HttpError(403, 'Only editors, stewards and owners can write the use cases and requirements document');
+  if (opts.actor && !await canTriage(project.id, opts.actor)) throw new HttpError(403, 'Only editors, stewards and owners can write the use cases and requirements document');
   for (let attempt = 0; attempt < 3; attempt++) {
     const doc = await writeRequirements(project, opts);
     if (doc) return doc;
@@ -371,16 +371,16 @@ export async function generateRequirements(project: OntologyProject, opts: { ver
 }
 
 async function writeRequirements(project: OntologyProject, opts: { version: string; release?: Release; actor?: User }): Promise<RequirementsDocument | undefined> {
-  const existing = findDocument(project.id, opts.version);
+  const existing = await findDocument(project.id, opts.version);
   if (existing?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
-  const all = allUseCases(project.id);
-  const ucs = all.filter((u) => isPublishable(u) && u.status !== 'out-of-scope').sort((a, b) => a.number - b.number);
+  const all = await allUseCases(project.id);
+  const ucs = (await filterAsync(all, async (u) => await isPublishable(u) && u.status !== 'out-of-scope')).sort((a, b) => a.number - b.number);
   // Group members see how many group-only use cases informed it. Private ones are never counted.
   const unpublished = { group: all.filter((u) => u.visibility === 'group' && !u.withdrawnAt && u.status !== 'archived').length };
   const graph = await ontologyStore.working(project);
   const terms = termIndex(graph);
   const releaseLike = opts.release ? { version: opts.version, changeRequestIds: opts.release.changeRequestIds } : undefined;
-  const pub = ucs.map((u) => toPublic(u, releaseLike));
+  const pub = (await Promise.all(ucs.map(async (u) => await toPublic(u, releaseLike))));
   const refToId = new Map(ucs.map((u) => [useCaseLabel(u), u.id]));
 
   const { value, simulated } = ucs.length
@@ -437,14 +437,19 @@ async function writeRequirements(project: OntologyProject, opts: { version: stri
     unpublished,
     coverage: coverageOf([]),
   };
-  // Consent is checked again now the writing is done, and nothing below waits, so nothing can change before it is stored.
-  if (isStale(doc)) return undefined;
-  const latest = findDocument(project.id, opts.version);
-  if (latest?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
-  refreshStatuses(doc, termIris(graph), releaseLike);
-  put('requirementsDocs', doc, project.id);
+  // Consent is checked again now the writing is done, in the transaction that stores it: a withdrawal
+  // (which empties drafts in its own transaction) lands wholly before this check or wholly after the save.
+  const stored = await transaction(async () => {
+    if (await isStale(doc)) return false;
+    const latest = await findDocument(project.id, opts.version);
+    if (latest?.status === 'published') throw new HttpError(409, `The document for ${opts.version} is published and can no longer change`);
+    await refreshStatuses(doc, termIris(graph), releaseLike);
+    await put('requirementsDocs', doc, project.id);
+    return true;
+  });
+  if (!stored) return undefined;
   if (opts.actor)
-    logActivity({ ontologyId: project.id, actorId: opts.actor.id, type: 'requirements.drafted', message: `drafted the use cases and requirements for ${opts.version}`, link: `/o/${project.id}/requirements/${opts.version}` });
+    await logActivity({ ontologyId: project.id, actorId: opts.actor.id, type: 'requirements.drafted', message: `drafted the use cases and requirements for ${opts.version}`, link: `/o/${project.id}/requirements/${opts.version}` });
   return doc;
 }
 
@@ -452,53 +457,58 @@ async function writeRequirements(project: OntologyProject, opts: { version: stri
 export async function prepareForRelease(project: OntologyProject, r: Release): Promise<RequirementsDocument | undefined> {
   try {
     const inGraph = termIris(await ontologyStore.working(project));
-    // Read after the wait, and checked and stored with nothing in between.
-    const existing = findDocument(project.id, r.version);
-    if (existing?.status === 'published') return existing;
-    // Consent is checked again here: a draft depending on anything no longer public is written again from scratch.
-    if (!existing || isStale(existing)) return await generateRequirements(project, { version: r.version, release: r });
-    existing.releaseId = r.id;
-    refreshStatuses(existing, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
-    put('requirementsDocs', existing, project.id);
-    return existing;
+    // Read, checked and stored in one transaction. Consent is checked again here: a draft depending on
+    // anything no longer public is written again from scratch (outside it: writing calls the model).
+    const kept = await keepCurrent(project.id, r, inGraph);
+    return kept ?? await generateRequirements(project, { version: r.version, release: r });
   } catch (err) {
     console.warn(`[requirements] could not prepare the document for ${r.version}: ${(err as Error).message}`);
     return undefined;
   }
 }
 
+/**
+ * The stored document for a release brought up to date and saved, in one transaction, unless it must be
+ * written again (missing, or drawing on a use case that is no longer public): then undefined.
+ */
+async function keepCurrent(ontologyId: string, r: Release, inGraph: Set<string>, opts: { publish?: boolean; fallback?: RequirementsDocument } = {}) {
+  return transaction(async () => {
+    const d = await findDocument(ontologyId, r.version) ?? opts.fallback;
+    if (d?.status === 'published') return d;
+    if (!d || await isStale(d)) return undefined;
+    if (opts.publish) d.status = 'published';
+    d.releaseId = r.id;
+    await refreshStatuses(d, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
+    await put('requirementsDocs', d, ontologyId);
+    return d;
+  });
+}
+
 /** After publishing: freeze the document. */
 export async function markPublished(doc: RequirementsDocument, r: Release) {
-  const project = getProject(doc.ontologyId);
+  const project = await getProject(doc.ontologyId);
   const inGraph = termIris(await ontologyStore.working(project));
-  // Read again after the wait: a withdrawal meanwhile invalidates the stored draft.
-  let current = findDocument(project.id, r.version) ?? doc;
-  if (current.status === 'published') return current;
-  if (isStale(current)) current = await generateRequirements(project, { version: r.version, release: r });
-  current.status = 'published';
-  current.releaseId = r.id;
-  refreshStatuses(current, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
-  put('requirementsDocs', current, current.ontologyId);
-  return current;
+  // Read again after the wait: a withdrawal meanwhile invalidates the stored draft, which is written again first.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const done = await keepCurrent(project.id, r, inGraph, { publish: true, fallback: doc });
+    if (done) return done;
+    await generateRequirements(project, { version: r.version, release: r });
+  }
+  throw new HttpError(409, 'Use cases kept changing while the document was being published. Try again.');
 }
 
 /** Draft releases keep a draft document in step. Runs in the background; failures are logged. */
 export function draftForRelease(r: Release) {
-  void (async () => {
+  // Detached: it is started from inside a release draft's transaction, and calls the model.
+  void detached(async () => {
     try {
-      const project = getProject(r.ontologyId);
+      const project = await getProject(r.ontologyId);
       const inGraph = termIris(await ontologyStore.working(project));
-      const d = findDocument(project.id, r.version);
-      if (d?.status === 'published') return;
-      if (d && !isStale(d)) {
-        d.releaseId = r.id;
-        refreshStatuses(d, inGraph, { version: r.version, changeRequestIds: r.changeRequestIds });
-        put('requirementsDocs', d, project.id);
-      } else await generateRequirements(project, { version: r.version, release: r });
+      if (!await keepCurrent(project.id, r, inGraph)) await generateRequirements(project, { version: r.version, release: r });
     } catch (err) {
       console.warn(`[requirements] background draft for ${r.version} failed: ${(err as Error).message}`);
     }
-  })();
+  });
 }
 
 /** Markdown version, committed with each release as USE_CASES.md. */

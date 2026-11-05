@@ -10,8 +10,8 @@ import { runTick, seedDemo } from './services/simulation.js';
 import { syncFeedbackSharing } from './services/feedback.js';
 
 acquireProcessLock(config.dataDir);
-openDb();
-const secrets = migrateClientSecrets();
+await openDb();
+const secrets = await migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {

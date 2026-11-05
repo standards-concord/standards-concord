@@ -6,6 +6,12 @@
  * Chromium only sends a frame when something changes, so a ticker repeats the latest
  * frame to hold a steady frame rate against the wall clock. The video's timeline is
  * therefore real time since start(), which the recorder uses to place the narration.
+ *
+ * Frames reach us some time after Chromium painted them, and longer when the machine is
+ * busy. Each frame is placed at the time it was painted (the screencast's own
+ * timestamp), not when it arrived: the ticker writes a short while behind real time so
+ * late frames still land where they belong. Otherwise the picture would lag the
+ * narration by however long frames took to arrive.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { CDPSession, Page } from '@playwright/test';
@@ -24,6 +30,16 @@ export class Capture {
   private cdp?: CDPSession;
   private ffmpeg?: ChildProcess;
   private last?: Buffer;
+  /** Frames received but not yet due, with the time (seconds since start) they were painted. */
+  private queue: { buf: Buffer; t: number }[] = [];
+  /** How long after painting each frame arrived, in milliseconds. */
+  private delays: number[] = [];
+  /** Frames that arrived after their place in the video had already been written. */
+  private tooLate = 0;
+  /** How far behind real time frames are written, so late ones still fit. */
+  static holdSeconds = 0.3;
+  /** Holds back every frame this long before it is taken, as a busy machine would (tests). */
+  static deliveryDelayMs = 0;
   private written = 0;
   private t0 = 0;
   private timer?: NodeJS.Timeout;
@@ -62,7 +78,9 @@ export class Capture {
     this.cdp = await this.page.context().newCDPSession(this.page);
     const first = new Promise<void>((resolve) => {
       this.cdp!.on('Page.screencastFrame', async (f) => {
-        this.last = Buffer.from(f.data, 'base64');
+        const take = () => this.receive(Buffer.from(f.data, 'base64'), f.metadata?.timestamp);
+        if (Capture.deliveryDelayMs && this.t0) setTimeout(take, Capture.deliveryDelayMs);
+        else take();
         resolve();
         await this.cdp!.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
       });
@@ -76,11 +94,33 @@ export class Capture {
     this.timer = setInterval(() => this.pump(), frameMs / 2);
   }
 
-  private pump() {
-    if (this.overrun || !this.last || !this.ffmpeg?.stdin?.writable) return;
+  /** Takes a frame, painted at `paintedAt` (seconds since the epoch, from Chromium). */
+  private receive(buf: Buffer, paintedAt?: number) {
+    if (!this.t0) {
+      this.last = buf; // before start: the opening picture
+      return;
+    }
+    // Only the delay comes from the wall clock, so clock adjustments can't move frames.
+    const delay = paintedAt ? Math.max(0, Date.now() - paintedAt * 1000) : 0;
+    this.delays.push(delay);
+    const t = this.now() - delay / 1000;
+    if (t < this.written / this.opts.fps) this.tooLate++;
+    // Frames arrive in paint order; keep the queue sorted in case one doesn't.
+    let i = this.queue.length;
+    while (i > 0 && this.queue[i - 1].t > t) i--;
+    this.queue.splice(i, 0, { buf, t });
+  }
+
+  /** Writes every frame now due: up to `hold` seconds before real time. */
+  private pump(hold = Capture.holdSeconds) {
+    if (this.overrun || !this.ffmpeg?.stdin?.writable) return;
     const stdin = this.ffmpeg.stdin;
-    const due = Math.floor(this.now() * this.opts.fps);
+    const due = Math.floor(Math.max(0, this.now() - hold) * this.opts.fps);
     while (this.written < due) {
+      // Show the newest frame painted by this frame's time.
+      const at = this.written / this.opts.fps;
+      while (this.queue.length && this.queue[0].t <= at) this.last = this.queue.shift()!.buf;
+      if (!this.last) return;
       // Frames are counted, not timed by ffmpeg, so a slow encoder never shifts the timeline;
       // it only queues bytes in memory (Node's back-pressure signal). That queue is capped
       // here, before every write: past the cap the recording stops instead of growing.
@@ -96,6 +136,13 @@ export class Capture {
     }
   }
 
+  /** How long frames took to arrive after painting (ms), and how many came too late to place. */
+  latency() {
+    const d = [...this.delays].sort((a, b) => a - b);
+    const q = (p: number) => (d.length ? Math.round(d[Math.min(d.length - 1, Math.floor(p * d.length))]) : 0);
+    return { frames: d.length, medianMs: q(0.5), p95Ms: q(0.95), maxMs: d.length ? Math.round(d[d.length - 1]) : 0, tooLate: this.tooLate };
+  }
+
   /** Throws if capture had to stop early; scenes call this between steps so a run fails fast. */
   check() {
     if (this.overrun) throw this.overrun;
@@ -103,7 +150,7 @@ export class Capture {
 
   async stop() {
     if (this.timer) clearInterval(this.timer);
-    this.pump();
+    this.pump(0);
     await this.cdp?.send('Page.stopScreencast').catch(() => {});
     if (this.overrun) {
       await this.done?.catch(() => {});

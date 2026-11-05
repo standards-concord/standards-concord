@@ -17,7 +17,7 @@ const PER_MINUTE = RATE_LIMITS.perMinute;
 beforeAll(async () => {
   // The rate limit has its own test, at the end.
   RATE_LIMITS.perMinute = 10_000;
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -150,9 +150,9 @@ describe('POST to the ontology IRI validates data', () => {
   it('validates nothing against a version held for approval, like every other public read', async () => {
     const { put, remove } = await import('../src/db.js');
     const { findProject } = await import('../src/services/ontologies.js');
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const key = `public-hold:${project.id}`;
-    put('kv', { id: key, ontologyId: project.id, versions: ['draft'], since: new Date().toISOString() });
+    await put('kv', { id: key, ontologyId: project.id, versions: ['draft'], since: new Date().toISOString() });
     try {
       const held = await post('/def/volunteering/draft', `${VALID}ex:opp vol:titl "typo" .\n`);
       expect(held.status).toBe(503);
@@ -161,7 +161,7 @@ describe('POST to the ontology IRI validates data', () => {
       // A version that isn't held still validates.
       expect((await post('/def/volunteering/1.0.0', VALID)).status).toBe(200);
     } finally {
-      remove('kv', key);
+      await remove('kv', key);
     }
     expect((await post('/def/volunteering/draft', VALID)).status).toBe(200);
   });

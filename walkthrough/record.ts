@@ -1,7 +1,9 @@
 /**
- * Records the narrated Concord walkthrough video.
+ * Records the narrated Concord videos: the platform tour (narration.md) and, for alpha
+ * testers, how to take part and give feedback (feedback.md).
  *
- *   pnpm walkthrough                       voice from the environment, records everything
+ *   pnpm walkthrough                       voice from the environment, records both videos
+ *   pnpm walkthrough --video feedback      just one of them (tour or feedback)
  *   pnpm walkthrough --voice elevenlabs    pick a voice provider (asks for the key if unset)
  *   pnpm walkthrough --draft               silent narration (captions only), fast
  *   pnpm walkthrough --only intro,goals    just some scenes
@@ -11,11 +13,13 @@
  *                                          requests, and it fails rather than produce a flawed video
  *   pnpm walkthrough --help
  *
- * Output goes to walkthrough/out/: concord-walkthrough.mp4 (1080p, AAC, soft captions),
- * .vtt captions, chapters.txt (YouTube-style) and report.json.
+ * Output goes to walkthrough/out/, per video (concord-walkthrough, concord-feedback):
+ * <name>.mp4 (1080p, AAC, soft captions), .vtt captions, .transcript.md, .chapters.txt
+ * (YouTube-style) and .report.json.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import type { Route } from '@playwright/test';
@@ -24,7 +28,7 @@ import { Director, sleep } from './lib/director.ts';
 import { guardContext, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
+import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, wordTime, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
@@ -32,6 +36,7 @@ import { actions, type Ctx } from './scenes.ts';
 import { vendorModule } from './lib/vendor.ts';
 import { serveFonts } from './lib/fonts.ts';
 import { startEgressProxy, type Egress } from './lib/egress.ts';
+import { applyRunBudget, parseBudget, recordVideos, videoEnv } from './lib/budget.ts';
 
 const HERE = import.meta.dirname;
 const ALL_FEATURES = ['forks', 'jsClasses', 'shaclc', 'appChecks', 'connectPage'];
@@ -48,7 +53,8 @@ const { values: argv } = parseArgs({
     strict: { type: 'boolean' },
     publish: { type: 'boolean' },
     out: { type: 'string', default: path.join(HERE, 'out') },
-    narration: { type: 'string', default: path.join(HERE, 'narration.md') },
+    video: { type: 'string', default: 'all' },
+    narration: { type: 'string' },
     web: { type: 'string', default: 'dev' },
     hub: { type: 'string' },
     'shown-hub': { type: 'string', default: 'https://standards-concord.vercel.app' },
@@ -56,6 +62,8 @@ const { values: argv } = parseArgs({
     'no-shims': { type: 'boolean' },
     'list-actions': { type: 'boolean' },
     'voice-only': { type: 'boolean' },
+    'voice-budget': { type: 'string' },
+    'voice-plan': { type: 'string' },
     headed: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -69,6 +77,9 @@ if (argv['list-actions']) {
   console.log(Object.keys(actions).sort().join('\n'));
   process.exit(0);
 }
+
+/** Most characters a paid voice may be sent in this run, across all its videos (lib/budget.ts). */
+const VOICE_BUDGET = parseBudget(argv['voice-budget'] ?? process.env.VOICE_CHAR_BUDGET);
 
 // A release video must be exactly what the script claims, or nothing at all.
 if (argv.publish) {
@@ -90,8 +101,81 @@ const EPOCH = '2026-11-23T10:00:00Z';
 const log = (s: string) => console.log(s);
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
+/** The videos this script makes, recorded in this order (the feedback video's landing page shows the tour). */
+const VIDEOS: Record<string, { script: string; name: string }> = {
+  tour: { script: 'narration.md', name: 'concord-walkthrough' },
+  feedback: { script: 'feedback.md', name: 'concord-feedback' },
+};
+
+/** Which video(s) to make: --narration names a script directly; --only picks the video that has those scenes. */
+async function pickVideos(): Promise<string[]> {
+  if (argv.narration) return ['custom'];
+  if (argv.video !== 'all') {
+    if (!VIDEOS[argv.video!]) throw new Error(`Unknown video "${argv.video}". Use ${Object.keys(VIDEOS).join(', ')} or all.`);
+    return [argv.video!];
+  }
+  if (!argv.only) return Object.keys(VIDEOS);
+  const ids = argv.only.split(',');
+  const found: string[] = [];
+  for (const [k, v] of Object.entries(VIDEOS)) {
+    const n = parseNarration(await readFile(path.join(HERE, v.script), 'utf8'));
+    if (n.scenes.some((sc) => ids.includes(sc.id))) found.push(k);
+  }
+  if (!found.length) throw new Error(`No video has scenes ${argv.only}`);
+  return found;
+}
+
+async function portsFree(ports: number[], ms = 20_000) {
+  const { connect } = await import('node:net');
+  const busy = (port: number) =>
+    new Promise<boolean>((r) => {
+      const sock = connect(port, '127.0.0.1');
+      sock.on('connect', () => (sock.destroy(), r(true))).on('error', () => r(false));
+    });
+  for (const end = Date.now() + ms; Date.now() < end; ) {
+    if (!(await Promise.all(ports.map(busy))).some(Boolean)) return;
+    await sleep(300);
+  }
+  throw new Error(`Ports ${ports.join(', ')} are still in use`);
+}
+
+/** Records several videos one after another, each in a fresh process with a fresh Concord. */
+async function recordEach(videos: string[]) {
+  // Ask for a missing key once, here, rather than once per video.
+  const provider = (argv.draft || argv.check ? 'silent' : (argv.voice as ProviderName | undefined) ?? autoProvider()) as ProviderName;
+  const key = DEFAULTS[provider] ? needsKey(provider) : undefined;
+  if (key && !process.env[key]) process.env[key] = await askHidden(`${key} (input hidden): `);
+  const { spawn } = await import('node:child_process');
+  const passOn = process.argv.slice(2).filter((a, i, all) => a !== '--video' && all[i - 1] !== '--video' && !a.startsWith('--video='));
+  const child = async (v: string, extra: string[], env: NodeJS.ProcessEnv) => {
+    await portsFree([8798, 5184, 4417]);
+    return new Promise<number>((r) => spawn(process.execPath, [...process.execArgv, process.argv[1], ...passOn, ...extra, '--video', v], { stdio: 'inherit', env }).on('exit', (c) => r(c ?? 1)));
+  };
+  await recordVideos({
+    videos,
+    paid: ['elevenlabs', 'openai', 'google'].includes(provider),
+    budget: VOICE_BUDGET,
+    log,
+    quota: async (total) => {
+      const q = await new Voice({ provider }, path.join(HERE, '.cache', 'voice')).checkQuota(total);
+      if (q) log(`ElevenLabs usage: ${q.used.toLocaleString('en')} of ${q.limit.toLocaleString('en')} characters this period, enough for this run`);
+    },
+    plan: async (v, file) => {
+      if ((await child(v, ['--voice-plan', file], process.env)) !== 0) throw new Error(`Planning the ${v} video failed`);
+    },
+    record: async (v, ledger) => {
+      if ((await child(v, [], videoEnv(process.env, ledger))) !== 0) throw new Error(`Recording the ${v} video failed`);
+    },
+  });
+}
+
 async function main() {
-  const narration = parseNarration(await readFile(argv.narration!, 'utf8'));
+  const videos = await pickVideos();
+  if (videos.length > 1) return recordEach(videos);
+  const video = videos[0] === 'custom' ? { script: argv.narration!, name: 'concord-walkthrough' } : VIDEOS[videos[0]];
+  const name = video.name;
+  const outFile = (suffix: string) => path.join(argv.out!, `${name}${suffix}`);
+  const narration = parseNarration(await readFile(path.resolve(HERE, video.script), 'utf8'));
   const lexicon = Object.fromEntries(Object.entries(JSON.parse(await readFile(path.join(HERE, 'lexicon.json'), 'utf8')) as Record<string, string>).filter(([k]) => !k.startsWith('_')));
 
   // Every action named in the script must exist, before we spend anything on voices.
@@ -104,12 +188,14 @@ async function main() {
   const key = needsKey(provider);
   if (key && !process.env[key]) process.env[key] = await askHidden(`${key} (input hidden): `);
   const voice = new Voice({ provider, voice: argv['voice-id'], model: argv.model, rate: argv.rate ? Number(argv.rate) : undefined }, path.join(HERE, '.cache', 'voice'));
+  // Recording several videos: what the others sent counts against the same budget.
+  applyRunBudget(voice, process.env, VOICE_BUDGET);
   log(`Voice: ${voice.label}`);
 
   await mkdir(argv.out!, { recursive: true });
 
   // 1. Boot Concord (unless recording an existing hub) and find out what it can do.
-  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev', epoch: EPOCH }));
+  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev', epoch: EPOCH, env: { MEDIA_DIR: path.resolve(argv.out!) } }));
   const hub = (argv.hub ?? concord!.web).replace(/\/$/, '');
   let egress: Egress | undefined;
   const shownHub = argv['shown-hub']!.replace(/\/$/, '');
@@ -168,20 +254,36 @@ async function main() {
     const clips = new Map<object, { file: string; duration: number; charStarts?: number[] }>();
     const say = (text: string) => speechMap(text, lexicon).speech;
     if (!argv.check) {
-      log(`Voicing ${spoken.length} paragraphs…`);
+      const reqs = spoken.map((x, i) => ({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) }));
+      // Paid voices have limited characters: refuse up front rather than run out halfway.
+      if (argv['voice-plan']) {
+        await writeFile(argv['voice-plan'], JSON.stringify({ cost: voice.cost(reqs) }));
+        return;
+      }
+      const cost = voice.checkBudget(reqs);
+      // And the account itself must have that many characters left.
+      const quota = await voice.checkQuota(cost);
+      if (quota) log(`ElevenLabs usage: ${quota.used.toLocaleString('en')} of ${quota.limit.toLocaleString('en')} characters this period${quota.resetsAt ? ` (resets ${quota.resetsAt.slice(0, 10)})` : ''}`);
+      else if (cost && provider === 'elevenlabs') log(`ElevenLabs usage: NOT CHECKED, this key isn't allowed to read it; ${voice.budget ? `only the run budget of ${voice.budget.toLocaleString('en')} characters limits this run` : 'this run has no budget either'}`);
+      log(`Voicing ${spoken.length} paragraphs${voice.paid ? ` (${cost.toLocaleString('en')} new characters${voice.budget ? ` of a ${voice.budget.toLocaleString('en')} budget${voice.spent ? `, ${voice.spent.toLocaleString('en')} already sent` : ''}` : ''})` : ''}…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
-        const c = await voice.synth({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) });
+        const c = await voice.synth(reqs[i]);
         if (!c.cached) fresh++;
         clips.set(x.step, c);
       });
       const speech = [...clips.values()].reduce((a, c) => a + c.duration, 0);
       log(`  ${fresh} new, ${spoken.length - fresh} cached, ${fmt(speech)} of speech`);
+      if (fresh && provider === 'elevenlabs') {
+        // Only for the log: the narration is already paid for, so a failed read doesn't fail the run.
+        const after = await voice.quota().catch((e: Error) => (log(`  ${e.message.replace(' Nothing was sent.', '')}`), undefined));
+        if (after) log(`  ElevenLabs usage now: ${after.used.toLocaleString('en')} of ${after.limit.toLocaleString('en')} characters`);
+      }
     }
     if (argv['voice-only']) return;
 
     // 3. The sample app's working copy, served with the stage pages.
-    const appDir = path.join(argv.out!, 'helping-hands');
+    const appDir = outFile('-helping-hands');
     await rm(appDir, { recursive: true, force: true });
     await cp(path.join(HERE, 'sample-app', 'base'), appDir, { recursive: true });
     const mainClasses = `${shownHub}/def/${ontology.slug}.js`;
@@ -215,26 +317,27 @@ async function main() {
       app: { url: `${stat.url}/`, dir: appDir, sampleDir: path.join(HERE, 'sample-app'), classes: mainClasses },
       shown,
       state: { token },
-      notices: { classesStandIn },
+      notices: { classesStandIn, publishing: !!argv.publish },
     };
 
     // 4. Record: each paragraph starts its actions and its narration together, and the
     //    next paragraph waits for both. The narration is laid on afterwards at the same times.
     await page.goto(`${stat.url}/__stage/blank.html`);
-    const video = path.join(argv.out!, 'video.mp4');
-    const cap = new Capture(page, video, { fps: 30, width: 1920, height: 1080, quality: 92, crf: 18 });
+    const raw = outFile('.raw.mp4');
+    const cap = new Capture(page, raw, { fps: 30, width: 1920, height: 1080, quality: 92, crf: 18 });
     if (argv.check) {
       // Run every step back to back, without recording or waiting for narration.
       for (const scene of kept) {
         log(`▶ ${scene.id}`);
         for (const step of scene.steps) {
           await run(ctx, scene, step.actions);
+          await run(ctx, scene, step.marks.map((m) => m.action));
           await run(ctx, scene, step.after);
         }
       }
       stat.close();
       await browser.close();
-      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
+      await writeFile(outFile('.report.json'), JSON.stringify({ check: true, video: name, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
       if (fonts.fetched.size) log(`\n⚠ ${fonts.fetched.size} web font file(s) weren't in walkthrough/fonts/ and were fetched live. Commit them so recordings stay offline.`);
       log(`\nChecked ${kept.length} scenes: ${d.warnings.length ? `${d.warnings.length} warning(s)` : 'all steps worked'}.`);
       if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
@@ -246,6 +349,9 @@ async function main() {
     const chapters: { at: number; title: string }[] = [];
     const LEAD = 0.35;
     const GAP = 0.45;
+    /** How late a timed mark may run before the recording counts it as out of sync. */
+    const MAX_LATE = 0.75;
+    const sync: { scene: string; action: string; word: string; at: number; late: number }[] = [];
     for (const scene of kept) {
       log(`▶ ${scene.id}`);
       chapters.push({ at: cap.now(), title: scene.title });
@@ -255,7 +361,20 @@ async function main() {
         const start = cap.now();
         if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
         const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
-        await Promise.all([run(ctx, scene, step.actions), speaking]);
+        const opening = run(ctx, scene, step.actions);
+        // Timed marks wait for the step's opening actions, then for their word.
+        const marked = (async () => {
+          await opening;
+          for (const m of step.marks) {
+            const due = clip ? start + LEAD + wordTime(step.text, lexicon, clip.duration, m.word, clip.charStarts) : cap.now();
+            if (due > cap.now()) await sleep((due - cap.now()) * 1000);
+            const late = cap.now() - due;
+            sync.push({ scene: scene.id, action: m.action.name, word: plain(step.text).split(/\s+/)[m.word], at: Number(due.toFixed(2)), late: Number(late.toFixed(2)) });
+            if (late > MAX_LATE) d.warnings.push(`${scene.id} / {@${m.action.name}} ran ${late.toFixed(1)}s after its word; move the mark later or shorten what runs before it`);
+            await run(ctx, scene, [m.action]);
+          }
+        })();
+        await Promise.all([opening, marked, speaking]);
         await run(ctx, scene, step.after);
         await sleep((GAP + step.pause) * 1000);
       }
@@ -273,13 +392,13 @@ async function main() {
 
     // 5. Mix the narration in, with captions and chapters.
     log('Mixing…');
-    const out = path.join(argv.out!, 'concord-walkthrough.mp4');
-    await mux({ video, videoSeconds: seconds, clips: placed, out, captions: path.join(argv.out!, 'concord-walkthrough.vtt'), chapters, title: narration.meta.title });
-    await rm(video, { force: true });
-    await writeFile(path.join(argv.out!, 'chapters.txt'), chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
+    const out = outFile('.mp4');
+    await mux({ video: raw, videoSeconds: seconds, clips: placed, out, captions: outFile('.vtt'), chapters, title: narration.meta.title });
+    await rm(raw, { force: true });
+    await writeFile(outFile('.chapters.txt'), chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
     // A clean transcript of exactly the scenes in this video.
     await writeFile(
-      path.join(argv.out!, 'transcript.md'),
+      outFile('.transcript.md'),
       `# ${narration.meta.title ?? 'Concord walkthrough'}\n\n` + kept.map((s, i) => `## ${s.title} (${fmt(chapters[i].at)})\n\n${s.steps.filter((st) => st.text).map((st) => plain(st.text)).join('\n\n')}`).join('\n\n') + '\n',
     );
     const report = {
@@ -296,10 +415,13 @@ async function main() {
       fontsMissing: [...fonts.missing],
       promisedMinutes: promisesLength ? promisedMinutes : undefined,
       toolchain: await toolchain(chromiumVersion),
+      // Timed marks: when each was due in the video, and how late its action started.
+      sync,
+      frameLatency: cap.latency(),
       warnings: d.warnings,
       captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };
-    await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify(report, null, 2));
+    await writeFile(outFile('.report.json'), JSON.stringify(report, null, 2));
     if (argv.publish && (d.warnings.length || shims.size || outside.size || fonts.missing.size)) {
       throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s), ${fonts.missing.size} missing font file(s). See report.json.`);
     }
@@ -463,7 +585,12 @@ async function toolchain(chromiumVersion: string) {
   return { node: process.version, chromium: chromiumVersion, ffmpeg: await out('ffmpeg', ['-version']), os: [distro, `${os.type()} ${os.release()} ${os.arch()}`].filter(Boolean).join(' · ') };
 }
 
-main().catch((e) => {
-  console.error(`\n✗ ${(e as Error).stack ?? e}`);
-  process.exit(1);
-});
+// Exits rather than waiting for stray handles (an early return, such as --voice-plan,
+// leaves the browser open).
+main().then(
+  () => process.exit(process.exitCode ?? 0),
+  (e) => {
+    console.error(`\n✗ ${(e as Error).stack ?? e}`);
+    process.exit(1);
+  },
+);

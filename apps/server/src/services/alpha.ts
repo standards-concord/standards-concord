@@ -19,8 +19,8 @@ export const TESTER_COOKIE = 'concord_tester';
 export const isLasting = (u: User) => u.providers.some((p) => p.provider === 'google' || p.provider === 'github' || p.provider === 'solid');
 
 /** The tester's own account: the one remembered when they switched to a persona or another demo member, else whoever is signed in. */
-export function testerFor(req: Request): User | undefined {
-  const remembered = sessionUser(req.cookies?.[TESTER_COOKIE]);
+export async function testerFor(req: Request): Promise<User | undefined> {
+  const remembered = await sessionUser(req.cookies?.[TESTER_COOKIE]);
   if (remembered && !remembered.simulated) return remembered;
   return req.user && !req.user.simulated ? req.user : undefined;
 }
@@ -32,35 +32,35 @@ export function testerFor(req: Request): User | undefined {
  * refused, not quietly treated as having no tester; the stale cookie is cleared
  * so the next attempt starts afresh.
  */
-export function testerForSaving(req: Request, res: Response): User | undefined {
+export async function testerForSaving(req: Request, res: Response): Promise<User | undefined> {
   const cookie = req.cookies?.[TESTER_COOKIE];
-  if (cookie && !sessionUser(cookie)) {
+  if (cookie && !await sessionUser(cookie)) {
     res.clearCookie(TESTER_COOKIE, { path: '/' });
     throw new HttpError(409, 'Your tester session ended (your testing record may have moved into the account you signed in to). Please sign in again and resend.');
   }
-  return testerFor(req);
+  return await testerFor(req);
 }
 
 const cookieOpts = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: config.publicUrl.startsWith('https://'), maxAge: 30 * 24 * 60 * 60 * 1000, path: '/' });
 
-export function clearTesterCookie(req: Request, res: Response) {
+export async function clearTesterCookie(req: Request, res: Response) { return transaction(async () => {
   if (req.cookies?.[TESTER_COOKIE]) {
-    destroySession(req.cookies[TESTER_COOKIE]);
+    await destroySession(req.cookies[TESTER_COOKIE]);
     res.clearCookie(TESTER_COOKIE, { path: '/' });
   }
-}
+}); }
 
 /**
  * Call after the demo sign-in switches the session to `next`. Whoever was
  * testing before (their own account, not a persona) stays the tester until they
  * sign out, whether they now play a persona or join as a new demo member.
  */
-export function rememberTester(req: Request, res: Response, before: User | undefined, next: User) {
-  if (!before || before.id === next.id) return clearTesterCookie(req, res);
-  if (sessionUser(req.cookies?.[TESTER_COOKIE])?.id === before.id) return;
-  clearTesterCookie(req, res);
-  res.cookie(TESTER_COOKIE, createSession(before.id), cookieOpts());
-}
+export async function rememberTester(req: Request, res: Response, before: User | undefined, next: User) { return transaction(async () => {
+  if (!before || before.id === next.id) return await clearTesterCookie(req, res);
+  if ((await sessionUser(req.cookies?.[TESTER_COOKIE]))?.id === before.id) return;
+  await clearTesterCookie(req, res);
+  res.cookie(TESTER_COOKIE, await createSession(before.id), cookieOpts());
+}); }
 
 export function testerInfo(u: User): AlphaTesterInfo {
   return { id: u.id, name: u.name, avatarUrl: u.avatarUrl, lasting: isLasting(u), providers: [...new Set(u.providers.map((p) => p.provider))], podUrl: u.podUrl };
@@ -167,13 +167,13 @@ function mergeEntry(a: TestedVersion, b: TestedVersion): TestedVersion {
 }
 
 const historyKey = (userId: string) => `alpha-history:${userId}`;
-function history(userId: string): HistoryDoc {
-  const doc = get<HistoryDoc>('kv', historyKey(userId));
+async function history(userId: string): Promise<HistoryDoc> {
+  const doc = await get<HistoryDoc>('kv', historyKey(userId));
   return doc ? { ...doc, versions: normaliseVersions(doc.versions) } : { id: historyKey(userId), versions: [], rev: 0, mirroredRev: 0 };
 }
-function saveHistory(doc: HistoryDoc) {
+async function saveHistory(doc: HistoryDoc) {
   doc.rev += 1;
-  put('kv', doc);
+  await put('kv', doc);
 }
 
 /**
@@ -203,7 +203,7 @@ const mirrors = new Map<string, Promise<void>>();
 export function mirrorToPod(user: User): Promise<void> {
   return runSerially(mirrors, user.id, async () => {
     try {
-      const h = history(user.id);
+      const h = await history(user.id);
       if (h.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
       // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
       // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
@@ -211,26 +211,29 @@ export function mirrorToPod(user: User): Promise<void> {
       const when = h.keptExisting ? {} : await solid.keepExisting(user.id, RECORD);
       const copied: string[] = [];
       for (const id of h.feedbackToCopy ?? []) {
-        const fb = get<FeedbackSubmission>('feedback', id);
+        const fb = await get<FeedbackSubmission>('feedback', id);
         if (fb) await solid.writeExisting(user.id, `feedback/${id}.json`, JSON.stringify(fb, null, 2), 'application/json');
         copied.push(id);
       }
       const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', versions: h.versions };
       // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
       await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json', when);
-      const now = history(user.id);
-      now.keptExisting = true;
-      now.mirroredRev = Math.max(now.mirroredRev, h.rev);
-      now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
-      put('kv', now);
+      // Re-read and saved in one transaction: a visit saved while the pod was being written must not be lost.
+      await transaction(async () => {
+        const now = await history(user.id);
+        now.keptExisting = true;
+        now.mirroredRev = Math.max(now.mirroredRev, h.rev);
+        now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
+        await put('kv', now);
+      });
     } catch (err) {
       console.warn(`[alpha] pod copy of ${user.id}'s testing record is behind: ${(err as Error).message}`);
     }
   });
 }
 
-function meFor(user: User): AlphaMe {
-  const h = history(user.id);
+async function meFor(user: User): Promise<AlphaMe> {
+  const h = await history(user.id);
   return {
     tester: testerInfo(user),
     versions: h.versions,
@@ -241,10 +244,10 @@ function meFor(user: User): AlphaMe {
 }
 
 export async function alphaMe(req: Request): Promise<AlphaMe> {
-  const t = testerFor(req);
+  const t = await testerFor(req);
   if (!t) return { versions: [] };
   await mirrorToPod(t);
-  return meFor(t);
+  return await meFor(t);
 }
 
 /**
@@ -298,11 +301,14 @@ function applyVisit(h: HistoryDoc, input: VisitInput) {
 
 /** Record that the tester used `version`. Saved here first, then mirrored to their pod. */
 export async function recordVersion(tester: User, input: VisitInput): Promise<AlphaMe> {
-  const h = history(tester.id);
-  applyVisit(h, input);
-  saveHistory(h);
+  // Read and saved in one transaction, so visits arriving at once (several tabs) can't overwrite each other.
+  await transaction(async () => {
+    const h = await history(tester.id);
+    applyVisit(h, input);
+    await saveHistory(h);
+  });
   await mirrorToPod(tester);
-  return meFor(tester);
+  return await meFor(tester);
 }
 
 /**
@@ -315,15 +321,15 @@ export async function recordFeedback(
   tester: User,
   sub: FeedbackSubmission,
   visit: Omit<VisitInput, 'feedbackId'> | undefined,
-  store: () => void,
+  store: () => Promise<unknown>,
 ): Promise<{ kind: 'solid' | 'local'; url: string }> {
-  transaction(() => {
-    const h = history(tester.id);
+  await transaction(async () => {
+    const h = await history(tester.id);
     if (h.movedTo) throw movedError();
     if (visit) applyVisit(h, { ...visit, feedbackId: sub.id });
     h.feedbackToCopy = [...new Set([...(h.feedbackToCopy ?? []), sub.id])];
-    store();
-    saveHistory(h);
+    await store();
+    await saveHistory(h);
   });
   await mirrorToPod(tester);
   return { kind: podKind(tester), url: podUrlOf(tester, `feedback/${sub.id}.json`) };
@@ -339,19 +345,32 @@ export async function recordFeedback(
  * into the account's pod with the record. Running it again finishes the job.
  */
 export async function mergeTesterRecords(from: User, into: User) {
-  transaction(() => {
-    const theirs = history(from.id);
+  await moveTesterRecord(from, into);
+  await mirrorToPod(into);
+}
+
+/** Where a demo account's testing record moved to, if it has. */
+export const testerRecordMovedTo = async (userId: string) => (await history(userId)).movedTo;
+
+/** The stored part of mergeTesterRecords, in one transaction (or the caller's, so it commits with the caller's writes). */
+export async function moveTesterRecord(from: User, into: User) {
+  await transaction(async () => {
+    // Only a demo account's record moves. If an identity was attached to it after the caller read it, the record
+    // belongs to that identity now, and moving it would close it and end that identity's sessions.
+    const stored = await get<User>('users', from.id);
+    if (stored && !stored.simulated && !stored.providers.every((p) => p.provider === 'demo'))
+      throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
+    const theirs = await history(from.id);
     if (!theirs.movedTo) {
-      const mine = history(into.id);
+      const mine = await history(into.id);
       if (theirs.versions.length) {
         mine.versions = normaliseVersions([...mine.versions, ...theirs.versions]);
         mine.feedbackToCopy = [...new Set([...(mine.feedbackToCopy ?? []), ...theirs.versions.flatMap((v) => v.feedbackIds)])];
-        saveHistory(mine);
+        await saveHistory(mine);
       }
       theirs.movedTo = into.id;
-      saveHistory(theirs);
+      await saveHistory(theirs);
     }
-    destroyUserSessions(from.id);
+    await destroyUserSessions(from.id);
   });
-  await mirrorToPod(into);
 }
