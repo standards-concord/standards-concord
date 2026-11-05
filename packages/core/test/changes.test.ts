@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DataFactory } from 'n3';
-import { ChangeOpError, NS, XSD, applyChangeOps, lint, toKGCL } from '../src/index.js';
+import { ChangeOpError, NS, XSD, applyChangeOps, lint, sameAnnotationValue, toKGCL } from '../src/index.js';
 import type { ClassView, IndividualView, PropertyView } from '../src/index.js';
 import { NSX, X, baseOntology } from './helpers.js';
 
@@ -86,6 +86,28 @@ describe('applyChangeOps', () => {
     expect(p.examples).toEqual(['Ada Lovelace']);
     expect(graph.store.getObjects(namedNode(X('Person')), namedNode(NS.rdfs + 'label'), null).map((o: any) => o.value).sort()).toEqual(['human person', 'personne']);
     expect(() => applyChangeOps(g0, [{ op: 'updateAnnotations', iri: X('Person'), set: { label: ' ' } }])).toThrow(ChangeOpError);
+  });
+
+  it('updateAnnotations with expect refuses to overwrite a value that changed since the edit was proposed', () => {
+    const g0 = baseOntology();
+    const original = cls(g0, 'Person').definition;
+    const first = { op: 'updateAnnotations' as const, iri: X('Person'), set: { definition: 'An individual human being.' }, expect: { definition: original } };
+    const second = { op: 'updateAnnotations' as const, iri: X('Person'), set: { definition: 'A human, living or dead.' }, expect: { definition: original } };
+    const afterFirst = applyChangeOps(g0, [first]).graph;
+    expect(cls(afterFirst, 'Person').definition).toBe('An individual human being.');
+    // Both were based on the original definition: the second must not silently replace the first.
+    expect(() => applyChangeOps(afterFirst, [second])).toThrow(/definition of <.*Person> has changed since this edit was proposed/);
+    // Lists compare as sets and missing equals empty.
+    expect(() => applyChangeOps(g0, [{ op: 'updateAnnotations', iri: X('Person'), set: { altLabels: ['human'] }, expect: { altLabels: [], comment: '' } }])).not.toThrow();
+  });
+
+  it('sameAnnotationValue trims, ignores list order and treats missing as empty', () => {
+    expect(sameAnnotationValue(' a ', 'a')).toBe(true);
+    expect(sameAnnotationValue(undefined, '')).toBe(true);
+    expect(sameAnnotationValue(['b', 'a', ''], ['a', 'b'])).toBe(true);
+    expect(sameAnnotationValue([], undefined)).toBe(true);
+    expect(sameAnnotationValue(['first line\nsecond line'], ['first line', 'second line'])).toBe(false);
+    expect(sameAnnotationValue('a', 'b')).toBe(false);
   });
 
   it('setSuperClasses replaces named superclasses but keeps restrictions', () => {

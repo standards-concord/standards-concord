@@ -39,6 +39,7 @@ import type {
   ReleaseDetail,
   Role,
   SessionInfo,
+  TermEditInput,
   TermView,
   TranscriptLine,
   AnonymisedDraft,
@@ -305,6 +306,7 @@ export const api = {
   createChangeRequest: (id: string, body: NewChangeRequestInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/change-requests`, body),
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
+  proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
   publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
   acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),

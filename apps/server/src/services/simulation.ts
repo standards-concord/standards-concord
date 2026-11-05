@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, list, put, transaction } from '../db.js';
+import { clearAll, list, put } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -430,12 +430,13 @@ export async function runTick() {
 
 /** Wipe everything and re-seed. Demo mode only. The AI spending totals survive, or a reset would refill the budget. */
 export async function resetAll() {
-  await transaction(async () => {
+  // Only while this server holds the repositories, and keeping its hold (see ontologyStore). What the deployment
+  // has spent on Claude survives the reset.
+  await ontologyStore.wipe(async () => {
     const spend = await snapshotSpending();
     await clearAll();
     await restoreSpending(spend);
   });
   clock.reset();
-  fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
   return seedDemo();
 }

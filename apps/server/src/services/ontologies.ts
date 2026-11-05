@@ -198,10 +198,10 @@ export async function validateGraph(key: string, graph: Graph, cqs: { question: 
 }
 
 export async function workingValidation(p: OntologyProject): Promise<ValidationReport> {
-  const revision = ontologyStore.head(p);
+  const revision = await ontologyStore.head(p);
   const graph = await ontologyStore.working(p);
   // A commit landed while the graph loaded: start again so the revision names this graph.
-  if (ontologyStore.head(p) !== revision) return workingValidation(p);
+  if ((await ontologyStore.head(p)) !== revision) return workingValidation(p);
   const cqs = await competencyTests(p.id);
   // Keyed by the questions' content, so a change in which questions run (or what they say) never reuses an old report.
   const digest = createHash('sha256').update(JSON.stringify(cqs)).digest('hex').slice(0, 16);

@@ -1,10 +1,8 @@
 import { createHash } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
 import type { ChangeRequest, OntologyProject, PublicHold, PublicHoldReview, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
-import { transaction, get, HttpError, list, put, remove } from '../db.js';
+import { transaction, get, HttpError, list, put } from '../db.js';
 import { getUser } from '../services/users.js';
 import { requireRole, updateProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -40,7 +38,7 @@ type Checked = Pick<OntologyProject, 'id' | 'slug' | 'publishedWithApproval'>;
 export async function holdOf(project: Checked): Promise<PublicHold | undefined> {
   const saved = await get<PublicHold>('kv', key(project.id));
   if (saved || project.publishedWithApproval) return saved;
-  return { id: key(project.id), ontologyId: project.id, versions: ['draft', ...ontologyStore.versions(project)], since: clock.iso() };
+  return { id: key(project.id), ontologyId: project.id, versions: ['draft', ...await ontologyStore.versions(project)], since: clock.iso() };
 }
 export const isHeld = async (project: Checked, version: string) => !!(await holdOf(project))?.versions.includes(version);
 /**
@@ -70,43 +68,22 @@ export async function holdLegacy(project: OntologyProject) { return transaction(
   await updateProject({ ...project, publishedWithApproval: true });
 }); }
 
-/** A release published while the working draft is held carries what's held: it's held too. */
-const claimsKey = (ontologyId: string, version: string) => `public-hold-claims:${ontologyId}:${version}`;
-
 /**
- * Hold `version` before a publish writes it, if the working draft is held. Every publish that does takes a claim
- * on the hold, so one that fails can't take back a hold another one still relies on. True if this call took a
- * claim: the caller must then call dropHoldClaim once it's done, whatever happened.
+ * A release published while the working draft is held carries what's held: it's held too. Called inside the
+ * transaction that publishes it (see publishNow), so the release is never public unheld, and a publish that is
+ * refused leaves no hold behind. True if this call added the hold.
  */
 export async function holdReleaseIfDraftHeld(project: OntologyProject, version: string): Promise<boolean> { return transaction(async () => {
   const hold = await holdOf(project);
-  if (!hold?.versions.includes('draft')) return false;
-  if (!hold.versions.includes(version)) await put('kv', { ...hold, versions: [...hold.versions, version] });
-  const k = claimsKey(project.id, version);
-  await put('kv', { id: k, value: ((await get<{ id: string; value: number }>('kv', k))?.value ?? 0) + 1 });
+  if (!hold?.versions.includes('draft') || hold.versions.includes(version)) return false;
+  await put('kv', { ...hold, versions: [...hold.versions, version] });
   return true;
 }); }
 
-/**
- * A publish is done with its claim. The hold is taken back only when this publish wrote nothing, no other publish
- * still has a claim, and the version has no files at all: a publish that failed part-way may have left files the
- * public pages would serve as that version. Anything else keeps it held until a steward approves it.
- */
-export async function dropHoldClaim(project: OntologyProject, version: string, wrote: boolean) { return transaction(async () => {
-  const k = claimsKey(project.id, version);
-  const left = Math.max(0, ((await get<{ id: string; value: number }>('kv', k))?.value ?? 1) - 1);
-  if (left) await put('kv', { id: k, value: left });
-  else await remove('kv', k);
-  if (wrote || left || ontologyStore.versions(project).includes(version)) return;
-  const hold = await holdOf(project);
-  if (!hold?.versions.includes(version)) return;
-  await put('kv', { ...hold, versions: hold.versions.filter((v) => v !== version) });
-}); }
-
 /** The version a reference names, as the public sees versions: 'draft' or a release. Anything else (a commit, a tag) isn't public. */
-export function publicVersion(project: OntologyProject, ref: string | undefined): string | undefined {
+export async function publicVersion(project: OntologyProject, ref: string | undefined): Promise<string | undefined> {
   if (ref === undefined || ref === '' || ref === 'working' || ref === 'draft') return 'draft';
-  return ontologyStore.versions(project).includes(ref) ? ref : undefined;
+  return (await ontologyStore.versions(project)).includes(ref) ? ref : undefined;
 }
 
 /**
@@ -117,7 +94,7 @@ export function publicVersion(project: OntologyProject, ref: string | undefined)
  */
 export async function readOntology(project: OntologyProject, ref: string | undefined, viewer: User | undefined): Promise<OntologyGraph> {
   if (viewer) return ontologyStore.at(project, ref);
-  const version = publicVersion(project, ref);
+  const version = await publicVersion(project, ref);
   if (!version) throw new HttpError(404, `${project.title} has no published version “${ref}”`);
   if (await isHeld(project, version)) throw new HttpError(503, HELD_MESSAGE);
   return ontologyStore.at(project, version === 'draft' ? 'working' : version);
@@ -126,13 +103,11 @@ export const HELD_MESSAGE = 'This version is being reviewed before it is publish
 
 /** Exactly what a version publishes: its Turtle (every download is made from it), its release notes and its use case snapshot. */
 async function content(project: OntologyProject, version: string) {
-  const dir = ontologyStore.dir(project);
-  if (version === 'draft') return { turtle: ontologyStore.readWorkingText(project), notes: '', snapshot: '' };
-  const rel = path.join(dir, 'releases', version);
-  const read = (name: string) => (fs.existsSync(path.join(rel, name)) ? fs.readFileSync(path.join(rel, name), 'utf8') : '');
+  if (version === 'draft') return { turtle: await ontologyStore.readWorkingText(project), notes: '', snapshot: '' };
+  const read = async (name: string) => await ontologyStore.readReleaseFile(project, version, name) ?? '';
   // The record the public page shows, not a rejected attempt at the same version.
   const release = await publishedRelease(project.id, version);
-  return { turtle: read('ontology.ttl'), notes: release?.notes ?? '', snapshot: read('requirements.json') };
+  return { turtle: await read('ontology.ttl'), notes: release?.notes ?? '', snapshot: await read('requirements.json') };
 }
 const fingerprintOf = (c: Awaited<ReturnType<typeof content>>) => createHash('sha256').update(JSON.stringify([c.turtle, c.notes, c.snapshot])).digest('base64url');
 

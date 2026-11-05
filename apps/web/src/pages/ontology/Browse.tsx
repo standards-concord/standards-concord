@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
@@ -12,6 +12,8 @@ import { ClassTree } from '../../components/ontology-viz/ClassTree';
 import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood, type DiagramOptions } from '../../components/ontology-viz/ClassDiagram';
 import { HierarchyPath, IncomingList, Neighbourhood, PropertyTable, SubclassList } from '../../components/ontology-viz/ClassPanels';
 import { BugReportDialog } from '../../components/BugReport';
+import { ProposedEditNotice, TermEditForm } from '../../components/TermEdit';
+import type { ChangeRequestDetail } from '@concord/shared';
 import { Badge, Button, Card, Chip, CopyButton, EmptyState, ErrorCard, Input, Loading, Select, cx } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -75,8 +77,22 @@ function TermDetailPanel({
   onClose?: () => void;
 }) {
   const { id, label, view } = useOntology();
-  const term = useAsync(() => api.term(id, iri), [id, iri]);
+  // Remember which term each response is for, so the editor never opens on a
+  // previous term's data while the selected one is still loading.
+  const term = useAsync(async () => ({ for: `${id}|${iri}`, detail: await api.term(id, iri) }), [id, iri]);
   const [bugOpen, setBugOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [proposed, setProposed] = useState<ChangeRequestDetail>();
+  const editId = useId();
+  const refocusEdit = useRef(false);
+  useEffect(() => {
+    setEditing(false);
+    setProposed(undefined);
+  }, [id, iri]);
+  useEffect(() => {
+    if (!editing && refocusEdit.current) document.getElementById(editId)?.focus();
+    refocusEdit.current = false;
+  }, [editing, editId]);
   // Members arriving from "Report a problem" on the public page (?report=1) land with the form open.
   const [params, setParams] = useSearchParams();
   useEffect(() => {
@@ -88,8 +104,29 @@ function TermDetailPanel({
   }, [params, setParams]);
   if (term.error && !term.data) return <ErrorCard error={term.error} onRetry={term.reload} />;
   if (!term.data) return <Loading />;
-  const t: TermDetail = term.data;
+  const t: TermDetail = term.data.detail;
+  const current = term.data.for === `${id}|${iri}` && !term.loading;
   const prefixes = view.data?.prefixes;
+  if (editing && current)
+    return (
+      <Card className="p-5">
+        <TermEditForm
+          key={`${id}|${t.iri}`}
+          term={t}
+          termLabel={t.label ?? label(t.iri)}
+          onCancel={() => {
+            refocusEdit.current = true;
+            setEditing(false);
+          }}
+          onProposed={(cr) => {
+            // Only for the term on screen: a late response for another term is ignored.
+            if (cr.origin.type !== 'term-edit' || cr.origin.termIri !== t.iri) return;
+            setEditing(false);
+            setProposed(cr);
+          }}
+        />
+      </Card>
+    );
   const isClass = t.kind === 'class' && model.classes.has(t.iri);
   const isProp = t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty';
   const slotCount = isClass ? model.allSlots(t.iri).reduce((n, g) => n + g.slots.length, 0) : 0;
@@ -124,7 +161,10 @@ function TermDetailPanel({
             <CopyButton text={t.iri} variant="ghost" />
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          <Button id={editId} size="sm" variant="ghost" icon={PenLine} disabled={!current} onClick={() => setEditing(true)}>
+            Edit
+          </Button>
           <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
             {compact ? 'Report a problem' : 'Report a problem with this term'}
           </Button>
@@ -135,6 +175,7 @@ function TermDetailPanel({
           )}
         </div>
       </div>
+      {proposed && <ProposedEditNotice cr={proposed} onDismiss={() => setProposed(undefined)} />}
 
       {t.deprecated && t.replacedBy && (
         <p className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-sm">

@@ -53,6 +53,33 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.26.0',
+    date: '2026-11-05',
+    title: 'Edit a term where you read it',
+    pr: 28,
+    changes: [
+      {
+        id: 'inline-term-edit',
+        type: 'feat',
+        title: 'Edit a term from Browse',
+        detail:
+          'Next to “Report a problem”, Edit lets you change a term’s label, definition, comment, other names, examples and editorial note in place. Saving opens a change request; nothing changes until it is reviewed and merged.',
+        roles: [],
+        to: '{o}/browse',
+        ask: 'Was it easy to propose a change to a term from Browse, and to find your change request afterwards?',
+      },
+      {
+        id: 'safer-merges',
+        type: 'fix',
+        title: 'Merges and releases no longer clash',
+        detail:
+          'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
+        roles: ['steward'],
+        to: '{o}/changes',
+      },
+    ],
+  },
+  {
     version: '0.25.0',
     date: '2026-11-05',
     title: 'Ask for a query in plain words',
