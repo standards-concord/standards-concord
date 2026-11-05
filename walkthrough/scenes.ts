@@ -91,7 +91,7 @@ async function claimFormat(c: Ctx, format: string) {
 }
 
 /** The app is showing opportunities, and the hours feature where the story says it should. */
-async function claimAppWorks(c: Ctx, withHours: boolean) {
+export async function claimAppWorks(c: Ctx, withHours: boolean) {
   await c.d.claimVisible(c.d.page.locator('.card'), 'the sample app lists opportunities');
   // Every card has a title; a summary is optional (an empty paragraph), but never an object.
   const titles = await c.d.page.locator('.card h2').allInnerTexts().catch(() => []);
@@ -130,7 +130,7 @@ async function showClassificationAndChecks(c: Ctx) {
 }
 
 /** Rings the card or section that contains some text. */
-async function ringAround(c: Ctx, text: string | RegExp, tag?: string) {
+export async function ringAround(c: Ctx, text: string | RegExp, tag?: string) {
   await c.d.checkRing(); // before scrolling the old ring away
   const el = await c.d.find(c.d.page.getByText(text), `text ${text}`);
   if (!el) return;

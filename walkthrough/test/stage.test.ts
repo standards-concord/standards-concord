@@ -14,6 +14,7 @@ import { hasChromium } from '../lib/browser.ts';
 import { pathToFileURL } from 'node:url';
 import { Director, garbled, ringProblem, unreadableCards, type Ringed } from '../lib/director.ts';
 import { Terminal } from '../lib/terminal.ts';
+import { claimAppWorks, ringAround } from '../scenes.ts';
 
 const required = process.env.WALKTHROUGH_BROWSER_TESTS === '1';
 if (required && !hasChromium()) throw new Error('WALKTHROUGH_BROWSER_TESTS=1 but Playwright Chromium is not installed');
@@ -174,15 +175,28 @@ describe.runIf(run)('in a browser', () => {
   });
 
   it('counts only content inside its own scrolling container, and notices content that disappears', async () => {
-    // The card is on screen, but its only text sits in an inner panel, scrolled out of view.
+    // The text is inside the card, but in an inner panel that clips it: the card looks empty.
     await fixture(`
       <section id="card" style="margin-top:100px;width:400px;height:200px">
-        <div style="height:120px;overflow:hidden"><p style="margin:300px 0 0">Members</p></div>
+        <div style="height:40px;overflow:hidden"><p style="margin:80px 0 0">Members</p></div>
       </section>
+      <section id="spill" style="width:400px;height:200px"><div style="height:0"><p style="margin:60px 0 0">Shown, overflowing a wrapper that doesn't clip</p></div></section>
       <section id="note" style="width:400px;height:200px"><p id="words">Governance</p></section>`);
     expect(ringProblem(await highlight('card'))).toMatch(/blank space/);
+    expect(ringProblem(await highlight('spill'))).toBeUndefined();
     expect(ringProblem(await highlight('note'))).toBeUndefined();
     await page.evaluate(() => ((document.getElementById('words') as HTMLElement).style.opacity = '0'));
+    await expect.poll(ringShown).toBe(false);
+    expect(await lost()).toBe('went blank');
+  });
+
+  it('notices when the text inside a ringed panel scrolls away and the panel stays put', async () => {
+    await fixture(`
+      <section id="panel" style="margin-top:100px;width:400px;height:150px;overflow:auto">
+        <p style="margin:0">Members</p><div style="height:1200px"></div>
+      </section>`);
+    expect(ringProblem(await highlight('panel'))).toBeUndefined();
+    await page.evaluate(() => document.getElementById('panel')!.scrollTo(0, 600));
     await expect.poll(ringShown).toBe(false);
     expect(await lost()).toBe('went blank');
   });
@@ -215,6 +229,34 @@ describe.runIf(run)('in a browser', () => {
     await page.waitForTimeout(50);
     await d.checkRing();
     expect(d.warnings.at(-1)).toBe('The highlight on the releases went off screen while it was shown');
+  });
+
+  it('switching rings with ringAround is not a lost ring, and a lost one is still reported', async () => {
+    await fixture(`<section style="margin-top:100px;height:150px"><h2>Members</h2></section><section style="margin-top:1500px;height:150px"><h2>Releases</h2></section>`);
+    const d = new Director(page, false);
+    const c = { d } as unknown as Parameters<typeof ringAround>[0];
+    await ringAround(c, 'Members');
+    await page.waitForTimeout(50);
+    await ringAround(c, 'Releases');
+    await page.waitForTimeout(50);
+    expect(d.warnings).toEqual([]);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(50);
+    await d.checkRing();
+    expect(d.warnings).toEqual(['The highlight on the section with Releases went off screen while it was shown']);
+  });
+
+  it('the sample app check accepts a card without a summary and rejects one without a title', async () => {
+    const cards = (t: string, p: string) => `<ul><li class="card"><h2>${t}</h2><p>${p}</p></li></ul>`;
+    const check = async (html: string) => {
+      await fixture(html);
+      const d = new Director(page, false);
+      await claimAppWorks({ d } as unknown as Parameters<typeof claimAppWorks>[0], false);
+      return d.warnings;
+    };
+    expect(await check(cards('Saturday park clean-up', ''))).toEqual([]);
+    expect((await check(cards('', 'Help keep the park clean'))).join()).toMatch(/unreadable text/);
+    expect((await check(cards('[object U]', '[object U]'))).join()).toMatch(/unreadable text/);
   });
 
   it('loads Claude Code on the web from its address and redraws the session on return', async () => {

@@ -137,6 +137,23 @@
     return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
+  /**
+   * Where content inside an element can be seen: the window, cut by every ancestor from the
+   * element up that clips (overflow other than visible). An element that doesn't clip lets its
+   * content overflow it, so its own box doesn't count.
+   */
+  function clipFor(el) {
+    let top = 0, left = 0, bottom = innerHeight, right = innerWidth;
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (st.overflowX === 'visible' && st.overflowY === 'visible') continue;
+      const c = n.getBoundingClientRect();
+      top = Math.max(top, c.top); left = Math.max(left, c.left);
+      bottom = Math.min(bottom, c.bottom); right = Math.min(right, c.right);
+    }
+    return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
   const meets = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 
   const intersect = (a, b) => {
@@ -156,7 +173,7 @@
     const range = document.createRange();
     const clips = new Map(); // a parent's visible part, worked out once per parent
     const seenPart = (p) => {
-      if (!clips.has(p)) clips.set(p, shown(p) ? intersect(visibleRect(p), area) : null);
+      if (!clips.has(p)) clips.set(p, shown(p) ? intersect(clipFor(p), area) : null);
       return clips.get(p);
     };
     for (let n = walk.nextNode(), i = 0; n && i < 2000 && words.join(' ').length < 80; n = walk.nextNode(), i++) {
