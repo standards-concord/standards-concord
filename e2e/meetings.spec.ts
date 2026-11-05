@@ -340,6 +340,7 @@ test.describe('Meet co-lead bot: bookings Recall.ai never confirmed', () => {
     await writeBotCalendar(page.request);
   });
 
+  // Calls are working group business, so "people who can't run calls" here is a reviewer: in the group, not a facilitator.
   test('people who can’t run calls don’t get the button to let a booking go', async ({ page }) => {
     await signIn(page, { name: 'E2E unconfirmed steward 2', role: 'steward' });
     const demo = await demoOntology(page.request);
@@ -348,7 +349,7 @@ test.describe('Meet co-lead bot: bookings Recall.ai never confirmed', () => {
     const listed = (await (await page.request.get(`/api/ontologies/${demo.id}/meetings`)).json()) as { id: string; title: string; calendar?: object }[];
     const real = listed.find((x) => x.title === title)!;
     await page.request.patch(`/api/meetings/${real.id}`, { data: { approve: true } });
-    await signIn(page, { name: 'E2E unconfirmed contributor', role: 'contributor' });
+    await signIn(page, { name: 'E2E unconfirmed reviewer', role: 'reviewer' });
     const seen = (await (await page.request.get(`/api/meetings/${real.id}`)).json()) as { calendar?: object };
     await page.route(`**/api/meetings/${real.id}`, (route) =>
       route.fulfill({ json: { ...seen, bot: { provider: 'recall', phase: 'booking', status: 'scheduled', uncertain: true, unconfirmed: true } } }),
@@ -365,7 +366,9 @@ test.describe('Meet co-lead bot: bookings Recall.ai never confirmed', () => {
   });
 });
 
-test.describe('Meet co-lead bot, as a contributor', () => {
+// Calls are working group business: a reviewer is in the group but can't run calls. (Contributors, outside the
+// group, see no calls at all: use-cases.spec.ts.)
+test.describe('Meet co-lead bot, as a reviewer', () => {
   test('only owners, stewards and editors can bring the bot in or change its calls', async ({ page, request }) => {
     const demo = await demoOntology(request);
     // A steward puts a call on the bot's calendar first.
@@ -376,7 +379,7 @@ test.describe('Meet co-lead bot, as a contributor', () => {
     expect((await page.request.patch(`/api/meetings/${pending.id}`, { data: { approve: true } })).ok()).toBeTruthy();
     await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E contributor list', delayMs: 0 } });
 
-    await signIn(page, { name: 'E2E contributor', role: 'contributor' });
+    await signIn(page, { name: 'E2E reviewer', role: 'reviewer' });
     // The API refuses, whatever the UI shows.
     const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/bot`, { data: { title: 'Nope', meetingUrl: 'https://meet.google.com/eee-test-abc' } });
     expect(r.status()).toBe(403);
@@ -389,7 +392,7 @@ test.describe('Meet co-lead bot, as a contributor', () => {
     await expect(menu.getByRole('menuitem', { name: /Invite the co-lead bot/ })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    // Contributors see upcoming calls but can't skip them.
+    // Reviewers see upcoming calls but can't skip them.
     const row = page.getByRole('listitem').filter({ hasText: 'E2E contributor view' });
     await expect(row).toBeVisible();
     await expect(row.getByRole('switch')).toHaveCount(0);

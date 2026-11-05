@@ -18,6 +18,7 @@ import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.j
 import { newId, slugify } from '../ids.js';
 import { template } from './governance.js';
 import { ontologyStore } from './ontologyStore.js';
+import { createHash } from 'node:crypto';
 import { getUser, logActivity } from './users.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 
@@ -33,6 +34,10 @@ export const mustFindProject = async (idOrSlug: string) => {
 export const members = async (ontologyId: string) => await list<Membership>('memberships', ontologyId);
 export const rolesFor = async (ontologyId: string, userId: string | undefined): Promise<Role[]> =>
   userId ? ((await get<Membership>('memberships', `${ontologyId}:${userId}`))?.roles ?? []) : [];
+
+const GROUP_ROLES: Role[] = ['owner', 'steward', 'editor', 'reviewer', 'member', 'odi'];
+/** Working group members: anyone with a role beyond contributor or agent. */
+export const isGroupMember = async (ontologyId: string, user?: User) => !!user && (user.isPlatformAdmin || (await rolesFor(ontologyId, user.id)).some((r) => GROUP_ROLES.includes(r)));
 
 export async function setRoles(ontologyId: string, userId: string, roles: Role[]): Promise<Membership> { return transaction(async () => {
   const id = `${ontologyId}:${userId}`;
@@ -165,16 +170,21 @@ export async function setGovernance(p: OntologyProject, policy: GovernancePolicy
 
 const validationCache = new Map<string, Promise<ValidationReport>>();
 
-/** Competency questions from use cases that have SPARQL tests attached. */
+/**
+ * Competency questions from use cases that have SPARQL tests attached. Validation
+ * reports are public (and saved on change requests), so only public use cases'
+ * questions run in them; a use case that stops being public has its questions
+ * removed from saved reports too (services/useCases.ts).
+ */
 export async function competencyTests(ontologyId: string) {
   return (await list<UseCase>('useCases', ontologyId))
-    .filter((u) => u.status !== 'archived')
-    .flatMap((u) => u.competencyQuestions)
-    .filter((q) => q.sparql)
-    .map((q) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData }));
+    .filter((u) => u.status !== 'archived' && u.status !== 'draft' && u.visibility === 'public' && !u.withdrawnAt)
+    .flatMap((u) => u.competencyQuestions.map((q) => ({ q, source: u.id })))
+    .filter(({ q }) => q.sparql)
+    .map(({ q, source }) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData, source }));
 }
 
-export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string }[]) {
+export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string; source?: string }[]) {
   const fair = await fairContext(graph.ontologyIRI);
   const r = fair.resolution;
   key += r ? `:${+r.rdf}${+r.html}` : '';
@@ -193,15 +203,18 @@ export async function workingValidation(p: OntologyProject): Promise<ValidationR
   // A commit landed while the graph loaded: start again so the revision names this graph.
   if (ontologyStore.head(p) !== revision) return workingValidation(p);
   const cqs = await competencyTests(p.id);
-  return { ...(await validateGraph(`${p.slug}@${revision}:${cqs.length}`, graph, cqs)), revision };
+  // Keyed by the questions' content, so a change in which questions run (or what they say) never reuses an old report.
+  const digest = createHash('sha256').update(JSON.stringify(cqs)).digest('hex').slice(0, 16);
+  return { ...(await validateGraph(`${p.slug}@${revision}:${digest}`, graph, cqs)), revision };
 }
 
 /**
  * An ontology with its counts and health. `withGraph: false` leaves out
  * everything read from the working draft (its counts and health) without
  * reading it: for callers who mustn't see a draft that waits for approval.
+ * Use cases are counted as `viewer` may see them.
  */
-export async function summary(p: OntologyProject, { withHealth = true, withGraph = true }: { withHealth?: boolean; withGraph?: boolean } = {}): Promise<OntologySummary> {
+export async function summary(p: OntologyProject, { withHealth = true, withGraph = true, viewer }: { withHealth?: boolean; withGraph?: boolean; viewer?: User } = {}): Promise<OntologySummary> {
   const view = withGraph ? (await ontologyStore.working(p)).view() : undefined;
   const crs = await list<ChangeRequest>('changeRequests', p.id);
   let health: OntologySummary['health'];
@@ -239,7 +252,16 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
         properties: view.objectProperties.length + view.datatypeProperties.length,
         individuals: view.individuals.length,
       }),
-      useCases: (await list<UseCase>('useCases', p.id)).length,
+      // Only the use cases this viewer can see, so the count doesn't reveal private ones.
+      useCases: await (async () => {
+        // The same rule as canSee in services/useCases.ts, with the membership check made once.
+        const group = await isGroupMember(p.id, viewer);
+        return (await list<UseCase>('useCases', p.id)).filter((u) => {
+          if (viewer && u.authorId === viewer.id) return true;
+          if (u.withdrawnAt || u.visibility === 'private') return false;
+          return (u.visibility === 'public' && u.status !== 'archived' && u.status !== 'draft') || group;
+        }).length;
+      })(),
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: (await list<Release>('releases', p.id)).filter((r) => r.status === 'published').length,
       members: (await members(p.id)).length,

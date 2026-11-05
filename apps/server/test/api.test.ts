@@ -746,7 +746,7 @@ describe('feedback', () => {
 });
 
 describe('anonymous access', () => {
-  it('keeps use cases, interviews, meetings, change requests, releases and feedback behind sign-in', async () => {
+  it('keeps interviews, meetings, change requests, releases and feedback behind sign-in, and shows signed-out visitors only public use cases', async () => {
     const agent = await login('contributor', 'Private author');
     const uc = await agent.post(`/api/ontologies/${demoId}/interviews`).send({});
     expect(uc.status).toBe(201);
@@ -755,9 +755,13 @@ describe('anonymous access', () => {
     const cr = (await agent.get(`/api/ontologies/${demoId}/change-requests`)).body[0] as { id: string };
     const rel = (await agent.get(`/api/ontologies/${demoId}/releases`)).body[0] as { id: string };
     const meetings = (await agent.get(`/api/ontologies/${demoId}/meetings`)).body as { id: string }[];
+    // Use case reads are open, but check what each viewer may see: signed out, only public ones.
+    const anonList = await request(app).get(`/api/ontologies/${demoId}/use-cases`);
+    expect(anonList.status).toBe(200);
+    expect((anonList.body as { visibility: string }[]).every((u) => u.visibility === 'public')).toBe(true);
+    expect(JSON.stringify(anonList.body)).not.toContain('Private author');
+    expect((await request(app).get(`/api/use-cases/${useCaseId ?? ucs[0].id}`)).status).toBe(404);
     const paths = [
-      `/api/ontologies/${demoId}/use-cases`,
-      `/api/use-cases/${useCaseId ?? ucs[0].id}`,
       `/api/interviews/${uc.body.id}`,
       `/api/ontologies/${demoId}/change-requests`,
       `/api/change-requests/${cr.id}`,

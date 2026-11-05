@@ -1,14 +1,12 @@
 import type { OntologyProject } from '@concord/shared';
-import { aggregationCompetencyQuestions, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_USE_CASE } from '../services/demoUseCases.js';
-import { PERSONAS } from '../services/personas.js';
+import { publicUseCases, releasingDocument, requirementsDocument, withdrawnSince } from '../services/requirements.js';
 
 /**
  * What the public ontology page shows on its "Use cases and requirements" tab.
  *
- * The use case thread owns the real data (sharing modes, anonymised synthetic
- * versions, the synthesised story document and per-release status). This file
- * is the single seam between that data and the public page: replace the body
- * of `publishedRequirements` with the real source. Whatever it returns is shown
+ * The data comes from services/requirements.ts (sharing modes, anonymised
+ * synthetic versions, the story document and per-release status). This file is
+ * the single seam between that data and the public page. Whatever it returns is shown
  * to anyone on the internet, so it must only ever contain public use cases or
  * anonymised synthetic versions of private ones, never private or
  * working-group-only material.
@@ -64,10 +62,9 @@ export interface RequirementsDocumentView {
   /** Either one markdown body, or an intro plus sections, or both. */
   intro?: string;
   markdown?: string;
-  sections?: { id: string; heading: string; markdown: string }[];
+  /** useCaseIds: the use cases each section draws on, kept so a section can be dropped if one is withdrawn. */
+  sections?: { id: string; heading: string; markdown: string; useCaseIds?: string[] }[];
   requirements?: RequirementView[];
-  /** Use cases that informed the version but aren't public (counts only). */
-  unpublished?: { group: number; private: number };
 }
 
 export interface PublishedRequirements {
@@ -75,12 +72,12 @@ export interface PublishedRequirements {
   useCases: PublicUseCaseView[];
   /** A release whose snapshot is missing or unreadable: shown as such, never filled with current data. */
   snapshotMissing?: boolean;
+  /** How many use cases recorded with this release have since been withdrawn (and, with what was written from them, are not shown). */
+  withdrawn?: number;
 }
 
 /**
- * Shapes of the use case thread's data (RequirementsDocument and PublicUseCase
- * in @concord/shared), kept structural so this file compiles before and after
- * that work merges.
+ * Structural views of RequirementsDocument and PublicUseCase in @concord/shared.
  */
 interface SourceUseCase {
   id: string;
@@ -102,18 +99,13 @@ interface SourceDocument {
   title: string;
   generatedAt?: string;
   intro?: string;
-  sections?: { id: string; heading: string; markdown: string }[];
+  sections?: { id: string; heading: string; markdown: string; useCaseIds?: string[] }[];
   requirements?: { id: string; text: string; useCaseIds: string[]; termIris?: string[]; status: string }[];
   useCases?: SourceUseCase[];
-  unpublished?: { group: number; private: number };
 }
 
 /**
- * Maps the use case thread's published document and public use cases onto the
- * page. Wire it up with:
- *   const doc = requirementsDocument(project.id, version);
- *   return toPublishedRequirements(doc, doc?.useCases ?? publicUseCases(project.id));
- * In-app links (origin.href like /o/...) point at working group pages, so only
+ * Maps a published document and public use cases onto the page. In-app links (origin.href like /o/...) point at working group pages, so only
  * absolute links are kept for the public page.
  */
 export function toPublishedRequirements(doc: SourceDocument | undefined, useCases: SourceUseCase[]): PublishedRequirements {
@@ -123,9 +115,8 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
       version: doc.version,
       generatedAt: doc.generatedAt,
       intro: doc.intro,
-      sections: doc.sections?.map((s) => ({ id: s.id, heading: s.heading, markdown: s.markdown })),
+      sections: doc.sections?.map((s) => ({ id: s.id, heading: s.heading, markdown: s.markdown, ...(s.useCaseIds ? { useCaseIds: s.useCaseIds } : {}) })),
       requirements: doc.requirements?.map((r) => ({ id: r.id, text: r.text, useCaseIds: r.useCaseIds, termIris: r.termIris, status: r.status })),
-      unpublished: doc.unpublished,
     },
     useCases: useCases.map((u) => ({
       id: u.id,
@@ -145,47 +136,17 @@ export function toPublishedRequirements(doc: SourceDocument | undefined, useCase
   };
 }
 
-const personaName = (key: string) => PERSONAS.find((p) => p.key === key)?.name;
-
 /**
- * Placeholder until use case sharing modes land: nothing for real ontologies
- * (no use case is marked public yet), and for the demo its fixed, fictional
- * seed content. It never reads use cases from the database, because testers
- * can sign in as a simulated persona and edit them.
+ * What a version's public page shows. A released version shows its frozen
+ * document, and the use cases as they stood at that release. The draft page has
+ * no document (drafts are for the working group) and shows the public use cases
+ * as they stand now. While a release is being published its document is
+ * prepared but not yet frozen, so `releasing` lets the page written into the
+ * release include it.
  */
-export function publishedRequirements(project: OntologyProject, _version?: string): PublishedRequirements {
-  if (!project.demo) return { useCases: [] };
-  const useCases: PublicUseCaseView[] = [];
-  const cqs = aggregationCompetencyQuestions();
-  if (cqs.length)
-    useCases.push({
-      id: 'demo-aggregation',
-      ref: 'UC-1',
-      title: AGGREGATION_USE_CASE.name!,
-      goal: AGGREGATION_USE_CASE.goal,
-      description: AGGREGATION_USE_CASE.description,
-      actors: AGGREGATION_USE_CASE.actors,
-      scenarios: AGGREGATION_USE_CASE.usageScenarios,
-      competencyQuestions: cqs.map((q) => ({ question: q.question })),
-      status: 'closed',
-      addressedIn: '1.0.0',
-      attribution: personaName('tom'),
-      origin: { kind: 'form' },
-    });
-  useCases.push({
-    id: 'demo-weekly-shifts',
-    ref: `UC-${useCases.length + 1}`,
-    title: WEEKLY_SHIFTS_USE_CASE.name!,
-    goal: WEEKLY_SHIFTS_USE_CASE.goal,
-    description: WEEKLY_SHIFTS_USE_CASE.description,
-    actors: WEEKLY_SHIFTS_USE_CASE.actors,
-    scenarios: WEEKLY_SHIFTS_USE_CASE.usageScenarios,
-    competencyQuestions: WEEKLY_SHIFTS_QUESTIONS,
-    status: 'accepted',
-    attribution: personaName('aisha'),
-    origin: { kind: 'interview' },
-  });
-  return { useCases };
+export async function publishedRequirements(project: OntologyProject, version?: string, opts: { releasing?: boolean } = {}): Promise<PublishedRequirements> {
+  const doc = version ? (opts.releasing ? await releasingDocument(project.id, version) : await requirementsDocument(project.id, version)) : undefined;
+  return toPublishedRequirements(doc, doc?.useCases ?? await publicUseCases(project.id));
 }
 
 /**
@@ -196,10 +157,31 @@ export function publishedRequirements(project: OntologyProject, _version?: strin
  * release without a readable snapshot says so instead of showing today's data
  * as its history.
  */
-export function requirementsFor(snapshot: PublishedRequirements | undefined): PublishedRequirements {
-  const valid = validSnapshot(snapshot);
-  if (!valid || valid.snapshotMissing) return { useCases: [], snapshotMissing: true };
-  return { document: valid.document, useCases: valid.useCases };
+export async function requirementsFor(project: OntologyProject, raw: PublishedRequirements | undefined): Promise<PublishedRequirements> {
+  const snapshot = validSnapshot(raw);
+  if (!snapshot || snapshot.snapshotMissing) return { useCases: [], snapshotMissing: true };
+  // A use case that may no longer be published (withdrawn, archived, made private or group-only) is no
+  // longer shown, and neither is anything written from it: every requirement citing it, every section
+  // drawing on it (or, in a snapshot that didn't record what sections draw on, every section), the
+  // introduction and the written title (the copy on GitHub can't be recalled). Same rule as served()
+  // in services/requirements.ts.
+  const d = snapshot.document;
+  const cited = [...snapshot.useCases.map((u) => u.id), ...(d?.requirements ?? []).flatMap((r) => r.useCaseIds), ...(d?.sections ?? []).flatMap((x) => x.useCaseIds ?? [])];
+  const gone = await withdrawnSince(project.id, [...new Set(cited)]);
+  const useCases = snapshot.useCases.filter((u) => !gone.has(u.id));
+  if (!d || !gone.size) return { document: d, useCases, ...(gone.size ? { withdrawn: gone.size } : {}) };
+  const citesGone = (md = '') => [...gone].some((id) => md.includes(`#uc-${id}`));
+  return {
+    document: {
+      title: `${project.title}: use cases and requirements for ${d.version}`,
+      version: d.version,
+      generatedAt: d.generatedAt,
+      sections: d.sections?.filter((x) => x.useCaseIds && !x.useCaseIds.some((id) => gone.has(id)) && !citesGone(x.markdown)),
+      requirements: d.requirements?.filter((r) => !r.useCaseIds.some((id) => gone.has(id))),
+    },
+    useCases,
+    withdrawn: gone.size,
+  };
 }
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
@@ -225,7 +207,7 @@ export function validSnapshot(x: unknown): PublishedRequirements | undefined {
   const d = x.document;
   if (d !== undefined) {
     if (!isObj(d) || !isStr(d.title) || !isStr(d.version) || !['generatedAt', 'intro', 'markdown'].every((k) => optStr(d[k]))) return undefined;
-    if (d.sections !== undefined && !(Array.isArray(d.sections) && d.sections.every((sec) => isObj(sec) && isStr(sec.id) && isStr(sec.heading) && isStr(sec.markdown)))) return undefined;
+    if (d.sections !== undefined && !(Array.isArray(d.sections) && d.sections.every((sec) => isObj(sec) && isStr(sec.id) && isStr(sec.heading) && isStr(sec.markdown) && strList(sec.useCaseIds)))) return undefined;
     if (d.requirements !== undefined && !(Array.isArray(d.requirements) && d.requirements.every((r) => isObj(r) && isStr(r.id) && isStr(r.text) && isStr(r.status) && Array.isArray(r.useCaseIds) && r.useCaseIds.every(isStr) && strList(r.termIris)))) return undefined;
     if (d.unpublished !== undefined && !(isObj(d.unpublished) && typeof d.unpublished.group === 'number' && typeof d.unpublished.private === 'number')) return undefined;
   }
