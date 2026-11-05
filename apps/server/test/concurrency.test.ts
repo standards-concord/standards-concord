@@ -2,13 +2,15 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { ChangeRequest, User } from '@concord/shared';
 import { createApp } from '../src/app.js';
-import { openDb, put } from '../src/db.js';
+import { get, openDb, put } from '../src/db.js';
+import { accountForIdentity } from '../src/auth.js';
+import { mergeTesterRecords, recordVersion } from '../src/services/alpha.js';
 import { createChangeRequest } from '../src/services/changeRequests.js';
 import { createProject, getProject, members, transferOwnership } from '../src/services/ontologies.js';
 import { draftRelease, listReleases } from '../src/services/releases.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { createUseCase, getUseCase, updateUseCase } from '../src/services/useCases.js';
-import { createUser, findByProvider, getUser, upsertFederatedUser } from '../src/services/users.js';
+import { allUsers, createSession, createUser, findByProvider, getUser, sessionUser, upsertFederatedUser } from '../src/services/users.js';
 
 /**
  * Requests that arrive at the same time. Since the store became async, a request can pause between reading a
@@ -167,5 +169,37 @@ describe('requests made at the same time', () => {
     const fresh = await upsertFederatedUser({ ...again, name: 'Racer two' });
     expect(fresh.id).not.toBe(c.id);
     expect(await findByProvider(again.provider, again.subject)).toMatchObject({ id: fresh.id });
+  });
+
+  it('leaves alone a demo account another identity has just attached to, when an existing account signs in from the same browser', async () => {
+    // The browser's demo account D is read before either sign-in. Identity A is new and is attached to D; identity B
+    // already has account E. B's sign-in, holding the stale demo copy of D, used to be let through: it returned E,
+    // and the caller then moved D's testing record into E, closing the record A now holds and ending A's sessions
+    // (r11 review).
+    const d = await createUser({ name: 'Demo stale', provider: 'demo', subject: 'race-demo-stale' });
+    await recordVersion(d, { version: '0.8.0' });
+    const e = await upsertFederatedUser({ provider: 'google', subject: 'race-go-existing', name: 'Existing E' });
+    await recordVersion(e, { version: '0.6.0' });
+    const a = { provider: 'github' as const, subject: 'race-gh-stale', name: 'Racer A' };
+    expect((await accountForIdentity(a, d)).id).toBe(d.id);
+    const aSession = await createSession(d.id, 'github');
+    const historyOf = async (id: string) => await get<{ movedTo?: string; versions: { version: string }[] }>('kv', `alpha-history:${id}`);
+    const before = { users: (await allUsers()).length, d: await historyOf(d.id), e: await historyOf(e.id) };
+
+    await expect(accountForIdentity({ provider: 'google', subject: 'race-go-existing', name: 'Existing E' }, d)).rejects.toMatchObject({ status: 409 });
+    expect((await allUsers()).length).toBe(before.users);
+    expect(await historyOf(d.id)).toEqual(before.d);
+    expect((await historyOf(d.id))?.movedTo).toBeUndefined();
+    expect(await historyOf(e.id)).toEqual(before.e);
+    expect((await sessionUser(aSession))?.id).toBe(d.id);
+    // The move itself also re-checks, for an identity attached between the lookup and the move.
+    await expect(mergeTesterRecords(d, e)).rejects.toMatchObject({ status: 409 });
+    expect(await historyOf(d.id)).toEqual(before.d);
+    expect((await sessionUser(aSession))?.id).toBe(d.id);
+
+    // A signing in again with the same stale copy is a retry into the account it is already attached to.
+    expect((await accountForIdentity(a, d)).id).toBe(d.id);
+    expect((await allUsers()).length).toBe(before.users);
+    expect((await sessionUser(aSession))?.id).toBe(d.id);
   });
 });

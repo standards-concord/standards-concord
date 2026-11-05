@@ -62,15 +62,17 @@ export async function upsertFederatedUser(p: { provider: AuthProvider; subject: 
   // (and attach it to two accounts), nor both attach to one account from copies read before the other saved.
   const found = await transaction(async () => {
     const existing = await findByProvider(p.provider, p.subject);
-    if (!existing && linkTo) {
+    if (linkTo) {
       // Re-read: whether it is still a demo-only account is decided on the stored copy, not the caller's.
       const linked = await get<User>('users', linkTo.id);
-      // Another sign-in from this browser attached an identity to it a moment ago. Making a new account here would
-      // have the caller move the demo account's testing record into it, closing the record the other identity now
-      // holds, so this sign-in is refused instead; signing in again starts from the account as it now is.
-      if (linked && !linked.simulated && !linked.providers.every((x) => x.provider === 'demo'))
+      const taken = !!linked && !linked.simulated && !linked.providers.every((x) => x.provider === 'demo');
+      // Another sign-in from this browser attached an identity to it a moment ago. Going on (to a new account, or
+      // to this identity's existing one) would have the caller move the demo account's testing record into that
+      // account, closing the record the other identity now holds, so this sign-in is refused instead; signing in
+      // again starts from the account as it now is. A retry by the identity that was attached goes through.
+      if (taken && existing?.id !== linkTo.id)
         throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
-      if (linked && !linked.simulated) {
+      if (!existing && linked && !linked.simulated) {
         linked.providers.push({ provider: p.provider, subject: p.subject });
         linked.name = p.name;
         // Signing in with their own WebID makes it the account's WebID.

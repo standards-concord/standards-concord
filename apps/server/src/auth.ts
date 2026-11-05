@@ -129,12 +129,20 @@ async function signInAs(req: Request, res: Response, userId: string, method: Aut
 async function federatedSignIn(req: Request, res: Response, identity: Parameters<typeof upsertFederatedUser>[0]) {
   const tester = await testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
-  const user = await upsertFederatedUser(identity, demoTester);
-  // An existing account takes over the demo account's testing record, in one step on this server.
-  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
+  const user = await accountForIdentity(identity, demoTester);
   await clearTesterCookie(req, res);
   const sessionToken = await signInAs(req, res, user.id, identity.provider);
   return { user, sessionToken };
+}
+/**
+ * The account an identity signs in to, given the demo account this browser was using (if any): the identity is
+ * attached to the demo account when new, and an existing account takes over the demo account's testing record.
+ */
+export async function accountForIdentity(identity: Parameters<typeof upsertFederatedUser>[0], demoTester?: User) {
+  const user = await upsertFederatedUser(identity, demoTester);
+  // An existing account takes over the demo account's testing record, in one step on this server.
+  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
+  return user;
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
 

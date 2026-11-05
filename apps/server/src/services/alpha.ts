@@ -346,6 +346,11 @@ export async function recordFeedback(
  */
 export async function mergeTesterRecords(from: User, into: User) {
   await transaction(async () => {
+    // Only a demo account's record moves. If an identity was attached to it after the caller read it, the record
+    // belongs to that identity now, and moving it would close it and end that identity's sessions.
+    const stored = await get<User>('users', from.id);
+    if (stored && !stored.simulated && !stored.providers.every((p) => p.provider === 'demo'))
+      throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
     const theirs = await history(from.id);
     if (!theirs.movedTo) {
       const mine = await history(into.id);
