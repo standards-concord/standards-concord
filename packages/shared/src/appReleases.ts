@@ -53,6 +53,70 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.17.0',
+    date: '2026-11-05',
+    title: 'A welcome page for testers, with two short videos',
+    pr: 60,
+    changes: [
+      {
+        id: 'welcome-page',
+        type: 'feat',
+        title: 'A welcome page that explains Concord and how to take part',
+        detail:
+          'The page to start from: what Concord is for, a narrated tour of the platform, a short video on how to take part and give feedback, and the four steps of the alpha. “Alpha tester? Start here” on the sign-in page leads to it.',
+        roles: [],
+        to: '/welcome',
+        ask: 'Did the welcome page and its videos tell you what you needed before you started?',
+      },
+    ],
+  },
+  {
+    version: '0.16.0',
+    date: '2026-11-05',
+    title: 'Share a public summary of your feedback',
+    pr: 44,
+    changes: [
+      {
+        id: 'feedback-public-summary',
+        type: 'feat',
+        title: 'Optionally post a short public summary of your feedback',
+        detail:
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Was it clear what would be made public, and would you tick the box?',
+      },
+    ],
+  },
+  {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'Sign in with your WebID',
+    pr: 46,
+    changes: [
+      {
+        id: 'solid-signin',
+        type: 'feat',
+        title: 'Sign in with your own WebID (Solid)',
+        detail:
+          'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
+        roles: [],
+        to: '/login',
+        ask: 'If you have a WebID, how easy was it to sign in with it?',
+      },
+      {
+        id: 'feedback-readers',
+        type: 'feat',
+        title: 'See who can read your feedback',
+        detail:
+          'The feedback page says who can read what you send: the alpha team. The copy saved in your pod is shared read-only with the team’s WebID, and they read it there as that WebID.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Is it clear who can read your feedback?',
+      },
+    ],
+  },
+  {
     version: '0.14.0',
     date: '2026-11-05',
     title: 'Check data explains what’s wrong and where',
