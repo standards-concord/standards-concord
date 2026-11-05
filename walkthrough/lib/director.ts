@@ -68,6 +68,7 @@ export class Director {
 
   /** Navigates and waits for the app to settle (no spinners, fonts loaded). */
   async goto(url: string, opts: { settle?: boolean; keepCard?: boolean } = {}) {
+    await this.checkRing();
     const res = await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     if (res && res.status() >= 400) this.warn(`${url} answered HTTP ${res.status()}`);
     await this.settle(opts.settle !== false);
@@ -143,18 +144,47 @@ export class Director {
     return true;
   }
 
-  /** Rings an element (with an optional caption) until the next highlight or clear. */
+  /**
+   * Rings an element (with an optional caption) until the next highlight or clear. The ring
+   * follows the element itself in the page, and ringing nothing visible is a warning (so a
+   * --publish run refuses it): a ring once sat on an empty side panel.
+   */
   async highlight(target: Locator | undefined, what: string, tag?: string) {
-    if (!target) return this.page.evaluate(() => (window as any).__wt?.highlight(null));
+    if (!target) return this.clearHighlight();
+    // Settle the ring being shown before scrolling, which would move it out of view.
+    await this.checkRing();
     const l = await this.find(target, what);
     if (!l) return;
     await l.scrollIntoViewIfNeeded().catch(() => {});
-    const box = await l.boundingBox();
-    if (box) await this.page.evaluate(([b, t]) => (window as any).__wt?.highlight(b, t), [box, tag] as const);
+    await this.ring(l, what, tag);
+  }
+
+  /** Rings exactly this element (see highlight). */
+  async ring(l: Locator, what: string, tag?: string) {
+    await this.checkRing();
+    this.ringed = what;
+    const seen = await l.evaluate((el, t) => (window as any).__wt?.highlight(el, t) ?? null, tag).catch(() => null);
+    const problem = ringProblem(seen);
+    if (problem) this.warn(`The highlight on ${what} ${problem}`);
   }
 
   async clearHighlight() {
+    await this.checkRing();
     await this.page.evaluate(() => (window as any).__wt?.highlight(null)).catch(() => {});
+  }
+
+  /**
+   * The ring being shown, and whether it stayed in view while it was (the overlay hides it if
+   * not). Checked when it is cleared or replaced, before scrolling to a new one, when the page
+   * changes, and at the end of the recording.
+   */
+  private ringed = '';
+  async checkRing() {
+    if (!this.ringed) return;
+    const what = this.ringed;
+    this.ringed = '';
+    const lost = await this.page.evaluate(() => (window as any).__wt?.ringLost?.() ?? '').catch(() => '');
+    if (lost) this.warn(`The highlight on ${what} ${lost} while it was shown`);
   }
 
   async label(text?: string) {
@@ -174,4 +204,37 @@ export class Director {
       await sleep(ms / steps);
     }
   }
+}
+
+/** What the overlay reported about a ringed element, if it shows nothing worth ringing. */
+export interface Ringed {
+  visible: boolean;
+  onScreen: boolean;
+  text: string;
+  media: boolean;
+  width: number;
+  height: number;
+}
+
+/** Why a ring would be around nothing (blank, hidden or off screen), or undefined if it's fine. */
+export function ringProblem(r: Ringed | null | undefined): string | undefined {
+  if (!r) return 'could not be drawn';
+  if (!r.visible) return `is around something hidden (${r.width}×${r.height})`;
+  if (!r.onScreen) return 'is off screen';
+  if (!r.text && !r.media) return 'is around blank space';
+  return undefined;
+}
+
+/**
+ * Text a page shows that is really an object printed as a string ("[object U]", "undefined").
+ * The first published tour's sample app showed "[object U]" for every title: the generated
+ * classes return sets that aren't `instanceof Set`, and the app printed the set itself.
+ */
+export function garbled(text: string): boolean {
+  return /\[object [^\]]*\]|^(undefined|null|NaN)$/.test(text.trim());
+}
+
+/** The sample app's card text that is unreadable: every title must read; a summary may be empty. */
+export function unreadableCards(titles: string[], summaries: string[]): string[] {
+  return [...titles.filter((t) => !t.trim() || garbled(t)), ...summaries.filter(garbled)];
 }

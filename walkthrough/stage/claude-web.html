@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claude Code</title>
+<!--
+  Claude Code on the web, for the walkthrough's coding-agent scenes: a project, a session
+  and its conversation. The recorder drives it step by step through window.term
+  (see lib/terminal.ts): it types messages, shows Claude's
+  replies, tool calls and edits as diffs. Tool results shown here come from real MCP calls
+  to the Concord server being recorded; the replies and code are scripted.
+-->
+<style>
+  :root {
+    --bg: #faf9f5; --panel: #ffffff; --side: #f0eee6; --line: #e3e0d6; --fg: #1f1e1d; --dim: #6f6b62; --faint: #9a958a;
+    --accent: #c96442; --green: #2f7d32; --red: #b3261e; --add-bg: #e6f4e7; --del-bg: #fbe9e7; --code-bg: #f5f3ec; --chip: #ebe8df;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #dcd8cc; }
+  body { display: flex; align-items: center; justify-content: center; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }
+  .window { width: calc(100vw - 48px); height: calc(100vh - 48px); background: var(--bg); border-radius: 12px; box-shadow: 0 24px 70px rgba(0,0,0,.28), 0 0 0 1px rgba(0,0,0,.06); display: flex; flex-direction: column; overflow: hidden; }
+  .chrome { height: 40px; background: #ecebe6; border-bottom: 1px solid var(--line); display: flex; align-items: center; padding: 0 14px; gap: 8px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; } .r { background: #ff5f57 } .y { background: #febc2e } .g { background: #28c840 }
+  .url { margin-left: 18px; flex: 0 1 520px; height: 26px; border-radius: 7px; background: #fff; border: 1px solid var(--line); display: flex; align-items: center; padding: 0 12px; font-size: 13px; color: var(--dim); }
+  .app { flex: 1; display: flex; min-height: 0; }
+  .side { width: 268px; background: var(--side); border-right: 1px solid var(--line); padding: 16px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 16px; padding: 4px 8px 14px; }
+  .brand .mark { color: var(--accent); font-size: 20px; line-height: 1; }
+  .new { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: 9px 12px; font-weight: 550; display: flex; gap: 8px; align-items: center; }
+  .side h4 { margin: 16px 8px 4px; font-size: 12px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; }
+  .sess { padding: 8px 10px; border-radius: 8px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess.on { background: #e4e1d7; color: var(--fg); font-weight: 550; }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .head { height: 54px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 26px; font-size: 14px; }
+  .head .title { font-weight: 600; font-size: 15px; }
+  .pill { background: var(--chip); color: var(--dim); border-radius: 999px; padding: 3px 10px; font-size: 12.5px; font-family: "JetBrains Mono", Menlo, monospace; }
+  .head .spacer { flex: 1; }
+  .conv { flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; padding: 0 26px; }
+  .msgs { max-width: 900px; width: 100%; margin: 0 auto; padding: 18px 0 8px; display: flex; flex-direction: column; gap: 12px; font-size: 15.5px; line-height: 1.55; }
+  .user { align-self: flex-end; max-width: 78%; background: #ecebe4; border-radius: 14px 14px 4px 14px; padding: 10px 15px; white-space: pre-wrap; }
+  .say { white-space: pre-wrap; }
+  .card { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; overflow: hidden; font-size: 13.5px; }
+  .card .top { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fbfaf7; border-bottom: 1px solid var(--line); }
+  .card .top .ok { color: var(--green); }
+  .card .top b { font-weight: 600; }
+  .card .top .args { color: var(--dim); font-family: "JetBrains Mono", Menlo, monospace; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card pre { margin: 0; padding: 9px 12px; font: 12.8px/1.5 "JetBrains Mono", Menlo, monospace; color: #3d3a35; white-space: pre-wrap; word-break: break-word; background: var(--code-bg); }
+  .card pre.more { padding-top: 0; color: var(--faint); }
+  .card .empty { display: none; }
+  .diff div { font: 12.8px/1.55 "JetBrains Mono", Menlo, monospace; white-space: pre; padding: 0 12px; }
+  .diff .add { background: var(--add-bg); color: #1d4d20; } .diff .del { background: var(--del-bg); color: #6d1a14; } .diff .ctx { color: var(--dim); }
+  .diff .ln { display: inline-block; width: 4ch; color: var(--faint); text-align: right; margin-right: 1.2ch; }
+  .note { color: var(--dim); font-size: 13.5px; }
+  .spin { color: var(--accent); font-size: 14px; display: flex; gap: 8px; align-items: center; }
+  .composer { max-width: 900px; width: calc(100% - 52px); margin: 6px auto 18px; border: 1px solid #d6d2c6; background: #fff; border-radius: 14px; padding: 12px 14px; min-height: 76px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.04); }
+  .composer .text { min-height: 1.5em; font-size: 15.5px; white-space: pre-wrap; }
+  .composer .text.placeholder { color: var(--faint); }
+  .composer .row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim); }
+  .composer .row .spacer { flex: 1; }
+  .composer .send { width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 16px; }
+  .caret { display: inline-block; width: 2px; height: 1.15em; background: var(--fg); vertical-align: text-bottom; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0 } }
+  .welcome { text-align: center; color: var(--dim); margin: auto 0 18px; }
+  .welcome .big { font-size: 26px; color: var(--fg); font-weight: 600; margin-bottom: 6px; }
+  .modal-bg { position: absolute; inset: 0; background: rgba(31,30,29,.32); display: none; align-items: center; justify-content: center; }
+  .modal-bg.on { display: flex; }
+  .modal { width: 520px; background: #fff; border-radius: 14px; padding: 22px 24px; box-shadow: 0 20px 60px rgba(0,0,0,.25); font-size: 14px; }
+  .modal h3 { margin: 0 0 4px; font-size: 18px; }
+  .modal p { margin: 0 0 16px; color: var(--dim); }
+  .modal label { display: block; font-weight: 550; margin: 12px 0 6px; }
+  .modal .field { border: 1px solid #d6d2c6; border-radius: 8px; padding: 9px 11px; min-height: 38px; font-family: "JetBrains Mono", Menlo, monospace; font-size: 13px; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .modal .btn { border-radius: 8px; padding: 8px 14px; font-weight: 600; border: 1px solid #d6d2c6; }
+  .modal .btn.primary { background: var(--fg); color: #fff; border-color: var(--fg); }
+  .modal .status { margin-top: 14px; color: var(--green); font-weight: 600; display: none; }
+  .modal .status.on { display: block; }
+</style>
+</head>
+<body>
+<div class="window" style="position: relative">
+  <div class="chrome"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="url" id="url">claude.ai/code</span></div>
+  <div class="app">
+    <aside class="side">
+      <div class="brand"><span class="mark">✻</span> Claude Code</div>
+      <div class="new">＋ New session</div>
+      <h4>Sessions</h4>
+      <div class="sess on" id="sessTitle">New session</div>
+      <div class="sess">Tidy up the opportunity cards</div>
+      <div class="sess">Add a dark theme</div>
+    </aside>
+    <section class="main">
+      <div class="head"><span class="title" id="title">helping-hands</span><span class="pill" id="branch">main</span><span class="spacer"></span><span class="note" id="model"></span></div>
+      <div class="conv"><div class="msgs" id="msgs"></div></div>
+      <div class="composer" id="composer"><div class="text placeholder" id="input">Reply to Claude…</div><div class="row"><span id="chip">⌘ Connectors</span><span class="spacer"></span><span class="send">↑</span></div></div>
+    </section>
+  </div>
+  <div class="modal-bg" id="modal"><div class="modal">
+    <h3>Add a custom connector</h3>
+    <p>Connect Claude to a remote MCP server.</p>
+    <label>Name</label><div class="field" id="cName"></div>
+    <label>Remote MCP server URL</label><div class="field" id="cUrl"></div>
+    <div class="status" id="cStatus">✓ Connected</div>
+    <div class="actions"><span class="btn">Cancel</span><span class="btn primary">Add</span></div>
+  </div></div>
+</div>
+<script>
+(() => {
+  const msgs = document.getElementById('msgs');
+  const input = document.getElementById('input');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+  // Seeded jitter so typing looks human but every recording types at the same pace.
+  let seed = 7;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  let mode = 'shell';
+  /** The card a shell command or tool call prints into, until the next message. */
+  let open = null;
+
+  function add(html, cls) {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.innerHTML = html;
+    msgs.appendChild(d);
+    while (msgs.children.length > 200) msgs.firstChild.remove();
+    return d;
+  }
+
+  async function typeInto(el, text, cps) {
+    if (!cps) { el.textContent += text; return; }
+    const delay = 1000 / cps;
+    for (const ch of text) {
+      el.textContent += ch;
+      await wait(ch === ' ' ? delay * 0.6 : delay * (0.7 + rand() * 0.6));
+    }
+  }
+
+  function caret(el) {
+    const c = document.createElement('span');
+    c.className = 'caret';
+    el.appendChild(c);
+    return c;
+  }
+
+  function card(name, args, icon = '✓') {
+    const c = add(`<div class="top"><span class="ok">${icon}</span><b>${esc(name)}</b><span class="args">${args ? esc(args) : ''}</span></div>`, 'card');
+    open = c;
+    return c;
+  }
+
+  function out(text, cls) {
+    const target = open ?? card('Output', '');
+    const pre = document.createElement('pre');
+    if (cls) pre.className = cls;
+    pre.textContent = text;
+    target.appendChild(pre);
+  }
+
+  function placeholder() {
+    input.className = 'text placeholder';
+    input.textContent = 'Reply to Claude…';
+  }
+
+  window.term = {
+    title(t) {
+      // Terminal titles look like "helping-hands — zsh": the project is the first part.
+      document.getElementById('title').textContent = String(t).split(' — ')[0];
+      document.getElementById('url').textContent = `claude.ai/code/${document.getElementById('title').textContent}`;
+    },
+    clear() { msgs.innerHTML = ''; open = null; },
+    blank() {},
+    /** Command output, or a line of its own. */
+    print(text, cls) { out(String(text), cls); },
+    html(h, cls) {
+      // A tool line such as <b>Write</b>(data/activities.ttl) becomes a tool card.
+      const tmp = document.createElement('div');
+      tmp.innerHTML = h;
+      const name = tmp.querySelector('.bold')?.textContent;
+      if (name) card(name, (tmp.querySelector('.dim')?.textContent ?? '').replace(/^\(|\)$/g, ''));
+      else add(h, cls);
+    },
+
+    /** A command Claude runs, shown as a Bash tool card; print() adds its output. */
+    async shell(cmd, { cps = 32 } = {}) {
+      const c = card('Bash', '');
+      const args = c.querySelector('.args');
+      await typeInto(args, cmd, cps ? cps * 2 : 0);
+    },
+
+    /** Opens the session on the project. */
+    startAgent({ model = '', cwdPath } = {}) {
+      mode = 'agent';
+      if (cwdPath) document.getElementById('title').textContent = cwdPath.split('/').pop();
+      document.getElementById('model').textContent = model;
+      document.getElementById('url').textContent = `claude.ai/code/${document.getElementById('title').textContent}`;
+      if (!msgs.querySelector('.user')) msgs.innerHTML = '';
+      if (!msgs.children.length) add('<div class="big">What should we build?</div>Claude is working in <b>' + esc(document.getElementById('title').textContent) + '</b>', 'welcome');
+      placeholder();
+    },
+
+    /** Types a message into the composer and sends it. */
+    async ask(text, { cps = 38 } = {}) {
+      msgs.querySelector('.welcome')?.remove();
+      input.className = 'text';
+      input.textContent = '';
+      const t = document.createElement('span');
+      input.appendChild(t);
+      const c = caret(input);
+      await typeInto(t, text, cps);
+      if (cps) await wait(500);
+      c.remove();
+      add(esc(text), 'user');
+      document.getElementById('sessTitle').textContent = text.length > 34 ? text.slice(0, 33) + '…' : text;
+      placeholder();
+      open = null;
+    },
+
+    async think(ms = 1400, word = 'Thinking') {
+      const frames = ['·', '✢', '✳', '✶', '✻', '✽'];
+      const row = add('', 'spin');
+      const start = performance.now();
+      let i = 0;
+      while (performance.now() - start < ms) {
+        row.textContent = `${frames[i++ % frames.length]} ${word}…`;
+        await wait(120);
+      }
+      row.remove();
+    },
+
+    async say(text, { cps = 140 } = {}) {
+      open = null;
+      const row = add('', 'say');
+      await typeInto(row, text, cps);
+    },
+
+    /** A tool call, e.g. concord - search_terms (MCP)(query: "hours"). */
+    tool(label, args) {
+      const m = /^(\S+) - (\S+) \(MCP\)$/.exec(label);
+      card(m ? `${m[2]}` : label, m ? `${m[1]} · ${args ?? ''}` : args ?? '');
+    },
+
+    /** The last tool call's result, folded after `max` lines. */
+    result(text, { max = 8 } = {}) {
+      const all = String(text).split('\n');
+      out(all.slice(0, max).join('\n'));
+      if (all.length > max) out(`… ${all.length - max} more lines`, 'more');
+      open = null;
+    },
+
+    /** An edit, shown as a diff card. rows: [{t:'ctx'|'add'|'del', n, s}] */
+    diff(file, summary, rows) {
+      const c = card('Edit', `${file} · ${summary}`);
+      const box = document.createElement('div');
+      box.className = 'diff';
+      for (const r of rows) {
+        const d = document.createElement('div');
+        d.className = r.t;
+        d.innerHTML = `<span class="ln">${r.n ?? ''}</span>${r.t === 'add' ? '+' : r.t === 'del' ? '-' : ' '} ${esc(r.s)}`;
+        box.appendChild(d);
+      }
+      c.appendChild(box);
+      open = null;
+    },
+
+    /** A file from the project, as a code card. */
+    file(name, text) {
+      card(name, 'Read', '📄');
+      out(String(text));
+      open = null;
+    },
+
+    /** The custom connector dialog, typed in, then connected. */
+    async connector(name, url, { cps = 30 } = {}) {
+      const m = document.getElementById('modal');
+      for (const id of ['cName', 'cUrl']) document.getElementById(id).textContent = '';
+      document.getElementById('cStatus').classList.remove('on');
+      m.classList.add('on');
+      await wait(cps ? 500 : 0);
+      await typeInto(document.getElementById('cName'), name, cps);
+      await typeInto(document.getElementById('cUrl'), url, cps);
+      if (cps) await wait(600);
+      document.getElementById('cStatus').classList.add('on');
+    },
+    closeConnector() { document.getElementById('modal').classList.remove('on'); },
+    /** A connector this project uses, shown beside the composer. */
+    connected(name) { document.getElementById('chip').textContent = `⌘ Connectors · ${name} ✓`; },
+
+    get mode() { return mode; },
+  };
+})();
+</script>
+</body>
+</html>

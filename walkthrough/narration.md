@@ -132,7 +132,7 @@ Here's the interesting bit. The app doesn't hand-write any code for the data mod
 ## Connecting Claude Code {#install requires=jsClasses}
 
 [do: install-mcp]
-To work on the app, I'll use Claude Code, connected to Concord through MCP, the Model Context Protocol: an open standard for plugging tools into AI agents. In a terminal, that's a single command.
+To work on the app, I'll use Claude Code on the web, connected to Concord through MCP, the Model Context Protocol: an open standard for plugging tools into AI agents. Connecting it is one custom connector, with Concord's address.
 
 One note before we start. The Claude Code session you'll see is a scripted demonstration. Its calls to Concord are real, but the agent's replies and the code it writes were prepared in advance.
 

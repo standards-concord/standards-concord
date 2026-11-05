@@ -109,6 +109,105 @@
     return card;
   }
 
+  const MEDIA = 'img,svg,video,canvas,input,textarea,select,.cm-editor';
+
+  /** Whether an element and every ancestor are rendered, visible and not transparent. */
+  function shown(el) {
+    if (!el.isConnected) return false;
+    if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) return false;
+    // checkVisibility's opacity test looks at the element alone; transparency is inherited.
+    let o = 1;
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) o *= Number(getComputedStyle(n).opacity);
+    return o > 0.05;
+  }
+
+  /** The part of an element's box that can be seen: clipped by scrolling ancestors and the window. */
+  function visibleRect(el) {
+    const r = el.getBoundingClientRect();
+    let top = r.top, left = r.left, bottom = r.bottom, right = r.right;
+    for (let n = el.parentElement; n && n !== document.documentElement; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (st.overflowX === 'visible' && st.overflowY === 'visible') continue;
+      const c = n.getBoundingClientRect();
+      top = Math.max(top, c.top); left = Math.max(left, c.left);
+      bottom = Math.min(bottom, c.bottom); right = Math.min(right, c.right);
+    }
+    top = Math.max(top, 0); left = Math.max(left, 0);
+    bottom = Math.min(bottom, innerHeight); right = Math.min(right, innerWidth);
+    return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  /**
+   * Where content inside an element can be seen: the window, cut by every ancestor from the
+   * element up that clips (overflow other than visible). An element that doesn't clip lets its
+   * content overflow it, so its own box doesn't count.
+   */
+  function clipFor(el) {
+    let top = 0, left = 0, bottom = innerHeight, right = innerWidth;
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+      const st = getComputedStyle(n);
+      if (st.overflowX === 'visible' && st.overflowY === 'visible') continue;
+      const c = n.getBoundingClientRect();
+      top = Math.max(top, c.top); left = Math.max(left, c.left);
+      bottom = Math.min(bottom, c.bottom); right = Math.min(right, c.right);
+    }
+    return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  const meets = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+  const intersect = (a, b) => {
+    const top = Math.max(a.top, b.top), left = Math.max(a.left, b.left), bottom = Math.min(a.bottom, b.bottom), right = Math.min(a.right, b.right);
+    return { top, left, bottom, right, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  };
+  const some = (r) => r.width > 0 && r.height > 0;
+
+  /**
+   * Text and media inside an element that can actually be seen: rendered, not transparent,
+   * inside its own scrolling containers and inside the ringed part. (Limit: something drawn
+   * over it, or text coloured like its background, still counts.)
+   */
+  function visibleContent(el, area) {
+    const words = [];
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    const clips = new Map(); // a parent's visible part, worked out once per parent
+    const seenPart = (p) => {
+      if (!clips.has(p)) clips.set(p, shown(p) ? intersect(clipFor(p), area) : null);
+      return clips.get(p);
+    };
+    for (let n = walk.nextNode(), i = 0; n && i < 2000 && words.join(' ').length < 80; n = walk.nextNode(), i++) {
+      if (!n.data.trim()) continue;
+      const part = seenPart(n.parentElement);
+      if (!part || !some(part)) continue;
+      range.selectNodeContents(n);
+      if ([...range.getClientRects()].some((r) => r.width > 0 && some(intersect(r, part)))) words.push(n.data.trim());
+    }
+    const items = [...(el.matches(MEDIA) ? [el] : []), ...el.querySelectorAll(MEDIA)];
+    const media = items.some((m) => shown(m) && some(intersect(visibleRect(m), area)));
+    const label = el.getAttribute('aria-label') || '';
+    return { text: (words.join(' ') || (media ? label : '')).slice(0, 80), media };
+  }
+
+  /** Whether an element shows anything: its size on screen and its visible text or media. */
+  function describe(el) {
+    const r = el.getBoundingClientRect();
+    const visible = r.width > 4 && r.height > 4 && shown(el);
+    const area = visibleRect(el);
+    const onScreen = area.width > 4 && area.height > 4;
+    const { text, media } = visible && onScreen ? visibleContent(el, area) : { text: '', media: false };
+    return { visible, onScreen, text, media, width: Math.round(r.width), height: Math.round(r.height) };
+  }
+
+  /** Whether a ring being followed can still be seen (content aside), and its visible part. */
+  function follow(el) {
+    if (!el.isConnected) return { why: 'was removed from the page' };
+    if (!shown(el)) return { why: 'was hidden' };
+    const rect = visibleRect(el);
+    if (rect.width <= 4 || rect.height <= 4) return { why: 'went off screen' };
+    return { why: '', rect };
+  }
+
   window.__wt = {
     setCursor(x, y) {
       state.x = x;
@@ -131,19 +230,73 @@
       card.classList.remove('on');
       await wait(650);
     },
-    highlight(rect, tag) {
+    /**
+     * Rings an element and keeps the ring on it, frame by frame, through scrolling and
+     * layout changes (a snapshot of where it was drifted off). Pass null to clear.
+     * Returns what it ringed, so the recorder can refuse a ring around nothing.
+     */
+    highlight(target, tag) {
       const ring = $('.ring');
-      if (!ring) return;
-      if (!rect) {
+      if (!ring) return null;
+      cancelAnimationFrame(state.track);
+      if (!target) {
         ring.classList.remove('on');
-        return;
+        state.target = null;
+        state.lost = '';
+        return null;
       }
+      state.target = target;
+      state.lost = '';
+      // Glide to a new target, then follow it exactly (an easing would lag behind a scroll).
+      ring.style.transition = '';
+      clearTimeout(state.glide);
+      state.glide = setTimeout(() => (ring.style.transition = 'opacity .45s'), 480);
       const pad = 8;
-      Object.assign(ring.style, { left: `${rect.x - pad}px`, top: `${rect.y - pad}px`, width: `${rect.width + pad * 2}px`, height: `${rect.height + pad * 2}px` });
+      const seen = describe(target);
+      const valid = seen.visible && seen.onScreen && !!(seen.text || seen.media);
+      state.valid = valid;
+      let frame = 0;
+      let blank = false;
+      const draw = () => {
+        if (state.target !== target) return;
+        // A ring around something no longer seen is hidden, never left as a ghost, and the
+        // recorder is told (ringLost) once the ring is cleared, replaced or the page changes.
+        const f = follow(target);
+        // Its content is re-checked a few times a second: walking it every frame costs frames.
+        if (f.rect && frame++ % 8 === 0) {
+          const c = visibleContent(target, f.rect);
+          blank = !c.text && !c.media;
+        }
+        const why = f.why || (blank ? 'went blank' : '');
+        if (why && valid && !state.lost) state.lost = why;
+        ring.classList.toggle('on', !why || !valid);
+        if ((why && valid) || !f.rect) {
+          state.track = requestAnimationFrame(draw);
+          return;
+        }
+        // Clipped to what can be seen, so a tall card's ring stays on screen.
+        const r = f.rect;
+        const top = Math.max(r.top, 8 + pad), bottom = Math.min(r.bottom, innerHeight - 8 - pad);
+        const left = Math.max(r.left, 8 + pad), right = Math.min(r.right, innerWidth - 8 - pad);
+        Object.assign(ring.style, { left: `${left - pad}px`, top: `${top - pad}px`, width: `${Math.max(0, right - left) + pad * 2}px`, height: `${Math.max(0, bottom - top) + pad * 2}px` });
+        state.track = requestAnimationFrame(draw);
+      };
+      draw();
       const t = ring.querySelector('.tag');
       t.hidden = !tag;
       t.textContent = tag || '';
-      ring.classList.add('on');
+      return seen;
+    },
+    /** What happened to the current ring after it was drawn ('' if it stayed in view). */
+    ringLost() {
+      // Look now as well, so a loss since the last frame isn't missed.
+      const target = state.target;
+      if (target && state.valid && !state.lost) {
+        const f = follow(target);
+        const c = f.rect && visibleContent(target, f.rect);
+        state.lost = f.why || (c && !c.text && !c.media ? 'went blank' : '');
+      }
+      return state.lost || '';
     },
     cursorVisible(on) {
       const c = $('.cursor');
