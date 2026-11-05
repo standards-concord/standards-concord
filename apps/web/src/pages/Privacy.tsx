@@ -10,7 +10,7 @@ import { Page } from '../components/Shell';
  */
 
 /** Where people write to about their data. */
-export const PRIVACY_CONTACT = 'jesse.wright@theodi.org';
+export const PRIVACY_CONTACT = 'solid-eng@theodi.org';
 /** When the wording last changed (shown on the page). */
 export const PRIVACY_UPDATED = '5 November 2026';
 
@@ -41,7 +41,7 @@ export function PrivacyPage() {
         </header>
 
         <Section id="privacy-sign-in" title="When you sign in">
-          <p>Concord only asks Google and GitHub for your basic profile, so that other people in a working group can see who said what.</p>
+          <p>Concord only asks for your basic profile, so that other people in a working group can see who said what.</p>
           <ul>
             <li>
               <strong>Google:</strong> your name, your email address (only if Google has verified it), your profile picture and your Google account ID.
@@ -51,10 +51,14 @@ export function PrivacyPage() {
               user ID.
             </li>
             <li>
+              <strong>Your WebID (Solid):</strong> your WebID and the name on your public WebID profile. Concord reads that profile to check which Solid provider
+              vouches for you.
+            </li>
+            <li>
               <strong>Try the demo:</strong> nothing about you. Concord makes up a tester account for that browser.
             </li>
           </ul>
-          <p>Concord never sees your password, and it can’t read your email, contacts, files or repositories, or act on your Google or GitHub account.</p>
+          <p>Concord never sees your password, and it can’t read your email, contacts, files or repositories, or act on your Google or GitHub account. In a Solid pod, it only writes to a <code>concord/</code> folder of its own.</p>
         </Section>
 
         <Section id="privacy-content" title="What you add">
@@ -129,7 +133,7 @@ export function PrivacyPage() {
 
         <Section id="privacy-deletion" title="Getting your data deleted">
           <p>
-            Write to {mail} from the email address on your account, or say which Google or GitHub account you signed in with. We will delete your account and what you added
+            Write to {mail} from the email address on your account, or say which Google, GitHub or WebID account you signed in with. We will delete your account and what you added
             from Concord’s servers within 30 days, and tell you when it is done. What Concord wrote to your own Solid pod is yours to delete with your pod provider. We will tell you if anything can’t be removed, such as text that is
             part of a version a working group has already published.
           </p>

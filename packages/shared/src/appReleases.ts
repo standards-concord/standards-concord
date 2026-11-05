@@ -53,19 +53,48 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.15.0',
+    version: '0.16.0',
     date: '2026-11-05',
     title: 'A privacy policy',
+    pr: 63,
     changes: [
       {
         id: 'privacy-policy',
         type: 'feat',
         title: 'A privacy policy explains what Concord keeps about you',
         detail:
-          'A new Privacy policy page, linked from the footer of every page and from the sign-in card, says what Google and GitHub sign-in share, where your contributions are kept, which services process them, and how to have your data deleted.',
+          'A new Privacy policy page, linked from the footer of every page and from the sign-in card, says what Google, GitHub and WebID sign-in share, where your contributions are kept, which services process them, and how to have your data deleted.',
         roles: [],
         to: '/privacy',
         ask: 'Does the privacy policy tell you what you’d want to know before signing in?',
+      },
+    ],
+  },
+  {
+    version: '0.15.0',
+    date: '2026-11-05',
+    title: 'Sign in with your WebID',
+    pr: 46,
+    changes: [
+      {
+        id: 'solid-signin',
+        type: 'feat',
+        title: 'Sign in with your own WebID (Solid)',
+        detail:
+          'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
+        roles: [],
+        to: '/login',
+        ask: 'If you have a WebID, how easy was it to sign in with it?',
+      },
+      {
+        id: 'feedback-readers',
+        type: 'feat',
+        title: 'See who can read your feedback',
+        detail:
+          'The feedback page says who can read what you send: the alpha team. The copy saved in your pod is shared read-only with the team’s WebID, and they read it there as that WebID.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Is it clear who can read your feedback?',
       },
     ],
   },
