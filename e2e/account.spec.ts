@@ -8,14 +8,14 @@ import { test, expect, demoOntology, settle, signIn, signInAsPersona, uniq } fro
 
 test.describe('account and hub', () => {
   test('signing in from a deep link returns to that page', async ({ page }) => {
-    await page.goto('/settings#tokens');
+    await page.goto('/settings');
     await expect(page).toHaveURL(/\/login\?next=%2Fsettings/);
     // Only the demo sign-in is configured here: no Google or GitHub buttons.
     await expect(page.getByRole('link', { name: /Google/ })).toHaveCount(0);
     await expect(page.getByRole('link', { name: /GitHub/ })).toHaveCount(0);
     await page.getByRole('button', { name: 'Try the demo' }).click();
     await expect(page).toHaveURL(/\/settings$/);
-    await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: 'Profile' })).toBeVisible();
   });
 
   test('the login page sends a signed-in person on, and the walkthrough link works', async ({ page }) => {
@@ -37,29 +37,29 @@ test.describe('account and hub', () => {
     const button = page.getByRole('button', { name: new RegExp(name) });
     await button.click();
     await expect(button).toHaveAttribute('aria-expanded', 'true');
-    const menu = page.getByRole('menu');
+    const menu = page.getByRole('navigation', { name: 'Account' });
     await expect(menu.getByText(name)).toBeVisible();
     for (const [label, url] of [
-      ['Profile & your WebID', /\/settings$/],
-      ['Connected agents', /\/settings#agents$/],
-      ['Appearance', /\/settings#appearance$/],
+      ['Profile', /\/settings$/],
+      ['Connect an agent', /\/connect$/],
+      ['Appearance', /\/appearance$/],
       ['Alpha walkthrough', /\/alpha$/],
     ] as const) {
       await page.goto('/');
       await page.getByRole('button', { name: new RegExp(name) }).click();
-      await page.getByRole('menu').getByRole('link', { name: label }).click();
+      await page.getByRole('navigation', { name: 'Account' }).getByRole('link', { name: label, exact: true }).click();
       await expect(page).toHaveURL(url);
     }
-    // Settings shows the WebID and pod made for this person behind the scenes.
+    // Profile keeps the WebID and pod made for this person behind the scenes, folded away.
     await page.goto('/settings');
-    await expect(page.getByRole('heading', { name: 'Your WebID and Solid pod' })).toBeVisible();
+    await page.getByRole('button', { name: /Your WebID and Solid pod/ }).click();
     await expect(page.getByRole('main').locator('code').first()).toContainText(/\/people\/usr_[^#]+#me$/);
     const webId = await page.getByRole('main').locator('code').first().innerText();
     const profile = await page.request.get(webId.replace(/#me$/, ''), { headers: { accept: 'text/turtle' } });
     expect(profile.ok(), `GET ${webId}`).toBeTruthy();
 
     await page.getByRole('button', { name: new RegExp(name) }).click();
-    await page.getByRole('menu').getByRole('button', { name: 'Sign out' }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
     await expect(page).toHaveURL(/\/login/);
     await page.goto('/');
     await expect(page).toHaveURL(/\/login\?next=%2F$/);

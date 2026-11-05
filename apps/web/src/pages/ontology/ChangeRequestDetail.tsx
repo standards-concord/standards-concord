@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
 import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
@@ -9,8 +9,9 @@ import { formatDate, plural, relativeTime, roleLabel, titleCase } from '../../li
 import { makeLabeler } from '../../lib/ontology';
 import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
+import { PolicyGlance } from '../../components/PolicyRules';
 import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
-import { ValidationDetails } from '../../components/Validation';
+import { ValidationDetails, validationVerdict } from '../../components/Validation';
 import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
 import { Disclosure, Popover } from '../../components/Disclosure';
@@ -308,16 +309,30 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
 
 type View = 'changes' | 'checks' | 'discussion';
 
+/** ARIA tabs with the standard keyboard pattern: one tab stop, arrow keys, Home and End move between tabs and select them. */
 function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => void; items: { id: View; label: string; note?: string; tone?: 'danger' | 'warn' }[] }) {
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Move from the focused tab, not the selected one: keys can arrive before the selection re-renders.
+    const focused = items.findIndex((t) => `cr-tab-${t.id}` === (e.target as HTMLElement).id);
+    const i = focused >= 0 ? focused : items.findIndex((t) => t.id === view);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: items.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const t = items[(next + items.length) % items.length];
+    onChange(t.id);
+    document.getElementById(`cr-tab-${t.id}`)?.focus();
+  };
   return (
-    <div role="tablist" aria-label="Change request views" className="flex gap-1 overflow-x-auto border-b border-line">
+    <div role="tablist" aria-label="Change request views" className="flex gap-1 overflow-x-auto border-b border-line" onKeyDown={onKeyDown}>
       {items.map((t) => (
         <button
           key={t.id}
+          type="button"
           role="tab"
           id={`cr-tab-${t.id}`}
           aria-selected={view === t.id}
           aria-controls={`cr-panel-${t.id}`}
+          tabIndex={view === t.id ? 0 : -1}
           onClick={() => onChange(t.id)}
           className={cx('-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap', view === t.id ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
         >
@@ -401,14 +416,14 @@ export function ChangeRequestPage() {
               {
                 id: 'checks',
                 label: 'Checks',
-                note: !cr.validation ? 'not run' : cr.validation.passed ? 'passing' : 'failing',
+                note: !cr.validation ? 'not run' : validationVerdict(cr.validation, 'inline'),
                 tone: cr.validation && !cr.validation.passed ? 'danger' : undefined,
               },
               { id: 'discussion', label: 'Discussion', note: `${cr.reviews.length + cr.votes.length}` },
             ]}
           />
           {tab === 'changes' && (
-            <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             {cr.description && (
               <Card className="p-5">
                 {cr.origin.type === 'public-report' ? (
@@ -512,7 +527,7 @@ export function ChangeRequestPage() {
             </div>
           )}
           {tab === 'checks' && (
-            <div role="tabpanel" id="cr-panel-checks" aria-labelledby="cr-tab-checks" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-checks" aria-labelledby="cr-tab-checks" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             <Card>
               <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
               <div className="p-5">
@@ -526,7 +541,7 @@ export function ChangeRequestPage() {
             </div>
           )}
           {tab === 'discussion' && (
-            <div role="tabpanel" id="cr-panel-discussion" aria-labelledby="cr-tab-discussion" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-discussion" aria-labelledby="cr-tab-discussion" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             <Card>
               <CardHeader icon={History} title="Reviews and timeline" />
               <ol className="relative space-y-4 p-5">
@@ -583,8 +598,9 @@ export function ChangeRequestPage() {
           {cr.origin.type === 'synthesis' && !['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status) && <PublicationApproval cr={cr} onUpdate={state.setData} />}
           <Card>
             <CardHeader icon={Scale} title="Decision" subtitle={`${ontology.governance.name} · ${plural(cr.reviews.filter((r) => r.decision !== 'comment').length, 'review')}`} />
-            <div className="p-5">
+            <div className="space-y-4 p-5">
               <GovernancePanel g={cr.governance} userById={userById} actions={<ActionBar cr={cr} onUpdate={state.setData} />} />
+              <PolicyGlance policy={ontology.governance} ontologyId={id} />
             </div>
           </Card>
         </div>

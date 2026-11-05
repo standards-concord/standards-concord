@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
-import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Settings, Shield, UserRound, Compass, Palette } from 'lucide-react';
+import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shield, UserRound, Compass, Palette } from 'lucide-react';
 import { api } from '../api';
 import { beginSignOut, finishSignOut, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
-import { useWalkthrough } from '../lib/walkthrough';
+import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
@@ -39,21 +39,46 @@ function OntologySwitcher() {
   );
 }
 
+/** The sign-in page, coming back to this exact place (path, query and #section) afterwards. */
+export function loginHref(loc: { pathname: string; search: string; hash: string }) {
+  if (loc.pathname === '/login') return '/login';
+  const here = loc.pathname + loc.search + loc.hash;
+  return here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`;
+}
+
 function UserMenu() {
-  const { session, setSession, refresh } = useSession();
+  const { session, setSession, refresh, isDemo } = useSession();
+  const loc = useLocation();
+  const w = useWalkthrough();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // A disclosure of ordinary links: focus moves to the first link, Escape closes and returns to the button,
+  // and clicking outside or tabbing away closes it.
   useEffect(() => {
     if (!open) return;
+    panelRef.current?.querySelector<HTMLElement>('a, button')?.focus();
     const h = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
     document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
+    document.addEventListener('keydown', k);
+    return () => {
+      document.removeEventListener('mousedown', h);
+      document.removeEventListener('keydown', k);
+    };
   }, [open]);
   const user = session?.user;
+  // In the demo, say which tester role this persona plays, e.g. "Alpha tester (Voting member)".
+  const testerRole = isDemo && user && w.demo ? testerRoleFor(user, w.myRoles).title : undefined;
   if (!user)
     return (
-      <Link to="/login">
+      <Link to={loginHref(loc)}>
         <Button size="sm" variant="primary">
           Sign in
         </Button>
@@ -73,29 +98,39 @@ function UserMenu() {
     nav('/login');
   };
   return (
-    <div className="relative" ref={ref}>
-      <button onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-haspopup="menu" aria-expanded={open}>
+    <div
+      className="relative"
+      ref={ref}
+      onBlur={(e) => {
+        if (open && e.relatedTarget && !ref.current?.contains(e.relatedTarget as Node)) setOpen(false);
+      }}
+    >
+      <button ref={buttonRef} onClick={() => setOpen((o) => !o)} className="app-user-button flex items-center gap-2 rounded-pill p-0.5 pr-2 hover:bg-surface-2" aria-expanded={open} aria-controls="account-menu">
         <Avatar name={user.name} src={user.avatarUrl} size={30} />
         <span className="hidden max-w-32 truncate text-sm font-medium lg:inline">{user.name}</span>
+        {testerRole && <span className="app-header-muted hidden text-sm whitespace-nowrap text-muted lg:inline">({testerRole})</span>}
+        {/* Below lg only the avatar shows, so give the button its name for screen readers. */}
+        <span className="sr-only lg:hidden">
+          {user.name}
+          {testerRole && ` (${testerRole})`}
+        </span>
         <ChevronDown className="app-header-muted hidden size-3.5 text-muted lg:inline" />
       </button>
       {open && (
-        <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
+        <nav id="account-menu" ref={panelRef} aria-label="Account" className="app-dropdown absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
           <div className="border-b border-line px-4 py-3">
             <div className="truncate text-sm font-medium">{user.name}</div>
+            {testerRole && <div className="truncate text-xs text-muted">Trying Concord as: {testerRole}</div>}
             {user.email && <div className="truncate text-xs text-muted">{user.email}</div>}
             {user.organisation && <div className="truncate text-xs text-muted">{user.organisation}</div>}
           </div>
           <MenuLink to="/settings" icon={<UserRound className="size-4" />}>
-            Profile & your WebID
+            Profile
           </MenuLink>
           <MenuLink to="/connect" icon={<Plug className="size-4" />}>
             Connect an agent
           </MenuLink>
-          <MenuLink to="/settings#agents" icon={<Settings className="size-4" />}>
-            Connected agents
-          </MenuLink>
-          <MenuLink to="/settings#appearance" icon={<Palette className="size-4" />}>
+          <MenuLink to="/appearance" icon={<Palette className="size-4" />}>
             Appearance
           </MenuLink>
           <MenuLink to="/alpha" icon={<Compass className="size-4" />}>
@@ -109,7 +144,7 @@ function UserMenu() {
           <button onClick={() => void logout()} className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-2">
             <LogOut className="size-4" /> Sign out
           </button>
-        </div>
+        </nav>
       )}
     </div>
   );
@@ -180,6 +215,19 @@ function DemoBanner() {
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col">
+      {/* Skips the repeated header. It focuses <main> without touching the URL hash, which some pages use for their own sections. */}
+      <a
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault();
+          const main = document.getElementById('main');
+          main?.focus();
+          main?.scrollIntoView({ block: 'start' });
+        }}
+        className="sr-only z-50 rounded-lg bg-surface px-3 py-2 text-sm font-medium text-accent shadow-lg focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:outline-2 focus:outline-accent"
+      >
+        Skip to main content
+      </a>
       <header className="app-header sticky top-0 z-30 border-b border-line backdrop-blur">
         <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
           <Link to="/" className="flex min-w-0 items-center gap-2.5" aria-label="Concord: home">
@@ -204,9 +252,11 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <DemoBanner />
-      <main className="flex-1">{children}</main>
+      <main id="main" tabIndex={-1} className="flex-1 scroll-mt-16 outline-none">
+        {children}
+      </main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. ·{' '}
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used. ·{' '}
         <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
           Privacy policy
         </Link>

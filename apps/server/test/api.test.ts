@@ -1,8 +1,12 @@
 import request from 'supertest';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
+import { getProject, members, updateProject } from '../src/services/ontologies.js';
+import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { publishRelease, releaseApproval, releaseGovernance } from '../src/services/releases.js';
+import type { Release, Vote } from '@concord/shared';
 
 const app = createApp();
 type Agent = ReturnType<typeof request.agent>;
@@ -112,6 +116,26 @@ describe('change request lifecycle', () => {
     const v = await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=1.1.0`);
     expect(v.text).toMatch(/owl:versionInfo "1\.1\.0"/);
     expect(v.text).toMatch(/owl:backwardCompatibleWith/);
+
+    // The approval is recorded at publish time: changing the policy afterwards doesn't rewrite the history.
+    expect(published.body.approvalSource).toBe('recorded');
+    const recorded = published.body.governance;
+    const project = await steward.get(`/api/ontologies/${demoId}`);
+    const policy = structuredClone(project.body.governance);
+    const original = structuredClone(policy);
+    policy.releases.minor.minApprovals = recorded.requiredApprovals + 3;
+    policy.releases.minor.reviewPeriodDays = 99;
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy })).status).toBe(200);
+    const later = await steward.get(`/api/releases/${draft.id}`);
+    expect(later.body.approvalSource).toBe('recorded');
+    expect(later.body.governance.requiredApprovals).toBe(recorded.requiredApprovals);
+    expect(later.body.governance.rule.reviewPeriodDays).toBe(recorded.rule.reviewPeriodDays);
+    expect(later.body.governance.reviewPeriodEndsAt).toBe(recorded.reviewPeriodEndsAt);
+    expect((await steward.put(`/api/ontologies/${demoId}/governance`).send({ policy: original })).status).toBe(200);
+
+    // The set-up release had no approval rules, and says so rather than borrowing today's.
+    const first = (await steward.get(`/api/ontologies/${demoId}/releases`)).body.find((r: { version: string }) => r.version === '1.0.0');
+    expect((await steward.get(`/api/releases/${first.id}`)).body.approvalSource).toBe('bootstrap');
   });
 
   it('rejects edits that make the ontology inconsistent from being approved', async () => {
@@ -814,5 +838,101 @@ describe('anonymous access', () => {
     const agent = await login('contributor', 'Validator');
     expect((await agent.get(`/api/ontologies/${demoId}/validation`)).status).toBe(200);
     expect((await agent.post('/api/simulation/step').send({ ontologyId: demoId })).status).toBe(200);
+  });
+});
+
+describe('release approval provenance', () => {
+  const release = (over: Partial<Release>): Release => ({
+    id: 'rel_test',
+    ontologyId: demoId,
+    version: '9.9.9',
+    level: 'minor',
+    status: 'draft',
+    changeRequestIds: ['cr_test'],
+    notes: '',
+    versionIRI: 'https://example.org/9.9.9',
+    createdBy: 'system',
+    createdAt: '2026-11-01T00:00:00Z',
+    statusSince: '2026-11-01T00:00:00Z',
+    ...over,
+  });
+
+  it('labels every decided release, rejected as well as published', async () => {
+    expect((await releaseApproval(release({ status: 'voting' }))).approvalSource).toBe('live');
+    expect((await releaseApproval(release({ status: 'rejected' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published', changeRequestIds: [] }))).approvalSource).toBe('bootstrap');
+    const saved = { ...(await releaseGovernance(release({ status: 'voting' }))), requiredApprovals: 42 };
+    for (const status of ['published', 'rejected'] as const) {
+      const shown = await releaseApproval(release({ status, approval: saved }));
+      expect(shown.approvalSource).toBe('recorded');
+      expect(shown.governance.requiredApprovals).toBe(42);
+    }
+  });
+
+  it('re-evaluates an unrecorded decision with only the votes cast before it, each person’s last vote counting', async () => {
+    const decidedAt = '2026-11-02T12:00:00Z';
+    const probe = await releaseGovernance(release({ id: 'rel_votes', level: 'major', status: 'voting' }));
+    const voterRoles = probe.rule.vote?.voterRoles ?? [];
+    expect(voterRoles.length, 'the demo policy votes on major releases').toBeGreaterThan(0);
+    const voters = (await members(demoId)).filter((m) => m.roles.some((r) => voterRoles.includes(r)));
+    expect(voters.length).toBeGreaterThanOrEqual(2);
+    const [a, b] = voters;
+    const vote = (id: string, userId: string, choice: Vote['choice'], at: string): Vote => ({ id, subjectType: 'release', subjectId: 'rel_votes', userId, roles: ['member'], choice, at });
+    // a changes their mind before the decision (no, then yes); b only votes after it.
+    for (const v of [vote('v_a1', a.userId, 'no', '2026-11-01T09:00:00Z'), vote('v_a2', a.userId, 'yes', '2026-11-02T09:00:00Z'), vote('v_b', b.userId, 'no', '2026-11-03T09:00:00Z')])
+      await put('votes', v, 'rel_votes');
+    for (const status of ['published', 'rejected'] as const) {
+      const { governance, approvalSource } = await releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
+      expect(approvalSource).toBe('current-policy');
+      expect(governance.vote).toMatchObject({ cast: 1, yes: 1, no: 0 });
+    }
+  });
+
+  it('records the approval that allowed publishing, even if the policy changes while the release is written', async () => {
+    // The snapshot used to be a second evaluation taken after the check that let the release through, so a policy
+    // change in between was recorded as if it had applied (and might not even say "approved"). The last check runs
+    // just before the files are written; a change while they're written must not reach the record.
+    const project = await getProject(demoId);
+    const original = structuredClone(project.governance);
+    const now = new Date().toISOString();
+    const r: Release = {
+      id: 'rel_snapshot', ontologyId: demoId, version: '1.1.1', level: 'patch', status: 'draft', changeRequestIds: [],
+      notes: 'Snapshot test', versionIRI: `${project.ontologyIRI}/1.1.1`, createdBy: 'system', createdAt: now, statusSince: now,
+    };
+    await put('releases', r, demoId);
+    const before = await releaseGovernance(r);
+    // Between the first check and the last one (while the files are built), the policy changes once: the last
+    // check sees that, and it's what is recorded.
+    const working = ontologyStore.working.bind(ontologyStore);
+    const between = vi.spyOn(ontologyStore, 'working').mockImplementationOnce(async (p) => {
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 2;
+      changed.governance.releases.patch.reviewPeriodDays = 33;
+      await updateProject(changed);
+      return working(p);
+    });
+    const write = ontologyStore.writeRelease.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 5;
+      changed.governance.releases.patch.reviewPeriodDays = 77;
+      await updateProject(changed);
+      return write(...args);
+    });
+    try {
+      const published = await publishRelease(r, undefined);
+      expect(between).toHaveBeenCalled();
+      expect(spy).toHaveBeenCalled();
+      expect(published.approval?.requiredApprovals).toBe(before.requiredApprovals + 2);
+      expect(published.approval?.rule.reviewPeriodDays).toBe(33);
+      expect((await releaseApproval(published)).approvalSource).toBe('recorded');
+    } finally {
+      between.mockRestore();
+      spy.mockRestore();
+      const restored = await getProject(demoId);
+      restored.governance = original;
+      await updateProject(restored);
+    }
   });
 });
