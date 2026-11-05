@@ -33,7 +33,7 @@ function hours(opportunity, volunteer) {
 
 /** The last day someone gave time to an opportunity. */
 function lastHelped(opportunity) {
-  const days = activitiesFor(opportunity).map((activity) => activity.activityDate?.getTime()).filter(Boolean);
+  const days = activitiesFor(opportunity).map((activity) => activity.activityDate?.getTime()).filter(Number.isFinite);
   return days.length ? new Date(Math.max(...days)) : undefined;
 }
 
