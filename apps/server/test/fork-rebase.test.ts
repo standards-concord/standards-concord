@@ -1,9 +1,7 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
-import type { ChangeRequest, OntologyFork, OntologyProject } from '@concord/shared';
+import type { ChangeRequest, OntologyFork, OntologyProject, User } from '@concord/shared';
 import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
 import nodePath from 'node:path';
 import request from 'supertest';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
@@ -11,12 +9,13 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { addReview, createChangeRequest, getCR, merge, saveChangeRequest, triage, updateOps } from '../src/services/changeRequests.js';
+import { addReview, createChangeRequest, getCR, updateOps } from '../src/services/changeRequests.js';
 import { llm } from '../src/llm/provider.js';
+import { triageBudget } from '../src/services/budget.js';
 import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
-import { checkoutTestHooks, ontologyStore } from '../src/services/ontologyStore.js';
+import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo, step } from '../src/services/simulation.js';
 
 // The OWL reasoner (sparq, in its worker) failing, with the pool's own fault injection: while `down` is 'owl' it falls
@@ -64,6 +63,13 @@ const addClass = (localName: string, label: string, extra: Partial<Extract<Chang
   ...extra,
 });
 
+/** Where git has a fork: its branch, and the commits still pinned (not yet on the branch). */
+function forkRefs(slug: string) {
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: nodePath.join(config.dataDir, 'ontologies', 'volunteering'), encoding: 'utf8' }).trim();
+  return { branch: git('rev-parse', `refs/heads/forks/${slug}`), pins: git('for-each-ref', '--format=%(objectname)', `refs/concord/fork-pins/${slug}/`).split('\n').filter(Boolean) };
+}
+const racer = { name: 'Racer', email: 'r@example.org' } as User;
+
 let dev: Agent;
 /** The demo ontology (its slug and id are all these tests use). */
 let vol: OntologyProject;
@@ -76,6 +82,8 @@ async function newFork(name: string) {
 }
 
 beforeAll(async () => {
+  // These tests propose far more forks than one person may have checked in ten minutes; the budget itself is tested in api.test.ts.
+  triageBudget.max = Number.MAX_SAFE_INTEGER;
   await openDb();
   await seedDemo();
   vol = (await findProject('volunteering'))!;
@@ -257,18 +265,21 @@ describe('second review', () => {
     const now = (await get<OntologyFork>('forks', stale.id))!;
     expect(now.revision).toBe(1);
     expect(now.ops).toHaveLength(1);
-    expect(now.head).toBe(ontologyStore.forkHead((await findProject('volunteering'))!, now.slug));
+    expect(now.head).toBe(forkRefs(now.slug).branch);
   });
 
   it('an edit prepared before the fork changed elsewhere is refused, in git and in the database', async () => {
     const path = await newFork('Other process');
     const p = (await findProject('volunteering'))!;
-    const before = await fork(path);
-    // Another server process moves the branch: this process's next edit must not build on the old head.
-    const g = await ontologyStore.forkGraph(p, before.slug);
-    await ontologyStore.commitFork(p, before.slug, g, 'Edit from another process', { name: 'Other', email: 'o@example.org' }, { expectedParent: before.head });
-    const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('LostEdit', 'lost edit')] });
-    expect(edit.status).toBe(409);
+    const stale = (await get<OntologyFork>('forks', (await fork(path)).id))!;
+    const g = await ontologyStore.graphAt(p, stale.head);
+    // Another server process commits to the fork: an edit prepared from the old record must not build on the old head.
+    const fresh = structuredClone(stale);
+    await forTests.commitAndSave(p, fresh, { seq: fresh.seq }, g, 'Edit from another process', racer);
+    await expect(forTests.commitAndSave(p, structuredClone(stale), { seq: stale.seq }, g, 'Lost edit', racer)).rejects.toThrow(/changed/);
+    expect((await get<OntologyFork>('forks', stale.id))!.head).toBe(fresh.head);
+    // Git agrees: the branch has the other process's commit, and the refused commit isn't held.
+    expect(forkRefs(stale.slug)).toEqual({ branch: fresh.head, pins: [] });
     // And a database record changed elsewhere (closed, here) is not overwritten.
     const path2 = await newFork('Closed elsewhere');
     const rec = (await get<OntologyFork>('forks', (await fork(path2)).id))!;
@@ -277,13 +288,14 @@ describe('second review', () => {
     expect((await dev.post(`${path2}/edits`).send({ ops: [addClass('NotAfterClose', 'not after close')] })).status).toBe(409);
   });
 
-  it('closing moves the branch, so an edit prepared before the close fails, and closing twice is refused', async () => {
+  it('closing is a change like any other, so an edit prepared before the close fails, and closing twice is refused', async () => {
     const path = await newFork('Close race');
     const p = (await findProject('volunteering'))!;
-    const before = await fork(path);
+    const stale = (await get<OntologyFork>('forks', (await fork(path)).id))!;
     expect((await dev.post(`${path}/close`)).status).toBe(200);
-    const g = await ontologyStore.forkGraph(p, before.slug);
-    await expect(ontologyStore.commitFork(p, before.slug, g, 'Late edit', { name: 'Late', email: 'l@example.org' }, { expectedParent: before.head })).rejects.toThrow(/changed/);
+    const g = await ontologyStore.graphAt(p, stale.head);
+    await expect(forTests.commitAndSave(p, stale, { seq: stale.seq }, g, 'Late edit', racer)).rejects.toThrow(/changed/);
+    expect(forkRefs(stale.slug).pins).toEqual([]);
     expect((await dev.post(`${path}/close`)).status).toBe(409);
     expect((await fork(path)).status).toBe('closed');
   });
@@ -329,7 +341,7 @@ describe('second review', () => {
   it('an edit that was undone drops out, so it can not conflict later', async () => {
     const p = (await findProject('volunteering'))!;
     const path = await newFork('Undone');
-    const original = (await ontologyStore.forkGraph(p, (await fork(path)).slug)).term(`${VOL}AccessibilityFeature`)!.definition!;
+    const original = (await ontologyStore.graphAt(p, (await fork(path)).head)).term(`${VOL}AccessibilityFeature`)!.definition!;
     await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: 'Temporarily reworded.' } }] });
     const undone = await dev.post(`${path}/edits`).send({ ops: [{ op: 'updateAnnotations', iri: `${VOL}AccessibilityFeature`, set: { definition: original } }] });
     expect(undone.body.fork.ops).toEqual([]);
@@ -403,7 +415,7 @@ describe('second review', () => {
 describe('third review', () => {
   const fork = async (path: string) => (await reader.get(path)).body;
 
-  it('saves are an atomic compare-and-swap on the record version, and a lost save undoes its commit', async () => {
+  it('saves are an atomic compare-and-swap on the record version, and a lost save moves nothing', async () => {
     const path = await newFork('Atomic save');
     const p = (await findProject('volunteering'))!;
     const f = (await get<OntologyFork>('forks', (await fork(path)).id))!;
@@ -411,12 +423,12 @@ describe('third review', () => {
     // Another process closes the fork after this one read it.
     expect(await putIf('forks', { ...f, status: 'closed', seq: (f.seq ?? 0) + 1 }, 'seq', f.seq, f.ontologyId)).toBe(true);
     expect(await putIf('forks', { ...f, status: 'active' }, 'seq', f.seq, f.ontologyId)).toBe(false);
-    const before = ontologyStore.forkHead(p, f.slug);
-    const graph = await ontologyStore.forkGraph(p, f.slug);
-    await expect(
-      forTests.commitAndSave(p, f, snapshot, async () => await ontologyStore.commitFork(p, f.slug, graph, 'Racing edit', { name: 'Racer', email: 'r@example.org' }, { expectedParent: before })),
-    ).rejects.toThrow(/changed/);
-    expect(ontologyStore.forkHead(p, f.slug)).toBe(before);
+    const before = f.head;
+    const graph = await ontologyStore.graphAt(p, f.head);
+    await expect(forTests.commitAndSave(p, f, snapshot, graph, 'Racing edit', racer)).rejects.toThrow(/changed/);
+    expect(f.head).toBe(before);
+    expect(forkRefs(f.slug)).toEqual({ branch: before, pins: [] });
+    expect((await get<OntologyFork>('forks', f.id))!.head).toBe(before);
     expect((await get<OntologyFork>('forks', f.id))!.status).toBe('closed');
   });
 
@@ -573,7 +585,7 @@ describe('fourth review', () => {
     expect(all.status).toBe(200);
     expect(all.body.ops).toEqual([]);
     const f = (await get<OntologyFork>('forks', all.body.id))!;
-    expect((await ontologyStore.forkGraph(p, f.slug)).metadata().issued).toEqual(issued);
+    expect((await ontologyStore.graphAt(p, f.head)).metadata().issued).toEqual(issued);
     expect((await dev.post(`${path}/discard`).send({ all: true })).body.error).toMatch(/no changes to discard/);
   });
 
@@ -735,7 +747,7 @@ describe('sixth review', () => {
     expect((await get<OntologyFork>('forks', f.id))!.ops).toEqual([]);
   });
 
-  it('a change request saved from an old copy is refused, whoever saves it', async () => {
+  it('a change request updated from an old copy keeps what was changed meanwhile, whoever changed it', async () => {
     const path = await newFork('Request editor race');
     await dev.post(`${path}/edits`).send({ ops: [addClass('EditorRace', 'editor race')] });
     const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id;
@@ -744,8 +756,10 @@ describe('sixth review', () => {
     const edited = await dev.patch(`/api/change-requests/${crId}`).send({ title: 'Edited in the request editor' });
     expect(edited.status).toBe(200);
     const owner = (await getUser((await get<OntologyFork>('forks', (await fork(path)).id))!.ownerId))!;
-    await expect(updateOps(stale, owner, { title: 'Stale title' })).rejects.toThrow(/changed by someone else/);
+    // Since #28 an update applies only what it changes to the request as stored (under the request's lock).
+    await updateOps(stale, owner, { description: 'Described from the old copy' });
     expect((await getCR(crId)).title).toBe('Edited in the request editor');
+    expect((await getCR(crId)).description).toBe('Described from the old copy');
   });
 
   it('the proposal fence refuses a proposal’s writes once the fork has moved on', async () => {
@@ -769,36 +783,12 @@ describe('seventh review', () => {
     expect(await putIf('forks', next, 'seq', f.seq, f.ontologyId)).toBe(true);
     return next;
   };
-  /** Runs `during` once, the first time a read of the draft happens while `when` holds. */
-  async function interleave<T>(when: () => boolean | Promise<boolean>, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
-    // Every read of the draft (working, and a merge's read at its exact base) goes through graphAt.
-    const original = ontologyStore.graphAt;
-    let done = false;
-    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
-      if (!done && (await when())) {
-        done = true;
-        await during();
-      }
-      return original.apply(this, args);
-    };
-    try {
-      return await fn();
-    } finally {
-      ontologyStore.graphAt = original;
-    }
-  }
   const proposeFrom = async (name: string, localName: string) => {
     const path = await newFork(name);
     await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
     const crId = (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
     return { path, crId };
   };
-  const approve = async (id: string) => {
-    const c = await getCR(id);
-    c.status = 'approved';
-    await saveChangeRequest(c);
-  };
-
   it('a proposal that loses its lease mid-way writes nothing (the production fence)', async () => {
     const path = await newFork('Lease lost mid-way');
     await dev.post(`${path}/edits`).send({ ops: [addClass('LeaseLost', 'lease lost')] });
@@ -814,73 +804,6 @@ describe('seventh review', () => {
     expect(res.status).toBe(409);
     const p = (await findProject('volunteering'))!;
     expect((await list<{ origin: { forkId?: string } }>('changeRequests', p.id)).filter((cr) => cr.origin.forkId === f.id)).toEqual([]);
-  });
-
-  // Since #15 a merge works from the request as stored, never the copy it was handed: an out-of-date copy can't
-  // merge edits that were replaced since (they go back to review), and what is merged is what is stored.
-  it('a merge from an out-of-date copy of a request never merges what that copy says', async () => {
-    const p = (await findProject('volunteering'))!;
-    const { crId } = await proposeFrom('Stale merge', 'StaleMerge');
-    await approve(crId);
-    const stale = await getCR(crId);
-    // Someone replaces the edits after the merge read the request: it goes back to review.
-    const owner = (await getUser(stale.authorId))!;
-    await updateOps(await getCR(crId), owner, { ops: [addClass('StaleReplacement', 'stale replacement')] });
-    const head = ontologyStore.head(p);
-    await expect(merge(stale, undefined)).rejects.toThrow(/Only approved requests/);
-    expect(ontologyStore.head(p)).toBe(head);
-    const working = await ontologyStore.working(p);
-    expect(working.term(`${VOL}StaleMerge`)).toBeUndefined();
-    expect(working.term(`${VOL}StaleReplacement`)).toBeUndefined();
-    expect((await getCR(crId)).status).toBe('review');
-    // A copy that is only behind on something else (its title) merges the request as stored.
-    const { crId: other } = await proposeFrom('Stale title', 'StaleTitle');
-    await approve(other);
-    const behind = await getCR(other);
-    const edited = await getCR(other);
-    edited.title = 'Edited before the merge';
-    await saveChangeRequest(edited);
-    const done = await merge(behind, undefined);
-    expect(done.status).toBe('merged');
-    expect(done.title).toBe('Edited before the merge');
-    expect((await getCR(other)).rev).toBe(done.rev);
-  });
-
-  it('while a merge holds a request, other saves are refused, and the merge records exactly what it committed', async () => {
-    const p = (await findProject('volunteering'))!;
-    const { crId } = await proposeFrom('Held merge', 'HeldMerge');
-    await approve(crId);
-    const owner = (await getUser((await getCR(crId)).authorId))!;
-    let refused: unknown;
-    const merged = await interleave(
-      async () => !!(await getCR(crId)).merging,
-      async () => {
-        refused = await updateOps(await getCR(crId), owner, { ops: [addClass('Replacement', 'replacement')] }).catch((e: Error) => e);
-      },
-      async () => merge(await getCR(crId), undefined),
-    );
-    expect(String(refused)).toMatch(/being merged/);
-    expect(merged.status).toBe('merged');
-    expect((await getCR(crId)).merging).toBeUndefined();
-    expect(JSON.stringify((await getCR(crId)).ops)).toMatch(/HeldMerge/);
-    expect((await ontologyStore.working(p)).term(`${VOL}HeldMerge`)).toBeDefined();
-    expect((await ontologyStore.working(p)).term(`${VOL}Replacement`)).toBeUndefined();
-  });
-
-  it('a merge whose draft moved underneath it commits nothing and gives the request back', async () => {
-    const p = (await findProject('volunteering'))!;
-    const { crId } = await proposeFrom('Draft moved', 'DraftMoved');
-    await approve(crId);
-    await expect(
-      interleave(
-                async () => !!(await getCR(crId)).merging,
-                () => upstream([addClass('MovedUnderneath', 'moved underneath')]),
-                async () => merge(await getCR(crId), undefined),
-              ),
-    ).rejects.toThrow(/working draft changed/);
-    expect((await ontologyStore.working(p)).term(`${VOL}DraftMoved`)).toBeUndefined();
-    expect((await getCR(crId)).merging).toBeUndefined();
-    expect((await getCR(crId)).status).toBe('approved');
   });
 
   it.each([
@@ -914,7 +837,8 @@ describe('seventh review', () => {
 
 /** Runs `during` once, the first time the draft is read (by any route) while `when` holds. */
 async function interleave<T>(when: () => boolean | Promise<boolean>, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
-  const originals = { working: ontologyStore.working, graphAt: ontologyStore.graphAt };
+  // (working reads through workingAt.)
+  const originals = { workingAt: ontologyStore.workingAt, graphAt: ontologyStore.graphAt };
   let done = false;
   const hook = async () => {
     if (!done && (await when())) {
@@ -922,9 +846,9 @@ async function interleave<T>(when: () => boolean | Promise<boolean>, during: () 
       await during();
     }
   };
-  ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.working>) {
+  ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.workingAt>) {
     await hook();
-    return originals.working.apply(this, args);
+    return originals.workingAt.apply(this, args);
   };
   ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.graphAt>) {
     await hook();
@@ -938,116 +862,6 @@ async function interleave<T>(when: () => boolean | Promise<boolean>, during: () 
 }
 
 describe('eighth review', () => {
-  const p = () => vol;
-  const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
-  /** Replace a store method for the length of `fn`. */
-  async function stubbed<K extends 'advanceWorking'>(key: K, impl: (original: (typeof ontologyStore)[K]) => (typeof ontologyStore)[K], fn: () => Promise<unknown>) {
-    const original = ontologyStore[key];
-    ontologyStore[key] = impl(original.bind(ontologyStore) as (typeof ontologyStore)[K]);
-    try {
-      return await fn();
-    } finally {
-      ontologyStore[key] = original;
-    }
-  }
-  const proposeFrom = async (name: string, localName: string) => {
-    const path = await newFork(name);
-    await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
-    return (await dev.post(`${path}/propose`).send({})).body.changeRequest.id as string;
-  };
-  const approve = async (id: string) => {
-    const c = await getCR(id);
-    c.status = 'approved';
-    await saveChangeRequest(c);
-  };
-  const stop = () => {
-    throw new Error('the merging process stopped');
-  };
-
-  it('a merge whose hold ran out commits nothing once the request has been edited', async () => {
-    // Used to: the stalled merge resumed after someone replaced the edits, committed the old ones
-    // (the draft hadn't moved, so the branch update went through), and only then failed.
-    const crId = await proposeFrom('Expired merge', 'ExpiredMerge');
-    await approve(crId);
-    const head = ontologyStore.head(p());
-    await expect(
-      interleave(
-                async () => !!(await getCR(crId)).merging,
-                async () => {
-                  const held = await getCR(crId);
-                  expect(await putIf('changeRequests', { ...held, merging: { ...held.merging!, until: Date.now() - 1 }, rev: held.rev! + 1 }, 'rev', held.rev, held.ontologyId)).toBe(true);
-                  const edited = await getCR(crId);
-                  edited.ops = [addClass('ReplacedWhileStalled', 'replaced while stalled')];
-                  await saveChangeRequest(edited);
-                },
-                async () => merge(await getCR(crId), undefined),
-              ),
-    ).rejects.toThrow(/changed by someone else/);
-    expect(ontologyStore.head(p())).toBe(head);
-    expect(await has('ExpiredMerge')).toBe(false);
-    expect(JSON.stringify((await getCR(crId)).ops)).toMatch(/ReplacedWhileStalled/);
-    expect((await getCR(crId)).merging).toBeUndefined();
-  });
-
-  it('reads the draft from its commit, so a checkout that lags behind loses nothing', async () => {
-    // Used to: a merge read ontology.ttl from the checkout, which another process had not rewritten
-    // yet after moving the branch, and committed a draft without that process's term.
-    const before = ontologyStore.readWorkingText(p());
-    await upstream([addClass('CommittedFirst', 'committed first')]);
-    const checkout = nodePath.join(ontologyStore.dir(p()), 'ontology.ttl');
-    fs.writeFileSync(checkout, before);
-    const crId = await proposeFrom('Lagging checkout', 'MergedOnTop');
-    await approve(crId);
-    expect((await merge(await getCR(crId), undefined)).status).toBe('merged');
-    expect(await has('CommittedFirst')).toBe(true);
-    expect(await has('MergedOnTop')).toBe(true);
-    // The merge brought the checkout up to the commit it made.
-    expect(fs.readFileSync(checkout, 'utf8')).toBe(ontologyStore.readAt(p(), 'HEAD'));
-  });
-
-  it('a merge that stopped right after committing is recognised by the retry, not redone', async () => {
-    // Used to: the request stayed approved with no mergedCommit, and the retry failed because the
-    // term already existed, moving the request to needs-work.
-    const crId = await proposeFrom('Stopped after commit', 'StoppedAfterCommit');
-    await approve(crId);
-    await expect(stubbed('advanceWorking', (original) => (...args) => (original(...args), stop()), async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
-    const stuck = await getCR(crId);
-    expect(stuck.status).toBe('approved');
-    expect(stuck.merging?.commit).toBeTruthy();
-    expect(await has('StoppedAfterCommit')).toBe(true);
-    const head = ontologyStore.head(p());
-    const done = await merge(await getCR(crId), undefined);
-    expect(done.status).toBe('merged');
-    expect(done.mergedCommit).toBe(stuck.merging!.commit);
-    expect(done.merging).toBeUndefined();
-    expect(ontologyStore.head(p())).toBe(head);
-  });
-
-  it('a merge that stopped after deciding its commit is finished by the next save, which is then refused', async () => {
-    const crId = await proposeFrom('Stopped before commit', 'StoppedBeforeCommit');
-    await approve(crId);
-    await expect(stubbed('advanceWorking', () => stop, async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
-    expect(await has('StoppedBeforeCommit')).toBe(false);
-    const late = await getCR(crId);
-    late.title = 'An edit after the merge decided';
-    await expect(saveChangeRequest(late)).rejects.toThrow(/has just been merged/);
-    expect((await getCR(crId)).status).toBe('merged');
-    expect((await getCR(crId)).title).not.toBe('An edit after the merge decided');
-    expect(await has('StoppedBeforeCommit')).toBe(true);
-  });
-
-  it('a decided merge whose draft moved first is given back, and the retry applies it to the new draft once', async () => {
-    const crId = await proposeFrom('Decided then moved', 'DecidedThenMoved');
-    await approve(crId);
-    await expect(stubbed('advanceWorking', () => stop, async () => merge(await getCR(crId), undefined))).rejects.toThrow(/stopped/);
-    await upstream([addClass('MovedFirst', 'moved first')]);
-    const done = await merge(await getCR(crId), undefined);
-    expect(done.status).toBe('merged');
-    expect(await has('MovedFirst')).toBe(true);
-    expect(await has('DecidedThenMoved')).toBe(true);
-    expect(ontologyStore.inWorking(p(), done.mergedCommit!)).toBe(true);
-  });
-
   it('tells the owner of a fork from an earlier version to recreate it, and offers no edits', async () => {
     // Used to: check_forks said keep using the fork and propose it, but proposing always failed.
     const path = await newFork('Legacy guidance');
@@ -1060,123 +874,6 @@ describe('eighth review', () => {
     expect(check.steps.join(' ')).toMatch(/create_fork/);
     expect(check.steps.join(' ')).not.toMatch(/propose_fork|sync_fork/);
     expect((await dev.post(`${path}/close`).send({})).status).toBe(200);
-  });
-});
-
-describe('ninth review', () => {
-  const p = () => vol;
-  const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
-  const dir = () => ontologyStore.dir(p());
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: dir(), encoding: 'utf8' }).trim();
-
-  it('a checkout left behind by a stopped merge cannot erase the merge when release pages are refreshed', async () => {
-    // Used to: a merge killed after moving the branch left the old checkout and index; the startup
-    // page refresh committed that index and silently removed the merged term.
-    const before = ontologyStore.head(p());
-    await upstream([addClass('SurvivesRefresh', 'survives refresh')]);
-    git('read-tree', '-u', '--reset', before);
-    const version = ontologyStore.versions(p())[0];
-    ontologyStore.updateReleaseFiles(p(), { [version]: { 'refresh-note.txt': `refreshed ${Date.now()}\n` } }, 'Refresh a release page');
-    expect(await has('SurvivesRefresh')).toBe(true);
-    expect(ontologyStore.releaseFile(p(), version, 'refresh-note.txt')).toMatch(/^refreshed/);
-    // ...and the refresh brought the checkout back up to HEAD.
-    expect(fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8')).toBe(ontologyStore.readAt(p(), 'HEAD'));
-  });
-
-  it('a release whose draft moved while it was being written publishes nothing and keeps the merge', async () => {
-    // Used to: the release checked HEAD, then committed the checkout unconditionally, so a merge
-    // landing in between (its lock taken over by age) was overwritten.
-    const project = p();
-    const head = ontologyStore.head(project);
-    const graph = await ontologyStore.working(project);
-    const slow = Object.create(graph) as typeof graph;
-    slow.toTurtle = async () => {
-      await upstream([addClass('LandedDuringRelease', 'landed during release')]);
-      return graph.toTurtle();
-    };
-    await expect(ontologyStore.writeRelease(project, '99.0.0', slow, {}, 'Should not publish', { name: 'Steward' }, { expectedHead: head })).rejects.toThrow(/changed while this release/);
-    expect(await has('LandedDuringRelease')).toBe(true);
-    expect(ontologyStore.versions(project)).not.toContain('99.0.0');
-    expect(git('tag', '--list', 'v99.0.0')).toBe('');
-  });
-
-  describe('the checkout lock', () => {
-    // Tenth review: the lock named only a process id (so a holder on another host, or a reused id,
-    // looked alive or dead wrongly), a busy lock blocked the server for 15 seconds, and the
-    // five-minute takeover was never tested.
-    const lock = () => nodePath.join(dir(), '.git', 'concord-checkout.lock');
-    const hold = (owner: string, ageMs: number) => {
-      fs.rmSync(lock(), { recursive: true, force: true });
-      fs.mkdirSync(lock());
-      fs.writeFileSync(nodePath.join(lock(), 'owner'), owner);
-      const at = new Date(Date.now() - ageMs);
-      fs.utimesSync(lock(), at, at);
-    };
-    const owner = () => fs.readFileSync(nodePath.join(lock(), 'owner'), 'utf8');
-    /** Move the checkout behind HEAD, so it shows whether an update ran. */
-    const behind = async () => {
-      const before = ontologyStore.head(p());
-      // A label of its own each time: a shared one would make every later request fail lint.
-      const n = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      await upstream([addClass(`Lock${n}`, `lock check ${n}`)]);
-      git('read-tree', '-u', '--reset', before);
-    };
-    const current = () => fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8') === ontologyStore.readAt(p(), 'HEAD');
-
-    it.each([
-      ['a live process on this host', () => `${os.hostname()}:${process.pid}:live`],
-      ['a process on another host', () => 'another-host.example:1:remote'],
-    ])('is left to %s, without holding the server up', async (_, name) => {
-      await behind();
-      hold(name(), 60_000);
-      const started = Date.now();
-      ontologyStore.syncCheckout(p());
-      expect(Date.now() - started).toBeLessThan(2_000);
-      expect(owner()).toBe(name());
-      expect(current()).toBe(false);
-      fs.rmSync(lock(), { recursive: true, force: true });
-    });
-
-    it.each([
-      ['a dead process on this host', () => `${os.hostname()}:2147483646:dead`, 60_000],
-      ['anyone, once it is more than five minutes old', () => `${os.hostname()}:${process.pid}:stuck`, 6 * 60_000],
-      ['a process on another host, once it is more than five minutes old', () => 'another-host.example:1:remote', 6 * 60_000],
-    ])('is taken over from %s, and the checkout caught up', async (_, name, age) => {
-      await behind();
-      hold(name(), age);
-      ontologyStore.syncCheckout(p());
-      expect(fs.existsSync(lock())).toBe(false);
-      expect(current()).toBe(true);
-    });
-
-    it('a holder taken over just before it writes does not leave its older checkout behind', async () => {
-      // Used to: the displaced holder checked the lock, was taken over, then wrote the checkout for
-      // the HEAD it had read, over the new holder's newer one, and stopped there.
-      await behind();
-      const project = p();
-      const read = ontologyStore.head(project);
-      const g = applyChangeOps(await ontologyStore.working(project), [addClass(`Newer${Date.now()}`, 'newer')], { date: '2026-11-05' }).graph;
-      const newer = await ontologyStore.prepareWorkingCommit(project, g, 'Newer draft', { name: 'Steward' }, read);
-      let fired = false;
-      checkoutTestHooks.beforeWrite = async () => {
-        if (fired) return;
-        fired = true;
-        // Another process takes the lock over, moves main on, writes the newer checkout and lets go.
-        fs.writeFileSync(nodePath.join(lock(), 'owner'), 'another-host.example:1:new-holder');
-        git('update-ref', 'refs/heads/main', newer, read);
-        git('read-tree', '-u', '--reset', newer);
-        fs.rmSync(lock(), { recursive: true, force: true });
-      };
-      try {
-        ontologyStore.syncCheckout(project);
-      } finally {
-        delete checkoutTestHooks.beforeWrite;
-      }
-      expect(fired).toBe(true);
-      expect(ontologyStore.head(project)).toBe(newer);
-      expect(current()).toBe(true);
-      expect(fs.existsSync(lock())).toBe(false);
-    });
   });
 });
 
@@ -1267,74 +964,62 @@ describe('saves that race a slow step', () => {
     expect(await reactions(ids)).toBeGreaterThan(before + commented.length);
   });
 
-  it('an older re-check never replaces the results of a newer one made against a later draft', async () => {
-    // Used to: a re-check retried after losing its save to a newer one put its own results back
-    // because the edits were the same, though it had checked them against an older draft.
-    const { crId } = await proposeFork('Older re-check', 'OlderRecheck');
-    const original = ontologyStore.graphAt;
-    let moved = false;
-    // After the first re-check has read the draft: the draft moves (the class now exists upstream,
-    // so the edit can no longer be applied) and a second re-check runs to completion.
-    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
-      const g = await original.apply(this, args);
-      if (!moved) {
-        moved = true;
-        await upstream([addClass('OlderRecheck', 'older recheck added upstream')]);
-        await triage(await getCR(crId));
-      }
-      return g;
-    };
-    try {
-      await triage(await getCR(crId));
-    } finally {
-      ontologyStore.graphAt = original;
-    }
-    expect(moved).toBe(true);
-    const cr = await getCR(crId);
-    // The newer check's result stands: against the current draft the edit can't be applied.
-    expect(cr.validation?.passed).toBe(false);
-    expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
-  });
-
-  it('two overlapping simulation steps record each member reaction once', async () => {
-    // Used to: whether a member had already reacted was checked before the slow LLM call, so a
-    // second step that ran meanwhile recorded the same member's reaction a second time.
-    const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
-    // Members only react to requests in review.
-    expect((await getCR(crId)).status).toBe('review');
-    const original = llm.json;
-    let nested = false;
-    llm.json = (async (...args: Parameters<typeof original>) => {
-      if (!nested && args[0].task === 'persona') {
-        nested = true;
-        await step(p().id, undefined, 50);
-      }
-      return original(...args);
-    }) as typeof original;
-    try {
-      await step(p().id, undefined, 50);
-    } finally {
-      llm.json = original;
-    }
-    expect(nested).toBe(true);
-    for (const cr of await list<ChangeRequest>('changeRequests', p().id)) {
-      const since = cr.opsUpdatedAt ?? '';
-      for (const kind of ['reviews', 'votes'] as const) {
-        const by = new Map<string, number>();
-        for (const r of await list<{ userId: string; at: string }>(kind, cr.id)) if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
-        expect([...by.values()].filter((n) => n > 1), `${kind} on #${cr.number}`).toEqual([]);
-      }
-    }
-  });
-
-  it('a review that cannot be saved leaves nothing behind', async () => {
+  it('a review given on an old copy of the request is recorded with the request, and loses nothing saved meanwhile', async () => {
     // Used to: the review was stored before the request's save was refused, so it counted towards
-    // approval although the request never recorded it.
+    // approval although the request never recorded it. (Since #28 a review is applied to the stored
+    // request under its lock, so the old copy no longer matters; the review and the request are saved together.)
     const { crId } = await proposeFork('Stale review', 'StaleReview');
     const stale = await getCR(crId);
     await commentOn(crId, 'Saved first');
     const before = (await list('reviews', crId)).length;
-    await expect(addReview(stale, (await getUser(stale.authorId))!, 'comment', 'Saved on an old copy')).rejects.toThrow(/changed by someone else/);
-    expect(await list('reviews', crId)).toHaveLength(before);
+    await addReview(stale, (await getUser(stale.authorId))!, 'comment', 'Given on an old copy');
+    expect(await list('reviews', crId)).toHaveLength(before + 1);
+    const timeline = (await getCR(crId)).timeline.map((e) => e.message).join('\n');
+    expect(timeline).toContain('Saved first');
+    expect(timeline).toContain('Given on an old copy');
+  });
+});
+
+describe('forks on the database-first store', () => {
+  // Since #28 the database says which commit is the draft; forks work the same way: the fork's record names its
+  // head, and git (the fork's branch, and pins for commits not yet on it) only holds the commits.
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: nodePath.join(config.dataDir, 'ontologies', 'volunteering'), encoding: 'utf8' }).trim();
+  const record = async (path: string) => (await get<OntologyFork>('forks', (await reader.get(path)).body.id))!;
+
+  it('a fork read while its branch lags behind its record shows the record, and the next edit catches the branch up', async () => {
+    const path = await newFork('Lagging branch');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('BeforeLag', 'before lag')] });
+    const f = await record(path);
+    // A server that stopped after saving the record but before moving the branch: the branch is a commit behind, the pin holds the head.
+    const behind = git('rev-parse', `${f.head}^`);
+    git('update-ref', `refs/concord/fork-pins/${f.slug}/${f.head}`, f.head);
+    git('update-ref', `refs/heads/forks/${f.slug}`, behind, f.head);
+    expect((await request(app).get(`/def/volunteering/forks/${f.slug}.ttl`)).text).toMatch(/BeforeLag/);
+    expect((await reader.get(path)).body.terms.map((t: { curie: string }) => t.curie)).toContain('vol:BeforeLag');
+    const res = await dev.post(`${path}/edits`).send({ ops: [addClass('AfterLag', 'after lag')] });
+    expect(res.status).toBe(200);
+    const now = await record(path);
+    expect(forkRefs(f.slug)).toEqual({ branch: now.head, pins: [] });
+    expect(git('rev-list', '--first-parent', now.head)).toContain(f.head);
+  });
+
+  it('a name whose branch was left behind by a fork that was never saved is not reused', async () => {
+    const taken = `left-behind-${Date.now()}`;
+    git('update-ref', `refs/heads/forks/${taken}`, git('rev-parse', 'HEAD'));
+    const res = await dev.post(API).send({ name: taken });
+    expect(res.status).toBe(201);
+    expect(res.body.slug).toBe(`${taken}-2`);
+  });
+
+  it('a fork whose record cannot be saved leaves no branch behind', async () => {
+    const p = (await findProject('volunteering'))!;
+    const before = git('for-each-ref', '--format=%(refname)', 'refs/heads/forks/');
+    await expect(
+      ontologyStore.commitFork(p, 'never-saved', await ontologyStore.working(p), 'Fork that fails', racer, { parent: await ontologyStore.head(p), create: true }, async () => {
+        throw new HttpError(409, 'refused');
+      }),
+    ).rejects.toThrow(/refused/);
+    expect(git('for-each-ref', '--format=%(refname)', 'refs/heads/forks/')).toBe(before);
+    expect(ontologyStore.hasForkBranch(p, 'never-saved')).toBe(false);
   });
 });

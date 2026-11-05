@@ -172,7 +172,7 @@ export { publishedReleases } from './published.js';
 
 /** The latest released version, if any, that exists in the repository. */
 export async function latestVersion(project: OntologyProject): Promise<string | undefined> {
-  const versions = ontologyStore.versions(project);
+  const versions = await ontologyStore.versions(project);
   if (project.currentVersion !== '0.0.0' && versions.includes(project.currentVersion)) return project.currentVersion;
   return (await publishedReleases(project.id)).find((r) => versions.includes(r.version))?.version;
 }
@@ -228,7 +228,7 @@ export async function pageInput(
     downloads,
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
-    requirements: isDraft ? await publishedRequirements(project) : await requirementsFor(project, opts.requirements ?? requirementsSnapshot(project, version)),
+    requirements: isDraft ? await publishedRequirements(project) : await requirementsFor(project, opts.requirements ?? await requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
@@ -239,9 +239,9 @@ export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 type SnapshotRead = { state: 'ok'; data: PublishedRequirements } | { state: 'absent' } | { state: 'corrupt' };
 
 /** The public use cases and requirements stored with a release: present and valid, absent, or unreadable. */
-function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
-  // Read from the commit, never the checkout (ontologyStore.ts).
-  const text = ontologyStore.releaseFile(project, version, REQUIREMENTS_SNAPSHOT);
+async function readSnapshot(project: OntologyProject, version: string): Promise<SnapshotRead> {
+  // From git, at the working draft (the checked-out files are only a mirror of it).
+  const text = await ontologyStore.readReleaseFile(project, version, REQUIREMENTS_SNAPSHOT);
   if (text === undefined) return { state: 'absent' };
   try {
     const data = validSnapshot(JSON.parse(text));
@@ -251,8 +251,8 @@ function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
   }
 }
 
-function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
-  const read = readSnapshot(project, version);
+async function requirementsSnapshot(project: OntologyProject, version: string): Promise<PublishedRequirements | undefined> {
+  const read = await readSnapshot(project, version);
   return read.state === 'ok' ? read.data : undefined;
 }
 
@@ -311,9 +311,12 @@ export async function refreshReleasePages(): Promise<void> {
     } catch (err) {
       console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
-    const versions = new Set(ontologyStore.versions(project));
+    const versions = new Set(await ontologyStore.versions(project));
     const releases = (await publishedReleases(project.id)).filter((r) => versions.has(r.version));
-    const pending = releases.filter((r) => state[project.slug] !== PAGE_GENERATOR || readSnapshot(project, r.version).state === 'absent' || ontologyStore.releaseFile(project, r.version, 'index.html') === undefined);
+    const pending: typeof releases = [];
+    for (const r of releases)
+      if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
+        pending.push(r);
     if (!pending.length) {
       state[project.slug] = PAGE_GENERATOR;
       continue;
@@ -322,7 +325,7 @@ export async function refreshReleasePages(): Promise<void> {
     let failed = 0;
     for (const release of pending) {
       try {
-        const snapshot = readSnapshot(project, release.version);
+        const snapshot = await readSnapshot(project, release.version);
         let requirements: PublishedRequirements;
         let writeSnapshot = false;
         // Rendered as served: without anything withdrawn since the snapshot was taken.
@@ -342,7 +345,7 @@ export async function refreshReleasePages(): Promise<void> {
     }
     try {
       if (Object.keys(changed).length) {
-        ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
+        await ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
       if (!failed) state[project.slug] = PAGE_GENERATOR;
@@ -391,9 +394,6 @@ function held(res: Response, project: OntologyProject, version: string, format: 
 }
 
 async function serve(req: Request, res: Response) {
-  // Public data: any web application may import it, as it can a fork (routes/forkResolver.ts).
-  res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Expose-Headers', 'Link, Content-Type');
   const slugSeg = String(req.params.slug);
   const versionSeg = req.params.version === undefined ? undefined : String(req.params.version);
   // An extension can be on the last segment: /def/x.ttl or /def/x/1.0.0.ttl
@@ -413,7 +413,7 @@ async function serve(req: Request, res: Response) {
   const latest = await latestVersion(project);
   if (requested === undefined || requested === 'latest') version = latest ?? 'draft';
   else if (requested === 'draft' || requested === 'working') version = 'draft';
-  else if (ontologyStore.versions(project).includes(requested)) version = requested;
+  else if ((await ontologyStore.versions(project)).includes(requested)) version = requested;
   else {
     // Slash namespaces put terms under the ontology IRI (…/volunteering/Volunteer):
     // send those to the term's anchor on the latest page.

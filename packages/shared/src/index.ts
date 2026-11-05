@@ -642,10 +642,39 @@ export interface MeetBotInfo {
 
 export type ChangeRequestKind = 'feature' | 'bug' | 'gap' | 'editorial' | 'deprecation';
 
+/** Annotation fields that can be edited inline on a term's page. */
+export const TERM_EDIT_FIELDS = ['label', 'definition', 'comment', 'altLabels', 'examples', 'editorialNote'] as const;
+export type TermEditField = (typeof TERM_EDIT_FIELDS)[number];
+export type TermEditValues = Partial<{ label: string; definition: string; comment: string; altLabels: string[]; examples: string[]; editorialNote: string }>;
+
+/**
+ * POST /api/ontologies/:id/term-edits. Opens an editorial change request with
+ * the changed fields; nothing is written to the working draft until it is
+ * approved and merged under the ontology's governance policy.
+ */
+export type TermEditInput = {
+  termIri: string;
+  /** New values for the fields being edited. An empty string or list removes the field. */
+  set: TermEditValues;
+  /** The values the editor started from, so a concurrent change is refused (409) rather than overwritten. */
+  previous?: TermEditValues;
+  /** Why the change is needed, for reviewers. */
+  reason?: string;
+  /**
+   * Required when an existing definition is reworded: 'same-meaning' records the
+   * author's confirmation that it still picks out the same things (patch);
+   * 'new-meaning' declares a change of meaning, which is reviewed as major.
+   */
+  definitionIntent?: 'same-meaning' | 'new-meaning';
+  /** Submit for review straight away; otherwise the request stays a draft for its author. */
+  submit?: boolean;
+};
+
 export type ChangeRequestOrigin =
   | { type: 'chat'; useCaseId?: string }
   | { type: 'meeting'; meetingId: string }
   | { type: 'agent'; agentName?: string; reportId?: string }
+  | { type: 'term-edit'; termIri: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] }
@@ -829,22 +858,29 @@ export interface AiAnalysis {
 export interface ChangeRequest {
   id: string;
   number: number; // per-ontology sequence, shown as #12
-  /** Record version: every save advances it, and a save only goes through if it hasn't moved since the request was read. */
-  rev?: number;
-  /**
-   * Set while a merge holds the request. Until it records `commit`, the hold
-   * runs out at `until` (epoch ms) and a later edit makes the merge give up.
-   * Once `commit` (the exact commit the merge will make on top of `base`) is
-   * recorded, the merge is decided: whoever touches the request next finishes
-   * it (moves the draft to `commit` if it is still at `base`) or, if the draft
-   * moved first, gives the claim back.
-   */
-  merging?: { until: number; by?: string; commit?: string; base?: string };
   ontologyId: string;
   title: string;
   description: string;
   kind: ChangeRequestKind;
   origin: ChangeRequestOrigin;
+  /**
+   * A level a person declared for this change, which classification can raise
+   * to but never lower (e.g. an author saying a new definition changes what a
+   * term means). Re-applied every time the request is triaged.
+   */
+  declaredLevel?: { level: ChangeLevel; rule: string; message: string; iri?: string };
+  /** People other than the author who rewrote the edits; like the author, they can't give the independent approval. */
+  revisedBy?: string[];
+  /**
+   * What the request was approved as. If, re-checked against the draft at merge
+   * time, it is a bigger change than this (or now rewords a definition), it goes
+   * back to review instead of merging.
+   */
+  approvedAs?: { level: ChangeLevel; confirmation: boolean; voted?: boolean };
+  /** Whose action approved it for an automatic merge that is waiting for their triage budget; the merge is charged to them. */
+  autoMergeBy?: string;
+  /** Bumped on every write; a merge only lands if the revision it checked is still current. */
+  rev?: number;
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;
@@ -854,8 +890,6 @@ export interface ChangeRequest {
   analysis?: AiAnalysis;
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
-  /** The working draft version its edits were last checked against (git commit). */
-  triagedHead?: string;
   mergedCommit?: string;
   /**
    * Where what a merge would publish looks like it names a private use case
@@ -1035,6 +1069,8 @@ export interface Release {
   createdAt: string;
   publishedAt?: string;
   statusSince: string;
+  /** Bumped on every write; a write from a copy at an older revision is refused. */
+  rev?: number;
   /** The approval evaluation recorded when the release was published or rejected, so later policy or membership changes don't rewrite its history. */
   approval?: GovernanceEvaluation;
 }

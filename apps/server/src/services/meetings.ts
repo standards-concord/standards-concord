@@ -613,13 +613,13 @@ export const NO_BOT_PROVIDER =
 export const isMeetUrl = (url: string) => /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(url);
 
 /** Removes a meeting along with its webhook secret (only once its bot record has settled: see botLifecycle). */
-export async function dropMeeting(id: string) { return await transaction(async () => {
+export async function dropMeeting(id: string) { return transaction(async () => {
   await remove('meetings', id);
   await remove('kv', `meeting-secret:${id}`);
 }); }
 
 /** Webhook secrets whose meeting has gone (removed some other way). */
-export async function pruneSecrets() { return await transaction(async () => {
+export async function pruneSecrets() { return transaction(async () => {
   for (const k of await list<{ id: string }>('kv')) if (k.id.startsWith('meeting-secret:') && !await get('meetings', k.id.slice('meeting-secret:'.length))) await remove('kv', k.id);
 }); }
 

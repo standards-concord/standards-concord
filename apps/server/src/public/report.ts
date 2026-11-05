@@ -274,7 +274,7 @@ function siteOrigin(req: Request) {
  */
 async function findTerm(project: OntologyProject, version: string | undefined, iri: string): Promise<{ term: TermView; version: string } | undefined> {
   const ref = version ?? 'draft';
-  if (ref !== 'draft' && !ontologyStore.versions(project).includes(ref)) return undefined;
+  if (ref !== 'draft' && !(await ontologyStore.versions(project)).includes(ref)) return undefined;
   if (await isHeld(project, ref)) return undefined;
   try {
     const term = (await readOntology(project, ref, undefined)).term(iri);

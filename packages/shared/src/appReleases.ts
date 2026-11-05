@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.26.0',
+    version: '0.27.0',
     date: '2026-11-05',
     title: 'Forks you can build against today',
     pr: 19,
@@ -67,6 +67,33 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'agent'],
         to: '{o}/forks',
         ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
+      },
+    ],
+  },
+  {
+    version: '0.26.0',
+    date: '2026-11-05',
+    title: 'Edit a term where you read it',
+    pr: 28,
+    changes: [
+      {
+        id: 'inline-term-edit',
+        type: 'feat',
+        title: 'Edit a term from Browse',
+        detail:
+          'Next to “Report a problem”, Edit lets you change a term’s label, definition, comment, other names, examples and editorial note in place. Saving opens a change request; nothing changes until it is reviewed and merged.',
+        roles: [],
+        to: '{o}/browse',
+        ask: 'Was it easy to propose a change to a term from Browse, and to find your change request afterwards?',
+      },
+      {
+        id: 'safer-merges',
+        type: 'fix',
+        title: 'Merges and releases no longer clash',
+        detail:
+          'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
+        roles: ['steward'],
+        to: '{o}/changes',
       },
     ],
   },

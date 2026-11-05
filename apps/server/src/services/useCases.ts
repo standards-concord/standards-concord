@@ -29,7 +29,7 @@ import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { ANONYMISER, INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnonymisedDraftSchema, InterviewTurnSchema, ProposalSchema, type InterviewTurn, type Proposal } from '../llm/schemas.js';
-import { createChangeRequest, saveChangeRequest } from './changeRequests.js';
+import { createChangeRequest } from './changeRequests.js';
 import { getProject, isGroupMember, members, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { proposalToOps, toLocalName } from './proposals.js';
@@ -680,8 +680,7 @@ export async function linkChangeRequest(cr: ChangeRequest, useCaseIds: string[],
   const ucs = await assertCitable(useCaseIds, actor, cr.ontologyId);
   cr = { ...(await get<ChangeRequest>('changeRequests', cr.id) ?? cr) };
   cr.useCaseIds = [...new Set([...(cr.useCaseIds ?? []), ...ucs.map((u) => u.id)])];
-  // Conditional on the copy just read, like every change request save (see saveChangeRequest).
-  await saveChangeRequest(cr);
+  await put('changeRequests', cr, cr.ontologyId);
   for (const u of ucs) {
     u.changeRequestIds = [...new Set([...(u.changeRequestIds ?? []), cr.id])];
     if (['triage', 'draft'].includes(u.status)) u.status = 'accepted';
@@ -1317,12 +1316,9 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
       await saveUseCase(u);
       await syncUseCase(u, [cr]);
     }
-    // Onto the request as stored now (it was checked, and may have been saved, since it was made), conditionally.
-    return await transaction(async () => {
-      const latest = (await get<ChangeRequest>('changeRequests', cr.id)) ?? cr;
-      latest.useCaseIds = linked;
-      return await saveChangeRequest(latest);
-    });
+    cr.useCaseIds = linked;
+    await put('changeRequests', cr, cr.ontologyId);
+    return cr;
   });
 }
 

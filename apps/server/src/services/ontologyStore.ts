@@ -1,17 +1,37 @@
 import { execFileSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
-import type { OntologyProject } from '@concord/shared';
+import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
-import { HttpError } from '../db.js';
+import { clearAll, get, HttpError, list, put, remove, transaction } from '../db.js';
 
 /**
  * Each ontology is a git repository. The working draft is `ontology.ttl` on
  * `main`; each release is committed under `releases/<version>/` and tagged
  * `v<version>`, so every version IRI keeps resolving and the history is a
  * normal git history that can be pushed to GitHub as-is.
+ *
+ * Which commit is the working draft is recorded in the database, and only ever
+ * moved by `advanceTo`: in one database transaction it checks the draft is still
+ * the commit a change was built on, runs the caller's own checks and writes
+ * (e.g. marking a change request merged), and moves the pointer. So a writer
+ * that stalled can't overwrite a newer draft, and a merge can't land unless its
+ * change request is still exactly as it checked it.
+ *
+ * The database is the only source of truth; git is a projection of it.
+ * Every new commit is pinned by a ref of its writer's own
+ * (refs/concord/commits/<sha>-t<time>-<writer>) before the pointer can name it,
+ * so git gc never removes it. The draft itself is held by refs/concord/draft,
+ * which only ever moves forward to the draft the database names; a pin is
+ * dropped once that ref holds its commit, by its writer if its advance is
+ * refused, or, if its writer never finished, once it is reclaimed (see
+ * prunePins). So pins never pile up. `sync` (idempotent; run at start-up, after
+ * every advance, and by every read that finds git out of line) brings the
+ * branch, the release tags (from the published releases' records) and the
+ * checked-out files in line with the database. Reads of content go to git
+ * objects, never to the checked-out files.
  */
 const FILE = 'ontology.ttl';
 export const ONTOLOGY_FILE = FILE;
@@ -20,187 +40,286 @@ function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
 }
 
-function git(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string {
-  const { name, email, ...extra } = env;
-  return execFileSync('git', args, {
+/** git commands that change nothing (in the repository or anywhere else). Every other one first checks this process may change the repositories. */
+const READS = new Set(['rev-parse', 'show', 'ls-tree', 'for-each-ref', 'merge-base', 'diff-index', 'log', 'cat-file']);
+
+async function git(dir: string, args: string[], env: Record<string, string> = {}, opts: { input?: string; extraEnv?: Record<string, string>; raw?: boolean } = {}): Promise<string> {
+  if (!READS.has(args[0]) && !(args[0] === 'remote' && args.length === 1)) await assertStoreHeld();
+  const out = execFileSync('git', args, {
     cwd: dir,
     encoding: 'utf8',
-    input,
+    input: opts.input,
+    maxBuffer: 256 * 1024 * 1024,
     env: {
       ...process.env,
-      GIT_AUTHOR_NAME: name ?? 'Concord',
-      GIT_AUTHOR_EMAIL: email ?? 'concord@localhost',
+      GIT_AUTHOR_NAME: env.name ?? 'Concord',
+      GIT_AUTHOR_EMAIL: env.email ?? 'concord@localhost',
       GIT_COMMITTER_NAME: 'Concord',
       GIT_COMMITTER_EMAIL: 'concord@localhost',
-      ...extra,
+      ...opts.extraEnv,
     },
-    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-  }).trim();
+    stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+  });
+  return opts.raw ? out : out.trim();
 }
 
-/** Fork branches live under refs/heads/forks/. */
-const FORK_PREFIX = 'forks/';
-const forkBranch = (forkSlug: string) => `${FORK_PREFIX}${forkSlug}`;
+const graphCache = new Map<string, OntologyGraph>();
+const headKey = (project: Pick<OntologyProject, 'slug'>) => `draft-head:${project.slug}`;
+const PIN = 'refs/concord/commits/';
+/** Holds the working draft (and so all its history) for git: moved only forward, to the database's draft. */
+const DRAFT_REF = 'refs/concord/draft';
+/** A pin this old whose commit never became the draft belongs to a writer that died or stalled; it is reclaimed. */
+export const PIN_GRACE_MS = 10 * 60 * 1000;
+const revokedKey = (writer: string) => `pin-revoked:${writer}`;
+/** Fork branches are refs/heads/forks/<slug>; fork commits not yet on one are held by refs under FORK_PIN (see commitFork). */
+const forkBranch = (forkSlug: string) => `forks/${forkSlug}`;
+const FORK_PIN = 'refs/concord/fork-pins/';
+/** update-ref's "must not exist yet" old value. */
+const NO_SHA = '0000000000000000000000000000000000000000';
 
-/** A file's content at a commit, exactly (untrimmed), or undefined if it isn't there. */
-function show(dir: string, spec: string): string | undefined {
+/**
+ * Only one server process may change the repositories at a time: two running
+ * different versions could disagree about how pins are named and reclaimed,
+ * and nothing is gained from two of the same. So the process claims them at
+ * start-up (one claim, with this process's own token) and keeps the claim
+ * alive. Every change to the working draft (in its transaction) and every
+ * git command or file write that changes anything (immediately before it
+ * runs) first checks the claim is still this process's, renewing it if it is
+ * more than a few seconds old, so that no other process can take over for
+ * the next STORE_CLAIM_MS. If it isn't this process's (it stalled long enough
+ * for another to start), it changes nothing and the process exits. What
+ * remains is a process that stalls for longer than STORE_CLAIM_MS inside one
+ * of those steps, between the check and the write. Upgrades are therefore
+ * exclusive (docs/deploy.md). A process that never claimed (tests, scripts)
+ * may write only while no live claim exists.
+ */
+export const STORE_VERSION = 2;
+const STORE_KEY = 'git-store';
+const STORE_CLAIM_MS = 30_000;
+/** A check renews a claim older than this, so every guarded step starts with nearly STORE_CLAIM_MS before anyone else could take over. */
+const STORE_RENEW_MS = 5_000;
+type StoreClaim = { id: string; owner: string; version: number; until: number };
+let ownClaim: { owner: string; onLost: (err: Error) => void; lost: boolean; renewed: number } | undefined;
+
+/**
+ * Throws (and, if this process held the claim, reports it lost) unless this
+ * process may change the repositories now. Call inside the transaction of a
+ * database change it guards, and immediately before any other write.
+ */
+async function assertStoreHeld(): Promise<void> {
+  if (ownClaim) {
+    const mine = ownClaim;
+    const due = Date.now() - mine.renewed >= STORE_RENEW_MS;
+    // Checked, and renewed if it is getting old, in one transaction: still ours means nobody took over (that rewrites the owner).
+    const held =
+      !mine.lost &&
+      await transaction(async () => {
+        const claim = await get<StoreClaim>('kv', STORE_KEY);
+        if (claim?.owner !== mine.owner) return false;
+        if (due) {
+          await put('kv', { ...claim, until: Date.now() + STORE_CLAIM_MS });
+          mine.renewed = Date.now();
+        }
+        return true;
+      });
+    if (held) return;
+    const err = new HttpError(503, 'This server lost its hold on the repositories to another one, so it changed nothing and is stopping.');
+    if (!ownClaim.lost) {
+      ownClaim.lost = true;
+      ownClaim.onLost(err);
+    }
+    throw err;
+  }
+  const claim = await get<StoreClaim>('kv', STORE_KEY);
+  if (claim && claim.until > Date.now()) throw new HttpError(503, `Another Concord server (store v${claim.version}) holds the repositories, so nothing was changed.`);
+}
+
+/**
+ * Claims the repositories for this process (at start-up), waiting up to
+ * `waitMs` for another process's claim to lapse (a stopped one's does within
+ * STORE_CLAIM_MS); throws if it doesn't. `onLost` runs once if the claim is
+ * ever found to be another's (default: exit). Returns `renew`, to call every
+ * few seconds, and `release`, which gives up only this process's own claim.
+ */
+export async function claimGitStore(opts: { waitMs?: number; onLost?: (err: Error) => void } = {}): Promise<{ renew: () => Promise<void>; release: () => Promise<void> }> {
+  const owner = randomUUID();
+  const onLost =
+    opts.onLost ??
+    ((err: Error) => {
+      console.error(`[git] ${err.message}`);
+      process.exit(1);
+    });
+  const take = async () =>
+    await transaction(async () => {
+      const claim = await get<StoreClaim>('kv', STORE_KEY);
+      if (claim && claim.owner !== owner && claim.until > Date.now())
+        throw new Error(`Another Concord server (store v${claim.version}) is still using these repositories. Stop it before starting this one.`);
+      await put('kv', { id: STORE_KEY, owner, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+    });
+  for (const giveUp = Date.now() + (opts.waitMs ?? STORE_CLAIM_MS + 5_000); ; ) {
+    try {
+      await take();
+      break;
+    } catch (err) {
+      if (Date.now() >= giveUp) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+  }
+  const mine = { owner, onLost, lost: false, renewed: Date.now() };
+  ownClaim = mine;
+  return {
+    renew: async () => {
+      try {
+        await transaction(async () => {
+          await assertStoreHeld();
+          await put('kv', { id: STORE_KEY, owner, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+          mine.renewed = Date.now();
+        });
+      } catch {
+        /* reported through onLost */
+      }
+    },
+    release: async () => {
+      await transaction(async () => {
+        if ((await get<StoreClaim>('kv', STORE_KEY))?.owner === owner) await remove('kv', STORE_KEY);
+      });
+      if (ownClaim === mine) ownClaim = undefined;
+    },
+  };
+}
+
+/** Pins are looked at by ordinary reads at most this often per repository (a throttle only: correctness never depends on it). */
+const PRUNE_EVERY_MS = 60_000;
+const lastPruned = new Map<string, number>();
+
+/** Whether any pins exist, read from the files (no git process). */
+function hasPins(dir: string): boolean {
   try {
-    return execFileSync('git', ['show', spec], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 });
+    if (fs.readdirSync(path.join(dir, '.git', PIN)).length) return true;
+  } catch {
+    /* none loose */
+  }
+  try {
+    return fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8').includes(` ${PIN}`);
+  } catch {
+    return false;
+  }
+}
+const syncKey = (project: Pick<OntologyProject, 'slug'>) => `git-sync:${project.slug}`;
+/** A sync that hasn't shown it is alive for this long is presumed dead, and its lease can be taken over. */
+export const SYNC_LEASE_MS = 30_000;
+
+/**
+ * Who is syncing a repository: a lease in the database, so taking it, renewing
+ * it and giving it up are each atomic across processes. A sync checks it still
+ * holds the lease before each change it makes to git, and only ever gives up
+ * its own, so one that was presumed dead and replaced stops instead of undoing
+ * its successor's work, and can't release its successor's lease.
+ */
+const syncLease = {
+  async take(project: Pick<OntologyProject, 'slug'>, token: string): Promise<boolean> {
+    return await transaction(async () => {
+      await assertStoreHeld();
+      const held = await get<{ token: string; until: number }>('kv', syncKey(project));
+      if (held && held.until > Date.now()) return false;
+      await put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
+      return true;
+    });
+  },
+  /** Throws if this sync has lost the lease; otherwise renews it. */
+  async renew(project: Pick<OntologyProject, 'slug'>, token: string): Promise<void> {
+    await transaction(async () => {
+      await assertStoreHeld();
+      if ((await get<{ token: string }>('kv', syncKey(project)))?.token !== token) throw new Error('another sync took over');
+      await put('kv', { id: syncKey(project), token, until: Date.now() + SYNC_LEASE_MS });
+    });
+  },
+  async give(project: Pick<OntologyProject, 'slug'>, token: string): Promise<void> {
+    await transaction(async () => {
+      if ((await get<{ token: string }>('kv', syncKey(project)))?.token === token) await remove('kv', syncKey(project));
+    });
+  },
+};
+
+/** The tags git should have: one per published release, on its recorded commit. */
+async function releaseTags(project: Pick<OntologyProject, 'slug'>): Promise<[string, string, string][]> {
+  const id = (await list<OntologyProject>('ontologies')).find((p) => p.slug === project.slug)?.id;
+  if (!id) return [];
+  return (await list<Release>('releases', id))
+    .filter((r) => r.status === 'published' && r.commit)
+    .map((r): [string, string, string] => [`v${r.version}`, r.commit!, `Release ${r.version}`])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+/** What the repository should look like, as one string: the draft commit and the release tags. */
+const expectedState = (head: string, tags: [string, string, string][]) => `${head} ${createHash('sha1').update(JSON.stringify(tags)).digest('hex')}`;
+
+/** A ref's value, read from the files (no git process), or undefined if it has none. */
+function refValue(dir: string, ref: string): string | undefined {
+  try {
+    const loose = path.join(dir, '.git', ref);
+    if (fs.existsSync(loose)) return fs.readFileSync(loose, 'utf8').trim();
+    const packed = fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8');
+    return packed.split('\n').find((l) => l.endsWith(` ${ref}`))?.split(' ')[0];
   } catch {
     return undefined;
   }
 }
 
-/**
- * Write a commit whose tree is `parent`'s with `files` (path → content)
- * replaced (null removes one), without touching the checkout, the index or any branch. Returns
- * undefined when nothing would change, unless `allowEmpty`.
- */
-function commitFiles(dir: string, parent: string, files: Record<string, string | null>, message: string, author: CommitAuthor, allowEmpty = false): string | undefined {
-  const index = path.join(dir, '.git', `concord-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
+/** The branch's commit, read from the files, or undefined if it can't be. */
+function branchSha(dir: string): string | undefined {
   try {
-    const env = { GIT_INDEX_FILE: index };
-    git(dir, ['read-tree', parent], env);
-    for (const [file, content] of Object.entries(files)) {
-      if (content === null) {
-        git(dir, ['update-index', '--force-remove', '--', file], env);
-        continue;
-      }
-      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, content);
-      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${file}`], env);
-    }
-    const tree = git(dir, ['write-tree'], env);
-    if (!allowEmpty && tree === git(dir, ['rev-parse', `${parent}^{tree}`])) return undefined;
-    return git(dir, ['commit-tree', tree, '-p', parent, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
-  } finally {
-    fs.rmSync(index, { force: true });
+    const head = fs.readFileSync(path.join(dir, '.git', 'HEAD'), 'utf8').trim();
+    return head.startsWith('ref: ') ? refValue(dir, head.slice(5)) : head;
+  } catch {
+    return undefined;
   }
 }
+const stampFile = (dir: string) => path.join(dir, '.git', 'concord-synced');
 
-/** Move main from `from` to `commit` only if it is still at `from` (atomic across processes). */
-function casMain(dir: string, commit: string, from: string): boolean {
+/** Whether the index and checked-out files are exactly `commit`'s (git compares them; the stamp alone can't show it). */
+async function checkedOut(dir: string, commit: string): Promise<boolean> {
   try {
-    git(dir, ['update-ref', git(dir, ['symbolic-ref', 'HEAD']), commit, from]);
+    await git(dir, ['diff-index', '--quiet', commit, '--']);
     return true;
   } catch {
     return false;
   }
 }
 
-/*
- * Nothing commits from the checkout or its index: every commit on main is
- * built from an exact parent commit and lands with a compare-and-swap on the
- * branch, and readers read commits, not files. The checkout is only kept up
- * to date for people browsing the repository, so updating it never blocks a
- * request for long and never fails one.
- *
- * Updates run under a lock directory (it holds across processes) naming its
- * holder by host, process and a random token. The holder rechecks that it
- * still holds the lock right before writing, and keeps going until the
- * checkout matches HEAD as it is after the write. A
- * lock is taken over when its holder is a process on this host that has
- * died, or when it is far older than any update takes (a holder on another
- * host, or a reused process id).
+/**
+ * A commit on `base` that writes `files` (repository path → content, or null to delete), or `base` itself if nothing changes
+ * (unless `always`: a fork records closing it even when nothing changed). `parents` are extra parents (a fork's sync names the
+ * upstream draft it took in). Moves nothing.
  */
-const LOCK_STALE_MS = 5 * 60_000;
-const LOCK_WAIT_MS = 250;
-const HOST = os.hostname();
-const sleeper = new Int32Array(new SharedArrayBuffer(4));
-
-function lockAbandoned(lock: string): boolean {
+async function buildCommit(dir: string, base: string, files: Record<string, string | null>, message: string, author: CommitAuthor, opts: { parents?: string[]; always?: boolean } = {}): Promise<string> {
+  const index = path.join(dir, '.git', `concord-index-${randomUUID()}`);
+  const extraEnv = { GIT_INDEX_FILE: index };
+  let tree: string;
   try {
-    if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) return true;
-    const [host, pid] = fs.readFileSync(path.join(lock, 'owner'), 'utf8').split(':');
-    if (host !== HOST) return false; // Can't tell from here: wait for it to go stale.
-    try {
-      process.kill(Number(pid), 0);
-      return false;
-    } catch (err) {
-      return (err as NodeJS.ErrnoException).code === 'ESRCH';
-    }
-  } catch {
-    return false; // Released meanwhile, or the holder hasn't written its name yet.
-  }
-}
-
-/** Runs `fn(stillHeld)` holding the lock, or returns false without running it if the lock stays busy. */
-function withCheckoutLock(dir: string, fn: (stillHeld: () => boolean) => void): boolean {
-  const lock = path.join(dir, '.git', 'concord-checkout.lock');
-  const owner = path.join(lock, 'owner');
-  const token = `${HOST}:${process.pid}:${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const held = () => {
-    try {
-      return fs.readFileSync(owner, 'utf8') === token;
-    } catch {
-      return false;
-    }
-  };
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      fs.mkdirSync(lock);
-      fs.writeFileSync(owner, token);
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      if (lockAbandoned(lock)) {
-        fs.rmSync(lock, { recursive: true, force: true });
+    await git(dir, ['read-tree', base], {}, { extraEnv });
+    for (const [file, content] of Object.entries(files)) {
+      if (content === null) {
+        await git(dir, ['update-index', '--force-remove', file], {}, { extraEnv });
         continue;
       }
-      if (Date.now() > deadline) return false;
-      Atomics.wait(sleeper, 0, 0, 10);
+      const blob = await git(dir, ['hash-object', '-w', '--stdin'], {}, { input: content });
+      await git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${file}`], {}, { extraEnv });
     }
-  }
-  try {
-    fn(held);
-    return true;
+    tree = await git(dir, ['write-tree'], {}, { extraEnv });
   } finally {
-    // Only give back our own lock (it may have been taken over).
-    if (held()) fs.rmSync(lock, { recursive: true, force: true });
-  }
-}
-
-/** For tests: runs just before the checkout is written, to reproduce a takeover at that moment. */
-export const checkoutTestHooks: { beforeWrite?: () => void } = {};
-
-/**
- * Make the checkout (files and index) match whatever HEAD is now. Best
- * effort: see above. Checking the lock and writing are two steps, so a
- * holder that was taken over in between may write an older checkout over
- * the new holder's. So every write is checked afterwards: a holder carries
- * on until the index matches HEAD's tree (which also undoes a displaced
- * holder's late write while it still holds the lock), and a holder that
- * finds it was displaced takes the lock again and repairs the checkout.
- */
-function syncCheckout(dir: string, attempt = 0): void {
-  const inSync = () => {
+    // (If this process no longer holds the repositories, the temporary index is left for its successor to ignore.)
     try {
-      return git(dir, ['write-tree']) === git(dir, ['rev-parse', 'HEAD^{tree}']);
+      await assertStoreHeld();
+      fs.rmSync(index, { force: true });
     } catch {
-      return false;
+      /* the error that matters is already on its way */
     }
-  };
-  let displaced = false;
-  try {
-    const done = withCheckoutLock(dir, (stillHeld) => {
-      for (let i = 0; i < 5; i++) {
-        const head = git(dir, ['rev-parse', 'HEAD']);
-        if (!stillHeld()) return void (displaced = true);
-        checkoutTestHooks.beforeWrite?.();
-        git(dir, ['read-tree', '-u', '--reset', head]);
-        if (!stillHeld()) return void (displaced = true); // Our write may have landed after the new holder's.
-        if (inSync()) return;
-      }
-    });
-    // Busy for longer than a request should wait: the holder, the next update or the next start catches it up.
-    if (!done) console.warn(`[ontology] the checkout in ${dir} is being updated by another process`);
-  } catch (err) {
-    console.warn(`[ontology] could not update the checkout in ${dir}: ${(err as Error).message}`);
   }
-  if (displaced && attempt < 3) syncCheckout(dir, attempt + 1);
+  if (!opts.always && !opts.parents?.length && tree === await git(dir, ['rev-parse', `${base}^{tree}`])) return base;
+  const parents = [base, ...(opts.parents ?? []).filter((p) => p !== base)].flatMap((p) => ['-p', p]);
+  return await git(dir, ['commit-tree', tree, ...parents, '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
 }
-
-const graphCache = new Map<string, OntologyGraph>();
 
 export interface CommitAuthor {
   name: string;
@@ -208,100 +327,296 @@ export interface CommitAuthor {
 }
 
 export const ontologyStore = {
-  dir: repoDir,
+  /** The repository folder, with its checkout brought in line with the database first. */
+  async dir(project: Pick<OntologyProject, 'slug'>): Promise<string> {
+    await this.ensureSynced(project);
+    return repoDir(project);
+  },
 
   async init(project: OntologyProject, turtle: string, readme: string): Promise<string> {
     const dir = repoDir(project);
+    await assertStoreHeld();
     fs.mkdirSync(dir, { recursive: true });
-    git(dir, ['init', '-q', '-b', 'main']);
+    await git(dir, ['init', '-q', '-b', 'main']);
+    await assertStoreHeld();
     fs.writeFileSync(path.join(dir, FILE), turtle);
+    await assertStoreHeld();
     fs.writeFileSync(path.join(dir, 'README.md'), readme);
-    git(dir, ['add', '-A']);
-    git(dir, ['commit', '-q', '-m', `Create ${project.title}`]);
-    return this.head(project);
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-q', '-m', `Create ${project.title}`]);
+    const sha = await git(dir, ['rev-parse', 'HEAD']);
+    await transaction(async () => {
+      await assertStoreHeld();
+      await put('kv', { id: headKey(project), sha });
+    });
+    return sha;
   },
 
-  head(project: Pick<OntologyProject, 'slug'>): string {
-    return git(repoDir(project), ['rev-parse', 'HEAD']);
+  /** The commit that is the working draft. */
+  async head(project: Pick<OntologyProject, 'slug'>): Promise<string> {
+    const stored = await get<{ sha: string }>('kv', headKey(project));
+    if (stored) return stored.sha;
+    // Not recorded yet (e.g. a repository from before this was): start from the branch.
+    const sha = await git(repoDir(project), ['rev-parse', 'HEAD']);
+    return await transaction(async () => {
+      const now = await get<{ sha: string }>('kv', headKey(project));
+      if (now) return now.sha;
+      await assertStoreHeld();
+      await put('kv', { id: headKey(project), sha });
+      return sha;
+    });
   },
 
-  /** The working draft's Turtle, read from the commit HEAD points at (never from the checkout, which may lag behind). */
-  readWorkingText(project: Pick<OntologyProject, 'slug'>): string {
-    return this.readAt(project, this.head(project));
+  /**
+   * Makes `commit` the working draft if it is still `base`, together with
+   * `record` (database writes, which can throw to refuse; awaited inside the
+   * transaction, so it must not wait on anything slow), in one transaction. Throws 409 if the draft has moved, or if this writer took so
+   * long that its pin was reclaimed. With commit === base it still checks and
+   * records.
+   */
+  async advanceTo(project: Pick<OntologyProject, 'slug'>, base: string, commit: string, record?: (commit: string) => Promise<void> | void): Promise<void> {
+    const dir = repoDir(project);
+    // The draft only ever moves forward, which is what lets pins of its ancestors be dropped (see prunePins).
+    if (commit !== base) {
+      try {
+        await git(dir, ['merge-base', '--is-ancestor', base, commit]);
+      } catch {
+        throw new Error(`${commit} does not build on ${base}`);
+      }
+    }
+    // A new commit is pinned (by a ref only this writer uses) before the database can point at it, and
+    // unpinned again if it doesn't. The draft (commit === base) is already held.
+    const writer = randomUUID();
+    const pin = commit === base ? undefined : `${PIN}${commit}-t${Date.now()}-${writer}`;
+    await transaction(assertStoreHeld);
+    if (pin) await git(dir, ['update-ref', pin, commit]);
+    try {
+      await transaction(async () => {
+        if (await this.head(project) !== base) throw new HttpError(409, 'The working draft changed while this change was being made, so nothing was committed. Try again.');
+        await assertStoreHeld();
+        // Reclaiming a pin is recorded in the database first (see prunePins), so either this sees it, or the reclaimer sees this.
+        if (pin && await get('kv', revokedKey(writer))) throw new HttpError(409, 'This change took too long to record, so nothing was committed. Try again.');
+        await record?.(commit);
+        await put('kv', { id: headKey(project), sha: commit });
+      });
+    } catch (err) {
+      try {
+        if (pin) await git(dir, ['update-ref', '-d', pin]);
+      } catch {
+        /* reclaimed later */
+      }
+      throw err;
+    }
+    // Done: the rest only brings git in line, and any read repairs it if it fails here.
+    try {
+      await this.sync(project);
+    } catch (err) {
+      console.warn(`[git] ${project.slug}: sync after commit failed, will repair: ${(err as Error).message}`);
+    }
+  },
+
+  /**
+   * Brings git in line with the database if it isn't: checks the branch, the
+   * tags, the record of the last completed sync and the checked-out files
+   * themselves against the database (not anything cached in this process), so
+   * it notices another process's half-done, older or overtaken sync. Every
+   * read calls it.
+   */
+  async ensureSynced(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    const dir = repoDir(project);
+    const head = await this.head(project);
+    let stamp = '';
+    try {
+      stamp = fs.readFileSync(stampFile(dir), 'utf8').trim();
+    } catch {
+      /* never synced */
+    }
+    const tags = await releaseTags(project);
+    if (branchSha(dir) === head && stamp === expectedState(head, tags) && tags.every(([name]) => refValue(dir, `refs/tags/${name}`)) && await checkedOut(dir, head)) {
+      // In line; but pins of writers that died are only reclaimed once they are old, so look at them now and then.
+      if (Date.now() - (lastPruned.get(project.slug) ?? 0) >= PRUNE_EVERY_MS && hasPins(dir)) {
+        try {
+          await this.prunePins(project);
+        } catch (err) {
+          console.warn(`[git] ${project.slug}: pin cleanup failed, will retry: ${(err as Error).message}`);
+        }
+      }
+      return;
+    }
+    try {
+      await this.sync(project);
+    } catch (err) {
+      console.warn(`[git] ${project.slug}: sync failed, will retry: ${(err as Error).message}`);
+    }
+  },
+
+  /**
+   * Idempotently brings the git branch, release tags and checked-out files in
+   * line with the database. Safe to run any time, from any process: syncs run
+   * one at a time (see `syncLease`) and each reads the database afresh, so an
+   * older one can't undo a newer one, and the record of the last completed
+   * sync says exactly what it synced. Whatever a sync that was overtaken
+   * writes anyway is caught by the next read (see `ensureSynced`).
+   */
+  async sync(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    const dir = repoDir(project);
+    const token = randomUUID();
+    // Someone else is syncing, from a fresh read, so they will finish the job (if they died, their lease lapses).
+    if (!await syncLease.take(project, token)) return;
+    const owner = async () => await syncLease.renew(project, token);
+    try {
+      await assertStoreHeld();
+      fs.rmSync(stampFile(dir), { force: true });
+      const target = await this.head(project);
+      const tags = await releaseTags(project);
+      await owner();
+      if (await git(dir, ['rev-parse', 'HEAD']) !== target) await git(dir, ['update-ref', '-m', 'concord: sync working draft', 'HEAD', target]);
+      for (const [name, commit, message] of tags) {
+        let at = '';
+        try {
+          at = await git(dir, ['rev-parse', '-q', '--verify', `refs/tags/${name}^{commit}`]);
+        } catch {
+          /* missing */
+        }
+        if (at !== commit) {
+          await owner();
+          await git(dir, ['tag', '-f', '-a', name, '-m', message, commit]);
+        }
+      }
+      // Checked-out files: reset the index and files to the commit (not just compare refs).
+      await owner();
+      await this.checkout(project, target);
+      await this.prunePins(project);
+      await owner();
+      fs.writeFileSync(stampFile(dir), `${expectedState(target, tags)}\n`);
+    } finally {
+      await syncLease.give(project, token);
+    }
+  },
+
+  /**
+   * Moves refs/concord/draft forward to the database's draft, then drops every
+   * pin it now holds, and reclaims pins whose writer never finished.
+   *
+   * The ref only moves forward (to a descendant, compare-and-swapped), so
+   * however stale the caller, it holds only commits the draft has held, and
+   * dropping their pins is safe. A pin outside it that is older than
+   * PIN_GRACE_MS is reclaimed in a database transaction that first checks the
+   * draft still doesn't include its commit and records the reclaim, which its
+   * writer checks in its own transaction: so either the writer recorded its
+   * commit first (and it is kept), or it never will.
+   */
+  async prunePins(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    const dir = repoDir(project);
+    lastPruned.set(project.slug, Date.now());
+    await transaction(assertStoreHeld);
+    const has = async (ancestor: string, of: string) => {
+      try {
+        await git(dir, ['merge-base', '--is-ancestor', ancestor, of]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const head = await this.head(project);
+    let draft = '';
+    try {
+      draft = await git(dir, ['rev-parse', '-q', '--verify', `${DRAFT_REF}^{commit}`]);
+    } catch {
+      /* not set yet */
+    }
+    if (draft !== head && (!draft || await has(draft, head))) {
+      await git(dir, ['update-ref', '-m', 'concord: working draft', DRAFT_REF, head, draft]);
+      draft = head;
+    }
+    if (!draft) return;
+    const held = new Set((await git(dir, ['for-each-ref', `--merged=${draft}`, '--format=%(refname)', PIN])).split('\n').filter(Boolean));
+    for (const line of (await git(dir, ['for-each-ref', '--format=%(objectname) %(refname)', PIN])).split('\n').filter(Boolean)) {
+      const [sha, ref] = line.split(' ');
+      // <sha>-t<time>-<writer>. A pin named any other way was made by a writer that doesn't check for
+      // reclaims, so it is never reclaimed: it is only dropped once the draft holds its commit.
+      const [, at, writer] = /^[0-9a-f]+-t(\d+)-(.+)$/.exec(ref.slice(PIN.length)) ?? [];
+      if (!held.has(ref)) {
+        if (!writer || Date.now() - Number(at) < PIN_GRACE_MS) continue;
+        const reclaimed = await transaction(async () => {
+          await assertStoreHeld();
+          const now = await this.head(project);
+          if (now === sha || await has(sha, now)) return false;
+          await put('kv', { id: revokedKey(writer), at: new Date().toISOString() });
+          return true;
+        });
+        if (!reclaimed) continue;
+      }
+      await git(dir, ['update-ref', '-d', ref, sha]);
+    }
+  },
+
+  /** Rewrites the index and checked-out files to match `commit`. */
+  async checkout(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<void> {
+    await git(repoDir(project), ['read-tree', '--reset', '-u', commit]);
+  },
+
+  /** The working draft as committed (git, not the checked-out file, which is only a mirror of it). */
+  async readWorkingText(project: Pick<OntologyProject, 'slug'>, commit?: string): Promise<string> {
+    if (!commit) await this.ensureSynced(project);
+    return await git(repoDir(project), ['show', `${commit ?? await this.head(project)}:${FILE}`], {}, { raw: true });
   },
 
   async working(project: Pick<OntologyProject, 'slug'>): Promise<OntologyGraph> {
-    return this.graphAt(project, this.head(project));
+    return (await this.workingAt(project)).graph;
   },
 
-  /** `ref` is 'working', a released version like '1.2.0', or a development fork 'forks/<fork-slug>'. */
+  /** The working draft and the commit it is from, read together. */
+  async workingAt(project: Pick<OntologyProject, 'slug'>): Promise<{ graph: OntologyGraph; head: string }> {
+    await this.ensureSynced(project);
+    const head = await this.head(project);
+    const key = `${project.slug}@${head}`;
+    let g = graphCache.get(key);
+    if (!g) {
+      g = await OntologyGraph.fromTurtle(await this.readWorkingText(project, head));
+      graphCache.set(key, g);
+    }
+    return { graph: g, head };
+  },
+
+  /** `ref` is 'working' or a released version like '1.2.0'. */
   async at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph> {
     if (!ref || ref === 'working') return this.working(project);
-    if (ref.startsWith(FORK_PREFIX)) return this.forkGraph(project, ref.slice(FORK_PREFIX.length));
+    await this.ensureSynced(project);
     const key = `${project.slug}@v${ref}`;
     let g = graphCache.get(key);
     if (!g) {
-      const turtle = this.releaseFile(project, ref, FILE);
-      if (turtle === undefined) throw new HttpError(404, `Version ${ref} not found`);
-      g = await OntologyGraph.fromTurtle(turtle);
+      const text = await this.readReleaseFile(project, ref, FILE);
+      if (text === undefined) throw new HttpError(404, `Version ${ref} not found`);
+      g = await OntologyGraph.fromTurtle(text);
       graphCache.set(key, g);
     }
     return g;
   },
 
-  /** Commit a new working draft on top of whatever is there now (seeding and tests; merges use commitWorkingIf). */
-  async commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor): Promise<string> {
-    return this.commitWorkingIf(project, graph, message, author, this.head(project));
-  },
-
-  /**
-   * Write a commit of `graph` on top of `parent` without moving any branch.
-   * The commit only becomes part of the draft once advanceWorking moves the
-   * branch to it, so a merge can record the exact commit it is about to make
-   * before making it (and anyone can finish or recognise it after a crash).
-   */
-  async prepareWorkingCommit(project: Pick<OntologyProject, 'slug'>, graph: OntologyGraph, message: string, author: CommitAuthor, parent: string): Promise<string> {
-    return commitFiles(repoDir(project), parent, { [FILE]: await graph.toTurtle() }, message, author, true)!;
-  },
-
-  /** Move the draft from `from` to `commit`, only if it is still at `from`. Returns whether it moved. */
-  advanceWorking(project: Pick<OntologyProject, 'slug'>, commit: string, from: string): boolean {
-    const dir = repoDir(project);
-    if (!casMain(dir, commit, from)) return false;
-    syncCheckout(dir);
-    return true;
-  },
-
-  /** Bring the checkout up to HEAD (after a crash, for instance). Nothing depends on it but people browsing the repository. */
-  syncCheckout(project: Pick<OntologyProject, 'slug'>): void {
-    syncCheckout(repoDir(project));
-  },
-
-  /** Is `commit` part of the working draft's history? (A merge that already happened.) */
-  inWorking(project: Pick<OntologyProject, 'slug'>, commit: string): boolean {
+  /** A file stored beside a released version (releases/<version>/<name>) in the working draft, from git. */
+  async readReleaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): Promise<string | undefined> {
+    if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+$/.test(name)) return undefined;
+    await this.ensureSynced(project);
     try {
-      git(repoDir(project), ['merge-base', '--is-ancestor', commit, 'HEAD']);
-      return true;
+      return await git(repoDir(project), ['show', `${await this.head(project)}:releases/${version}/${name}`], {}, { raw: true });
     } catch {
-      return false;
+      return undefined;
     }
   },
 
   /**
-   * Commit a new working draft on top of `expectedHead`, only if the draft is
-   * still there. On a 409 nothing is written.
+   * Commits a new working draft on top of `base` (default: the current draft),
+   * together with `record` (see `advanceTo`). Throws 409, changing nothing, if
+   * the draft is no longer `base`, even when the new draft would be identical.
    */
-  async commitWorkingIf(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor, expectedHead: string): Promise<string> {
-    const commit = await this.prepareWorkingCommit(project, graph, message, author, expectedHead);
-    if (!this.advanceWorking(project, commit, expectedHead)) throw new HttpError(409, 'The working draft changed while this was being merged. Nothing was merged; try again.');
+  async commitWorking(project: OntologyProject, graph: OntologyGraph, message: string, author: CommitAuthor, base?: string, record?: (commit: string) => Promise<void> | void): Promise<string> {
+    const parent = base ?? await this.head(project);
+    const commit = await buildCommit(repoDir(project), parent, { [FILE]: await graph.toTurtle() }, message, author);
+    await this.advanceTo(project, parent, commit, record);
     return commit;
   },
 
-  /**
-   * Commit a release on top of `expectedHead` (the draft the release was made
-   * from; the current head if not given) and tag it. If anything was merged
-   * since, nothing is written (409), so a release can never undo a merge.
-   */
   async writeRelease(
     project: OntologyProject,
     version: string,
@@ -309,87 +624,65 @@ export const ontologyStore = {
     files: Record<string, string>,
     notes: string,
     author: CommitAuthor,
-    opts: {
-      /** The draft the release was made from (default: the current head). If main moved since, nothing is written. */
-      expectedHead?: string;
-      /**
-       * Runs after the last await, just before anything is written: throwing writes nothing. Typed to return
-       * undefined, not void, so an async function (whose throw would come too late to stop the write) is refused.
-       */
-      beforeWrite?: () => undefined;
-    } = {},
+    base?: string,
+    /** Runs inside the transaction that moves the draft (see advanceTo): throwing writes nothing. */
+    record?: (commit: string) => Promise<void> | void,
   ): Promise<string> {
     const dir = repoDir(project);
-    const parent = opts.expectedHead ?? this.head(project);
+    const parent = base ?? await this.head(project);
     const turtle = await graph.toTurtle();
-    // From here to the branch update nothing awaits, so nothing else in this process runs in between.
-    opts.beforeWrite?.();
-    const prev = (show(dir, `${parent}:CHANGELOG.md`) ?? '').replace(/^# Changelog\n+/, '');
-    const entries: Record<string, string> = {
-      // The released file and the working draft are identical at release time.
+    let prev = '';
+    try {
+      prev = (await git(dir, ['show', `${parent}:CHANGELOG.md`], {}, { raw: true })).replace(/^# Changelog\n+/, '');
+    } catch {
+      /* first release */
+    }
+    // The released file and the working draft are identical at release time.
+    const all: Record<string, string> = {
       [FILE]: turtle,
       [`releases/${version}/${FILE}`]: turtle,
       'CHANGELOG.md': `# Changelog\n\n## ${version} — ${new Date().toISOString().slice(0, 10)}\n\n${notes.trim()}\n\n${prev}`,
     };
-    for (const [name, content] of Object.entries(files)) entries[`releases/${version}/${name}`] = content;
-    const commit = commitFiles(dir, parent, entries, `Release ${version}`, { name: author.name, email: author.email ?? 'steward@concord' }, true)!;
-    if (!this.advanceWorking(project, commit, parent))
-      throw new HttpError(409, 'The working draft changed while this release was being prepared. Nothing was published; try again.');
-    git(dir, ['tag', '-a', `v${version}`, commit, '-m', `Release ${version}`]);
+    for (const [name, content] of Object.entries(files)) all[`releases/${version}/${name}`] = content;
+    const commit = await buildCommit(dir, parent, all, `Release ${version}`, { name: author.name, email: author.email ?? 'steward@concord' });
+    // The release's own bookkeeping (record, which marks it published on this commit, and so tags it) is part of the same advance.
+    await this.advanceTo(project, parent, commit, record);
     return commit;
   },
 
-  /**
-   * Commit `files` (path → content, null removes it) on top of the latest
-   * draft without touching the checkout. Built on the head it read, so a merge
-   * landing meanwhile makes it try again on top of that.
-   */
-  commitOnMain(project: Pick<OntologyProject, 'slug'>, files: Record<string, string | null>, message: string): string {
-    const dir = repoDir(project);
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const parent = this.head(project);
-      const commit = commitFiles(dir, parent, files, message, { name: 'Concord', email: 'steward@concord' });
-      if (!commit) return parent;
-      if (this.advanceWorking(project, commit, parent)) return commit;
-    }
-    throw new HttpError(409, 'The ontology kept changing while this was being saved. Try again.');
-  },
-
-  /** Rewrites files beside released versions (releases/<version>/<name>; null removes one) in one commit; tags stay where they were. */
-  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): string {
-    const entries: Record<string, string | null> = {};
-    for (const [version, named] of Object.entries(files)) for (const [name, content] of Object.entries(named)) entries[`releases/${version}/${name}`] = content;
-    return this.commitOnMain(project, entries, message);
+  /** Rewrites files beside released versions (releases/<version>/<name>) in one commit; tags stay where they were. */
+  async updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): Promise<string> {
+    const all: Record<string, string | null> = {};
+    for (const [version, named] of Object.entries(files)) for (const [name, content] of Object.entries(named)) all[`releases/${version}/${name}`] = content;
+    const parent = await this.head(project);
+    const commit = await buildCommit(repoDir(project), parent, all, message, { name: 'Concord', email: 'steward@concord' });
+    if (commit !== parent) await this.advanceTo(project, parent, commit);
+    return commit;
   },
 
   /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
-  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): string {
-    return this.commitOnMain(project, { [name]: content }, message);
+  async updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string> {
+    if (!/^[\w.-]+$/.test(name) || name === FILE) throw new Error(`Not a repository file Concord rewrites: ${name}`);
+    const parent = await this.head(project);
+    const commit = await buildCommit(repoDir(project), parent, { [name]: content }, message, { name: 'Concord', email: 'steward@concord' });
+    if (commit !== parent) await this.advanceTo(project, parent, commit);
+    return commit;
   },
-
-  /** A file stored beside a released version (releases/<version>/<name>), as committed. */
-  releaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): string | undefined {
-    if (!/^[\w.+-]+$/.test(version) || !/^[\w.+-]+$/.test(name)) return undefined;
-    return show(repoDir(project), `HEAD:releases/${version}/${name}`);
-  },
-
-
 
   /** Drops cached released graphs, after their files were rewritten. */
   forgetReleases(project: Pick<OntologyProject, 'slug'>) {
     for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
-  versions(project: Pick<OntologyProject, 'slug'>): string[] {
-    const files = git(repoDir(project), ['ls-tree', '-r', '--name-only', 'HEAD', '--', 'releases']);
-    return files
-      .split('\n')
-      .map((f) => /^releases\/([^/]+)\/ontology\.ttl$/.exec(f)?.[1])
-      .filter((v): v is string => !!v);
+  async versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]> {
+    await this.ensureSynced(project);
+    const files = (await git(repoDir(project), ['ls-tree', '-r', '--name-only', await this.head(project), '--', 'releases'])).split('\n');
+    return files.map((f) => f.match(/^releases\/([^/]+)\/ontology\.ttl$/)?.[1]).filter((v): v is string => !!v);
   },
 
-  log(project: Pick<OntologyProject, 'slug'>, limit = 50) {
-    const out = git(repoDir(project), ['log', `-${limit}`, '--format=%H%x1f%an%x1f%aI%x1f%s']);
+  async log(project: Pick<OntologyProject, 'slug'>, limit = 50) {
+    await this.ensureSynced(project);
+    const out = await git(repoDir(project), ['log', `-${limit}`, '--format=%H%x1f%an%x1f%aI%x1f%s', await this.head(project)]);
     return out
       .split('\n')
       .filter(Boolean)
@@ -399,70 +692,103 @@ export const ontologyStore = {
       });
   },
 
+  /**
+   * Deletes every repository and, with `clear` (which empties the database,
+   * in this transaction), every database row (a demo reset), keeping this
+   * process's hold on the repositories: only while it has it.
+   */
+  async wipe(clear: () => Promise<void> = clearAll): Promise<void> {
+    // The repositories are moved out of the way inside the checked transaction (a takeover needs that write lock,
+    // so can't happen in between), to a place only this process uses; deleting them afterwards can't touch a successor's.
+    const repos = path.join(config.dataDir, 'ontologies');
+    const trash = path.join(config.dataDir, `.ontologies-deleted-${randomUUID()}`);
+    await transaction(async () => {
+      await assertStoreHeld();
+      const claim = await get<StoreClaim>('kv', STORE_KEY);
+      await clear();
+      if (claim) await put('kv', claim);
+      if (fs.existsSync(repos)) fs.renameSync(repos, trash);
+    });
+    fs.rmSync(trash, { recursive: true, force: true });
+    graphCache.clear();
+    lastPruned.clear();
+  },
+
+  /**
+   * At start-up: undoes a wipe that a crash interrupted before its
+   * transaction committed. That case is unambiguous only when there is exactly
+   * one moved-aside folder, no repositories folder, and the database still
+   * has its ontologies: then the folder is moved back. Anything else is left
+   * where it is, with a warning, for someone to look at; nothing is deleted.
+   */
+  async recoverWipe(): Promise<void> {
+    const repos = path.join(config.dataDir, 'ontologies');
+    let trash: string[];
+    try {
+      trash = fs.readdirSync(config.dataDir).filter((name) => name.startsWith('.ontologies-deleted-'));
+    } catch {
+      return;
+    }
+    if (!trash.length) return;
+    await assertStoreHeld();
+    if (trash.length === 1 && !fs.existsSync(repos) && (await list('ontologies')).length) {
+      fs.renameSync(path.join(config.dataDir, trash[0]), repos);
+      console.warn(`[git] restored the repositories from an interrupted reset (${trash[0]})`);
+      return;
+    }
+    console.warn(`[git] left ${trash.join(', ')} in ${config.dataDir}: repositories moved aside by a reset that may have finished. Delete them once you have checked nothing in them is needed.`);
+  },
+
   /* ---------------------------------------------------------------------- */
-  /* Development forks: branches that never touch the working tree          */
+  /* Development forks                                                      */
   /* ---------------------------------------------------------------------- */
+  /*
+   * As with the working draft, the database is the truth: a fork's record
+   * (forks collection) names its head commit, and every change to a fork is a
+   * conditional write of that record. Git only holds the commits: each new one
+   * is pinned (refs/concord/fork-pins/<slug>/<sha>) before the record can name
+   * it, then the fork's branch (refs/heads/forks/<slug>, for people looking at
+   * the repository) is moved forward to it and the pin dropped. A commit whose
+   * record write failed loses its pin; one whose writer stopped in between
+   * keeps it, which costs a ref and nothing else. Nothing here touches the
+   * checked-out files or the working draft.
+   */
 
   forkBranch,
 
-  /** Start a fork branch at the current head of main. Returns the commit it starts from. */
-  createFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string): string {
-    const dir = repoDir(project);
-    const head = this.head(project);
-    git(dir, ['branch', forkBranch(forkSlug), head]);
-    return head;
+  /** Whether git has a branch for a fork of this name (a name in use, even if its record was never saved). */
+  hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): boolean {
+    return !!refValue(repoDir(project), `refs/heads/${forkBranch(forkSlug)}`);
   },
 
-  forkExists(project: Pick<OntologyProject, 'slug'>, forkSlug: string): boolean {
+  /** ontology.ttl exactly as committed at `commit` (a fork's head or base). */
+  async readAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<string> {
+    if (!/^[0-9a-f]{7,64}$/.test(commit)) throw new HttpError(404, `No ontology at ${commit || 'an empty commit'}`);
     try {
-      git(repoDir(project), ['rev-parse', '--verify', '--quiet', `refs/heads/${forkBranch(forkSlug)}`]);
-      return true;
+      return await git(repoDir(project), ['show', `${commit}:${FILE}`], {}, { raw: true });
     } catch {
-      return false;
+      throw new HttpError(404, `No ontology at ${commit}`);
     }
   },
 
-  forkHead(project: Pick<OntologyProject, 'slug'>, forkSlug: string): string {
-    if (!this.forkExists(project, forkSlug)) throw new HttpError(404, `Fork ${forkSlug} not found`);
-    return git(repoDir(project), ['rev-parse', `refs/heads/${forkBranch(forkSlug)}`]);
-  },
-
-  /** ontology.ttl exactly as committed at `commit`. */
-  readAt(project: Pick<OntologyProject, 'slug'>, commit: string): string {
-    const text = show(repoDir(project), `${commit}:${FILE}`);
-    if (text === undefined) throw new HttpError(404, `No ontology at ${commit}`);
-    return text;
-  },
-
-  async forkGraph(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<OntologyGraph> {
-    const head = this.forkHead(project, forkSlug);
-    const key = `${project.slug}@${head}`;
-    let g = graphCache.get(key);
-    if (!g) {
-      g = await OntologyGraph.fromTurtle(this.readAt(project, head));
-      graphCache.set(key, g);
-    }
-    return g;
-  },
-
-  /** The ontology as it was at a commit (a fork's base, for three-way comparisons). */
+  /** The ontology at a commit (a fork's head, or the draft it was based on, for three-way comparisons). */
   async graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph> {
     const key = `${project.slug}@${commit}`;
     let g = graphCache.get(key);
     if (!g) {
-      g = await OntologyGraph.fromTurtle(this.readAt(project, commit));
+      g = await OntologyGraph.fromTurtle(await this.readAt(project, commit));
       graphCache.set(key, g);
     }
     return g;
   },
 
   /**
-   * Commit a new ontology.ttl to a fork branch without checking it out: the
-   * blob goes into a throwaway index built from the branch's tree, so main's
-   * working tree is never touched. `expectedParent` is the head the caller
-   * read the fork's graph at: the ref only moves if it is still there, so an
-   * edit based on a stale graph fails instead of overwriting a newer one. A
-   * sync passes the upstream head in `extraParents` so the history shows it.
+   * Commits `graph` to a fork on top of `parent` (the head the caller read the
+   * fork at), runs `record` (the conditional write of the fork record that
+   * makes the commit its head, which throws if the fork moved on), and only
+   * then moves the fork's branch. `create` starts the fork's branch, refusing
+   * if one of that name exists. `extraParents`: a sync names the upstream
+   * draft it took in. Every call makes a commit, even if nothing changed.
    */
   async commitFork(
     project: Pick<OntologyProject, 'slug'>,
@@ -470,56 +796,71 @@ export const ontologyStore = {
     graph: OntologyGraph,
     message: string,
     author: CommitAuthor,
-    opts: { expectedParent: string; extraParents?: string[] },
+    opts: { parent: string; extraParents?: string[]; create?: boolean },
+    record: (commit: string) => Promise<void>,
   ): Promise<string> {
     const dir = repoDir(project);
-    const branch = forkBranch(forkSlug);
-    const parent = opts.expectedParent;
-    const index = path.join(dir, '.git', `concord-fork-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
+    const branch = `refs/heads/${forkBranch(forkSlug)}`;
+    const commit = await buildCommit(dir, opts.parent, { [FILE]: await graph.toTurtle() }, message, { name: author.name, email: author.email ?? 'developer@concord' }, { parents: opts.extraParents, always: true });
+    // Hold the commit before anything can name it: a new fork's branch (which must not exist yet), otherwise a pin.
+    const hold = opts.create ? branch : `${FORK_PIN}${forkSlug}/${commit}`;
     try {
-      const env = { GIT_INDEX_FILE: index };
-      const blob = git(dir, ['hash-object', '-w', '--stdin'], env, await graph.toTurtle());
-      git(dir, ['read-tree', parent], env);
-      git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${FILE}`], env);
-      const tree = git(dir, ['write-tree'], env);
-      const parents = [parent, ...(opts.extraParents ?? []).filter((p) => p !== parent)].flatMap((p) => ['-p', p]);
-      const commit = git(dir, ['commit-tree', tree, ...parents, '-m', message], { name: author.name, email: author.email ?? 'developer@concord' });
-      try {
-        git(dir, ['update-ref', `refs/heads/${branch}`, commit, parent]);
-      } catch {
-        throw new HttpError(409, 'The fork changed while this edit was being prepared. Reload it and try again.');
-      }
-      return commit;
-    } finally {
-      fs.rmSync(index, { force: true });
-    }
-  },
-
-  /**
-   * Move a fork branch back from `from` to `to`, only if it is still at
-   * `from`: undoes a commit whose fork record could not be saved.
-   */
-  rewindFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string, to: string, from: string): boolean {
-    try {
-      git(repoDir(project), ['update-ref', `refs/heads/${forkBranch(forkSlug)}`, to, from]);
-      return true;
+      await git(dir, ['update-ref', hold, commit, opts.create ? '' : NO_SHA]);
     } catch {
-      return false;
+      throw new HttpError(409, opts.create ? `A fork called “${forkSlug}” already exists. Pick another name.` : 'The fork changed while this edit was being prepared. Reload it and try again.');
+    }
+    try {
+      await record(commit);
+    } catch (err) {
+      try {
+        await git(dir, ['update-ref', '-d', hold, commit]);
+      } catch {
+        /* a leftover ref holds an unused commit, nothing more */
+      }
+      throw err;
+    }
+    if (!opts.create) await this.holdFork(project, forkSlug, commit);
+    return commit;
+  },
+
+  /** Moves the fork's branch forward to `commit` (the fork's head) if it isn't already there, then drops the pins it now holds. Never moves it back. */
+  async holdFork(project: Pick<OntologyProject, 'slug'>, forkSlug: string, commit: string): Promise<void> {
+    const dir = repoDir(project);
+    const branch = `refs/heads/${forkBranch(forkSlug)}`;
+    const ancestor = async (a: string, b: string) => {
+      try {
+        await git(dir, ['merge-base', '--is-ancestor', a, b]);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      const at = refValue(dir, branch);
+      if (!at) await git(dir, ['update-ref', branch, commit, '']);
+      else if (at !== commit && await ancestor(at, commit)) await git(dir, ['update-ref', branch, commit, at]);
+      for (const line of (await git(dir, ['for-each-ref', `--merged=${branch}`, '--format=%(objectname) %(refname)', `${FORK_PIN}${forkSlug}/`])).split('\n').filter(Boolean)) {
+        const [sha, ref] = line.split(' ');
+        await git(dir, ['update-ref', '-d', ref, sha]);
+      }
+    } catch (err) {
+      // The pin still holds the commit; the next change to the fork tries again.
+      console.warn(`[git] ${project.slug}: fork ${forkSlug}'s branch not moved yet: ${(err as Error).message}`);
     }
   },
 
-  /** Commits on main since `commit` (how far a fork has fallen behind). */
-  commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): number {
+  /** How many commits the working draft has gained since `commit` (how far a fork has fallen behind). */
+  async commitsSince(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<number> {
     try {
-      return Number(git(repoDir(project), ['rev-list', '--count', `${commit}..main`]));
+      return Number(await git(repoDir(project), ['rev-list', '--count', `${commit}..${await this.head(project)}`]));
     } catch {
       return 0;
     }
   },
 
-  /** The fork's own commits (newest first), not the upstream ones it was synced with. */
-  forkLog(project: Pick<OntologyProject, 'slug'>, forkSlug: string, limit = 50) {
-    const out = git(repoDir(project), ['log', `-${limit}`, '--first-parent', '--format=%H%x1f%an%x1f%aI%x1f%s', `refs/heads/${forkBranch(forkSlug)}`, '^refs/heads/main']);
+  /** A fork's own commits from `head` (newest first), not the upstream ones it was synced with. */
+  async forkLog(project: Pick<OntologyProject, 'slug'>, head: string, limit = 50) {
+    const out = await git(repoDir(project), ['log', `-${limit}`, '--first-parent', '--format=%H%x1f%an%x1f%aI%x1f%s', head, `^${await this.head(project)}`]);
     return out
       .split('\n')
       .filter(Boolean)
@@ -530,11 +871,12 @@ export const ontologyStore = {
   },
 
   /** Push main and tags to a GitHub remote using a token. */
-  push(project: OntologyProject, remoteUrl: string) {
+  async push(project: OntologyProject, remoteUrl: string) {
     const dir = repoDir(project);
-    const remotes = git(dir, ['remote']);
-    if (remotes.split('\n').includes('origin')) git(dir, ['remote', 'set-url', 'origin', remoteUrl]);
-    else git(dir, ['remote', 'add', 'origin', remoteUrl]);
-    git(dir, ['push', '-q', 'origin', 'main', '--follow-tags']);
+    const remotes = await git(dir, ['remote']);
+    if (remotes.split('\n').includes('origin')) await git(dir, ['remote', 'set-url', 'origin', remoteUrl]);
+    else await git(dir, ['remote', 'add', 'origin', remoteUrl]);
+    await this.sync(project);
+    await git(dir, ['push', '-q', 'origin', 'main', '--follow-tags']);
   },
 };

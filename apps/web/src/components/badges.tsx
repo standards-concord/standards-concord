@@ -3,6 +3,7 @@ import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySum
 import { Bot, Bug, CircleCheck, CircleAlert, Combine, FileText, GitFork, GitMerge, Globe, IdCard, MessageSquareText, Pencil, Users, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
+import { PenLine } from 'lucide-react';
 
 export function LevelBadge({ level, className }: { level?: ChangeLevel; className?: string }) {
   if (!level) return null;
@@ -57,6 +58,8 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
       return { icon: Users, label: 'From a meeting' };
     case 'agent':
       return { icon: Bot, label: origin.agentName ? `From agent ${origin.agentName}` : 'From a coding agent' };
+    case 'term-edit':
+      return { icon: PenLine, label: 'Edited on the term page' };
     case 'bug-report':
       return { icon: Bug, label: 'Bug report' };
     case 'public-report':

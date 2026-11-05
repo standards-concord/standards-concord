@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, HttpError, list, put, transaction } from '../db.js';
+import { clearAll, list, put } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -15,8 +15,8 @@ import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
-import { createFork, editFork } from './forks.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
+import { createFork, editFork } from './forks.js';
 import { ontologyStore } from './ontologyStore.js';
 import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
@@ -189,8 +189,7 @@ async function seedHistory() {
     details: 'Building the CharityBase export, shifts are stored as recurring sessions with an iCalendar RRULE (e.g. FREQ=WEEKLY;BYDAY=SA). The ontology has startDateTime and endDateTime on Session but nothing for recurrence, so the export would have to emit every occurrence.',
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
   });
-
-  // Gareth isn't blocked by that gap: he forks the standard and carries on building.
+  // That gap doesn't block the CharityBase export: Gareth forks the standard and carries on building.
   const fork = await createFork(project, gareth, { name: 'CharityBase recurring shifts', purpose: 'Exporting recurring shifts from CharityBase without listing every occurrence.' });
   await editFork(fork, gareth, {
     message: 'Add a recurrence rule for sessions',
@@ -206,6 +205,7 @@ async function seedHistory() {
       },
     ],
   });
+
   await seedTraceability(project, { priya, aisha, mei, gareth }, shifts.id);
   // What the public pages may show of the personas' use cases, from now on.
   for (const u of await list<UseCase>('useCases', project.id)) if (u.visibility === 'public') await freezeDemoSeed(u);
@@ -404,33 +404,17 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       if (!p) continue;
       const g = await governanceFor(cr);
       const roles = await rolesFor(ontologyId, u.id);
-      // A reaction takes a while (an LLM call), so it is recorded on the request as it is by then,
-      // only if it is still about the same edits at the same stage, and only once per member
-      // (another step may have run meanwhile; addReview/addVote check that atomically).
-      const latest = async () => {
-        const now = await getCR(cr.id);
-        return now.status === cr.status && now.opsUpdatedAt === cr.opsUpdatedAt ? now : undefined;
-      };
-      try {
-        if (cr.status === 'voting') {
-          if (!canVote(g.rule, roles) || (await list<{ userId: string; at: string }>('votes', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
-          const r = await personaReaction(p, cr, compact);
-          const now = await latest();
-          if (!now) continue;
-          await addVote(now, u, r.vote, r.comment, { once: true });
-          actions++;
-        } else {
-          const reviewed = (await list<{ userId: string; at: string }>('reviews', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
-          if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
-          const r = await personaReaction(p, cr, compact);
-          const now = await latest();
-          if (!now) continue;
-          await addReview(now, u, r.decision, r.comment, { once: true });
-          actions++;
-        }
-      } catch (err) {
-        // Changed by someone else just now (or being merged): this member reacts next time.
-        if (!(err instanceof HttpError && err.status === 409)) throw err;
+      if (cr.status === 'voting') {
+        if (!canVote(g.rule, roles) || (await list<{ userId: string; at: string }>('votes', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
+        const r = await personaReaction(p, cr, compact);
+        await addVote(cr, u, r.vote, r.comment);
+        actions++;
+      } else {
+        const reviewed = (await list<{ userId: string; at: string }>('reviews', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
+        if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
+        const r = await personaReaction(p, cr, compact);
+        await addReview(cr, u, r.decision, r.comment);
+        actions++;
       }
     }
   }
@@ -463,12 +447,13 @@ export async function runTick() {
 
 /** Wipe everything and re-seed. Demo mode only. The AI spending totals survive, or a reset would refill the budget. */
 export async function resetAll() {
-  await transaction(async () => {
+  // Only while this server holds the repositories, and keeping its hold (see ontologyStore). What the deployment
+  // has spent on Claude survives the reset.
+  await ontologyStore.wipe(async () => {
     const spend = await snapshotSpending();
     await clearAll();
     await restoreSpending(spend);
   });
   clock.reset();
-  fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
   return seedDemo();
 }

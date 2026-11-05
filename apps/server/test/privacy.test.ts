@@ -949,13 +949,12 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     const editor = await login('editor', 'Revise Editor');
     const cr = await derived(id, { title: 'Model Revise race case', status: 'review', authorId: (await userNamed('Revise Editor')).id, ops: [addClass('Revise race thing')] });
     const before = (await get<ChangeRequest>('changeRequests', cr.id))!;
-    // A merge reads the draft at the exact commit it builds on (graphAt): hold that read.
-    const real = ontologyStore.graphAt.bind(ontologyStore);
+    const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
-    const spy = vi.spyOn(ontologyStore, 'graphAt').mockImplementation(async (p, ref) => {
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
       if (++calls === 1) await new Promise<void>((ok) => (resume = ok));
-      return real(p, ref);
+      return real(p);
     });
     try {
       const revising = editor.post(`/api/change-requests/${cr.id}/revise`).send({ instruction: 'Add a Berth class too' }).then((r) => r);
@@ -991,17 +990,16 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
   it('a withdrawal waits while a merge is committing, and a merge waits for a withdrawal (finding 2)', async () => {
     const { id, agent } = await publicCase('Merge Race Author', 'Merge race case');
     const editor = await login('editor', 'Merge Race Editor');
-    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', ops: [addClass('Merge race thing')] });
+    const cr = await derived(id, { title: 'Model Merge race case', status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true }, ops: [addClass('Merge race thing')] });
     // Drafted from a use case, so an editor approves exactly what it publishes before it can merge.
     const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
     await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Merge Race Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
-    // A merge reads the draft at the exact commit it builds on (graphAt): hold that read.
-    const real = ontologyStore.graphAt.bind(ontologyStore);
+    const real = ontologyStore.working.bind(ontologyStore);
     let resume!: () => void;
     let calls = 0;
-    const spy = vi.spyOn(ontologyStore, 'graphAt').mockImplementation(async (p, ref) => {
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
       if (++calls === 1) await new Promise<void>((ok) => (resume = ok));
-      return real(p, ref);
+      return real(p);
     });
     let withdrawal: Promise<request.Response> | undefined;
     try {
@@ -1023,32 +1021,6 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     expect((await get<ChangeRequest>('changeRequests', cr.id))!.status).toBe('merged');
     const outsider = await login('contributor');
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
-  });
-
-  // With #19's merge protocol, a merge records its commit before moving the draft, and if its process stops there the
-  // next one to touch the request finishes it, outside that merge's consent lock. Finishing it used to move the draft
-  // whatever had happened since, so a use case withdrawn in between was merged anyway.
-  it('a merge finished after its process stopped never merges a use case withdrawn since', async () => {
-    const { applyChangeOps } = await import('@concord/core');
-    const { merge } = await import('../src/services/changeRequests.js');
-    const { id, agent } = await publicCase('Stopped Merge Author', 'Stopped merge case');
-    await login('editor', 'Stopped Merge Editor');
-    const op = addClass('Stopped merge thing');
-    const cr = await derived(id, { title: 'Model Stopped merge case', status: 'approved', ops: [op] });
-    const project = (await findProject(demoId))!;
-    const base = ontologyStore.head(project);
-    const after = applyChangeOps(await ontologyStore.graphAt(project, base), [op], { date: '2026-01-01' }).graph;
-    const commit = await ontologyStore.prepareWorkingCommit(project, after, 'Stopped merge', { name: 'Concord' }, base);
-    const stored = (await get<ChangeRequest>('changeRequests', cr.id))!;
-    await put('changeRequests', { ...stored, merging: { until: Date.now() - 1, commit, base } }, demoId);
-    expect((await agent.post(`/api/use-cases/${id}/withdraw`)).status).toBe(200);
-    const done = await merge((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Stopped Merge Editor'));
-    expect(done.status).toBe('needs-work');
-    expect(ontologyStore.head(project)).toBe(base);
-    expect(ontologyStore.inWorking(project, commit)).toBe(false);
-    const now = (await get<ChangeRequest>('changeRequests', cr.id))!;
-    expect(now.status).toBe('needs-work');
-    expect(now.merging).toBeUndefined();
   });
 
   it('a request drafted from or citing a withdrawn use case is withheld on every read: API, list, activity, MCP, releases, use case pages (finding 3)', async () => {
@@ -1416,19 +1388,19 @@ describe('merge review: calls waiting for approval, malformed snapshots', () => 
   it('a release snapshot whose section lists its use cases wrongly is shown as not recorded, not as an error', async () => {
     // Snapshot validation used to skip a section's useCaseIds, which the page then calls .some() on: a 500.
     const project = (await findProject(demoId))!;
-    // Released files are served from the release's commit, so the snapshot is changed there.
-    const store = (content: string) => ontologyStore.updateReleaseFiles(project, { '1.0.0': { 'requirements.json': content } }, 'Test snapshot');
-    const original = ontologyStore.releaseFile(project, '1.0.0', 'requirements.json')!;
+    // Release files are read from git, so the test writes them there.
+    const original = (await ontologyStore.readReleaseFile(project, '1.0.0', 'requirements.json'))!;
+    const setSnapshot = async (content: string) => await ontologyStore.updateReleaseFiles(project, { '1.0.0': { 'requirements.json': content } }, 'test: set requirements.json');
     try {
       const good = JSON.parse(original);
       const bad = JSON.stringify({ ...good, document: { title: 'T', version: '1.0.0', sections: [{ id: 's1', heading: 'H', markdown: 'M', useCaseIds: 'uc_1' }] } });
-      store(bad);
+      await setSnapshot(bad);
       const res = await request(app).get(`/def/${project.slug}/1.0.0`);
       expect(res.status).toBe(200);
       expect(res.text).toContain('were not recorded when it was published');
       expect((await requirementsFor(project, JSON.parse(bad))).snapshotMissing).toBe(true);
     } finally {
-      store(original);
+      await setSnapshot(original);
     }
   });
 });

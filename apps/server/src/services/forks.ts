@@ -91,21 +91,24 @@ async function save(f: OntologyFork, from: Snapshot): Promise<Snapshot> {
 }
 
 /**
- * Commit to the fork's branch (compare-and-swap on its head), then save the
- * record. If the save loses to a change made elsewhere, the commit is undone,
- * so the branch and the record never disagree.
+ * Commit `graph` on top of the fork's head and save the record naming the new
+ * commit as its head (the conditional save above), as one step: the record is
+ * the truth, so if the save loses to a change made elsewhere, the commit is
+ * simply never used (see ontologyStore.commitFork).
  */
-async function commitAndSave(p: OntologyProject, f: OntologyFork, from: Snapshot, commit: () => Promise<string>): Promise<Snapshot> {
-  const before = f.head;
-  const head = await commit();
-  f.head = head;
+async function commitAndSave(p: OntologyProject, f: OntologyFork, from: Snapshot, graph: OntologyGraph, message: string, author: User, extraParents?: string[]): Promise<Snapshot> {
+  const parent = f.head;
+  let saved: Snapshot | undefined;
   try {
-    return await save(f, from);
+    await ontologyStore.commitFork(p, f.slug, graph, message, { name: author.name, email: author.email }, { parent, extraParents }, async (commit) => {
+      f.head = commit;
+      saved = await save(f, from);
+    });
   } catch (err) {
-    ontologyStore.rewindFork(p, f.slug, before, head);
-    f.head = before;
+    f.head = parent;
     throw err;
   }
+  return saved!;
 }
 
 /** A proposal's writes hold only while the fork record is still at the version its lease was saved with. */
@@ -389,10 +392,9 @@ interface RebasePlan {
 }
 
 async function rebasePlan(p: OntologyProject, f: OntologyFork, author?: string): Promise<RebasePlan> {
-  const upstreamHead = ontologyStore.head(p);
-  const upstream = await ontologyStore.working(p);
+  const { graph: upstream, head: upstreamHead } = await ontologyStore.workingAt(p);
   const base = await ontologyStore.graphAt(p, f.baseCommit);
-  const fork = await ontologyStore.forkGraph(p, f.slug);
+  const fork = await ontologyStore.graphAt(p, f.head);
   const label = (k: string) => keyLabel(k, upstream.prefixes);
   const out = outstanding(base, fork, f.ops);
   const landed: string[] = [];
@@ -470,17 +472,18 @@ function requireOpen(f: OntologyFork) {
     throw new HttpError(409, 'This fork was made by an earlier version of Concord and can no longer be changed. It still resolves; create a new fork, redo its changes there, and close this one.');
 }
 
-async function uniqueForkSlug(ontologyId: string, base: string) {
-  const taken = new Set((await listForks(ontologyId)).map((f) => f.slug));
+async function uniqueForkSlug(p: OntologyProject, base: string) {
+  const taken = new Set((await listForks(p.id)).map((f) => f.slug));
   let s = base;
-  for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
+  // A branch left by a fork whose record was never saved (its server stopped in between) also takes the name.
+  for (let i = 2; taken.has(s) || ontologyStore.hasForkBranch(p, s); i++) s = `${base}-${i}`;
   return s;
 }
 
 export async function createFork(p: OntologyProject, owner: User, input: { name: string; purpose?: string }): Promise<OntologyFork> {
   const name = input.name.trim();
   if (!name) throw new HttpError(400, 'Give the fork a name');
-  const slug = await uniqueForkSlug(p.id, slugify(name).replace(/^-+|-+$/g, '') || 'fork');
+  const slug = await uniqueForkSlug(p, slugify(name).replace(/^-+|-+$/g, '') || 'fork');
   const now = clock.iso();
   const fork: OntologyFork = {
     id: newId('frk'),
@@ -501,11 +504,22 @@ export async function createFork(p: OntologyProject, owner: User, input: { name:
     createdAt: now,
     updatedAt: now,
   };
-  fork.baseCommit = ontologyStore.createFork(p, slug);
-  const graph = stamp(await ontologyStore.working(p), p, fork);
-  fork.head = await ontologyStore.commitFork(p, slug, graph, `Fork ${p.title} ${p.currentVersion} as “${name}”${fork.purpose ? `\n\n${fork.purpose}` : ''}`, { name: owner.name, email: owner.email }, { expectedParent: fork.baseCommit });
+  const { graph: working, head: base } = await ontologyStore.workingAt(p);
+  fork.baseCommit = base;
   fork.seq = 1;
-  await put('forks', fork, fork.ontologyId);
+  // The fork's branch is created with its first commit (refusing a name already taken), and the record saved in the same step.
+  await ontologyStore.commitFork(
+    p,
+    slug,
+    stamp(working, p, fork),
+    `Fork ${p.title} ${p.currentVersion} as “${name}”${fork.purpose ? `\n\n${fork.purpose}` : ''}`,
+    { name: owner.name, email: owner.email },
+    { parent: base, create: true },
+    async (commit) => {
+      fork.head = commit;
+      await put('forks', fork, fork.ontologyId);
+    },
+  );
   await logActivity({ ontologyId: p.id, actorId: owner.id, type: 'fork.created', message: `forked ${p.title} as “${name}”`, link: `/o/${p.slug}/forks/${slug}` });
   return fork;
 }
@@ -564,9 +578,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
     const p = await getProject(f.ontologyId);
-    const head = f.head;
-    const current = await ontologyStore.forkGraph(p, f.slug);
-    if (ontologyStore.forkHead(p, f.slug) !== head) throw new HttpError(409, 'The fork changed while this edit was being prepared. Reload it and try again.');
+    const current = await ontologyStore.graphAt(p, f.head);
     let ops = input.ops ?? [];
     let warnings: string[] = [];
     let message = input.message;
@@ -597,7 +609,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
     const subject = (message || input.description?.split('\n')[0] || 'Edit the fork').slice(0, 120);
     // Keep only the edits that still make a difference (an edit undone later drops out).
     f.ops = outstanding(await ontologyStore.graphAt(p, f.baseCommit), after, [...f.ops, ...ops]).ops;
-    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, stamp(after, p, f), subject, { name: user.name, email: user.email }, { expectedParent: head }));
+    await commitAndSave(p, f, from, stamp(after, p, f), subject, user);
     await logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.edited', message: `edited the fork “${f.title}”: ${subject}`, link: `/o/${p.slug}/forks/${f.slug}` });
     const summary = await forkSummary(f);
     const edited = new Set(keysPerOp(current, ops).flat());
@@ -718,7 +730,7 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
     const p = await getProject(f.ontologyId);
-    const behind = ontologyStore.commitsSince(p, f.baseCommit);
+    const behind = await ontologyStore.commitsSince(p, f.baseCommit);
     if (!behind) return { synced: false, fork: await forkSummary(f), conflicts: [], message: 'Already up to date with upstream.' };
     const plan = await rebasePlan(p, f, (await getUser(f.ownerId))?.name);
     if (plan.conflicts.length || !plan.result)
@@ -736,7 +748,6 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
       if (!(err instanceof HttpError) || err.status !== 422) throw err;
       return { synced: false, fork: await forkSummary(f), conflicts: [{ message: (err as Error).message.replace('so nothing was changed', 'combined with upstream, so the fork was left as it was') }], message: 'Not synced: the fork and upstream are each consistent, but not together.' };
     }
-    const head = f.head;
     const oldBase = f.baseCommit;
     f.revision += 1;
     f.baseCommit = plan.upstreamHead;
@@ -744,14 +755,12 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
     f.ops = plan.remaining;
     if (plan.landed.length) {
       const before = await ontologyStore.graphAt(p, oldBase);
-      const fork = await ontologyStore.forkGraph(p, f.slug);
+      const fork = await ontologyStore.graphAt(p, f.head);
       const landed = new Map((f.landed ?? []).map((l) => [l.key, l]));
       for (const k of plan.landed) if (!landed.has(k)) landed.set(k, { key: k, change: changeKind(describe(before, k), describe(fork, k)) });
       f.landed = [...landed.values()];
     }
-    await commitAndSave(p, f, from, async () =>
-      await ontologyStore.commitFork(p, f.slug, stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, { name: user.name, email: user.email }, { expectedParent: head, extraParents: [plan.upstreamHead] }),
-    );
+    await commitAndSave(p, f, from, stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, user, [plan.upstreamHead]);
     const landed = plan.landed.map((k) => keyLabel(k, result.prefixes));
     return {
       synced: true,
@@ -777,7 +786,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     requireOpen(f);
     const p = await getProject(f.ontologyId);
     const base = await ontologyStore.graphAt(p, f.baseCommit);
-    const out = outstanding(base, await ontologyStore.forkGraph(p, f.slug), f.ops);
+    const out = outstanding(base, await ontologyStore.graphAt(p, f.head), f.ops);
     const drop = terms === 'all' ? undefined : new Set(terms.map((t) => toKey(t, base.prefixes)));
     const label = (k: string) => keyLabel(k, base.prefixes);
     const keep: ChangeOp[] = [];
@@ -815,8 +824,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     const named = drop ? [...drop, ...related].map(label).join(', ') : 'everything';
     f.revision += 1;
     f.ops = keep;
-    const head = f.head;
-    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, stamp(graph, p, f), `Discard the fork's changes to ${named}`, { name: user.name, email: user.email }, { expectedParent: head }));
+    await commitAndSave(p, f, from, stamp(graph, p, f), `Discard the fork's changes to ${named}`, user);
     return forkSummary(f);
   });
 }
@@ -836,12 +844,11 @@ export async function closeFork(fork: OntologyFork, user: User | undefined) {
   return locked(fork.id, async (f, from) => {
     if (f.status === 'closed') throw new HttpError(409, 'This fork is already closed.');
     const p = await getProject(f.ontologyId);
-    // Closing moves the branch too, so an edit prepared before the close (here or in
-    // another server process) fails its compare-and-swap instead of reopening the fork.
-    const graph = await ontologyStore.forkGraph(p, f.slug);
-    const head = f.head;
+    // Closing is a conditional save like any change (with a commit, for the history), so an edit
+    // prepared before the close (here or in another server process) fails instead of reopening the fork.
+    const graph = await ontologyStore.graphAt(p, f.head);
     f.status = 'closed';
-    await commitAndSave(p, f, from, async () => await ontologyStore.commitFork(p, f.slug, graph, 'Close the fork', { name: user.name, email: user.email }, { expectedParent: head }));
+    await commitAndSave(p, f, from, graph, 'Close the fork', user);
     await logActivity({ ontologyId: f.ontologyId, actorId: user.id, type: 'fork.closed', message: `closed the fork “${f.title}”`, link: `/o/${p.slug}/forks/${f.slug}` });
     return forkSummary(f);
   });
@@ -853,9 +860,9 @@ export async function closeFork(fork: OntologyFork, user: User | undefined) {
 
 async function termStatuses(f: OntologyFork, p: OntologyProject): Promise<ForkTerm[]> {
   const base = await ontologyStore.graphAt(p, f.baseCommit);
-  const fork = await ontologyStore.forkGraph(p, f.slug);
+  const fork = await ontologyStore.graphAt(p, f.head);
   const working = await ontologyStore.working(p);
-  const released = p.currentVersion !== '0.0.0' && ontologyStore.versions(p).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
+  const released = p.currentVersion !== '0.0.0' && (await ontologyStore.versions(p)).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
   const cr = await latestCR(f);
   const crOpen = cr && OPEN_CR.includes(cr.status);
   let proposed: OntologyGraph | undefined;
@@ -918,13 +925,13 @@ export async function forkSummary(f: OntologyFork): Promise<ForkSummary> {
     urls: forkUrls(p, f),
     terms,
     changeRequest: cr ? { id: cr.id, number: cr.number, title: cr.title, status: cr.status, level: cr.classification?.level } : undefined,
-    behindBy: ontologyStore.commitsSince(p, f.baseCommit),
+    behindBy: await ontologyStore.commitsSince(p, f.baseCommit),
   };
 }
 
 export async function forkDetail(f: OntologyFork) {
   const p = await getProject(f.ontologyId);
-  return { ...(await forkSummary(f)), history: ontologyStore.forkLog(p, f.slug, 30) };
+  return { ...(await forkSummary(f)), history: await ontologyStore.forkLog(p, f.head, 30) };
 }
 
 /**
@@ -937,11 +944,11 @@ export async function forkDetail(f: OntologyFork) {
  * header fields other than imports.
  */
 async function notIn(p: OntologyProject, f: OntologyFork): Promise<{ release: string[]; draft: string[]; prefixes: Record<string, string> }> {
-  const fork = await ontologyStore.forkGraph(p, f.slug);
+  const fork = await ontologyStore.graphAt(p, f.head);
   const working = await ontologyStore.working(p);
   const lacking = (target: OntologyGraph) =>
     changedTerms(target, fork).filter((k) => !k.startsWith('meta:') && describe(fork, k) !== '' && describe(fork, k) !== describe(target, k));
-  const released = p.currentVersion !== '0.0.0' && ontologyStore.versions(p).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
+  const released = p.currentVersion !== '0.0.0' && (await ontologyStore.versions(p)).includes(p.currentVersion) ? await ontologyStore.at(p, p.currentVersion) : undefined;
   return { release: released ? lacking(released) : [], draft: lacking(working), prefixes: working.prefixes };
 }
 

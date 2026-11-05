@@ -54,7 +54,7 @@ async function serve(req: Request, res: Response) {
   // The same formats, headers and file names as a release (public/routes.ts).
   await sendFormat(req, res, {
     project,
-    graph: await ontologyStore.forkGraph(project, fork.slug),
+    graph: await ontologyStore.graphAt(project, fork.head),
     format,
     version: `fork-${fork.slug}`,
     self: urls.iri,

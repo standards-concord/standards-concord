@@ -94,8 +94,10 @@ describe('requests made at the same time', () => {
   it('change requests opened at once get different numbers', async () => {
     const owner = await login('Owner Num', 'steward');
     const project = await getProject(await newOntology(owner.agent));
+    // Four people, since one person's changes are checked one at a time (see withTriageBudget).
+    const authors = await Promise.all(Array.from({ length: 4 }, (_, i) => login(`Author Num ${i}`)));
     const crs = await Promise.all(
-      Array.from({ length: 4 }, (_, i) => createChangeRequest(project, owner.user, { title: `Change ${i}`, description: 'Concurrent', kind: 'feature', origin: { type: 'chat' }, ops: [] })),
+      authors.map((a, i) => createChangeRequest(project, a.user, { title: `Change ${i}`, description: 'Concurrent', kind: 'feature', origin: { type: 'chat' }, ops: [] })),
     );
     expect(new Set(crs.map((c) => c.number)).size).toBe(4);
   });
