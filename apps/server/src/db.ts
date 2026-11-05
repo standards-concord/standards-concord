@@ -154,8 +154,12 @@ export function claim<T>(collection: Collection, id: string, field: string, valu
   return doc as T;
 }
 
-export function clearAll() {
-  conn().exec('DELETE FROM docs');
+/** Deletes every document, except the ones named in `keep`. */
+export function clearAll(keep: [Collection, string][] = []) {
+  if (!keep.length) return void conn().exec('DELETE FROM docs');
+  conn()
+    .prepare(`DELETE FROM docs WHERE NOT (${keep.map(() => '(collection = ? AND id = ?)').join(' OR ')})`)
+    .run(...keep.flat());
 }
 
 /**

@@ -1606,6 +1606,17 @@ describe('inline term edits', () => {
       const fresh = { ...project, slug: `claim-lost-${Date.now()}`, title: 'Never created' };
       await expect(ontologyStore.init(fresh as never, '', '')).rejects.toMatchObject({ status: 503 });
       expect(fs.existsSync(path.join(path.dirname(raw), fresh.slug))).toBe(false);
+      // Nor does it build commits, publish to a remote (or even record one), or wipe anything.
+      const objects = rawGit('count-objects', '-v');
+      expect(() => ontologyStore.updateReleaseFiles(project, { '1.0.0': { 'NOTE.md': 'stale' } }, 'stale release files')).toThrow('lost its hold');
+      expect(rawGit('count-objects', '-v')).toBe(objects);
+      const remotes = rawGit('remote', '-v');
+      expect(() => ontologyStore.push(project as never, path.join(path.dirname(raw), 'nowhere.git'))).toThrow('lost its hold');
+      expect(rawGit('remote', '-v')).toBe(remotes);
+      const simulation = await import('../src/services/simulation.js');
+      await expect(simulation.resetAll()).rejects.toMatchObject({ status: 503 });
+      expect(get('ontologies', demoId)).toBeDefined();
+      expect(fs.existsSync(raw)).toBe(true);
       store.renew();
       expect(lost).toHaveBeenCalledTimes(1);
       // Shutting down gives up only its own claim, never the successor's.
@@ -1649,6 +1660,32 @@ describe('inline term edits', () => {
       expect(rawGit('rev-parse', 'refs/concord/draft')).toBe(h2);
     } finally {
       cleanup.stop();
+    }
+  });
+
+  it('keeps the server’s hold on the repositories through a demo reset', async () => {
+    const { claimGitStore } = await import('../src/services/ontologyStore.js');
+    const simulation = await import('../src/services/simulation.js');
+    const { get, remove } = await import('../src/db.js');
+    const lost = vi.fn();
+    const store = await claimGitStore({ waitMs: 0, onLost: lost });
+    try {
+      const owner = get<{ owner: string }>('kv', 'git-store')?.owner;
+      const demo = await simulation.resetAll();
+      // The reset wiped everything else, but not the hold, so reseeding (and everything after) still works.
+      expect(lost).not.toHaveBeenCalled();
+      expect(get<{ owner: string }>('kv', 'git-store')?.owner).toBe(owner);
+      expect(demo).toBeDefined();
+      demoId = demo!.id;
+      const { ontologyStore, project } = await repo();
+      const head = ontologyStore.head(project);
+      await ontologyStore.commitWorking(project, await ontologyStore.working(project), 'after the reset', { name: 'After' });
+      expect(ontologyStore.head(project)).toBe(head);
+      expect((await (await login('member', 'Reader After Reset')).get(`/api/ontologies/${demoId}/source?format=turtle`)).status).toBe(200);
+      expect(lost).not.toHaveBeenCalled();
+    } finally {
+      store.release();
+      remove('kv', 'git-store');
     }
   });
 });

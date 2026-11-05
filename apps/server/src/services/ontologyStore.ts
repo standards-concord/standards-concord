@@ -5,7 +5,7 @@ import path from 'node:path';
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
-import { get, HttpError, list, put, remove, transaction } from '../db.js';
+import { clearAll, get, HttpError, list, put, remove, transaction } from '../db.js';
 
 /**
  * Each ontology is a git repository. The working draft is `ontology.ttl` on
@@ -39,7 +39,11 @@ function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
 }
 
+/** git commands that change nothing (in the repository or anywhere else). Every other one first checks this process may change the repositories. */
+const READS = new Set(['rev-parse', 'show', 'ls-tree', 'for-each-ref', 'merge-base', 'diff-index', 'log', 'cat-file']);
+
 function git(dir: string, args: string[], env: Record<string, string> = {}, opts: { input?: string; extraEnv?: Record<string, string>; raw?: boolean } = {}): string {
+  if (!READS.has(args[0]) && !(args[0] === 'remote' && args.length === 1)) assertStoreHeld();
   const out = execFileSync('git', args, {
     cwd: dir,
     encoding: 'utf8',
@@ -72,23 +76,45 @@ const revokedKey = (writer: string) => `pin-revoked:${writer}`;
  * different versions could disagree about how pins are named and reclaimed,
  * and nothing is gained from two of the same. So the process claims them at
  * start-up (one claim, with this process's own token) and keeps the claim
- * alive. Every change to git or to the working draft first checks the claim
- * is still this process's; if it isn't (this process stalled long enough for
- * another to start), it changes nothing and the process exits. Upgrades are
- * therefore exclusive (docs/deploy.md). A process that never claimed (tests,
- * scripts) may write only while no live claim exists.
+ * alive. Every change to the working draft (in its transaction) and every
+ * git command or file write that changes anything (immediately before it
+ * runs) first checks the claim is still this process's, renewing it if it is
+ * more than a few seconds old, so that no other process can take over for
+ * the next STORE_CLAIM_MS. If it isn't this process's (it stalled long enough
+ * for another to start), it changes nothing and the process exits. What
+ * remains is a process that stalls for longer than STORE_CLAIM_MS inside one
+ * of those steps, between the check and the write. Upgrades are therefore
+ * exclusive (docs/deploy.md). A process that never claimed (tests, scripts)
+ * may write only while no live claim exists.
  */
 export const STORE_VERSION = 2;
 const STORE_KEY = 'git-store';
 const STORE_CLAIM_MS = 30_000;
+/** A check renews a claim older than this, so every guarded step starts with nearly STORE_CLAIM_MS before anyone else could take over. */
+const STORE_RENEW_MS = 5_000;
 type StoreClaim = { id: string; owner: string; version: number; until: number };
-let ownClaim: { owner: string; onLost: (err: Error) => void; lost: boolean } | undefined;
+let ownClaim: { owner: string; onLost: (err: Error) => void; lost: boolean; renewed: number } | undefined;
 
-/** Throws (and, if this process held the claim, reports it lost) unless this process may change the repositories now. Call inside the transaction of the change it guards. */
+/**
+ * Throws (and, if this process held the claim, reports it lost) unless this
+ * process may change the repositories now. Call inside the transaction of a
+ * database change it guards, and immediately before any other write.
+ */
 function assertStoreHeld(): void {
   const claim = get<StoreClaim>('kv', STORE_KEY);
   if (ownClaim) {
-    if (claim?.owner === ownClaim.owner && !ownClaim.lost) return;
+    if (claim?.owner === ownClaim.owner && !ownClaim.lost) {
+      // Still ours (taking over rewrites the owner): renew it, atomically with the check, if it is getting old.
+      if (Date.now() - ownClaim.renewed >= STORE_RENEW_MS) {
+        const mine = ownClaim;
+        transaction(() => {
+          if (get<StoreClaim>('kv', STORE_KEY)?.owner !== mine.owner) return;
+          put('kv', { ...claim, until: Date.now() + STORE_CLAIM_MS });
+          mine.renewed = Date.now();
+        });
+      }
+      return;
+    }
     const err = new HttpError(503, 'This server lost its hold on the repositories to another one, so it changed nothing and is stopping.');
     if (!ownClaim.lost) {
       ownClaim.lost = true;
@@ -130,7 +156,7 @@ export async function claimGitStore(opts: { waitMs?: number; onLost?: (err: Erro
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }
-  const mine = { owner, onLost, lost: false };
+  const mine = { owner, onLost, lost: false, renewed: Date.now() };
   ownClaim = mine;
   return {
     renew: () => {
@@ -138,6 +164,7 @@ export async function claimGitStore(opts: { waitMs?: number; onLost?: (err: Erro
         transaction(() => {
           assertStoreHeld();
           put('kv', { id: STORE_KEY, owner, version: STORE_VERSION, until: Date.now() + STORE_CLAIM_MS });
+          mine.renewed = Date.now();
         });
       } catch {
         /* reported through onLost */
@@ -288,9 +315,10 @@ export const ontologyStore = {
 
   async init(project: OntologyProject, turtle: string, readme: string): Promise<string> {
     const dir = repoDir(project);
-    transaction(assertStoreHeld);
+    assertStoreHeld();
     fs.mkdirSync(dir, { recursive: true });
     git(dir, ['init', '-q', '-b', 'main']);
+    assertStoreHeld();
     fs.writeFileSync(path.join(dir, FILE), turtle);
     fs.writeFileSync(path.join(dir, 'README.md'), readme);
     git(dir, ['add', '-A']);
@@ -628,6 +656,21 @@ export const ontologyStore = {
   },
 
   /** Push main and tags to a GitHub remote using a token. */
+  /**
+   * Deletes every repository and every database row (a demo reset), keeping
+   * this process's hold on the repositories: only while it has it.
+   */
+  wipe(): void {
+    transaction(() => {
+      assertStoreHeld();
+      clearAll([['kv', STORE_KEY]]);
+    });
+    assertStoreHeld();
+    fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
+    graphCache.clear();
+    lastPruned.clear();
+  },
+
   push(project: OntologyProject, remoteUrl: string) {
     const dir = repoDir(project);
     const remotes = git(dir, ['remote']);

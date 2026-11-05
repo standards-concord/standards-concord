@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, list, put } from '../db.js';
+import { list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
@@ -322,8 +322,8 @@ export async function runTick() {
 
 /** Wipe everything and re-seed. Demo mode only. */
 export async function resetAll() {
-  clearAll();
+  // Only while this server holds the repositories, and keeping its hold (see ontologyStore).
+  ontologyStore.wipe();
   clock.reset();
-  fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
   return seedDemo();
 }
