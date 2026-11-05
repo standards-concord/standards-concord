@@ -20,6 +20,8 @@ test('the backend is connected', () => {
 test('the walkthrough page loads', async ({ page }) => {
   await page.goto('/alpha');
   await expect(page.getByRole('heading', { name: 'Guided walkthrough' })).toBeVisible();
+  // Testers can see which version they're testing.
+  await expect(page.getByTestId('app-version')).toHaveText(/^Concord \d+\.\d+\.\d+$/);
 });
 
 test.describe('with the backend', () => {

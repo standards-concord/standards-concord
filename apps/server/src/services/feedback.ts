@@ -1,4 +1,4 @@
-import type { ChatMessage, FeedbackQuestion, FeedbackSubmission, User } from '@concord/shared';
+import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, type ChatMessage, type FeedbackQuestion, type FeedbackSubmission, type TesterRoleKey, type User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { HttpError, list, put } from '../db.js';
@@ -7,7 +7,7 @@ import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
-import { solid } from './solid.js';
+import { acceptVersion, recordFeedback } from './alpha.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
   id,
@@ -43,6 +43,53 @@ export const FEEDBACK_QUESTIONS: FeedbackQuestion[] = [
   { id: 'missing', section: 'Overall', text: 'What is missing or got in your way?', type: 'text' },
   { id: 'comments', section: 'Any other comments', text: 'Any other comments? Anything at all.', type: 'text', optional: true },
 ];
+
+export type Pathway = FeedbackSubmission['pathway'];
+
+/** How many changes the "what's changed" questionnaire asks about, at most. */
+export const MAX_CHANGE_QUESTIONS = 6;
+
+export interface QuestionScope {
+  pathway?: Pathway;
+  /** The version the tester last tested. */
+  since?: string;
+  /** The tester role they're giving feedback as. */
+  role?: TesterRoleKey | string;
+  /** The version they're testing now (defaults to this server's version). */
+  version?: string;
+}
+
+const asRole = (r: unknown) => (TESTER_ROLE_KEYS.includes(r as TesterRoleKey) ? (r as TesterRoleKey) : undefined);
+
+/**
+ * Questions for a returning tester: one about each change since the version
+ * they last tested (their role's changes first, features before fixes), then
+ * the few overall questions. Fixes are only asked about when they say what to ask.
+ */
+export function changeQuestions(since: string, role?: TesterRoleKey | string, version: string = APP_VERSION): FeedbackQuestion[] {
+  const upTo = findRelease(version)?.version ?? APP_VERSION;
+  const changes = changesFor(changesSince(since, upTo), asRole(role)).filter((c) => c.type !== 'fix' || c.ask);
+  if (!changes.length) return [];
+  const section = `What’s new since ${since}`;
+  const asked = changes.slice(0, MAX_CHANGE_QUESTIONS).map((c) =>
+    scale(`new:${c.id}`, section, `New in ${c.version}: ${c.ask ?? `how well does this work for you: ${c.title.replace(/[.!]$/, '')}?`}`, 'Not well', 'Very well', true),
+  );
+  const core = FEEDBACK_QUESTIONS.filter((q) => ['overall', 'missing', 'comments'].includes(q.id));
+  return [
+    ...asked,
+    { id: 'new:other', section, text: `Did anything else change since ${since} that helped or got in your way?`, type: 'text', optional: true },
+    ...core,
+  ];
+}
+
+/** The questionnaire for a pathway. "changes" falls back to the full set when there's nothing new to ask about. */
+export function questionsFor(scope: QuestionScope = {}): FeedbackQuestion[] {
+  if (scope.pathway === 'changes' && scope.since) {
+    const qs = changeQuestions(scope.since, scope.role, scope.version);
+    if (qs.length) return qs;
+  }
+  return FEEDBACK_QUESTIONS;
+}
 
 type Answers = FeedbackSubmission['answers'];
 
@@ -80,7 +127,7 @@ export function interpretAnswer(q: FeedbackQuestion, raw: string): string | numb
   return t;
 }
 
-const unanswered = (answers: Answers) => FEEDBACK_QUESTIONS.filter((q) => answers[q.id] === undefined || answers[q.id] === '');
+const unanswered = (questions: FeedbackQuestion[], answers: Answers) => questions.filter((q) => answers[q.id] === undefined || answers[q.id] === '');
 
 function ask(q: FeedbackQuestion) {
   const opts =
@@ -92,8 +139,8 @@ function ask(q: FeedbackQuestion) {
   return `${q.text}${opts}${q.optional ? ' You can skip this one.' : ''}`;
 }
 
-export interface FeedbackChatInput {
-  pathway: 'structured' | 'general';
+export interface FeedbackChatInput extends QuestionScope {
+  pathway: Pathway;
   messages: ChatMessage[];
   answers: Answers;
   /** Question the client last asked (structured pathway). */
@@ -102,8 +149,9 @@ export interface FeedbackChatInput {
 
 export async function feedbackChat(input: FeedbackChatInput) {
   const answers: Answers = { ...input.answers };
+  const questions = questionsFor(input);
   const last = [...input.messages].reverse().find((m) => m.role === 'user');
-  const fallback = () => heuristicFeedbackTurn(input, answers, last?.content);
+  const fallback = () => heuristicFeedbackTurn(input, questions, answers, last?.content);
   const { value } = await llm.json({
     task: 'feedback',
     system: FEEDBACK_INTERVIEWER,
@@ -113,7 +161,7 @@ export async function feedbackChat(input: FeedbackChatInput) {
     messages: [
       {
         role: 'user',
-        content: `Pathway: ${input.pathway}\n\nQuestionnaire:\n${FEEDBACK_QUESTIONS.map((q) => `- ${q.id} [${q.section}] (${q.type}${q.optional ? ', optional' : ''}) ${q.text}${q.options ? ` Options: ${q.options.join(' | ')}` : ''}`).join('\n')}\n\nAnswers so far: ${JSON.stringify(answers)}\n\nConversation:\n${input.messages.map((m) => `${m.role === 'assistant' ? 'Interviewer' : 'Tester'}: ${m.content}`).join('\n')}\n\nGive the next turn.`,
+        content: `Pathway: ${input.pathway === 'changes' ? `changes (a returning tester, last tested ${input.since}; ask only about what changed)` : input.pathway}\n\nQuestionnaire:\n${questions.map((q) => `- ${q.id} [${q.section}] (${q.type}${q.optional ? ', optional' : ''}) ${q.text}${q.options ? ` Options: ${q.options.join(' | ')}` : ''}`).join('\n')}\n\nAnswers so far: ${JSON.stringify(answers)}\n\nConversation:\n${input.messages.map((m) => `${m.role === 'assistant' ? 'Interviewer' : 'Tester'}: ${m.content}`).join('\n')}\n\nGive the next turn.`,
       },
     ],
     fallback: () => {
@@ -122,14 +170,14 @@ export async function feedbackChat(input: FeedbackChatInput) {
     },
   });
   for (const a of value.answers) {
-    const q = FEEDBACK_QUESTIONS.find((x) => x.id === a.questionId);
+    const q = questions.find((x) => x.id === a.questionId);
     if (a.questionId === 'general') answers.general = [answers.general, a.value].filter(Boolean).join('\n');
     else if (q) answers[q.id] = q.type === 'multi' ? a.value.split(/\s*\|\s*/) : q.type === 'scale' ? (interpretAnswer(q, a.value) ?? a.value) : a.value;
   }
   return { reply: value.reply, answers, done: value.done, nextQuestionId: value.nextQuestionId };
 }
 
-function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastText?: string) {
+function heuristicFeedbackTurn(input: FeedbackChatInput, questions: FeedbackQuestion[], answers: Answers, lastText?: string) {
   if (input.pathway === 'general') {
     if (lastText) answers.general = [answers.general, lastText].filter(Boolean).join('\n');
     const turns = input.messages.filter((m) => m.role === 'user').length;
@@ -143,7 +191,7 @@ function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastT
     ][Math.min(turns - 1, 2)];
     return { reply: follow, answers, done: false, nextQuestionId: undefined };
   }
-  const current = input.currentQuestionId ? FEEDBACK_QUESTIONS.find((q) => q.id === input.currentQuestionId) : lastText ? unanswered(answers)[0] : undefined;
+  const current = input.currentQuestionId ? questions.find((q) => q.id === input.currentQuestionId) : lastText ? unanswered(questions, answers)[0] : undefined;
   let prefix = '';
   if (current && lastText) {
     const skip = current.optional && /^(skip|pass|no|none|nothing|n\/a)\b/i.test(lastText.trim());
@@ -152,25 +200,38 @@ function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastT
     answers[current.id] = v;
     prefix = 'Thanks. ';
   }
-  const next = unanswered(answers)[0];
+  const next = unanswered(questions, answers)[0];
   if (!next) return { reply: 'That’s everything. Thank you! Press “Submit feedback” to send it to the team.', answers, done: true, nextQuestionId: undefined };
   const sectionIntro = !current || current.section !== next.section ? `**${next.section}.** ` : '';
   return { reply: `${prefix}${sectionIntro}${ask(next)}`, answers, done: false, nextQuestionId: next.id };
 }
 
-export async function submitFeedback(user: User | undefined, input: Omit<FeedbackSubmission, 'id' | 'createdAt'>) {
+/**
+ * Store feedback. `tester` is the tester's own account, which differs from `user`
+ * while they play a persona: their copy goes to their own pod, with the app
+ * version they tested.
+ */
+export async function submitFeedback(user: User | undefined, input: Omit<FeedbackSubmission, 'id' | 'createdAt'>, tester: User | undefined = user && !user.simulated ? user : undefined) {
   if (!input.answers || typeof input.answers !== 'object') throw new HttpError(400, 'answers required');
+  const appVersion = acceptVersion(input.appVersion);
   const sub: FeedbackSubmission = {
     ...input,
+    appVersion,
+    sinceVersion: input.sinceVersion && findRelease(input.sinceVersion) ? findRelease(input.sinceVersion)!.version : undefined,
     id: newId('fb'),
     userId: user?.id,
-    name: input.name ?? user?.name,
+    testerId: tester && tester.id !== user?.id ? tester.id : undefined,
+    name: input.name ?? (user?.simulated ? undefined : user?.name),
     createdAt: clock.iso(),
   };
-  put('feedback', sub);
-  // Testers' own copy of what they said goes in their pod too.
-  if (user) await solid.write(user.id, `feedback/${sub.id}.json`, JSON.stringify(sub, null, 2), 'application/json').catch(() => undefined);
-  return sub;
+  if (!tester) {
+    put('feedback', sub);
+    return { ...sub, savedTo: undefined };
+  }
+  // A tester's feedback is stored together with its place in their testing record (or not at all, with a 409, if
+  // the record can't take it), then copied to their pod with the version they tested.
+  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, () => put('feedback', sub));
+  return { ...sub, savedTo };
 }
 
 export const listFeedback = () => list<FeedbackSubmission>('feedback').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -179,7 +240,9 @@ export async function summariseFeedback() {
   const subs = listFeedback();
   if (!subs.length) return { summary: 'No feedback yet.', themes: [], count: 0, tallies: {} };
   const tallies: Record<string, Record<string, number>> = {};
-  for (const q of FEEDBACK_QUESTIONS.filter((x) => x.type !== 'text')) {
+  // Questions about specific changes ("new:<change id>") are tallied alongside the standard ones.
+  const changeIds = [...new Set(subs.flatMap((s) => Object.keys(s.answers).filter((k) => k.startsWith('new:') && k !== 'new:other')))];
+  for (const q of [...FEEDBACK_QUESTIONS.filter((x) => x.type !== 'text'), ...changeIds.map((id) => ({ id }))]) {
     tallies[q.id] = {};
     for (const s of subs) {
       const v = s.answers[q.id];
@@ -191,9 +254,9 @@ export async function summariseFeedback() {
     system: FEEDBACK_SUMMARY,
     schema: FeedbackSummarySchema,
     effort: 'medium',
-    messages: [{ role: 'user', content: `Questionnaire tallies: ${JSON.stringify(tallies)}\n\nSubmissions:\n${subs.map((s) => JSON.stringify({ role: s.role, pathway: s.pathway, answers: s.answers })).join('\n')}` }],
+    messages: [{ role: 'user', content: `Questionnaire tallies: ${JSON.stringify(tallies)}\n\nSubmissions:\n${subs.map((s) => JSON.stringify({ role: s.role, pathway: s.pathway, appVersion: s.appVersion, sinceVersion: s.sinceVersion, answers: s.answers })).join('\n')}` }],
     fallback: () => {
-      const texts = subs.flatMap((s) => ['valuable', 'missing', 'comments', 'general', 'gov_other'].map((k) => s.answers[k]).filter((x): x is string => typeof x === 'string' && x !== '(skipped)'));
+      const texts = subs.flatMap((s) => ['valuable', 'missing', 'comments', 'general', 'gov_other', 'new:other'].map((k) => s.answers[k]).filter((x): x is string => typeof x === 'string' && x !== '(skipped)'));
       const words = new Map<string, number>();
       for (const t of texts)
         for (const w of new Set(t.toLowerCase().match(/[a-z]{5,}/g) ?? [])) if (!['about', 'would', 'there', 'their', 'which', 'think', 'really', 'could', 'should'].includes(w)) words.set(w, (words.get(w) ?? 0) + 1);

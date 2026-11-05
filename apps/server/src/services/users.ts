@@ -46,10 +46,29 @@ export function findByProvider(provider: AuthProvider, subject: string): User | 
   return list<User>('users').find((u) => u.providers.some((p) => p.provider === provider && p.subject === subject));
 }
 
-export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }) {
-  // Sign-in is by provider and subject only. Matching on email would let a new
-  // identity that merely shares an address take over an existing account.
+/**
+ * Find or create the account for a Google or GitHub identity. Sign-in is by
+ * provider and subject only: matching on email would let a new identity that
+ * merely shares an address take over an existing account.
+ *
+ * `linkTo` is the demo tester account the same browser was using (the caller has
+ * checked the OAuth state, so the browser started this sign-in). When the
+ * identity is new it is attached to that account, so what they saved stays theirs.
+ */
+export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string }, linkTo?: User) {
   const existing = findByProvider(p.provider, p.subject);
+  if (!existing && linkTo && !linkTo.simulated && linkTo.providers.every((x) => x.provider === 'demo')) {
+    const linked = get<User>('users', linkTo.id);
+    if (linked) {
+      linked.providers.push({ provider: p.provider, subject: p.subject });
+      linked.name = p.name;
+      linked.email ??= p.email;
+      linked.avatarUrl ??= p.avatarUrl;
+      // Sessions issued while it was a demo account (in any browser) end here.
+      destroyUserSessions(linked.id);
+      return put('users', linked);
+    }
+  }
   if (existing) {
     if (!existing.providers.some((x) => x.provider === p.provider)) existing.providers.push({ provider: p.provider, subject: p.subject });
     existing.avatarUrl ??= p.avatarUrl;
@@ -71,18 +90,32 @@ export const publicUser = (u?: User) => (u ? { id: u.id, name: u.name, avatarUrl
 interface SessionDoc {
   id: string;
   userId: string;
+  /**
+   * How this session was signed in. Administrator access needs a session that
+   * was itself signed in with Google or GitHub: an account that later gains a
+   * provider does not upgrade the sessions it already had.
+   */
+  method?: AuthProvider;
   createdAt: string;
 }
 
-export function createSession(userId: string): string {
+export function createSession(userId: string, method?: AuthProvider): string {
   const id = newToken();
-  put<SessionDoc>('sessions', { id: hash(id), userId, createdAt: new Date().toISOString() });
+  put<SessionDoc>('sessions', { id: hash(id), userId, method, createdAt: new Date().toISOString() });
   return id;
 }
-export function sessionUser(token: string | undefined): User | undefined {
+export function sessionOf(token: string | undefined): { user: User; method?: AuthProvider } | undefined {
   if (!token) return;
   const s = get<SessionDoc>('sessions', hash(token));
-  return s ? getUser(s.userId) : undefined;
+  const user = s && getUser(s.userId);
+  return user ? { user, method: s.method } : undefined;
+}
+export function sessionUser(token: string | undefined): User | undefined {
+  return sessionOf(token)?.user;
+}
+/** End every session an account has (for example when a demo account gains a Google or GitHub identity). */
+export function destroyUserSessions(userId: string) {
+  for (const s of list<SessionDoc>('sessions')) if (s.userId === userId) remove('sessions', s.id);
 }
 export function destroySession(token: string | undefined) {
   if (token) remove('sessions', hash(token));

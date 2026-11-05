@@ -6,6 +6,7 @@
 import type {
   Publication,
   ActivityItem,
+  AlphaMe,
   FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
@@ -135,6 +136,8 @@ export type TermDetail = TermView & { usedBy: UsedBy[] };
 export type InterviewDetail = InterviewSession & { useCase: UseCase };
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
+/** Which questionnaire: `pathway: 'changes'` asks about what changed since `since`, for a tester in `role`. */
+export type FeedbackScope = { pathway?: FeedbackSubmission['pathway']; since?: string; role?: string; version?: string };
 export type FeedbackChatResponse = { reply: string; answers: FeedbackAnswers; done: boolean; nextQuestionId?: string };
 export type FeedbackSummary = { summary: string; themes: { theme: string; count: number }[] };
 export type NewOntologyInput = {
@@ -286,10 +289,11 @@ export const api = {
   activity: (ontologyId?: string) => get<ActivityItem[]>(`/api/activity${qs({ ontologyId })}`),
 
   // Feedback
-  feedbackQuestions: () => get<FeedbackQuestion[]>('/api/feedback/questions'),
-  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
+  feedbackQuestions: (scope: FeedbackScope = {}) => get<FeedbackQuestion[]>(`/api/feedback/questions${qs({ pathway: scope.pathway, since: scope.since, role: scope.role, version: scope.version })}`),
+  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers; currentQuestionId?: string } & FeedbackScope) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
-  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) =>
+    post<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>('/api/feedback', body as unknown as Json),
   feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
   withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
   resolveFeedbackPublication: (
@@ -300,6 +304,9 @@ export const api = {
   publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
+  // Alpha testing: the tester's own account and the app versions they've tested
+  alphaMe: () => get<AlphaMe>('/api/alpha/me'),
+  alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),
 };
 
