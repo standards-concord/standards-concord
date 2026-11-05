@@ -99,10 +99,10 @@ export function reportToken(scope: TokenScope, now = Date.now()): string {
 const TOKEN_FORMAT = /^(\d{10,16})\.([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/;
 
 /** Records a token's nonce as used, in one statement: false if it was used before (by this process or any other, before or after a restart). */
-const consume = (nonce: string, until: number) => insertOnce('reportNonces', { id: nonce, until }, 'nonce');
+const consume = async (nonce: string, until: number) => await insertOnce('reportNonces', { id: nonce, until }, 'nonce');
 
 const EXPIRED = 'This form has expired. Reload the page and try again.';
-function tokenProblem(scope: TokenScope, token: unknown, now = Date.now()): string | undefined {
+async function tokenProblem(scope: TokenScope, token: unknown, now = Date.now()): Promise<string | undefined> {
   const m = typeof token === 'string' ? TOKEN_FORMAT.exec(token) : null;
   if (!m || !scope.session) return EXPIRED;
   const [, ts, nonce, sig] = m;
@@ -113,7 +113,7 @@ function tokenProblem(scope: TokenScope, token: unknown, now = Date.now()): stri
   if (now - issued > TOKEN_MAX_AGE_MS || issued - now > 60_000) return EXPIRED;
   if (now - issued < TOKEN_MIN_AGE_MS) return 'That was quick. Please check your report and send it again.';
   // Each token is good for one try.
-  if (!consume(nonce, issued + TOKEN_MAX_AGE_MS)) return EXPIRED;
+  if (!await consume(nonce, issued + TOKEN_MAX_AGE_MS)) return EXPIRED;
   return undefined;
 }
 
@@ -125,7 +125,7 @@ const MAX_KEYS = 50_000;
 let lastSweep = 0;
 
 /** Forgets what no limit needs any more, and keeps memory bounded. */
-function sweep(now = Date.now(), force = false) {
+async function sweep(now = Date.now(), force = false) {
   if (!force && now - lastSweep < 60_000) return;
   lastSweep = now;
   for (const [k, ts] of hits) {
@@ -133,22 +133,22 @@ function sweep(now = Date.now(), force = false) {
     if (live.length) hits.set(k, live);
     else hits.delete(k);
   }
-  removeWhereAtMost('reportNonces', 'until', now);
+  await removeWhereAtMost('reportNonces', 'until', now);
   for (const [k, v] of sent) if (v.until <= now) sent.delete(k);
   for (const m of [hits, sent] as Map<string, unknown>[]) for (const k of m.keys()) if (m.size > MAX_KEYS) m.delete(k);
 }
 
 /** For tests: clears every limit, and what was remembered about past reports. */
-export function resetReportLimits() {
+export async function resetReportLimits() { return transaction(async () => {
   hits.clear();
   sent.clear();
   lastSweep = 0;
-  removeWhereAtMost('reportNonces', 'until', Number.MAX_SAFE_INTEGER);
-  for (const d of [0, 1]) remove('kv', dailyKey(Date.now() - d * DAY_MS));
-}
+  await removeWhereAtMost('reportNonces', 'until', Number.MAX_SAFE_INTEGER);
+  for (const d of [0, 1]) await remove('kv', dailyKey(Date.now() - d * DAY_MS));
+}); }
 /** For tests: how many visitors and tokens are remembered. */
-export const reportMemory = () => ({ visitors: [...hits.keys()].filter((k) => k.startsWith('v:')).length, attempts: [...hits.keys()].filter((k) => k.startsWith('a:')).length, tokens: list('reportNonces', 'nonce').length, sent: sent.size });
-export const sweepReportMemory = (now: number) => sweep(now, true);
+export const reportMemory = async () => ({ visitors: [...hits.keys()].filter((k) => k.startsWith('v:')).length, attempts: [...hits.keys()].filter((k) => k.startsWith('a:')).length, tokens: (await list('reportNonces', 'nonce')).length, sent: sent.size });
+export const sweepReportMemory = async (now: number) => await sweep(now, true);
 
 function visitorLimited(who: string, now: number): boolean {
   const key = `v:${who}`;
@@ -174,15 +174,15 @@ interface DailyCounts {
 }
 const dailyKey = (now: number) => `public-report-counts:${new Date(now).toISOString().slice(0, 10)}`;
 /** Per ontology and overall, per day, stored so a restart doesn't reset them. */
-function dailyLimited(ontologyId: string, now: number): boolean {
-  const counts = get<DailyCounts>('kv', dailyKey(now)) ?? { id: dailyKey(now), all: 0, byOntology: {} };
+async function dailyLimited(ontologyId: string, now: number): Promise<boolean> { return transaction(async () => {
+  const counts = await get<DailyCounts>('kv', dailyKey(now)) ?? { id: dailyKey(now), all: 0, byOntology: {} };
   if (counts.all >= DAILY.all || (counts.byOntology[ontologyId] ?? 0) >= DAILY.ontology) return true;
   counts.all++;
   counts.byOntology[ontologyId] = (counts.byOntology[ontologyId] ?? 0) + 1;
-  put('kv', counts);
-  remove('kv', dailyKey(now - 2 * DAY_MS));
+  await put('kv', counts);
+  await remove('kv', dailyKey(now - 2 * DAY_MS));
   return false;
-}
+}); }
 
 /** A visitor, by network (an IPv6 /56, as the sign-in limits do) and pseudonymised with its own key. */
 const visitor = (req: Request) => crypto.createHmac('sha256', keyFor('visitor')!).update(ipKeyGenerator(clientIp(req))).digest('base64url').slice(0, 22);
@@ -275,7 +275,7 @@ function siteOrigin(req: Request) {
 async function findTerm(project: OntologyProject, version: string | undefined, iri: string): Promise<{ term: TermView; version: string } | undefined> {
   const ref = version ?? 'draft';
   if (ref !== 'draft' && !ontologyStore.versions(project).includes(ref)) return undefined;
-  if (isHeld(project, ref)) return undefined;
+  if (await isHeld(project, ref)) return undefined;
   try {
     const term = (await readOntology(project, ref, undefined)).term(iri);
     return term ? { term, version: ref } : undefined;
@@ -317,7 +317,7 @@ class ReportError extends Error {
 async function submit(req: Request, res: Response, project: OntologyProject) {
   const now = Date.now();
   // Before anything else, so posts that fail a check below are cleaned up after and limited too.
-  sweep(now);
+  await sweep(now);
   const who = visitor(req);
   if (attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
   const b = (req.body ?? {}) as Record<string, unknown>;
@@ -329,7 +329,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   const scope = { slug: project.slug, term: found.term.iri, version: found.version, session };
   const fields = { title: clean(b.title, REPORT_LIMITS.title), description: clean(b.description, REPORT_LIMITS.description + 1, true) };
   const fail = (status: number, error: string, field?: 'description') => ({ found, fields, status, error, field, token: reportToken(scope) });
-  const tokenError = tokenProblem(scope, b.token);
+  const tokenError = await tokenProblem(scope, b.token);
   if (tokenError) return fail(400, tokenError);
   // Bots fill every field; people never see this one.
   if (typeof b.website === 'string' && b.website.trim()) return { found, fields, status: 201, reference: `r-${crypto.randomBytes(6).toString('base64url')}` };
@@ -341,7 +341,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   const fingerprint = crypto.createHmac('sha256', keyFor('duplicate')!).update([session, project.id, found.version, found.term.iri, fields.description.toLowerCase().replace(/\s+/g, ' ')].join('\n')).digest('base64url');
   const before = sent.get(fingerprint);
   if (before) return { found, fields, status: 201, reference: before.reference };
-  if (dailyLimited(project.id, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
+  if (await dailyLimited(project.id, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
 
   const report: PublicReport = {
     id: newId('prp'),
@@ -353,7 +353,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
     description: fields.description,
     createdAt: clock.iso(),
   };
-  put('publicReports', report, project.id);
+  await put('publicReports', report, project.id);
   sent.set(fingerprint, { reference: report.id, until: now + DAY_MS });
   return { found, fields, status: 201, reference: report.id };
 }
@@ -366,8 +366,8 @@ export function reportRouter(): Router {
   const r = Router();
   const base = `${PUBLIC_BASE}/:slug/-/report`;
   if (!publicReportsEnabled()) console.warn(`[public] reports from the public page are off: set REPORT_SECRET (at least ${MIN_SECRET} characters, not the session secret) to turn them on`);
-  const project = (req: Request, res: Response) => {
-    const p = findProject(String(req.params.slug));
+  const project = async (req: Request, res: Response) => {
+    const p = await findProject(String(req.params.slug));
     if (!p) res.status(404).set('Cache-Control', 'no-store').type('text/plain').send('No such ontology');
     return p;
   };
@@ -379,7 +379,7 @@ export function reportRouter(): Router {
 
   r.get(`${base}/token`, async (req, res, next) => {
     try {
-      const p = project(req, res);
+      const p = await project(req, res);
       if (!p) return;
       res.set('Cache-Control', 'no-store');
       if (!publicReportsEnabled()) return void res.status(503).json({ error: UNAVAILABLE });
@@ -393,7 +393,7 @@ export function reportRouter(): Router {
 
   r.get(base, async (req, res, next) => {
     try {
-      const p = project(req, res);
+      const p = await project(req, res);
       if (!p) return;
       res.set('Cache-Control', 'no-store');
       const found = await term(req, p);
@@ -408,7 +408,7 @@ export function reportRouter(): Router {
 
   r.post(base, express.urlencoded({ extended: false, limit: '16kb' }), express.json({ limit: '16kb' }), async (req, res, next) => {
     try {
-      const p = project(req, res);
+      const p = await project(req, res);
       if (!p) return;
       res.set('Cache-Control', 'no-store');
       const json = wantsJson(req);
@@ -444,12 +444,12 @@ const CLAIM_STALE_MS = 2 * 60 * 1000;
 const claimedNow = (r: PublicReport, now: number) => !!r.claimedAt && now - r.claimedAt <= CLAIM_STALE_MS;
 
 /** What moderators see: the report without the claim's private token. */
-export const listPublicReports = (ontologyId: string) =>
-  list<PublicReport>('publicReports', ontologyId)
+export const listPublicReports = async (ontologyId: string) =>
+  (await list<PublicReport>('publicReports', ontologyId))
     .map(({ claimToken: _, ...r }) => r)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-export const getPublicReport = (ontologyId: string, id: string) => {
-  const r = get<PublicReport>('publicReports', id);
+export const getPublicReport = async (ontologyId: string, id: string) => {
+  const r = await get<PublicReport>('publicReports', id);
   return r && r.ontologyId === ontologyId ? r : undefined;
 };
 
@@ -466,12 +466,12 @@ export interface ReportClaim {
  * convertPublicReport). Undefined if the report is gone or someone else is
  * opening it right now.
  */
-export function claimPublicReport(ontologyId: string, id: string, now = Date.now()): ReportClaim | undefined {
-  return transaction(() => {
-    const report = getPublicReport(ontologyId, id);
+export async function claimPublicReport(ontologyId: string, id: string, now = Date.now()): Promise<ReportClaim | undefined> {
+  return await transaction(async () => {
+    const report = await getPublicReport(ontologyId, id);
     if (!report || claimedNow(report, now)) return undefined;
     const token = crypto.randomUUID();
-    put('publicReports', { ...report, claimedAt: now, claimToken: token }, report.ontologyId);
+    await put('publicReports', { ...report, claimedAt: now, claimToken: token }, report.ontologyId);
     return { report: { ...report, claimedAt: undefined, claimToken: undefined }, token };
   });
 }
@@ -482,17 +482,17 @@ export function claimPublicReport(ontologyId: string, id: string, now = Date.now
  * this claim still holds it, so a request whose claim was taken over (or a
  * report dismissed meanwhile) saves nothing. One report, one change request.
  */
-export function convertPublicReport(c: ReportClaim) {
-  const now = get<PublicReport>('publicReports', c.report.id);
+export async function convertPublicReport(c: ReportClaim) { return transaction(async () => {
+  const now = await get<PublicReport>('publicReports', c.report.id);
   if (!now || now.claimToken !== c.token) throw new HttpError(409, 'This report was reviewed by someone else while you were opening it');
-  remove('publicReports', c.report.id);
-}
+  await remove('publicReports', c.report.id);
+}); }
 
 /** Puts a claimed report back in the queue when opening it failed, unless someone else holds it by now. */
-export function releasePublicReport(c: ReportClaim) {
-  transaction(() => {
-    const now = get<PublicReport>('publicReports', c.report.id);
-    if (now?.claimToken === c.token) put('publicReports', { ...now, claimedAt: undefined, claimToken: undefined }, now.ontologyId);
+export async function releasePublicReport(c: ReportClaim) {
+  await transaction(async () => {
+    const now = await get<PublicReport>('publicReports', c.report.id);
+    if (now?.claimToken === c.token) await put('publicReports', { ...now, claimedAt: undefined, claimToken: undefined }, now.ontologyId);
   });
 }
 
@@ -501,15 +501,15 @@ export function releasePublicReport(c: ReportClaim) {
  * a conflict, and the report becomes their change request. True if it was
  * dismissed, false if it was already gone.
  */
-export function dismissPublicReport(ontologyId: string, id: string, now = Date.now()): boolean {
-  return transaction(() => {
-    const report = getPublicReport(ontologyId, id);
+export async function dismissPublicReport(ontologyId: string, id: string, now = Date.now()): Promise<boolean> {
+  return await transaction(async () => {
+    const report = await getPublicReport(ontologyId, id);
     if (!report) return false;
     if (claimedNow(report, now)) throw new HttpError(409, 'Someone is opening this report as a change request right now');
-    remove('publicReports', id);
+    await remove('publicReports', id);
     return true;
   });
 }
 
 /** Removes a report outright: one whose change request already exists. */
-export const removePublicReport = (id: string) => remove('publicReports', id);
+export const removePublicReport = async (id: string) => await remove('publicReports', id);

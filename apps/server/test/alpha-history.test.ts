@@ -19,7 +19,7 @@ import { solid } from '../src/services/solid.js';
 
 const app = createApp();
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 afterEach(() => vi.restoreAllMocks());
@@ -117,9 +117,17 @@ describe('the first copy in a tester’s pod', () => {
     fs.writeFileSync(path.join(dir, '.testing.jsonld.concord-tmp'), 'old', { mode: 0o644 });
     fs.chmodSync(path.join(dir, '.testing.jsonld.concord-tmp'), 0o644);
     const modesAtWrite: number[] = [];
+    // Only writes to files in the tester's folder count: on PGlite the database writes its own files the same way.
+    const theirs = new Set<number>();
+    const open = fs.openSync.bind(fs);
+    vi.spyOn(fs, 'openSync').mockImplementation(((file: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (open as (...a: unknown[]) => number)(file, ...rest);
+      if (String(file).startsWith(dir)) theirs.add(fd);
+      return fd;
+    }) as typeof fs.openSync);
     const write = fs.writeSync.bind(fs);
     vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, ...rest: unknown[]) => {
-      modesAtWrite.push(fs.fstatSync(fd).mode & 0o777);
+      if (theirs.has(fd)) modesAtWrite.push(fs.fstatSync(fd).mode & 0o777);
       return (write as (...a: unknown[]) => number)(fd, ...rest);
     }) as typeof fs.writeSync);
     expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBeUndefined();
@@ -178,15 +186,15 @@ describe('feedback from a tester', () => {
   // Feedback used to be stored first, so a full or closed record answered 201 and the feedback never reached the record.
   it('is refused, and not stored, when the record already has its limit of versions', async () => {
     const u = await tester('full-versions');
-    put('kv', { id: `alpha-history:${u.id}`, versions: Array.from({ length: MAX_VERSIONS }, (_, i) => ({ version: `50.0.${i}`, firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds: [] })), rev: 1, mirroredRev: 1 });
-    const before = (await import('../src/services/feedback.js')).listFeedback().length;
+    await put('kv', { id: `alpha-history:${u.id}`, versions: Array.from({ length: MAX_VERSIONS }, (_, i) => ({ version: `50.0.${i}`, firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds: [] })), rev: 1, mirroredRev: 1 });
+    const before = (await (await import('../src/services/feedback.js')).listFeedback()).length;
     await expect(submitFeedback(u, { pathway: 'general', usedVoice: false, answers, transcript: [], appVersion: '0.8.0' })).rejects.toMatchObject({ status: 409 });
-    expect((await import('../src/services/feedback.js')).listFeedback()).toHaveLength(before);
+    expect(await (await import('../src/services/feedback.js')).listFeedback()).toHaveLength(before);
   });
 
   it('is refused, and not stored, when that version already has its limit of feedback', async () => {
     const u = await tester('full-feedback');
-    put('kv', { id: `alpha-history:${u.id}`, versions: [{ version: '0.8.0', firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds: Array.from({ length: MAX_FEEDBACK_PER_VERSION }, (_, i) => `fb_${i}`) }], rev: 1, mirroredRev: 1 });
+    await put('kv', { id: `alpha-history:${u.id}`, versions: [{ version: '0.8.0', firstAt: '2026-11-01T00:00:00Z', lastAt: '2026-11-01T00:00:00Z', feedbackIds: Array.from({ length: MAX_FEEDBACK_PER_VERSION }, (_, i) => `fb_${i}`) }], rev: 1, mirroredRev: 1 });
     await expect(submitFeedback(u, { pathway: 'general', usedVoice: false, answers, transcript: [], appVersion: '0.8.0' })).rejects.toMatchObject({ status: 409 });
   });
 
@@ -195,9 +203,9 @@ describe('feedback from a tester', () => {
     const into = await upsertFederatedUser({ provider: 'github', subject: 'moved-feedback-into', name: 'Moved into' });
     await recordVersion(demo, { version: '0.7.0' });
     await mergeTesterRecords(demo, into);
-    const before = (await import('../src/services/feedback.js')).listFeedback().length;
+    const before = (await (await import('../src/services/feedback.js')).listFeedback()).length;
     await expect(submitFeedback(demo, { pathway: 'general', usedVoice: false, answers, transcript: [] })).rejects.toMatchObject({ status: 409 });
-    expect((await import('../src/services/feedback.js')).listFeedback()).toHaveLength(before);
+    expect(await (await import('../src/services/feedback.js')).listFeedback()).toHaveLength(before);
   });
 
   it('is stored with its place in the record, and comes back over the API with a link to the pod copy', async () => {
@@ -220,13 +228,13 @@ describe('feedback sent while playing a persona', () => {
     expect((await agent.get('/api/alpha/me')).body.tester.id).toBe(demoId);
     const into = await upsertFederatedUser({ provider: 'github', subject: 'persona-move-into', name: 'Moved into' });
     const { getUser } = await import('../src/services/users.js');
-    await mergeTesterRecords(getUser(demoId)!, into);
+    await mergeTesterRecords((await getUser(demoId))!, into);
     const { listFeedback } = await import('../src/services/feedback.js');
-    const before = listFeedback().length;
+    const before = (await listFeedback()).length;
     const fb = await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] });
     expect(fb.status).toBe(409);
     expect(String(fb.headers['set-cookie'])).toMatch(/concord_tester=;/);
-    expect(listFeedback()).toHaveLength(before);
+    expect(await listFeedback()).toHaveLength(before);
     // With the stale cookie gone, the persona can send feedback as anyone signed out of a tester account would.
     expect((await agent.post('/api/feedback').send({ pathway: 'general', usedVoice: false, answers: { overall: 4 }, transcript: [] })).status).toBe(201);
   });
@@ -238,11 +246,11 @@ describe('moving a record', () => {
     const demo = await tester('half-moved');
     const into = await upsertFederatedUser({ provider: 'github', subject: 'half-moved-into', name: 'Half moved into' });
     await recordVersion(demo, { version: '0.7.0' });
-    put('kv', { ...get<{ id: string }>('kv', `alpha-history:${demo.id}`)!, movedTo: into.id });
-    const token = createSession(demo.id, 'demo');
-    expect(sessionUser(token)?.id).toBe(demo.id);
+    await put('kv', { ...(await get<{ id: string }>('kv', `alpha-history:${demo.id}`))!, movedTo: into.id });
+    const token = await createSession(demo.id, 'demo');
+    expect((await sessionUser(token))?.id).toBe(demo.id);
     await mergeTesterRecords(demo, into);
-    expect(sessionUser(token)).toBeUndefined();
+    expect(await sessionUser(token)).toBeUndefined();
   });
 });
 
