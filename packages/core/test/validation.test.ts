@@ -317,6 +317,16 @@ describe('SHACL validation against the derived shapes', () => {
     expect((await hasValue.validate(blankValue, [], { batched: false })).conforms).toBe(false);
   });
 
+  it('finds the instances of blank node classes when batching, as in one run', async () => {
+    const { graph, validator } = await setup();
+    const context = classHierarchy(graph);
+    const data = await parseData(`${P}@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . _:x a _:C . _:C rdfs:subClassOf _:D . _:D rdfs:subClassOf vol:VolunteeringOpportunity .`, 'turtle');
+    const whole = await validator.validate(data, context, { batched: false });
+    expect(whole.results.length).toBeGreaterThan(0);
+    expect(await validator.validate(data, context, { batchChars: 1 })).toEqual(whole);
+    expect(await validator.validate(data, context)).toEqual(whole);
+  });
+
   it('validates nested shapes in one run, as batches only hold the values’ types', async () => {
     const data = await parseData('@prefix ex: <https://e/> . ex:s a ex:T ; ex:p ex:v . ex:v ex:q "yes" .', 'turtle');
     const shapes = {

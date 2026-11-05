@@ -579,8 +579,10 @@ export class ShapesValidator {
     // Every subClassOf triple joins every batch: sh:targetClass and sh:class follow them.
     const hierarchy = all.filter((q) => q.predicate.value === SUB);
     const hierarchyNT = hierarchy.map(nt).join('\n');
+    // Classes by term (a class can be a blank node), and each class's superclasses.
+    const key = (t: Term) => `${t.termType}:${t.value}`;
     const supers = new Map<string, string[]>();
-    for (const q of hierarchy) supers.set(q.subject.value, [...(supers.get(q.subject.value) ?? []), q.object.value]);
+    for (const q of hierarchy) supers.set(key(q.subject as Term), [...(supers.get(key(q.subject as Term)) ?? []), key(q.object as Term)]);
     const closures = new Map<string, Set<string>>();
     const above = (cls: string) => {
       let seen = closures.get(cls);
@@ -591,7 +593,6 @@ export class ShapesValidator {
       closures.set(cls, seen);
       return seen;
     };
-    const key = (t: Term) => `${t.termType}:${t.value}`;
     const bySubject = new Map<string, Quad[]>();
     for (const q of all) {
       const k = key(q.subject as Term);
@@ -599,12 +600,14 @@ export class ShapesValidator {
       if (list) list.push(q);
       else bySubject.set(k, [q]);
     }
-    // Each focus node, in order, with the shapes that target it.
+    // Each focus node, in order, with the shapes that target it: instances of a target class
+    // through any chain of subclasses, named or blank.
     const focus = new Map<string, { node: Term; shapes: Set<string> }>();
     for (const q of all) {
-      if (q.predicate.value !== RDF_TYPE || q.object.termType !== 'NamedNode') continue;
-      for (const cls of above(q.object.value)) {
-        for (const shape of targets.get(cls) ?? []) {
+      if (q.predicate.value !== RDF_TYPE || q.object.termType === 'Literal') continue;
+      for (const cls of above(key(q.object as Term))) {
+        if (!cls.startsWith('NamedNode:')) continue;
+        for (const shape of targets.get(cls.slice('NamedNode:'.length)) ?? []) {
           const k = key(q.subject as Term);
           if (!focus.has(k)) focus.set(k, { node: q.subject as Term, shapes: new Set() });
           focus.get(k)!.shapes.add(shape);

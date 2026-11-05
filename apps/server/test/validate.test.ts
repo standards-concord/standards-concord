@@ -268,17 +268,32 @@ describe('POST to the ontology IRI validates data', () => {
     }
   });
 
-  it('never lets an IRI stand in for a blank node, or rewrites literals, in either report', async () => {
-    // An incomplete opportunity as a blank node, next to a complete one named with the prefix blank nodes once became.
-    const doc = `${PREFIXES}_:alice a vol:VolunteeringOpportunity ; vol:title "t"^^<urn:x-concord-blank:d> .
+  it('never lets an IRI stand in for a blank node', async () => {
+    // An incomplete opportunity as a blank node, next to a complete one named with the prefix blank nodes once
+    // became. Its only problems are the blank node's, so a merge would make it valid.
+    const doc = `${PREFIXES}_:alice a vol:VolunteeringOpportunity ; vol:title "t" .
 <urn:x-concord-blank:alice> a vol:VolunteeringOpportunity ; vol:title "t" ; vol:offeredBy ex:org ; vol:hasRole ex:role .
 ex:org a vol:Organisation ; vol:offersOpportunity <urn:x-concord-blank:alice> . ex:role a vol:Role .`;
     const json = await post('/def/volunteering', doc);
     expect([json.status, json.body.valid]).toEqual([200, false]);
-    expect(json.body.results.some((r: { focusNode: string }) => r.focusNode === '_:alice')).toBe(true);
+    expect(json.body.results.length).toBeGreaterThan(0);
+    expect(json.body.results.every((r: { focusNode: string }) => r.focusNode === '_:alice')).toBe(true);
+  });
+
+  it('finds instances of blank node classes', async () => {
+    const blankClass = await post('/def/volunteering', `${PREFIXES}@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n_:x a _:C . _:C rdfs:subClassOf vol:VolunteeringOpportunity .`);
+    expect([blankClass.status, blankClass.body.valid, blankClass.body.summary.violations]).toEqual([200, false, 2]);
+  });
+
+  it('reports a literal that mentions the blank node prefix exactly, in either report', async () => {
+    const doc = `${PREFIXES}ex:opp a vol:VolunteeringOpportunity ; vol:title "t"^^<urn:x-concord-blank:d> ; vol:offeredBy ex:org ; vol:hasRole ex:role .
+ex:org a vol:Organisation ; vol:offersOpportunity ex:opp . ex:role a vol:Role .`;
+    const json = await post('/def/volunteering', doc);
+    expect(json.body.results.map((r: { value?: string }) => r.value)).toContain('"t"^^<urn:x-concord-blank:d>');
     const ttl = await request(app).post('/def/volunteering').set('Content-Type', 'text/turtle').set('Accept', 'text/turtle').send(doc);
     expect(ttl.status).toBe(200);
-    expect(new Store(new Parser().parse(ttl.text)).getQuads(null, 'http://www.w3.org/ns/shacl#result', null, null).length).toBeGreaterThan(0);
+    const values = new Store(new Parser().parse(ttl.text)).getObjects(null, 'http://www.w3.org/ns/shacl#value', null);
+    expect(values.some((v) => v.termType === 'Literal' && (v as { datatype: { value: string } }).datatype.value === 'urn:x-concord-blank:d')).toBe(true);
   });
 
   it('lists at most 1,000 results and counts them all', async () => {
