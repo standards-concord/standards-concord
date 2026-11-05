@@ -4,13 +4,15 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../src/config.js';
 import { closeDb, get, openDb, put, remove, transaction } from '../src/db.js';
 import { readCommit, readObject, readTree, writeCommit, writeTree, type Person } from '../src/services/gitdb.js';
 import { enqueueGitHubPublish, githubPublishJob, runGitHubPublish, type GitHubPublishJob } from '../src/services/githubOutbox.js';
 import { publishToGitHub, PublishPaused, PublishRefused, releaseTag } from '../src/services/githubPublisher.js';
+import { createUseCase, withdrawUseCase } from '../src/services/useCases.js';
+import { createUser } from '../src/services/users.js';
 
 /**
  * Publishing from the database store to GitHub (githubPublisher.ts, githubOutbox.ts). GitHub here is a stand-in: a
@@ -32,14 +34,18 @@ afterAll(async () => {
 
 const ZERO = '0000000000000000000000000000000000000000';
 
-function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () => void; onWrite?: (n: number) => Promise<void> } = {}) {
+/**
+ * `beforeRefUpdate` runs as an updateRefs call arrives (someone else pushing, say); `dropRefUpdate` makes the stand-in
+ * hang up on it without answering, after applying it or not.
+ */
+function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () => void; dropRefUpdate?: () => 'applied' | 'not applied' | undefined; onWrite?: (n: number, path: string) => Promise<void> } = {}) {
   const bare = mkdtempSync(join(tmpdir(), 'standin-'));
   execFileSync('git', ['init', '-q', '--bare', bare]);
   let writes = 0;
   let posts = 0;
   const calls: string[] = [];
   const git = (args: string[], input?: string | Buffer, env: Record<string, string> = {}) =>
-    execFileSync('git', ['--git-dir', bare, ...args], { input, env: { ...process.env, ...env } }).toString().trim();
+    execFileSync('git', ['--git-dir', bare, ...args], { input, env: { ...process.env, ...env }, stdio: 'pipe' }).toString().trim();
   const sha = (ref: string) => {
     try {
       return git(['rev-parse', '-q', '--verify', ref]);
@@ -52,7 +58,7 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', async () => {
-      if (req.method !== 'GET') await opts.onWrite?.(++posts);
+      if (req.method !== 'GET') await opts.onWrite?.(++posts, req.url!);
       const send = (status: number, body: unknown, headers: Record<string, string> = {}) => {
         res.writeHead(status, { 'content-type': 'application/json', ...headers });
         res.end(JSON.stringify(body));
@@ -90,8 +96,11 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
           const updates: { name: string; beforeOid: string; afterOid: string }[] = body.variables.input.refUpdates;
           // All or none, each from exactly the value named (git's own atomic transaction).
           const input = updates.map((u) => `update ${u.name} ${u.afterOid} ${u.beforeOid === ZERO ? '' : u.beforeOid}\n`).join('');
+          const drop = opts.dropRefUpdate?.();
+          if (drop === 'not applied') return req.socket.destroy();
           try {
             git(['update-ref', '--stdin'], `start\n${input}prepare\ncommit\n`);
+            if (drop === 'applied') return req.socket.destroy();
           } catch (err) {
             return send(200, { data: { updateRefs: null }, errors: [{ message: `A ref moved: ${(err as Error).message.split('\n')[0]}` }] });
           }
@@ -117,6 +126,7 @@ function gitHubStandIn(opts: { writesBeforeLimit?: number; beforeRefUpdate?: () 
 }
 
 let n = 0;
+const uniqueSuffix = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const unlimited = { spend: async () => true, checkpoint: async () => undefined };
 
 /** A history in the database: drafts, two releases, and a fork merged back in. */
@@ -266,6 +276,124 @@ describe('GitHub publisher', () => {
   });
 });
 
+describe('GitHub publisher, when refs move under it', () => {
+  // r1 review of #83: each of these used to end in a retry that could undo another writer's push, or in success
+  // with a ref wrong.
+  const published = async (commit: string, releases: Release[]) => {
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    await publishToGitHub({ repo: 'example/pub', token: 't', commit, releases }, { ...unlimited, api });
+    return { gh, api };
+  };
+  /** A stand-in holding what `from` has, with its own options. */
+  const copyOf = async (from: ReturnType<typeof gitHubStandIn>, opts: Parameters<typeof gitHubStandIn>[0]) => {
+    const gh = gitHubStandIn(opts);
+    gh.git(['fetch', '-q', from.bare, '+refs/*:refs/*']);
+    return { gh, api: await gh.listen() };
+  };
+
+  it('stops, rather than trying again, when GitHub doesn’t answer the ref update and main is somewhere unexpected', async () => {
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    const removed = (await readCommit(r1)).parents[0];
+    let racing: ReturnType<typeof gitHubStandIn> | undefined;
+    const { gh, api } = await copyOf(first.gh, { beforeRefUpdate: () => racing!.git(['update-ref', 'refs/heads/main', removed]), dropRefUpdate: () => 'not applied' });
+    racing = gh;
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toBeInstanceOf(PublishRefused);
+      expect(gh.sha('refs/heads/main')).toBe(removed);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('tries again later when GitHub doesn’t answer the ref update and nothing moved, and finishes when it did take effect', async () => {
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    const { gh, api } = await copyOf(first.gh, { dropRefUpdate: () => 'not applied' });
+    const second = await copyOf(first.gh, { dropRefUpdate: () => 'applied' });
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toBeInstanceOf(PublishPaused);
+      expect(gh.sha('refs/heads/main')).toBe(r1);
+      expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api: second.api })).toMatchObject({ tags: 1 });
+      expect(second.gh.sha('refs/heads/main')).toBe(r2);
+    } finally {
+      gh.close();
+      second.gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('stops when someone moves main while it is saving partial progress, instead of pausing to undo them later', async () => {
+    const { r1, r2, releases } = await history();
+    const first = await published(r1, releases.slice(0, 1));
+    const removed = (await readCommit(r1)).parents[0];
+    let racing: ReturnType<typeof gitHubStandIn> | undefined;
+    const { gh, api } = await copyOf(first.gh, { beforeRefUpdate: () => racing!.git(['update-ref', 'refs/heads/main', removed]) });
+    racing = gh;
+    let budget = 8;
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: async () => budget-- > 0 })).rejects.toBeInstanceOf(PublishRefused);
+      expect(gh.sha('refs/heads/main')).toBe(removed);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('checks every ref the target needs, not only those it moves: main moved during a tags-only update stops it', async () => {
+    const { r1, r2, releases } = await history();
+    const first = await published(r2, releases.slice(0, 1));
+    let racing: ReturnType<typeof gitHubStandIn> | undefined;
+    const { gh, api } = await copyOf(first.gh, { beforeRefUpdate: () => racing!.git(['update-ref', 'refs/heads/main', r1]) });
+    racing = gh;
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toThrow(/refs\/heads\/main .* moved while Concord was publishing/);
+    } finally {
+      gh.close();
+      first.gh.close();
+    }
+  });
+
+  it('with nothing to send, still finds main isn’t where it should be', async () => {
+    const { r2, releases } = await history();
+    const { gh, api } = await published(r2, releases);
+    try {
+      gh.git(['update-ref', '-d', 'refs/tags/v1.0.0']);
+      // A missing tag is made again; a tag moved elsewhere is a conflict.
+      expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).toEqual({ commits: 0, tags: 1 });
+      gh.git(['update-ref', 'refs/tags/v2.0.0', releases[0].commit!]);
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).rejects.toThrow(/v2\.0\.0 .* another tag/);
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('keeps its progress when the writes run out at the tags, so the next run only makes the tags', async () => {
+    // r1 review of #83: the pause came after the commits but before main moved, so every run sent them all again.
+    const { r2, releases } = await history();
+    const count = gitHubStandIn();
+    const countApi = await count.listen();
+    await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases: [] }, { ...unlimited, api: countApi });
+    const objects = count.calls.filter((c) => /^POST \/git\/(blobs|trees|commits)$/.test(c)).length;
+    count.close();
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    // Every object, plus the write held for the ref update: none left for a tag.
+    let budget = objects + 1;
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: async () => budget-- > 0 })).rejects.toBeInstanceOf(PublishPaused);
+      expect(gh.sha('refs/heads/main')).toBe(r2);
+      gh.calls.length = 0;
+      expect(await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api })).toEqual({ commits: 0, tags: 2 });
+      expect(gh.calls.filter((c) => /^POST \/git\/(blobs|trees|commits)$/.test(c))).toEqual([]);
+    } finally {
+      gh.close();
+    }
+  });
+});
+
 describe('GitHub publishing outbox', () => {
   const token = config.github.publishToken;
   const withToken = async <T>(fn: () => Promise<T>) => {
@@ -347,6 +475,98 @@ describe('GitHub publishing outbox', () => {
       expect(posts).toHaveLength(7);
       expect((await githubPublishJob(project.id))!.status).toBe('done');
     } finally {
+      gh.close();
+    }
+  });
+
+  it('stops publishing for good when a use case is withdrawn before its release reached GitHub', async () => {
+    // r1 review of #83: a withdrawal left every check passing, so a paused or running job went on uploading.
+    const { project, releases } = await setUp();
+    const author = await createUser({ name: `Outbox author ${uniqueSuffix()}`, provider: 'github', subject: `outbox-${uniqueSuffix()}` });
+    const useCase = await createUseCase(project, author, { source: 'form', visibility: 'public', status: 'accepted', sections: { name: 'Withdrawn later' } });
+    const gh = gitHubStandIn({
+      onWrite: async (n) => {
+        if (n === 3) await withdrawUseCase(useCase, author);
+      },
+    });
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect(await githubPublishJob(project.id)).toMatchObject({ status: 'cancelled', reason: expect.stringMatching(/use case stopped being public/) });
+      // The write on its way when the withdrawal landed is the last that went.
+      expect(gh.calls.filter((c) => c.startsWith('POST'))).toHaveLength(3);
+      expect(gh.sha('refs/heads/main')).toBeUndefined();
+      // A newer release doesn't start it again: the history still holds what the release had.
+      gh.calls.length = 0;
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect((await githubPublishJob(project.id))!.status).toBe('cancelled');
+      expect(gh.calls).toEqual([]);
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('lets a withdrawal after everything reached GitHub block nothing', async () => {
+    const { project, releases } = await setUp();
+    const author = await createUser({ name: `Outbox author ${uniqueSuffix()}`, provider: 'github', subject: `outbox-${uniqueSuffix()}` });
+    const useCase = await createUseCase(project, author, { source: 'form', visibility: 'public', status: 'accepted', sections: { name: 'Withdrawn after' } });
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect((await githubPublishJob(project.id))!.status).toBe('done');
+      await withdrawUseCase(useCase, author);
+      expect(await get('kv', `github-publish-block:${project.id}`)).toBeUndefined();
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('gives the releases no link, and leaves the job alone, when its lease passed to another worker before it finished', async () => {
+    // r1 review of #83: the links were written before the lease was checked, by a worker that might have lost it.
+    const { project, releases } = await setUp();
+    const gh = gitHubStandIn({
+      onWrite: async (_n, path) => {
+        if (path !== '/graphql') return;
+        const job = (await githubPublishJob(project.id))!;
+        await put('kv', { ...job, lease: { token: 'another-worker', until: Date.now() + 60_000 } }, 'github-publish');
+      },
+    });
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect(await githubPublishJob(project.id)).toMatchObject({ status: 'pending', lease: { token: 'another-worker' } });
+      expect((await get<Release>('releases', releases[1].id))!.githubUrl).toBeUndefined();
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('counts each write against the hour it is made in', async () => {
+    // r1 review of #83: the hour was read once per run, so a run across the hour spent the last hour's allowance.
+    const { project, releases } = await setUp();
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2031-03-01T10:59:59.000Z') });
+    const gh = gitHubStandIn({
+      onWrite: async (n) => {
+        if (n === 4) vi.setSystemTime(new Date('2031-03-01T11:00:01.000Z'));
+      },
+    });
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      expect((await githubPublishJob(project.id))!.status).toBe('done');
+      const used = async (hour: string) => (await get<{ count: number }>('kv', `github-writes:${hour}`))?.count ?? 0;
+      // The first write also took one for the ref update, which then used it.
+      const posts = gh.calls.filter((c) => c.startsWith('POST')).length;
+      expect(await used('2031-03-01T10')).toBe(4 + 1);
+      expect(await used('2031-03-01T11')).toBe(posts - 4 - 1);
+    } finally {
+      vi.useRealTimers();
       gh.close();
     }
   });

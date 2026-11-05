@@ -12,7 +12,7 @@ import { hashObject, isAncestor, isoDate, readCommit, readObject, readTree, reac
  *
  * Object uploads are idempotent (an id is its content), and so are tag objects (a release's tagger time is its
  * publication time). Every write is first granted by `spend` (the first also takes one more, held for the ref
- * update, so main can always move to what was sent), and `checkpoint` runs every few writes (the caller renews its
+ * update, so main can always move to what was sent), and `checkpoint` runs before each write (the caller renews its
  * lease and checks publishing is still allowed there, throwing to stop). The outbox (githubOutbox.ts) owns the job;
  * this module only talks to GitHub.
  */
@@ -41,7 +41,7 @@ export interface PublishTarget {
 export interface PublishHooks {
   /** Grants one write (false: out of writes for now). */
   spend: () => Promise<boolean>;
-  /** Runs every `every` writes and before refs move; throws to stop. */
+  /** Runs before every `every` writes (default every one) and before refs move; throws to stop. */
   checkpoint: () => Promise<void>;
   every?: number;
   /** GitHub's REST API root (tests point it at a stand-in); GraphQL is at <api>/graphql. */
@@ -148,7 +148,7 @@ async function objectsIn(tree: string, trees: Map<string, TreeEntry[]>, into = n
  */
 export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks): Promise<{ commits: number; tags: number }> {
   const gh = client(target.repo, target.token, (hooks.api ?? 'https://api.github.com').replace(/\/$/, ''));
-  const every = hooks.every ?? 20;
+  const every = hooks.every ?? 1;
   let writes = 0;
   // The first write also takes one for a ref update, held so that main can always be moved to what was sent.
   let held = false;
@@ -187,36 +187,44 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
     if (res.status !== 200) throw refused('listing tags', res);
     return new Map((res.body ?? []).map((r) => [r.ref, r.object.sha]));
   };
-  let remote = await readMain();
+  const remote = await readMain();
   if (remote && remote !== target.commit && !((await readObject(remote))?.type === 'commit' && (await isAncestor(remote, target.commit))))
     throw new PublishRefused(`main on github.com/${target.repo} has commits Concord doesn't have (it is at ${remote}), so nothing was published.`);
 
-  /** Moves refs from exactly what was read to what they should be, all or none; then checks they are there. */
-  const moveRefs = async (updates: { name: string; before: string | undefined; after: string }[]) => {
-    if (!updates.length) return;
-    await hooks.checkpoint();
-    if (held) held = false;
-    else if (!(await hooks.spend())) throw outOfWrites();
-    writes++;
+  /**
+   * Moves refs from exactly what was read to what they should be, all or none, then reads every ref back: each one
+   * moved must be at its new value and every one in `keep` at its value. A ref at neither its old nor its new
+   * value was moved by someone else, which stops publishing; so does a refusal. Only an update GitHub didn't
+   * answer, with every ref still where it was read, is tried again later.
+   */
+  const moveRefs = async (updates: { name: string; before: string | undefined; after: string }[], keep: Map<string, string>) => {
     let answer: Awaited<ReturnType<typeof gh.graphql>> | undefined;
-    try {
-      answer = await gh.graphql(
-        'mutation ($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }',
-        { input: { repositoryId, refUpdates: updates.map((u) => ({ name: u.name, beforeOid: u.before ?? ZERO, afterOid: u.after })) } },
-      );
-    } catch (err) {
-      if (!(err instanceof PublishPaused)) throw err;
-      // Unknown whether it took effect: look.
+    if (updates.length) {
+      await hooks.checkpoint();
+      if (held) held = false;
+      else if (!(await hooks.spend())) throw outOfWrites();
+      writes++;
+      try {
+        answer = await gh.graphql(
+          'mutation ($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }',
+          { input: { repositoryId, refUpdates: updates.map((u) => ({ name: u.name, beforeOid: u.before ?? ZERO, afterOid: u.after })) } },
+        );
+      } catch (err) {
+        if (!(err instanceof PublishPaused)) throw err;
+        // Unknown whether it took effect: look.
+      }
     }
-    const ok = !!answer && answer.status === 200 && !answer.body.errors?.length;
     const main = await readMain();
     const tags = await readTags();
-    const there = updates.every((u) => (u.name === 'refs/heads/main' ? main : tags.get(u.name)) === u.after);
-    if (there) return;
-    if (!answer) throw new PublishPaused('GitHub didn’t confirm the ref update; publishing carries on later.');
+    const at = (name: string) => (name === 'refs/heads/main' ? main : tags.get(name));
+    const kept = [...keep].filter(([name, sha]) => at(name) !== sha).map(([name]) => name);
+    if (kept.length) throw new PublishRefused(`${kept.join(', ')} on github.com/${target.repo} moved while Concord was publishing, so publishing stopped.`);
+    if (updates.every((u) => at(u.name) === u.after)) return;
+    if (!answer && updates.every((u) => at(u.name) === u.before)) throw new PublishPaused('GitHub didn’t confirm the ref update; publishing carries on later.');
+    const ok = !!answer && answer.status === 200 && !answer.body.errors?.length;
     throw new PublishRefused(
-      ok
-        ? `GitHub accepted the ref update but the refs aren't where Concord put them, so publishing stopped.`
+      ok || !answer
+        ? `refs on github.com/${target.repo} aren't where Concord put them or left them, so publishing stopped.`
         : `GitHub refused to move the refs (${answer.body.errors?.map((e) => e.message).join('; ') || answer.status}): one moved since Concord read it, so nothing was overwritten.`,
     );
   };
@@ -227,6 +235,10 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
   for (let sha: string | undefined = target.commit; sha && sha !== remote; sha = (await readCommit(sha)).parents[0]) line.add(sha);
   let lastOnLine = remote;
   const trees = new Map<string, TreeEntry[]>();
+  const wanted = target.releases.map(releaseTag);
+  const madeTags: { name: string; sha: string }[] = [];
+  /** Tags already right on GitHub (read after the commits are sent), which must stay so. */
+  const tagsThere = new Map<string, string>();
   try {
     for (const c of commits) {
       const parentTree = c.parents[0] ? (await readCommit(c.parents[0])).tree : undefined;
@@ -252,33 +264,47 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
       await write(`commit ${c.sha}`, 'POST', '/git/commits', { message: c.message, tree: c.tree, parents: c.parents, author: asGitHubPerson(c.author), committer: asGitHubPerson(c.committer) }, c.sha);
       if (line.has(c.sha)) lastOnLine = c.sha;
     }
+
+    // Tag objects for releases GitHub has no tag for; a tag that names anything else is a conflict.
+    const have = await readTags();
+    for (const t of wanted) {
+      const at = have.get(`refs/tags/${t.name}`);
+      if (at === t.sha) {
+        tagsThere.set(`refs/tags/${t.name}`, t.sha);
+        continue;
+      }
+      if (at) throw new PublishRefused(`${t.name} on github.com/${target.repo} is another tag (${at}) than the one Concord made, so it was left as it is.`);
+      const r = target.releases.find((x) => `v${x.version}` === t.name)!;
+      await write(`tag ${t.name}`, 'POST', '/git/tags', { tag: t.name, message: t.message, object: r.commit, type: 'commit', tagger: asGitHubPerson(t.tagger) }, t.sha);
+      madeTags.push(t);
+    }
   } catch (err) {
-    // Keep what was sent: main moves forward, along the draft's own line, to the last commit sent in full.
-    if (err instanceof PublishPaused && lastOnLine && lastOnLine !== remote) {
+    // Keep what was sent: main moves forward, along the draft's own line, to the last commit sent in full, with the
+    // tags made so far (the write held for this pays for it). Only a pause is carried on later; a conflict found
+    // while moving them stops publishing instead.
+    if (err instanceof PublishPaused && ((lastOnLine && lastOnLine !== remote) || madeTags.length)) {
       try {
-        await moveRefs([{ name: 'refs/heads/main', before: remote, after: lastOnLine }]);
-      } catch {
-        /* the next run sends again what it must */
+        await moveRefs(
+          [
+            ...(lastOnLine && lastOnLine !== remote ? [{ name: 'refs/heads/main', before: remote, after: lastOnLine }] : []),
+            ...madeTags.map((t) => ({ name: `refs/tags/${t.name}`, before: undefined, after: t.sha })),
+          ],
+          tagsThere,
+        );
+      } catch (moveErr) {
+        if (!(moveErr instanceof PublishPaused)) throw moveErr;
       }
     }
     throw err;
   }
 
-  // Tag objects for releases GitHub has no tag for; a tag that names anything else is a conflict.
-  const have = await readTags();
-  const newTags: { name: string; sha: string }[] = [];
-  for (const r of target.releases) {
-    const t = releaseTag(r);
-    const at = have.get(`refs/tags/${t.name}`);
-    if (at === t.sha) continue;
-    if (at) throw new PublishRefused(`${t.name} on github.com/${target.repo} is another tag (${at}) than the one Concord made, so it was left as it is.`);
-    await write(`tag ${t.name}`, 'POST', '/git/tags', { tag: t.name, message: t.message, object: r.commit, type: 'commit', tagger: asGitHubPerson(t.tagger) }, t.sha);
-    newTags.push(t);
-  }
-  await moveRefs([
-    ...(remote === target.commit ? [] : [{ name: 'refs/heads/main', before: remote, after: target.commit }]),
-    ...newTags.map((t) => ({ name: `refs/tags/${t.name}`, before: undefined, after: t.sha })),
-  ]);
-  remote = target.commit;
-  return { commits: commits.length, tags: newTags.length };
+  // main and the new tags together; then every ref the target needs is checked, not only those that moved.
+  await moveRefs(
+    [
+      ...(remote === target.commit ? [] : [{ name: 'refs/heads/main', before: remote, after: target.commit }]),
+      ...madeTags.map((t) => ({ name: `refs/tags/${t.name}`, before: undefined, after: t.sha })),
+    ],
+    new Map([...(remote === target.commit ? [['refs/heads/main', target.commit] as [string, string]] : []), ...tagsThere]),
+  );
+  return { commits: commits.length, tags: madeTags.length };
 }

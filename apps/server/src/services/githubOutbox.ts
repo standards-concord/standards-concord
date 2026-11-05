@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { OntologyProject, Release } from '@concord/shared';
+import type { OntologyProject, Release, UseCase } from '@concord/shared';
 import { config } from '../config.js';
 import { get, list, put, reserveCounters, transaction } from '../db.js';
 import { anyHeld, historyApproved } from '../public/holds.js';
 import { isAncestor } from './gitdb.js';
 import { publishToGitHub, PublishPaused, PublishRefused } from './githubPublisher.js';
+import { onNoLongerPublic } from './useCases.js';
 
 /**
  * Publishing to GitHub from the database store, as an outbox: a release records that its ontology should be
@@ -15,9 +16,16 @@ import { publishToGitHub, PublishPaused, PublishRefused } from './githubPublishe
  *   commit forward (the draft only moves forward, so the new target descends from the old).
  * - A worker takes the job's lease (a token and an expiry, set in a transaction), and renews it at every checkpoint;
  *   every write it makes to the job is conditional on still holding it. GitHub is never called in a transaction.
- * - At every checkpoint, before any upload and every few writes, it checks again that publishing is allowed: the
- *   ontology still publishes to the same repository, the token is still set, nothing is held for a steward's
- *   approval, and the history was made under the approval rules. If not, the job is cancelled.
+ * - At every checkpoint, before each write, it checks again that publishing is allowed: the ontology still publishes
+ *   to the same repository, the token is still set, nothing is held for a steward's approval, the history was made
+ *   under the approval rules, and no use case stopped being public while some of its history wasn't on GitHub yet.
+ *   If not, the job is cancelled.
+ * - A use case withdrawn (or made non-public) while a published release isn't on GitHub yet blocks publishing that
+ *   ontology for good: the release's files (its use cases, its notes) were written with the use case's consent then,
+ *   and history can't change. The block is recorded in the withdrawal's own transaction; a write already on its way
+ *   to GitHub then is the only one that still goes (each write is checked first). Once a job is done every release
+ *   is on GitHub, and a release made later is prepared under the consent lock without the use case, so a
+ *   withdrawal then blocks nothing (as with the git store, what was already on GitHub can't be recalled).
  * - Writes are counted against an hourly budget shared by every worker and ontology (one token), and GitHub's own
  *   rate limits set when to try again. Something publishing again won't fix quarantines the job, with its reason,
  *   until a newer release (or an operator) starts it again; other ontologies carry on.
@@ -44,6 +52,7 @@ export interface GitHubPublishJob {
 
 export const OUTBOX = 'github-publish';
 const jobId = (ontologyId: string) => `github-publish:${ontologyId}`;
+const blockId = (ontologyId: string) => `github-publish-block:${ontologyId}`;
 export const LEASE_MS = 2 * 60_000;
 /** Most writes per hour for the publish token, across all ontologies (GitHub allows about 500 content writes an hour). */
 export const WRITES_PER_HOUR = Number(process.env.GITHUB_PUBLISH_WRITES_PER_HOUR ?? 400);
@@ -76,10 +85,28 @@ export async function enqueueGitHubPublish(project: OntologyProject, release: Pi
   );
 }
 
+interface PublishBlock {
+  id: string;
+  ontologyId: string;
+  useCaseId: string;
+  reason: string;
+}
+
+// Runs in the transaction that makes the use case non-public, so the block exists exactly when the withdrawal does.
+onNoLongerPublic(async (u: UseCase) => {
+  const [job, project] = await Promise.all([get<GitHubPublishJob>('kv', jobId(u.ontologyId)), get<OntologyProject>('ontologies', u.ontologyId)]);
+  const allSent = job?.status === 'done' && job.repo === project?.github?.repo;
+  if (allSent || (await get<PublishBlock>('kv', blockId(u.ontologyId)))) return;
+  if (!(await list<Release>('releases', u.ontologyId)).some((r) => r.status === 'published')) return;
+  await put<PublishBlock>('kv', { id: blockId(u.ontologyId), ontologyId: u.ontologyId, useCaseId: u.id, reason: 'a use case stopped being public before its history was all on GitHub' }, OUTBOX);
+});
+
 /** Why publishing isn't allowed right now, or undefined if it is. */
 async function notAllowed(job: GitHubPublishJob): Promise<string | undefined> {
   const project = await get<OntologyProject>('ontologies', job.ontologyId);
   if (!project) return 'the ontology no longer exists';
+  const block = await get<PublishBlock>('kv', blockId(job.ontologyId));
+  if (block) return block.reason;
   if (project.github?.repo !== job.repo) return `the ontology no longer publishes to ${job.repo}`;
   if (!config.github.publishToken) return 'no GitHub publish token is set';
   if (await anyHeld(project)) return 'a version is waiting for a steward’s approval';
@@ -87,12 +114,12 @@ async function notAllowed(job: GitHubPublishJob): Promise<string | undefined> {
   return undefined;
 }
 
-/** Changes the job only while `token` still holds its lease. False if it doesn't. */
-async function whileHeld(id: string, token: string, change: (job: GitHubPublishJob) => GitHubPublishJob | undefined): Promise<boolean> {
+/** Changes the job (and anything else `change` writes) only while `token` holds an unexpired lease. False if not. */
+async function whileHeld(id: string, token: string, change: (job: GitHubPublishJob) => GitHubPublishJob | undefined | Promise<GitHubPublishJob | undefined>): Promise<boolean> {
   return await transaction(async () => {
     const job = await get<GitHubPublishJob>('kv', id);
-    if (!job || job.lease?.token !== token) return false;
-    const next = change(job);
+    if (!job || job.lease?.token !== token || job.lease.until <= Date.now()) return false;
+    const next = await change(job);
     if (next) await put('kv', { ...next, updatedAt: new Date().toISOString() }, OUTBOX);
     return true;
   });
@@ -147,18 +174,19 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
     for (const r of await list<Release>('releases', job.ontologyId))
       if (r.status === 'published' && r.commit && r.publishedAt && (r.commit === job.commit || (await isAncestor(r.commit, job.commit)))) releases.push(r);
     releases.sort((a, b) => a.version.localeCompare(b.version));
-    const hour = new Date().toISOString().slice(0, 13);
-    await publishToGitHub(
-      { repo: job.repo, token: config.github.publishToken!, commit: job.commit, releases },
-      { api: opts.api ?? config.github.publishApi, every: opts.every, checkpoint, spend: async () => await reserveCounters([{ id: `github-writes:${hour}`, max: WRITES_PER_HOUR }], OUTBOX) },
-    );
-    // Done: give each release its link (on the release as it is now), then close the job unless a newer target came.
-    for (const releaseId of job.releaseIds)
-      await transaction(async () => {
+    // Each write counts against the hour it is made in.
+    const spend = async () => await reserveCounters([{ id: `github-writes:${new Date().toISOString().slice(0, 13)}`, max: WRITES_PER_HOUR }], OUTBOX);
+    await publishToGitHub({ repo: job.repo, token: config.github.publishToken!, commit: job.commit, releases }, { api: opts.api ?? config.github.publishApi, every: opts.every, checkpoint, spend });
+    // Done: in one transaction, and only while this worker still holds the job, give each release its link (on the
+    // release as it is now) and close the job, unless a newer target came.
+    const closed = await whileHeld(id, token, async (j) => {
+      for (const releaseId of job.releaseIds) {
         const r = await get<Release>('releases', releaseId);
         if (r?.status === 'published' && !r.githubUrl) await put('releases', { ...r, githubUrl: `https://github.com/${job.repo}/releases/tag/v${r.version}` }, r.ontologyId);
-      });
-    await whileHeld(id, token, (j) => (j.seq === job.seq ? { ...j, status: 'done', reason: undefined, notBefore: undefined, lease: undefined, releaseIds: [] } : { ...j, releaseIds: j.releaseIds.filter((r) => !job.releaseIds.includes(r)), lease: undefined }));
+      }
+      return j.seq === job.seq ? { ...j, status: 'done', reason: undefined, notBefore: undefined, lease: undefined, releaseIds: [] } : { ...j, releaseIds: j.releaseIds.filter((r) => !job.releaseIds.includes(r)), lease: undefined };
+    });
+    if (!closed) throw new LeaseLost('another worker took over this job');
   } catch (err) {
     if (err instanceof LeaseLost) return;
     if (err instanceof PublishPaused) await stop('pending', err.message, err.notBefore);
