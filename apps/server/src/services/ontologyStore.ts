@@ -687,30 +687,28 @@ export const ontologyStore = {
   },
 
   /**
-   * At start-up: finishes or undoes a wipe that a crash interrupted. If the
-   * repositories were moved aside but the database still has its ontologies
-   * (the crash came before the transaction committed), they are moved back;
-   * any other leftover (the wipe committed) is deleted.
+   * At start-up: undoes a wipe that a crash interrupted before its
+   * transaction committed. That case is unambiguous only when there is exactly
+   * one moved-aside folder, no repositories folder, and the database still
+   * has its ontologies: then the folder is moved back. Anything else is left
+   * where it is, with a warning, for someone to look at; nothing is deleted.
    */
   recoverWipe(): void {
     const repos = path.join(config.dataDir, 'ontologies');
     let trash: string[];
     try {
-      trash = fs
-        .readdirSync(config.dataDir)
-        .filter((name) => name.startsWith('.ontologies-deleted-'))
-        .map((name) => path.join(config.dataDir, name))
-        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+      trash = fs.readdirSync(config.dataDir).filter((name) => name.startsWith('.ontologies-deleted-'));
     } catch {
       return;
     }
-    for (const dir of trash) {
-      assertStoreHeld();
-      if (!fs.existsSync(repos) && list('ontologies').length) {
-        fs.renameSync(dir, repos);
-        console.warn(`[git] restored the repositories from an interrupted reset (${path.basename(dir)})`);
-      } else fs.rmSync(dir, { recursive: true, force: true });
+    if (!trash.length) return;
+    assertStoreHeld();
+    if (trash.length === 1 && !fs.existsSync(repos) && list('ontologies').length) {
+      fs.renameSync(path.join(config.dataDir, trash[0]), repos);
+      console.warn(`[git] restored the repositories from an interrupted reset (${trash[0]})`);
+      return;
     }
+    console.warn(`[git] left ${trash.join(', ')} in ${config.dataDir}: repositories moved aside by a reset that may have finished. Delete them once you have checked nothing in them is needed.`);
   },
 
   push(project: OntologyProject, remoteUrl: string) {

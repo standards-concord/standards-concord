@@ -1694,25 +1694,44 @@ describe('inline term edits', () => {
     }
   });
 
-  it('puts back the repositories a crash left moved aside mid-reset, and deletes what a finished reset left', async () => {
+  it('puts back the repositories a crash left moved aside mid-reset, and never deletes or guesses otherwise', async () => {
     const { ontologyStore, project, raw } = await repo();
+    const { list, put, remove } = await import('../src/db.js');
     const fs = await import('node:fs');
     const path = await import('node:path');
     const { config } = await import('../src/config.js');
     const repos = path.dirname(raw);
     const text = ontologyStore.readWorkingText(project);
+    const aside = (name: string) => path.join(config.dataDir, `.ontologies-deleted-${name}`);
     // The crash came after the move but before the transaction committed: the rows are back, the repositories aren't.
-    const stranded = path.join(config.dataDir, '.ontologies-deleted-crashed');
-    fs.renameSync(repos, stranded);
+    fs.renameSync(repos, aside('crashed'));
     ontologyStore.recoverWipe();
-    expect(fs.existsSync(stranded)).toBe(false);
+    expect(fs.existsSync(aside('crashed'))).toBe(false);
     expect(ontologyStore.readWorkingText(project)).toBe(text);
-    // Left over from a reset that committed (the repositories are there): deleted.
-    const leftover = path.join(config.dataDir, '.ontologies-deleted-finished');
-    fs.mkdirSync(path.join(leftover, 'old'), { recursive: true });
+
+    // The reset committed (no ontologies left in the database): nothing is moved back, and nothing deleted.
+    const rows = list<{ id: string }>('ontologies');
+    fs.renameSync(repos, aside('committed'));
+    for (const r of rows) remove('ontologies', r.id);
+    try {
+      ontologyStore.recoverWipe();
+      expect(fs.existsSync(repos)).toBe(false);
+      expect(fs.existsSync(aside('committed'))).toBe(true);
+    } finally {
+      for (const r of rows) put('ontologies', r);
+    }
+    // Several left aside: which one is the draft's is a guess, so none is moved back or deleted.
+    fs.mkdirSync(path.join(aside('older'), 'old'), { recursive: true });
     ontologyStore.recoverWipe();
-    expect(fs.existsSync(leftover)).toBe(false);
+    expect(fs.existsSync(repos)).toBe(false);
+    expect(fs.existsSync(aside('committed'))).toBe(true);
+    expect(fs.existsSync(aside('older'))).toBe(true);
+    // A leftover beside the repositories is left alone too.
+    fs.renameSync(aside('committed'), repos);
+    ontologyStore.recoverWipe();
+    expect(fs.existsSync(aside('older'))).toBe(true);
     expect(ontologyStore.readWorkingText(project)).toBe(text);
+    fs.rmSync(aside('older'), { recursive: true, force: true });
   });
 
   it('keeps the server’s hold on the repositories through a demo reset', async () => {
