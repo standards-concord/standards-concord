@@ -135,6 +135,7 @@ Each fix has a test that fails without it.
 | Bug | Fix | Test |
 | --- | --- | --- |
 | Modal dialogs had no accessible name, so screen readers announced just "dialog" | Dialogs are labelled by their title | every `getByRole('dialog', { name })` in change-requests, governance-flow, meeting-transcripts, browse-basics |
+| The hourly feedback triage sent `"possibleDuplicateOf": null` for "no duplicate" and the server refused it with a 400; the routine never retries with different content, so the summary would never be triaged (found checking the live site) | null means no duplicate; other non-numbers are still refused | API test (the triage routine has no UI): `feedbackIssues.test.ts` "takes a null possibleDuplicateOf to mean no duplicate" |
 | A reviewer's comment showed twice in the Discussion tab | Timeline copies of comments are skipped | change-requests: "a contributor can comment…" |
 | Policy switches (auto-merge, vote, lazy consensus) and the new-owner picker had no names | Named per level, e.g. "Auto-merge (minor)" | governance-flow |
 | Role and filter chips only showed "on" with colour and a tick | Chips expose `aria-pressed` | governance-flow |
