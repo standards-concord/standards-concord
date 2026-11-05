@@ -8,7 +8,7 @@ import {
   stampRelease,
 } from '@concord/core';
 import type { ChangeLevel, OutputFormat } from '@concord/core/types';
-import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
+import type { ChangeRequest, GovernanceEvaluation, OntologyProject, Release, ReleaseApprovalSource, ReleaseDetail, User, Vote } from '@concord/shared';
 import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
@@ -61,7 +61,8 @@ async function pendingChanges(ontologyId: string) {
     .sort((a, b) => a.number - b.number);
 }
 
-export async function releaseGovernance(r: Release) {
+/** Evaluate a release against today's policy. `until` leaves out votes cast after that time (a decision already made). */
+export async function releaseGovernance(r: Release, until?: string) {
   const project = await getProject(r.ontologyId);
   return evaluate({
     policy: project.governance,
@@ -72,11 +73,24 @@ export async function releaseGovernance(r: Release) {
     reviewStartedAt: r.statusSince,
     authorId: r.createdBy,
     reviews: [],
-    votes: await list<Vote>('votes', r.id),
+    votes: (await list<Vote>('votes', r.id)).filter((v) => !until || v.at <= until),
     members: await members(r.ontologyId),
     validationOk: true,
     now: clock.now(),
   });
+}
+
+/** A decided release shows the evaluation recorded at the time; only open releases are evaluated live. */
+export async function releaseApproval(r: Release): Promise<{ governance: GovernanceEvaluation; approvalSource: ReleaseApprovalSource }> {
+  const decided = r.status === 'published' || r.status === 'rejected';
+  if (!decided) return { governance: await releaseGovernance(r), approvalSource: 'live' };
+  if (r.approval) return { governance: r.approval, approvalSource: 'recorded' };
+  // No record: re-evaluate with today's policy, but only with the votes cast before the decision.
+  const decidedAt = r.status === 'published' ? (r.publishedAt ?? r.statusSince) : r.statusSince;
+  const governance = await releaseGovernance(r, decidedAt);
+  // Releases are only drafted from merged changes, so a published release with none is the set-up release.
+  if (r.status === 'published' && !r.changeRequestIds.length) return { governance, approvalSource: 'bootstrap' };
+  return { governance, approvalSource: 'current-policy' };
 }
 
 /**
@@ -95,7 +109,7 @@ export async function releaseDetail(r: Release, viewer?: User): Promise<ReleaseD
   return {
     ...await releaseForViewer(r, viewer),
     votes: await list<Vote>('votes', r.id),
-    governance: await releaseGovernance(r),
+    ...(await releaseApproval(r)),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
   };
 }
@@ -199,7 +213,11 @@ export async function advanceRelease(stale: Release): Promise<Release> {
   // Decided and written in one transaction, from the stored release and its votes as they are now.
   const r = await transaction(async () => {
     const now = await mustGet<Release>('releases', stale.id);
-    if (now.status !== 'voting' || (await releaseGovernance(now)).outcome !== 'rejected') return now;
+    if (now.status !== 'voting') return now;
+    const g = await releaseGovernance(now);
+    if (g.outcome !== 'rejected') return now;
+    // Recorded with the rejection: the decision exactly as it was made, in this transaction.
+    now.approval = g;
     now.status = 'rejected';
     now.statusSince = clock.iso();
     await save(now);
@@ -213,12 +231,16 @@ export async function advanceRelease(stale: Release): Promise<Release> {
 /** What a published release is made from: if any of it changes while publishing, the files would no longer match. */
 const releaseSnapshot = (r: Release) => JSON.stringify([r.status, r.version, r.level, r.notes, r.versionIRI, r.changeRequestIds]);
 
-/** Can this release be published now? (approved vote, or no vote needed) */
-async function publishable(r: Release) {
-  if (r.status === 'draft') return { ok: true, why: '' };
-  if (r.status !== 'voting') return { ok: false, why: `Release is ${r.status}` };
-  const g = await releaseGovernance(r);
-  return g.outcome === 'approved' ? { ok: true, why: '' } : { ok: false, why: g.unmet.join('; ') || g.next };
+/**
+ * Can this release be published now? (approved vote, or no vote needed). The evaluation that decides it is
+ * read in one transaction (policy, votes and members from the same moment) and returned, so the approval
+ * recorded on the release is exactly the one that allowed it, never a later re-read.
+ */
+async function publishable(r: Release): Promise<{ ok: boolean; why: string; approval: GovernanceEvaluation }> {
+  const approval = await transaction(() => releaseGovernance(r));
+  if (r.status === 'draft') return { ok: true, why: '', approval };
+  if (r.status !== 'voting') return { ok: false, why: `Release is ${r.status}`, approval };
+  return approval.outcome === 'approved' ? { ok: true, why: '', approval } : { ok: false, why: approval.unmet.join('; ') || approval.next, approval };
 }
 
 export async function publishRelease(r: Release, actor: User | undefined): Promise<Release> {
@@ -296,12 +318,13 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     const latest = await mustGet<Release>('releases', r.id);
     if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
     if (releaseSnapshot(latest) !== snapshot) throw new HttpError(409, 'The release changed while it was being published, so it was not published. Try again.');
+    // This check, in the transaction that publishes, is the approval recorded on the release.
     const now = await publishable(latest);
     if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
     // Made from a working draft still waiting for approval: it waits too. The draft is the one this
     // release was made from (advanceTo checks), so whether it's held now is whether this release is.
     await holdReleaseIfDraftHeld(project, r.version);
-    Object.assign(r, latest, { notes: publishedNotes, commit, status: 'published', publishedAt, statusSince: publishedAt });
+    Object.assign(r, latest, { approval: now.approval, notes: publishedNotes, commit, status: 'published', publishedAt, statusSince: publishedAt });
     await save(r);
     // Also closes the use cases each change addressed (markReleased syncs them).
     for (const id of r.changeRequestIds) await markReleased(id, r.id, r.version, publishedAt);

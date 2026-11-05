@@ -15,12 +15,12 @@ const parse = (r: unknown) => JSON.parse((r as Text).content[0].text);
 test('a personal token lets an agent use every tool, and revoking it cuts the agent off', async ({ page, baseURL, request }) => {
   const demo = await demoOntology(request);
   await signIn(page, { name: `Agent owner ${uniq()}`, role: 'editor' });
-  await page.goto('/settings#tokens');
+  await page.goto('/connect#tokens');
   await settle(page);
   const name = `CI agent ${uniq()}`;
   await page.getByRole('textbox', { name: 'Token name' }).fill(name);
   await page.getByRole('button', { name: 'Create token' }).click();
-  await expect(page.getByText('Copy your token now — it won’t be shown again.')).toBeVisible();
+  await expect(page.getByText(`Copy “${name}” now. It won’t be shown again.`)).toBeVisible();
   const token = (await page.locator('#tokens code').first().innerText()).trim();
   expect(token.length).toBeGreaterThan(20);
   const row = page.locator('#tokens li').filter({ hasText: name });
@@ -72,7 +72,7 @@ test('a personal token lets an agent use every tool, and revoking it cuts the ag
     await expect(page.getByText('e2e-ci-agent').or(page.getByText(name)).first()).toBeVisible();
 
     // The token now shows when it was last used.
-    await page.goto('/settings#tokens');
+    await page.goto('/connect#tokens');
     await expect(page.locator('#tokens li').filter({ hasText: name })).toContainText('last used');
   } finally {
     await client.close();
@@ -80,7 +80,7 @@ test('a personal token lets an agent use every tool, and revoking it cuts the ag
 
   // Revoked, the token no longer works.
   page.once('dialog', (d) => void d.accept());
-  await page.locator('#tokens li').filter({ hasText: name }).getByRole('button', { name: 'Revoke' }).click();
+  await page.locator('#tokens li').filter({ hasText: name }).getByRole('button', { name: `Revoke ${name}` }).click();
   await expect(page.locator('#tokens li').filter({ hasText: name })).toHaveCount(0);
   const r = await request.post('/mcp', {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },

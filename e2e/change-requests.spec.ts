@@ -153,8 +153,8 @@ test.describe('change requests', () => {
     await page.goto(url);
     await actions(page).getByRole('button', { name: 'Approve' }).click();
     // Her approval is recorded, but she is told it doesn't count towards the threshold.
-    await expect(actions(page).getByText(/Your approval is recorded but only .* approvals count/)).toBeVisible();
     await expect(actions(page).getByText('You previously chose “approve”.')).toBeVisible();
+    await expect(actions(page).getByText(/Your approval is recorded but only .* approvals count/)).toBeVisible();
     await actions(page).getByRole('textbox').fill('Coordinators call these "slots".');
     await actions(page).getByRole('button', { name: 'Comment' }).click();
     await page.getByRole('tab', { name: /^Discussion/ }).click();

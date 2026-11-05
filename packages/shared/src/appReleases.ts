@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.24.0',
+    version: '0.25.0',
     date: '2026-11-05',
     title: 'Edit a term where you read it',
     pr: 28,
@@ -76,6 +76,42 @@ export const APP_RELEASES: AppRelease[] = [
           'A change request or release that two people act on at once is now handled one at a time, so a merge can’t be lost, applied twice, or go out without the approval it was checked against.',
         roles: ['steward'],
         to: '{o}/changes',
+      },
+    ],
+  },
+  {
+    version: '0.24.0',
+    date: '2026-11-05',
+    title: 'Each role sees what it needs, and agents live in one place',
+    pr: 37,
+    changes: [
+      {
+        id: 'role-based-views',
+        type: 'feat',
+        title: 'Your role in brackets, and a nav that fits it',
+        detail:
+          'The account button shows the role you’re trying Concord as. Governance appears in the ontology nav for stewards, owners and ODI oversight; everyone else gets “Show all sections”, and the policy is summarised where you review and vote.',
+        roles: [],
+        to: '{o}',
+        ask: 'Did the sections you saw fit the role you picked, and could you find the governance rules when you needed them?',
+      },
+      {
+        id: 'connect-agent-hub',
+        type: 'feat',
+        title: 'Connect an agent, connected agents and tokens on one page',
+        detail:
+          'The account menu has one “Connect an agent” item. Its page sets up an app and, once you’re signed in, lists the agents you’ve connected and your personal tokens. Appearance has its own page, and the WebID and pod are folded away on Profile.',
+        roles: ['agent'],
+        to: '/connect',
+      },
+      {
+        id: 'release-approval-record',
+        type: 'feat',
+        title: 'Releases keep a record of how they were approved',
+        detail:
+          'A published or rejected release shows the rules, approvals and vote as they stood when it was decided, and says why a rejected one failed. Changing the policy later no longer rewrites that history.',
+        roles: ['steward', 'member', 'odi'],
+        to: '{o}/releases',
       },
     ],
   },

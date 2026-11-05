@@ -7,7 +7,7 @@ import { Plus, X } from 'lucide-react';
 import { api, ApiError } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { CR_STATUS_LABEL, LevelBadge } from './badges';
-import { ruleSummary } from '../pages/ontology/Governance';
+import { ruleSummary } from './PolicyRules';
 import { useOntology } from '../pages/ontology/Layout';
 import { Button, Field, InlineError, Input, Textarea, cx } from './ui';
 
@@ -219,7 +219,7 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
         <h2 className="text-lg font-semibold">Edit “{termLabel}”</h2>
         <p className="mt-1 text-sm text-muted">
           Your edit is proposed as a change request; the published ontology and the working draft stay as they are until it is approved and merged.
-          {patchRule && <> Wording changes are patch changes here: {ruleSummary(patchRule)}.</>}
+          {patchRule && <> Wording changes are patch changes here: {ruleSummary(patchRule, 'patch', ontology.governance)}.</>}
         </p>
       </div>
 
@@ -304,7 +304,7 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
       {(removesKeyText.length > 0 || (rewordsDefinition && intent === 'new-meaning')) && (
         <p className="rounded-md bg-warn-soft px-3 py-2 text-sm">
           {removesKeyText.length > 0 ? `Removing the ${removesKeyText.join(' and ')} of an existing term` : 'Changing what a term means'} is a <LevelBadge level="major" className="mx-0.5" /> change, so it needs the stricter sign-off
-          {ontology.governance?.changes?.major && <>: {ruleSummary(ontology.governance.changes.major)}</>}.
+          {ontology.governance?.changes?.major && <>: {ruleSummary(ontology.governance.changes.major, 'major', ontology.governance)}</>}.
         </p>
       )}
 

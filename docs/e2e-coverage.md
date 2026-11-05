@@ -15,12 +15,13 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/alpha` | Guided walkthrough: welcome, pick a role, tasks per role, simulate the others, feedback; floating panel | ✅ | alpha |
 | `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out. Opt-in public summary posted as a GitHub issue exactly as previewed, then withdrawn. Who can read your feedback (the admins, their WebIDs, Anthropic when Claude runs the interview, OpenAI when the server transcribes); a signed-in tester's copy lands in their pod, shared read-only with the admin WebIDs and closed to everyone else | ✅ | feedback, feedback-issues (against a GitHub stand-in), webid-signin; solid-signin |
 | `/privacy` | Read the privacy policy signed out or in; reached from the sign-in card and the footer; deletion contact is a mail link | ✅ | privacy |
-| `/connect` | Pick an app, install links and commands, copy buttons; every app shows its own logo, same size, visible in light and dark mode | ✅ | connect |
+| `/connect` | Pick an app (arrow keys), install links and commands, copy buttons; signed in: connected agents (disconnect) and personal tokens (create, save, revoke); signed out: sign in and come back ; every app shows its own logo, same size, visible in light and dark mode | ✅ | connect, agents, oauth |
+| `/appearance` | Pick a visual style; works signed out | ✅ | looks |
 | `/oauth/authorize` | Consent: sign in, allow, decline; refuses script and plain-http redirects, background approval, stale links | ✅ | oauth |
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
-| `/settings` | Profile and WebID, pod, sign-in providers, connected agents (disconnect), personal tokens (create, revoke), appearance | ✅ | account, agents, oauth, looks |
+| `/settings` (Profile) | Profile, ways to sign in, WebID and pod folded away; old `#agents`, `#tokens`, `#appearance` links redirect to /connect and /appearance | ✅ | account, app, connect |
 | `/admin/feedback` | Read and summarise tester feedback (platform admins only); an admin signed in with their WebID reads testers' feedback straight from their pods as that WebID (per browser session; ends on sign-out) | 🟡 | security (refusal for non-admins); solid-signin (the pod reader, with a real Community Solid Server, and a non-admin WebID refused). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests, including the list of public summaries waiting for a decision and its actions (pick the issue, check again, post again, confirm a withdrawal) in `apps/server/test/feedbackIssues.test.ts`. The triage routine's endpoints are API-only and covered there too |
-| `/o/:id` overview | Lifecycle bubble, health chip, lint, reasoner (and its in-browser re-check), FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment, reasoner |
+| `/o/:id` overview | Lifecycle bubble, health chip, lint, reasoner (and its in-browser re-check), FAIR and competency questions, members, policy link, recent activity; `#health` focus while loading; popups on very short screens | ✅ | ia, disclosure, alignment, reasoner, roles |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
@@ -35,8 +36,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/changes` | Filter by scope and status, new change request, report a bug, reports from the public page (editors and up) | ✅ | change-requests, ia, public-page |
 | `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure; 🔜 #17 (app checks, autopilot) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
-| `/o/:id/releases/:id` | Notes, included changes, publish; approval details | ✅ | governance-flow, ia, public-page |
-| `/o/:id/governance` | Summary, edit and save the policy, templates, members and roles, transfer ownership | ✅ | governance-flow, ia |
+| `/o/:id/releases/:id` | Notes, included changes, publish; live approval while open; read-only approval record once published or rejected, labelled recorded or checked against today’s policy | ✅ | governance-flow, ia, public-page, release-history, roles |
+| `/o/:id/governance` | Summary, edit and save the policy (owners only), templates, members and roles, transfer ownership | ✅ | governance-flow, ia, roles |
 | `/o/:id/agents` | Agent reports, analysis collapsed | ✅ | agents, connect |
 | `*` | Not found | ✅ | app |
 
@@ -64,7 +65,9 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Reviewer (Mei, Gareth) | Approve, report bugs, report problems with terms | | change-requests, browse-basics |
 | Steward / owner (Priya, or a new creator) | Create ontology, edit and save the policy, add and remove members, change roles, merge, draft and publish releases, transfer ownership | | governance-flow, change-requests |
 | Voting member (Gareth, once given the role) | Vote, change a vote | Contributors can't vote | governance-flow |
-| ODI (Daniel) | | | ❌ no flow yet exercises ODI veto or final say through the UI (policy summary only, in ia) |
+| Steward without ownership | Sees Governance and Manage members | Edit policy hidden; policy PUT is 403 | roles |
+| ODI (Daniel) | Sees Governance in the nav | | ❌ no flow yet exercises ODI veto or final say through the UI (policy summary only, in ia); nav in roles |
+| Every demo tester role | Account button shows the role in brackets; nav shows that role's sections, with "Show all sections" for the rest | Governance hidden from the nav (not locked) for roles other than owner, steward and ODI | roles |
 | Platform admin | | Non-admins can't read feedback, and the menu hides it | security |
 | Agent (token or OAuth) | Every MCP tool | Revoked or missing token | agents, oauth |
 

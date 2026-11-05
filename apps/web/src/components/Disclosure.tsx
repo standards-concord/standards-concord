@@ -7,8 +7,12 @@ import { cx } from './ui';
  * the detail one click away, so nothing is removed but less is on screen at once.
  */
 
-/** Opens when `defaultOpen` turns true later (e.g. new failures arrive) or when `openKey` changes to a new truthy value (e.g. a link to this section is followed again). */
-function useOpenState(defaultOpen: boolean, openKey: unknown) {
+/**
+ * Opens when `defaultOpen` turns true later (e.g. new failures arrive), when `openKey` changes to a new truthy
+ * value (e.g. a link to this section is followed again), or when `failures` gains an entry it didn't have
+ * before, even if the person closed it while older failures were showing.
+ */
+function useOpenState(defaultOpen: boolean, openKey: unknown, failures?: string[]) {
   const [open, setOpen] = useState(defaultOpen);
   const prevDefault = useRef(defaultOpen);
   useEffect(() => {
@@ -18,6 +22,14 @@ function useOpenState(defaultOpen: boolean, openKey: unknown) {
   useEffect(() => {
     if (openKey !== undefined && openKey !== null && openKey !== false) setOpen(true);
   }, [openKey]);
+  const seen = useRef(new Set(failures ?? []));
+  const signature = (failures ?? []).join('\u0000');
+  useEffect(() => {
+    const now = failures ?? [];
+    if (now.some((f) => !seen.current.has(f))) setOpen(true);
+    seen.current = new Set(now);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
   return [open, setOpen] as const;
 }
 
@@ -45,7 +57,8 @@ export function Popover({
   panelClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [shift, setShift] = useState(0);
+  const [placement, setPlacement] = useState<'top' | 'bottom' | 'screen'>('bottom');
+  const above = placement === 'top';
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -71,27 +84,85 @@ export function Popover({
     };
   }, [open]);
 
-  // Keep the panel inside the viewport, and move focus into it so keyboard users land on its content.
+  // Keep the panel inside the viewport: nudge it sideways, open it upwards when there's more room above
+  // (e.g. a trigger near the bottom of a short screen), and cap its height to the room it has.
+  // The offset and height cap are written straight to the panel, never through React state: every
+  // placement clears them to measure, so they must be put back every time, even when the values
+  // haven't changed (a width-only resize), which a state update would skip.
   useLayoutEffect(() => {
     if (!open) {
-      setShift(0);
+      setPlacement('bottom');
       return;
     }
+    // While the panel fills the screen, the page behind it doesn't scroll, so the panel can't be scrolled away.
+    let unlock: (() => void) | undefined;
+    const lockScroll = () => {
+      if (unlock) return;
+      const root = document.documentElement;
+      const prev = root.style.overflow;
+      root.style.overflow = 'hidden';
+      unlock = () => {
+        root.style.overflow = prev;
+        unlock = undefined;
+      };
+    };
     const place = () => {
       const panel = panelRef.current;
-      if (!panel) return;
-      panel.style.transform = '';
+      const button = buttonRef.current;
+      if (!panel || !button) return;
+      unlock?.();
+      for (const k of ['transform', 'position', 'top', 'bottom', 'left', 'right', 'marginTop', 'marginBottom', 'overscrollBehavior'] as const) panel.style[k] = '';
+      // Measure the panel's natural height: the stylesheet's own cap (100vh - 8rem) collapses to nothing on
+      // a very short screen and would make it look as if the panel fits. The inline cap set below replaces it.
+      panel.style.maxHeight = 'none';
       const r = panel.getBoundingClientRect();
+      const b = button.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
+      const vh = window.innerHeight;
       const margin = 8;
       let dx = 0;
       if (r.right > vw - margin) dx = vw - margin - r.right;
       if (r.left + dx < margin) dx = margin - r.left;
-      setShift(dx);
+      panel.style.transform = dx ? `translateX(${dx}px)` : '';
+      const gap = 8;
+      const below = vh - b.bottom - gap - margin;
+      const aboveRoom = b.top - gap - margin;
+      const up = r.height > below && aboveRoom > below;
+      const room = Math.floor(up ? aboveRoom : below);
+      const screen = vh - 2 * margin;
+      if (r.height > room && room < 120 && screen > room) {
+        // Too little room on either side of the trigger (a very short or zoomed screen): fill the viewport
+        // instead, fixed to it, so nothing ends up off screen and scrolling stays inside the panel.
+        Object.assign(panel.style, {
+          position: 'fixed',
+          top: `${margin}px`,
+          left: `${margin}px`,
+          bottom: 'auto',
+          right: 'auto',
+          marginTop: '0',
+          marginBottom: '0',
+          transform: '',
+          maxHeight: `${screen}px`,
+          overscrollBehavior: 'contain',
+        });
+        // An ancestor with a transform or backdrop filter makes "fixed" relative to itself: correct for it.
+        const f = panel.getBoundingClientRect();
+        if (Math.abs(f.top - margin) > 0.5) panel.style.top = `${2 * margin - f.top}px`;
+        if (Math.abs(f.left - margin) > 0.5) panel.style.left = `${2 * margin - f.left}px`;
+        lockScroll();
+        setPlacement('screen');
+        return;
+      }
+      setPlacement(up ? 'top' : 'bottom');
+      // Never taller than the room actually there; the panel scrolls inside.
+      panel.style.maxHeight = `min(32rem, ${Math.max(0, room)}px)`;
     };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    return () => {
+      window.removeEventListener('resize', place);
+      unlock?.();
+    };
   }, [open]);
   useEffect(() => {
     if (open) panelRef.current?.focus({ preventScroll: true });
@@ -127,9 +198,10 @@ export function Popover({
           aria-modal="false"
           aria-label={label}
           tabIndex={-1}
-          style={shift ? { transform: `translateX(${shift}px)` } : undefined}
+          data-placement={placement}
           className={cx(
-            'absolute z-40 mt-2 max-h-[min(32rem,calc(100vh-8rem))] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-line bg-surface p-4 text-sm shadow-xl outline-none',
+            'absolute z-40 max-h-[min(32rem,calc(100vh-8rem))] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto rounded-xl border border-line bg-surface p-4 text-sm shadow-xl outline-none',
+            above ? 'bottom-full mb-2' : 'mt-2',
             align === 'right' ? 'right-0' : 'left-0',
             panelClassName,
           )}
@@ -155,6 +227,7 @@ export function Disclosure({
   heading,
   className,
   tone,
+  failures,
 }: {
   title: ReactNode;
   /** Shown with the title, e.g. a count or a one-line verdict. */
@@ -172,8 +245,10 @@ export function Disclosure({
   heading?: HeadingLevel;
   className?: string;
   tone?: 'muted';
+  /** Identifiers of the current failures inside; a new one reopens the section. */
+  failures?: string[];
 }) {
-  const [open, setOpen] = useOpenState(defaultOpen, openKey);
+  const [open, setOpen] = useOpenState(defaultOpen, openKey, failures);
   const id = useId();
   const button = (
     <button
@@ -210,7 +285,10 @@ export function Disclosure({
   );
 }
 
-/** A card whose body is collapsed behind its header; the header can show a one-line summary. */
+/**
+ * A card whose body is collapsed behind its header. The toggle sits inside the heading (the accordion
+ * pattern); the subtitle and the closed-state summary sit outside it and describe the toggle.
+ */
 export function CollapsibleCard({
   title,
   subtitle,
@@ -221,6 +299,7 @@ export function CollapsibleCard({
   openKey,
   keepMounted,
   id,
+  level = 3,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -231,22 +310,38 @@ export function CollapsibleCard({
   openKey?: unknown;
   keepMounted?: boolean;
   id?: string;
+  /** Heading level, so cards follow the page's heading structure. */
+  level?: HeadingLevel;
 }) {
   const [open, setOpen] = useOpenState(defaultOpen, openKey);
   const bodyId = useId();
+  const descId = useId();
+  const H = `h${level}` as const;
+  const hasDesc = !!subtitle || (!!summary && !open);
   return (
     <section id={id} className="ui-card scroll-mt-20 rounded-xl border border-line bg-surface">
-      <button type="button" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen((o) => !o)} className="flex w-full items-start gap-3 px-5 py-4 text-left">
-        <div className="min-w-0 flex-1">
-          <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
-            {Icon && <Icon className="size-4 text-muted" />}
-            {title}
-          </h3>
-          {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
-          {summary && !open && <div className="mt-1.5 text-sm text-fg/85">{summary}</div>}
-        </div>
-        {open ? <ChevronDown className="mt-0.5 size-4 shrink-0 text-muted" /> : <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted" />}
-      </button>
+      <div className="px-5 py-4">
+        <H className="ui-card-title m-0 text-sm font-semibold">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={bodyId}
+            aria-describedby={hasDesc ? descId : undefined}
+            onClick={() => setOpen((o) => !o)}
+            className="flex w-full items-center gap-2 text-left"
+          >
+            {Icon && <Icon className="size-4 shrink-0 text-muted" />}
+            <span className="min-w-0 flex-1">{title}</span>
+            {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
+          </button>
+        </H>
+        {hasDesc && (
+          <div id={descId}>
+            {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
+            {summary && !open && <div className="mt-1.5 text-sm text-fg/85">{summary}</div>}
+          </div>
+        )}
+      </div>
       {(open || keepMounted) && (
         <div id={bodyId} className="border-t border-line" hidden={!open}>
           {children}
