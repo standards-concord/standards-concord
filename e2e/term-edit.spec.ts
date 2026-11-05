@@ -81,7 +81,7 @@ test.describe('editing a term inline', () => {
     await expect(notice).toContainText(/change request #\d+/);
     // Keyboard focus lands on the result.
     await expect(notice.getByRole('link', { name: /change request #/ })).toBeFocused();
-    await expect(notice).toContainText('patch');
+    await expect(notice).toContainText('Patch');
     await expect(notice).toContainText('In review');
     // The working draft is untouched until the change request is approved and merged.
     await expect(page.getByText(ORIGINAL_DEFINITION, { exact: true })).toBeVisible();
@@ -118,7 +118,7 @@ test.describe('editing a term inline', () => {
 
     const notice = page.getByRole('status').filter({ hasText: 'Saved as draft' });
     await expect(notice).toContainText(/change request #\d+/);
-    await expect(notice).toContainText('major');
+    await expect(notice).toContainText('Major');
     await expect(notice).toContainText('Submit it for review');
     await notice.getByRole('button', { name: 'Dismiss' }).click();
     await expect(notice).toHaveCount(0);
@@ -137,7 +137,7 @@ test.describe('editing a term inline', () => {
     await form.getByRole('button', { name: 'Save as draft' }).click();
 
     const notice = page.getByRole('status').filter({ hasText: 'Saved as draft' });
-    await expect(notice).toContainText('major');
+    await expect(notice).toContainText('Major');
     const res = await page.request.get(`/api/change-requests/${(await notice.getByRole('link').getAttribute('href'))!.split('/').pop()}`);
     const cr = await res.json();
     expect(cr.ops[0].set.examples).toEqual(['The community hall\non Station Road']);
