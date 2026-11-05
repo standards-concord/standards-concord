@@ -10,7 +10,7 @@ import { Page } from '../components/Shell';
  */
 
 /** Where people write to about their data. */
-export const PRIVACY_CONTACT = 'CONTACT_TBD@example.org';
+export const PRIVACY_CONTACT = 'jesse.wright@theodi.org';
 /** When the wording last changed (shown on the page). */
 export const PRIVACY_UPDATED = '5 November 2026';
 
