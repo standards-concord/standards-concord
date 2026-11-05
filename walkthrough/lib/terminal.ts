@@ -1,7 +1,9 @@
 /**
- * Drives stage/claude-web.html, Claude Code on the web. Every call is remembered, so when
- * a scene goes back to the browser and later returns to Claude Code, the session so far is
- * redrawn instantly and carries on: it looks like one continuous session.
+ * Drives the coding-agent stage: stage/claude-web.html (Claude Code on the web, for the
+ * tour) or stage/terminal.html (a plain terminal, for the features video's real commands).
+ * Both take the same calls; file() and connector() are drawn only by claude-web.html.
+ * Every call is remembered, so when a scene goes back to the browser and later returns,
+ * the session so far is redrawn instantly and carries on: it looks like one session.
  */
 import type { Director } from './director.ts';
 
@@ -30,8 +32,11 @@ export class Terminal {
     await this.d.page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
   }
 
-  /** Opens the terminal page and redraws the session so far. */
-  async open() {
+  /**
+   * Opens the terminal page and redraws the session so far. `disclosure` is the caption
+   * that says how what's on screen was made (the scripted agent session by default).
+   */
+  async open(disclosure = SCRIPTED) {
     await this.d.goto(this.url, { settle: false });
     await this.d.page.waitForFunction(() => !!(window as any).term);
     for (const op of this.history) {
@@ -43,7 +48,7 @@ export class Terminal {
     // Keyboard only in Claude Code: hide the pointer.
     await this.d.page.evaluate(() => (window as any).__wt?.cursorVisible(false));
     // Viewers of the video alone never see the README, so say it on screen.
-    await this.d.label(SCRIPTED);
+    await this.d.label(disclosure);
   }
 
   title(t: string) {

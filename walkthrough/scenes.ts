@@ -34,6 +34,8 @@ export interface Ctx {
   };
   /** Rewrites local URLs in text to the hub URL shown on screen. */
   shown: (text: string) => string;
+  /** The recorded hub's data directory, when we started it ourselves (its git repositories are under ontologies/). */
+  dataDir?: string;
   /** Things the video must say on screen about how it was made. */
   notices: { classesStandIn: boolean; publishing?: boolean };
   state: {
@@ -70,7 +72,7 @@ const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
 /** What each format view must contain for the narration about it to be true. */
 const FORMAT_MARKERS: Record<string, RegExp> = { turtle: /@prefix|owl:Class/, linkml: /classes:/, shacl: /sh:NodeShape/, shaclc: /\bshape\s+\S+\s*->/, typescript: /\bclass\s+\w+/ };
 
-async function apiJson(c: Ctx, p: string): Promise<any> {
+export async function apiJson(c: Ctx, p: string): Promise<any> {
   const res = await c.api.get(`${c.hub}${p}`);
   if (!res.ok()) {
     c.d.warn(`GET ${p}: HTTP ${res.status()}`);
@@ -110,7 +112,7 @@ async function gotoApp(c: Ctx, opts: { keepCard?: boolean } = {}) {
 }
 
 /** Shows a URL, or if we're already there (e.g. under a chapter card), reveals it. */
-async function show(c: Ctx, url: string) {
+export async function show(c: Ctx, url: string) {
   if (c.d.page.url() === url) await c.d.page.evaluate(() => (window as any).__wt?.hideChapter()).catch(() => {});
   else await c.d.goto(url);
   await c.d.clearHighlight();

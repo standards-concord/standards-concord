@@ -1,17 +1,18 @@
 # Narrated walkthrough videos
 
-Records two narrated videos of Concord as MP4s, each from an editable script:
+Records three narrated videos of Concord as MP4s, each from an editable script:
 
 - **The tour** ([narration.md](narration.md), `concord-walkthrough.*`): what Concord is for, how a standard grows into a release, and building an app on it with a coding agent.
 - **How to take part** ([feedback.md](feedback.md), `concord-feedback.*`): for alpha testers. The welcome page, the guided walkthrough, simulating the others, and how to give feedback. About three minutes.
+- **A closer look** ([features.md](features.md), `concord-features.*`): one change followed from a term's page through review, a git commit, a release tag and the standard's public address, then checking data against its SHACL shapes. About five minutes. Its actions are in [features.ts](features.ts); the git and `curl` shots are real, read-only commands run on the recorded hub's own repository and address, captioned as such, so those scenes need a hub the recorder started itself (`gitRepo`).
 
-Both are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)).
+The tour and the feedback video are embedded on the alpha landing page, `/welcome` (the link to send testers), which plays the latest GitHub release's copies (see [Releases](#releases)). The features video isn't on the page yet: record it with `--video features` (or the workflow's `video` input), and it lands in the run's artifact.
 
 The tour is about nine minutes with the developer story, about four without it (the intro states the estimated length of the scenes being recorded, and the run warns if the video is more than a minute and a half off). Runs are repeatable, not frame-identical. The same scenes play in the same order with the same words, the recorded hub's clock starts at a fixed moment and its ids come from a seeded sequence, but timings shift by fractions of a second and a re-voiced paragraph may not sound exactly the same. Re-run it after each release and the video shows that release.
 
 ```sh
-pnpm walkthrough                        # both videos, voice from the environment (see below)
-pnpm walkthrough --video feedback       # one video: tour or feedback
+pnpm walkthrough                        # all three videos, voice from the environment (see below)
+pnpm walkthrough --video feedback       # some videos: tour, feedback or features, comma-separated
 pnpm walkthrough --voice elevenlabs     # asks for ELEVENLABS_API_KEY without echoing it, if unset
 pnpm walkthrough --draft                # no voice: captions only, for checking pacing and visuals
 pnpm walkthrough --only intro,goals     # some scenes only (of the video that has them)
@@ -63,7 +64,7 @@ The script is written to be listened to, so the voice matters. In order of prefe
 
 | `--voice` | Service | Key | Notes |
 | --- | --- | --- | --- |
-| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording of both videos is about 8,000 characters, so re-voice only what changed. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
+| `elevenlabs` | ElevenLabs `eleven_multilingual_v2` | `ELEVENLABS_API_KEY` | **Recommended.** The most natural long-form narration, and it uses each paragraph's neighbours so clips flow into each other. Default voice "George", a warm British narrator; any voice id works with `--voice-id`. A full recording of the tour and feedback videos is about 8,000 characters, and the features video about 4,000 more, so re-voice only what changed. Audio is 128 kbps MP3 (`mp3_44100_128`), which every plan can produce; set `ELEVENLABS_OUTPUT_FORMAT=mp3_44100_192` on Creator or above. Only MP3 formats are accepted. A fixed seed makes re-voicing more repeatable, though not identical. |
 | `openai` | OpenAI `gpt-4o-mini-tts` | `OPENAI_API_KEY` | Very good, and steerable with a style brief (`DEFAULT_STYLE` in lib/tts.ts). Default voice `sage`. |
 | `google` | Google Cloud Chirp 3 HD | `GOOGLE_TTS_API_KEY`, or `GOOGLE_TTS_USE_GCLOUD=1` | Good, and cheapest. Default voice `en-GB-Chirp3-HD-Charon`. |
 | `say` | macOS `say` | none | Quick local drafts only. |
@@ -75,7 +76,7 @@ With no `--voice`, the first provider whose key is set is used, then `say` on a 
 
 ## What's real and what's scripted
 
-Everything in the hub is the real app, driven by Playwright. The sample app ([sample-app/](sample-app/)) is a real app whose code is edited on camera and reloaded. Claude Code (on the web) is a scripted replay drawn in [stage/claude-web.html](stage/claude-web.html): its words are fixed so each recording tells the same story, but every MCP tool result it shows comes from a real call to the Concord being recorded, and the edits it shows are applied to the app for real.
+Everything in the hub is the real app, driven by Playwright. The sample app ([sample-app/](sample-app/)) is a real app whose code is edited on camera and reloaded. Claude Code (on the web) is a scripted replay drawn in [stage/claude-web.html](stage/claude-web.html) (the features video runs real commands in the plain terminal of [stage/terminal.html](stage/terminal.html)): its words are fixed so each recording tells the same story, but every MCP tool result it shows comes from a real call to the Concord being recorded, and the edits it shows are applied to the app for real.
 
 The video says so itself. While the terminal is on screen a caption reads "Scripted demonstration: real Concord tool calls; prepared agent responses and code", and the narration says it out loud. The autopilot scene reports a passing CI run to Concord rather than running one, and is labelled "Simulated CI" on screen and in the narration.
 
@@ -97,7 +98,7 @@ Video frames are counted against the clock, so a slow encoder never shifts the t
 
 ## Releases
 
-[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records both videos when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in either video and nothing is uploaded.
+[.github/workflows/walkthrough.yml](../.github/workflows/walkthrough.yml) records the tour and the feedback video when a GitHub release is published (or on demand from the Actions tab) with `--publish`, and attaches each one's MP4, captions, transcript and chapters to the release. Only a clean run is attached: one failed step, stand-in, warning or outside request in either video and nothing is uploaded. Pick `features` for the workflow's `video` input to record the features video instead; it is kept in the run's artifact and never attached.
 
 - The welcome page (`/welcome`) plays the videos of the newest release that has them. The API server reads that release from GitHub (`MEDIA_REPO`, default `standards-concord/standards-concord`), downloads each file once per release into its data directory, and serves it from `/api/media/`, so captions and seeking work from Concord's own origin. Set `MEDIA_DIR` to serve a local folder instead, such as `walkthrough/out/` after a recording. Until a release has the videos, the page says they're on their way.
 

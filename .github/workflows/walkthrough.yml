@@ -3,7 +3,9 @@ name: Walkthrough video
 # Records the two narrated videos (walkthrough/README.md) for every published release, or
 # on demand, and attaches them to the release: the tour (concord-walkthrough.*) and how
 # alpha testers take part (concord-feedback.*). The /welcome page plays the copies from
-# the newest release that has them.
+# the newest release that has them. A third video, a closer look at the features
+# (concord-features.*), is recorded only when asked for with the `video` input; it lands in
+# the run's artifact rather than on a release.
 #
 # Release videos use `--publish`: every scene must run cleanly, with no stand-ins, no
 # warnings and no requests to outside hosts, or nothing is attached. Set the
@@ -36,6 +38,11 @@ on:
         description: Most new narration characters to send (empty uses VOICE_CHAR_BUDGET or 2500; 0 means no limit)
         type: string
         default: ''
+      video:
+        description: Which videos to record. Only tour,feedback (the pair /welcome plays) can be attached to a release.
+        type: choice
+        options: ['tour,feedback', tour, feedback, features]
+        default: 'tour,feedback'
       release:
         description: Release tag to attach the videos to, such as v0.17.0 (publish mode only; created from this commit if it doesn't exist; empty attaches nothing)
         type: string
@@ -111,9 +118,9 @@ jobs:
         if: steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-
+            walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-
             walkthrough-voice-${{ steps.voice.outputs.voice }}-
       - name: Restore narration from the last release
         if: steps.voice.outputs.ready == 'true'
@@ -143,11 +150,16 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GOOGLE_TTS_API_KEY: ${{ secrets.GOOGLE_TTS_API_KEY }}
           VOICE_CHAR_BUDGET: ${{ inputs.voice_budget || vars.VOICE_CHAR_BUDGET || '2500' }}
+          VIDEO: ${{ inputs.video || 'tour,feedback' }}
         run: |
+          case "$VIDEO" in
+            tour,feedback|tour|feedback|features) ;;
+            *) echo "::error::Unknown video '$VIDEO'"; exit 1 ;;
+          esac
           if [ "$MODE" = publish ]; then
-            pnpm walkthrough --publish --voice "$VOICE"
+            pnpm walkthrough --publish --voice "$VOICE" --video "$VIDEO"
           else
-            pnpm walkthrough --voice "$VOICE"
+            pnpm walkthrough --voice "$VOICE" --video "$VIDEO"
           fi
       - name: Keep the narration, even if the recording failed
         if: always() && steps.voice.outputs.ready == 'true'
@@ -158,7 +170,7 @@ jobs:
         if: always() && steps.voice.outputs.ready == 'true'
         with:
           path: walkthrough/.cache/voice
-          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: walkthrough-voice-${{ steps.voice.outputs.voice }}-${{ hashFiles('walkthrough/narration.md', 'walkthrough/feedback.md', 'walkthrough/features.md', 'walkthrough/lexicon.json', 'walkthrough/lib/tts.ts') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - uses: actions/upload-artifact@v4
         if: always() && steps.voice.outputs.ready == 'true'
@@ -177,7 +189,8 @@ jobs:
   # Only a clean --publish run reaches here; this is the one job that can write.
   attach:
     needs: record
-    if: needs.record.outputs.recorded == 'true' && (github.event_name == 'release' || (inputs.release != '' && inputs.mode == 'publish'))
+    # A release gets the pair the welcome page plays, so only a run that recorded both is attached.
+    if: needs.record.outputs.recorded == 'true' && (github.event_name == 'release' || (inputs.release != '' && inputs.mode == 'publish' && inputs.video == 'tour,feedback'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write

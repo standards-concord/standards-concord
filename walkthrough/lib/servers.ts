@@ -30,6 +30,8 @@ async function waitFor(url: string, ms: number, proc?: ChildProcess, log?: () =>
 export interface Concord {
   web: string;
   api: string;
+  /** The server's data directory: each ontology's git repository is under ontologies/<slug>. */
+  dataDir: string;
   stop(): void;
 }
 
@@ -84,7 +86,7 @@ export async function startConcord(opts: { apiPort: number; webPort: number; mod
     stop();
     throw e;
   }
-  return { web, api, stop };
+  return { web, api, dataDir, stop };
 }
 
 /** Serves the sample app (with {{PLACEHOLDERS}} filled in) and the stage pages. */
