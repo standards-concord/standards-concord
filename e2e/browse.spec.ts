@@ -770,6 +770,27 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await expect(d.getByRole('alert')).toHaveCount(0);
   });
 
+  test('transparent pixels never count as a loaded font', async ({ page }) => {
+    // A canvas that reads back transparent black (as when nothing was drawn): the font check must
+    // not mistake it for dark ink and save an image whose labels may still be blank.
+    await page.addInitScript(() => {
+      const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+      CanvasRenderingContext2D.prototype.getImageData = function (this: CanvasRenderingContext2D, ...a: Parameters<typeof getImageData>) {
+        const real = getImageData.apply(this, a);
+        return new ImageData(new Uint8ClampedArray(real.data.length), real.width, real.height);
+      } as typeof getImageData;
+    });
+    await stub(page, [cls('Owner'), cls('Pet')]);
+    await page.goto(`${base}?view=diagram&hops=0`);
+    const d = page.getByTestId('class-diagram');
+    await expect(d.locator('[data-node]')).toHaveCount(2);
+    let downloads = 0;
+    page.on('download', () => downloads++);
+    await d.getByRole('button', { name: 'Download as PNG' }).click();
+    await expect(d.getByRole('alert')).toContainText("fonts didn't load", { timeout: 15_000 });
+    expect(downloads).toBe(0);
+  });
+
   test('a PNG too large for the browser is saved smaller, and one it cannot make says so', async ({ page }) => {
     // A browser that can't allocate canvases above a given size (as large canvases fail on
     // memory-constrained devices), and then one that can't encode any PNG at all.
