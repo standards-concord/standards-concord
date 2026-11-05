@@ -167,7 +167,8 @@ export async function voteOnRelease(r: Release, actor: User, choice: Vote['choic
 
 export async function advanceRelease(r: Release): Promise<Release> {
   if (r.status !== 'voting') return r;
-  const g = await releaseGovernance(r);
+  // Policy, votes and members read together, so a recorded rejection is one consistent decision.
+  const g = await transaction(() => releaseGovernance(r));
   if (g.outcome === 'rejected') {
     r.approval = g;
     r.status = 'rejected';
@@ -180,18 +181,24 @@ export async function advanceRelease(r: Release): Promise<Release> {
   return r;
 }
 
-/** Can this release be published now? (approved vote, or no vote needed) */
-async function publishable(r: Release) {
-  if (r.status === 'draft') return { ok: true, why: '' };
-  if (r.status !== 'voting') return { ok: false, why: `Release is ${r.status}` };
-  const g = await releaseGovernance(r);
-  return g.outcome === 'approved' ? { ok: true, why: '' } : { ok: false, why: g.unmet.join('; ') || g.next };
+/**
+ * Can this release be published now? (approved vote, or no vote needed). The evaluation that decides it is
+ * read in one transaction (policy, votes and members from the same moment) and returned, so the approval
+ * recorded on the release is exactly the one that allowed it, never a later re-read.
+ */
+async function publishable(r: Release): Promise<{ ok: boolean; why: string; approval: GovernanceEvaluation }> {
+  const approval = await transaction(() => releaseGovernance(r));
+  if (r.status === 'draft') return { ok: true, why: '', approval };
+  if (r.status !== 'voting') return { ok: false, why: `Release is ${r.status}`, approval };
+  return approval.outcome === 'approved' ? { ok: true, why: '', approval } : { ok: false, why: approval.unmet.join('; ') || approval.next, approval };
 }
 
 export async function publishRelease(r: Release, actor: User | undefined): Promise<Release> {
   if (actor) await requireRole(r.ontologyId, actor, ['steward', 'owner'], 'publish releases');
   const can = await publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
+  // Recorded on the release once it's published: the decision as it stood when it was checked.
+  const approval = can.approval;
   const project = await getProject(r.ontologyId);
   // What this release captures: if the working draft changes before it's written, nothing is published.
   const capturedHead = ontologyStore.head(project);
@@ -238,8 +245,6 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
   }
 
   const author = actor ?? await getUser(r.createdBy);
-  // Record what the rules required at the moment of publishing, before the status changes.
-  const approval = await releaseGovernance(r);
   // Published commits carry no names.
   // Made from a working draft still waiting for approval: it waits too, from before its files exist, so the
   // public never sees it unheld. Recorded first because writeRelease's check below has to be synchronous.

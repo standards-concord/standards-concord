@@ -1,10 +1,11 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb, put } from '../src/db.js';
-import { members } from '../src/services/ontologies.js';
+import { getProject, members, updateProject } from '../src/services/ontologies.js';
+import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
-import { releaseApproval, releaseGovernance } from '../src/services/releases.js';
+import { publishRelease, releaseApproval, releaseGovernance } from '../src/services/releases.js';
 import type { Release, Vote } from '@concord/shared';
 
 const app = createApp();
@@ -424,6 +425,40 @@ describe('release approval provenance', () => {
       const { governance, approvalSource } = await releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
       expect(approvalSource).toBe('current-policy');
       expect(governance.vote).toMatchObject({ cast: 1, yes: 1, no: 0 });
+    }
+  });
+
+  it('records the approval that allowed publishing, even if the policy changes while the release is built', async () => {
+    // The snapshot used to be a second evaluation taken after the files were built, so a policy change in between
+    // was recorded as if it had applied (and might not even say "approved").
+    const project = await getProject(demoId);
+    const original = structuredClone(project.governance);
+    const now = new Date().toISOString();
+    const r: Release = {
+      id: 'rel_snapshot', ontologyId: demoId, version: '1.1.1', level: 'patch', status: 'draft', changeRequestIds: [],
+      notes: 'Snapshot test', versionIRI: `${project.ontologyIRI}/1.1.1`, createdBy: 'system', createdAt: now, statusSince: now,
+    };
+    await put('releases', r, demoId);
+    const before = await releaseGovernance(r);
+    const working = ontologyStore.working.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementationOnce(async (p) => {
+      const changed = await getProject(demoId);
+      changed.governance.releases.patch.minApprovals = before.requiredApprovals + 5;
+      changed.governance.releases.patch.reviewPeriodDays = 77;
+      await updateProject(changed);
+      return working(p);
+    });
+    try {
+      const published = await publishRelease(r, undefined);
+      expect(spy).toHaveBeenCalled();
+      expect(published.approval?.requiredApprovals).toBe(before.requiredApprovals);
+      expect(published.approval?.rule.reviewPeriodDays).toBe(before.rule.reviewPeriodDays);
+      expect((await releaseApproval(published)).approvalSource).toBe('recorded');
+    } finally {
+      spy.mockRestore();
+      const restored = await getProject(demoId);
+      restored.governance = original;
+      await updateProject(restored);
     }
   });
 });
