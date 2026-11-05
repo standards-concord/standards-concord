@@ -88,7 +88,7 @@ function ClientSteps({ client, url }: { client: ClientId; url: string }) {
           </Step>
           <Step n={2}>
             <p>
-              Open ChatGPT’s Plugins page, choose <em>+</em> then <em>Add custom MCP server</em>. Name it Concord, paste the URL, pick <em>OAuth</em> for authentication and create it.
+              Open ChatGPT’s Plugins page, choose <em>+</em> then <em>Add custom MCP server</em>. Name it Concord, paste the URL under <em>Connection</em>, pick <em>OAuth</em> for authentication, accept the warning and choose <em>Create as a plugin</em>.
             </p>
             <a href={CHATGPT_PLUGINS_URL} target="_blank" rel="noreferrer" className={cx(linkButton, 'bg-accent text-accent-fg shadow-sm hover:bg-accent-hover')} data-testid="open-chatgpt">
               Open ChatGPT <ExternalLink className="size-3.5" />
@@ -97,7 +97,16 @@ function ClientSteps({ client, url }: { client: ClientId; url: string }) {
               If you don’t see that option, look under Settings → Apps → Advanced, where some plans need <em>Developer mode</em> turned on first. In a Business or Enterprise workspace, an admin may have to allow custom MCP servers.
             </p>
           </Step>
-          <Step n={3}>{signIn}</Step>
+          <Step n={3}>
+            <p>
+              Open the new Concord plugin under your plugins and choose <em>Install</em>. When ChatGPT asks, sign in to Concord and click Allow.
+            </p>
+          </Step>
+          <Step n={4}>
+            <p>
+              In a chat, type <code className="font-mono">@</code> and pick <em>Concord</em>, then ask about the hub’s ontologies.
+            </p>
+          </Step>
         </ol>
       );
     case 'claude-code':
