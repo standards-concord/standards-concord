@@ -6,9 +6,10 @@ import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { list } from '../db.js';
+import { transaction, list } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
+import { releaseForViewer } from '../services/releases.js';
 import { holdLegacy, isHeld, readOntology } from './holds.js';
 import { publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
@@ -221,13 +222,13 @@ export async function pageInput(
     view: graph.view(),
     kind: isDraft ? 'draft' : 'release',
     version,
-    release: release && !isDraft ? { level: release.level, notes: release.notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
+    release: release && !isDraft ? { level: release.level, notes: (await releaseForViewer(release, undefined)).notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
     releases: releases.map((r) => ({ version: r.version, level: r.level, publishedAt: r.publishedAt, href: `${root}/${r.version}` })),
     latestVersion: latest,
     downloads,
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
-    requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
+    requirements: isDraft ? await publishedRequirements(project) : await requirementsFor(project, opts.requirements ?? requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
@@ -264,14 +265,16 @@ export async function releasePageFiles(
   project: OntologyProject,
   release: Release,
   graph: Awaited<ReturnType<typeof ontologyStore.at>>,
-  requirements: PublishedRequirements = releaseRequirements(project, release.version),
+  given?: PublishedRequirements,
 ): Promise<Record<string, string>> {
+  const requirements = given ?? await releaseRequirements(project, release.version);
   const html = renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph, requirements }));
   return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: snapshotFile(requirements) };
 }
 
 /** The public use cases and requirements to freeze into a release published now. */
-export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version);
+/** A release's public use cases and requirements: while it is being published its document is prepared but not yet frozen. */
+export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version, { releasing: true });
 export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
 
 /** Which renderer last wrote each ontology's release pages. Kept in the data directory, never in anything served. */
@@ -322,10 +325,11 @@ export async function refreshReleasePages(): Promise<void> {
         const snapshot = readSnapshot(project, release.version);
         let requirements: PublishedRequirements;
         let writeSnapshot = false;
-        if (snapshot.state === 'ok') requirements = snapshot.data;
+        // Rendered as served: without anything withdrawn since the snapshot was taken.
+        if (snapshot.state === 'ok') requirements = await requirementsFor(project, snapshot.data);
         else if (snapshot.state === 'corrupt') requirements = { useCases: [], snapshotMissing: true };
         else {
-          requirements = project.demo ? releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
+          requirements = project.demo ? await releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
           writeSnapshot = true;
         }
         const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
@@ -444,6 +448,8 @@ async function serve(req: Request, res: Response) {
   const graph = await readOntology(project, version, undefined);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');
+    // The page quotes use cases: revalidated on every request (the ETag keeps that cheap), so a withdrawn one never outlives withdrawal in a cache.
+    res.set('Cache-Control', 'no-cache');
     const input = await pageInput(project, version, base, { graph });
     res.type('html').send(renderOntologyPage(input));
     return;

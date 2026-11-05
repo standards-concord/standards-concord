@@ -811,20 +811,34 @@ describe('seventh review', () => {
     expect((await list<{ origin: { forkId?: string } }>('changeRequests', p.id)).filter((cr) => cr.origin.forkId === f.id)).toEqual([]);
   });
 
-  it('a merge from an out-of-date copy of a request changes nothing', async () => {
+  // Since #15 a merge works from the request as stored, never the copy it was handed: an out-of-date copy can't
+  // merge edits that were replaced since (they go back to review), and what is merged is what is stored.
+  it('a merge from an out-of-date copy of a request never merges what that copy says', async () => {
     const p = (await findProject('volunteering'))!;
     const { crId } = await proposeFrom('Stale merge', 'StaleMerge');
     await approve(crId);
     const stale = await getCR(crId);
-    // Someone saves an edit to the request after the merge read it.
-    const edited = await getCR(crId);
-    edited.title = 'Edited before the merge finished';
-    await saveChangeRequest(edited);
+    // Someone replaces the edits after the merge read the request: it goes back to review.
+    const owner = (await getUser(stale.authorId))!;
+    await updateOps(await getCR(crId), owner, { ops: [addClass('StaleReplacement', 'stale replacement')] });
     const head = ontologyStore.head(p);
-    await expect(merge(stale, undefined)).rejects.toThrow(/changed by someone else/);
+    await expect(merge(stale, undefined)).rejects.toThrow(/Only approved requests/);
     expect(ontologyStore.head(p)).toBe(head);
-    expect((await ontologyStore.working(p)).term(`${VOL}StaleMerge`)).toBeUndefined();
-    expect((await getCR(crId)).status).toBe('approved');
+    const working = await ontologyStore.working(p);
+    expect(working.term(`${VOL}StaleMerge`)).toBeUndefined();
+    expect(working.term(`${VOL}StaleReplacement`)).toBeUndefined();
+    expect((await getCR(crId)).status).toBe('review');
+    // A copy that is only behind on something else (its title) merges the request as stored.
+    const { crId: other } = await proposeFrom('Stale title', 'StaleTitle');
+    await approve(other);
+    const behind = await getCR(other);
+    const edited = await getCR(other);
+    edited.title = 'Edited before the merge';
+    await saveChangeRequest(edited);
+    const done = await merge(behind, undefined);
+    expect(done.status).toBe('merged');
+    expect(done.title).toBe('Edited before the merge');
+    expect((await getCR(other)).rev).toBe(done.rev);
   });
 
   it('while a merge holds a request, other saves are refused, and the merge records exactly what it committed', async () => {

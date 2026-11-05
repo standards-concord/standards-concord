@@ -15,9 +15,14 @@ test.describe('privacy review', () => {
   async function synthesised(page: import('@playwright/test').Page, name: string) {
     const interview = await (await page.request.post(`/api/ontologies/${demo.id}/interviews`, { data: {} })).json();
     const uc = await page.request.patch(`/api/use-cases/${interview.useCaseId}`, {
-      data: { status: 'ready', sections: { name }, terms: [{ label: `${name} record`, kind: 'class', definition: `A record kept for ${name}.` }] },
+      data: { sections: { name }, terms: [{ label: `${name} record`, kind: 'class', definition: `A record kept for ${name}.` }] },
     });
     expect(uc.ok(), await uc.text()).toBeTruthy();
+    // Interviews start private; changes are drafted only from public use cases sent for triage.
+    const shared = await page.request.post(`/api/use-cases/${interview.useCaseId}/visibility`, { data: { visibility: 'public' } });
+    expect(shared.ok(), await shared.text()).toBeTruthy();
+    const submitted = await page.request.post(`/api/use-cases/${interview.useCaseId}/submit`);
+    expect(submitted.ok(), await submitted.text()).toBeTruthy();
     const cr = await page.request.post(`/api/ontologies/${demo.id}/synthesise`, { data: { useCaseIds: [interview.useCaseId] } });
     expect(cr.ok(), await cr.text()).toBeTruthy();
     return (await cr.json()) as { id: string; ops: { op: string; localName?: string }[] };

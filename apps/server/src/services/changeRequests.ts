@@ -36,9 +36,11 @@ import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { evaluate } from './governance.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
+import { OWN_TEST, SOURCE_GONE, sourcesPublic, withConsentLock } from './useCases.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
+import { syncUseCasesForCR } from './traceability.js';
 import { createHash } from 'node:crypto';
 import { findSecrets, secretsOf } from './redact.js';
 import { reasonInWorker } from '../reasoner/pool.js';
@@ -93,13 +95,14 @@ export async function saveChangeRequest(cr: ChangeRequest, opts: { claimMerge?: 
 }
 const save = saveChangeRequest;
 
-function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) {
+async function setStatus(cr: ChangeRequest, status: ChangeRequestStatus, message: string, actorId?: string) { return transaction(async () => {
   if (cr.status === status) return;
   cr.status = status;
   cr.statusSince = clock.iso();
   if (status === 'review') cr.reviewStartedAt = cr.statusSince;
   cr.timeline.push(ev('status', message, actorId));
-}
+  await syncUseCasesForCR(cr);
+}); }
 
 /* ------------------------------------------------------------------------ */
 /* Creation                                                                  */
@@ -117,6 +120,11 @@ export interface CreateInput {
   warnings?: string[];
   /** Submit straight into review (agents, synthesis) rather than leaving as a draft. */
   submit?: boolean;
+  /**
+   * Wraps the moment the request is first stored: it must call `store()`, and may check first
+   * (and refuse by throwing, in which case nothing is ever stored) and add to it after.
+   */
+  commit?: (cr: ChangeRequest, store: () => Promise<void>) => Promise<void>;
   /**
    * Runs in the same transaction that saves the change request, just before
    * it: throwing saves nothing. For steps that must happen exactly once with
@@ -142,36 +150,39 @@ export async function createChangeRequest(project: OntologyProject, author: User
     analysis ??= drafted.analysis;
   }
 
+  const now = clock.iso();
+  const cr: ChangeRequest = {
+    id: newId('cr'),
+    number: 0,
+    ontologyId: project.id,
+    title: title || 'Untitled change',
+    description: input.description,
+    kind: input.kind,
+    origin: input.origin,
+    authorId: author.id,
+    ops,
+    status: 'draft',
+    analysis,
+    timeline: [ev('created', `opened this ${input.kind === 'bug' ? 'bug report' : 'change request'}`, author.id)],
+    createdAt: now,
+    updatedAt: now,
+    statusSince: now,
+    opsUpdatedAt: now,
+    tests,
+    warnings,
+    baseCommit: ontologyStore.head(project),
+  };
   // Numbering and saving in one transaction, so two requests opened at once can't both take the same number.
-  const cr = await transaction(async () => {
-    const now = clock.iso();
-    const number = (await list<ChangeRequest>('changeRequests', project.id)).reduce((m, c) => Math.max(m, c.number), 0) + 1;
-    const cr: ChangeRequest = {
-      id: newId('cr'),
-      number,
-      ontologyId: project.id,
-      title: title || 'Untitled change',
-      description: input.description,
-      kind: input.kind,
-      origin: input.origin,
-      authorId: author.id,
-      ops,
-      status: 'draft',
-      analysis,
-      timeline: [ev('created', `opened this ${input.kind === 'bug' ? 'bug report' : 'change request'}`, author.id)],
-      createdAt: now,
-      updatedAt: now,
-      statusSince: now,
-      opsUpdatedAt: now,
-      tests,
-      warnings,
-      baseCommit: ontologyStore.head(project),
-    };
-    await input.atSave?.();
-    await save(cr);
-    await logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
-    return cr;
-  });
+  const store = async () => {
+    await transaction(async () => {
+      cr.number = (await list<ChangeRequest>('changeRequests', project.id)).reduce((m, c) => Math.max(m, c.number), 0) + 1;
+      await input.atSave?.();
+      await save(cr);
+      await logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
+    });
+  };
+  if (input.commit) await input.commit(cr, store);
+  else await store();
   await triage(cr);
   if (input.submit) await submit(cr, author);
   return cr;
@@ -250,7 +261,8 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const { graph: after, warnings } = applyChangeOps(before, ops, { author: author?.name, date: clock.iso().slice(0, 10) });
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
-  const cqs = [...await competencyTests(project.id), ...(tests ?? [])];
+  // The request's own tests are marked as such, so readers can tell them from use cases' questions.
+  const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
   const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI) });
   return { before, after, diff, classification, validation, warnings };
 }
@@ -262,10 +274,18 @@ function validationPassed(v: ValidationReport | undefined) {
 export async function triage(cr: ChangeRequest, depth = 0): Promise<ChangeRequest> {
   const project = await getProject(cr.ontologyId);
   const author = await getUser(cr.authorId);
+  // Triage works on stored requests only, from the stored record: one that has been discarded is never written back.
+  // Competency question results carry the use case each came from, and readers see only those they may
+  // (visibleCQResults).
+  const base = await get<ChangeRequest>('changeRequests', cr.id);
+  if (!base) return cr;
+  adopt(cr, structuredClone(base));
   // The edits being checked: the results are only saved onto a request that still has them.
   const checked = JSON.stringify([cr.ops, cr.tests]);
-  // ...against this version of the draft.
+  // ...against this version of the draft...
   const head = ontologyStore.head(project);
+  // ...and these use cases' questions. Read before the check reads them, so any change after it is seen below.
+  const questions = JSON.stringify(await competencyTests(project.id));
   let apply: (target: ChangeRequest) => void;
   try {
     const p = await preview(project, cr.ops, cr.tests, author, head);
@@ -311,7 +331,8 @@ export async function triage(cr: ChangeRequest, depth = 0): Promise<ChangeReques
   for (let attempt = 0; ; attempt++) {
     if (attempt > 0) {
       const stored = await get<ChangeRequest>('changeRequests', cr.id);
-      if (!stored) throw new HttpError(404, 'Change request not found');
+      // Discarded meanwhile: never written back.
+      if (!stored) return cr;
       adopt(cr, stored);
       if (JSON.stringify([cr.ops, cr.tests]) !== checked) return cr;
       const now = ontologyStore.head(project);
@@ -322,9 +343,19 @@ export async function triage(cr: ChangeRequest, depth = 0): Promise<ChangeReques
       }
     }
     const before = structuredClone(cr);
-    apply(cr);
+    let rerun = false;
     try {
-      return await save(cr);
+      const saved = await transaction(async () => {
+        // A use case withdrawn (or its questions changed) while this ran: the results may hold what it no longer
+        // shares, so check again. Read in the same transaction as the save, so none can change in between.
+        if (JSON.stringify(await competencyTests(project.id)) !== questions) {
+          rerun = true;
+          return undefined;
+        }
+        apply(cr);
+        return await save(cr);
+      });
+      if (saved) return saved;
     } catch (err) {
       const conflict = err instanceof HttpError && err.status === 409 && /changed by someone else/.test(err.message);
       const stored = await get<ChangeRequest>('changeRequests', cr.id);
@@ -333,6 +364,10 @@ export async function triage(cr: ChangeRequest, depth = 0): Promise<ChangeReques
         adopt(cr, before);
         throw err;
       }
+    }
+    if (rerun) {
+      if (depth >= 3) throw new HttpError(409, `Change request #${cr.number} was changed by someone else at the same time. Reload it and try again.`);
+      return triage(cr, depth + 1);
     }
   }
 }
@@ -416,7 +451,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
   if (cr.authorId !== actor.id && !(await rolesFor(cr.ontologyId, actor.id)).some((r) => ['steward', 'editor', 'owner'].includes(r)))
     throw new HttpError(403, 'Only the author or an editor can submit this');
   if (!['draft', 'needs-work'].includes(cr.status)) throw new HttpError(409, `Cannot submit a request that is ${cr.status}`);
-  setStatus(cr, 'review', 'submitted for review', actor.id);
+  if (!await sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
+  await setStatus(cr, 'review', 'submitted for review', actor.id);
   await save(cr);
   return advance(cr);
 }
@@ -424,6 +460,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
 export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?: string; description?: string; ops?: ChangeOp[] }) {
   if (cr.authorId !== actor.id) await requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'edit this change request');
   if (['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status)) throw new HttpError(409, `Cannot edit a ${cr.status} request`);
+  // Checked as the edit is stored (no await before the save), so a withdrawal during an AI revision counts.
+  if (!await sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   // An approval of what it publishes covers exactly what was approved: a new title or new edits need a new one.
   if ((patch.title && patch.title !== cr.title) || patch.ops) cr.privacyCleared = undefined;
   if (patch.title) cr.title = patch.title;
@@ -432,7 +470,7 @@ export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?:
     cr.ops = patch.ops;
     cr.opsUpdatedAt = clock.iso();
     cr.timeline.push(ev('ops-updated', 'updated the proposed edits (earlier approvals no longer count)', actor.id));
-    if (cr.status === 'voting' || cr.status === 'approved') setStatus(cr, 'review', 'returned to review after the edits changed', actor.id);
+    if (cr.status === 'voting' || cr.status === 'approved') await setStatus(cr, 'review', 'returned to review after the edits changed', actor.id);
   }
   await save(cr);
   await triage(cr);
@@ -493,10 +531,18 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
 
 /** Re-evaluate governance and apply any transition it allows. Safe to call any time. */
 export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
+  // A request whose use case is no longer public stops where it is: it can't be approved into the ontology.
+  if (OPEN.includes(cr.status) && !await sourcesPublic(cr)) {
+    if (cr.status !== 'needs-work') {
+      await setStatus(cr, 'needs-work', SOURCE_GONE);
+      await save(cr);
+    }
+    return cr;
+  }
   for (let i = 0; i < 4; i++) {
     if (!OPEN.includes(cr.status)) break;
     if (cr.status === 'triage') {
-      setStatus(cr, 'review', 'entered review');
+      await setStatus(cr, 'review', 'entered review');
       continue;
     }
     const g = await governanceFor(cr);
@@ -505,7 +551,7 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
     if (cr.status === 'needs-work' && g.outcome !== 'rejected') {
       // needs-work only leaves via an explicit resubmit/revision, or once the blockers clear
       if (g.outcome === 'needs-work') break;
-      setStatus(cr, 'review', 'blocking issues resolved; back in review');
+      await setStatus(cr, 'review', 'blocking issues resolved; back in review');
       continue;
     }
     const messages: Partial<Record<ChangeRequestStatus, string>> = {
@@ -515,7 +561,7 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
       'needs-work': `needs work — ${g.unmet[0] ?? ''}`,
       review: 'returned to review',
     };
-    setStatus(cr, g.outcome, messages[g.outcome] ?? g.outcome);
+    await setStatus(cr, g.outcome, messages[g.outcome] ?? g.outcome);
     await logActivity({ ontologyId: cr.ontologyId, type: `cr.${g.outcome}`, message: `#${cr.number} ${cr.title} → ${g.outcome}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   }
   await save(cr);
@@ -570,6 +616,8 @@ async function publicationOf(cr: ChangeRequest, given?: OntologyProject, givenBa
 
 /** For the editor approving it: what would be published, every statement in full, with what looks private highlighted. */
 export async function publicationPreview(cr: ChangeRequest): Promise<Publication> {
+  // Drafted from a use case that is no longer shared: what it would publish is no longer anyone's to read.
+  if (!await sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   const p = await publicationOf(cr);
   const secrets = await secretsOf(cr);
   const hint = (text: string) => (secrets ? findSecrets(text, secrets)[0] : undefined);
@@ -599,6 +647,7 @@ export async function approvePublication(cr: ChangeRequest, actor: User, fingerp
   if (!needsPublicationApproval(cr)) throw new HttpError(409, 'This request doesn’t need its publication approved');
   if (cr.status !== 'draft' && !OPEN.includes(cr.status)) throw new HttpError(409, `This request is ${cr.status}`);
   if (typeof fingerprint !== 'string' || !fingerprint) throw new HttpError(400, 'Say which version you reviewed (its fingerprint)');
+  if (!await sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   const p = await publicationOf(cr);
   if (p.fingerprint !== fingerprint) throw new HttpError(409, 'This request changed after you reviewed it. Review what it publishes again.');
   cr.privacyCleared = { by: actor.id, at: clock.iso(), fingerprint, title: p.title, kgcl: p.kgcl };
@@ -607,7 +656,7 @@ export async function approvePublication(cr: ChangeRequest, actor: User, fingerp
   cr.heldForPublication = undefined;
   cr.privacyFindings = undefined;
   if (held && cr.status === 'needs-work') {
-    setStatus(cr, 'approved', 'approved again once its publication was approved', actor.id);
+    await setStatus(cr, 'approved', 'approved again once its publication was approved', actor.id);
     await save(cr);
     return merge(cr, actor);
   }
@@ -635,61 +684,80 @@ const MERGE_LEASE_MS = 2 * 60_000;
  */
 export async function merge(cr: ChangeRequest, actor: User | undefined): Promise<ChangeRequest> {
   if (actor) await requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'merge changes');
-  const current = await get<ChangeRequest>('changeRequests', cr.id);
-  if (current?.merging?.commit) {
-    // An earlier merge decided its commit and stopped: finish it rather than apply the edits twice.
-    const outcome = await settleMerge(current);
-    adopt(cr, current);
-    if (outcome === 'merged') {
-      await retriageOthers(cr);
-      return cr;
-    }
-  }
-  if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
-  if (cr.merging && cr.merging.until > Date.now()) throw new HttpError(409, `Change request #${cr.number} is already being merged.`);
-  cr.merging = { until: Date.now() + MERGE_LEASE_MS, by: actor?.id };
-  await save(cr, { claimMerge: true });
-  const giveBack = async () => {
-    delete cr.merging;
-    try {
-      await save(cr, { claimMerge: true });
-    } catch {
-      // Changed after the claim ran out: it's no longer this merge's to give back.
-    }
-  };
   const project = await getProject(cr.ontologyId);
-  try {
-    const base = ontologyStore.head(project);
-    let p: Awaited<ReturnType<typeof publicationOf>>;
-    try {
-      p = await publicationOf(cr, project, base);
-    } catch (err) {
-      delete cr.merging;
-      setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
-      return await save(cr, { claimMerge: true });
+  // From the consent check to the commit, no use case can be withdrawn (withdrawals wait), and the
+  // request is the stored one at that moment: what goes into the ontology is what was consented to.
+  const merged = await withConsentLock(cr.ontologyId, async () => {
+    const stored = await get<ChangeRequest>('changeRequests', cr.id);
+    if (!stored) throw new HttpError(404, `change request ${cr.id} not found`);
+    adopt(cr, stored);
+    if (cr.merging?.commit) {
+      // An earlier merge decided its commit and stopped: finish it rather than apply the edits twice.
+      if ((await settleMerge(cr)) === 'merged') return true;
+      if (cr.status === 'needs-work') return false;
     }
-    // Drafted from use cases: published only as an editor approved it, byte for byte.
-    if (needsPublicationApproval(cr) && cr.privacyCleared?.fingerprint !== p.fingerprint) {
-      const pv = await publicationPreview(cr);
-      delete cr.merging;
-      cr.privacyFindings = [...pv.hints, ...pv.statements.filter((st) => st.hint).map((st) => ({ where: `${st.predicate} of ${st.subject}`, kind: st.hint! }))];
-      cr.heldForPublication = true;
-      cr.privacyCleared = undefined;
-      setStatus(cr, 'needs-work', 'held back before merging: it was drafted from use cases, so an editor must approve exactly what it publishes first.');
-      return await save(cr, { claimMerge: true });
+    if (cr.status !== 'approved') throw new HttpError(409, `Only approved requests can be merged (this one is ${cr.status})`);
+    if (cr.merging && cr.merging.until > Date.now()) throw new HttpError(409, `Change request #${cr.number} is already being merged.`);
+    if (!await sourcesPublic(cr)) {
+      await transaction(async () => {
+        await setStatus(cr, 'needs-work', SOURCE_GONE);
+        await save(cr);
+      });
+      return false;
     }
-    cr.privacyFindings = undefined;
-    cr.kgcl = p.kgcl;
-    // Commits are published with the ontology, so they carry no names: the change request records who asked.
-    const commit = await ontologyStore.prepareWorkingCommit(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base);
-    cr.merging = { ...cr.merging!, commit, base };
+    cr.merging = { until: Date.now() + MERGE_LEASE_MS, by: actor?.id };
     await save(cr, { claimMerge: true });
-  } catch (err) {
-    if (!cr.merging?.commit || !(await get<ChangeRequest>('changeRequests', cr.id))?.merging?.commit) await giveBack();
-    throw err;
-  }
-  if (await settleMerge(cr) !== 'merged') throw new HttpError(409, 'The working draft changed while this was being merged. Nothing was merged; try again.');
-  await retriageOthers(cr);
+    const giveBack = async () => {
+      delete cr.merging;
+      try {
+        await save(cr, { claimMerge: true });
+      } catch {
+        // Changed after the claim ran out: it's no longer this merge's to give back.
+      }
+    };
+    /** Give the claim back and send the request back for work, in one step. */
+    const sendBack = async (message: string) => {
+      delete cr.merging;
+      await transaction(async () => {
+        await setStatus(cr, 'needs-work', message);
+        await save(cr, { claimMerge: true });
+      });
+      return false;
+    };
+    try {
+      const base = ontologyStore.head(project);
+      let p: Awaited<ReturnType<typeof publicationOf>>;
+      try {
+        p = await publicationOf(cr, project, base);
+      } catch (err) {
+        return await sendBack(`could not be merged on the latest draft: ${(err as Error).message}`);
+      }
+      // Drafted from use cases: published only as an editor approved it, byte for byte.
+      if (needsPublicationApproval(cr) && cr.privacyCleared?.fingerprint !== p.fingerprint) {
+        const pv = await publicationPreview(cr);
+        cr.privacyFindings = [...pv.hints, ...pv.statements.filter((st) => st.hint).map((st) => ({ where: `${st.predicate} of ${st.subject}`, kind: st.hint! }))];
+        cr.heldForPublication = true;
+        cr.privacyCleared = undefined;
+        return await sendBack('held back before merging: it was drafted from use cases, so an editor must approve exactly what it publishes first.');
+      }
+      cr.privacyFindings = undefined;
+      cr.kgcl = p.kgcl;
+      // Commits are published with the ontology, so they carry no names: the change request records who asked.
+      const commit = await ontologyStore.prepareWorkingCommit(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base);
+      cr.merging = { ...cr.merging!, commit, base };
+      await save(cr, { claimMerge: true });
+    } catch (err) {
+      if (!cr.merging?.commit || !(await get<ChangeRequest>('changeRequests', cr.id))?.merging?.commit) await giveBack();
+      throw err;
+    }
+    if ((await settleMerge(cr)) !== 'merged') {
+      // Sent back by settling it (a use case withdrawn meanwhile): nothing was merged, and the request says why.
+      if ((cr.status as ChangeRequestStatus) === 'needs-work') return false;
+      throw new HttpError(409, 'The working draft changed while this was being merged. Nothing was merged; try again.');
+    }
+    return true;
+  });
+  if (merged) await retriageOthers(cr);
   return cr;
 }
 
@@ -704,18 +772,27 @@ async function settleMerge(cr: ChangeRequest): Promise<'merged' | 'released'> {
   const m = cr.merging;
   if (!m?.commit || !m.base) return cr.status === 'merged' ? 'merged' : 'released';
   const project = await getProject(cr.ontologyId);
-  if (!ontologyStore.inWorking(project, m.commit) && ontologyStore.head(project) === m.base) ontologyStore.advanceWorking(project, m.commit, m.base);
+  let gone = false;
+  if (!ontologyStore.inWorking(project, m.commit)) {
+    // Consent is checked as the draft moves, with nothing awaited in between, so a merge finished by someone
+    // else after its process stopped (outside its consent lock) never publishes a use case withdrawn since.
+    gone = !(await sourcesPublic(cr));
+    if (!gone && ontologyStore.head(project) === m.base) ontologyStore.advanceWorking(project, m.commit, m.base);
+  }
   const merged = ontologyStore.inWorking(project, m.commit);
   // A merge that stopped right after moving the branch never caught the checkout up.
   if (merged) ontologyStore.syncCheckout(project);
   const actorId = m.by;
   delete cr.merging;
-  if (merged) {
-    cr.mergedCommit = m.commit;
-    setStatus(cr, 'merged', `merged into the working draft${actorId ? '' : ' automatically'}`, actorId);
-  }
   try {
-    await save(cr, { claimMerge: true });
+    // The status change (and the use cases it updates) and the save land together or not at all.
+    await transaction(async () => {
+      if (merged) {
+        cr.mergedCommit = m.commit;
+        await setStatus(cr, 'merged', `merged into the working draft${actorId ? '' : ' automatically'}`, actorId);
+      } else if (gone) await setStatus(cr, 'needs-work', SOURCE_GONE);
+      await save(cr, { claimMerge: true });
+    });
   } catch (err) {
     // Someone else settled it first: take what they stored.
     const stored = await get<ChangeRequest>('changeRequests', cr.id);
@@ -753,11 +830,12 @@ async function retriageOthers(cr: ChangeRequest) {
 export async function withdraw(cr: ChangeRequest, actor: User) {
   if (cr.authorId !== actor.id) await requireRole(cr.ontologyId, actor, ['steward', 'owner'], 'withdraw someone else’s request');
   if (['merged', 'released'].includes(cr.status)) throw new HttpError(409, 'Already merged');
-  setStatus(cr, 'withdrawn', 'withdrew this request', actor.id);
+  await setStatus(cr, 'withdrawn', 'withdrew this request', actor.id);
   return await save(cr);
 }
 
 export async function revise(cr: ChangeRequest, actor: User, instruction: string) {
+  if (!await sourcesPublic(cr)) throw new HttpError(409, SOURCE_GONE);
   const project = await getProject(cr.ontologyId);
   const working = await ontologyStore.working(project);
   const c = (iri: string) => compactIRI(iri, working.prefixes);

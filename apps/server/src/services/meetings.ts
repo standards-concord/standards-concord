@@ -1,9 +1,8 @@
 import { EventEmitter } from 'node:events';
-import type { ChangeRequest, FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
+import type { FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
-import { saveChangeRequest } from './changeRequests.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -12,9 +11,10 @@ import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
 import { withLock } from '../locks.js';
+import { filterAsync } from '../asyncList.js';
 import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
 import { recall } from './recall.js';
-import { createUseCase, synthesise } from './useCases.js';
+import { allUseCases, canSee, createUseCase, getUseCase, inMeetingAudience, refOf, setMeetingRule } from './useCases.js';
 import { logActivity } from './users.js';
 
 export const getMeeting = async (id: string) => await mustGet<Meeting>('meetings', id);
@@ -274,35 +274,81 @@ export function heuristicAnalysis(transcript: TranscriptLine[], existingLabels: 
 }
 
 /** Turn an analysed meeting into draft use cases (one per participant use case) and a proposed change request. */
-export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[]; changeRequest?: ChangeRequest }> {
+/** Transcript lines a use case from the analysis most likely came from: its speaker's turns that share words with it. */
+export function sourceLinesFor(m: Meeting, g: { speaker?: string; title: string; sections: UseCase['sections'] }): number[] {
+  const words = (t: string) => new Set(t.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+  const topic = words([g.title, g.sections.goal, g.sections.description, ...(g.sections.usageScenarios ?? [])].filter(Boolean).join(' '));
+  const scored = m.transcript
+    .map((l, i) => ({ i, l, overlap: [...words(l.text)].filter((w) => topic.has(w)).length }))
+    .filter((x) => (!g.speaker || x.l.speaker === g.speaker) && (x.overlap >= 2 || (g.speaker && x.overlap >= 1)));
+  const lines = (scored.length ? scored : g.speaker ? m.transcript.map((l, i) => ({ i, l, overlap: 0 })).filter((x) => x.l.speaker === g.speaker) : []).map((x) => x.i);
+  return lines.slice(0, 12);
+}
+
+/** Use cases created from a meeting, for a viewer. */
+export async function useCasesFromMeeting(m: Meeting, viewer?: User): Promise<NonNullable<Meeting['useCases']>> {
+  const fromCall = (await allUseCases(m.ontologyId)).filter((u) => u.source === 'meeting' && u.sourceRef === m.id);
+  return (await filterAsync(fromCall, (u) => canSee(u, viewer)))
+    .sort((a, b) => a.number - b.number)
+    .map((u) => ({ ...refOf(u), sourceLines: u.sourceLines }));
+}
+
+/** A meeting with its linked use cases, for a viewer. */
+export const meetingFor = async (m: Meeting, viewer?: User): Promise<Meeting> => ({ ...m, useCases: await useCasesFromMeeting(m, viewer) });
+
+/**
+ * A meeting as a viewer may see it, or undefined if it doesn't exist for them. Calls are working
+ * group business (members, whoever recorded one, and facilitators); a call waiting for approval is
+ * for facilitators only, and Meet links and bot details are trimmed for everyone else
+ * (visibleMeeting). Its use cases are the ones the viewer may see.
+ */
+export async function meetingView(m: Meeting, viewer: User | undefined): Promise<Meeting | undefined> {
+  if (!await inMeetingAudience(m, viewer) && !await canFacilitate(m, viewer)) return undefined;
+  const v = await visibleMeeting(m, viewer);
+  return v && await meetingFor(v, viewer);
+}
+// Use cases, change requests and activity show or link a call only to those it exists for.
+setMeetingRule(async (m, viewer) => !!viewer && (await inMeetingAudience(m, viewer) || await canFacilitate(m, viewer)) && !!await visibleMeeting(m as Meeting, viewer));
+
+/**
+ * Turn an analysed meeting into use cases shared with the working group, one per
+ * participant use case. No change request is drafted here: change requests are
+ * public, and a call's use cases are group-only until their author makes one
+ * public, after which anyone can draft changes from it.
+ */
+export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ useCases: UseCase[] }> {
+  if (!await meetingView(m, actor)) throw new HttpError(404, `meeting ${m.id} not found`);
   if (!m.analysis) m = await analyseMeeting(m);
   const a = m.analysis!;
   const project = await getProject(m.ontologyId);
-  const ucs: UseCase[] = [];
-  const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
-  for (const [i, g] of groups.entries()) {
-    ucs.push(
-      await createUseCase(project, actor, {
-        source: 'meeting',
-        sourceRef: m.id,
-        status: 'ready',
-        sections: { ...g.sections, name: g.sections.name ?? g.title, notes: `From the call “${m.title}”${'speaker' in g && g.speaker ? `, described by ${g.speaker}` : ''}.` },
-        // Attach the call's questions and terms to the first use case so they are not duplicated.
-        competencyQuestions:
-          i === 0 ? a.competencyQuestions.map((q) => ({ id: newId('cq'), question: q.question, status: 'untested' as const, exampleAnswer: undefined })) : [],
-        terms: i === 0 ? a.terms : [],
-      }),
-    );
-  }
-  let changeRequest: ChangeRequest | undefined;
-  try {
-    changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
-    changeRequest.origin = { type: 'meeting', meetingId: m.id };
-    await saveChangeRequest(changeRequest);
-  } catch (err) {
-    console.warn(`[meeting] synthesis failed: ${(err as Error).message}`);
-  }
-  return { useCases: ucs, changeRequest };
+  // Calling this twice must not duplicate the use cases: the check and the creation are one transaction.
+  const { ucs, created } = await transaction(async () => {
+    const existing = (await allUseCases(m.ontologyId)).filter((u) => u.source === 'meeting' && u.sourceRef === m.id);
+    if (existing.length) return { ucs: existing, created: false };
+    const made: UseCase[] = [];
+    const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
+    for (const [i, g] of groups.entries()) {
+      made.push(
+        await createUseCase(project, actor, {
+          source: 'meeting',
+          sourceRef: m.id,
+          sourceLines: sourceLinesFor(m, g),
+          // Calls are working group business: their use cases are shared with the group, not published.
+          visibility: 'group',
+          status: 'triage',
+          sections: { ...g.sections, name: g.sections.name ?? g.title, notes: `From the call “${m.title}”${'speaker' in g && g.speaker ? `, described by ${g.speaker}` : ''}.` },
+          // Attach the call's questions and terms to the first use case so they are not duplicated.
+          competencyQuestions:
+            i === 0 ? a.competencyQuestions.map((q) => ({ id: newId('cq'), question: q.question, status: 'untested' as const, exampleAnswer: undefined })) : [],
+          terms: i === 0 ? a.terms : [],
+        }),
+      );
+    }
+    return { ucs: made, created: true };
+  });
+  if (created)
+    await logActivity({ ontologyId: m.ontologyId, actorId: actor.id, type: 'meeting.usecases', message: `turned the call “${m.title}” into ${ucs.length} use case${ucs.length === 1 ? '' : 's'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
+  return { useCases: await Promise.all(ucs.map((u) => getUseCase(u.id))) };
 }
 
 /* ------------------------------------------------------------------------ */

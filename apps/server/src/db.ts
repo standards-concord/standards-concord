@@ -31,6 +31,7 @@ export type Collection =
   | 'oauthGrants'
   | 'oauthTokens'
   | 'feedback'
+  | 'requirementsDocs'
   | 'feedbackPublications'
   | 'activity'
   | 'forks'
@@ -169,8 +170,15 @@ export async function clearAll(): Promise<void> {
  * (after a timer, say) runs outside it.
  */
 export async function transaction<T>(fn: () => T | Promise<T>): Promise<T> {
-  return (await conn()).transaction(async () => fn());
+  return (await conn()).transaction(async () => insideTransaction.run(true, fn));
 }
+
+const insideTransaction = new AsyncLocalStorage<boolean>();
+/**
+ * True inside transaction(fn) (and not inside detached(fn) started from one). Code that waits for an in-memory
+ * lock checks this: waiting for it while holding the writer lock deadlocks against a holder that needs to write.
+ */
+export const inTransaction = () => insideTransaction.getStore() === true;
 
 /**
  * Run fn without waiting on other connections' locks: anything blocked throws at once instead of stalling.
@@ -185,7 +193,7 @@ export async function withoutWaiting<T>(fn: () => T | Promise<T>): Promise<T> {
  * inside one, which would otherwise inherit it and be refused once it rolls back or while it commits.
  */
 export async function detached<T>(fn: () => T | Promise<T>): Promise<T> {
-  return (await conn()).detached(async () => fn());
+  return (await conn()).detached(async () => insideTransaction.run(false, fn));
 }
 
 /** Rewrite storage so old copies of rewritten or deleted rows are gone. False if blocked: retry later. */

@@ -103,19 +103,13 @@ test.describe('Public ontology page', () => {
     await page.getByRole('tab', { name: /Use cases and requirements/ }).click();
     await expect(page).toHaveURL(/#tab-use-cases$/);
     const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
-    await expect(panel.getByRole('heading', { name: 'Use cases and requirements' })).toBeVisible();
+    await expect(panel.getByRole('heading', { name: 'Use cases and requirements', exact: true })).toBeVisible();
     const closed = panel.locator('article.uc', { hasText: 'Aggregate volunteering opportunities across platforms' });
     await expect(closed).toBeVisible();
     await expect(closed.locator('.ucs')).toHaveText('Closed in 1.0.0');
     await expect(closed).toContainText('Questions the ontology must answer');
-    const open = panel.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' });
-    await expect(open.locator('.ucs')).toHaveText('Accepted');
-    // Filter by status.
-    await panel.getByRole('button', { name: /^Closed/ }).click();
-    await expect(closed).toBeVisible();
-    await expect(open).toBeHidden();
-    await panel.getByRole('button', { name: /^All/ }).click();
-    await expect(open).toBeVisible();
+    // The released page is frozen: a use case raised after 1.0.0 isn't in it.
+    await expect(panel.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' })).toHaveCount(0);
     // A use case anchor deep-links into the tab.
     const id = (await closed.getAttribute('id'))!;
     await page.goto(`${PAGE}#${id}`);
@@ -123,26 +117,46 @@ test.describe('Public ontology page', () => {
     await expect(page.locator(`#${id}`)).toBeInViewport();
   });
 
+  test('the working draft shows the public use cases as they stand now, and can filter by status', async ({ page }) => {
+    await page.goto(`${PAGE}/draft#tab-use-cases`);
+    const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
+    const closed = panel.locator('article.uc', { hasText: 'Aggregate volunteering opportunities across platforms' });
+    const open = panel.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' });
+    await expect(closed.locator('.ucs')).toHaveText('Closed in 1.0.0');
+    // Other tests share the demo and may merge the change that addresses it.
+    await expect(open.locator('.ucs')).toHaveText(/^(Accepted|In progress|In the working draft)$/);
+    // Anonymised versions of private use cases are public; working group ones are not.
+    await expect(panel.locator('article.uc', { hasText: 'Anonymised' }).first()).toBeVisible();
+    await expect(panel).not.toContainText('Publish recurring shifts once');
+    await panel.getByRole('button', { name: /^Closed/ }).click();
+    await expect(closed).toBeVisible();
+    await expect(open).toBeHidden();
+    await panel.getByRole('button', { name: /^All/ }).click();
+    await expect(open).toBeVisible();
+  });
+
   test('a deep link to a use case clears a status filter that hides it', async ({ page }) => {
-    await page.goto(`${PAGE}#tab-use-cases`);
+    // The weekly shifts use case came after 1.0.0, so it is on the working draft's page.
+    await page.goto(`${PAGE}/draft#tab-use-cases`);
     const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
     const open = panel.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' });
     const id = (await open.getAttribute('id'))!;
     await panel.getByRole('button', { name: /^Closed/ }).click();
     await expect(open).toBeHidden();
-    await page.goto(`${PAGE}#${id}`);
+    await page.goto(`${PAGE}/draft#${id}`);
     await expect(open).toBeVisible();
     await expect(open).toBeInViewport();
     await expect(panel.getByRole('button', { name: /^All/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
   test('printing shows every use case and term, whatever the filters', async ({ page }) => {
-    await page.goto(`${PAGE}#tab-use-cases`);
+    await page.goto(`${PAGE}/draft#tab-use-cases`);
     const panel = page.getByRole('tabpanel', { name: /Use cases and requirements/ });
     await panel.getByRole('button', { name: /^Closed/ }).click();
     await page.getByRole('tab', { name: 'Specification' }).click();
     await page.getByPlaceholder('Search terms, definitions…').fill('zzzz-no-match');
-    await page.goto(`${PAGE}#Volunteer`);
+    // The draft page: its use cases are today's public ones, open and closed (a release shows only the ones it was published with).
+    await page.goto(`${PAGE}/draft#Volunteer`);
     await page.emulateMedia({ media: 'print' });
     await expect(page.locator('article.uc', { hasText: 'Find weekly shifts that need volunteers' })).toBeVisible();
     await expect(page.locator('article.term#VolunteeringOpportunity')).toBeVisible();
@@ -235,7 +249,7 @@ test.describe('Public ontology page', () => {
     await page.goto(PAGE);
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
     await expect(page.locator('article.term#VolunteeringOpportunity')).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Use cases and requirements' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Use cases and requirements', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Formats' })).toBeVisible();
     // Search needs the script, so it isn't offered without it.
     await expect(page.getByPlaceholder('Search terms, definitions…')).toBeHidden();

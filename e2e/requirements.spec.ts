@@ -50,13 +50,17 @@ test.describe('requirements', () => {
     await expect(answer(page)).toBeVisible();
     await layout.getByRole('button', { name: 'Conversation' }).click();
 
-    // Finishing opens the use case, marked Ready, with what was captured.
+    // Finishing keeps it private and asks what should happen to it. Making it public submits it for triage.
     await page.getByRole('button', { name: 'Finish' }).click();
+    await expect(page.getByRole('heading', { name: 'What happens to this use case?' })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole('radiogroup', { name: 'Who can see this use case?' }).getByRole('radio', { name: /Public/ }).click();
+    await expect(page.getByText(/It is public and will be triaged/)).toBeVisible();
+    await page.getByRole('button', { name: 'View use case' }).click();
     await expect(page).toHaveURL(/\/use-cases\/[^/]+$/, { timeout: 30_000 });
     await settle(page);
     await expectNoCrash(page);
     await expect(page.getByRole('heading', { level: 2, name: goal.replace(/\.$/, '') })).toBeVisible();
-    await expect(page.getByText('Ready', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('Needs triage', { exact: true }).first()).toBeVisible();
     const ucUrl = page.url();
 
     // It is listed with the other use cases.
@@ -69,7 +73,9 @@ test.describe('requirements', () => {
     await expect(page).toHaveURL(/\/changes\/cr_[^/]+$/, { timeout: 30_000 });
     await settle(page);
     await expectNoCrash(page);
-    await page.getByRole('link', { name: /use case 1|view use case/ }).first().click();
+    // The use cases it addresses are listed with its edits.
+    await page.getByRole('tab', { name: /Changes/ }).click();
+    await page.getByRole('main').getByRole('link', { name: new RegExp(goal.replace(/\.$/, '')) }).first().click();
     await expect(page).toHaveURL(ucUrl);
   });
 
@@ -99,6 +105,8 @@ test.describe('requirements', () => {
     await answer(page).press('Enter');
     await expect(page.getByRole('main').getByText('Track DBS checks').first()).toBeVisible();
     await page.getByRole('button', { name: 'Finish' }).click();
+    await expect(page.getByRole('heading', { name: 'What happens to this use case?' })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'View use case' }).click();
     await expect(page).toHaveURL(/\/use-cases\/[^/]+$/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Archive' }).click();
     await expect(page.getByText('Archived', { exact: true }).first()).toBeVisible();

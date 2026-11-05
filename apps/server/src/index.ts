@@ -3,6 +3,7 @@ import { config } from './config.js';
 import type { OntologyProject } from '@concord/shared';
 import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
+import { acquireProcessLock } from './processLock.js';
 import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
 import { processOutstanding } from './services/feedbackIssues.js';
@@ -10,6 +11,7 @@ import { ontologyStore } from './services/ontologyStore.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import { syncFeedbackSharing } from './services/feedback.js';
 
+acquireProcessLock(config.dataDir);
 await openDb();
 const secrets = await migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);

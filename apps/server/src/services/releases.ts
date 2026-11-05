@@ -1,4 +1,4 @@
-import { needsPublicationApproval } from './changeRequests.js';
+import { needsPublicationApproval, saveChangeRequest } from './changeRequests.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -13,14 +13,17 @@ import { canCastVote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
-import { saveChangeRequest } from './changeRequests.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { anyHeld, dropHoldClaim, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { getUser, logActivity } from './users.js';
+import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
+import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
+import { someAsync } from '../asyncList.js';
+import { syncUseCasesForCR } from './traceability.js';
+import { logActivity } from './users.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
 const maxLevel = (levels: ChangeLevel[]) => levels.reduce<ChangeLevel>((m, l) => (LEVEL_ORDER.indexOf(l) > LEVEL_ORDER.indexOf(m) ? l : m), 'patch');
@@ -56,10 +59,21 @@ export async function releaseGovernance(r: Release) {
   });
 }
 
-export async function releaseDetail(r: Release): Promise<ReleaseDetail> {
-  const crs = (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
+/**
+ * A release as a viewer may see it. Its notes list its change requests by title, so when one of
+ * them is withheld from the viewer (a use case it came from is no longer shared with them), the
+ * notes they see are written again from the requests as they may see them. Stored notes are kept.
+ */
+export async function releaseForViewer(r: Release, viewer?: User): Promise<Release> {
+  const crs = (await Promise.all(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)))).filter((c): c is ChangeRequest => !!c);
+  if (!await someAsync(crs, (c) => crWithheld(c, viewer))) return r;
+  return { ...r, notes: draftNotes(await getProject(r.ontologyId), await Promise.all(crs.map((c) => crForViewer(c, viewer))), r.level, r.version, 'the previous release') };
+}
+
+export async function releaseDetail(r: Release, viewer?: User): Promise<ReleaseDetail> {
+  const crs = (await Promise.all(r.changeRequestIds.map(async (id) => await crForViewer(await mustGet<ChangeRequest>('changeRequests', id), viewer))));
   return {
-    ...r,
+    ...await releaseForViewer(r, viewer),
     votes: await list<Vote>('votes', r.id),
     governance: await releaseGovernance(r),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
@@ -76,14 +90,14 @@ const published = (c: ChangeRequest, text: string) => (!needsPublicationApproval
 const publishedEdits = (c: ChangeRequest) => (!needsPublicationApproval(c) ? (c.kgcl ?? []) : (c.privacyCleared?.kgcl ?? []));
 
 /** Release notes grouped by level, from the merged change requests. */
-function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
+function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string, prior: string = project.currentVersion) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
     items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${publishedEdits(c).length ? `\n${publishedEdits(c).slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
-      ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
-      : `${version} is backward compatible with ${project.currentVersion}.`;
+      ? `**Breaking release.** ${version} is not backward compatible with ${prior}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
+      : `${version} is backward compatible with ${prior}.`;
   return [header, section('Breaking changes', by('major')), section('New terms and features', by('minor')), section('Fixes and clarifications', by('patch'))]
     .filter(Boolean)
     .join('\n');
@@ -127,6 +141,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   if (!existing) {
     await logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
+  // Keep the release's use cases and requirements document in step (in the background).
+  draftForRelease(r);
   return await openVoteIfNeeded(r);
 }); }
 
@@ -210,74 +226,90 @@ export async function publishRelease(r: Release, actor: User | undefined): Promi
       console.warn(`[release] migration script: ${(err as Error).message}`);
     }
   }
-  // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
-  // never reaches the page); notes a steward wrote are published as they wrote them.
-  if (!r.notesBy) r.notes = draftNotes(project, (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id)))), r.level, r.version);
-  files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
-  // The use case snapshot always goes in, so the release never shows live data;
-  // a rendering failure only costs the stored page (served pages render on request).
-  const requirements = releaseRequirements(project, r.version);
-  files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
-  try {
-    Object.assign(files, await releasePageFiles(project, { ...r, publishedAt: clock.iso() }, stamped, requirements));
-  } catch (err) {
-    console.warn(`[release] public page: ${(err as Error).message}`);
-  }
-
-  const author = actor ?? (await getUser(r.createdBy));
-  // Published commits carry no names. Committed on top of the captured draft only (a compare-and-swap on main).
-  // Made from a working draft still waiting for approval: it waits too, from before its files exist, so the
-  // public never sees it unheld. Recorded first because writeRelease's check below has to be synchronous.
-  const held = await holdReleaseIfDraftHeld(project, r.version);
-  // From the moment the check passes, files may be written: after that a failure must never take the hold back.
-  let writing = false;
-  try {
-    r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, {
-      expectedHead: capturedHead,
-      beforeWrite: () => {
-        // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
-        // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
-        if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
-          throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
-        writing = true;
-      },
-    });
-  } finally {
-    if (held) await dropHoldClaim(project, r.version, writing);
-  }
-  r.status = 'published';
-  r.publishedAt = clock.iso();
-  r.statusSince = r.publishedAt;
-
-  // Mark change requests as released.
-  for (const id of r.changeRequestIds) {
-    const cr = await mustGet<ChangeRequest>('changeRequests', id);
-    cr.status = 'released';
-    cr.releaseId = r.id;
-    cr.statusSince = r.publishedAt;
-    cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
-    await saveChangeRequest(cr);
-  }
-
-  project.currentVersion = r.version;
-  project.stage = 'released';
-  await updateProject(project);
-
-  // Public ontologies are persisted to GitHub on release, when configured.
-  // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
-  // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
-  if (project.github && config.github.publishToken && (await anyHeld(project) || !await historyApproved(project))) {
-    console.log(`[release] not pushing ${project.slug} to GitHub: ${await anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
-  } else if (project.github && config.github.publishToken) {
+  // From the use cases being read for the release to the release being pushed and saved, no one can
+  // withdraw one or change who may see it (withdrawals wait), so what is committed is what they consented to.
+  await withConsentLock(project.id, async () => {
+    // Work from the stored record from here on, never the copy this call started with.
+    const stored = await get<Release>('releases', r.id);
+    if (!stored) throw new HttpError(404, `release ${r.id} not found`);
+    for (const k of Object.keys(r) as (keyof Release)[]) delete r[k];
+    Object.assign(r, stored);
+    if (!(await publishable(r)).ok) throw new HttpError(409, `Not ready to publish: ${(await publishable(r)).why}`);
+    // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
+    // never reaches the page); notes a steward wrote are published as they wrote them.
+    if (!r.notesBy) r.notes = draftNotes(project, (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id)))), r.level, r.version);
+    // What goes into the public files is what anyone may see: nothing from a use case withdrawn since.
+    const publicNotes = (await releaseForViewer(r, undefined)).notes;
+    files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${publicNotes}\n`;
+    const doc = await prepareForRelease(project, r);
+    if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
+    // The use case snapshot always goes in, so the release never shows live data;
+    // a rendering failure only costs the stored page (served pages render on request).
+    const requirements = await releaseRequirements(project, r.version);
+    files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
     try {
-      const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
-      ontologyStore.push(project, remote);
-      r.githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      Object.assign(files, await releasePageFiles(project, { ...r, notes: publicNotes, publishedAt: clock.iso() }, stamped, requirements));
     } catch (err) {
-      console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
+      console.warn(`[release] public page: ${(err as Error).message}`);
     }
-  }
-  await save(r);
+
+    // Published commits carry no names.
+    // Made from a working draft still waiting for approval: it waits too, from before its files exist, so the
+    // public never sees it unheld. Recorded first because writeRelease's check below has to be synchronous.
+    const held = await holdReleaseIfDraftHeld(project, r.version);
+    // From the moment the check passes, files may be written: after that a failure must never take the hold back.
+    let writing = false;
+    try {
+      r.commit = await ontologyStore.writeRelease(project, r.version, stamped, files, publicNotes, { name: 'Concord' }, {
+        expectedHead: capturedHead,
+        beforeWrite: () => {
+          // Checked with nothing awaited before the write: the release is exactly the draft captured above. If the
+          // draft changed meanwhile (a merge, say), publishing would overwrite it and release what nobody approved.
+          if (ontologyStore.head(project) !== capturedHead || ontologyStore.readWorkingText(project) !== capturedText)
+            throw new HttpError(409, 'The working draft changed while this release was being prepared. Publish it again.');
+          writing = true;
+        },
+      });
+    } finally {
+      if (held) await dropHoldClaim(project, r.version, writing);
+    }
+    r.status = 'published';
+    r.publishedAt = clock.iso();
+    r.statusSince = r.publishedAt;
+
+    // Mark change requests as released.
+    for (const id of r.changeRequestIds) {
+      const cr = await mustGet<ChangeRequest>('changeRequests', id);
+      cr.status = 'released';
+      cr.releaseId = r.id;
+      cr.statusSince = r.publishedAt;
+      cr.timeline.push({ at: r.publishedAt, type: 'released', message: `released in ${r.version}` });
+      await saveChangeRequest(cr);
+      // Use cases this change addressed are now closed by this version.
+      await syncUseCasesForCR(cr);
+    }
+    if (doc) await markPublished(doc, r);
+
+    project.currentVersion = r.version;
+    project.stage = 'released';
+    await updateProject(project);
+
+    // Public ontologies are persisted to GitHub on release, when configured.
+    // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
+    // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
+    if (project.github && config.github.publishToken && (await anyHeld(project) || !await historyApproved(project))) {
+      console.log(`[release] not pushing ${project.slug} to GitHub: ${await anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
+    } else if (project.github && config.github.publishToken) {
+      try {
+        const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
+        ontologyStore.push(project, remote);
+        r.githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      } catch (err) {
+        console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
+      }
+    }
+    await save(r);
+  });
   await logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return r;
 }
