@@ -336,27 +336,32 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     }
   };
 
-  const ask = async (text: string) => {
+  /** Asks the assistant. Resolves to false when the question failed before it was kept, so the box can offer it again. */
+  const ask = async (text: string): Promise<boolean | undefined> => {
     const mine: ChatMessage = { id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() };
     const history = [...chat, mine];
     // Whose conversation this is, as of now: nothing is saved unless it still is, now and when the answer arrives.
     const token = accountToken();
-    if (!stillCurrent(token, account)) return;
+    if (!stillCurrent(token, account)) return undefined;
     // Shown at once, but saved only after the server confirms the account.
     setPending(mine);
     setAsking(true);
     setChatError(undefined);
+    let kept = false;
+    let otherAccount = false;
     try {
       // This conversation belongs to one account: never send it on under another one signed in from another tab.
       // The server refuses it too if the session changes after this check.
       const now = await api.session();
       if ((now.user?.id ?? 'guest') !== account || !stillCurrent(token, account)) {
         setPending(undefined);
+        otherAccount = true;
         if (stillCurrent(token, account)) setSession(now);
         throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
       }
       setChat(history);
       setPending(undefined);
+      kept = true;
       const r = await api.queryChat(id, {
         messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
         query,
@@ -366,7 +371,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         account,
       });
       // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
-      if (!stillCurrent(token, account)) return;
+      if (!stillCurrent(token, account)) return undefined;
       setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
       // The editor is read-only while the assistant works, so its answer never replaces newer edits.
       // It isn't run until the person has looked at it and pressed Run.
@@ -379,10 +384,15 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
       }
     } catch (e) {
       setPending(undefined);
-      if (stillCurrent(token, account)) setChatError(e);
+      if (!stillCurrent(token, account)) return undefined;
+      setChatError(e);
+      // Failed before the question was kept (the session check couldn't be made): hand it back to retry, rather than
+      // lose it. Never into a box that now belongs to someone else.
+      if (!kept && !otherAccount) return false;
     } finally {
       setAsking(false);
     }
+    return undefined;
   };
 
   /** The refresh button: clears the conversation and puts the starting query back. */

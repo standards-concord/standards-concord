@@ -57,7 +57,19 @@ const SHORT = new Set([
   'md5', 'sha1', 'sha256', 'sha384', 'sha512', 'lang', 'datatype', 'uuid', 'struuid', 'bnode',
 ]);
 
-type Env = Map<string, number>;
+/**
+ * The variables of one query level and the longest value each can hold. `maybe` holds those that can be unbound
+ * on some rows (VALUES … UNDEF, OPTIONAL, one branch of a UNION, an expression that fails): a join can't tighten
+ * what they let through.
+ */
+class Env extends Map<string, number> {
+  maybe = new Set<string>();
+  copy(): Env {
+    const e = new Env(this);
+    e.maybe = new Set(this.maybe);
+    return e;
+  }
+}
 
 /**
  * An upper bound on the longest value a query can build from its own
@@ -88,7 +100,7 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
       const op = String(n.operator).toLowerCase();
       if (op === 'exists' || op === 'notexists') {
         // The pattern inside is evaluated too (with the outer variables in scope), but yields only a boolean.
-        patterns(args, new Map(env));
+        patterns(args, env.copy());
         return 64;
       }
       const sizes = args.map((a) => est(a, env));
@@ -109,14 +121,28 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
   };
 
   /**
-   * Binds a variable. One already bound keeps the longer estimate: a join would make the values equal, but a
-   * variable can be unbound on some rows (VALUES … UNDEF, OPTIONAL, one branch of a UNION), where the new value
-   * goes through unchanged, so the shorter estimate is not a bound.
+   * Binds a variable, joining it with what is already bound. Where both sides are always bound the join makes them
+   * equal, so the shorter estimate is a bound. Where one side can be unbound, the other side's value goes through
+   * unchanged on those rows, so only the always-bound side's estimate holds; where both can be, the longer one.
    */
-  const bind = (env: Env, name: string, chars: number) => env.set(name, Math.max(env.get(name) ?? 0, chars));
+  const bind = (env: Env, name: string, chars: number, maybe = false) => {
+    const before = env.get(name);
+    const wasMaybe = env.maybe.has(name);
+    if (before === undefined || (wasMaybe && !maybe)) env.set(name, chars);
+    else if (!wasMaybe && !maybe) env.set(name, Math.min(before, chars));
+    else if (wasMaybe && maybe) env.set(name, Math.max(before, chars));
+    // An always-bound variable joined with one that may be unbound keeps its own estimate.
+    if (before === undefined ? maybe : wasMaybe && maybe) env.maybe.add(name);
+    else env.maybe.delete(name);
+  };
   const fromData = (env: Env, t: unknown) => {
     const n = t as Node | undefined;
     if (n?.termType === 'Variable') bind(env, n.value as string, DATA_CHARS);
+  };
+  /** Only a constant can't fail: any other expression leaves its variable unbound on rows where it errors. */
+  const constant = (e: unknown) => {
+    const n = e as Node | undefined;
+    return !!n?.termType && n.termType !== 'Variable';
   };
 
   /** Evaluates patterns in order into env, the variables of this query level. */
@@ -131,30 +157,41 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
           break;
         case 'bind': {
           const chars = est(p.expression, env);
-          bind(env, (p.variable as Node).value as string, chars);
+          bind(env, (p.variable as Node).value as string, chars, !constant(p.expression));
           note(chars, (p.variable as Node).value as string);
           break;
         }
-        case 'values':
-          for (const row of p.values as Record<string, unknown>[]) for (const [k, t] of Object.entries(row)) if (t) note(est(t, env));
-          for (const k of new Set((p.values as Record<string, unknown>[]).flatMap((r) => Object.keys(r))))
-            bind(env, k.replace(/^\?/, ''), Math.max(0, ...(p.values as Record<string, unknown>[]).map((r) => est(r[k], env))));
+        case 'values': {
+          const rows = p.values as Record<string, unknown>[];
+          for (const row of rows) for (const t of Object.values(row)) if (t) note(est(t, env));
+          // A variable missing from a row, or UNDEF there, is unbound on that row.
+          for (const k of new Set(rows.flatMap((r) => Object.keys(r))))
+            bind(env, k.replace(/^\?/, ''), Math.max(0, ...rows.map((r) => est(r[k], env))), rows.some((r) => !r[k]));
           break;
+        }
         case 'filter':
           filters.push(p.expression);
           break;
         case 'query':
           // A subquery has its own variables and passes out only its projections.
-          for (const [k, v] of query(p)) bind(env, k, v);
+          {
+            const sub = query(p);
+            for (const [k, v] of sub) bind(env, k, v, sub.maybe.has(k));
+          }
           break;
         case 'union': {
           // Each branch sees the variables so far; afterwards a variable may come from either.
           const branches = (p.patterns as unknown[]).map((b) => {
-            const copy = new Map(env);
+            const copy = env.copy();
             patterns([b], copy);
             return copy;
           });
-          for (const k of new Set(branches.flatMap((b) => [...b.keys()]))) env.set(k, Math.max(...branches.filter((b) => b.has(k)).map((b) => b.get(k)!)));
+          for (const k of new Set(branches.flatMap((b) => [...b.keys()]))) {
+            env.set(k, Math.max(...branches.filter((b) => b.has(k)).map((b) => b.get(k)!)));
+            // Unbound wherever a branch doesn't bind it for sure.
+            if (branches.every((b) => b.has(k) && !b.maybe.has(k))) env.maybe.delete(k);
+            else env.maybe.add(k);
+          }
           break;
         }
         case 'optional':
@@ -163,9 +200,14 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
         case 'graph':
         case 'service': {
           if (p.type === 'graph' || p.type === 'service') fromData(env, p.name);
-          const inner = new Map(env);
+          const inner = env.copy();
           patterns(p.patterns as unknown[], inner);
-          if (p.type !== 'minus') for (const [k, v] of inner) bind(env, k, v);
+          // What OPTIONAL binds can be unbound (where it doesn't match); a group or GRAPH is joined as it is.
+          if (p.type === 'optional') for (const [k, v] of inner) bind(env, k, v, true);
+          else if (p.type !== 'minus') {
+            for (const [k, v] of inner) env.set(k, v);
+            env.maybe = inner.maybe;
+          }
           break;
         }
         default:
@@ -177,23 +219,33 @@ function longestValue(tree: ParsedSparql): { chars: number; variable?: string } 
 
   /** One query level: WHERE in order, then GROUP BY and projections in order. Returns what it projects. */
   function query(q: Node): Env {
-    const env: Env = new Map();
+    const env = new Env();
     if (q.values) patterns([{ type: 'values', values: q.values }], env);
     patterns((q.where as unknown[] | undefined) ?? [], env);
     for (const g of (q.group as Node[] | undefined) ?? []) {
       const chars = est(g.expression, env);
-      if ((g.variable as Node | undefined)?.termType === 'Variable') bind(env, (g.variable as Node).value as string, chars);
+      if ((g.variable as Node | undefined)?.termType === 'Variable') bind(env, (g.variable as Node).value as string, chars, !constant(g.expression));
     }
     for (const h of (q.having as unknown[] | undefined) ?? []) est(h, env);
-    const projected: Env = new Map();
+    const projected = new Env();
+    const pass = (name: string, chars: number, maybe: boolean) => {
+      projected.set(name, chars);
+      if (maybe) projected.maybe.add(name);
+      else projected.maybe.delete(name);
+    };
     for (const v of (q.variables as Node[] | undefined) ?? []) {
-      if (v.termType === 'Variable') projected.set(v.value as string, env.get(v.value as string) ?? DATA_CHARS);
-      else if (v.termType === 'Wildcard') for (const [k, c] of env) projected.set(k, c);
+      if (v.termType === 'Variable') {
+        const name = v.value as string;
+        pass(name, env.get(name) ?? DATA_CHARS, !env.has(name) || env.maybe.has(name));
+      } else if (v.termType === 'Wildcard') for (const [k, c] of env) pass(k, c, env.maybe.has(k));
       else if (v.expression && (v.variable as Node | undefined)?.termType === 'Variable') {
         const name = (v.variable as Node).value as string;
         const chars = est(v.expression, env);
+        const maybe = !constant(v.expression);
         env.set(name, chars);
-        projected.set(name, chars);
+        if (maybe) env.maybe.add(name);
+        else env.maybe.delete(name);
+        pass(name, chars, maybe);
         note(chars, name);
       }
     }

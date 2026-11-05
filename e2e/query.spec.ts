@@ -151,6 +151,29 @@ test.describe('Query tab', () => {
     expect(await editorText(page)).toBe(start);
   });
 
+  test('if the account check fails, the question goes back in the box to retry', async ({ page, consoleGuard }) => {
+    // The box is cleared on send and the question is kept only once the account check passes. When that check
+    // failed (a 503 from /api/session), the error handler dropped the pending copy too, and the question was lost.
+    consoleGuard.allow(/status of 503/);
+    const question = 'List every volunteering opportunity';
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    await box.fill(question);
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(chat(page).getByRole('alert')).toContainText('Service unavailable');
+    await expect(box).toHaveValue(question);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
+    // Once the server is back, sending it again works.
+    await page.unroute(/\/api\/session$/);
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const before = await replies.count();
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(replies).toHaveCount(before + 1);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(chat(page).getByTestId('chat-message-user')).toContainText(question);
+    await expect(box).toHaveValue('');
+  });
+
   test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {
     const start = await editorText(page);
     await ask(page, 'List every volunteering opportunity');

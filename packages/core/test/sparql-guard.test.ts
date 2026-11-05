@@ -34,6 +34,9 @@ describe('resource checks', () => {
     const long = `{ SELECT ?x WHERE { ${doubling(16).replace(/^SELECT \?v16 WHERE \{|\}$/g, '')} BIND(?v16 AS ?x) } }`;
     for (const maybe of ['VALUES ?x { UNDEF }', 'OPTIONAL { BIND("a" AS ?x) }', '{ BIND("a" AS ?x) } UNION { BIND(1 AS ?y) }'])
       expect(resourceProblem(tree(`SELECT ?big WHERE { ${maybe} ${long} BIND(CONCAT(?x, ?x) AS ?big) }`)), maybe).toMatch(/characters/);
+    // An expression that fails leaves its variable unbound, so it doesn't tighten a later join either: STRLEN of an
+    // unbound variable errors, ?x then comes from the data, and eleven copies are up to 110,000 characters.
+    expect(resourceProblem(tree(`SELECT ?big WHERE { BIND(STRLEN(?nothing) AS ?x) ?s ?p ?x BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?big) }`))).toMatch(/110,000 characters/);
     // Growth built on GROUP_CONCAT (whose own size depends on the data) still counts.
     expect(resourceProblem(tree(`SELECT ?big WHERE { { SELECT (GROUP_CONCAT(?o) AS ?g) WHERE { ?s ?p ?o } } BIND(CONCAT(?g, ?g, ?g) AS ?big) }`))).toMatch(/characters/);
   });
@@ -50,6 +53,14 @@ describe('resource checks', () => {
       `SELECT ?x WHERE { FILTER(STRLEN(CONCAT(${Array(11).fill('?x').join(',')})) > 0) VALUES ?x { "x" } }`,
       `SELECT ?x WHERE { VALUES ?x { "x" } FILTER(STRLEN(CONCAT(${Array(11).fill('?x').join(',')})) > 0) }`,
       doubling(10),
+      // A join with a value that is always bound keeps the tighter bound: here ?x is "x" on every row, so eleven
+      // copies are eleven characters. Round 7 of the review found these were refused (estimated at 110,000), when
+      // every variable joined twice took the longer estimate.
+      `SELECT ?y WHERE { VALUES ?x { "x" } ?s ?p ?x BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
+      `SELECT ?y WHERE { ?s ?p ?x VALUES ?x { "x" } BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
+      `SELECT ?y WHERE { VALUES ?x { "x" } { SELECT ?x WHERE { ?s ?p ?x } } BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
+      `SELECT ?y WHERE { VALUES ?x { "x" } OPTIONAL { ?s ?p ?x } BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
+      `SELECT ?y WHERE { VALUES ?x { "x" } { ?s ?p ?x } UNION { ?x ?p ?o } BIND(CONCAT(${Array(11).fill('?x').join(', ')}) AS ?y) }`,
       'SELECT ?s (CONCAT(?label, " – ", ?definition) AS ?text) WHERE { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label ; <http://www.w3.org/2004/02/skos/core#definition> ?definition }',
       'SELECT (REPLACE(STR(?s), "#", "/") AS ?path) WHERE { ?s ?p ?o }',
       'SELECT ?p (GROUP_CONCAT(DISTINCT STR(?o); SEPARATOR=", ") AS ?all) WHERE { ?s ?p ?o } GROUP BY ?p',

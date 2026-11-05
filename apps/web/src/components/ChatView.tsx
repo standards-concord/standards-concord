@@ -40,7 +40,8 @@ function Bubble({ m, userName, plainText, children }: { m: ChatMessage; userName
 export interface ChatViewProps {
   messages: ChatMessage[];
   pending?: boolean;
-  onSend: (text: string, viaVoice: boolean) => void | Promise<void>;
+  /** Return false when the message wasn't taken (it failed before being kept anywhere): the text goes back in the box to retry. */
+  onSend: (text: string, viaVoice: boolean) => void | boolean | Promise<void | boolean>;
   /** Rendered beneath the latest assistant message (quick replies). */
   quickReplies?: ReactNode;
   disabled?: boolean;
@@ -84,7 +85,9 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
     setText('');
     const v = voiceUsed;
     setVoiceUsed(false);
-    await onSend(value, v);
+    const taken = await onSend(value, v);
+    // Put it back unless something new has been typed meanwhile.
+    if (taken === false) setText((t) => t || value);
   };
 
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
