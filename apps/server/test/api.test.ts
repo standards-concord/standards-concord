@@ -2494,4 +2494,61 @@ describe('reports from the retired HermiT reasoner', () => {
     // Once checked again, a request is not checked again at every tick.
     expect(await crsMod.recheckRetiredReasonerReports()).toBe(0);
   });
+
+  // Used to go wrong: the sweep listed every request up front and only compared edits before
+  // writing, so a request closed while an earlier one was being checked (or while its own check
+  // ran) got the old entry's re-check written over its newer report.
+  it('leaves a request alone that is closed after the sweep lists it', async () => {
+    const editor = await login('editor', 'Editor Ivo');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const ids: string[] = [];
+    for (const title of ['Closed before its turn', 'Closed during its check', 'Still open']) {
+      const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+        title,
+        description: 'Checked before the move to sparq.',
+        kind: 'feature',
+        ops: [{ op: 'addClass', localName: `Swept${Math.random().toString(36).slice(2, 8)}`, label: title.toLowerCase(), definition: 'A class added to test the re-check sweep.' }],
+      });
+      const cr = await getCR(res.body.id);
+      await put('changeRequests', { ...cr, validation: { ...cr.validation!, reasoner: { ...cr.validation!.reasoner, engine: 'hermit' } } }, demoId);
+      ids.push(cr.id);
+    }
+    const [before, during, open] = ids;
+    const withdraw = async (id: string) => { await crsMod.updateCR(await getCR(id), (c) => { c.status = 'withdrawn'; }); };
+    const seen: string[] = [];
+    await crsMod.recheckRetiredReasonerReports({
+      beforeCheck: async (cr) => {
+        if (!ids.includes(cr.id)) return;
+        seen.push(cr.id);
+        // The first of ours to come up closes "before" (unless it is "before"), after the list was taken.
+        if (seen.length === 1 && cr.id !== before) await withdraw(before);
+        if (cr.id === during || (cr.id === before && seen.length === 1)) await withdraw(cr.id);
+      },
+    });
+    expect((await getCR(before)).validation?.reasoner.engine).toBe('hermit');
+    expect((await getCR(during)).validation?.reasoner.engine).toBe('hermit');
+    expect((await getCR(open)).validation?.reasoner.engine).toBe('sparq');
+  });
+
+  // Used to go wrong: the governance tick runs every minute without waiting for the last one, so
+  // two sweeps could both re-check the same requests.
+  it('runs one sweep at a time', async () => {
+    const editor = await login('editor', 'Editor Jo');
+    const crsMod = await import('../src/services/changeRequests.js');
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Swept once',
+      description: 'Checked before the move to sparq.',
+      kind: 'feature',
+      ops: [{ op: 'addClass', localName: `Once${Math.random().toString(36).slice(2, 8)}`, label: 'swept once', definition: 'A class added to test overlapping sweeps.' }],
+    });
+    const cr = await getCR(res.body.id);
+    await put('changeRequests', { ...cr, validation: { ...cr.validation!, reasoner: { ...cr.validation!.reasoner, engine: 'hermit' } } }, demoId);
+    const events = (await getCR(cr.id)).timeline.length;
+    const [a, b] = await Promise.all([crsMod.recheckRetiredReasonerReports(), crsMod.recheckRetiredReasonerReports()]);
+    expect(a + b).toBeGreaterThanOrEqual(1);
+    expect(Math.min(a, b)).toBe(0);
+    const after = await getCR(cr.id);
+    expect(after.validation?.reasoner.engine).toBe('sparq');
+    expect(after.timeline.length).toBe(events + 1);
+  });
 });

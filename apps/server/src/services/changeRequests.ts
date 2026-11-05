@@ -356,7 +356,11 @@ function validationPassed(v: ValidationReport | undefined) {
  * results onto the latest stored request, so a status change made meanwhile (a withdrawal, a merge) is kept;
  * if the edits themselves changed meanwhile, its now-stale results are dropped.
  */
-export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}): Promise<ChangeRequest> {
+export async function triage(
+  cr: ChangeRequest,
+  /** onlyIf: checked on the latest stored copy, under the lock, before writing; false writes nothing. */
+  opts: { analyse?: boolean; onlyIf?: (latest: ChangeRequest) => boolean } = {},
+): Promise<ChangeRequest> {
   // Triage works on stored requests only: one never stored (or since discarded) is never written back.
   if (!(await get<ChangeRequest>('changeRequests', cr.id))) return cr;
   const project = await getProject(cr.ontologyId);
@@ -404,6 +408,7 @@ export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}
   }
   return locked(cr, async (latest) => {
     if (JSON.stringify(latest.ops) !== opsKey) return latest;
+    if (opts.onlyIf && !opts.onlyIf(latest)) return latest;
     for (const [k, v] of Object.entries(result)) if (v !== undefined) (latest as unknown as Record<string, unknown>)[k] = v;
     latest.timeline.push(event);
     return await save(latest);
@@ -1188,17 +1193,38 @@ async function reviseNow(cr: ChangeRequest, actor: User, instruction: string) {
 const RETIRED_REASONERS = new Set(['hermit', 'pellet']);
 const OPEN_STATUSES: ChangeRequest['status'][] = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
 
+const checkedByRetiredReasoner = (c: ChangeRequest) => OPEN_STATUSES.includes(c.status) && RETIRED_REASONERS.has(c.validation?.reasoner.engine ?? '');
+let sweeping = false;
+
 /**
  * Open requests last checked by a retired reasoner are checked again (rule-based, no LLM), so
  * their checks say what Concord runs now rather than "HermiT". Closed ones keep the report they
  * were decided on. Each is re-checked once: afterwards its report names sparq (or no verdict).
+ *
+ * One sweep at a time (the governance tick doesn't wait for the last one, and a sweep can take
+ * longer than a tick). Each request is read again just before its check, and the result is only
+ * written if, under the lock, the request is still the revision that was checked: one merged,
+ * closed or changed meanwhile keeps its newer report. Returns how many were written.
+ * `beforeCheck` (tests only) runs after a request is read and before it is checked.
  */
-export async function recheckRetiredReasonerReports(): Promise<number> {
-  const stale = (await list<ChangeRequest>('changeRequests')).filter(
-    (c) => OPEN_STATUSES.includes(c.status) && RETIRED_REASONERS.has(c.validation?.reasoner.engine ?? ''),
-  );
-  for (const cr of stale) await triage(cr, { analyse: false });
-  return stale.length;
+export async function recheckRetiredReasonerReports(opts: { beforeCheck?: (cr: ChangeRequest) => Promise<void> } = {}): Promise<number> {
+  if (sweeping) return 0;
+  sweeping = true;
+  try {
+    let written = 0;
+    for (const { id } of (await list<ChangeRequest>('changeRequests')).filter(checkedByRetiredReasoner)) {
+      const cr = await get<ChangeRequest>('changeRequests', id);
+      if (!cr || !checkedByRetiredReasoner(cr)) continue;
+      const rev = cr.rev ?? 0;
+      await opts.beforeCheck?.(cr);
+      let current = false;
+      await triage(cr, { analyse: false, onlyIf: (latest) => (current = (latest.rev ?? 0) === rev && checkedByRetiredReasoner(latest)) });
+      if (current) written++;
+    }
+    return written;
+  } finally {
+    sweeping = false;
+  }
 }
 
 /** Periodic sweep: time-based transitions (review periods ending, votes closing). */
