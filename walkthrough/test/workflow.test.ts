@@ -32,4 +32,17 @@ describe('the recording workflow', () => {
     expect(step(/actions\/cache\/restore@/)).toMatch(/restore-keys:/);
     expect(steps.some((s) => /uses: actions\/cache@/.test(s) && /\.cache\/voice/.test(s))).toBe(false);
   });
+
+  // The features video (features.md) isn't on /welcome, and attach-release.sh needs both of the
+  // pair it plays, so release runs record only that pair, and only that pair is ever attached.
+  it('records and attaches only the tour and feedback videos for a release', () => {
+    expect(step(/name: Record\b/)).toMatch(/VIDEO: \$\{\{ inputs\.video \|\| 'tour,feedback' \}\}/);
+    expect(step(/name: Record\b/)).toMatch(/--video "\$VIDEO"/);
+    const attach = yml.slice(yml.indexOf('\n  attach:'));
+    expect(attach).toMatch(/inputs\.video == 'tour,feedback'/);
+  });
+
+  it('keys the narration cache on every script, the features video’s included', () => {
+    for (const s of [step(/actions\/cache\/restore@/), step(/actions\/cache\/save@/)]) expect(s).toMatch(/walkthrough\/features\.md/);
+  });
 });
