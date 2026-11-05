@@ -17,6 +17,7 @@ import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
 import { ChatView } from '../../components/ChatView';
 import { accountToken, stillCurrent, useSession } from '../../lib/session';
+import { CheckData, type CheckResult } from '../../components/check/CheckData';
 import { useOntology } from './Layout';
 
 /**
@@ -100,7 +101,6 @@ const OFFLINE_NOTE: Record<NonNullable<QueryChatResponse['offlineReason']>, stri
   limit: 'Offline helper: the assistant has reached today’s usage limit, so this matches your words to the ontology’s terms instead.',
 };
 
-const FINDINGS_PER_PAGE = 20;
 
 /** Previous / next paging for long results, so a big answer doesn't flood the page. */
 function Pager({ page, pageSize, total, onPage, label }: { page: number; pageSize: number; total: number; onPage: (p: number) => void; label: string }) {
@@ -182,7 +182,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const workspace: Workspace = params.get('view') === 'check' ? 'check' : 'query';
   const setWorkspace = (w: Workspace) => setParam('view', w);
   const [rowPage, setRowPage] = useState(0);
-  const [findingPage, setFindingPage] = useState(0);
+  const [checkResult, setCheckResult] = useState<CheckResult>({ report: null });
 
   const turtle = useAsync(() => api.source(id, 'turtle'), [id]);
   const shapes = useAsync(() => api.source(id, 'shacl'), [id]);
@@ -205,19 +205,13 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
   const [data, setData] = useLocalStorage(`${storageKey}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
-  const [report, setReportState] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
-  const [checkError, setCheckError] = useState<unknown>();
 
   const setResult = (r: Result | null) => {
     setResultState(r);
     setRowPage(0);
   };
-  const setReport = (r: typeof report) => {
-    setReportState(r);
-    setFindingPage(0);
-  };
   const label = useMemo(() => makeLabeler(view.data), [view.data]);
-  const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
+  const prefixes = useMemo(() => view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace }, [view.data, ontology.prefix, ontology.namespace]);
 
   // How many records of each class the sample data has, for the dataset summary and the starting class.
   const [recordCounts, setRecordCounts] = useState<{ byClass: Map<string, number>; total: number }>();
@@ -303,13 +297,11 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const keyFor = (q: string, t: Target) => `${t}|${q}|${t === 'data' ? data : ''}`;
   const questionKey = keyFor(query, target);
   const [ranKey, setRanKey] = useState<string>();
-  const [checkedData, setCheckedData] = useState<string>();
   // The query the assistant last wrote, waiting for the person to read it and press Run.
   const [wroteKey, setWroteKey] = useState<string>();
   const awaitingRun = wroteKey === questionKey && ranKey !== questionKey;
   const resultStale = !!result && ranKey !== questionKey;
   const queryLimit = useMemo(() => limitOf(query), [query]);
-  const reportStale = !!report && checkedData !== data;
 
   /** Runs the editor's query, or the one the assistant just wrote (state hasn't caught up yet). */
   const run = async (next?: { query: string; target: Target; columns: Columns }) => {
@@ -441,29 +433,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     at: '',
   };
   const lastReply = [...chat].reverse().find((m) => m.role === 'assistant');
-
-  const check = () => {
-    const s = storeRef.current;
-    if (!s || !shapes.data) return;
-    setCheckError(undefined);
-    setCheckedData(data);
-    try {
-      // The ontology goes in the data graph too, so sh:class sees subclass relationships.
-      const r = s.validate(`${turtle.data ?? ''}\n${data}`, shapes.data, 'turtle');
-      setReport({
-        conforms: r.conforms,
-        results: r.results.map((x) => ({
-          focusNode: x.focusNode as string | undefined,
-          path: x.path as string | undefined,
-          severity: x.severity as string | undefined,
-          message: x.message as string | undefined,
-        })),
-      });
-    } catch (e) {
-      setCheckError(e);
-      setReport(null);
-    }
-  };
 
   if (turtle.error) return <ErrorCard error={turtle.error} onRetry={turtle.reload} />;
   return (
@@ -748,54 +717,19 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
           </Card>
         </div>
       ) : (
-        <Card>
-          <CardHeader
-            title="Check your data"
-            subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. Questions about records run over this data too."
-            icon={ShieldCheck}
-            actions={
-              <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes.data}>
-                Check
-              </Button>
-            }
-          />
-          <div className="space-y-3 p-4">
-            <CodeEditor value={data} onChange={setData} language="turtle" completions={turtleCompletions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
-            <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</p>
-            {checkError ? <InlineError error={checkError} /> : null}
-            {reportStale && (
-              <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="report-stale">
-                The data changed since this check.
-                <Button size="sm" icon={ShieldCheck} onClick={check}>
-                  Check again
-                </Button>
-              </p>
-            )}
-            {report && (
-              <div className={cx('space-y-2', reportStale && 'opacity-50')} data-testid="shacl-report">
-                <p className="text-sm">
-                  {report.conforms ? (
-                    <Badge tone="ok">Conforms</Badge>
-                  ) : (
-                    <Badge tone="danger">
-                      {report.results.length} problem{report.results.length === 1 ? '' : 's'}
-                    </Badge>
-                  )}
-                </p>
-                <ul className="space-y-1 text-sm">
-                  {report.results.slice(findingPage * FINDINGS_PER_PAGE, (findingPage + 1) * FINDINGS_PER_PAGE).map((r, i) => (
-                    <li key={i} className="rounded-md border border-line px-3 py-2">
-                      <span className="font-mono text-xs">{r.focusNode ? short(r.focusNode, prefixes) : ''}</span>
-                      {r.path ? <span className="font-mono text-xs text-muted"> · {short(r.path, prefixes)}</span> : null}
-                      <div>{r.message}</div>
-                    </li>
-                  ))}
-                </ul>
-                <Pager page={findingPage} pageSize={FINDINGS_PER_PAGE} total={report.results.length} onPage={setFindingPage} label="Finding pages" />
-              </div>
-            )}
-          </div>
-        </Card>
+        <CheckData
+          result={checkResult}
+          onResult={setCheckResult}
+          data={data}
+          onDataChange={setData}
+          completions={turtleCompletions}
+          ontologyTurtle={turtle.data}
+          shapes={shapes.data}
+          store={() => storeRef.current}
+          ready={!!ready}
+          ontologyPrefixes={prefixes}
+          namespace={ontology.namespace}
+        />
       )}
     </div>
   );

@@ -5,7 +5,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./types": "./src/types.ts",
-    "./sparql-guard": "./src/sparqlGuard.ts"
+    "./sparql-guard": "./src/sparqlGuard.ts",
+    "./data-formats": "./src/dataFormats.ts"
   },
   "scripts": {
     "test": "vitest run",
@@ -13,6 +14,7 @@
   },
   "dependencies": {
     "@rdfjs/wrapper": "0.34.0",
+    "@sparq-org/sparq": "0.1.5",
     "@theodi/shacl-converter": "1.0.5",
     "esbuild": "0.28.2",
     "jsonld": "^9.0.0",
@@ -26,7 +28,6 @@
   },
   "devDependencies": {
     "@rdfjs/types": "^2",
-    "@sparq-org/sparq": "0.1.5",
     "@types/jsonld": "^1.5.15",
     "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",

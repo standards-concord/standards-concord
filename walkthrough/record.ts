@@ -7,26 +7,31 @@
  *   pnpm walkthrough --only intro,goals    just some scenes
  *   pnpm walkthrough --strict              fail on any UI drift (a missing button etc.)
  *   pnpm walkthrough --check               run every step quickly with no video or voice (CI)
+ *   pnpm walkthrough --publish             a release video: strict, no stand-ins, no outside
+ *                                          requests, and it fails rather than produce a flawed video
  *   pnpm walkthrough --help
  *
  * Output goes to walkthrough/out/: concord-walkthrough.mp4 (1080p, AAC, soft captions),
  * .vtt captions, chapters.txt (YouTube-style) and report.json.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { chromium, type Route } from '@playwright/test';
+import type { Route } from '@playwright/test';
 import { Capture } from './lib/capture.ts';
 import { Director, sleep } from './lib/director.ts';
+import { guardContext, launchBrowser } from './lib/browser.ts';
 import { McpClient } from './lib/mcp.ts';
 import { mux, type Placed } from './lib/mux.ts';
-import { forSpeech, parseNarration, selectScenes, type Action, type Scene } from './lib/narration.ts';
+import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, type Action, type Scene } from './lib/narration.ts';
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
 import { actions, type Ctx } from './scenes.ts';
 import { vendorModule } from './lib/vendor.ts';
+import { serveFonts } from './lib/fonts.ts';
+import { startEgressProxy, type Egress } from './lib/egress.ts';
 
 const HERE = import.meta.dirname;
 const ALL_FEATURES = ['forks', 'jsClasses', 'shaclc', 'appChecks', 'connectPage'];
@@ -41,6 +46,7 @@ const { values: argv } = parseArgs({
     check: { type: 'boolean' },
     only: { type: 'string' },
     strict: { type: 'boolean' },
+    publish: { type: 'boolean' },
     out: { type: 'string', default: path.join(HERE, 'out') },
     narration: { type: 'string', default: path.join(HERE, 'narration.md') },
     web: { type: 'string', default: 'dev' },
@@ -64,6 +70,23 @@ if (argv['list-actions']) {
   process.exit(0);
 }
 
+// A release video must be exactly what the script claims, or nothing at all.
+if (argv.publish) {
+  argv.strict = true;
+  argv['no-shims'] = true;
+  if (argv.draft || argv.check) throw new Error('--publish records the real thing: drop --draft/--check');
+}
+
+/**
+ * Pages loaded through the egress proxy or fulfilled by a Playwright route lose
+ * Chromium's record that they came from localhost, so its local-network checks would
+ * then block the dev server's own websocket. Everything here is local (and the proxy
+ * enforces that), so turn those checks off.
+ */
+
+/** "Now", as far as the recorded hub and browser are concerned, so dates on screen never drift. */
+const EPOCH = '2026-11-23T10:00:00Z';
+
 const log = (s: string) => console.log(s);
 const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
@@ -77,6 +100,7 @@ async function main() {
 
   const provider = (argv.draft || argv.check ? 'silent' : (argv.voice as ProviderName | undefined) ?? autoProvider()) as ProviderName;
   if (!DEFAULTS[provider]) throw new Error(`Unknown voice provider "${provider}". Use elevenlabs, openai, google, say or silent.`);
+  if (argv.publish && (provider === 'silent' || provider === 'say')) throw new Error(`--publish needs a narration voice (elevenlabs, openai or google), not "${provider}"`);
   const key = needsKey(provider);
   if (key && !process.env[key]) process.env[key] = await askHidden(`${key} (input hidden): `);
   const voice = new Voice({ provider, voice: argv['voice-id'], model: argv.model, rate: argv.rate ? Number(argv.rate) : undefined }, path.join(HERE, '.cache', 'voice'));
@@ -85,13 +109,23 @@ async function main() {
   await mkdir(argv.out!, { recursive: true });
 
   // 1. Boot Concord (unless recording an existing hub) and find out what it can do.
-  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev' }));
+  const concord = argv.hub ? undefined : await (log('Starting Concord…'), startConcord({ apiPort: 8798, webPort: 5184, mode: argv.web === 'preview' ? 'preview' : 'dev', epoch: EPOCH }));
   const hub = (argv.hub ?? concord!.web).replace(/\/$/, '');
+  let egress: Egress | undefined;
   const shownHub = argv['shown-hub']!.replace(/\/$/, '');
   try {
-    const browser = await chromium.launch({ headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars'] });
+    // Every connection the browser makes goes through the allowlisting proxy, loopback included.
+    const outside = new Set<string>();
+    egress = await startEgressProxy([hub, concord?.api].filter(Boolean) as string[], outside);
+    const browser = await launchBrowser({ proxy: egress.url, headless: !argv.headed, args: ['--force-color-profile=srgb', '--font-render-hinting=none', '--hide-scrollbars'] });
+    const chromiumVersion = browser.version();
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1.5, colorScheme: 'light', reducedMotion: 'no-preference', locale: 'en-GB', timezoneId: 'Europe/London' });
+    // tsx compiles with keepNames, which wraps functions we hand to the page in __name().
+    await context.addInitScript('globalThis.__name ??= (f) => f;');
+    await guardContext(context);
     await context.addInitScript({ path: path.join(HERE, 'stage', 'overlay.js') });
+    // The browser's clock agrees with the server's, and runs normally from there.
+    if (!argv.hub) await context.clock.setSystemTime(new Date(EPOCH));
     const page = await context.newPage();
     const api = page.request;
     const local = [hub, concord?.api].filter(Boolean) as string[];
@@ -112,20 +146,32 @@ async function main() {
 
     const features = await detectFeatures(hub, mcp, ontology.id);
     log(`Platform features: ${[...features].join(', ') || 'none of the optional ones'}`);
+    // For drafts only: let the app scenes run on a stand-in for the generated classes,
+    // clearly labelled on screen. Published videos (--no-shims) skip those scenes instead.
+    const classesStandIn = !features.has('jsClasses') && !argv['no-shims'];
+    if (classesStandIn) {
+      // Scenes that show the hub's own Classes pages still skip (unless=jsClassesStandIn).
+      features.add('jsClasses').add('jsClassesStandIn');
+      log('  generated JS classes: not on this hub; the draft uses a labelled stand-in');
+    }
 
     const { kept, skipped } = selectScenes(narration, features, argv.only?.split(','));
     for (const s of skipped) log(`  skip ${s.id}: ${s.reason}`);
     if (!kept.length) throw new Error('No scenes to record');
+    const promisesLength = kept.some((s) => s.steps.some((st) => st.text.includes('{minutes}')));
+    const promisedMinutes = fillMinutes(kept);
+    if (promisesLength) log(`  the intro will say about ${promisedMinutes} minutes`);
 
     // 2. Voice every paragraph (cached), with its neighbours for natural flow.
     const steps = kept.flatMap((s) => s.steps.map((st) => ({ scene: s, step: st })));
     const spoken = steps.filter((x) => x.step.text);
-    const clips = new Map<object, { file: string; duration: number }>();
+    const clips = new Map<object, { file: string; duration: number; charStarts?: number[] }>();
+    const say = (text: string) => speechMap(text, lexicon).speech;
     if (!argv.check) {
       log(`Voicing ${spoken.length} paragraphs…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
-        const c = await voice.synth({ text: forSpeech(x.step.text, lexicon), previous: spoken[i - 1] && forSpeech(spoken[i - 1].step.text, lexicon), next: spoken[i + 1] && forSpeech(spoken[i + 1].step.text, lexicon) });
+        const c = await voice.synth({ text: say(x.step.text), previous: spoken[i - 1] && say(spoken[i - 1].step.text), next: spoken[i + 1] && say(spoken[i + 1].step.text) });
         if (!c.cached) fresh++;
         clips.set(x.step, c);
       });
@@ -145,6 +191,10 @@ async function main() {
 
     const shown = (text: string) => local.reduce((t, l) => t.split(l).join(shownHub), text);
     const shims = new Set<string>();
+    egress.allow(stat.url);
+    // Registered after the guard, so it answers font requests first (Playwright runs the newest route first).
+    const fonts = { fetched: new Set<string>(), missing: new Set<string>() };
+    await serveFonts(context, { dir: path.join(HERE, 'fonts'), offline: !!argv.publish, ...fonts });
     await routeModules(page, { hub, api: concord?.api, shownHub, noShims: !!argv['no-shims'], shims });
 
     // Warm up: compile pages in the dev server and fill caches so nothing loads on camera.
@@ -165,6 +215,7 @@ async function main() {
       app: { url: `${stat.url}/`, dir: appDir, sampleDir: path.join(HERE, 'sample-app'), classes: mainClasses },
       shown,
       state: { token },
+      notices: { classesStandIn },
     };
 
     // 4. Record: each paragraph starts its actions and its narration together, and the
@@ -183,9 +234,11 @@ async function main() {
       }
       stat.close();
       await browser.close();
-      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], warnings: d.warnings }, null, 2));
+      await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify({ check: true, hub, features: [...features], scenes: kept.map((s) => s.id), skipped, shims: [...shims], outsideRequests: [...outside], fontsFetchedLive: [...fonts.fetched], warnings: d.warnings }, null, 2));
+      if (fonts.fetched.size) log(`\n⚠ ${fonts.fetched.size} web font file(s) weren't in walkthrough/fonts/ and were fetched live. Commit them so recordings stay offline.`);
       log(`\nChecked ${kept.length} scenes: ${d.warnings.length ? `${d.warnings.length} warning(s)` : 'all steps worked'}.`);
-      if (d.warnings.length) process.exitCode = 1;
+      if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
+      if (d.warnings.length || (argv.strict && outside.size)) process.exitCode = 1;
       return;
     }
     await cap.start();
@@ -197,9 +250,10 @@ async function main() {
       log(`▶ ${scene.id}`);
       chapters.push({ at: cap.now(), title: scene.title });
       for (const step of scene.steps) {
+        cap.check();
         const clip = clips.get(step);
         const start = cap.now();
-        if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text });
+        if (clip) placed.push({ file: clip.file, at: start + LEAD, duration: clip.duration, text: step.text, cues: cuesFor(step.text, lexicon, clip.duration, clip.charStarts) });
         const speaking = clip ? sleep((LEAD + clip.duration) * 1000) : Promise.resolve();
         await Promise.all([run(ctx, scene, step.actions), speaking]);
         await run(ctx, scene, step.after);
@@ -208,6 +262,12 @@ async function main() {
     }
     await sleep(1500);
     const seconds = await cap.stop();
+    // The intro says how long the video is; check it said the truth.
+    if (promisesLength && Math.abs(seconds / 60 - promisedMinutes) > 1.5)
+      d.note(`The intro promises about ${promisedMinutes} minutes, but the video is ${fmt(seconds)}`);
+    // A big backlog means the encoder couldn't keep up. Timing stays right (frames are counted),
+    // but the machine is close to running out of memory, so it's worth knowing.
+    if (cap.peakBacklogBytes > 256 * 1024 * 1024) d.warnings.push(`video encoder fell behind (peak backlog ${Math.round(cap.peakBacklogBytes / 1048576)} MB); use a faster machine`);
     stat.close();
     await browser.close();
 
@@ -217,6 +277,11 @@ async function main() {
     await mux({ video, videoSeconds: seconds, clips: placed, out, captions: path.join(argv.out!, 'concord-walkthrough.vtt'), chapters, title: narration.meta.title });
     await rm(video, { force: true });
     await writeFile(path.join(argv.out!, 'chapters.txt'), chapters.map((c) => `${fmt(c.at)} ${c.title}`).join('\n') + '\n');
+    // A clean transcript of exactly the scenes in this video.
+    await writeFile(
+      path.join(argv.out!, 'transcript.md'),
+      `# ${narration.meta.title ?? 'Concord walkthrough'}\n\n` + kept.map((s, i) => `## ${s.title} (${fmt(chapters[i].at)})\n\n${s.steps.filter((st) => st.text).map((st) => plain(st.text)).join('\n\n')}`).join('\n\n') + '\n',
+    );
     const report = {
       recordedAt: new Date().toISOString(),
       duration: Math.round(seconds),
@@ -226,14 +291,27 @@ async function main() {
       scenes: kept.map((s) => s.id),
       skipped,
       shims: [...shims],
+      outsideRequests: [...outside],
+      fontsFetchedLive: [...fonts.fetched],
+      fontsMissing: [...fonts.missing],
+      promisedMinutes: promisesLength ? promisedMinutes : undefined,
+      toolchain: await toolchain(chromiumVersion),
       warnings: d.warnings,
+      captionTiming: clips.size && [...clips.values()].every((c) => c.charStarts) ? 'voice timestamps' : 'estimated from text length',
     };
     await writeFile(path.join(argv.out!, 'report.json'), JSON.stringify(report, null, 2));
+    if (argv.publish && (d.warnings.length || shims.size || outside.size || fonts.missing.size)) {
+      throw new Error(`Not publishable: ${d.warnings.length} warning(s), ${shims.size} stand-in(s), ${outside.size} outside request(s), ${fonts.missing.size} missing font file(s). See report.json.`);
+    }
+    // Some warnings arrive between steps (page errors, failed requests), so strict mode checks again at the end.
+    if (argv.strict && (d.warnings.length || outside.size)) throw new Error(`--strict: ${d.warnings.length} warning(s) and ${outside.size} blocked outside request(s) during the recording. See report.json.`);
     log(`\nDone: ${out} (${fmt(seconds)})`);
+    if (outside.size) log(`\n⚠ Blocked requests to outside hosts:\n  ${[...outside].join('\n  ')}`);
     if (shims.size) log(`\n⚠ Stand-ins were used for platform features this hub doesn't serve yet:\n  ${[...shims].join('\n  ')}\n  Re-record once they're deployed, or pass --no-shims to refuse.`);
     if (d.warnings.length) log(`\n${d.warnings.length} warning(s); see report.json.`);
   } finally {
     concord?.stop();
+    await egress?.close();
   }
 }
 
@@ -241,15 +319,35 @@ async function main() {
  * Runs in every page: shows the public hub address wherever the local one appears in the
  * page's text (the hub prints its own URL in places), and hides the alpha testers'
  * floating "Walkthrough" button, which would sit in the corner of every shot.
+ *
+ * CodeMirror owns its DOM and redraws any text changed under it, which would set this
+ * observer off again forever, so code views are changed through the editor instead.
  */
 function presentation({ local, shown }: { local: string[]; shown: string }) {
+  const swap = (t: string) => local.reduce((acc, l) => acc.split(l).join(shown), t);
+  const editor = (content: Element) => {
+    // EditorView.findFromDOM, without importing the app's CodeMirror.
+    const tile = (content as any).cmTile ?? (content as any).cmView;
+    const view = tile?.root?.view ?? tile?.rootView?.view;
+    if (!view) return;
+    const doc: string = view.state.doc.toString();
+    if (!local.some((l) => doc.includes(l))) return;
+    view.dispatch({ changes: { from: 0, to: doc.length, insert: swap(doc) } });
+  };
   const fix = (root: Node) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const el = root instanceof Element ? root : root.parentElement;
+    const inEditor = el?.closest('.cm-content');
+    if (inEditor) return editor(inEditor);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest('.cm-editor') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       const t = n.nodeValue ?? '';
-      if (local.some((l) => t.includes(l))) n.nodeValue = local.reduce((acc, l) => acc.split(l).join(shown), t);
+      if (local.some((l) => t.includes(l))) n.nodeValue = swap(t);
     }
-    for (const b of (root instanceof Element || root instanceof Document ? root : document).querySelectorAll?.('button.fixed') ?? []) {
+    const scope = root instanceof Element || root instanceof Document ? root : document;
+    for (const c of scope.querySelectorAll?.('.cm-content') ?? []) editor(c);
+    for (const b of scope.querySelectorAll?.('button.fixed') ?? []) {
       if (/^\s*Walkthrough/.test(b.textContent ?? '')) (b as HTMLElement).style.display = 'none';
     }
   };
@@ -313,6 +411,11 @@ async function detectFeatures(hub: string, mcp: McpClient, ontologyId: string): 
 }
 
 /**
+ * Recordings shouldn't depend on the outside world: anything not served by the hub
+ * being recorded, the stage server, or a route below is blocked and reported. The app's
+ * web fonts are the one exception, so the video shows the real typography.
+ */
+/**
  * Network routing for the recording:
  * - CDN modules (n3, @rdfjs/wrapper) are served from local bundles, so recordings work
  *   offline and never change because a CDN did.
@@ -329,7 +432,8 @@ async function routeModules(page: import('@playwright/test').Page, o: { hub: str
     const u = new URL(route.request().url());
     for (const base of [o.hub, o.api].filter(Boolean) as string[]) {
       try {
-        const r = await route.fetch({ url: `${base}${u.pathname}${u.search}` });
+        // Redirects are not followed: this fetch runs outside the browser and its proxy.
+        const r = await route.fetch({ url: `${base}${u.pathname}${u.search}`, maxRedirects: 0 });
         if (r.ok() && /javascript/.test(r.headers()['content-type'] ?? '')) {
           const body = (await r.text()).split(o.hub).join(o.shownHub);
           return route.fulfill({ status: 200, contentType: 'text/javascript', body, headers: { 'access-control-allow-origin': '*' } });
@@ -348,6 +452,15 @@ async function routeModules(page: import('@playwright/test').Page, o: { hub: str
     }
     return route.fulfill({ status: 404, body: 'Not found' });
   });
+}
+
+/** Versions of everything that affects the pixels and the sound, for comparing recordings. */
+async function toolchain(chromiumVersion: string) {
+  const { execFile } = await import('node:child_process');
+  const os = await import('node:os');
+  const out = (cmd: string, args: string[]) => new Promise<string>((r) => execFile(cmd, args, (_e, stdout) => r(String(stdout ?? '').split('\n')[0].trim())));
+  const distro = existsSync('/etc/os-release') ? (await readFile('/etc/os-release', 'utf8')).match(/^PRETTY_NAME="?([^"\n]*)/m)?.[1] : process.platform === 'darwin' ? `macOS ${await out('sw_vers', ['-productVersion'])}` : undefined;
+  return { node: process.version, chromium: chromiumVersion, ffmpeg: await out('ffmpeg', ['-version']), os: [distro, `${os.type()} ${os.release()} ${os.arch()}`].filter(Boolean).join(' · ') };
 }
 
 main().catch((e) => {

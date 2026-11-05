@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
@@ -15,8 +17,14 @@ import { defineConfig, devices } from '@playwright/test';
 const mode = process.env.E2E_MODE === 'preview' ? 'preview' : 'dev';
 const API_PORT = Number(process.env.E2E_API_PORT ?? 8797);
 const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5183);
+/** Stand-in for GitHub's issues API, so tester feedback can be filed as issues offline. */
+export const GITHUB_STUB_PORT = Number(process.env.E2E_GITHUB_STUB_PORT ?? 8799);
 const dataDir = process.env.E2E_DATA_DIR ?? path.join(os.tmpdir(), `concord-e2e-${process.pid}`);
 const root = path.resolve(import.meta.dirname, '..');
+// The co-lead bot's calendar feed: meetings.spec.ts writes invites here and asks the server to re-read it.
+const botCalendar = (process.env.E2E_BOT_ICS ??= path.join(dataDir, 'bot-calendar.ics'));
+fs.mkdirSync(path.dirname(botCalendar), { recursive: true });
+fs.writeFileSync(botCalendar, 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Concord e2e//EN\r\nEND:VCALENDAR\r\n');
 const live = process.env.LIVE_URL ?? 'https://standards-concord.vercel.app';
 const runningLive = process.argv.some((a) => a === '--project=live' || a === 'live');
 
@@ -55,6 +63,15 @@ export default defineConfig({
     ? undefined
     : [
         {
+          command: 'node e2e/github-stub.mjs',
+          cwd: root,
+          url: `http://localhost:${GITHUB_STUB_PORT}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          env: { PORT: String(GITHUB_STUB_PORT) },
+          stdout: 'ignore',
+          stderr: 'pipe',
+        },
+        {
           command: 'pnpm --filter @concord/server start',
           cwd: root,
           url: `http://localhost:${API_PORT}/healthz`,
@@ -65,12 +82,27 @@ export default defineConfig({
             CONCORD_DATA_DIR: dataDir,
             WEB_URL: `http://localhost:${WEB_PORT}`,
             DEMO_MODE: 'true',
+            // Public reporting needs its own secret; this one is only for the test server.
+            REPORT_SECRET: 'e2e-only-public-report-secret-0123456789abcdef',
             // Keep the tests deterministic and offline: no real LLM, pods or GitHub.
             LLM_PROVIDER: 'simulated',
             ANTHROPIC_API_KEY: '',
             SOLID_SERVER_URL: '',
             GOOGLE_CLIENT_ID: '',
             GITHUB_CLIENT_ID: '',
+            // Every test validates from the same address.
+            VALIDATE_RATE_LIMIT: '1000',
+            VALIDATE_PER_CLIENT: '100',
+            VALIDATE_QUEUE: '32',
+            VALIDATE_JSONLD_QUEUE: '32',
+            // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
+            MEET_BOT_EMAIL: 'concord.bot@example.org',
+            MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,
+            RECALL_API_KEY: '',
+            // Feedback is filed as GitHub issues, to the local stand-in.
+            FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
+            FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
+            FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
           },
           stdout: 'ignore',
           stderr: 'pipe',

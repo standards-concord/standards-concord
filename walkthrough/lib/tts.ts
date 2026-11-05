@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -39,7 +39,20 @@ export interface Clip {
   /** Seconds. */
   duration: number;
   cached: boolean;
+  /** Start time (seconds) of each character of the spoken text, when the provider reports it. */
+  charStarts?: number[];
 }
+
+/**
+ * ElevenLabs output format. Only MP3 formats are accepted, because clips are stored and
+ * probed as MP3. 128 kbps works on every plan; 192 kbps needs Creator or above.
+ */
+export const ELEVENLABS_FORMATS = ['mp3_22050_32', 'mp3_44100_32', 'mp3_44100_64', 'mp3_44100_96', 'mp3_44100_128', 'mp3_44100_192'];
+const ELEVENLABS_FORMAT = process.env.ELEVENLABS_OUTPUT_FORMAT || 'mp3_44100_128';
+/** A fixed seed makes ElevenLabs more repeatable (it does not guarantee identical audio). */
+const ELEVENLABS_SEED = 4242;
+/** Voice settings sent with every ElevenLabs request (speed is added from the rate). */
+const ELEVENLABS_SETTINGS = { stability: 0.5, similarity_boost: 0.75, style: 0.15, use_speaker_boost: true };
 
 export const DEFAULTS: Record<ProviderName, { voice?: string; model?: string; key?: string }> = {
   // "George": a warm, mid-paced British narrator from ElevenLabs' default voice library.
@@ -121,10 +134,16 @@ export interface SynthRequest {
 }
 
 export class Voice {
+  /** First retry delay; doubles each time. */
+  static retryBaseMs = 1500;
+
   constructor(
     readonly opts: VoiceOptions,
     readonly cacheDir: string,
-  ) {}
+  ) {
+    if (opts.provider === 'elevenlabs' && !ELEVENLABS_FORMATS.includes(ELEVENLABS_FORMAT))
+      throw new Error(`ELEVENLABS_OUTPUT_FORMAT must be one of ${ELEVENLABS_FORMATS.join(', ')} (got "${ELEVENLABS_FORMAT}")`);
+  }
 
   get label() {
     const d = DEFAULTS[this.opts.provider];
@@ -134,20 +153,26 @@ export class Voice {
   private key(req: SynthRequest) {
     const o = this.opts;
     const d = DEFAULTS[o.provider];
-    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, o.provider === 'elevenlabs' ? [req.previous, req.next] : null]);
+    // Everything that changes the audio is part of its identity.
+    const material = JSON.stringify([o.provider, o.voice ?? d.voice, o.model ?? d.model, o.style ?? DEFAULT_STYLE, o.rate ?? 1, req.text, o.provider === 'elevenlabs' ? [req.previous, req.next, ELEVENLABS_FORMAT, ELEVENLABS_SEED, ELEVENLABS_SETTINGS] : null]);
     return createHash('sha256').update(material).digest('hex').slice(0, 24);
   }
 
   async synth(req: SynthRequest): Promise<Clip> {
     const ext = this.opts.provider === 'say' ? 'aiff' : this.opts.provider === 'silent' ? 'wav' : 'mp3';
     const file = path.join(this.cacheDir, this.opts.provider, `${this.key(req)}.${ext}`);
-    if (existsSync(file)) return { file, duration: await probeDuration(file), cached: true };
+    const timing = `${file}.timing.json`;
+    const readTiming = async () => (existsSync(timing) ? (JSON.parse(await readFile(timing, 'utf8')) as number[]) : undefined);
+    if (existsSync(file)) return { file, duration: await probeDuration(file), cached: true, charStarts: await readTiming() };
     await mkdir(path.dirname(file), { recursive: true });
     const tmp = `${file}.part.${ext}`;
     switch (this.opts.provider) {
-      case 'elevenlabs':
-        await writeFile(tmp, await this.elevenlabs(req));
+      case 'elevenlabs': {
+        const r = await this.elevenlabs(req);
+        await writeFile(tmp, r.audio);
+        if (r.charStarts) await writeFile(timing, JSON.stringify(r.charStarts));
         break;
+      }
       case 'openai':
         await writeFile(tmp, await this.openai(req));
         break;
@@ -162,7 +187,7 @@ export class Voice {
         break;
     }
     await rename(tmp, file);
-    return { file, duration: await probeDuration(file), cached: false };
+    return { file, duration: await probeDuration(file), cached: false, charStarts: await readTiming() };
   }
 
   private secret(name: string) {
@@ -171,13 +196,28 @@ export class Voice {
     return v;
   }
 
-  private async post(url: string, init: RequestInit, what: string): Promise<Response> {
+  /**
+   * POSTs and reads the whole response with `read`, retrying timeouts, dropped
+   * connections (including mid-body), rate limits and server errors.
+   */
+  private async post<T>(url: string, init: RequestInit, what: string, read: (res: Response) => Promise<T>): Promise<T> {
+    const wait = (attempt: number) => new Promise((r) => setTimeout(r, Voice.retryBaseMs * 2 ** attempt));
     for (let attempt = 1; ; attempt++) {
-      const res = await fetch(url, init);
-      if (res.ok) return res;
+      let res: Response;
+      try {
+        // The timeout covers the body too: the signal stays live until read() finishes.
+        res = await fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+        if (res.ok) return await read(res);
+      } catch (err) {
+        if (attempt < 4) {
+          await wait(attempt);
+          continue;
+        }
+        throw new Error(`${what} failed: ${(err as Error).message}`);
+      }
       const body = await res.text().catch(() => '');
       if ((res.status === 429 || res.status >= 500) && attempt < 4) {
-        await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt));
+        await wait(attempt);
         continue;
       }
       throw new Error(`${what} failed: ${res.status} ${body.slice(0, 300)}`);
@@ -186,26 +226,30 @@ export class Voice {
 
   private async elevenlabs(req: SynthRequest) {
     const voice = this.opts.voice ?? DEFAULTS.elevenlabs.voice;
-    const res = await this.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_192`,
+    // The with-timestamps endpoint also returns when each character is spoken, for captions.
+    const j = await this.post(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps?output_format=${ELEVENLABS_FORMAT}`,
       {
         method: 'POST',
-        headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY'), 'content-type': 'application/json', accept: 'audio/mpeg' },
+        headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY'), 'content-type': 'application/json' },
         body: JSON.stringify({
           text: req.text,
+          seed: ELEVENLABS_SEED,
           model_id: this.opts.model ?? DEFAULTS.elevenlabs.model,
           previous_text: req.previous,
           next_text: req.next,
-          voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.15, use_speaker_boost: true, speed: this.opts.rate ?? 1 },
+          voice_settings: { ...ELEVENLABS_SETTINGS, speed: this.opts.rate ?? 1 },
         }),
       },
       'ElevenLabs',
+      async (res) => (await res.json()) as { audio_base64: string; alignment?: { characters: string[]; character_start_times_seconds: number[] } },
     );
-    return Buffer.from(await res.arrayBuffer());
+    const starts = j.alignment?.character_start_times_seconds;
+    return { audio: Buffer.from(j.audio_base64, 'base64'), charStarts: starts && starts.length === req.text.length ? starts : undefined };
   }
 
   private async openai(req: SynthRequest) {
-    const res = await this.post(
+    return this.post(
       'https://api.openai.com/v1/audio/speech',
       {
         method: 'POST',
@@ -220,8 +264,8 @@ export class Voice {
         }),
       },
       'OpenAI speech',
+      async (res) => Buffer.from(await res.arrayBuffer()),
     );
-    return Buffer.from(await res.arrayBuffer());
   }
 
   private async google(req: SynthRequest) {
@@ -235,7 +279,7 @@ export class Voice {
     } else {
       url += `?key=${encodeURIComponent(this.secret('GOOGLE_TTS_API_KEY'))}`;
     }
-    const res = await this.post(
+    return this.post(
       url,
       {
         method: 'POST',
@@ -247,8 +291,7 @@ export class Voice {
         }),
       },
       'Google Text-to-Speech',
+      async (res) => Buffer.from(((await res.json()) as { audioContent: string }).audioContent, 'base64'),
     );
-    const json = (await res.json()) as { audioContent: string };
-    return Buffer.from(json.audioContent, 'base64');
   }
 }

@@ -4,6 +4,14 @@ Send testers the `/alpha` link. The walkthrough runs inside the app; this page i
 
 The demo ontology is the **volunteering opportunities** standard. It is already at version 1.0.0 and has a simulated working group of six people (all fictional): Priya (ODI, steward), Tom (ontologist), Aisha (council volunteer coordinator), Gareth (CRM developer), Mei (charity research officer) and Daniel (ODI oversight). The governance policy is the W3C-style working group template.
 
+## Versions and returning testers
+
+The top of `/alpha` says which version of Concord the tester is using (and the build commit), with release notes for every version. The versions and their changes live in `packages/shared/src/appReleases.ts`, newest first. Numbers follow semantic-release: each release lists its changes as `feat`, `fix`, `perf` or `breaking`, and the server's unit tests check that the version is the previous one bumped by the biggest change. **When a pull request changes something testers will notice, add a release at the top** with the tester roles it matters to (`steward`, `contributor`, `member`, `odi`, `agent`, or none for everyone), where to try it (`{o}` is the demo ontology) and, ideally, a feedback question (`ask`).
+
+Testers are encouraged to sign in (Google or GitHub, or a tester account kept in their browser when those aren't switched on). Concord then saves each version they test, the roles they tried and their feedback to their own pod (`concord/alpha/testing.jsonld` and `concord/feedback/`). That stays tied to their own account while they play a simulated persona: a second cookie remembers who the tester is until they sign out. The history itself is kept on the Concord server, so a pod that is down never loses a visit or a piece of feedback, and the pod gets a copy that is rewritten whenever the history changes (and again on a later visit if the pod couldn't be written to). Signing in with Google or GitHub after using a tester account moves the whole history and its feedback into that account in one step. The tester account is then closed and its other sessions end.
+
+When they come back on a newer version, the page shows what changed since the last version they tested (signed-out testers pick it themselves), the role picker marks roles with changes made for them, the Explore step leads with those changes, and the feedback page offers a short questionnaire about just those changes before the overall questions.
+
 ## 1. Pick a role (2 minutes)
 
 Testers enter their name and choose a role. This signs them in to a demo account with a WebID and private storage created automatically.
@@ -48,6 +56,7 @@ The *Give feedback* button opens a chat. Testers can type or talk (microphone bu
 
 - **Guided**: a short questionnaire covering their role, requirements gathering, governance (which models, how many sign-offs, the ODI's privilege, ownership transfer, automation), formats, and an open "any other comments" question.
 - **Open**: say anything; the AI asks a follow-up or two.
+- **What's changed** (returning testers only): one question per change since the version they last tested, their role's first, then the overall questions.
 
 Feedback is readable at `/admin/feedback` by ODI staff and ontology owners, with an AI summary of themes and tallies of the governance answers.
 

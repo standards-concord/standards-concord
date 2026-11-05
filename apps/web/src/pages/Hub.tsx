@@ -17,7 +17,7 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const ontologies = useOntologies();
   const templates = useAsync(() => api.governanceTemplates(), []);
   const user = useSession().session?.user;
-  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: true });
+  const [form, setForm] = useState({ title: '', prefix: '', description: '', domain: '', governanceTemplate: '' as GovernanceTemplateId | '', creditCreator: false });
   const set = (k: keyof typeof form) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const create = useAction(async () => {
     const o = await api.createOntology({
@@ -28,9 +28,10 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       governanceTemplate: form.governanceTemplate || undefined,
       creditCreator: form.creditCreator,
     });
-    await ontologies.reload();
     onClose();
     nav(`/o/${o.id}`);
+    // In the background: the list counts every ontology, and the new one's first validation can be slow.
+    void ontologies.reload();
   });
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>
@@ -177,7 +178,7 @@ export function HubPage() {
                         ['Members', o.stats.members],
                       ].map(([l, v]) => (
                         <div key={l}>
-                          <div className="text-base font-semibold tabular-nums">{v}</div>
+                          <div className="text-base font-semibold tabular-nums">{v ?? '—'}</div>
                           <div className="text-[0.7rem] text-muted">{l}</div>
                         </div>
                       ))}
@@ -186,7 +187,7 @@ export function HubPage() {
                       <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
                         <HealthChip o={o} />
                         v{o.currentVersion}
-                        {o.stats.openChangeRequests > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
+                        {(o.stats.openChangeRequests ?? 0) > 0 && <span>· {o.stats.openChangeRequests} open changes</span>}
                       </span>
                       <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
                     </div>

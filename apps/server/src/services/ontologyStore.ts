@@ -13,6 +13,7 @@ import { HttpError } from '../db.js';
  * normal git history that can be pushed to GitHub as-is.
  */
 const FILE = 'ontology.ttl';
+export const ONTOLOGY_FILE = FILE;
 
 function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
@@ -90,7 +91,7 @@ export const ontologyStore = {
     const dir = repoDir(project);
     fs.writeFileSync(path.join(dir, FILE), await graph.toTurtle());
     git(dir, ['add', FILE]);
-    const status = git(dir, ['status', '--porcelain']);
+    const status = git(dir, ['diff', '--cached', '--name-only']);
     if (status) git(dir, ['commit', '-q', '-m', message], { name: author.name, email: author.email ?? 'contributor@concord' });
     return this.head(project);
   },
@@ -102,11 +103,15 @@ export const ontologyStore = {
     files: Record<string, string>,
     notes: string,
     author: CommitAuthor,
+    /** Runs after the last await, just before anything is written: throwing writes nothing. */
+    beforeWrite?: () => void,
   ): Promise<string> {
     const dir = repoDir(project);
     const relDir = path.join(dir, 'releases', version);
-    fs.mkdirSync(relDir, { recursive: true });
     const turtle = await graph.toTurtle();
+    // From here to the commit nothing awaits, so nothing else runs in between.
+    beforeWrite?.();
+    fs.mkdirSync(relDir, { recursive: true });
     // The released file and the working draft are identical at release time.
     fs.writeFileSync(path.join(dir, FILE), turtle);
     fs.writeFileSync(path.join(relDir, FILE), turtle);
@@ -121,13 +126,34 @@ export const ontologyStore = {
   },
 
   /** Rewrites files beside released versions (releases/<version>/<name>) in one commit; tags stay where they were. */
-  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string>>, message: string): string {
+  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): string {
     const dir = repoDir(project);
     for (const [version, named] of Object.entries(files))
-      for (const [name, content] of Object.entries(named)) fs.writeFileSync(path.join(dir, 'releases', version, name), content);
+      for (const [name, content] of Object.entries(named)) {
+        const file = path.join(dir, 'releases', version, name);
+        // null removes the file.
+        if (content === null) fs.rmSync(file, { force: true });
+        else fs.writeFileSync(file, content);
+      }
     git(dir, ['add', 'releases']);
-    if (git(dir, ['status', '--porcelain'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    // Only what was staged here: other changes in the repository (a hand edit, say) aren't swept in or in the way.
+    if (git(dir, ['diff', '--cached', '--name-only'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
     return this.head(project);
+  },
+
+  /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): string {
+    const dir = repoDir(project);
+    fs.writeFileSync(path.join(dir, name), content);
+    git(dir, ['add', name]);
+    // Only what was staged here: other changes in the repository (a hand edit, say) aren't swept in or in the way.
+    if (git(dir, ['diff', '--cached', '--name-only'])) git(dir, ['commit', '-q', '-m', message], { name: 'Concord', email: 'steward@concord' });
+    return this.head(project);
+  },
+
+  /** Drops cached released graphs, after their files were rewritten. */
+  forgetReleases(project: Pick<OntologyProject, 'slug'>) {
+    for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
