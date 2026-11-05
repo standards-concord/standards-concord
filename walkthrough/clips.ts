@@ -7,6 +7,8 @@
  * Like scenes.ts, every action drives the real app being recorded, and checks what its
  * paragraph claims.
  */
+import { readFile } from 'node:fs/promises';
+import type { Locator } from '@playwright/test';
 import { sleep } from './lib/director.ts';
 import { SAMPLE, signInAs } from './features.ts';
 import { apiJson, ringAround, type Ctx } from './scenes.ts';
@@ -40,6 +42,29 @@ async function majorChange(c: Ctx): Promise<ChangeRequest | undefined> {
 const currentVotes = async (c: Ctx, id: string) => (((await apiJson(c, `/api/change-requests/${id}`)) as ChangeRequest | undefined)?.votes ?? []).filter((v) => !v.stale);
 
 let vote: { id: string; url: string; count?: number } | undefined;
+
+/** The JSON validation report, as the API and the JSON download give it. */
+interface ApiReport {
+  conforms?: boolean;
+  summary?: { violations?: number };
+  results?: { path?: string; severity?: string }[];
+}
+/** The sample's report: one violation, on the minimum age. */
+const isTheReport = (r: ApiReport | undefined) =>
+  r?.conforms === false && r.summary?.violations === 1 && !!r.results?.some((x) => x.severity === 'Violation' && /minimumAge$/.test(x.path ?? ''));
+
+/** Clicks a download button and returns what was downloaded, as text. */
+async function download(c: Ctx, button: Locator, what: string): Promise<string | undefined> {
+  const started = c.d.page.waitForEvent('download', { timeout: 15_000 });
+  if (!(await c.d.click(button, what, { settle: false }))) return undefined;
+  try {
+    const file = await (await started).path();
+    return await readFile(file, 'utf8');
+  } catch (e) {
+    c.d.warn(`${what} didn't download: ${(e as Error).message.split('\n')[0]}`);
+    return undefined;
+  }
+}
 
 export const clipActions: Record<string, Action> = {
   /** The clip's title over a blank screen, then its page (one of the ontology's tabs) underneath. */
@@ -80,16 +105,35 @@ export const clipActions: Record<string, Action> = {
     await c.d.highlight(c.d.page.getByTestId('validation-results').getByRole('listitem').first(), 'the problem, under the record it is about');
   },
   async 'c-report-downloads'(c) {
-    const turtle = c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' });
-    await c.d.pointAt(c.d.page.getByRole('button', { name: 'JSON', exact: true }), 'the JSON download');
-    await sleep(700);
-    await c.d.highlight(turtle, 'the SHACL report download');
+    // Both downloads really happen, and each is the report shown: the one violation, on the minimum age.
+    const json = await download(c, c.d.page.getByRole('button', { name: 'JSON', exact: true }), 'the JSON download');
+    let report: ApiReport | undefined;
+    try {
+      report = json === undefined ? undefined : (JSON.parse(json) as ApiReport);
+    } catch {
+      /* claimed below */
+    }
+    c.d.claim(isTheReport(report), 'the JSON download is the report, with the minimum age violation');
+    await sleep(400);
+    const turtle = await download(c, c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
+    c.d.claim(
+      !!turtle && /sh:ValidationReport/.test(turtle) && /sh:conforms\s+false/.test(turtle) && /minimumAge/.test(turtle),
+      'the Turtle download is a SHACL validation report of the same problem',
+    );
+    await c.d.highlight(c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
   },
   async 'c-validate-api'(c) {
     await c.d.clearHighlight();
     if (!(await c.d.click(c.d.page.getByRole('button', { name: /Validate from your own code/ }), 'Validate from your own code'))) return;
     const example = c.d.page.getByTestId('validate-api-example').first();
     await c.d.claimVisible(example.getByText(/curl -X POST/), 'the example is a POST');
+    // Run the request the example shows (to the recorded hub, which serves the same paths) with the same data.
+    const shown = /curl -X POST (\S+)/.exec((await example.textContent()) ?? '')?.[1];
+    const address = shown && new URL(shown);
+    if (!address) return c.d.warn('The curl example has no address');
+    const res = await c.api.post(`${c.hub}${address.pathname}`, { headers: { 'content-type': 'text/turtle' }, data: SAMPLE });
+    const body = res.ok() ? ((await res.json().catch(() => undefined)) as ApiReport | undefined) : undefined;
+    c.d.claim(res.ok() && isTheReport(body), `POST ${address.pathname} returns the same report (HTTP ${res.status()})`);
     await c.d.highlight(example, 'the curl example');
   },
 
@@ -140,17 +184,29 @@ export const clipActions: Record<string, Action> = {
     const row = c.d.page.getByRole('main').getByRole('link').filter({ hasText: /Analysed/ }).first();
     if (!(await c.d.click(row, 'an analysed meeting'))) return;
     const produced = c.d.page.getByRole('list', { name: 'What the call produced' });
-    for (const k of ['use cases', 'terms', 'competency questions', 'open questions']) await c.d.claimVisible(produced.getByText(k, { exact: true }), `the call produced ${k}`);
-    await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Decisions' }), 'the call recorded decisions');
+    await c.d.find(produced, 'what the call produced');
+    // Each count is shown even when it is zero, so check the numbers, not just the labels.
+    const counts = ((await produced.getByRole('listitem').allTextContents().catch(() => [])) as string[]).map((t) => t.replace(/\s+/g, ' ').trim());
+    for (const k of ['use cases', 'terms', 'competency questions', 'open questions']) {
+      const n = Number(counts.find((t) => t.endsWith(` ${k}`))?.split(' ')[0]);
+      c.d.claim(n > 0, `the call produced ${k} (${counts.join(', ')})`);
+    }
+    const decisions = c.d.page.getByText('Decisions', { exact: true }).locator('xpath=ancestor::*[.//ul][1]').getByRole('listitem');
+    c.d.claim((await decisions.count()) > 0, 'the call recorded decisions');
     await c.d.highlight(c.d.page.getByText('Decisions', { exact: true }).locator('xpath=ancestor::*[.//ul][1]').or(produced).first(), 'what the call produced');
   },
   async 'c-meeting-transcript'(c) {
     await c.d.clearHighlight();
     if (!(await c.d.click(c.d.page.getByRole('radio', { name: /^Transcript/ }), 'Transcript', { settle: false }))) return;
-    // Lines that fed a use case carry its reference (WG-1).
-    const line = c.d.page.getByRole('main').locator('li, div').filter({ has: c.d.page.getByRole('link', { name: /^WG-\d+$/ }) }).last();
-    await c.d.claimVisible(line, 'transcript lines link to the use case they fed');
-    await c.d.highlight(c.d.page.getByRole('link', { name: /^WG-\d+$/ }).first().locator('xpath=..'), 'a line that fed the use case');
+    // Lines that fed a use case carry its reference (WG-1), linking to the use case this call produced.
+    const tag = c.d.page.getByRole('link', { name: /^WG-\d+$/ }).first();
+    if (!(await c.d.find(tag, 'a line tagged with its use case'))) return;
+    const useCase = await c.d.page.getByTestId('meeting-use-cases').getByRole('link').first().getAttribute('href').catch(() => null);
+    c.d.claim(!!useCase && (await tag.getAttribute('href')) === useCase, 'the tag is the use case this call produced');
+    const line = tag.locator('xpath=..');
+    const said = ((await line.textContent()) ?? '').replace(/\s+/g, ' ');
+    c.d.claim(/(Priya Shah|Tom Okafor|Aisha Rahman|Gareth Lewis|Mei Chen|Daniel Brooks)\s*\S.{20,}/.test(said), 'the tagged line shows who said it, in their words');
+    await c.d.highlight(line, 'a line that fed the use case');
   },
 
   /* ------------------------------ agents ----------------------------- */

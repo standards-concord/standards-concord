@@ -60,7 +60,7 @@ Upload a transcript, or invite Concord's bot to join the call.
 Concord pulls out use cases, terms, competency questions, open questions and decisions.
 
 [do: c-meeting-transcript]
-Each one links back to the lines it came from, so you can check the speaker's own words.
+Lines that fed a use case are tagged with it, so you can check the speaker's own words.
 
 ## Reports from coding agents {#agents}
 
