@@ -85,7 +85,7 @@ export default defineConfig({
             // Feedback is filed as GitHub issues, to the local stand-in.
             FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
             FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
-            FEEDBACK_GITHUB_REPO: 'jeswr/standards-concord',
+            FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
           },
           stdout: 'ignore',
           stderr: 'pipe',

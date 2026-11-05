@@ -60,7 +60,7 @@ test('a tester posts a public summary exactly as previewed, then withdraws it', 
   const number = Number((await note.innerText()).match(/#(\d+)/)![1]);
 
   const issue = (await stubIssues(page)).find((i) => i.number === number)!;
-  expect(issue.repo).toBe('jeswr/standards-concord');
+  expect(issue.repo).toBe('standards-concord/standards-concord');
   expect(issue.authorized).toBe(true);
   expect(issue.labels).toEqual(['feedback', 'needs-triage']);
   expect(issue.title).toMatch(/^Feedback: Release notes need a link back to the ontology\. Details: /);

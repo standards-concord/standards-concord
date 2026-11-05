@@ -64,7 +64,7 @@ export const config = {
      * can choose to post a short summary of their feedback as an issue labelled "feedback".
      */
     token: process.env.FEEDBACK_GITHUB_TOKEN || undefined,
-    repo: process.env.FEEDBACK_GITHUB_REPO || 'jeswr/standards-concord',
+    repo: process.env.FEEDBACK_GITHUB_REPO || 'standards-concord/standards-concord',
     /** Overridable for tests. */
     apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
     /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */

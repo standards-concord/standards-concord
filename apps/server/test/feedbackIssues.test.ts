@@ -185,7 +185,7 @@ const app = createApp();
 const original = { ...config.feedbackIssues };
 let t = Date.parse('2026-11-04T21:00:00Z');
 const HOUR = 60 * 60_000;
-const REPO = 'jeswr/standards-concord';
+const REPO = 'standards-concord/standards-concord';
 const TRIAGE_TOKEN = 'triage-token-not-real-but-long-enough-0123456789';
 const LEASE_MS = 2 * 60_000;
 

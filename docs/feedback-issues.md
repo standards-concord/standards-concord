@@ -48,7 +48,7 @@ Each submission gets one record in `feedbackPublications`, keyed by the feedback
 
 1. Create a fine-grained personal access token at <https://github.com/settings/personal-access-tokens/new>:
    - **Resource owner:** `jeswr`
-   - **Repository access:** Only select repositories → `jeswr/standards-concord`
+   - **Repository access:** Only select repositories → `standards-concord/standards-concord`
    - **Repository permissions:** Issues → **Read and write** (Metadata: read-only is added automatically). Nothing else.
 2. Set it on the server (the value is read without echoing):
 
