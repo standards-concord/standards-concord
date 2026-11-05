@@ -1045,19 +1045,26 @@ describe('inline term edits', () => {
     await approveForReal(created.body.id);
     return created.body.id as string;
   };
-  /** The process dies the moment the database transaction of the next advance commits: nothing after it runs, not even the git sync. */
-  const dieAfterNextCommit = async () => {
-    const { ontologyStore } = await import('../src/services/ontologyStore.js');
-    const original = ontologyStore.advanceTo;
-    const sync = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => undefined);
-    const spy = vi.spyOn(ontologyStore, 'advanceTo').mockImplementationOnce(function (this: typeof ontologyStore, ...args) {
-      original.apply(ontologyStore, args);
-      throw new Error('killed');
-    });
-    return () => {
-      spy.mockRestore();
-      sync.mockRestore();
-    };
+  /**
+   * Runs a merge or publication in another process, which is SIGKILLed the
+   * instant the database transaction moving the working draft commits (see
+   * killAfterCommit.ts): nothing after COMMIT runs, not even a finally block.
+   */
+  const killedAfterCommit = async (op: 'merge' | 'publish', id: string, userId: string) => {
+    const { spawnSync } = await import('node:child_process');
+    const { fileURLToPath } = await import('node:url');
+    const { remove } = await import('../src/db.js');
+    const script = fileURLToPath(new URL('./killAfterCommit.ts', import.meta.url));
+    const child = spawnSync(process.execPath, ['--no-warnings', '--import', 'tsx', script, op, id, userId], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', env: process.env, timeout: 90_000 });
+    expect(child.signal, `${child.stdout}\n${child.stderr}`).toBe('SIGKILL');
+    // The dead process's working-draft lease would lapse in a minute; let the test go on without waiting.
+    remove('kv', `working-draft-lock:${demoId}`);
+  };
+  /** Every pin left is the working draft's own (the draft, and through it all its ancestors, stay safe from gc). */
+  const onlyDraftPins = (rawGit: (...args: string[]) => string, head: string) => {
+    const pins = rawGit('for-each-ref', '--format=%(objectname)', 'refs/concord/commits/').split('\n').filter(Boolean);
+    expect(pins.length).toBeGreaterThan(0);
+    for (const sha of pins) expect(sha).toBe(head);
   };
 
   it('never lets a copy read before a merge be saved over it', async () => {
@@ -1105,12 +1112,7 @@ describe('inline term edits', () => {
     const { ontologyStore, project, rawGit, rawFile } = await repo();
     const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
     const before = ontologyStore.head(project);
-    const restore = await dieAfterNextCommit();
-    try {
-      await expect(crsMod.merge(crsMod.getCR(id), await userOf(await login('steward', 'Steward Crash')))).rejects.toThrow('killed');
-    } finally {
-      restore();
-    }
+    await killedAfterCommit('merge', id, (await userOf(await login('steward', 'Steward Crash'))).id);
     // The merge and its bookkeeping landed together in the database...
     const merged = ontologyStore.head(project);
     expect(merged).not.toBe(before);
@@ -1126,8 +1128,7 @@ describe('inline term edits', () => {
     expect(rawGit('rev-parse', 'HEAD')).toBe(merged);
     expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
     expect(rawFile('ontology.ttl')).toContain('Survives a crash.');
-    // Its pin is no longer needed once the branch includes it.
-    expect(rawGit('for-each-ref', 'refs/concord/commits/')).toBe('');
+    onlyDraftPins(rawGit, merged);
   });
 
   it('repairs checked-out files that failed to update, and files an older sync put back', async () => {
@@ -1177,7 +1178,7 @@ describe('inline term edits', () => {
     const graph = await ontologyStore.working(project);
     const stale = rawGit('rev-parse', `${ontologyStore.head(project)}~1`);
     await expect(ontologyStore.commitWorking(project, graph, 'refused', { name: 'Refused' }, stale)).rejects.toMatchObject({ status: 409 });
-    expect(rawGit('for-each-ref', 'refs/concord/commits/')).toBe('');
+    onlyDraftPins(rawGit, ontologyStore.head(project));
   });
 
   it('records a release atomically, survives dying before its tag, and refuses a second publisher', async () => {
@@ -1195,16 +1196,8 @@ describe('inline term edits', () => {
     const draft = put('releases', { ...pending, status: 'draft' }, demoId);
     const tag = `v${draft.version}`;
 
-    // Two publishers queued on the same (soon stale) release object; the first dies the moment its transaction commits.
-    const restore = await dieAfterNextCommit();
-    let first, second;
-    try {
-      [first, second] = await Promise.allSettled([releases.publishRelease({ ...draft } as never, stewardUser), releases.publishRelease({ ...draft } as never, stewardUser)]);
-    } finally {
-      restore();
-    }
-    expect(first).toMatchObject({ status: 'rejected', reason: { message: 'killed' } });
-    expect(second).toMatchObject({ status: 'rejected', reason: { status: 409 } });
+    // The publisher's process is killed the moment its transaction commits.
+    await killedAfterCommit('publish', draft.id, stewardUser.id);
     // Everything the release records landed with the commit.
     const stored = list<{ id: string; status: string; commit?: string }>('releases', demoId).find((r) => r.id === draft.id)!;
     expect(stored.status).toBe('published');
@@ -1215,7 +1208,7 @@ describe('inline term edits', () => {
     expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
     expect((await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=${draft.version}`)).status).toBe(200);
     expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
-    // Publishing again is refused rather than rewriting the version.
+    // Publishing again (from a copy read before) is refused rather than rewriting the version.
     const released = ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
     await expect(releases.publishRelease({ ...draft } as never, stewardUser)).rejects.toMatchObject({ status: 409 });
     expect(ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl')).toBe(released);
@@ -1294,5 +1287,152 @@ describe('inline term edits', () => {
     } finally {
       updateProject({ ...getProject(demoId), governance: saved });
     }
+  });
+
+  it('writes a vote only together with the request it was cast on', async () => {
+    const crsMod = await import('../src/services/changeRequests.js');
+    const { getProject, updateProject } = await import('../src/services/ontologies.js');
+    const { GOVERNANCE_TEMPLATES } = await import('../src/services/governance.js');
+    const { clock } = await import('../src/clock.js');
+    const { put, list } = await import('../src/db.js');
+    const project = getProject(demoId);
+    const saved = project.governance;
+    updateProject({ ...project, governance: GOVERNANCE_TEMPLATES['lazy-consensus'] });
+    try {
+      const contributor = await login('contributor', 'Contributor Atomic Vote');
+      const editor = await login('editor', 'Editor Atomic Vote');
+      const created = await edit(contributor, { termIri: `${VOL}Cause`, set: { comment: 'Voted on atomically.' } });
+      const id = created.body.id;
+      put('changeRequests', { ...crsMod.getCR(id), status: 'voting', statusSince: clock.iso() }, demoId);
+      // Someone else keeps writing the request while the vote is being made: the vote and its save are refused together.
+      const iso = clock.iso.bind(clock);
+      const spy = vi.spyOn(clock, 'iso').mockImplementation(() => {
+        put('changeRequests', { ...crsMod.getCR(id), rev: (crsMod.getCR(id).rev ?? 0) + 1 }, demoId);
+        return iso();
+      });
+      try {
+        expect((await editor.post(`/api/change-requests/${id}/votes`).send({ round: roundOf(editor, id), choice: 'no', comment: 'Lost with its save.' })).status).toBe(409);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(list<{ comment?: string }>('votes', id).some((v) => v.comment === 'Lost with its save.')).toBe(false);
+      put('changeRequests', { ...crsMod.getCR(id), status: 'withdrawn' }, demoId);
+    } finally {
+      updateProject({ ...getProject(demoId), governance: saved });
+    }
+  });
+
+  it('never lets a release vote begun before the release was published undo the publication', async () => {
+    const releases = await import('../src/services/releases.js');
+    const { put, list, mustGet, remove } = await import('../src/db.js');
+    const { newId } = await import('../src/ids.js');
+    const voter = await userOf(await login('editor', 'Editor Release Race'));
+    const now = new Date().toISOString();
+    // A major release whose vote has closed without quorum: anyone looking at this copy would reject it.
+    const stale = put(
+      'releases',
+      { id: newId('rel'), ontologyId: demoId, version: '99.0.0', level: 'major' as const, status: 'voting' as const, changeRequestIds: [], notes: 'Raced.', versionIRI: 'https://example.org/raced/99.0.0', createdBy: voter.id, createdAt: now, statusSince: '2000-01-01T00:00:00Z' },
+      demoId,
+    );
+    try {
+      expect(releases.releaseGovernance(stale).outcome).toBe('rejected');
+      // Another process publishes it after the vote (and the clock) read it.
+      put('releases', { ...stale, status: 'published', commit: 'c0ffee', publishedAt: now, statusSince: now, rev: 1 }, demoId);
+      await expect(releases.voteOnRelease({ ...stale }, voter, 'no')).rejects.toMatchObject({ status: 409 });
+      expect(list('votes', stale.id)).toHaveLength(0);
+      expect(await releases.advanceRelease({ ...stale })).toMatchObject({ status: 'published', commit: 'c0ffee' });
+      expect(mustGet('releases', stale.id)).toMatchObject({ status: 'published', commit: 'c0ffee', publishedAt: now, rev: 1 });
+    } finally {
+      remove('releases', stale.id);
+    }
+  });
+
+  it('never drops the pin of a commit that is, or is about to be, the working draft, however old', async () => {
+    const { ontologyStore, project, rawGit } = await repo();
+    const gc = () => {
+      rawGit('reflog', 'expire', '--expire=now', '--all');
+      rawGit('gc', '-q', '--prune=now');
+    };
+    const later = Date.now() + 24 * 3600_000;
+    const { OntologyGraph } = await import('@concord/core');
+    const withLabel = (label: string) => OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:${label}> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`);
+    // A writer pauses after pinning its commit, before recording it; meanwhile, a day later, another process syncs and collects garbage.
+    let paused = '';
+    const committed = await ontologyStore.commitWorking(project, await withLabel('paused'), 'paused writer', { name: 'Paused' }, undefined, (commit) => {
+      paused = commit;
+      const now = vi.spyOn(Date, 'now').mockReturnValue(later);
+      try {
+        ontologyStore.sync(project);
+      } finally {
+        now.mockRestore();
+      }
+      gc();
+      expect(rawGit('cat-file', '-t', commit)).toBe('commit');
+    });
+    expect(committed).toBe(paused);
+    expect(rawGit('cat-file', '-t', paused)).toBe('commit');
+
+    // A newer draft recorded while git still shows the older one, then a sync that read the older draft, a day later.
+    const older = ontologyStore.head(project);
+    const sync = vi.spyOn(ontologyStore, 'sync').mockImplementationOnce(() => undefined);
+    let newer: string;
+    try {
+      newer = await ontologyStore.commitWorking(project, await withLabel('newer'), 'newer draft', { name: 'Newer' });
+    } finally {
+      sync.mockRestore();
+    }
+    expect(rawGit('rev-parse', 'HEAD')).toBe(older);
+    const head = vi.spyOn(ontologyStore, 'head').mockReturnValueOnce(older);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(later);
+    try {
+      ontologyStore.sync(project);
+    } finally {
+      head.mockRestore();
+      now.mockRestore();
+    }
+    gc();
+    expect(rawGit('cat-file', '-t', newer)).toBe('commit');
+    // And reads put git back on the newer draft, leaving only its own pins.
+    ontologyStore.log(project);
+    expect(rawGit('rev-parse', 'HEAD')).toBe(ontologyStore.head(project));
+    onlyDraftPins(rawGit, ontologyStore.head(project));
+  });
+
+  it('stops a sync that was overtaken from undoing its successor, and repairs files it put back anyway', async () => {
+    const { ontologyStore, project, rawGit, rawFile, raw } = await repo();
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { get, put, remove } = await import('../src/db.js');
+    const stamp = path.join(raw, '.git', 'concord-synced');
+    const lease = `git-sync:${project.slug}`;
+    ontologyStore.ensureSynced(project);
+    const head = ontologyStore.head(project);
+    // Files an overtaken sync put back after its successor finished: branch and record of the sync both look right.
+    const stampBefore = fs.readFileSync(stamp, 'utf8');
+    rawGit('read-tree', '--reset', '-u', `${head}~1`);
+    expect(fs.readFileSync(stamp, 'utf8')).toBe(stampBefore);
+    ontologyStore.log(project);
+    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
+    expect(rawFile('ontology.ttl')).toBe(ontologyStore.readWorkingText(project, head));
+
+    // A sync presumed dead and replaced mid-way: it stops, leaves no record of a sync, and leaves its successor's lease alone.
+    const checkout = vi.spyOn(ontologyStore, 'checkout').mockImplementationOnce(() => {
+      put('kv', { id: lease, token: 'successor', until: Date.now() + 60_000 });
+    });
+    try {
+      expect(() => ontologyStore.sync(project)).toThrow('another sync took over');
+    } finally {
+      checkout.mockRestore();
+    }
+    expect(get<{ token: string }>('kv', lease)?.token).toBe('successor');
+    expect(fs.existsSync(stamp)).toBe(false);
+    // While the successor holds the lease, others leave the job to it.
+    ontologyStore.ensureSynced(project);
+    expect(fs.existsSync(stamp)).toBe(false);
+    // Once it is gone, the next read finishes the job.
+    remove('kv', lease);
+    ontologyStore.versions(project);
+    expect(fs.existsSync(stamp)).toBe(true);
+    expect(get('kv', lease)).toBeUndefined();
   });
 });

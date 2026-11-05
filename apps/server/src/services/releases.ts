@@ -10,7 +10,7 @@ import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, mustGet, put } from '../db.js';
+import { HttpError, list, mustGet, put, transaction } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
 import { newId } from '../ids.js';
 import { markReleased } from './changeRequests.js';
@@ -26,7 +26,25 @@ const maxLevel = (levels: ChangeLevel[]) => levels.reduce<ChangeLevel>((m, l) =>
 export const getRelease = (id: string) => mustGet<Release>('releases', id);
 export const listReleases = (ontologyId: string) =>
   list<Release>('releases', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-const save = (r: Release) => put('releases', r, r.ontologyId);
+/**
+ * Writes a release if it is still at the revision it was read at, bumping the
+ * revision: a compare-and-swap, so a writer holding a copy read before someone
+ * else's write (a publication, a vote closing) can never write over it.
+ */
+const save = (r: Release) =>
+  transaction(() => {
+    const stored = mustGet<Release>('releases', r.id);
+    if ((stored.rev ?? 0) !== (r.rev ?? 0)) throw new HttpError(409, `Release ${r.version} was changed by someone else meanwhile. Reload it and try again.`);
+    r.rev = (stored.rev ?? 0) + 1;
+    return put('releases', r, r.ontologyId);
+  });
+/** Saves a new release (no stored copy to compare with yet). */
+const create = (r: Release) =>
+  transaction(() => {
+    if (list<Release>('releases', r.ontologyId).some((x) => x.id === r.id)) throw new HttpError(409, 'Release already exists');
+    r.rev = 1;
+    return put('releases', r, r.ontologyId);
+  });
 
 const versionIRI = (p: OntologyProject, version: string) => `${p.ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 
@@ -109,7 +127,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   r.version = bumpVersion(project.currentVersion, r.level);
   r.versionIRI = versionIRI(project, r.version);
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
-  save(r);
+  if (existing) save(r);
+  else create(r);
   if (!existing) {
     logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
@@ -128,29 +147,35 @@ function openVoteIfNeeded(r: Release): Release {
   return r;
 }
 
-export async function voteOnRelease(r: Release, actor: User, choice: Vote['choice'], comment?: string) {
-  if (r.status !== 'voting') throw new HttpError(409, 'There is no open vote on this release');
-  const g = releaseGovernance(r);
-  const roles = rolesFor(r.ontologyId, actor.id);
-  if (!roles.some((role) => g.rule.vote?.voterRoles.includes(role))) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
-  const vote: Vote = { id: newId('vote'), subjectType: 'release', subjectId: r.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
-  put('votes', vote, r.id);
+export async function voteOnRelease(stale: Release, actor: User, choice: Vote['choice'], comment?: string) {
+  const roles = rolesFor(stale.ontologyId, actor.id);
+  // The vote only counts on the release as it is stored now, checked in the same transaction it is written in:
+  // a vote begun before the release was published (or closed) is refused, not recorded against it.
+  const r = transaction(() => {
+    const now = mustGet<Release>('releases', stale.id);
+    if (now.status !== 'voting') throw new HttpError(409, 'There is no open vote on this release');
+    const g = releaseGovernance(now);
+    if (!roles.some((role) => g.rule.vote?.voterRoles.includes(role))) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
+    put('votes', { id: newId('vote'), subjectType: 'release', subjectId: now.id, userId: actor.id, roles, choice, comment, at: clock.iso() } satisfies Vote, now.id);
+    return now;
+  });
   logActivity({ ontologyId: r.ontologyId, actorId: actor.id, type: 'release.voted', message: `voted ${choice} on release ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
-  return advanceRelease(r);
+  return Object.assign(stale, await advanceRelease(r));
 }
 
-export async function advanceRelease(r: Release): Promise<Release> {
-  if (r.status !== 'voting') return r;
-  const g = releaseGovernance(r);
-  if (g.outcome === 'rejected') {
-    r.status = 'rejected';
-    r.statusSince = clock.iso();
-    save(r);
-    logActivity({ ontologyId: r.ontologyId, type: 'release.rejected', message: `release ${r.version} was not approved`, link: `/o/${r.ontologyId}/releases/${r.id}` });
-  } else if (g.outcome === 'approved' && getProject(r.ontologyId).governance.releases[r.level].autoMerge) {
-    return publishRelease(r, undefined);
-  }
-  return r;
+export async function advanceRelease(stale: Release): Promise<Release> {
+  // Decided and written in one transaction, from the stored release and its votes as they are now.
+  const r = transaction(() => {
+    const now = mustGet<Release>('releases', stale.id);
+    if (now.status !== 'voting' || releaseGovernance(now).outcome !== 'rejected') return now;
+    now.status = 'rejected';
+    now.statusSince = clock.iso();
+    save(now);
+    logActivity({ ontologyId: now.ontologyId, type: 'release.rejected', message: `release ${now.version} was not approved`, link: `/o/${now.ontologyId}/releases/${now.id}` });
+    return now;
+  });
+  if (r.status === 'voting' && releaseGovernance(r).outcome === 'approved' && getProject(r.ontologyId).governance.releases[r.level].autoMerge) return publishRelease(r, undefined);
+  return Object.assign(stale, r);
 }
 
 /** What a published release is made from: if any of it changes while publishing, the files would no longer match. */
@@ -245,12 +270,13 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     try {
       const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
       ontologyStore.push(project, remote);
-      r.githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      const githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+      // Only the link is added, to the release as stored now.
+      Object.assign(r, transaction(() => save({ ...mustGet<Release>('releases', r.id), githubUrl })));
     } catch (err) {
       console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
     }
   }
-  save(r);
   logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return Object.assign(stale, r);
 }
