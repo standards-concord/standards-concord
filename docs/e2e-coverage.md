@@ -14,7 +14,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/alpha` | Guided walkthrough: welcome, pick a role, tasks per role, simulate the others, feedback; floating panel | ✅ | alpha |
 | `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out. Opt-in public summary posted as a GitHub issue exactly as previewed, then withdrawn. Who can read your feedback (the admins, their WebIDs, Anthropic when Claude runs the interview, OpenAI when the server transcribes); a signed-in tester's copy lands in their pod, shared read-only with the admin WebIDs and closed to everyone else | ✅ | feedback, feedback-issues (against a GitHub stand-in), webid-signin; solid-signin |
 | `/privacy` | Read the privacy policy signed out or in; reached from the sign-in card and the footer; deletion contact is a mail link | ✅ | privacy |
-| `/connect` | Pick an app, install links and commands, copy buttons | ✅ | connect |
+| `/connect` | Pick an app, install links and commands, copy buttons; every app shows its own logo, same size, visible in light and dark mode | ✅ | connect |
 | `/oauth/authorize` | Consent: sign in, allow, decline; refuses script and plain-http redirects, background approval, stale links | ✅ | oauth |
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
 | `/settings` | Profile and WebID, pod, sign-in providers, connected agents (disconnect), personal tokens (create, revoke), appearance | ✅ | account, agents, oauth, looks |
