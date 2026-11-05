@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto';
-import { HttpError, insertOnce, removeBelow } from '../db.js';
+import { HttpError, insertOnce, removeWhereAtMost } from '../db.js';
 
 /**
  * Proof that a CI run really ran in a given GitHub repository: the OpenID Connect token GitHub
@@ -124,9 +124,9 @@ export async function verifyGithubRun(token: unknown, audience: string): Promise
  * id), in any process, and a transaction that fails takes the insert back with it. `mayReuse`
  * says this is the same report retried with the same token.
  */
-export function consumeRunProof(proof: VerifiedRun, mayReuse: boolean) {
-  removeBelow('oidcTokens', 'exp', Date.now() / 1000 - 120);
-  if (!insertOnce('oidcTokens', { id: `${proof.iss}#${proof.jti}`, iss: proof.iss, jti: proof.jti, exp: proof.exp }) && !mayReuse)
+export async function consumeRunProof(proof: VerifiedRun, mayReuse: boolean) {
+  await removeWhereAtMost('oidcTokens', 'exp', Date.now() / 1000 - 120);
+  if (!(await insertOnce('oidcTokens', { id: `${proof.iss}#${proof.jti}`, iss: proof.iss, jti: proof.jti, exp: proof.exp })) && !mayReuse)
     throw new HttpError(400, 'This run identity token was already used; each run asks GitHub for its own');
 }
 

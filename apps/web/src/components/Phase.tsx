@@ -61,7 +61,7 @@ export function PhaseBubble({
         </>
       }
     >
-      <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">{title}</h4>
+      <h4 className="mb-3 text-sm font-semibold">{title}</h4>
       <ol className="relative space-y-3">
         {steps.map((s, i) => {
           const done = i < current;
@@ -182,10 +182,32 @@ export function ChangeStatusBubble({ status, hasVote }: { status: ChangeRequestS
  * One verdict for the working draft's health. A clean result only reads "Healthy" when every
  * required check ran; if the OWL reasoner could not run it says "Checks incomplete" instead.
  */
+type Health = NonNullable<OntologySummary['health']>;
+
+/** How far the OWL reasoner got (older summaries don't say, so it's inferred from which reasoner ran). */
+const reasonerChecked = (h: Health) => h.reasonerChecked ?? (h.reasoner !== 'structural' && !(h.incomplete ?? []).some((m) => m.startsWith('OWL reasoner')) ? 'complete' : 'none');
+
+/**
+ * The popover's reasoner row, matching the health panel's detail: no verdict, inconsistent,
+ * consistent but not every class checked, consistent with unsatisfiable classes, or consistent.
+ */
+export function reasonerRow(h: Health): { value: string; ok: boolean; warn: boolean } {
+  const checked = reasonerChecked(h);
+  const consistent = h.reasonerConsistent ?? h.consistent;
+  const unsat = h.unsatisfiable ?? 0;
+  if (checked === 'none') return { value: "No verdict, so validation can't pass", ok: false, warn: true };
+  if (!consistent) return { value: 'Inconsistent', ok: false, warn: false };
+  if (checked === 'consistency') return { value: 'Consistent, not every class checked', ok: false, warn: true };
+  if (unsat || !h.consistent) return { value: unsat ? `Consistent, but ${plural(unsat, 'unsatisfiable class', 'unsatisfiable classes')}` : 'Consistent, but some classes are unsatisfiable', ok: false, warn: false };
+  return { value: 'Consistent', ok: true, warn: false };
+}
+
 export function healthState(o: OntologySummary) {
   const h = o.health;
   const incomplete = h?.incomplete ?? [];
-  const problem = h && (!h.consistent || h.errors > 0);
+  // A logical problem counts only when the reasoner decided it; with no verdict the chip says
+  // the checks are incomplete, as the health panel's detail does.
+  const problem = h && (h.errors > 0 || (reasonerChecked(h) !== 'none' && !h.consistent));
   const caution = h && !problem && (h.warnings > 0 || h.fairScore < 0.8 || !h.passed);
   const tone: BubbleTone = !h ? 'neutral' : problem ? 'danger' : incomplete.length || caution ? 'warn' : 'ok';
   const label = !h ? 'Not validated yet' : problem ? 'Needs fixing' : incomplete.length ? 'Checks incomplete' : caution ? 'Healthy, with notes' : 'Healthy';
@@ -207,7 +229,6 @@ export function HealthChip({ o }: { o: OntologySummary }) {
 /** One chip for the working draft's health; the breakdown opens on click. */
 export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologySummary; detailsHref?: string; align?: 'left' | 'right' }) {
   const { h, tone, label, Icon, incomplete } = healthState(o);
-  const reasonerRan = !!h && h.reasoner !== 'structural' && !incomplete.some((m) => m.startsWith('OWL reasoner'));
   return (
     <Popover
       label={`Health: ${label}. Show details`}
@@ -222,16 +243,11 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
     >
       {(close) => (
         <>
-          <h4 className="mb-3 text-xs font-semibold tracking-wide text-muted uppercase">Health of the working draft</h4>
+          <h4 className="mb-3 text-sm font-semibold">Health of the working draft</h4>
           {h ? (
             // A two-column grid, so every value starts in the same column whatever the label's length.
             <ul className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
-              <HealthRow
-                ok={h.consistent && reasonerRan}
-                warn={h.consistent && !reasonerRan}
-                label="Reasoner"
-                value={!h.consistent ? 'Inconsistent' : reasonerRan ? 'Consistent' : 'Not run (structural checks only)'}
-              />
+              <HealthRow label="Reasoner" {...reasonerRow(h)} />
               <HealthRow ok={h.fairScore >= 0.8} warn={h.fairScore >= 0.5 && h.fairScore < 0.8} label="FAIR score" value={pct(h.fairScore)} />
               <HealthRow
                 ok={h.errors === 0 && h.warnings === 0}

@@ -1,59 +1,21 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import type { ClassView } from '@concord/core/types';
-import { Bug, ChevronDown, PenLine, ChevronRight, Circle, Network, ListTree, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
 import { compactIri } from '../../lib/format';
 import { OntologyGraph } from '../../components/OntologyGraph';
+import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
+import { ClassTree } from '../../components/ontology-viz/ClassTree';
+import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood, type DiagramOptions } from '../../components/ontology-viz/ClassDiagram';
+import { HierarchyPath, IncomingList, Neighbourhood, PropertyTable, SubclassList } from '../../components/ontology-viz/ClassPanels';
 import { BugReportDialog } from '../../components/BugReport';
 import { ProposedEditNotice, TermEditForm } from '../../components/TermEdit';
 import type { ChangeRequestDetail } from '@concord/shared';
-import { Badge, Button, Card, CopyButton, EmptyState, ErrorCard, Input, Loading, cx } from '../../components/ui';
+import { Badge, Button, Card, Chip, CopyButton, EmptyState, ErrorCard, Input, Loading, Select, cx } from '../../components/ui';
 import { useOntology } from './Layout';
-
-function buildTree(view: OntologyView) {
-  const iris = new Set(view.classes.map((c) => c.iri));
-  const children = new Map<string, ClassView[]>();
-  const roots: ClassView[] = [];
-  for (const c of view.classes) {
-    const parents = c.superClasses.filter((s) => iris.has(s) && s !== c.iri);
-    if (!parents.length) roots.push(c);
-    for (const p of parents) children.set(p, [...(children.get(p) ?? []), c]);
-  }
-  const byLabel = (a: ClassView, b: ClassView) => (a.label ?? a.iri).localeCompare(b.label ?? b.iri);
-  roots.sort(byLabel);
-  for (const v of children.values()) v.sort(byLabel);
-  return { roots, children };
-}
-
-function TreeNode({ c, children, depth, selected, onSelect, label, seen }: { c: ClassView; children: Map<string, ClassView[]>; depth: number; selected?: string; onSelect: (iri: string) => void; label: Labeler; seen: Set<string> }) {
-  const kids = seen.has(c.iri) ? [] : (children.get(c.iri) ?? []);
-  const [open, setOpen] = useState(depth < 2);
-  const nextSeen = useMemo(() => new Set([...seen, c.iri]), [seen, c.iri]);
-  return (
-    <li>
-      <div className={cx('flex items-center rounded-md pr-2 text-sm', selected === c.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2')} style={{ paddingLeft: depth * 14 }}>
-        <button className="flex size-6 shrink-0 items-center justify-center text-muted" onClick={() => setOpen((o) => !o)} aria-label={open ? 'Collapse' : 'Expand'} disabled={!kids.length}>
-          {kids.length ? open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : <Circle className="size-1.5 fill-current opacity-40" />}
-        </button>
-        <button className={cx('min-w-0 flex-1 truncate py-1 text-left', c.deprecated && 'text-muted line-through')} onClick={() => onSelect(c.iri)}>
-          {c.label ?? label(c.iri)}
-        </button>
-        {kids.length > 0 && <span className="text-[0.65rem] text-subtle">{kids.length}</span>}
-      </div>
-      {open && kids.length > 0 && (
-        <ul>
-          {kids.map((k) => (
-            <TreeNode key={k.iri} c={k} children={children} depth={depth + 1} selected={selected} onSelect={onSelect} label={label} seen={nextSeen} />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
 
 function TermLink({ iri, label, onSelect }: { iri: string; label: Labeler; onSelect: (iri: string) => void }) {
   return (
@@ -86,7 +48,34 @@ function IriList({ iris, label, onSelect, empty = '—' }: { iris: string[]; lab
   );
 }
 
-function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string) => void }) {
+function Section({ title, count, children, defaultOpen = false }: { title: string; count?: number; children: ReactNode; defaultOpen?: boolean }) {
+  return (
+    <details open={defaultOpen} className="group mt-4 border-t border-line pt-3">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded text-sm font-semibold focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-4 text-muted transition-transform group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
+        {title}
+        {count !== undefined && <span className="rounded-full bg-surface-2 px-1.5 text-xs font-medium text-muted">{count}</span>}
+      </summary>
+      <div className="mt-3">{children}</div>
+    </details>
+  );
+}
+
+function TermDetailPanel({
+  iri,
+  onSelect,
+  model,
+  showNeighbourhood,
+  compact,
+  onClose,
+}: {
+  iri: string;
+  onSelect: (i: string) => void;
+  model: OntologyModel;
+  showNeighbourhood: boolean;
+  compact?: boolean;
+  onClose?: () => void;
+}) {
   const { id, label, view } = useOntology();
   // Remember which term each response is for, so the editor never opens on a
   // previous term's data while the selected one is still loading.
@@ -104,6 +93,15 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
     if (!editing && refocusEdit.current) document.getElementById(editId)?.focus();
     refocusEdit.current = false;
   }, [editing, editId]);
+  // Members arriving from "Report a problem" on the public page (?report=1) land with the form open.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (params.get('report') !== '1') return;
+    setBugOpen(true);
+    const next = new URLSearchParams(params);
+    next.delete('report');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   if (term.error && !term.data) return <ErrorCard error={term.error} onRetry={term.reload} />;
   if (!term.data) return <Loading />;
   const t: TermDetail = term.data.detail;
@@ -129,8 +127,21 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
         />
       </Card>
     );
+  const isClass = t.kind === 'class' && model.classes.has(t.iri);
+  const isProp = t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty';
+  const slotCount = isClass ? model.allSlots(t.iri).reduce((n, g) => n + g.slots.length, 0) : 0;
+  const rules =
+    t.kind === 'class'
+      ? t.restrictions.length + t.equivalentClasses.length + t.disjointWith.length + (t.superClassExpressions?.length ?? 0) + (t.equivalentExpressions?.length ?? 0)
+      : isProp
+        ? t.superProperties.length + (t.inverseOf ? 1 : 0) + t.characteristics.length
+        : t.kind === 'individual'
+          ? Object.keys(t.facts).length
+          : 0;
+  const usage = (t.usedBy?.length ?? 0) + (isClass ? model.incoming(t.iri).length : 0);
+  const editorial = (t.altLabels?.length ? 1 : 0) + (t.source?.length ? 1 : 0) + (t.editorialNote ? 1 : 0);
   return (
-    <Card className="p-5">
+    <Card className={cx('p-5', compact && 'p-4')}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -138,6 +149,11 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
             <Badge tone="outline">{KIND_LABEL[t.kind]}</Badge>
             {t.deprecated && <Badge tone="warn">Deprecated</Badge>}
           </div>
+          {t.kind === 'class' && model.classes.has(t.iri) && (
+            <div className="mt-1">
+              <HierarchyPath iri={t.iri} model={model} label={label} onSelect={onSelect} />
+            </div>
+          )}
           <div className="mt-1 flex items-center gap-1.5">
             <code className="truncate font-mono text-xs text-muted" title={t.iri}>
               {compactIri(t.iri, prefixes)}
@@ -145,13 +161,18 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
             <CopyButton text={t.iri} variant="ghost" />
           </div>
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <Button id={editId} size="sm" variant="ghost" icon={PenLine} disabled={!current} onClick={() => setEditing(true)}>
             Edit
           </Button>
           <Button size="sm" variant="ghost" icon={Bug} onClick={() => setBugOpen(true)}>
-            Report a problem with this term
+            {compact ? 'Report a problem' : 'Report a problem with this term'}
           </Button>
+          {onClose && (
+            <button type="button" className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-fg" onClick={onClose} aria-label="Close term details">
+              <X className="size-4" />
+            </button>
+          )}
         </div>
       </div>
       {proposed && <ProposedEditNotice cr={proposed} onDismiss={() => setProposed(undefined)} />}
@@ -169,14 +190,47 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
       )}
       {t.comment && <p className="mt-2 text-sm text-muted">{t.comment}</p>}
 
+      {/* Always visible: what it is and where it sits. Everything else is grouped below. */}
       <dl className="mt-4 divide-y divide-line border-t border-line">
-        {t.altLabels?.length ? <Row k="Also known as">{t.altLabels.join(', ')}</Row> : null}
         {t.kind === 'class' && (
           <>
             <Row k="Subclass of">
               <IriList iris={t.superClasses} label={label} onSelect={onSelect} empty="owl:Thing (top level)" />
             </Row>
-            {t.restrictions.length > 0 && (
+            {model.classes.has(t.iri) && (
+              <Row k="Subclasses">
+                <SubclassList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+              </Row>
+            )}
+          </>
+        )}
+        {isProp && (
+          <>
+            <Row k="Domain">
+              <IriList iris={t.domain} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
+            </Row>
+            <Row k="Range">
+              <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
+            </Row>
+          </>
+        )}
+        {t.kind === 'individual' && (
+          <Row k="Instance of">
+            <IriList iris={t.types} label={label} onSelect={onSelect} />
+          </Row>
+        )}
+      </dl>
+
+      {isClass && (
+        <Section title="Properties" count={slotCount} defaultOpen>
+          <PropertyTable iri={t.iri} model={model} label={label} onSelect={onSelect} compact={compact} />
+        </Section>
+      )}
+
+      {rules > 0 && (
+        <Section title="Logical rules" count={rules}>
+          <dl className="divide-y divide-line">
+            {t.kind === 'class' && t.restrictions.length > 0 && (
               <Row k="Restrictions">
                 <ul className="space-y-1 font-mono text-[0.8rem]">
                   {t.restrictions.map((r, i) => (
@@ -189,37 +243,45 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
                 </ul>
               </Row>
             )}
-            {t.equivalentClasses.length > 0 && (
+            {t.kind === 'class' && !!t.superClassExpressions?.length && (
+              <Row k="Also a subclass of">
+                <ul className="space-y-1 font-mono text-[0.8rem]">
+                  {t.superClassExpressions.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              </Row>
+            )}
+            {t.kind === 'class' && !!t.equivalentExpressions?.length && (
+              <Row k="Defined as">
+                <ul className="space-y-1 font-mono text-[0.8rem]">
+                  {t.equivalentExpressions.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              </Row>
+            )}
+            {t.kind === 'class' && t.equivalentClasses.length > 0 && (
               <Row k="Equivalent to">
                 <IriList iris={t.equivalentClasses} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.disjointWith.length > 0 && (
+            {t.kind === 'class' && t.disjointWith.length > 0 && (
               <Row k="Disjoint with">
                 <IriList iris={t.disjointWith} label={label} onSelect={onSelect} />
               </Row>
             )}
-          </>
-        )}
-        {(t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty') && (
-          <>
-            <Row k="Domain">
-              <IriList iris={t.domain} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
-            </Row>
-            <Row k="Range">
-              <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
-            </Row>
-            {t.superProperties.length > 0 && (
+            {isProp && t.superProperties.length > 0 && (
               <Row k="Sub-property of">
                 <IriList iris={t.superProperties} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.inverseOf && (
+            {isProp && t.inverseOf && (
               <Row k="Inverse of">
                 <TermLink iri={t.inverseOf} label={label} onSelect={onSelect} />
               </Row>
             )}
-            {t.characteristics.length > 0 && (
+            {isProp && t.characteristics.length > 0 && (
               <Row k="Characteristics">
                 <span className="flex flex-wrap gap-1">
                   {t.characteristics.map((c) => (
@@ -228,56 +290,80 @@ function TermDetailPanel({ iri, onSelect }: { iri: string; onSelect: (i: string)
                 </span>
               </Row>
             )}
-          </>
-        )}
-        {t.kind === 'individual' && (
-          <>
-            <Row k="Instance of">
-              <IriList iris={t.types} label={label} onSelect={onSelect} />
-            </Row>
-            {Object.entries(t.facts).map(([p, vs]) => (
-              <Row key={p} k={label(p)}>
-                {vs.map((v) => (v.startsWith('http') ? label(v) : v)).join(', ')}
-              </Row>
-            ))}
-          </>
-        )}
-        {t.examples?.length ? (
-          <Row k="Examples">
-            <ul className="list-disc pl-4">
-              {t.examples.map((e, i) => (
-                <li key={i}>{e}</li>
+            {t.kind === 'individual' &&
+              Object.entries(t.facts).map(([p, vs]) => (
+                <Row key={p} k={label(p)}>
+                  {vs.map((v) => (v.startsWith('http') ? label(v) : v)).join(', ')}
+                </Row>
               ))}
-            </ul>
+          </dl>
+        </Section>
+      )}
+
+      <Section title="Usage" count={usage}>
+        <dl className="divide-y divide-line">
+          <Row k="Used by">
+            {t.usedBy?.length ? (
+              <ul className="space-y-1">
+                {t.usedBy.map((u, i) => (
+                  <li key={i}>
+                    <TermLink iri={u.iri} label={(x) => u.label ?? label(x)} onSelect={onSelect} /> <span className="text-xs text-muted">via {u.via}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-muted">Not referenced by other terms.</span>
+            )}
           </Row>
-        ) : null}
-        {t.source?.length ? <Row k="Source">{t.source.join(', ')}</Row> : null}
-        {t.editorialNote && <Row k="Editorial note">{t.editorialNote}</Row>}
-        <Row k="Used by">
-          {t.usedBy?.length ? (
-            <ul className="space-y-1">
-              {t.usedBy.map((u, i) => (
-                <li key={i}>
-                  <TermLink iri={u.iri} label={(x) => u.label ?? label(x)} onSelect={onSelect} /> <span className="text-xs text-muted">via {u.via}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <span className="text-muted">Not referenced by other terms.</span>
+          {isClass && (
+            <Row k="Relationships pointing here">
+              <IncomingList iri={t.iri} model={model} label={label} onSelect={onSelect} />
+            </Row>
           )}
-        </Row>
-      </dl>
+        </dl>
+      </Section>
+
+      {t.examples?.length ? (
+        <Section title="Examples" count={t.examples.length}>
+          <ul className="list-disc space-y-1 pl-4 text-sm">
+            {t.examples.map((e, i) => (
+              <li key={i}>{e}</li>
+            ))}
+          </ul>
+        </Section>
+      ) : null}
+
+      {editorial > 0 && (
+        <Section title="Editorial details" count={editorial}>
+          <dl className="divide-y divide-line">
+            {t.altLabels?.length ? <Row k="Also known as">{t.altLabels.join(', ')}</Row> : null}
+            {t.source?.length ? <Row k="Source">{t.source.join(', ')}</Row> : null}
+            {t.editorialNote && <Row k="Editorial note">{t.editorialNote}</Row>}
+          </dl>
+        </Section>
+      )}
+
+      {isClass && showNeighbourhood && view.data && (
+        <Section title="Neighbourhood diagram">
+          <Neighbourhood iri={t.iri} view={view.data} model={model} label={label} onSelect={onSelect} />
+        </Section>
+      )}
       <BugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} ontologyId={id} termIri={t.iri} termLabel={t.label ?? label(t.iri)} />
     </Card>
   );
 }
 
 function PropList({ title, items, selected, onSelect, label }: { title: string; items: TermView[]; selected?: string; onSelect: (i: string) => void; label: Labeler }) {
-  const [open, setOpen] = useState(true);
+  // Collapsed until asked for, or until the selected term is in this list.
+  const has = !!selected && items.some((i) => i.iri === selected);
+  const [open, setOpen] = useState(has);
+  useEffect(() => {
+    if (has) setOpen(true);
+  }, [has]);
   if (!items.length) return null;
   return (
-    <div className="mt-4">
-      <button className="mb-1 flex w-full items-center gap-1 text-xs font-semibold tracking-wide text-muted uppercase" onClick={() => setOpen((o) => !o)}>
+    <div className="mt-3">
+      <button className="mb-1 flex w-full items-center gap-1 rounded text-sm font-semibold hover:text-fg" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />} {title} ({items.length})
       </button>
       {open && (
@@ -288,7 +374,11 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
               <li key={p.iri}>
                 <button
                   onClick={() => onSelect(p.iri)}
-                  className={cx('block w-full truncate rounded-md px-2 py-1 text-left text-sm', selected === p.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2', p.deprecated && 'line-through opacity-70')}
+                  className={cx(
+                    'block w-full rounded-md px-2 py-1 text-left text-sm leading-snug break-words',
+                    selected === p.iri ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2',
+                    p.deprecated && 'line-through opacity-70',
+                  )}
                 >
                   {p.label ?? label(p.iri)}
                 </button>
@@ -300,115 +390,374 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
   );
 }
 
+type Mode = 'tree' | 'diagram' | 'graph';
+const MODES: {
+  key: Mode;
+  label: string;
+  icon: typeof ListTree;
+  task: string;
+}[] = [
+  {
+    key: 'tree',
+    label: 'Classes',
+    icon: ListTree,
+    task: 'Find a term and read its definition, properties and where it’s used.',
+  },
+  {
+    key: 'diagram',
+    label: 'Diagram',
+    icon: LayoutTemplate,
+    task: 'Check what data each class has: attributes, types and how many of each.',
+  },
+  {
+    key: 'graph',
+    label: 'Graph',
+    icon: Network,
+    task: 'Explore how classes connect across the whole ontology.',
+  },
+];
+
+/** More classes than this and the diagram asks where to start rather than drawing everything. */
+export const LARGE_DIAGRAM = 80;
+
+/** Whole ontology, or a class and everything one or two links away. */
+function ScopeControl({ hops, setHops, anchor, centreOn, onCentre }: { hops: number; setHops: (h: number) => void; anchor?: string; centreOn?: string; onCentre: (iri: string) => void }) {
+  const { label } = useOntology();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="flex items-center gap-2 text-xs text-muted">
+        Show
+        <Select value={anchor ? String(hops) : '0'} onChange={(e) => setHops(Number(e.target.value))} className="h-8 w-56 text-sm" aria-label="Scope">
+          <option value="0">Whole ontology</option>
+          <option value="1" disabled={!anchor}>
+            {anchor ? `${label(anchor)} and direct links` : 'Around a class (pick one first)'}
+          </option>
+          <option value="2" disabled={!anchor}>
+            {anchor ? `${label(anchor)}, two links out` : 'Two links out (pick a class)'}
+          </option>
+        </Select>
+      </label>
+      {centreOn && (
+        <Button size="sm" variant="secondary" icon={Crosshair} onClick={() => onCentre(centreOn)}>
+          Centre on {label(centreOn)}
+        </Button>
+      )}
+      {anchor && hops > 0 && (
+        <Button size="sm" variant="ghost" icon={Maximize} onClick={() => setHops(0)}>
+          Show entire ontology
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** Classes with the most links, as starting points for a large ontology's diagram. */
+function hubs(model: OntologyModel, n: number) {
+  const degree = new Map<string, number>();
+  const bump = (iri: string, by = 1) => model.classes.has(iri) && degree.set(iri, (degree.get(iri) ?? 0) + by);
+  for (const [c, ps] of model.parents) for (const p of ps) (bump(c), bump(p));
+  for (const c of model.classes.keys()) for (const s of model.ownSlots(c)) for (const r of s.range) if (model.classes.has(r)) (bump(c), bump(r));
+  return [...degree]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([iri]) => iri);
+}
+
+function DiagramView({
+  model,
+  selected,
+  focus,
+  hops,
+  onSelect,
+  onCentre,
+}: {
+  model: OntologyModel;
+  selected?: string;
+  focus?: string;
+  hops: number;
+  onSelect: (iri: string) => void;
+  onCentre: (iri: string) => void;
+}) {
+  const { view, label } = useOntology();
+  const [opts, setOpts] = useState<DiagramOptions>(DEFAULT_DIAGRAM_OPTIONS);
+  const [drawAll, setDrawAll] = useState(false);
+  const large = !focus && model.classes.size > LARGE_DIAGRAM && !drawAll;
+  const scope = useMemo(() => (focus ? neighbourhood(model, focus, hops, opts) : new Set(model.classes.keys())), [model, focus, hops, opts]);
+  const starts = useMemo(() => (large ? hubs(model, 8) : []), [large, model]);
+  const toggle = (k: keyof DiagramOptions) => setOpts((o) => ({ ...o, [k]: !o[k] }));
+  if (!view.data) return null;
+  if (large)
+    return (
+      <section data-testid="large-diagram" aria-labelledby="large-diagram-title">
+        <Card className="p-6">
+          <h3 id="large-diagram-title" className="font-semibold">
+            Where would you like to start?
+          </h3>
+          <p className="mt-1 max-w-prose text-sm text-muted">
+            This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, choose one from the Terms panel, or use the Graph view for an
+            overview.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Start from a class">
+            {starts.map((iri) => (
+              <Button key={iri} size="sm" variant="secondary" onClick={() => onCentre(iri)}>
+                {label(iri)}
+              </Button>
+            ))}
+          </div>
+          <Button size="sm" variant="ghost" className="mt-4" onClick={() => setDrawAll(true)}>
+            Draw all {model.classes.size} classes anyway
+          </Button>
+        </Card>
+      </section>
+    );
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
+        <Chip active={opts.attributes} onClick={() => toggle('attributes')}>
+          Attributes
+        </Chip>
+        <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>
+          Inherited attributes
+        </Chip>
+        <Chip active={opts.associations} onClick={() => toggle('associations')}>
+          Relationships
+        </Chip>
+        <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>
+          Subclasses
+        </Chip>
+      </div>
+      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={640} detailsId="term-details" />
+    </div>
+  );
+}
+
 export function BrowseTab() {
   const { id, view, label } = useOntology();
   const [params, setParams] = useSearchParams();
   const selected = params.get('term') ?? undefined;
-  const mode = params.get('view') === 'graph' ? 'graph' : 'tree';
+  const raw = params.get('view');
+  const mode: Mode = raw === 'graph' || raw === 'diagram' ? raw : 'tree';
+  const canvas = mode !== 'tree';
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
+  const [navOpen, setNavOpen] = useState<boolean>();
   useEffect(() => {
     const t = setTimeout(() => setDebounced(q.trim()), 250);
     return () => clearTimeout(t);
   }, [q]);
   const results = useAsync(async () => (debounced ? api.search(id, debounced) : undefined), [id, debounced]);
-  const tree = useMemo(() => (view.data ? buildTree(view.data) : undefined), [view.data]);
+  const model = useMemo(() => (view.data ? buildModel(view.data) : undefined), [view.data]);
 
+  // Canvas scope. The drawing is anchored on ?around= (a class), independently of the term
+  // being inspected (?term=), so picking something shows its details without redrawing.
+  // Arriving with only a class selected anchors on that class.
+  const isClass = (iri?: string | null): iri is string => !!iri && !!model?.classes.has(iri);
+  const aroundParam = params.get('around');
+  const hopsParam = params.get('hops');
+  const around = isClass(aroundParam) ? aroundParam : hopsParam === null && isClass(selected) ? selected : undefined;
+  const hops = around ? (hopsParam !== null ? Math.max(0, Math.min(2, Number(hopsParam) || 0)) : 1) : 0;
+  const focus = around && hops > 0 ? around : undefined;
+  const scope = useMemo(() => (model && focus ? neighbourhood(model, focus, hops, DEFAULT_DIAGRAM_OPTIONS) : undefined), [model, focus, hops]);
+
+  const update = (f: (p: URLSearchParams) => void, replace = false) => {
+    const next = new URLSearchParams(params);
+    f(next);
+    setParams(next, { replace });
+  };
+  // Write the current scope into the URL so it survives a change of term.
+  const pin = (p: URLSearchParams) => {
+    if (focus) {
+      p.set('around', focus);
+      p.set('hops', String(hops));
+    } else {
+      p.delete('around');
+      p.set('hops', '0');
+    }
+  };
+  const centre = (iri: string) =>
+    update((p) => {
+      p.set('term', iri);
+      p.set('around', iri);
+      p.set('hops', String(hops || 1));
+    });
+  // From the term list, search or links: in a canvas view, a class outside the drawing
+  // recentres it; anything else keeps the current scope.
   const select = (iri: string) => {
-    const next = new URLSearchParams(params);
-    next.set('term', iri);
-    setParams(next, { replace: false });
+    if (canvas && scope && isClass(iri) && !scope.has(iri)) return centre(iri);
+    update((p) => {
+      p.set('term', iri);
+      if (canvas) pin(p);
+    });
   };
-  const setMode = (m: 'tree' | 'graph') => {
-    const next = new URLSearchParams(params);
-    if (m === 'graph') next.set('view', 'graph');
-    else next.delete('view');
-    setParams(next, { replace: true });
-  };
+  // Picking on the canvas only changes the details.
+  const selectOnCanvas = (iri: string) =>
+    update((p) => {
+      p.set('term', iri);
+      pin(p);
+    });
+  const setHops = (h: number) =>
+    update((p) => {
+      const anchor = around ?? (isClass(selected) ? selected : undefined);
+      if (h > 0 && anchor) {
+        p.set('around', anchor);
+        p.set('hops', String(h));
+      } else {
+        p.delete('around');
+        p.set('hops', '0');
+      }
+    }, true);
+  const setMode = (m: Mode) =>
+    update((p) => {
+      if (m === 'tree') p.delete('view');
+      else p.set('view', m);
+    }, true);
+  const clear = () =>
+    update((p) => {
+      p.delete('term');
+      if (canvas) pin(p);
+    });
+  const anchor = focus ?? (isClass(selected) ? selected : undefined);
+  const centreOn = isClass(selected) && selected !== focus ? selected : undefined;
 
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
-  if (!view.data || !tree) return <Loading label="Loading ontology…" />;
+  if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
   const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length;
+  // In the canvas views the navigation folds away so the drawing gets the room.
+  const showNav = navOpen ?? !canvas;
+
+  const nav = (
+    <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
+      {debounced ? (
+        <div>
+          <div className="mb-2 text-sm font-semibold">Search results</div>
+          {results.loading && !results.data ? (
+            <Loading />
+          ) : results.error ? (
+            <ErrorCard error={results.error} />
+          ) : results.data?.length ? (
+            <ul>
+              {results.data.map((t) => (
+                <li key={t.iri}>
+                  <button onClick={() => select(t.iri)} className={cx('w-full rounded-md px-2 py-1.5 text-left hover:bg-surface-2', selected === t.iri && 'bg-accent-soft')}>
+                    <div className="text-sm font-medium">{t.label ?? label(t.iri)}</div>
+                    <div className="text-xs text-muted">
+                      {KIND_LABEL[t.kind]}
+                      {t.definition && ` · ${t.definition.slice(0, 70)}${t.definition.length > 70 ? '…' : ''}`}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="px-2 py-4 text-sm text-muted">No terms match “{debounced}”.</p>
+          )}
+        </div>
+      ) : (
+        <>
+          <ClassTree model={model} label={label} selected={selected} onSelect={select} />
+          <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
+          <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
+          <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
+        </>
+      )}
+    </Card>
+  );
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="relative w-full max-w-sm">
-          <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search terms, definitions…" className="pl-9" />
-          {q && (
-            <button className="absolute top-2.5 right-3 text-muted" onClick={() => setQ('')} aria-label="Clear search">
-              <X className="size-4" />
-            </button>
+        <div className="flex w-full max-w-md items-center gap-2">
+          {canvas && (
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={showNav ? PanelLeftClose : PanelLeftOpen}
+              onClick={() => setNavOpen(!showNav)}
+              aria-expanded={showNav}
+              aria-controls="browse-nav"
+              className="h-9 shrink-0"
+            >
+              {showNav ? 'Hide terms' : 'Terms'}
+            </Button>
           )}
+          <div className="relative w-full">
+            <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
+            <Input
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                if (e.target.value) setNavOpen(true);
+              }}
+              placeholder="Search terms, definitions…"
+              className="pl-9"
+              aria-label="Search terms"
+            />
+            {q && (
+              <button className="absolute top-2.5 right-3 text-muted" onClick={() => setQ('')} aria-label="Clear search">
+                <X className="size-4" />
+              </button>
+            )}
+          </div>
         </div>
-        <div className="inline-flex rounded-lg border border-line-strong p-0.5">
-          <button onClick={() => setMode('tree')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === 'tree' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-            <ListTree className="size-4" /> Tree
-          </button>
-          <button onClick={() => setMode('graph')} className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === 'graph' ? 'bg-surface-2 font-medium' : 'text-muted')}>
-            <Network className="size-4" /> Graph
-          </button>
+        <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View" aria-describedby="view-task">
+          {MODES.map((m) => (
+            <button
+              key={m.key}
+              role="radio"
+              aria-checked={mode === m.key}
+              title={m.task}
+              onClick={() => setMode(m.key)}
+              className={cx('inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm', mode === m.key ? 'bg-surface-2 font-medium' : 'text-muted hover:text-fg')}
+            >
+              <m.icon className="size-4" aria-hidden /> {m.label}
+            </button>
+          ))}
         </div>
       </div>
+      <p id="view-task" className="-mt-2 mb-4 text-sm text-muted">
+        {MODES.find((m) => m.key === mode)!.task}
+      </p>
 
       {empty ? (
         <EmptyState icon={ListTree} title="This ontology has no terms yet">
           Describe a use case or upload a meeting, then synthesise a change request — approved changes appear here.
         </EmptyState>
-      ) : (
+      ) : !canvas ? (
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
-          <Card className="max-h-[75vh] overflow-y-auto p-3 lg:sticky lg:top-20">
-            {debounced ? (
-              <div>
-                <div className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Search results</div>
-                {results.loading && !results.data ? (
-                  <Loading />
-                ) : results.error ? (
-                  <ErrorCard error={results.error} />
-                ) : results.data?.length ? (
-                  <ul>
-                    {results.data.map((t) => (
-                      <li key={t.iri}>
-                        <button onClick={() => select(t.iri)} className={cx('w-full rounded-md px-2 py-1.5 text-left hover:bg-surface-2', selected === t.iri && 'bg-accent-soft')}>
-                          <div className="text-sm font-medium">{t.label ?? label(t.iri)}</div>
-                          <div className="text-xs text-muted">
-                            {KIND_LABEL[t.kind]}
-                            {t.definition && ` · ${t.definition.slice(0, 70)}${t.definition.length > 70 ? '…' : ''}`}
-                          </div>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="px-2 py-4 text-sm text-muted">No terms match “{debounced}”.</p>
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Classes ({v.classes.length})</div>
-                <ul>
-                  {tree.roots.map((c) => (
-                    <TreeNode key={c.iri} c={c} children={tree.children} depth={0} selected={selected} onSelect={select} label={label} seen={new Set()} />
-                  ))}
-                </ul>
-                <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
-                <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
-                <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
-              </>
-            )}
-          </Card>
+          <div id="browse-nav">{nav}</div>
           <div className="min-w-0 space-y-4">
-            {mode === 'graph' && <OntologyGraph view={v} selected={selected} onSelect={select} height={selected ? 420 : 600} />}
             {selected ? (
-              <TermDetailPanel iri={selected} onSelect={select} />
+              <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
             ) : (
-              mode === 'tree' && (
-                <EmptyState icon={ListTree} title="Pick a term">
-                  Choose a class or property on the left to see its definition, axioms and where it’s used.
-                </EmptyState>
-              )
+              <EmptyState icon={ListTree} title="Pick a term">
+                Choose a class or property on the left to see its definition, properties and where it’s used. Use the Diagram to check what data each class has, or the Graph to see how everything
+                connects.
+              </EmptyState>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className={cx('grid gap-4', showNav ? 'lg:grid-cols-[280px_1fr]' : 'grid-cols-1')}>
+          {showNav && <div id="browse-nav">{nav}</div>}
+          <div className={cx('grid min-w-0 gap-4', selected && 'xl:grid-cols-[1fr_380px]')}>
+            <div className="min-w-0 space-y-2">
+              <ScopeControl hops={hops} setHops={setHops} anchor={anchor} centreOn={centreOn} onCentre={centre} />
+              {mode === 'graph' ? (
+                <OntologyGraph view={v} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} height={620} />
+              ) : (
+                <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} />
+              )}
+            </div>
+            {selected && (
+              <aside
+                id="term-details"
+                tabIndex={-1}
+                className="min-w-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto"
+                aria-label="Term details"
+              >
+                <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={false} compact onClose={clear} />
+              </aside>
             )}
           </div>
         </div>

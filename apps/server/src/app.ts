@@ -7,10 +7,13 @@ import { config } from './config.js';
 import { HttpError } from './db.js';
 import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
+import { reportRouter } from './public/report.js';
 import { publicRouter } from './public/routes.js';
+import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
+import { StoreBusyError } from './store/index.js';
 
 export function createApp(): express.Express {
   const app = express();
@@ -24,10 +27,11 @@ export function createApp(): express.Express {
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
   // Auto-provisioned WebID profiles, used when no Solid server is configured.
-  app.get('/people/:id', (req, res) => {
-    const user = getUser(String(req.params.id));
+  app.get('/people/:id', async (req, res) => {
+    const user = await getUser(String(req.params.id));
     if (!user) throw new HttpError(404, 'No such person');
-    res.type('text/turtle').send(solid.profileDocument(user));
+    // Anyone can resolve a WebID (sign-in needs that), but names are for signed-in users.
+    res.set('Vary', 'Cookie').type('text/turtle').send(solid.profileDocument(user, { named: !!req.user }));
   });
 
   const auth = express.Router();
@@ -43,7 +47,10 @@ export function createApp(): express.Express {
   app.use(oauthRoutes);
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
   app.use('/api', apiRouter());
-  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation),
+  // POST to them to validate data against their SHACL shapes, and public problem reports.
+  app.use(reportRouter());
+  app.use(validationRouter());
   app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.
@@ -53,8 +60,8 @@ export function createApp(): express.Express {
   }
 
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-    // Another writer held the database for longer than this request waits (busy_timeout): it is
-    // busy, not broken, and the same request will work again shortly.
+    // Another writer held the database for longer than this request waits: it is busy, not
+    // broken, and the same request will work again shortly.
     if (isDatabaseBusy(err)) {
       res.setHeader('Retry-After', '2');
       return void res.status(503).json({ error: 'The server is busy with another change. Try again in a moment.' });
@@ -68,8 +75,12 @@ export function createApp(): express.Express {
   return app;
 }
 
-/** SQLite's "database is locked" (SQLITE_BUSY, 5, or its extended codes), as node:sqlite reports it. */
+/**
+ * The store gave up waiting for another writer (StoreBusyError, on any store), or SQLite reported
+ * "database is locked" (SQLITE_BUSY, 5, or its extended codes) directly.
+ */
 function isDatabaseBusy(err: unknown): boolean {
+  if (err instanceof StoreBusyError) return true;
   const e = err as { code?: string; errcode?: number; message?: string };
   return e?.code === 'ERR_SQLITE_ERROR' && ((e.errcode ?? 0) & 0xff) === 5;
 }

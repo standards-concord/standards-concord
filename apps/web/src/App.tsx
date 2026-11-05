@@ -9,13 +9,17 @@ import { LoginPage } from './pages/Login';
 import { HubPage } from './pages/Hub';
 import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
+import { WelcomePage } from './pages/Welcome';
 import { SettingsPage } from './pages/Settings';
+import { AppearancePage } from './pages/Appearance';
 import { NotFound } from './pages/NotFound';
+import { PrivacyPage } from './pages/Privacy';
 import { OntologyLayout } from './pages/ontology/Layout';
 import { OverviewTab } from './pages/ontology/Overview';
 import { BrowseTab } from './pages/ontology/Browse';
 import { SourceTab } from './pages/ontology/Source';
 import { QueryTab } from './pages/ontology/Query';
+import { ValidateTab } from './pages/ontology/Validate';
 import { UseCasesTab } from './pages/ontology/UseCases';
 import { UseCaseDetailPage } from './pages/ontology/UseCaseDetail';
 import { InterviewPage } from './pages/ontology/Interview';
@@ -25,6 +29,7 @@ import { ChangeRequestsTab } from './pages/ontology/ChangeRequests';
 import { ChangeRequestPage } from './pages/ontology/ChangeRequestDetail';
 import { ReleasesTab } from './pages/ontology/Releases';
 import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
+import { RequirementsDocPage } from './pages/ontology/RequirementsDoc';
 import { GovernanceTab } from './pages/ontology/Governance';
 import { AgentReportsTab, ConnectAgentTab } from './pages/ontology/Agents';
 import { ConnectPage } from './pages/Connect';
@@ -67,8 +72,21 @@ function RequireUser({ children }: { children: ReactNode }) {
         <p className="mt-4 text-sm text-muted">Concord needs its API server to be running. If you’re developing locally, start it with <code className="font-mono">pnpm --filter @concord/server dev</code>.</p>
       </Page>
     );
-  if (!session.user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
+  if (!session.user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search + loc.hash)}`} replace />;
   return <>{children}</>;
+}
+
+/** Agents, tokens and appearance used to live in Settings. Old links go straight to their public pages, signed in or not. */
+const MOVED_FROM_SETTINGS: Record<string, string> = { '#agents': '/connect#agents', '#tokens': '/connect#tokens', '#appearance': '/appearance' };
+function SettingsRoute() {
+  const { hash } = useLocation();
+  const moved = MOVED_FROM_SETTINGS[hash];
+  if (moved) return <Navigate to={moved} replace />;
+  return (
+    <RequireUser>
+      <SettingsPage />
+    </RequireUser>
+  );
 }
 
 function Routed() {
@@ -78,18 +96,22 @@ function Routed() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/connect" element={<ConnectPage />} />
+          <Route path="/appearance" element={<AppearancePage />} />
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
-          <Route path="/settings" element={<RequireUser><SettingsPage /></RequireUser>} />
+          <Route path="/settings" element={<SettingsRoute />} />
           <Route path="/admin/feedback" element={<RequireUser><AdminFeedbackPage /></RequireUser>} />
           <Route path="/o/:id" element={<RequireUser><OntologyLayout /></RequireUser>}>
             <Route index element={<OverviewTab />} />
             <Route path="browse" element={<BrowseTab />} />
             <Route path="source" element={<SourceTab />} />
             <Route path="query" element={<QueryTab />} />
+            <Route path="validate" element={<ValidateTab />} />
             <Route path="use-cases" element={<UseCasesTab />} />
             <Route path="use-cases/:useCaseId" element={<UseCaseDetailPage />} />
             <Route path="interview/:sessionId" element={<InterviewPage />} />
@@ -99,6 +121,7 @@ function Routed() {
             <Route path="changes/:crId" element={<ChangeRequestPage />} />
             <Route path="releases" element={<ReleasesTab />} />
             <Route path="releases/:releaseId" element={<ReleaseDetailPage />} />
+            <Route path="requirements/:version" element={<RequirementsDocPage />} />
             <Route path="governance" element={<GovernanceTab />} />
             <Route path="agents" element={<AgentReportsTab />} />
             <Route path="connect" element={<ConnectAgentTab />} />

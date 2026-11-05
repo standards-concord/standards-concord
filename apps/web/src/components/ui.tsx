@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
@@ -18,6 +18,18 @@ const VARIANTS: Record<Variant, string> = {
   danger: 'bg-danger text-danger-fg hover:brightness-110 border border-transparent',
 };
 
+const BUTTON_SIZES = { sm: 'h-8 px-2.5 text-xs gap-1.5', md: 'h-9 px-3.5 text-sm gap-2', lg: 'h-11 px-5 text-sm gap-2' };
+
+/** Button styling for something that isn't a <button>, e.g. a link that navigates. */
+export function buttonClasses(variant: Variant = 'secondary', size: 'sm' | 'md' | 'lg' = 'md', className?: string) {
+  return cx(
+    'inline-flex shrink-0 items-center justify-center rounded-lg font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+    VARIANTS[variant],
+    BUTTON_SIZES[size],
+    className,
+  );
+}
+
 export function Button({
   variant = 'secondary',
   size = 'md',
@@ -28,18 +40,8 @@ export function Button({
   disabled,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: 'sm' | 'md' | 'lg'; icon?: LucideIcon; loading?: boolean }) {
-  const sizes = { sm: 'h-8 px-2.5 text-xs gap-1.5', md: 'h-9 px-3.5 text-sm gap-2', lg: 'h-11 px-5 text-sm gap-2' };
   return (
-    <button
-      {...rest}
-      disabled={disabled || loading}
-      className={cx(
-        'inline-flex shrink-0 items-center justify-center rounded-lg font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-        VARIANTS[variant],
-        sizes[size],
-        className,
-      )}
-    >
+    <button {...rest} disabled={disabled || loading} className={buttonClasses(variant, size, className)}>
       {loading ? <LoaderCircle className="size-4 animate-spin" /> : Icon ? <Icon className={size === 'sm' ? 'size-3.5' : 'size-4'} /> : null}
       {children}
     </button>
@@ -52,14 +54,15 @@ export function Card({ className, children, as: As = 'div' }: { className?: stri
   return <As className={cx('ui-card rounded-xl border border-line bg-surface', className)}>{children}</As>;
 }
 
-export function CardHeader({ title, subtitle, actions, icon: Icon }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon }) {
+export function CardHeader({ title, subtitle, actions, icon: Icon, level = 3 }: { title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; icon?: LucideIcon; level?: 2 | 3 | 4 }) {
+  const H = `h${level}` as const;
   return (
     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-5 py-4">
       <div className="min-w-0">
-        <h3 className="ui-card-title flex items-center gap-2 text-sm font-semibold">
+        <H className="ui-card-title flex items-center gap-2 text-sm font-semibold">
           {Icon && <Icon className="size-4 text-muted" />}
           {title}
-        </h3>
+        </H>
         {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -71,7 +74,7 @@ export function PageHeader({ title, subtitle, actions, eyebrow }: { title: React
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        {eyebrow && <div className="page-eyebrow mb-1 text-xs font-medium tracking-wide text-muted uppercase">{eyebrow}</div>}
+        {eyebrow && <div className="page-eyebrow mb-1 text-sm font-medium text-muted">{eyebrow}</div>}
         <h1 className="page-title">{title}</h1>
         {subtitle && <p className="mt-1 max-w-2xl text-sm text-muted">{subtitle}</p>}
       </div>
@@ -196,7 +199,7 @@ export function ProgressBar({ value, tone = 'accent', className, marker }: { val
 const inputCls =
   'w-full rounded-lg border border-control bg-surface px-3 py-2 text-sm text-fg placeholder:text-subtle focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20 disabled:opacity-60';
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
+export function Input(props: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   return <input {...props} className={cx(inputCls, 'h-9', props.className)} />;
 }
 export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
@@ -230,7 +233,7 @@ export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { chec
         onClick={() => onChange(!checked)}
         className={cx('relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50', checked ? 'bg-accent' : 'bg-control')}
       >
-        <span className={cx('inline-block size-4 rounded-full bg-white shadow transition-transform', checked ? 'translate-x-4.5' : 'translate-x-0.5')} />
+        <span className={cx('inline-block size-4 rounded-full shadow transition-transform', checked ? 'translate-x-4.5 bg-accent-fg' : 'translate-x-0.5 bg-switch-thumb')} />
       </button>
       {label && (
         <label htmlFor={id} className="cursor-pointer text-sm">
@@ -246,13 +249,17 @@ export function Toggle({ checked, onChange, label, disabled, ariaLabel }: { chec
 export function Dialog({ open, onClose, title, children, footer, wide }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  // Callers pass a new onClose each render. Reading it through a ref keeps the effect below tied to opening
+  // only: re-running it on every render of the page behind moved focus back to the first field mid-typing.
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close.current();
     window.addEventListener('keydown', onKey);
     ref.current?.querySelector<HTMLElement>('input,textarea,select')?.focus();
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -340,6 +347,58 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       {active && <Check className="size-3" />}
       {children}
     </button>
+  );
+}
+
+/** A labelled choice of one option, shown as chips (a radio group to assistive technology). */
+/**
+ * A row of chips that behaves as a radio group: one tab stop (the chosen option),
+ * arrow keys move the choice, Home and End jump to the ends.
+ */
+export function Segmented<T extends string>({ label, value, onChange, options, className }: { label: string; value: T; onChange: (v: T) => void; options: { value: T; label: ReactNode; icon?: LucideIcon }[]; className?: string }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const current = Math.max(0, options.findIndex((o) => o.value === value));
+  const choose = (i: number) => {
+    const n = (i + options.length) % options.length;
+    onChange(options[n].value);
+    refs.current[n]?.focus();
+  };
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (step) choose(current + step);
+    else if (e.key === 'Home') choose(0);
+    else if (e.key === 'End') choose(options.length - 1);
+    else return;
+    e.preventDefault();
+  };
+  return (
+    <div role="radiogroup" aria-label={label} className={cx('flex flex-wrap gap-2', className)}>
+      {options.map((o, i) => {
+        const active = i === current;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.value}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={o.value === value}
+            tabIndex={active ? 0 : -1}
+            onKeyDown={onKeyDown}
+            onClick={() => onChange(o.value)}
+            className={cx(
+              'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+              o.value === value ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',
+            )}
+          >
+            {Icon && <Icon className="size-3" aria-hidden />}
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

@@ -17,6 +17,7 @@ async function openTerm(page: Page, localName: string) {
 }
 
 const editor = (page: Page) => page.getByRole('form', { name: /^Edit / });
+const classItem = (page: Page, name: string) => page.getByRole('tree', { name: /Classes/ }).getByRole('treeitem', { name: new RegExp(`^${name}\\b`) }).first();
 
 test.describe('editing a term inline', () => {
   test.beforeEach(async ({ page }) => {
@@ -80,7 +81,7 @@ test.describe('editing a term inline', () => {
     await expect(notice).toContainText(/change request #\d+/);
     // Keyboard focus lands on the result.
     await expect(notice.getByRole('link', { name: /change request #/ })).toBeFocused();
-    await expect(notice).toContainText('patch');
+    await expect(notice).toContainText('Patch');
     await expect(notice).toContainText('In review');
     // The working draft is untouched until the change request is approved and merged.
     await expect(page.getByText(ORIGINAL_DEFINITION, { exact: true })).toBeVisible();
@@ -117,7 +118,7 @@ test.describe('editing a term inline', () => {
 
     const notice = page.getByRole('status').filter({ hasText: 'Saved as draft' });
     await expect(notice).toContainText(/change request #\d+/);
-    await expect(notice).toContainText('major');
+    await expect(notice).toContainText('Major');
     await expect(notice).toContainText('Submit it for review');
     await notice.getByRole('button', { name: 'Dismiss' }).click();
     await expect(notice).toHaveCount(0);
@@ -136,7 +137,7 @@ test.describe('editing a term inline', () => {
     await form.getByRole('button', { name: 'Save as draft' }).click();
 
     const notice = page.getByRole('status').filter({ hasText: 'Saved as draft' });
-    await expect(notice).toContainText('major');
+    await expect(notice).toContainText('Major');
     const res = await page.request.get(`/api/change-requests/${(await notice.getByRole('link').getAttribute('href'))!.split('/').pop()}`);
     const cr = await res.json();
     expect(cr.ops[0].set.examples).toEqual(['The community hall\non Station Road']);
@@ -155,7 +156,7 @@ test.describe('editing a term inline', () => {
       await held;
       await route.continue();
     });
-    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await classItem(page, 'time commitment').click();
     await expect(editor(page)).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
     release();
@@ -229,7 +230,7 @@ test.describe('editing a term inline', () => {
       saved();
     });
     await editor(page).getByRole('button', { name: 'Save as draft' }).click();
-    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await classItem(page, 'time commitment').click();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     const form = editor(page);
     await expect(form.getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();

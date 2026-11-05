@@ -78,6 +78,11 @@ export interface ClassView extends TermBase {
   restrictions: Restriction[];
   /** Addition: anonymous non-restriction superclasses (e.g. unions), in Manchester syntax. */
   superClassExpressions?: string[];
+  /**
+   * Addition: for each anonymous superclass that is an intersection of named classes and
+   * simple restrictions, its parts (the expression is also in superClassExpressions).
+   */
+  superClassConjuncts?: { expression: string; classes: IRI[]; restrictions: Restriction[] }[];
   /** Addition: anonymous equivalent class expressions (logical definitions), in Manchester syntax. */
   equivalentExpressions?: string[];
 }
@@ -322,15 +327,38 @@ export interface FairReport {
   checks: FairCheck[];
 }
 
+/** An OWL 2 DL profile violation the reasoner reported (OWL 2 Structural Specification §11 and related rules). */
+export interface OwlProfileNote {
+  /** sparq's violation kind, e.g. Undeclared, IllegalPunning, NonSimpleProperty. */
+  kind: string;
+  detail: string;
+}
+
 export interface ReasonerResult {
-  engine: 'hermit' | 'pellet' | 'structural';
+  /**
+   * sparq: complete OWL 2 DL reasoning (WebAssembly). structural: the fast, incomplete checks.
+   * hermit and pellet only appear in reports stored before Concord moved to sparq.
+   */
+  /** 'none': nothing could be checked (the OWL reasoner and the structural fallback both failed). */
+  engine: 'sparq' | 'structural' | 'none' | 'hermit' | 'pellet';
+  /** false when the OWL reasoner did not finish, so the structural checks filled in (see `error` and `checked`). */
   available: boolean;
+  /**
+   * How much the OWL reasoner decided. complete: consistency and every class's satisfiability.
+   * consistency: the ontology is consistent, but not every class could be checked. none: no verdict.
+   * Absent for the structural reasoner on its own and in reports stored before this field.
+   */
+  checked?: 'complete' | 'consistency' | 'none';
   consistent: boolean;
   unsatisfiable: IRI[];
   /** Inferred direct subclass axioms not asserted: [sub, super] */
   inferredSubClassOf: [IRI, IRI][];
   explanation?: string;
+  /** OWL 2 DL profile violations that did not stop reasoning (e.g. an undeclared property). */
+  profile?: OwlProfileNote[];
   durationMs: number;
+  /** Time spent inside the reasoner itself, excluding loading and serialising. */
+  checkMs?: number;
   error?: string;
 }
 
@@ -342,6 +370,8 @@ export interface CompetencyQuestionResult {
   error?: string;
   /** Satisfied = query ran and returned at least one row (or matched expected). */
   satisfied: boolean;
+  /** The use case the question came from, if any. Results are shown only to people who may see it. */
+  source?: string;
 }
 
 export interface ValidationReport {
@@ -349,6 +379,11 @@ export interface ValidationReport {
   fair: FairReport;
   reasoner: ReasonerResult;
   competencyQuestions: CompetencyQuestionResult[];
-  /** true when there are no errors from lint and the reasoner says consistent with no unsatisfiable classes */
+  /**
+   * true when lint has no errors and the OWL reasoner finished and found the ontology consistent with
+   * no unsatisfiable classes. A check that did not finish never passes.
+   */
   passed: boolean;
+  /** The working-draft revision the report is for, when the server validated its working draft. */
+  revision?: string;
 }

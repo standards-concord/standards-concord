@@ -15,7 +15,20 @@ test('signing in from the login page lands on the walkthrough', async ({ page })
 test('signed-out visitors are sent to the login page', async ({ page }) => {
   await page.goto('/settings');
   await expect(page).toHaveURL(/\/login\?next=%2Fsettings/);
-  await expect(page.getByRole('heading', { name: 'Concord: design open standards together' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Design open standards together' })).toBeVisible();
+});
+
+test('the first Tab reaches a skip link that moves focus past the header', async ({ page }) => {
+  await page.goto('/appearance');
+  await settle(page);
+  await page.keyboard.press('Tab');
+  const skip = page.getByRole('link', { name: 'Skip to main content' });
+  await expect(skip).toBeFocused();
+  await expect(skip).toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('main#main')).toBeFocused();
+  // It doesn't change the URL, which some pages use for their own sections.
+  await expect(page).toHaveURL(/\/appearance$/);
 });
 
 test.describe('signed in', () => {
@@ -23,7 +36,7 @@ test.describe('signed in', () => {
     await signIn(page, { name: 'E2E tester', role: 'steward' });
   });
 
-  for (const path of ['/', '/settings', '/feedback', '/alpha']) {
+  for (const path of ['/', '/settings', '/connect', '/appearance', '/feedback', '/alpha']) {
     test(`page ${path} opens`, async ({ page }) => {
       await page.goto(path);
       await settle(page);
@@ -31,6 +44,43 @@ test.describe('signed in', () => {
       await expect(page.locator('main')).not.toBeEmpty();
     });
   }
+
+  test('Profile shows who you are and how you sign in, with the WebID and pod folded away', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /E2E tester/ }).click();
+    const menu = page.getByRole('navigation', { name: 'Account' });
+    // Profile, one agents entry and Appearance, in that order.
+    await expect(menu.getByRole('link')).toHaveText(['Profile', 'Connect an agent', 'Appearance', 'Alpha walkthrough']);
+    // It's a plain list of links: focus starts on the first, Escape closes it and returns to the button.
+    await expect(menu.getByRole('link', { name: 'Profile' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /E2E tester/ })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(menu.getByRole('link', { name: 'Profile' })).toBeFocused();
+    await menu.getByRole('link', { name: 'Profile' }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByRole('heading', { name: 'Profile', level: 1 })).toBeVisible();
+    await expect(page.getByText('E2E tester').last()).toBeVisible();
+
+    // "Ways to sign in" explains itself and lists this account's sign-in.
+    await expect(page.getByRole('heading', { name: 'Ways to sign in' })).toBeVisible();
+    await expect(page.getByText('Each of these opens this same Concord account.')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Linked sign-in providers' })).toHaveCount(0);
+
+    // The WebID and pod are one click away, not on show.
+    const webid = page.getByRole('button', { name: /Your WebID and Solid pod/ });
+    await expect(webid).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByText('WebID', { exact: true })).toBeHidden();
+    await webid.click();
+    await expect(webid).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByText('WebID', { exact: true })).toBeVisible();
+    await expect(page.locator('#webid code').first()).toContainText('http');
+
+    // Pointers to where agents and appearance went.
+    await expect(page.getByRole('link', { name: 'Connect an agent' })).toHaveAttribute('href', '/connect#agents');
+    await expect(page.getByRole('main').getByRole('link', { name: 'Appearance' })).toHaveAttribute('href', '/appearance');
+  });
 
   test('every ontology section and page opens', async ({ page, request }) => {
     const demo = await demoOntology(request);
@@ -62,7 +112,7 @@ test.describe('signed in', () => {
       });
     }
     // Every page from before the regrouping is still reachable.
-    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query & validate', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
+    expect(seen).toEqual(expect.arrayContaining(['Overview', 'Browse', 'Source & export', 'Query', 'Validate data', 'Connect an agent', 'Use cases', 'Meetings', 'Agent reports', 'Change requests', 'Releases', 'Governance']));
   });
 
   test('detail pages linked from the ontology open', async ({ page, request }) => {

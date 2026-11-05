@@ -10,6 +10,7 @@ import type {
   Role,
   Vote,
 } from '@concord/shared';
+import { canCastVote } from '@concord/shared';
 import { addDays } from '../clock.js';
 
 /* ------------------------------------------------------------------------ */
@@ -232,7 +233,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
   if (r.vote && r.lazyConsensus && objections.length === 0 && level !== 'major') voteNeeded = false;
   if (r.vote && voteNeeded) {
     const eligibleIds = members
-      .filter((m) => m.roles.some((role) => r.vote!.voterRoles.includes(role)) && !m.roles.every((x) => x === 'agent'))
+      .filter((m) => canCastVote(m.roles, r.vote!.voterRoles))
       .map((m) => m.userId);
     const latestVotes = new Map<string, Vote>();
     for (const v of [...input.votes].sort((a, b) => a.at.localeCompare(b.at))) if (eligibleIds.includes(v.userId)) latestVotes.set(v.userId, v);
@@ -341,5 +342,5 @@ export function canApprove(rule: ApprovalRule, roles: Role[]) {
   return roles.some((r) => rule.approverRoles.includes(r) || rule.vetoRoles.includes(r));
 }
 export function canVote(rule: ApprovalRule, roles: Role[]) {
-  return !!rule.vote && roles.some((r) => rule.vote!.voterRoles.includes(r));
+  return !!rule.vote && canCastVote(roles, rule.vote.voterRoles);
 }

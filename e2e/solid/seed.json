@@ -1,0 +1,4 @@
+[
+  { "email": "admin@example.org", "password": "admin-password", "pods": [{ "name": "admin" }] },
+  { "email": "visitor@example.org", "password": "visitor-password", "pods": [{ "name": "visitor" }] }
+]

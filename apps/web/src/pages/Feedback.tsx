@@ -1,17 +1,33 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import type { ChatMessage, FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
-import { ArrowLeft, Heart, ListChecks, MessageCircle, Mic, Send } from 'lucide-react';
+import { PUBLIC_NOTICE, PUBLIC_SUMMARY_MAX, publicSummary, type ChatMessage, type FeedbackPublicationStatus, type FeedbackQuestion, type FeedbackSubmission } from '@concord/shared';
+import { ArrowLeft, Heart, History, KeyRound, ListChecks, MessageCircle, Mic, Send } from 'lucide-react';
 import { api, type FeedbackAnswers } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useWalkthrough } from '../lib/walkthrough';
+import { useDemoOntology, useOntologies } from '../lib/ontologies';
+import { useTester } from '../lib/tester';
+import { VersionLine } from '../components/TesterStatus';
+import { FeedbackPrivacy } from '../components/FeedbackPrivacy';
 import { dictationSupport } from '../lib/speech';
 import { Page } from '../components/Shell';
 import { ChatView } from '../components/ChatView';
-import { Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
+import { Badge, Button, Card, Chip, ErrorCard, Field, InlineError, Input, Select, Textarea, cx } from '../components/ui';
 
 type Pathway = FeedbackSubmission['pathway'];
+
+/** What an interview is about, fixed when it starts. */
+interface Scope {
+  pathway: Pathway;
+  version: string;
+  commit?: string;
+  since?: string;
+  role?: string;
+}
+
+/** The questionnaire scope the server needs: only the "changes" pathway depends on the baseline and role. */
+const questionScope = (sc: Scope) => (sc.pathway === 'changes' && sc.since ? { pathway: sc.pathway, since: sc.since, role: sc.role, version: sc.version } : { pathway: sc.pathway });
 
 const msg = (role: ChatMessage['role'], content: string): ChatMessage => ({ id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, role, content, at: new Date().toISOString() });
 
@@ -38,6 +54,11 @@ function QuickReplies({ q, onPick, current }: { q: FeedbackQuestion; onPick: (te
               {n}
             </button>
           ))}
+          {q.optional && (
+            <button onClick={() => onPick('Skip', '(skipped)')} className="h-9 rounded-lg border border-line-strong bg-surface px-3 text-sm text-muted transition-colors hover:border-accent">
+              Skip
+            </button>
+          )}
         </div>
         {(q.minLabel || q.maxLabel) && (
           <div className="mt-1 flex justify-between gap-4 text-[0.7rem] text-muted" style={{ maxWidth: nums.length * 42 }}>
@@ -118,11 +139,92 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   return <Textarea aria-label={q.text} rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
 }
 
+const withdrawKey = (feedbackId: string) => `concord-feedback-withdraw:${feedbackId}`;
+
+/** Opt-in: a short summary, written by the tester, posted exactly as previewed. */
+function PublicSummaryOption({ on, setOn, text, setText }: { on: boolean; setOn: (v: boolean) => void; text: string; setText: (v: string) => void }) {
+  const preview = publicSummary(text);
+  return (
+    <div className="rounded-lg border border-line p-3">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-0.5" checked={on} onChange={(e) => setOn(e.target.checked)} />
+        <span>Also post a short public summary as a GitHub issue</span>
+      </label>
+      {on && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-muted">{PUBLIC_NOTICE}</p>
+          <Field label="Public summary">
+            <Textarea rows={3} maxLength={PUBLIC_SUMMARY_MAX} value={text} placeholder="e.g. The diff view is hard to read without colours" onChange={(e) => setText(e.target.value)} />
+          </Field>
+          <div>
+            <div className="text-xs font-medium">Posted exactly as:</div>
+            <blockquote data-testid="public-summary-preview" className="mt-1 border-l-2 border-line pl-2 text-xs whitespace-pre-wrap text-muted">
+              {preview || <span className="text-subtle">Nothing yet</span>}
+            </blockquote>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PublicationNote({ feedbackId, publication }: { feedbackId: string; publication: FeedbackPublicationStatus }) {
+  const [current, setCurrent] = useState(publication);
+  const withdraw = useAction(async () => {
+    let token = publication.withdrawToken;
+    try {
+      token ??= localStorage.getItem(withdrawKey(feedbackId)) ?? undefined;
+    } catch {
+      /* storage unavailable */
+    }
+    if (!token) throw new Error('This browser no longer has the link to withdraw it.');
+    const s = await api.withdrawFeedbackPublication(feedbackId, token);
+    setCurrent(s);
+    try {
+      localStorage.removeItem(withdrawKey(feedbackId));
+    } catch {
+      /* storage unavailable */
+    }
+  });
+  const text =
+    current.state === 'withdrawn'
+      ? 'Your public summary has been withdrawn. If it had been posted, its text was replaced and the issue closed; GitHub keeps an edit history.'
+      : current.state === 'withdrawing'
+        ? 'Withdrawing your public summary…'
+        : current.issue
+          ? `Your public summary is posted as issue #${current.issue.number}.`
+          : current.state === 'needs-admin'
+            ? 'Your public summary is waiting for the team to check it was posted.'
+            : 'Your public summary will be posted shortly.';
+  return (
+    <div className="mt-3 text-sm text-muted" data-testid="feedback-publication">
+      <p>{text}</p>
+      {current.state !== 'withdrawn' && current.state !== 'withdrawing' && (
+        <Button size="sm" variant="ghost" className="mt-1" loading={withdraw.pending} onClick={() => void withdraw.run()}>
+          Withdraw the public summary
+        </Button>
+      )}
+      <InlineError error={withdraw.error} />
+    </div>
+  );
+}
+
 export function FeedbackPage() {
   const { session } = useSession();
   const w = useWalkthrough();
-  const questions = useAsync(() => api.feedbackQuestions(), []);
+  const tester = useTester();
+  const demoSummary = useDemoOntology();
+  const { loading: ontologiesLoading } = useOntologies();
+  // The scope is fixed when an interview starts, so wait until we know the tester's history and role.
+  const { loading: sessionLoading } = useSession();
+  const ready = !!session && !sessionLoading && !tester.meLoading && (!session.user || (!ontologiesLoading && !demoSummary) || (!!w.demo && !w.demoLoading));
   const [pathway, setPathway] = useState<Pathway>();
+  // Returning testers can answer questions about what changed since the version they last tested.
+  const changeCount = tester.since ? tester.changes.filter((c) => c.type !== 'fix' || c.ask).length : 0;
+  // The version, baseline and role are fixed when the interview starts, so the questions can't change
+  // under the tester if their pod history arrives (or they switch role) part-way through.
+  const [scope, setScope] = useState<Scope>();
+  const questions = useAsync(() => api.feedbackQuestions(scope ? questionScope(scope) : {}), [scope]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [answers, setAnswers] = useState<FeedbackAnswers>({});
   const [done, setDone] = useState(false);
@@ -132,16 +234,29 @@ export function FeedbackPage() {
   const [chatError, setChatError] = useState<unknown>();
   const [name, setName] = useState(session?.user?.simulated ? '' : (session?.user?.name ?? ''));
   const [email, setEmail] = useState(session?.user?.simulated ? '' : (session?.user?.email ?? ''));
-  const [submitted, setSubmitted] = useState<FeedbackSubmission>();
+  const [submitted, setSubmitted] = useState<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>();
+  const publishing = useAsync(() => api.feedbackPublishing(), []);
+  const [publishOn, setPublishOn] = useState(false);
+  const [publicText, setPublicText] = useState('');
   const voice = dictationSupport() !== 'none';
 
-  const turn = async (p: Pathway, msgs: ChatMessage[], ans: FeedbackAnswers) => {
+  const turn = async (sc: Scope, msgs: ChatMessage[], ans: FeedbackAnswers, currentQuestionId?: string) => {
     setPending(true);
     setChatError(undefined);
     try {
-      const r = await api.feedbackChat({ pathway: p, messages: msgs, answers: ans });
+      const r = await api.feedbackChat({ ...questionScope(sc), messages: msgs, answers: ans, pathway: sc.pathway, currentQuestionId });
       setMessages([...msgs, msg('assistant', r.reply)]);
-      if (r.answers) setAnswers({ ...ans, ...r.answers });
+      // Apply only what the reply changed, and never over an answer edited in the panel while it was on its way.
+      const changed = r.answers;
+      if (changed)
+        setAnswers((cur) => {
+          const next = { ...cur };
+          for (const [k, v] of Object.entries(changed)) {
+            const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+            if (!same(v, ans[k]) && same(cur[k], ans[k])) next[k] = v;
+          }
+          return next;
+        });
       setDone(r.done);
       setNextQ(r.nextQuestionId);
     } catch (e) {
@@ -152,21 +267,26 @@ export function FeedbackPage() {
   };
 
   const start = (p: Pathway) => {
+    const sc: Scope = { pathway: p, version: tester.version, commit: tester.commit || undefined, since: tester.since, role: tester.roleKey ?? w.myRoles[0] };
+    setScope(sc);
     setPathway(p);
     setMessages([]);
     setAnswers({});
     setDone(false);
-    void turn(p, [], {});
+    void turn(sc, [], {});
   };
 
   const send = (text: string, viaVoice: boolean, value?: { qid: string; v: FeedbackAnswers[string] }) => {
-    if (!pathway) return;
+    if (!pathway || !scope) return;
     if (viaVoice) setUsedVoice(true);
     const nextMsgs = [...messages, msg('user', text)];
     const nextAns = value ? { ...answers, [value.qid]: value.v } : answers;
     setMessages(nextMsgs);
     setAnswers(nextAns);
-    void turn(pathway, nextMsgs, nextAns);
+    // Say which question this answers, so a reply like “Skip” is applied to it and not the next one. If they've
+    // already answered it in the panel, typed text goes to the next unanswered question instead of replacing that.
+    const answering = value || !nextQ || answers[nextQ] === undefined ? nextQ : undefined;
+    void turn(scope, nextMsgs, nextAns, answering);
   };
 
   const submit = useAction(async () => {
@@ -174,13 +294,26 @@ export function FeedbackPage() {
       userId: session?.user?.id,
       name: name.trim() || undefined,
       email: email.trim() || undefined,
-      role: w.myRoles[0],
+      role: scope?.role,
       pathway: pathway!,
       answers,
       transcript: messages,
       usedVoice,
+      appVersion: scope?.version ?? tester.version,
+      appCommit: scope?.commit,
+      sinceVersion: scope?.since,
+      publish: publishOn ? { summary: publicSummary(publicText) } : undefined,
     });
+    void tester.reloadMe();
+    if (s.publication?.withdrawToken)
+      try {
+        localStorage.setItem(withdrawKey(s.id), s.publication.withdrawToken);
+      } catch {
+        /* storage unavailable */
+      }
     setSubmitted(s);
+    setPublishOn(false);
+    setPublicText('');
   });
 
   if (submitted)
@@ -190,6 +323,14 @@ export function FeedbackPage() {
           <Heart className="mx-auto size-8 text-accent" />
           <h1 className="mt-3 text-xl font-semibold">Thank you!</h1>
           <p className="mt-2 text-sm text-muted">Your feedback goes straight to the Open Data Institute team building Concord. It genuinely shapes what we build next.</p>
+          <p className="mt-3 flex items-start justify-center gap-1.5 text-xs text-muted" data-testid="feedback-saved">
+            <KeyRound className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            {submitted.savedTo
+              ? `A copy is saved to ${submitted.savedTo.kind === 'solid' ? 'your Solid pod' : 'your private storage'}, with the version you tested (${submitted.appVersion}).`
+              : `Sign in next time and we’ll keep a copy in your own pod, with the version you tested (${submitted.appVersion}).`}
+          </p>
+          <FeedbackPrivacy className="mt-3 justify-center text-left" />
+          {submitted.publication && <PublicationNote feedbackId={submitted.id} publication={submitted.publication} />}
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/">
               <Button>Back to the hub</Button>
@@ -211,16 +352,33 @@ export function FeedbackPage() {
             This is an early prototype, and your honest reactions matter more than polish. Type, or tap the microphone and just talk — whatever’s easier.
           </p>
         </div>
-        <div className="mx-auto grid max-w-3xl gap-4 sm:grid-cols-2">
-          <button onClick={() => start('structured')} className="group text-left">
+        <Card className="mx-auto mb-6 max-w-5xl p-4">
+          <VersionLine />
+        </Card>
+        <div className={cx('mx-auto grid gap-4', changeCount ? 'max-w-5xl sm:grid-cols-3' : 'max-w-3xl sm:grid-cols-2')}>
+          {changeCount > 0 && (
+            <button onClick={() => start('changes')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
+              <Card className="h-full border-accent p-6 transition-shadow group-hover:shadow-md">
+                <History className="size-6 text-accent" />
+                <h2 className="mt-3 font-semibold">What’s changed since {tester.since}</h2>
+                <p className="text-xs text-muted">
+                  About {Math.max(2, Math.min(6, changeCount) + 1)} minutes · <Badge tone="accent">Recommended</Badge>
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  You’ve tested Concord before, so we’ll only ask about the {changeCount} change{changeCount === 1 ? '' : 's'} since then, and a couple of overall questions.
+                </p>
+              </Card>
+            </button>
+          )}
+          <button onClick={() => start('structured')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
             <Card className="h-full p-6 transition-shadow group-hover:border-accent group-hover:shadow-md">
               <ListChecks className="size-6 text-accent" />
-              <h2 className="mt-3 font-semibold">Guided feedback</h2>
+              <h2 className="mt-3 font-semibold">{changeCount ? 'Guided feedback on everything' : 'Guided feedback'}</h2>
               <p className="text-xs text-muted">About 8 minutes</p>
               <p className="mt-2 text-sm text-muted">A friendly assistant walks you through a short set of questions about each part of Concord.</p>
             </Card>
           </button>
-          <button onClick={() => start('general')} className="group text-left">
+          <button onClick={() => start('general')} disabled={!ready} aria-busy={!ready} className="group text-left disabled:cursor-wait disabled:opacity-60">
             <Card className="h-full p-6 transition-shadow group-hover:border-accent group-hover:shadow-md">
               <MessageCircle className="size-6 text-accent" />
               <h2 className="mt-3 font-semibold">Just tell us something</h2>
@@ -229,6 +387,7 @@ export function FeedbackPage() {
             </Card>
           </button>
         </div>
+        <FeedbackPrivacy className="mx-auto mt-6 max-w-3xl" />
         {voice && (
           <p className="mt-6 flex items-center justify-center gap-1.5 text-xs text-muted">
             <Mic className="size-3.5" /> Voice input works in this browser.
@@ -240,7 +399,7 @@ export function FeedbackPage() {
 
   const qs = questions.data ?? [];
   const current = qs.find((q) => q.id === nextQ);
-  const captured = qs.filter((q) => pathway === 'structured' || answers[q.id] !== undefined);
+  const captured = qs.filter((q) => pathway !== 'general' || answers[q.id] !== undefined);
   const answeredCount = qs.filter((q) => formatAnswer(answers[q.id]) !== '').length;
 
   return (
@@ -252,8 +411,8 @@ export function FeedbackPage() {
         <Card className="flex h-[calc(100vh-13rem)] min-h-[520px] flex-col p-4">
           <div className="flex items-center justify-between border-b border-line pb-3">
             <div>
-              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : 'Tell us something'}</h1>
-              {pathway === 'structured' && qs.length > 0 && <p className="text-xs text-muted">{answeredCount} of {qs.length} questions answered</p>}
+              <h1 className="font-semibold">{pathway === 'structured' ? 'Guided feedback' : pathway === 'changes' ? `What’s changed since ${scope?.since}` : 'Tell us something'}</h1>
+              {pathway !== 'general' && qs.length > 0 && <p className="text-xs text-muted">{answeredCount} of {qs.length} questions answered</p>}
             </div>
             {current && <span className="text-xs text-muted">{current.section}</span>}
           </div>
@@ -271,7 +430,7 @@ export function FeedbackPage() {
           {done && (
             <div className="mt-3 rounded-lg bg-ok-soft p-3 text-sm">
               That’s everything — review your answers on the right, then submit.{' '}
-              <Button size="sm" variant="primary" className="ml-2" loading={submit.pending} onClick={() => void submit.run()}>
+              <Button size="sm" variant="primary" className="ml-2" loading={submit.pending} disabled={publishOn && !publicSummary(publicText)} onClick={() => void submit.run()}>
                 Submit feedback
               </Button>
             </div>
@@ -308,10 +467,12 @@ export function FeedbackPage() {
             <Field label="Email (optional)" hint="Only if you’re happy for us to follow up.">
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
             </Field>
-            <Button variant={done ? 'primary' : 'secondary'} className="w-full" icon={Send} loading={submit.pending} disabled={!messages.some((m) => m.role === 'user')} onClick={() => void submit.run()}>
+            {publishing.data?.enabled && <PublicSummaryOption on={publishOn} setOn={setPublishOn} text={publicText} setText={setPublicText} />}
+            <Button variant={done ? 'primary' : 'secondary'} className="w-full" icon={Send} loading={submit.pending} disabled={!messages.some((m) => m.role === 'user') || (publishOn && !publicSummary(publicText))} onClick={() => void submit.run()}>
               {done ? 'Submit feedback' : 'Submit what I’ve said so far'}
             </Button>
             <InlineError error={submit.error} />
+            <FeedbackPrivacy />
             {usedVoice && <p className="text-xs text-muted">Thanks for using voice — it helps us test it.</p>}
           </Card>
         </div>

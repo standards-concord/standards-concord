@@ -62,14 +62,14 @@ DatabaseSync.prototype.exec = function (this: DatabaseSync, sql: string) {
 const [op, id, userId] = process.argv.slice(2);
 const { getUser } = await import('../src/services/users.js');
 if (op === 'merge' || op === 'publish') {
-  const actor = getUser(userId);
+  const actor = await getUser(userId);
   if (!actor) throw new Error(`No user ${userId}`);
   if (op === 'merge') {
     const crs = await import('../src/services/changeRequests.js');
-    await crs.merge(crs.getCR(id), actor);
+    await crs.merge(await crs.getCR(id), actor);
   } else {
     const releases = await import('../src/services/releases.js');
-    await releases.publishRelease(releases.getRelease(id), actor);
+    await releases.publishRelease(await releases.getRelease(id), actor);
   }
   console.error('finished without being killed');
   process.exit(3);
@@ -77,8 +77,8 @@ if (op === 'merge' || op === 'publish') {
   const { OntologyGraph } = await import('@concord/core');
   const { ontologyStore } = await import('../src/services/ontologyStore.js');
   const { list } = await import('../src/db.js');
-  const project = list<{ id: string; slug: string }>('ontologies').find((p) => p.slug === process.env.WRITER_SLUG)!;
-  const graph = await OntologyGraph.fromTurtle(`${ontologyStore.readWorkingText(project)}\n<urn:concord-test:${id}> <http://www.w3.org/2000/01/rdf-schema#label> "${id}" .\n`);
+  const project = (await list<{ id: string; slug: string }>('ontologies')).find((p) => p.slug === process.env.WRITER_SLUG)!;
+  const graph = await OntologyGraph.fromTurtle(`${await ontologyStore.readWorkingText(project)}\n<urn:concord-test:${id}> <http://www.w3.org/2000/01/rdf-schema#label> "${id}" .\n`);
   try {
     console.log(`committed ${await ontologyStore.commitWorking(project as never, graph, `writer ${id}`, { name: 'Writer' })}`);
   } catch (err) {
@@ -87,9 +87,9 @@ if (op === 'merge' || op === 'publish') {
 } else if (op === 'prune') {
   const { ontologyStore } = await import('../src/services/ontologyStore.js');
   const { list } = await import('../src/db.js');
-  const project = list<{ id: string; slug: string }>('ontologies').find((p) => p.slug === process.env.WRITER_SLUG)!;
+  const project = (await list<{ id: string; slug: string }>('ontologies')).find((p) => p.slug === process.env.WRITER_SLUG)!;
   try {
-    ontologyStore.prunePins(project);
+    await ontologyStore.prunePins(project);
     console.log('pruned');
   } catch (err) {
     console.log(`refused ${(err as Error).message.split('\n')[0]}`);

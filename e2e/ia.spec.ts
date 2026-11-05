@@ -109,10 +109,154 @@ test.describe('progressive disclosure', () => {
     await expect(cqs).toHaveAttribute('aria-expanded', 'false');
   });
 
+  test('the overview reads as a short report: summary, what waits for you, changes in progress', async ({ page }) => {
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string; number: number; title: string; status: string }[];
+    const open = crs.filter((c) => ['voting', 'review', 'triage', 'needs-work', 'approved'].includes(c.status));
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    // One plain sentence of counts, each linking to where the detail lives.
+    const summary = page.getByTestId('overview-summary');
+    await expect(summary).toContainText(/\d+ class(es)? and \d+ propert(y|ies)/);
+    await expect(summary.getByRole('link', { name: /class/ })).toHaveAttribute('href', `/o/${demo.id}/browse`);
+    await expect(summary.getByRole('link', { name: /use case/ })).toHaveAttribute('href', `/o/${demo.id}/use-cases`);
+    // Changes in progress are a table that links to each change.
+    const table = page.getByTestId('changes-in-progress');
+    expect(open.length, 'the demo has changes in progress').toBeGreaterThan(0);
+    await expect(table.getByRole('columnheader')).toHaveText(['Change', 'Stage', 'Size', 'Updated']);
+    await expect(table.getByRole('row')).toHaveCount(Math.min(open.length, 8) + 1);
+    await table.getByRole('link', { name: new RegExp(`#${open[0].number}`) }).first().waitFor();
+    // A steward sees the changes waiting on them, each a link to act on.
+    const asks = page.getByTestId('overview-asks');
+    await expect(asks.getByRole('heading', { name: /waiting for you/ })).toBeVisible();
+    const first = asks.getByRole('link').first();
+    await expect(first).toHaveText(/^(Review|Vote on|Merge|Revise) #\d+: /);
+    await first.click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/changes/`));
+  });
+
+  for (const look of ['odi', 'spec', 'civic', 'workbench', 'classic'])
+    for (const scheme of ['light', 'dark'] as const)
+      test(`overview links are underlined and the action banner keeps a visible focus ring (${look}, ${scheme})`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto(`/o/${demo.id}?look=${look}`);
+      await settle(page);
+      // Links inside sentences never rely on colour alone.
+      for (const link of await page.getByTestId('overview-summary').getByRole('link').all())
+        expect(await link.evaluate((el) => getComputedStyle(el).textDecorationLine), await link.innerText()).toContain('underline');
+      // The banner is filled with the accent colour, so its focus ring must differ from it.
+      const asks = page.getByTestId('overview-asks');
+      const link = asks.getByRole('link').first();
+      await link.focus();
+      await page.keyboard.press('Shift+Tab');
+      await page.keyboard.press('Tab');
+      await expect(link).toBeFocused();
+      const [ring, bg, style, width] = await link.evaluate((el) => [
+        getComputedStyle(el).outlineColor,
+        getComputedStyle(el.closest('[data-testid=overview-asks]')!).backgroundColor,
+        getComputedStyle(el).outlineStyle,
+        getComputedStyle(el).outlineWidth,
+      ]);
+      expect(style, 'focus ring style').not.toBe('none');
+      expect(parseFloat(width), 'focus ring width').toBeGreaterThanOrEqual(2);
+      const ratio = await page.evaluate(
+        ([a, b]) => {
+          const parse = (c: string) => c.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+          const lum = ([r, g, bl]: number[]) => {
+            const f = (c: number) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+            return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(bl);
+          };
+          const [hi, lo] = [lum(parse(a)), lum(parse(b))].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        },
+        [ring, bg],
+      );
+      expect(ratio, `focus ring ${ring} on ${bg}`).toBeGreaterThanOrEqual(3);
+    });
+
+  test('the overview health checks sit one heading level below their section', async ({ page }) => {
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const health = page.locator('#health');
+    await expect(health.getByRole('heading', { level: 2, name: 'Health of the working draft' })).toBeVisible();
+    for (const name of [/Lint findings/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
+  });
+
+  test('the overview says the draft is being reviewed, not "undefined", when its counts are withheld', async ({ page }) => {
+    // The server leaves out graph counts while the working draft waits for publishing approval (#35); the
+    // report-style summary sentence used to assume they were always there.
+    await page.route(new RegExp(`/api/ontologies/${demo.id}$`), async (route) => {
+      const o = await (await route.fetch()).json();
+      await route.fulfill({ json: { ...o, health: undefined, stats: { releases: o.stats.releases } } });
+    });
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const summary = page.getByTestId('overview-summary');
+    await expect(summary).toContainText('The working draft is being reviewed before it is published.');
+    await page.getByRole('button', { name: /Ontology details/ }).click();
+    const about = page.getByRole('region', { name: 'About this ontology' });
+    await expect(about).not.toContainText('undefined');
+    await expect(about).not.toContainText('NaN');
+    await expect(about.getByRole('definition').first()).toHaveText('—');
+  });
+
+  test('a contributor is asked to review changes, since any member can send one back, but not to merge or vote', async ({ page }) => {
+    const me = await signIn(page, { name: 'Bystander', role: 'contributor' });
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { number: number; status: string; authorId: string }[];
+    const inReview = crs.filter((c) => c.status === 'review' && c.authorId !== me.user.id);
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    await expect(page.getByTestId('changes-in-progress')).toBeVisible();
+    const asks = page.getByTestId('overview-asks');
+    if (!inReview.length) return await expect(asks).toHaveCount(0);
+    const links = asks.getByRole('link', { name: /#\d+: / });
+    await expect(links).toHaveCount(Math.min(inReview.length, 5));
+    for (const text of await links.allTextContents()) expect(text).toMatch(/^Review #\d+: /);
+  });
+
+  test('the ODI is still asked to approve a major change under final say once its vote opens', async ({ page }) => {
+    const me = await signIn(page, { name: 'ODI reviewer', role: 'odi' });
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string; number: number; title: string; authorId: string }[];
+    const target = crs.find((c) => c.authorId !== me.user.id)!;
+    // Stage the case the server allows: an ODI-stewarded policy whose vote opened before the ODI approved.
+    const asVoting = <T extends object>(cr: T) => ({ ...cr, status: 'voting', classification: { ...(cr as { classification?: object }).classification, level: 'major' }, timeline: [] });
+    await page.route(new RegExp(`/api/ontologies/${demo.id}$`), async (route) => {
+      const o = await (await route.fetch()).json();
+      await route.fulfill({ json: { ...o, governance: { ...o.governance, odiPrivilege: 'final-say' } } });
+    });
+    await page.route(new RegExp(`/api/ontologies/${demo.id}/change-requests$`), async (route) => {
+      const list = (await (await route.fetch()).json()) as { id: string }[];
+      await route.fulfill({ json: list.map((c) => (c.id === target.id ? asVoting(c) : c)) });
+    });
+    let reviewed: unknown;
+    await page.route(new RegExp(`/api/change-requests/${target.id}(/reviews)?$`), async (route) => {
+      if (route.request().method() === 'POST') reviewed = route.request().postDataJSON();
+      const d = await (await page.request.get(`/api/change-requests/${target.id}`)).json();
+      // Stamp the approval with the demo clock, which runs ahead of real time, as the server would.
+      const at = ((await (await page.request.get('/api/session')).json()) as { now: string }).now;
+      expect(at >= (d.opsUpdatedAt ?? d.createdAt), 'the mock approval comes after the latest edits').toBe(true);
+      const reviews = reviewed ? [{ id: 'rev-odi', changeRequestId: target.id, userId: me.user.id, roles: ['odi'], decision: 'approve', at }] : [];
+      await route.fulfill({ json: { ...asVoting(d), reviews, votes: [] } });
+    });
+
+    await page.goto(`/o/${demo.id}`);
+    await settle(page);
+    const ask = page.getByTestId('overview-asks').getByRole('link', { name: `Approve #${target.number}: ${target.title}` });
+    await expect(ask).toBeVisible();
+    await ask.click();
+    await settle(page);
+    const approval = page.getByTestId('odi-approval');
+    await expect(approval).toContainText('cannot pass the vote until the ODI approves it');
+    await approval.getByRole('button', { name: 'Approve for the ODI' }).click();
+    await expect.poll(() => reviewed).toMatchObject({ decision: 'approve' });
+    await expect(page.getByText('The ODI has approved this change.')).toBeVisible();
+    await expect(approval).toHaveCount(0);
+  });
+
   test('members show as avatars, with roles one click away', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const card = page.locator('main').locator('div.rounded-xl', { has: page.getByRole('heading', { name: /^Members \(\d+\)$/ }) });
+    const card = page.getByTestId('overview-members');
+    await expect(card.getByRole('heading', { name: /^Members \(\d+\)$/ })).toBeVisible();
     const avatars = card.getByRole('list', { name: 'Members' }).getByRole('listitem');
     expect(await avatars.count()).toBeGreaterThan(1);
     await expect(card.getByText('Voting member')).toHaveCount(0);
@@ -124,7 +268,7 @@ test.describe('progressive disclosure', () => {
   test('recent activity starts short and expands', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const feed = page.locator('text=Recent activity').locator('xpath=ancestor::div[contains(@class,"rounded-xl")][1]');
+    const feed = page.getByTestId('overview-activity');
     const before = await feed.locator('ol > li').count();
     expect(before).toBeLessThanOrEqual(3);
     await page.getByRole('button', { name: 'Show more activity' }).click();
@@ -140,7 +284,7 @@ test.describe('progressive disclosure', () => {
     for (const name of ['What each kind of change needs', 'What each kind of release needs']) {
       const summary = page.getByRole('list', { name });
       await expect(summary.getByRole('listitem')).toHaveCount(3);
-      for (const level of ['patch', 'minor', 'major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
+      for (const level of ['Patch', 'Minor', 'Major']) await expect(summary.getByText(level, { exact: true })).toBeVisible();
       await expect(summary).toContainText(/sign-off/);
     }
 
@@ -213,6 +357,9 @@ test.describe('progressive disclosure', () => {
     // Patch and minor only go to a vote if someone objects; major always does.
     await expect(changes.getByRole('listitem').nth(0)).toContainText('a vote only if someone objects');
     await expect(changes.getByRole('listitem').nth(2)).not.toContainText('only if someone objects');
+    // Silence only decides patch and minor changes; a major change still needs its sign-offs and vote.
+    await expect(changes.getByRole('listitem').nth(0)).toContainText('accepted if nobody objects');
+    await expect(changes.getByRole('listitem').nth(2)).not.toContainText('accepted if nobody objects');
     await page.getByRole('button', { name: /ODI stewarded/ }).click();
     await expect(changes.getByRole('listitem').nth(2)).toContainText('ODI oversight must approve');
     await expect(changes.getByRole('listitem').nth(0)).toContainText(/ODI oversight can block it/);
@@ -287,6 +434,17 @@ test.describe('progressive disclosure', () => {
     await page.reload();
     await settle(page);
     await expect(page.getByRole('tab', { name: /Discussion/ })).toHaveAttribute('aria-selected', 'true');
+    // Keyboard: one tab stop, and the arrow keys, Home and End move between views.
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('tabindex', '-1');
+    await tabs.getByRole('tab', { name: /Discussion/ }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toBeFocused();
+    await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('End');
+    await expect(tabs.getByRole('tab', { name: /Discussion/ })).toBeFocused();
+    await page.keyboard.press('ArrowLeft');
+    await expect(tabs.getByRole('tab', { name: /Checks/ })).toHaveAttribute('aria-selected', 'true');
+    await expect(page).toHaveURL(/view=checks/);
     // No raw ISO timestamps leak into the page.
     await expect(page.locator('main')).not.toContainText(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
   });
@@ -452,9 +610,26 @@ test.describe('progressive disclosure', () => {
       await cqGroup.click();
       await expect(detail.first()).toHaveAttribute('aria-expanded', 'true');
     }
-    // One primary action, chosen by the use case's state.
-    const primary = uc.source === 'chat' && uc.status === 'eliciting' ? 'Continue the interview' : uc.status === 'ready' || uc.status === 'synthesised' ? 'Draft changes' : 'Mark as ready';
-    await expect(page.getByRole('button', { name: primary })).toHaveClass(/bg-accent /);
+  });
+
+  test('a use case offers one primary action, chosen by its state', async ({ page, request }) => {
+    const ucs = (await (await request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; status: string; sections: { name?: string } }[];
+    // Once the working group accepts a use case, drafting changes is the next step. Other
+    // tests share the demo and may move this one on, so the expectation follows its status.
+    const shifts = ucs.find((u) => u.sections.name === 'Find weekly shifts that need volunteers');
+    expect(shifts).toBeTruthy();
+    await page.goto(`/o/${demo.id}/use-cases/${shifts!.id}`);
+    await settle(page);
+    const draft = page.getByRole('button', { name: 'Draft changes' });
+    if (['accepted', 'in-progress'].includes(shifts!.status)) await expect(draft).toHaveClass(/bg-accent /);
+    else if (shifts!.status !== 'closed') await expect(draft).not.toHaveClass(/bg-accent /);
+    // A closed use case has nothing left to draft.
+    const closed = ucs.find((u) => u.status === 'closed');
+    expect(closed).toBeTruthy();
+    await page.goto(`/o/${demo.id}/use-cases/${closed!.id}`);
+    await settle(page);
+    await expect(page.getByRole('heading', { level: 2 }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Draft changes' })).toHaveCount(0);
   });
 
   test('releases are grouped into in progress, latest and previous', async ({ page, request }) => {
@@ -491,13 +666,25 @@ test.describe('progressive disclosure', () => {
     await latest.getByRole('link').first().click();
     await settle(page);
     await expectNoCrash(page);
-    const how = page.getByRole('button', { name: /How this was approved/ });
+    const releaseId = new URL(page.url()).pathname.split('/').pop()!;
+    const { approvalSource } = (await (await page.request.get(`/api/releases/${releaseId}`)).json()) as { approvalSource: string };
+    const how = page.getByRole('button', { name: approvalSource === 'current-policy' ? /Approval, checked against today’s policy/ : /How this was approved/ });
     await expect(how).toHaveAttribute('aria-expanded', 'false');
     await how.click();
-    await expect(page.getByText('Next:', { exact: true })).toBeVisible();
-    // One click reveals the approval history: no second "Approval details" click needed.
-    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.getByText(/Rules for a .* release/)).toBeVisible();
+    if (approvalSource === 'bootstrap') {
+      // The set-up release had no approval rules, so there's no evaluation to show, only that explanation.
+      await expect(page.getByTestId('approval-source')).toContainText('No approval rules applied to it');
+      await expect(page.getByRole('heading', { name: 'Approval details' })).toHaveCount(0);
+      await page.getByRole('button', { name: /Technical details/ }).click();
+      await expect(page.getByText('Version IRI:')).toBeVisible();
+      return;
+    }
+    // One click reveals the read-only record: no further toggles, and nothing about what happens next.
+    const record = page.getByTestId('approval-record');
+    await expect(record).toContainText('Approved');
+    await expect(record.getByText(/Rules applied to this/)).toBeVisible();
+    await expect(page.getByText('Next:', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Approval details/ })).toHaveCount(0);
     await page.getByRole('button', { name: /Technical details/ }).click();
     await expect(page.getByText('Version IRI:')).toBeVisible();
   });

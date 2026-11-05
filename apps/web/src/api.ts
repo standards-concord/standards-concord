@@ -4,7 +4,10 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  Publication,
   ActivityItem,
+  AlphaMe,
+  FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
   AutopilotSettings,
@@ -20,14 +23,20 @@ import type {
   CompetencyQuestion,
   FeedbackQuestion,
   FeedbackSubmission,
+  PodFeedbackReport,
   GovernancePolicy,
   GovernanceTemplateId,
   InterviewSession,
+  MeetBotInfo,
   Meeting,
   Membership,
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicReport,
+  PublicHoldReview,
+  QueryChatRequest,
+  QueryChatResponse,
   Release,
   ReleaseDetail,
   Role,
@@ -35,8 +44,15 @@ import type {
   TermEditInput,
   TermView,
   TranscriptLine,
+  AnonymisedDraft,
+  PublicUseCase,
+  RequirementsDocument,
   UseCase,
+  UseCaseDetail,
+  UseCaseLink,
   UseCaseSections,
+  UseCaseStatus,
+  UseCaseVisibility,
   User,
   ValidationReport,
 } from '@concord/shared';
@@ -61,7 +77,7 @@ const OFFLINE_MESSAGE =
 
 type Json = Record<string, unknown> | unknown[] | undefined;
 
-async function request<T>(method: string, path: string, body?: Json | BodyInit, opts: { raw?: boolean; headers?: Record<string, string> } = {}): Promise<T> {
+async function request<T>(method: string, path: string, body?: Json | BodyInit, opts: { raw?: boolean; headers?: Record<string, string>; onHeaders?: (h: Headers) => void } = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: opts.raw ? '*/*' : 'application/json', ...opts.headers };
   let payload: BodyInit | undefined;
   if (body !== undefined) {
@@ -99,6 +115,7 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
     }
     throw new ApiError(res.status, message, parsed);
   }
+  opts.onHeaders?.(res.headers);
   if (opts.raw) return (await res.text()) as T;
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -130,9 +147,26 @@ export type MemberWithUser = Membership & { user: User };
 export type OntologyDetail = OntologySummary & { members: MemberWithUser[] };
 export type UsedBy = { iri: string; label?: string; via: string };
 export type TermDetail = TermView & { usedBy: UsedBy[] };
-export type InterviewDetail = InterviewSession & { useCase: UseCase };
+export type InterviewDetail = InterviewSession & { useCase: UseCaseDetail };
+export type RequirementsSummary = Pick<RequirementsDocument, 'id' | 'version' | 'status' | 'generatedAt' | 'title' | 'releaseId' | 'coverage'>;
+export type NewUseCaseLink = Pick<UseCaseLink, 'type' | 'relation'> & { id?: string; url?: string; label?: string };
+export type DataValidation = {
+  ontology: string;
+  version: string;
+  shapes?: string;
+  conforms: boolean;
+  valid: boolean;
+  triples: number;
+  summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
+  results: { focusNode: string; path?: string; value?: string; severity: 'Violation' | 'Warning' | 'Info'; constraint: string; shape?: string; message?: string }[];
+  terms: { severity: 'error' | 'warning'; message: string; term?: string }[];
+  /** More results or term issues than the report lists (1,000 of each); the summary counts them all. */
+  truncated?: true;
+};
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
+/** Which questionnaire: `pathway: 'changes'` asks about what changed since `since`, for a tester in `role`. */
+export type FeedbackScope = { pathway?: FeedbackSubmission['pathway']; since?: string; role?: string; version?: string };
 export type FeedbackChatResponse = { reply: string; answers: FeedbackAnswers; done: boolean; nextQuestionId?: string };
 export type FeedbackSummary = { summary: string; themes: { theme: string; count: number }[] };
 export type NewOntologyInput = {
@@ -142,7 +176,7 @@ export type NewOntologyInput = {
   namespace?: string;
   domain?: string;
   governanceTemplate?: GovernanceTemplateId;
-  /** List me as the ontology's creator (public). Defaults to true. */
+  /** List me as the ontology's creator (public). Off unless set. */
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
@@ -151,24 +185,54 @@ export type NewChangeRequestInput = {
   kind: ChangeRequestKind;
   ops?: ChangeOp[];
   naturalLanguage?: string;
+  /** Use cases this change addresses. */
+  useCaseIds?: string[];
 };
 export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment';
 export type VoteChoice = 'yes' | 'no' | 'abstain';
 
 /* ---------------------------------------------------------------- routes */
 
+/** A public feedback summary waiting for an administrator's decision. */
+export interface PublicationNeedingAdmin {
+  id: string;
+  /** Why it's waiting: a post whose outcome is unknown, a withdrawal, a triage comment whose outcome is unknown, or a summary out of the triage queue. */
+  kind: 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+  /** Sent back with a decision, so a decision about an older state is refused. */
+  ref: string;
+  state: 'needs-admin' | 'withdrawing' | 'filed';
+  summary: string;
+  repo: string;
+  marker: string;
+  issue?: { number: number; url: string };
+  candidates: { number: number; url: string }[];
+  reason?: string;
+  feedbackDeleted: boolean;
+  createdAt: string;
+}
+
+export interface MediaIndex {
+  release: { tag: string; name?: string; publishedAt?: string; url: string } | null;
+  files: { name: string; size: number; url: string }[];
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
   demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
   logout: () => post<Record<string, never>>('/api/auth/logout'),
+  /** The walkthrough videos for the latest release (see /welcome). */
+  mediaIndex: () => get<MediaIndex>('/api/media/index.json'),
   personas: () => get<(User & { roles?: Role[] })[]>('/api/personas'),
   oauthUrl: (provider: 'google' | 'github', returnTo?: string) => `/auth/${provider}${qs({ returnTo })}`,
+  /** Sign in with a WebID (or the address of a Solid provider). */
+  solidLoginUrl: (webId: string, returnTo?: string) => `/auth/solid${qs({ webId, returnTo })}`,
 
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
   createOntology: (body: NewOntologyInput) => post<OntologySummary>('/api/ontologies', body),
   ontology: (id: string) => get<OntologyDetail>(`/api/ontologies/${e(id)}`),
+  queryChat: (id: string, body: QueryChatRequest) => post<QueryChatResponse>(`/api/ontologies/${e(id)}/query-chat`, body as unknown as Json),
   view: (id: string, ref = 'working') => get<OntologyView>(`/api/ontologies/${e(id)}/view${qs({ ref })}`),
   term: (id: string, iri: string) => get<TermDetail>(`/api/ontologies/${e(id)}/terms/${e(iri)}`),
   search: (id: string, q: string) => get<TermView[]>(`/api/ontologies/${e(id)}/search${qs({ q })}`),
@@ -176,6 +240,15 @@ export const api = {
     `/api/ontologies/${e(id)}/source${qs({ format, ref, download: download ? 1 : undefined })}`,
   source: (id: string, format: OutputFormat, ref = 'working') =>
     request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, { raw: true }),
+  /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
+  workingTurtle: async (id: string) => {
+    let revision: string | undefined;
+    const turtle = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format: 'turtle', ref: 'working' })}`, undefined, {
+      raw: true,
+      onHeaders: (h) => (revision = h.get('X-Concord-Revision') ?? undefined),
+    });
+    return { turtle, revision };
+  },
   validation: (id: string, ref = 'working') => get<ValidationReport>(`/api/ontologies/${e(id)}/validation${qs({ ref })}`),
   sparql: (id: string, query: string) => post<SparqlResult>(`/api/ontologies/${e(id)}/sparql`, { query }),
 
@@ -189,24 +262,46 @@ export const api = {
 
   // Use cases & interviews
   useCases: (id: string) => get<UseCase[]>(`/api/ontologies/${e(id)}/use-cases`),
-  useCase: (id: string) => get<UseCase>(`/api/use-cases/${e(id)}`),
-  updateUseCase: (id: string, body: { sections?: UseCaseSections; competencyQuestions?: CompetencyQuestion[]; status?: UseCase['status'] }) =>
-    patch<UseCase>(`/api/use-cases/${e(id)}`, body),
+  useCase: (id: string) => get<UseCaseDetail>(`/api/use-cases/${e(id)}`),
+  updateUseCase: (id: string, body: { sections?: UseCaseSections; competencyQuestions?: CompetencyQuestion[]; status?: UseCaseStatus }) =>
+    patch<UseCaseDetail>(`/api/use-cases/${e(id)}`, body),
+  setUseCaseVisibility: (id: string, visibility: UseCaseVisibility) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/visibility`, { visibility }),
+  submitUseCase: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/submit`),
+  withdrawUseCase: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/withdraw`),
+  triageUseCase: (id: string, status: UseCaseStatus, note?: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/triage`, { status, note }),
+  addUseCaseLink: (id: string, link: NewUseCaseLink) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/links`, link),
+  removeUseCaseLink: (id: string, target: string) => del<UseCaseDetail>(`/api/use-cases/${e(id)}/links/${e(target)}`),
+  proposeAnonymised: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/anonymise`),
+  publishAnonymised: (id: string, draft?: Partial<AnonymisedDraft>) =>
+    post<{ original: UseCaseDetail; published: UseCaseDetail }>(`/api/use-cases/${e(id)}/anonymise/publish`, { draft }),
+  declineAnonymised: (id: string) => post<UseCaseDetail>(`/api/use-cases/${e(id)}/anonymise/decline`),
+  publicUseCases: (id: string) => get<PublicUseCase[]>(`/api/ontologies/${e(id)}/public-use-cases`),
+  requirementsDocs: (id: string) => get<RequirementsSummary[]>(`/api/ontologies/${e(id)}/requirements`),
+  requirementsDoc: (id: string, version: string) => get<RequirementsDocument>(`/api/ontologies/${e(id)}/requirements/${e(version)}`),
+  requirementsMarkdown: (id: string, version: string) => request<string>('GET', `/api/ontologies/${e(id)}/requirements/${e(version)}/markdown`, undefined, { raw: true }),
+  generateRequirements: (releaseId: string) => post<RequirementsDocument>(`/api/releases/${e(releaseId)}/requirements`),
   startInterview: (id: string, useCaseId?: string) => post<InterviewSession>(`/api/ontologies/${e(id)}/interviews`, { useCaseId }),
   interview: (id: string) => get<InterviewDetail>(`/api/interviews/${e(id)}`),
   sendInterviewMessage: (id: string, content: string) =>
-    post<{ session: InterviewSession; useCase: UseCase }>(`/api/interviews/${e(id)}/messages`, { content }),
-  finishInterview: (id: string) => post<{ useCase: UseCase }>(`/api/interviews/${e(id)}/finish`),
+    post<{ session: InterviewSession; useCase: UseCaseDetail }>(`/api/interviews/${e(id)}/messages`, { content }),
+  finishInterview: (id: string) => post<{ useCase: UseCaseDetail }>(`/api/interviews/${e(id)}/finish`),
   synthesise: (id: string, useCaseIds?: string[]) => post<ChangeRequest>(`/api/ontologies/${e(id)}/synthesise`, { useCaseIds }),
 
   // Meetings
   meetings: (id: string) => get<Meeting[]>(`/api/ontologies/${e(id)}/meetings`),
   uploadMeeting: (id: string, title: string, transcript: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/upload`, { title, transcript }),
-  inviteBot: (id: string, title: string, meetingUrl: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/bot`, { title, meetingUrl }),
-  simulateMeeting: (id: string, title: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title }),
+  inviteBot: (id: string, title: string, meetingUrl: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/bot`, { title, meetingUrl, postPromptsToChat }),
+  scheduleFromInvite: (id: string, ics: string, postPromptsToChat = false) => post<{ meetings: Meeting[]; cancelled: number; cancelRetrying: number }>(`/api/ontologies/${e(id)}/meetings/calendar`, { ics, postPromptsToChat }),
+  simulateMeeting: (id: string, title: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title, postPromptsToChat }),
+  meetBot: () => get<MeetBotInfo>('/api/meet-bot'),
+  syncMeetBot: () => post<MeetBotInfo>('/api/meet-bot/sync'),
   meeting: (id: string) => get<Meeting>(`/api/meetings/${e(id)}`),
+  updateMeeting: (id: string, changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => patch<Meeting>(`/api/meetings/${e(id)}`, changes),
+  postPrompt: (id: string, index: number) => post<Meeting>(`/api/meetings/${e(id)}/prompts/${index}/post`),
+  endMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/end`),
+  dismissBooking: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/bot/dismiss`),
   analyseMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/analyse`),
-  proposeFromMeeting: (id: string) => post<{ useCases: UseCase[]; changeRequest?: ChangeRequest }>(`/api/meetings/${e(id)}/propose`),
+  proposeFromMeeting: (id: string) => post<{ useCases: UseCase[] }>(`/api/meetings/${e(id)}/propose`),
 
   // Change requests
   changeRequests: (id: string, status?: ChangeRequestStatus) => get<ChangeRequest[]>(`/api/ontologies/${e(id)}/change-requests${qs({ status })}`),
@@ -215,6 +310,13 @@ export const api = {
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
+  acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
+  dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
+  publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
+  approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
+  publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
+  approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
@@ -225,6 +327,11 @@ export const api = {
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),
 
   // Releases
+  /** POST data to the ontology's public IRI to validate it (see apps/server/src/public/validate.ts). */
+  validateData: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<DataValidation>('POST', `/def/${e(slug)}/${e(version)}`, data, { headers: mediaType ? { 'Content-Type': mediaType } : { 'Content-Type': 'text/plain' } }),
+  validationReportTurtle: (slug: string, version: string, data: string, mediaType?: string) =>
+    request<string>('POST', `/def/${e(slug)}/${e(version)}`, data, { raw: true, headers: { Accept: 'text/turtle', 'Content-Type': mediaType ?? 'text/plain' } }),
   releases: (id: string) => get<Release[]>(`/api/ontologies/${e(id)}/releases`),
   draftRelease: (id: string, notes?: string) => post<ReleaseDetail>(`/api/ontologies/${e(id)}/releases`, { notes }),
   release: (id: string) => get<ReleaseDetail>(`/api/releases/${e(id)}`),
@@ -260,12 +367,25 @@ export const api = {
   activity: (ontologyId?: string) => get<ActivityItem[]>(`/api/activity${qs({ ontologyId })}`),
 
   // Feedback
-  feedbackQuestions: () => get<FeedbackQuestion[]>('/api/feedback/questions'),
-  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
+  feedbackQuestions: (scope: FeedbackScope = {}) => get<FeedbackQuestion[]>(`/api/feedback/questions${qs({ pathway: scope.pathway, since: scope.since, role: scope.role, version: scope.version })}`),
+  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers; currentQuestionId?: string } & FeedbackScope) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
-  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) =>
+    post<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>('/api/feedback', body as unknown as Json),
+  feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
+  withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
+  resolveFeedbackPublication: (
+    feedbackId: string,
+    ref: string,
+    body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number },
+  ) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { ...body, ref }),
+  publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
+  podFeedback: () => get<PodFeedbackReport>('/api/feedback/pods'),
+  // Alpha testing: the tester's own account and the app versions they've tested
+  alphaMe: () => get<AlphaMe>('/api/alpha/me'),
+  alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),
 };
 

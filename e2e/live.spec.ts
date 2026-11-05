@@ -20,6 +20,8 @@ test('the backend is connected', () => {
 test('the walkthrough page loads', async ({ page }) => {
   await page.goto('/alpha');
   await expect(page.getByRole('heading', { name: 'Guided walkthrough' })).toBeVisible();
+  // Testers can see which version they're testing.
+  await expect(page.getByTestId('app-version')).toHaveText(/^Concord \d+\.\d+\.\d+$/);
 });
 
 test.describe('with the backend', () => {
@@ -44,7 +46,7 @@ test.describe('with the backend', () => {
     }
   });
 
-  test('the Query tab loads sparq (WebAssembly) and the Formats tab is highlighted', async ({ page }) => {
+  test('the Query tab loads sparq (WebAssembly), the query assistant answers, and Source is highlighted', async ({ page }) => {
     await page.goto('/login');
     await page.getByRole('button', { name: 'Try the demo' }).click();
     await expect(page).toHaveURL(/\/alpha$/);
@@ -55,6 +57,13 @@ test.describe('with the backend', () => {
     expect((await wasm).headers()['content-type']).toContain('application/wasm');
     await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Run', exact: true }).click();
+    await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
+    // The query assistant answers through the backend, and its query runs here when asked.
+    await page.getByTestId('query-suggestions').getByRole('button').first().click();
+    await expect(page.getByTestId('query-chat').getByTestId('chat-message-assistant')).toHaveCount(2, { timeout: 60_000 });
+    await expect(page.getByLabel('Run against')).toHaveValue(/data|ontology/);
+    // It runs only once the person presses Run.
+    await page.getByTestId('query-run-prompt').getByRole('button', { name: 'Run this query' }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
     await page.goto(`/o/${demo.id}/source?format=turtle`);
     await expect(page.getByTestId('source-code').locator('.tok-iri').first()).toBeVisible();
@@ -69,5 +78,18 @@ test.describe('with the backend', () => {
     const ttl = await request.get('/def/volunteering', { headers: { Accept: 'text/turtle' } });
     expect(ttl.headers()['content-type']).toContain('text/turtle');
     expect(await ttl.text()).toContain('owl:Ontology');
+  });
+
+  test('POST to the ontology IRI validates data through Vercel, and the SHACL profile returns the shapes', async ({ request }) => {
+    const res = await request.post('/def/volunteering', {
+      headers: { 'Content-Type': 'text/turtle' },
+      data: '<https://example.org/o> a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> .',
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const report = await res.json();
+    expect(report.conforms).toBe(false);
+    expect(report.results.length).toBeGreaterThan(0);
+    const shapes = await request.get('/def/volunteering', { headers: { 'Accept-Profile': '<http://www.w3.org/ns/shacl#>' } });
+    expect(await shapes.text()).toContain('sh:NodeShape');
   });
 });

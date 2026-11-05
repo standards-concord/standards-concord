@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import type { ChangeOp, ChangeRequestDetail } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
+import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
+import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -9,26 +9,125 @@ import { formatDate, plural, relativeTime, roleLabel, titleCase } from '../../li
 import { makeLabeler } from '../../lib/ontology';
 import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
+import { PolicyGlance } from '../../components/PolicyRules';
 import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
-import { ValidationDetails } from '../../components/Validation';
+import { ValidationDetails, validationVerdict } from '../../components/Validation';
 import { AppChecksCard, AutopilotBadge } from '../../components/AppChecks';
 import { ChangeStatusBubble } from '../../components/Phase';
 import { Markdown } from '../../components/Markdown';
 import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
+import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
+import { needsOdiApproval, odiApproved } from '../../lib/asks';
+
+/**
+ * A request drafted from use cases (which may be private) is published only
+ * as an editor approved it: this shows exactly what merging it would publish,
+ * highlights what looks like a use case title or a person's name (a hint,
+ * never a verdict), and approves that exact version.
+ */
+function PublicationApproval({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
+  const { hasRole, userById } = useOntology();
+  const pub = useAsync(() => api.publication(cr.id), [cr.id, cr.opsUpdatedAt, cr.title, cr.status, cr.privacyCleared?.fingerprint]);
+  const approve = useAction(async (fingerprint: string) => {
+    try {
+      onUpdate(await api.approvePublication(cr.id, fingerprint));
+    } finally {
+      // Changed since it was shown (409) or approved: either way, show what is there now.
+      await pub.reload();
+    }
+  });
+  const p = pub.data;
+  const approved = !!p && cr.privacyCleared?.fingerprint === p.fingerprint;
+  const hinted = p ? p.hints.length + p.statements.filter((st) => st.hint).length : 0;
+  const kind = (k: 'use case title' | 'name') => (k === 'name' ? 'a person’s name' : 'a use case title');
+  const short = (iri: string) => iri.replace(/^.*[#/]/, '') || iri;
+  return (
+    <Card>
+      <CardHeader icon={ShieldCheck} title="What this publishes" subtitle="Drafted from use cases, which may be private. An editor approves exactly this before it is merged." />
+      <div className="space-y-3 p-5 text-sm" data-testid="publication">
+        {pub.error && !p ? (
+          <ErrorCard title="Couldn’t work out what this publishes" error={pub.error} onRetry={() => void pub.reload()} />
+        ) : !p ? (
+          <Loading label="Working out what this publishes…" />
+        ) : (
+          <>
+            {approved ? (
+              <p className="rounded-lg bg-ok-soft p-2.5 text-ok" data-testid="publication-approved">
+                Approved by {userById(cr.privacyCleared!.by)?.name ?? 'an editor'} {relativeTime(cr.privacyCleared!.at, Date.now())}. Any change needs approving again.
+              </p>
+            ) : hinted ? (
+              <p className="rounded-lg bg-warn-soft p-2.5 text-warn" role="note">
+                {plural(hinted, 'item')} may name a use case or a person (highlighted). The check can miss things, so read it all.
+              </p>
+            ) : (
+              <p className="text-muted">Nothing below looks private, but the check can miss things, so read it all.</p>
+            )}
+            <dl className="space-y-2">
+              <div>
+                <dt className="text-xs font-medium text-muted">Title (in the commit and the release notes)</dt>
+                <dd className={cx('mt-0.5 break-words', p.hints.some((h) => h.where === 'the title') && 'rounded bg-warn-soft px-1')}>{p.title}</dd>
+              </div>
+              <div>
+                <dt className="text-xs font-medium text-muted">Statements added to the public ontology ({p.statements.length})</dt>
+                <dd>
+                  <ul className="mt-1 max-h-72 space-y-1 overflow-auto">
+                    {p.statements.map((st, i) => (
+                      <li key={i} data-statement data-hint={st.hint ?? undefined} className={cx('break-words rounded px-1 font-mono text-xs', st.hint && 'bg-warn-soft')}>
+                        <span className="block font-sans">
+                          <span className="font-medium">{short(st.subject)}</span> · {short(st.predicate)} · {st.object}
+                        </span>
+                        {/* Exactly as published: full IRIs, language and datatype. A private name can sit anywhere in an IRI. */}
+                        <code className="block text-muted" data-nt>
+                          {st.nt}
+                        </code>
+                        {st.hint && <span className="sr-only"> (may be {kind(st.hint)})</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+              {p.kgcl.length > 0 && (
+                <div>
+                  <dt className="text-xs font-medium text-muted">Edit list (in the commit and the release notes)</dt>
+                  <dd>
+                    <ul className="mt-1 space-y-0.5 font-mono text-xs">
+                      {p.kgcl.map((k, i) => (
+                        <li key={i} className="break-words">
+                          {k}
+                        </li>
+                      ))}
+                    </ul>
+                  </dd>
+                </div>
+              )}
+            </dl>
+            {!approved && hasRole('editor', 'steward', 'owner') && (
+              <Button variant="primary" icon={Check} loading={approve.pending} onClick={() => void approve.run(p.fingerprint)}>
+                Approve exactly this for publishing
+              </Button>
+            )}
+            <InlineError error={approve.error} />
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
 
 function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
-  const { hasRole, myRoles } = useOntology();
+  const { hasRole, myRoles, ontology } = useOntology();
   const { session } = useSession();
   const uid = session?.user?.id;
   const [comment, setComment] = useState('');
   const [reviseOpen, setReviseOpen] = useState(false);
   const [instruction, setInstruction] = useState('');
-  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>) => {
+  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>, sent?: string) => {
     const d = await fn();
     onUpdate(d);
-    setComment('');
+    // Clear only what was sent with it: text typed while the request was on its way is kept, not wiped.
+    setComment((now) => (sent !== undefined && now.trim() === sent ? '' : now));
   });
   const revise = useAction(async () => {
     onUpdate(await api.revise(cr.id, instruction.trim()));
@@ -40,13 +139,17 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const canEdit = isAuthor || hasRole('editor', 'steward', 'owner');
   const open = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
   const voterRoles = cr.governance.rule.vote?.voterRoles ?? [];
-  const canVote = cr.status === 'voting' && (voterRoles.some((r) => myRoles.includes(r)) || hasRole());
+  // The same check the server uses to accept and count a vote.
+  const canVote = cr.status === 'voting' && canCastVote(myRoles, voterRoles);
   const myVote = cr.votes.find((v) => v.userId === uid);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
-  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c));
-  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c));
+  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c), c);
+  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c), c);
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
+  // Under final say the vote can open before the ODI approves, but cannot pass without it.
+  const odiNeeded = needsOdiApproval(ontology.governance, cr);
+  const odiDone = odiNeeded && odiApproved(cr.reviews, ontology.members ?? [], cr.opsUpdatedAt ?? cr.createdAt);
 
   if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;
 
@@ -54,6 +157,11 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
     <div className="space-y-3">
       {(cr.status === 'review' || cr.status === 'voting' || cr.status === 'triage' || cr.status === 'needs-work' || cr.status === 'draft') && (
         <Textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Add a comment (optional for approvals, helpful for objections)…" />
+      )}
+      {cr.heldForPublication && cr.status === 'needs-work' && (
+        <p className="rounded-lg border border-warn/40 bg-warn-soft p-3 text-sm" data-testid="publication-hold">
+          Held before merging until an editor approves exactly what it publishes (under “What this publishes”).
+        </p>
       )}
       {(cr.status === 'draft' || cr.status === 'needs-work') && canEdit && (
         <Button variant="primary" icon={Send} className="w-full" loading={act.pending} onClick={() => void act.run(() => api.submitChangeRequest(cr.id))}>
@@ -94,6 +202,15 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </Button>
           </div>
           {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on this.</p>}
+          {odiNeeded && !odiDone && myRoles.includes('odi') && (
+            <div className="space-y-1.5 border-t border-line pt-3" data-testid="odi-approval">
+              <p className="text-xs text-muted">This major change cannot pass the vote until the ODI approves it.</p>
+              <Button variant="primary" icon={ShieldCheck} className="w-full" disabled={act.pending} onClick={() => void review('approve')}>
+                Approve for the ODI
+              </Button>
+            </div>
+          )}
+          {odiNeeded && odiDone && <p className="text-xs text-muted">The ODI has approved this change.</p>}
           {myVote && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
         </>
       )}
@@ -173,7 +290,7 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
   if (!c) return <LevelBadge level={undefined} />;
   return (
     <Popover label={`Level: ${c.level}. Why it’s ${c.level}`} className="rounded-pill focus-visible:outline-offset-2" trigger={<LevelBadge level={c.level} />}>
-      <h4 className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Why it’s {c.level}</h4>
+      <h4 className="mb-1 text-sm font-semibold">Why it’s {c.level}</h4>
       <p className="mb-3 text-xs text-muted">Rule-based semantic versioning classification. The level decides which governance rules apply.</p>
       <ul className="space-y-2 text-sm">
         {c.reasons.map((r, i) => (
@@ -193,16 +310,30 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
 
 type View = 'changes' | 'checks' | 'discussion';
 
+/** ARIA tabs with the standard keyboard pattern: one tab stop, arrow keys, Home and End move between tabs and select them. */
 function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => void; items: { id: View; label: string; note?: string; tone?: 'danger' | 'warn' }[] }) {
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Move from the focused tab, not the selected one: keys can arrive before the selection re-renders.
+    const focused = items.findIndex((t) => `cr-tab-${t.id}` === (e.target as HTMLElement).id);
+    const i = focused >= 0 ? focused : items.findIndex((t) => t.id === view);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: items.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const t = items[(next + items.length) % items.length];
+    onChange(t.id);
+    document.getElementById(`cr-tab-${t.id}`)?.focus();
+  };
   return (
-    <div role="tablist" aria-label="Change request views" className="flex gap-1 overflow-x-auto border-b border-line">
+    <div role="tablist" aria-label="Change request views" className="flex gap-1 overflow-x-auto border-b border-line" onKeyDown={onKeyDown}>
       {items.map((t) => (
         <button
           key={t.id}
+          type="button"
           role="tab"
           id={`cr-tab-${t.id}`}
           aria-selected={view === t.id}
           aria-controls={`cr-panel-${t.id}`}
+          tabIndex={view === t.id ? 0 : -1}
           onClick={() => onChange(t.id)}
           className={cx('-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm whitespace-nowrap', view === t.id ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
         >
@@ -271,19 +402,14 @@ export function ChangeRequestPage() {
               view term
             </Link>
           )}
-          {cr.origin.type === 'chat' && cr.origin.useCaseId && (
-            <Link className="text-accent hover:underline" to={`/o/${id}/use-cases/${cr.origin.useCaseId}`}>
-              view use case
-            </Link>
-          )}
-          {cr.origin.type === 'synthesis' &&
-            cr.origin.useCaseIds.map((u, i) => (
-              <Link key={u} className="text-accent hover:underline" to={`/o/${id}/use-cases/${u}`}>
-                use case {i + 1}
-              </Link>
-            ))}
         </div>
-        {cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>}
+        {cr.withheld ? (
+          <p role="note" className="mt-2 text-sm text-muted">
+            This change request was drafted from, or cites, a use case that is no longer shared with you (its author may have withdrawn it), so its details are not shown. It can't be merged; a new request can be opened instead.
+          </p>
+        ) : (
+          cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
@@ -296,17 +422,35 @@ export function ChangeRequestPage() {
               {
                 id: 'checks',
                 label: 'Checks',
-                note: !cr.validation ? 'not run' : cr.validation.passed ? 'passing' : 'failing',
+                note: !cr.validation ? 'not run' : validationVerdict(cr.validation, 'inline'),
                 tone: cr.validation && !cr.validation.passed ? 'danger' : undefined,
               },
               { id: 'discussion', label: 'Discussion', note: `${cr.reviews.length + cr.votes.length}` },
             ]}
           />
           {tab === 'changes' && (
-            <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-changes" aria-labelledby="cr-tab-changes" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             {cr.description && (
               <Card className="p-5">
-                <Markdown text={cr.description} />
+                {cr.origin.type === 'public-report' ? (
+                  // Written by someone without an account: shown as it was typed, never rendered.
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{cr.description}</p>
+                ) : (
+                  <Markdown text={cr.description} />
+                )}
+              </Card>
+            )}
+
+            {!!cr.useCases?.length && (
+              <Card>
+                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
+                <ul className="divide-y divide-line" data-testid="cr-use-cases">
+                  {cr.useCases.map((u) => (
+                    <li key={u.id} className="px-5 py-3">
+                      <UseCaseRefLink ontologyId={id} r={u} />
+                    </li>
+                  ))}
+                </ul>
               </Card>
             )}
 
@@ -368,12 +512,12 @@ export function ChangeRequestPage() {
                   <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>
                     <div className="space-y-3">
                       <div>
-                        <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Rationale</div>
+                        <div className="mb-1 text-sm font-semibold">Rationale</div>
                         <Markdown text={cr.analysis.rationale} className="text-muted" />
                       </div>
                       {cr.analysis.risks?.length ? (
                         <div>
-                          <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Risks</div>
+                          <div className="mb-1 text-sm font-semibold">Risks</div>
                           <ul className="list-disc space-y-0.5 pl-5">
                             {cr.analysis.risks.map((r, i) => (
                               <li key={i}>{r}</li>
@@ -389,7 +533,7 @@ export function ChangeRequestPage() {
             </div>
           )}
           {tab === 'checks' && (
-            <div role="tabpanel" id="cr-panel-checks" aria-labelledby="cr-tab-checks" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-checks" aria-labelledby="cr-tab-checks" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             <Card>
               <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
               <div className="p-5">
@@ -404,7 +548,7 @@ export function ChangeRequestPage() {
             </div>
           )}
           {tab === 'discussion' && (
-            <div role="tabpanel" id="cr-panel-discussion" aria-labelledby="cr-tab-discussion" className="space-y-6">
+            <div role="tabpanel" id="cr-panel-discussion" aria-labelledby="cr-tab-discussion" tabIndex={0} className="space-y-6 outline-none focus-visible:outline-2 focus-visible:outline-accent">
             <Card>
               <CardHeader icon={History} title="Reviews and timeline" />
               <ol className="relative space-y-4 p-5">
@@ -460,10 +604,12 @@ export function ChangeRequestPage() {
         </div>
 
         <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+          {cr.origin.type === 'synthesis' && !['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status) && <PublicationApproval cr={cr} onUpdate={state.setData} />}
           <Card>
             <CardHeader icon={Scale} title="Decision" subtitle={`${ontology.governance.name} · ${plural(cr.reviews.filter((r) => r.decision !== 'comment').length, 'review')}`} />
-            <div className="p-5">
+            <div className="space-y-4 p-5">
               <GovernancePanel g={cr.governance} userById={userById} actions={<ActionBar cr={cr} onUpdate={state.setData} />} />
+              <PolicyGlance policy={ontology.governance} ontologyId={id} />
             </div>
           </Card>
         </div>

@@ -1,12 +1,15 @@
-import type { ChatMessage, FeedbackQuestion, FeedbackSubmission, User } from '@concord/shared';
+import { APP_VERSION, changesFor, changesSince, findRelease, TESTER_ROLE_KEYS, type ChatMessage, type FeedbackQuestion, type FeedbackSubmission, type PodFeedbackFolder, type PodFeedbackReport, type TesterRoleKey, type User } from '@concord/shared';
+import { Parser } from 'n3';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, put } from '../db.js';
+import { get as get_, HttpError, list, put, remove } from '../db.js';
+import * as oauth from 'oauth4webapi';
 import { newId } from '../ids.js';
 import { FEEDBACK_INTERVIEWER, FEEDBACK_SUMMARY } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { FeedbackSummarySchema, FeedbackTurnSchema } from '../llm/schemas.js';
 import { GOVERNANCE_TEMPLATES } from './governance.js';
+import { acceptVersion, recordFeedback } from './alpha.js';
 import { solid } from './solid.js';
 
 const scale = (id: string, section: string, text: string, minLabel: string, maxLabel: string, optional = false): FeedbackQuestion => ({
@@ -44,6 +47,53 @@ export const FEEDBACK_QUESTIONS: FeedbackQuestion[] = [
   { id: 'comments', section: 'Any other comments', text: 'Any other comments? Anything at all.', type: 'text', optional: true },
 ];
 
+export type Pathway = FeedbackSubmission['pathway'];
+
+/** How many changes the "what's changed" questionnaire asks about, at most. */
+export const MAX_CHANGE_QUESTIONS = 6;
+
+export interface QuestionScope {
+  pathway?: Pathway;
+  /** The version the tester last tested. */
+  since?: string;
+  /** The tester role they're giving feedback as. */
+  role?: TesterRoleKey | string;
+  /** The version they're testing now (defaults to this server's version). */
+  version?: string;
+}
+
+const asRole = (r: unknown) => (TESTER_ROLE_KEYS.includes(r as TesterRoleKey) ? (r as TesterRoleKey) : undefined);
+
+/**
+ * Questions for a returning tester: one about each change since the version
+ * they last tested (their role's changes first, features before fixes), then
+ * the few overall questions. Fixes are only asked about when they say what to ask.
+ */
+export function changeQuestions(since: string, role?: TesterRoleKey | string, version: string = APP_VERSION): FeedbackQuestion[] {
+  const upTo = findRelease(version)?.version ?? APP_VERSION;
+  const changes = changesFor(changesSince(since, upTo), asRole(role)).filter((c) => c.type !== 'fix' || c.ask);
+  if (!changes.length) return [];
+  const section = `What’s new since ${since}`;
+  const asked = changes.slice(0, MAX_CHANGE_QUESTIONS).map((c) =>
+    scale(`new:${c.id}`, section, `New in ${c.version}: ${c.ask ?? `how well does this work for you: ${c.title.replace(/[.!]$/, '')}?`}`, 'Not well', 'Very well', true),
+  );
+  const core = FEEDBACK_QUESTIONS.filter((q) => ['overall', 'missing', 'comments'].includes(q.id));
+  return [
+    ...asked,
+    { id: 'new:other', section, text: `Did anything else change since ${since} that helped or got in your way?`, type: 'text', optional: true },
+    ...core,
+  ];
+}
+
+/** The questionnaire for a pathway. "changes" falls back to the full set when there's nothing new to ask about. */
+export function questionsFor(scope: QuestionScope = {}): FeedbackQuestion[] {
+  if (scope.pathway === 'changes' && scope.since) {
+    const qs = changeQuestions(scope.since, scope.role, scope.version);
+    if (qs.length) return qs;
+  }
+  return FEEDBACK_QUESTIONS;
+}
+
 type Answers = FeedbackSubmission['answers'];
 
 /** Interpret a free-text (often spoken) answer for a question. */
@@ -80,7 +130,7 @@ export function interpretAnswer(q: FeedbackQuestion, raw: string): string | numb
   return t;
 }
 
-const unanswered = (answers: Answers) => FEEDBACK_QUESTIONS.filter((q) => answers[q.id] === undefined || answers[q.id] === '');
+const unanswered = (questions: FeedbackQuestion[], answers: Answers) => questions.filter((q) => answers[q.id] === undefined || answers[q.id] === '');
 
 function ask(q: FeedbackQuestion) {
   const opts =
@@ -92,8 +142,8 @@ function ask(q: FeedbackQuestion) {
   return `${q.text}${opts}${q.optional ? ' You can skip this one.' : ''}`;
 }
 
-export interface FeedbackChatInput {
-  pathway: 'structured' | 'general';
+export interface FeedbackChatInput extends QuestionScope {
+  pathway: Pathway;
   messages: ChatMessage[];
   answers: Answers;
   /** Question the client last asked (structured pathway). */
@@ -102,8 +152,9 @@ export interface FeedbackChatInput {
 
 export async function feedbackChat(input: FeedbackChatInput) {
   const answers: Answers = { ...input.answers };
+  const questions = questionsFor(input);
   const last = [...input.messages].reverse().find((m) => m.role === 'user');
-  const fallback = () => heuristicFeedbackTurn(input, answers, last?.content);
+  const fallback = () => heuristicFeedbackTurn(input, questions, answers, last?.content);
   const { value } = await llm.json({
     task: 'feedback',
     system: FEEDBACK_INTERVIEWER,
@@ -113,7 +164,7 @@ export async function feedbackChat(input: FeedbackChatInput) {
     messages: [
       {
         role: 'user',
-        content: `Pathway: ${input.pathway}\n\nQuestionnaire:\n${FEEDBACK_QUESTIONS.map((q) => `- ${q.id} [${q.section}] (${q.type}${q.optional ? ', optional' : ''}) ${q.text}${q.options ? ` Options: ${q.options.join(' | ')}` : ''}`).join('\n')}\n\nAnswers so far: ${JSON.stringify(answers)}\n\nConversation:\n${input.messages.map((m) => `${m.role === 'assistant' ? 'Interviewer' : 'Tester'}: ${m.content}`).join('\n')}\n\nGive the next turn.`,
+        content: `Pathway: ${input.pathway === 'changes' ? `changes (a returning tester, last tested ${input.since}; ask only about what changed)` : input.pathway}\n\nQuestionnaire:\n${questions.map((q) => `- ${q.id} [${q.section}] (${q.type}${q.optional ? ', optional' : ''}) ${q.text}${q.options ? ` Options: ${q.options.join(' | ')}` : ''}`).join('\n')}\n\nAnswers so far: ${JSON.stringify(answers)}\n\nConversation:\n${input.messages.map((m) => `${m.role === 'assistant' ? 'Interviewer' : 'Tester'}: ${m.content}`).join('\n')}\n\nGive the next turn.`,
       },
     ],
     fallback: () => {
@@ -122,14 +173,14 @@ export async function feedbackChat(input: FeedbackChatInput) {
     },
   });
   for (const a of value.answers) {
-    const q = FEEDBACK_QUESTIONS.find((x) => x.id === a.questionId);
+    const q = questions.find((x) => x.id === a.questionId);
     if (a.questionId === 'general') answers.general = [answers.general, a.value].filter(Boolean).join('\n');
     else if (q) answers[q.id] = q.type === 'multi' ? a.value.split(/\s*\|\s*/) : q.type === 'scale' ? (interpretAnswer(q, a.value) ?? a.value) : a.value;
   }
   return { reply: value.reply, answers, done: value.done, nextQuestionId: value.nextQuestionId };
 }
 
-function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastText?: string) {
+function heuristicFeedbackTurn(input: FeedbackChatInput, questions: FeedbackQuestion[], answers: Answers, lastText?: string) {
   if (input.pathway === 'general') {
     if (lastText) answers.general = [answers.general, lastText].filter(Boolean).join('\n');
     const turns = input.messages.filter((m) => m.role === 'user').length;
@@ -143,7 +194,7 @@ function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastT
     ][Math.min(turns - 1, 2)];
     return { reply: follow, answers, done: false, nextQuestionId: undefined };
   }
-  const current = input.currentQuestionId ? FEEDBACK_QUESTIONS.find((q) => q.id === input.currentQuestionId) : lastText ? unanswered(answers)[0] : undefined;
+  const current = input.currentQuestionId ? questions.find((q) => q.id === input.currentQuestionId) : lastText ? unanswered(questions, answers)[0] : undefined;
   let prefix = '';
   if (current && lastText) {
     const skip = current.optional && /^(skip|pass|no|none|nothing|n\/a)\b/i.test(lastText.trim());
@@ -152,34 +203,198 @@ function heuristicFeedbackTurn(input: FeedbackChatInput, answers: Answers, lastT
     answers[current.id] = v;
     prefix = 'Thanks. ';
   }
-  const next = unanswered(answers)[0];
+  const next = unanswered(questions, answers)[0];
   if (!next) return { reply: 'That’s everything. Thank you! Press “Submit feedback” to send it to the team.', answers, done: true, nextQuestionId: undefined };
   const sectionIntro = !current || current.section !== next.section ? `**${next.section}.** ` : '';
   return { reply: `${prefix}${sectionIntro}${ask(next)}`, answers, done: false, nextQuestionId: next.id };
 }
 
-export async function submitFeedback(user: User | undefined, input: Omit<FeedbackSubmission, 'id' | 'createdAt'>) {
+/**
+ * Store feedback. `tester` is the tester's own account, which differs from `user`
+ * while they play a persona: their copy goes to their own pod, with the app
+ * version they tested.
+ */
+export async function submitFeedback(user: User | undefined, input: Omit<FeedbackSubmission, 'id' | 'createdAt'>, tester: User | undefined = user && !user.simulated ? user : undefined) {
   if (!input.answers || typeof input.answers !== 'object') throw new HttpError(400, 'answers required');
+  const appVersion = acceptVersion(input.appVersion);
   const sub: FeedbackSubmission = {
     ...input,
+    appVersion,
+    sinceVersion: input.sinceVersion && findRelease(input.sinceVersion) ? findRelease(input.sinceVersion)!.version : undefined,
     id: newId('fb'),
     userId: user?.id,
-    name: input.name ?? user?.name,
+    testerId: tester && tester.id !== user?.id ? tester.id : undefined,
+    name: input.name ?? (user?.simulated ? undefined : user?.name),
     createdAt: clock.iso(),
   };
-  put('feedback', sub);
-  // Testers' own copy of what they said goes in their pod too.
-  if (user) await solid.write(user.id, `feedback/${sub.id}.json`, JSON.stringify(sub, null, 2), 'application/json').catch(() => undefined);
-  return sub;
+  if (!tester) {
+    await put('feedback', sub);
+    return { ...sub, savedTo: undefined };
+  }
+  // A tester's feedback is stored together with its place in their testing record (or not at all, with a 409, if
+  // the record can't take it), then copied to their pod with the version they tested.
+  const savedTo = await recordFeedback(tester, sub, appVersion ? { version: appVersion, commit: input.appCommit, role: input.role } : undefined, async () => await put('feedback', sub));
+  // The pod's feedback folder is shared read-only with the admins' WebIDs (testers are told this).
+  if (savedTo.kind === 'solid') await shareFeedbackFolder(tester.id);
+  return { ...sub, savedTo };
 }
 
-export const listFeedback = () => list<FeedbackSubmission>('feedback').sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+/* ------------------------------------------------------------------------ */
+/* Administrators read testers' feedback in their pods                       */
+/* ------------------------------------------------------------------------ */
+
+export const FEEDBACK_FOLDER = 'feedback/';
+
+/**
+ * Share a tester's pod feedback folder read-only with the administrators'
+ * WebIDs (ADMIN_WEBIDS). Testers are told this on the feedback page.
+ */
+export async function shareFeedbackFolder(userId: string, opts: { create?: boolean; force?: boolean } = {}) {
+  try {
+    const r = await solid.shareRead(userId, FEEDBACK_FOLDER, config.adminWebIds, opts);
+    if (r === 'shared' || r === 'unchanged') await remove('kv', shareErrorKey(userId));
+    return r;
+  } catch (err) {
+    const message = (err as Error).message.slice(0, 300);
+    console.warn(`[solid] could not share the feedback folder of ${userId}: ${message}`);
+    // Shown to the admins beside that tester's folder.
+    await put('kv', { id: shareErrorKey(userId), value: message, at: clock.iso() });
+    return 'error' as const;
+  }
+}
+
+const shareErrorKey = (userId: string) => `share-error:${userId}`;
+const sharingError = async (userId: string) => (await get_<{ value: string }>('kv', shareErrorKey(userId)))?.value;
+
+/** Bring every tester's feedback folder in line with ADMIN_WEBIDS (run at start-up: the list may have changed). */
+export async function syncFeedbackSharing() {
+  if (!solid.enabled) return { shared: 0, unchanged: 0, missing: 0, failed: 0 };
+  const counts = { shared: 0, unchanged: 0, missing: 0, failed: 0 };
+  for (const pod of await solid.pods()) {
+    const r = await shareFeedbackFolder(pod.userId);
+    if (r === 'shared') counts.shared++;
+    else if (r === 'unchanged') counts.unchanged++;
+    else if (r === 'missing' || r === 'local') counts.missing++;
+    else counts.failed++;
+  }
+  return counts;
+}
+
+const LDP_CONTAINS = 'http://www.w3.org/ns/ldp#contains';
+const MAX_POD_ITEMS = 100;
+
+/** Keep only what looks like a feedback submission (the pod is read over the network, so check its shape). */
+function asSubmission(doc: unknown): FeedbackSubmission | undefined {
+  if (!doc || typeof doc !== 'object') return undefined;
+  const d = doc as Record<string, unknown>;
+  if (typeof d.id !== 'string' || typeof d.createdAt !== 'string' || !d.answers || typeof d.answers !== 'object' || Array.isArray(d.answers)) return undefined;
+  return { ...(d as unknown as FeedbackSubmission), transcript: Array.isArray(d.transcript) ? (d.transcript as FeedbackSubmission['transcript']) : [] };
+}
+
+/** Run `fn` over `items`, a few at a time. */
+async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(size, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]!);
+      }
+    }),
+  );
+  return out;
+}
+
+type PodGet = (url: string, accept: string) => Promise<Response>;
+
+/**
+ * The feedback documents a folder listing may name: direct children of the
+ * folder, named by Concord (<id>.json), after URL normalisation. A listing is
+ * read over the network, so `..`, encoded slashes and anything else are ignored.
+ */
+export function feedbackMembers(folder: string, turtle: string): string[] {
+  const quads = new Parser({ baseIRI: folder, format: 'text/turtle' }).parse(turtle);
+  const out = new Set<string>();
+  for (const q of quads) {
+    if (q.predicate.value !== LDP_CONTAINS || q.subject.termType !== 'NamedNode' || q.subject.value !== folder || q.object.termType !== 'NamedNode') continue;
+    let url: URL;
+    try {
+      url = new URL(q.object.value);
+    } catch {
+      continue;
+    }
+    if (url.search || url.hash || !url.href.startsWith(folder)) continue;
+    if (!/^[\w-]{1,64}\.json$/.test(url.href.slice(folder.length))) continue;
+    out.add(url.href);
+  }
+  return [...out];
+}
+
+async function readFolder(get: PodGet, testerId: string, url: string): Promise<PodFeedbackFolder> {
+  const testerName = (await get_<User>('users', testerId))?.name ?? testerId;
+  const base = { testerId, testerName, url, items: [] as FeedbackSubmission[], sharingError: await sharingError(testerId) };
+  let res: Response;
+  try {
+    res = await get(url, 'text/turtle');
+  } catch (err) {
+    // oauth4webapi raises the pod's 401 challenge as an error.
+    return { ...base, status: err instanceof oauth.WWWAuthenticateChallengeError ? 'forbidden' : 'error' };
+  }
+  if (res.status === 401 || res.status === 403) return { ...base, status: 'forbidden' };
+  if (res.status === 404) return { ...base, status: 'missing' };
+  // Redirects are never followed (they could point outside the folder).
+  if (!res.ok) return { ...base, status: 'error' };
+  let members: string[];
+  try {
+    members = feedbackMembers(url, await res.text());
+  } catch {
+    return { ...base, status: 'error' };
+  }
+  // Requests queue for the transport's few connections (see safeRequest), so this needn't be throttled; what fails is counted, never dropped silently.
+  const read = await Promise.all(
+    members.slice(0, MAX_POD_ITEMS).map(async (m) => {
+      try {
+        const r = await get(m, 'application/json');
+        return r.ok ? asSubmission(await r.json()) : undefined;
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  const items = read.filter((x): x is FeedbackSubmission => !!x).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // Documents that failed, and any beyond the first MAX_POD_ITEMS (not read at all), are both counted.
+  const unread = members.length - items.length;
+  return { ...base, status: unread ? 'partial' : 'ok', items, ...(unread ? { unread } : {}) };
+}
+
+/**
+ * Read every tester's feedback folder straight from their pod, as the
+ * administrator's own WebID (their DPoP-bound Solid login). What comes back is
+ * exactly what the pods' access control lets that WebID read.
+ */
+export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
+  if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
+  // Looked up first, then filtered: filter() itself would take each async lookup's promise as a yes.
+  const all = await solid.pods();
+  const real = await Promise.all(all.map(async (p) => !(await get_<User>('users', p.userId))?.simulated));
+  const pods = all.filter((_, i) => real[i]);
+  const folders = pods.map((p) => ({ testerId: p.userId, url: `${p.podUrl}concord/${FEEDBACK_FOLDER}` }));
+  // A few folders at a time keeps the transport's queue short (each folder queues up to MAX_POD_ITEMS reads).
+  const read = await pool(folders, 4, (f) => readFolder(as.get, f.testerId, f.url));
+  // Testers who never sent feedback have no folder: leave them out.
+  return { readAs: as.webId, readers: config.adminWebIds, folders: read.filter((f) => f.status !== 'missing') };
+}
+
+export const listFeedback = async () => (await list<FeedbackSubmission>('feedback')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
 export async function summariseFeedback() {
-  const subs = listFeedback();
+  const subs = await listFeedback();
   if (!subs.length) return { summary: 'No feedback yet.', themes: [], count: 0, tallies: {} };
   const tallies: Record<string, Record<string, number>> = {};
-  for (const q of FEEDBACK_QUESTIONS.filter((x) => x.type !== 'text')) {
+  // Questions about specific changes ("new:<change id>") are tallied alongside the standard ones.
+  const changeIds = [...new Set(subs.flatMap((s) => Object.keys(s.answers).filter((k) => k.startsWith('new:') && k !== 'new:other')))];
+  for (const q of [...FEEDBACK_QUESTIONS.filter((x) => x.type !== 'text'), ...changeIds.map((id) => ({ id }))]) {
     tallies[q.id] = {};
     for (const s of subs) {
       const v = s.answers[q.id];
@@ -191,9 +406,9 @@ export async function summariseFeedback() {
     system: FEEDBACK_SUMMARY,
     schema: FeedbackSummarySchema,
     effort: 'medium',
-    messages: [{ role: 'user', content: `Questionnaire tallies: ${JSON.stringify(tallies)}\n\nSubmissions:\n${subs.map((s) => JSON.stringify({ role: s.role, pathway: s.pathway, answers: s.answers })).join('\n')}` }],
+    messages: [{ role: 'user', content: `Questionnaire tallies: ${JSON.stringify(tallies)}\n\nSubmissions:\n${subs.map((s) => JSON.stringify({ role: s.role, pathway: s.pathway, appVersion: s.appVersion, sinceVersion: s.sinceVersion, answers: s.answers })).join('\n')}` }],
     fallback: () => {
-      const texts = subs.flatMap((s) => ['valuable', 'missing', 'comments', 'general', 'gov_other'].map((k) => s.answers[k]).filter((x): x is string => typeof x === 'string' && x !== '(skipped)'));
+      const texts = subs.flatMap((s) => ['valuable', 'missing', 'comments', 'general', 'gov_other', 'new:other'].map((k) => s.answers[k]).filter((x): x is string => typeof x === 'string' && x !== '(skipped)'));
       const words = new Map<string, number>();
       for (const t of texts)
         for (const w of new Set(t.toLowerCase().match(/[a-z]{5,}/g) ?? [])) if (!['about', 'would', 'there', 'their', 'which', 'think', 'really', 'could', 'should'].includes(w)) words.set(w, (words.get(w) ?? 0) + 1);

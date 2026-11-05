@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ApprovalRule, ChangeLevel, GovernancePolicy, Role } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
-import { Crown, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
+import { Crown, EyeOff, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { pct, plural, roleLabel } from '../../lib/format';
@@ -9,6 +9,8 @@ import { LevelBadge, RoleChips } from '../../components/badges';
 import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, Input, Loading, Select, Toggle, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+import { alwaysRules, RuleList, ruleSummary } from '../../components/PolicyRules';
+import { scrollBehavior } from '../../lib/motion';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const ALL_ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -239,52 +241,12 @@ function Members() {
 const OWNERSHIP: Record<GovernancePolicy['ownership']['model'], string> = { single: 'Single owner', group: 'Group of owners' };
 const ODI: Record<GovernancePolicy['odiPrivilege'], string> = { none: 'no ODI privilege', veto: 'ODI can veto', 'final-say': 'ODI has the final say' };
 
-/**
- * One plain-language line per rule, following how the server actually evaluates it
- * (services/governance.ts): lazy consensus skips sign-offs and the vote for patch and minor
- * levels unless someone objects, any ODI privilege adds an ODI veto, and "final say" means ODI
- * must approve major changes and releases.
- */
-export function ruleSummary(r: ApprovalRule, level: ChangeLevel = 'minor', policy?: Pick<GovernancePolicy, 'odiPrivilege'>, kind: 'change' | 'release' = 'change'): string {
-  const lazySkips = r.lazyConsensus && level !== 'major';
-  const who = r.approverRoles.map(roleLabel).join(' or ') || 'anyone';
-  const parts: string[] = [];
-  if (r.minApprovals > 0) parts.push(lazySkips ? `no sign-off unless someone objects (then ${plural(r.minApprovals, 'sign-off')} from ${who})` : `${plural(r.minApprovals, 'sign-off')} from ${who}`);
-  else parts.push('no sign-off needed');
-  if (r.reviewPeriodDays > 0) parts.push(`${plural(r.reviewPeriodDays, 'day')} open for comment`);
-  if (r.lazyConsensus) parts.push('accepted if nobody objects');
-  if (r.vote) parts.push(`${lazySkips ? 'a vote only if someone objects' : 'a vote'} (${pct(r.vote.threshold)} in favour, ${pct(r.vote.quorum)} turnout)`);
-  const odi = policy && policy.odiPrivilege !== 'none';
-  if (odi && policy.odiPrivilege === 'final-say' && level === 'major') parts.push('ODI oversight must approve');
-  const veto = [...r.vetoRoles, ...(odi && !r.vetoRoles.includes('odi') ? (['odi'] as Role[]) : [])];
-  if (veto.length) parts.push(`${veto.map(roleLabel).join(' or ')} can block it`);
-  if (r.autoMerge) parts.push(kind === 'release' ? 'published automatically' : 'merged automatically');
-  return parts.join(' · ');
-}
-
-function RuleList({ rules, policy, label, kind = 'change' }: { rules: Record<ChangeLevel, ApprovalRule>; policy: GovernancePolicy; label: string; kind?: 'change' | 'release' }) {
-  return (
-    <ul className="space-y-1.5 text-sm" aria-label={label}>
-      {LEVELS.map((l) => (
-        <li key={l} className="flex items-start gap-2">
-          <LevelBadge level={l} className="mt-0.5 w-14 justify-center" />
-          <span>{ruleSummary(rules[l], l, policy, kind)}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function PolicySummary({ policy, preview }: { policy: GovernancePolicy; preview?: boolean }) {
-  const always = [
-    policy.odiPrivilege === 'veto' && 'ODI oversight can veto any change or release',
-    policy.odiPrivilege === 'final-say' && 'ODI oversight can veto anything and must approve major changes and releases',
-    policy.requireValidation && 'changes that fail validation can never be approved',
-  ].filter(Boolean) as string[];
+  const always = alwaysRules(policy);
   return (
     <Card className="p-5">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="text-xs font-semibold tracking-wide text-muted uppercase">In short</div>
+        <div className="text-sm font-semibold">In short</div>
         {preview && <Badge tone="warn">Preview of unsaved changes</Badge>}
       </div>
       <p className="mt-1 text-sm">
@@ -356,6 +318,110 @@ function RulesSection({
 
 const TRANSFER: Record<GovernancePolicy['ownership']['transfer'], string> = { 'owner-decides': 'The owner decides', 'member-vote': 'Voting members vote', 'odi-approval': 'ODI must approve' };
 
+/**
+ * Versions published before anyone approved what goes public, held until an
+ * owner or steward approves exactly what each publishes. What looks private is
+ * highlighted (a hint: the check misses things), and the whole Turtle is there
+ * to read. The working draft can be fixed with ordinary change requests first.
+ */
+function HeldVersions() {
+  const { id, hasRole } = useOntology();
+  const canReview = hasRole('owner', 'steward');
+  const holds = useAsync(() => (canReview ? api.publicHolds(id) : Promise.resolve([])), [id, canReview]);
+  const heading = useRef<HTMLSpanElement>(null);
+  const [status, setStatus] = useState('');
+  const approve = useAction(async (version: string, fingerprint: string) => {
+    try {
+      await api.approvePublicHold(id, version, fingerprint);
+      setStatus(`${version === 'draft' ? 'The working draft' : `Version ${version}`} is published again.`);
+    } finally {
+      // Approved, or changed since it was shown: either way, show what is there now.
+      await holds.reload();
+      requestAnimationFrame(() => heading.current?.focus());
+    }
+  });
+  if (!canReview) return null;
+  if (holds.error && !holds.data) return <ErrorCard title="Couldn’t load the versions waiting for approval" error={holds.error} onRetry={() => void holds.reload()} />;
+  if (!holds.data || (!holds.data.length && !status)) return null;
+  const kind = (k: 'use case title' | 'name') => (k === 'name' ? 'a person’s name' : 'a use case title');
+  return (
+    <section aria-labelledby="held-h">
+      <Card>
+        <CardHeader
+          icon={EyeOff}
+          title={
+            <span id="held-h" ref={heading} tabIndex={-1} className="outline-none">
+              Waiting for approval before they are public ({holds.data.length})
+            </span>
+          }
+        />
+        <p className="px-5 pt-3 pb-2 text-sm text-muted">
+          Older versions of Concord published changes drafted from use cases without anyone approving them. Until you approve exactly what each version publishes, its public page and downloads say it is being reviewed. Fix the working draft with a change request first if it needs it; a release can only be approved as it is.
+        </p>
+        <p role="status" className="sr-only">
+          {status}
+        </p>
+        {!holds.data.length && <p className="px-5 pb-3 text-sm text-muted">Nothing is waiting for approval.</p>}
+        <ul className="divide-y divide-line">
+          {holds.data.map((h) => (
+            <li key={h.version} className="space-y-2 px-5 py-3" data-held={h.version}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-medium">{h.version === 'draft' ? 'Working draft' : `Version ${h.version}`}</span>
+                <span className="text-xs text-muted">{plural(h.statements, 'statement')}</span>
+              </div>
+              {h.error && (
+                <p className="text-sm text-warn" role="note">
+                  {h.error}
+                </p>
+              )}
+              {h.hints.length ? (
+                <>
+                  <p className="text-sm text-warn">{plural(h.hints.length, 'item')} may name a use case or a person. The check can miss things, so read it all.</p>
+                  <ul className="max-h-60 space-y-1 overflow-auto">
+                    {h.hints.map((x, i) => (
+                      <li key={i} className="break-words rounded bg-warn-soft px-1 font-mono text-xs" data-hint={x.kind}>
+                        {x.subject}
+                        {x.predicate && ` · ${x.predicate}`} · <span className="font-sans">{x.object}</span>
+                        <span className="sr-only"> (may be {kind(x.kind)})</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="text-sm text-muted">Nothing looks private, but the check can miss things, so read it all.</p>
+              )}
+              <div className="space-y-1" data-held-content>
+                <p className="text-xs text-muted">Approving publishes exactly these, as shown here:</p>
+                {(
+                  [
+                    ['turtle', 'The ontology (Turtle; every download is made from it)', h.turtle],
+                    ['notes', 'Release notes', h.notes],
+                    ['snapshot', 'Use case snapshot shown on the page', h.snapshot],
+                  ] as const
+                ).map(([key, label, text]) => (
+                  <details key={key} data-part={key} className="rounded border border-line">
+                    <summary className="cursor-pointer px-2 py-1 text-sm">
+                      {label}
+                      {!text && <span className="text-muted"> (none)</span>}
+                    </summary>
+                    {text && <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words border-t border-line p-2 font-mono text-xs">{text}</pre>}
+                  </details>
+                ))}
+              </div>
+              <Button size="sm" variant="primary" loading={approve.pending} disabled={!h.fingerprint} onClick={() => void approve.run(h.version, h.fingerprint)}>
+                Approve exactly this for publishing
+              </Button>
+            </li>
+          ))}
+        </ul>
+        <div className="px-5 pb-3">
+          <InlineError error={approve.error} />
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 export function GovernanceTab() {
   const { id, ontology, hasRole, reload } = useOntology();
   const templates = useAsync(() => api.governanceTemplates(), []);
@@ -364,7 +430,8 @@ export function GovernanceTab() {
   const [saved, setSaved] = useState(false);
   useEffect(() => setPolicy(ontology.governance), [ontology.governance]);
   const dirty = useMemo(() => JSON.stringify(policy) !== JSON.stringify(ontology.governance), [policy, ontology.governance]);
-  const canEdit = hasRole('owner', 'steward');
+  // Only owners can save a policy (the server checks the same), so only they get the edit controls.
+  const canEdit = hasRole('owner');
   const save = useAction(async () => {
     await api.setGovernance(id, policy);
     await reload();
@@ -377,7 +444,11 @@ export function GovernanceTab() {
     setEditing(false);
   };
   useEffect(() => {
-    if (window.location.hash === '#roles') document.getElementById('roles')?.scrollIntoView({ behavior: 'smooth' });
+    if (window.location.hash !== '#roles') return;
+    // Move focus as well as the view, so keyboard and screen-reader users land on the members list too.
+    const section = document.getElementById('roles');
+    section?.scrollIntoView({ behavior: scrollBehavior() });
+    section?.querySelector<HTMLElement>('button[aria-expanded]')?.focus({ preventScroll: true });
   }, []);
 
   const edit = (p: Partial<GovernancePolicy>) => setPolicy((x) => ({ ...x, ...p, templateId: p.templateId ?? 'custom', name: p.name ?? (p.templateId ? x.name : x.templateId === 'custom' ? x.name : `${x.name} (customised)`) }));
@@ -413,9 +484,10 @@ export function GovernanceTab() {
           ) : null}
         </div>
       </div>
-      {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can view the policy; only owners and stewards can change it.</p>}
+      {!canEdit && <p className="rounded-lg bg-surface-2 px-4 py-2.5 text-sm text-muted">You can read the policy; only the ontology’s owners can change it.</p>}
       {editing && <p className="rounded-lg bg-accent-soft px-4 py-2.5 text-sm">Editing the policy. Nothing changes for anyone until you save; the summary below previews your edits.</p>}
       <InlineError error={save.error} />
+      <HeldVersions />
 
       <PolicySummary policy={policy} preview={editing && dirty} />
 
