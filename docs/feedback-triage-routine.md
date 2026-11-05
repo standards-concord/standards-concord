@@ -32,7 +32,7 @@ DECIDING
 - kind: one of bug, enhancement, ux, docs, question, insight.
 - size: size:small for a contained change, otherwise size:large.
 - needsJesse: true if it needs a product decision, or concerns sign-in, OAuth, security, privacy, personal data, secrets, deployment or CI.
-- possibleDuplicateOf: the issue number of an entry in the queue's "triaged" list that says the same thing, if any. Never anything else.
+- possibleDuplicateOf: the issue number of an entry in the queue's "triaged" list that says the same thing, or null if there is none. Never anything else.
 - comment: plain text, at most 500 characters, with no links, email addresses or @mentions (the server refuses them). Only a short, neutral reading of the summary without quoting it, the likely location as repository-relative paths (or "not established"), and a non-sensitive suggested next step. Never include private feedback, names, credentials, environment values, or details of a security or privacy weakness. If needsJesse is true, the comment is exactly: Flagged for the maintainer to review.
 
 STEPS

@@ -728,7 +728,8 @@ function parseTriage(b: Record<string, unknown>, issue: number): TriageDecision 
   if (!kind || !size) throw new HttpError(400, `kind must be one of ${TRIAGE_KINDS.join(', ')} and size one of ${TRIAGE_SIZES.join(', ')}`);
   if (b.needsJesse !== undefined && typeof b.needsJesse !== 'boolean') throw new HttpError(400, 'needsJesse must be true or false');
   const needsJesse = b.needsJesse === true;
-  const dup = b.possibleDuplicateOf;
+  // null is how the routine says "no duplicate" when it sends every field.
+  const dup = b.possibleDuplicateOf === null ? undefined : b.possibleDuplicateOf;
   if (dup !== undefined) {
     if (!validId(dup) || dup === issue) throw new HttpError(400, 'possibleDuplicateOf must be another issue’s number');
   }
