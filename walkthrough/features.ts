@@ -16,10 +16,10 @@ type Action = (ctx: Ctx, ...args: string[]) => Promise<void>;
 
 const VOL = 'https://w3id.org/odi/volunteering#';
 /** The term whose definition the editor clarifies, and the new wording. */
-const TERM = { localName: 'Skill', label: 'skill', definition: 'A learned capability, such as first aid or bookkeeping, that a volunteer can bring to a role.', why: 'Say how skills relate to volunteers.' };
+const TERM = { localName: 'Skill', label: 'skill', definition: 'A learned capability, such as first aid or bookkeeping, that a person can apply to a task, for example a volunteer in their role.', why: 'Say how skills apply to volunteering.' };
 /** What the terminal is, said on screen (the scripted-agent caption doesn't apply here). */
-const REAL_TERMINAL = 'Real commands, run on the recorded hub’s own git repository';
-const REAL_CURL = 'Real request to the standard’s public address';
+const REAL_TERMINAL = 'Real commands, run as shown on the recorded hub’s own git repository';
+const REAL_CURL = 'Real request, run as shown, to the hub this video was recorded on (it serves the same paths as the live hub)';
 /** Data about one food bank shift, with one mistake: the minimum age is written as text. */
 const SAMPLE = `@prefix vol: <https://w3id.org/odi/volunteering#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -55,29 +55,38 @@ async function signInAs(c: Ctx, name: string) {
   if (!r.ok()) c.d.warn(`Signing in as ${name}: HTTP ${r.status()}`);
 }
 
-/** Runs a read-only git command in the recorded hub's repository for this ontology. */
-function git(c: Ctx, args: string[]): string | undefined {
-  if (!c.dataDir) {
-    c.d.warn('The git scenes need a hub this recorder started (its repositories are on this machine)');
-    return undefined;
-  }
+/** The recorded hub's git repository for this ontology, or a warning if it isn't on this machine. */
+function repo(c: Ctx) {
+  if (c.dataDir) return path.join(c.dataDir, 'ontologies', c.ontology.slug);
+  c.d.warn('The git scenes need a hub this recorder started (its repositories are on this machine)');
+  return undefined;
+}
+
+/** Runs a shell command line exactly as written (read-only commands only) and returns its output. */
+function run(c: Ctx, cmd: string, cwd: string): string | undefined {
   try {
-    return execFileSync('git', ['-c', 'color.ui=never', '-c', 'core.pager=cat', ...args], { cwd: path.join(c.dataDir, 'ontologies', c.ontology.slug), encoding: 'utf8', timeout: 20_000 }).trimEnd();
+    // Not a terminal, so git uses no pager and no colour; NO_PROXY keeps curl on the local hub.
+    return execFileSync('sh', ['-c', cmd], { cwd, encoding: 'utf8', timeout: 20_000, env: { ...process.env, NO_PROXY: 'localhost,127.0.0.1', no_proxy: 'localhost,127.0.0.1' } }).trimEnd();
   } catch (e) {
-    c.d.warn(`git ${args.join(' ')} failed: ${(e as Error).message.split('\n')[0]}`);
+    c.d.warn(`${cmd} failed: ${(e as Error).message.split('\n')[0]}`);
     return undefined;
   }
 }
 
-/** Shows a git command and its real output in the terminal, keeping at most `max` lines. */
-async function shellGit(c: Ctx, shown: string, args: string[], max = 18) {
-  await c.term.shell(shown, { cwdLabel: `~/concord/${c.ontology.slug}` });
-  const out = git(c, args);
-  if (out === undefined) return undefined;
-  const lines = out.split('\n');
-  await c.term.print(lines.length > max ? [...lines.slice(0, max), '…'].join('\n') : out);
+/**
+ * Types a command into the terminal, runs exactly that command and prints all of its output.
+ * Long output is cut with `| head` in the command itself, so what's shown is what ran.
+ */
+async function shell(c: Ctx, cmd: string, cwd: string | undefined, cwdLabel: string) {
+  if (!cwd) return undefined;
+  await c.term.shell(cmd, { cwdLabel });
+  const out = run(c, cmd, cwd);
+  if (out !== undefined) await c.term.print(out);
   return out;
 }
+const inRepo = (c: Ctx, cmd: string) => shell(c, cmd, repo(c), `~/concord/${c.ontology.slug}`);
+/** Every format a release writes (releases.ts), each under releases/<version>/. */
+const RELEASE_FILES = ['ontology.ttl', 'ontology.jsonld', 'ontology.owl', 'ontology.nt', 'ontology.omn', 'ontology.linkml.yaml', 'ontology.shacl.ttl', 'ontology.shaclc', 'ontology.js', 'ontology.ts', 'index.html'];
 
 async function openTerminal(c: Ctx, disclosure: string) {
   await c.term.open(disclosure);
@@ -86,7 +95,7 @@ async function openTerminal(c: Ctx, disclosure: string) {
   await c.term.title(`${c.ontology.slug} — zsh`);
 }
 
-const cr = async (c: Ctx) => (story.crId ? ((await apiJson(c, `/api/change-requests/${story.crId}`)) as { status: string; number: number; classification?: { level?: string }; validation?: { ok?: boolean; valid?: boolean } } | undefined) : undefined);
+const cr = async (c: Ctx) => (story.crId ? ((await apiJson(c, `/api/change-requests/${story.crId}`)) as { status: string; number: number; classification?: { level?: string }; validation?: { passed?: boolean; competencyQuestions?: { satisfied: boolean }[] } } | undefined) : undefined);
 
 async function waitForStatus(c: Ctx, want: RegExp, ms = 20_000) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) {
@@ -179,7 +188,7 @@ export const featureActions: Record<string, Action> = {
     await c.d.clearHighlight();
     if (await c.d.click(c.d.page.getByRole('button', { name: 'Triples' }), 'the Triples view')) {
       await sleep(300);
-      await c.d.claimVisible(c.d.page.getByRole('tabpanel').getByText(/a volunteer can bring to a role/).first(), 'the triples show the new definition');
+      await c.d.claimVisible(c.d.page.getByRole('tabpanel').getByText(/for example a volunteer in their role/).first(), 'the triples show the new definition');
       await c.d.scroll(260, 1000);
     }
   },
@@ -187,7 +196,9 @@ export const featureActions: Record<string, Action> = {
     await c.d.scroll(-2000, 500);
     await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
     const v = (await cr(c))?.validation;
-    c.d.claim(v && (v.ok ?? v.valid) !== false, 'the change passes its checks');
+    c.d.claim(v?.passed === true, 'lint and the reasoner pass with the change applied');
+    // The overall verdict leaves competency questions out, so check them too.
+    c.d.claim(v && (v.competencyQuestions ?? []).length > 0 && v.competencyQuestions!.every((q) => q.satisfied), 'every competency question is answered with the change applied');
     await ringAround(c, /^Validation$/);
   },
   async 'f-show-decision'(c) {
@@ -218,18 +229,21 @@ export const featureActions: Record<string, Action> = {
   async 'f-git-log'(c) {
     await c.d.clearHighlight();
     await openTerminal(c, REAL_TERMINAL);
-    const out = await shellGit(c, 'git log --oneline --decorate --graph --all', ['log', '--oneline', '--decorate', '--graph', '--all', '-n', '14']);
+    const out = await inRepo(c, 'git log --oneline --decorate --graph --all | head -n 14');
     c.d.claim(out && story.crNumber && new RegExp(`#${story.crNumber} Edit the definition of .skill.`).test(out), 'the merged change is a commit named after its change request');
     c.d.claim(out && /tag: v\d+\.\d+\.\d+/.test(out), 'releases are tags');
-    story.sha = git(c, ['log', '-1', '--format=%h', '--grep', `^#${story.crNumber} `, 'main']);
+    // Found off camera, so the next shot can type its id.
+    const dir = repo(c);
+    if (dir && story.crNumber) story.sha = run(c, `git log -1 --format=%h --grep='^#${Number(story.crNumber)} ' main`, dir);
   },
   async 'f-git-show'(c) {
     if (!story.sha) return c.d.warn('No commit for the change request');
-    const out = await shellGit(c, `git show ${story.sha}`, ['show', '--format=commit %h%nAuthor: %an%nDate:   %ad%n%n    %s%n', '--date=format:%d %b %Y', story.sha], 26);
-    c.d.claim(out && /^\+.*a volunteer can bring to a role/m.test(out) && /^-.*a person can apply to a task/m.test(out), 'the commit is a Turtle diff of the new definition');
+    if (!/^[0-9a-f]{4,40}$/.test(story.sha)) return c.d.warn(`Unexpected commit id ${story.sha}`);
+    const out = await inRepo(c, `git show ${story.sha} | head -n 24`);
+    c.d.claim(out && /^\+.*for example a volunteer in their role/m.test(out) && /^-.*that a person can apply to a task\."/m.test(out), 'the commit is a Turtle diff of the new definition');
   },
   async 'f-git-forks'(c) {
-    const out = await shellGit(c, 'git branch --list', ['branch', '--list']);
+    const out = await inRepo(c, 'git branch --list');
     c.d.claim(out && /forks\//.test(out), 'forks are branches');
   },
 
@@ -258,10 +272,12 @@ export const featureActions: Record<string, Action> = {
   async 'f-git-tag'(c) {
     if (!story.release) return c.d.warn('No release was published');
     await openTerminal(c, REAL_TERMINAL);
-    const log = await shellGit(c, 'git log --oneline --decorate -n 4', ['log', '--oneline', '--decorate', '-n', '4', 'main']);
+    if (!/^\d+\.\d+\.\d+$/.test(story.release)) return c.d.warn(`Unexpected release version ${story.release}`);
+    const log = await inRepo(c, 'git log --oneline --decorate -n 4');
     c.d.claim(log?.includes(`tag: v${story.release}`), `the release is tagged v${story.release}`);
-    const files = await shellGit(c, `git show --stat --format=%s v${story.release}`, ['show', '--stat=100', '--format=%s', `v${story.release}`], 22);
-    c.d.claim(files?.includes(`releases/${story.release}/ontology.ttl`), `every format is written under releases/${story.release}`);
+    const files = await inRepo(c, `git ls-tree --name-only v${story.release} releases/${story.release}/`);
+    const missing = RELEASE_FILES.filter((f) => !files?.split('\n').includes(`releases/${story.release}/${f}`));
+    c.d.claim(files && !missing.length, `every format is in the release's folder (missing: ${missing.join(', ') || 'none'})`);
   },
 
   /* ---------------------------- public page ---------------------------- */
@@ -274,13 +290,15 @@ export const featureActions: Record<string, Action> = {
     await c.d.clearHighlight();
     await openTerminal(c, REAL_CURL);
     const url = `${c.hub}/def/${c.ontology.slug}`;
-    await c.term.shell(`curl -H "Accept: text/turtle" ${c.shown(url)}`, { cwdLabel: '~' });
-    const res = await c.api.get(url, { headers: { accept: 'text/turtle' } });
-    const body = await res.text();
-    c.d.claim(res.ok() && /text\/turtle/.test(res.headers()['content-type'] ?? '') && /@prefix/.test(body), 'the address answers with Turtle when asked for it');
-    const lines = body.split('\n');
-    await c.term.print(c.shown([...lines.slice(0, 16), '…'].join('\n')));
-    if (story.release) c.d.claim(body.includes(`/${story.release}>`), `the Turtle is version ${story.release}`);
+    if (!/^https?:\/\/[\w.:-]+\/def\/[\w-]+$/.test(url)) return c.d.warn(`Unexpected address ${url}`);
+    const type = await shell(c, `curl -sS -o /dev/null -w '%{http_code} %{content_type}\\n' -H "Accept: text/turtle" ${url}`, process.cwd(), '~');
+    c.d.claim(type && /^200 text\/turtle/.test(type), 'the address answers with Turtle when asked for it');
+    const out = await shell(c, `curl -sS -H "Accept: text/turtle" ${url} | head -n 14`, process.cwd(), '~');
+    c.d.claim(out && /@prefix/.test(out), 'the body is Turtle');
+    if (story.release) {
+      const full = run(c, `curl -sS -H "Accept: text/turtle" ${url}`, process.cwd());
+      c.d.claim(full?.includes(`/${story.release}>`), `the Turtle is version ${story.release}`);
+    }
   },
 
   /* ----------------------------- check data ----------------------------- */

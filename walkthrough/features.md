@@ -33,7 +33,7 @@ Every change is checked against the whole standard: strict OWL lint, a reasoner,
 The reasoner is sparq, compiled to WebAssembly, so you can run it again right here in your browser. Every class is satisfiable, and it agrees with the server.
 
 [do: f-show-fair]
-The FAIR checks follow published tests, so you can see exactly why a standard is findable, accessible, interoperable and reusable.
+The FAIR checks follow published tests, so you can see which ones pass, and which couldn't be run here.
 
 ## Seeing the model {#diagram}
 
@@ -43,10 +43,10 @@ Browse also draws the model as a diagram, showing what data each class carries, 
 ## Editing a term {#edit}
 
 [do: f-open-term]
-Now I'm Tom, one of the editors. This is the term "skill". Its definition talks about a person, but in this standard it's volunteers who bring skills to roles.
+Now I'm Tom, one of the editors. This is the term "skill". Its definition is right, but it doesn't say how a skill shows up in volunteering.
 
 [do: f-edit-term]
-So I'll fix it right here, on the term's page. {@f-type-definition} I rewrite the definition so it talks about volunteers and roles. Then I {@f-confirm-meaning} confirm it still means the same thing, and say why.
+So I'll fix it right here, on the term's page. {@f-type-definition} I add an example to the definition, a volunteer in their role. Then I {@f-confirm-meaning} confirm it still means the same thing, and say why.
 
 [do: f-propose]
 Propose change. The term itself doesn't change yet. My edit becomes a change request, for others to review.
@@ -54,7 +54,7 @@ Propose change. The term itself doesn't change yet. My edit becomes a change req
 ## Review {#review}
 
 [do: f-open-change]
-Concord has already classified it as a patch: clearer wording that doesn't change what the term means.
+Concord has already classified it as a patch, because it only changes wording, and Tom has confirmed the meaning stays the same.
 
 [do: f-show-triples]
 The triples view shows exactly which statement is removed and which is added.
@@ -93,7 +93,7 @@ Publish.
 ## Tagged in git {#tag requires=gitRepo}
 
 [do: f-git-tag]
-Back in git, the release is one more commit and a tag. Every format is written under its version's folder, so each version's address keeps working for good.
+Back in git, the release is one more commit and a tag, with a file for every format in that version's own folder.
 
 ## The standard's own address {#public}
 
@@ -101,7 +101,7 @@ Back in git, the release is one more commit and a tag. Every format is written u
 Outside Concord, the standard lives at its own address. This is the public page people find there. It already shows the new version, with downloads in every format.
 
 [do: f-curl]
-And the same address serves machines. Ask for Turtle, and Turtle is what you get. That's content negotiation, one of the FAIR checks we saw earlier.
+And the same address serves machines. Ask for Turtle, and Turtle is what you get. That's content negotiation.
 
 ## Checking data {#check-data}
 
@@ -129,6 +129,6 @@ For files in other formats, or a check against a particular release, Validate da
 ## Wrapping up {#outro}
 
 [do: f-outro-card]
-That's one change, from a term's page to a tagged release, checked, reviewed, and recorded in git at every step. Thanks for watching.
+That's one change, from a term's page to a tagged release: checked and reviewed in Concord, with the merged change and the release recorded in git. Thanks for watching.
 
 [pause: 1.5]
