@@ -37,7 +37,7 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 ## Adding keys later
 
-Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh NAME` adds or changes one; the server applies it within five minutes.
+Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh NAME` adds or changes one; the server applies it within five minutes. It asks for the value without showing it (or reads it from a pipe, e.g. `pbpaste | ./deploy/azure/set-key.sh NAME`) and never puts it in a command line: `az` reads it from a private temporary file that is deleted afterwards. `deploy/azure/set-key.test.sh` checks this in CI.
 
 | Key | What it turns on |
 | --- | --- |
