@@ -1260,7 +1260,9 @@ describe('autopilot', () => {
       const termOf = async (id: string) => ((await getCR(id)).ops[0] as { localName: string }).localName;
       const dbFile = () => path.join(config.dataDir, 'concord.sqlite');
       const repo = async () => path.join(config.dataDir, 'ontologies', (await getProject(demoId)).slug);
-      const branch = async () => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: await repo(), encoding: 'utf8' }).trim();
+      // Where git's branch is (ONTOLOGY_STORE=db has no separate copy to fall behind: the draft is the branch).
+      const onGit = config.ontologyStore === 'git';
+      const branch = async () => (onGit ? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: await repo(), encoding: 'utf8' }).trim() : await ontologyStore.head(await getProject(demoId)));
       const src = new URL('../src/services/', import.meta.url).href;
 
       /**
@@ -1359,7 +1361,8 @@ describe('autopilot', () => {
         expect(text).toContain(await termOf(b));
       });
 
-      it('a merge killed after it was recorded is finished in git by the next read (or restart)', async () => {
+      // Only git has anything left to finish after the record (the database store's merge ends with it).
+      it.runIf(onGit)('a merge killed after it was recorded is finished in git by the next read (or restart)', async () => {
         const id = await approvedCR('Autopilot and a merge killed after recording');
         const project = await getProject(demoId);
         const head = await ontologyStore.head(project);

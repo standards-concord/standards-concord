@@ -337,24 +337,31 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // The requirements document is published with the version (it may need the model, so not in the transaction).
   if (doc) await markPublished(doc, r);
 
-  // Public ontologies are persisted to GitHub on release, when configured.
-  // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
-  // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
-  if (project.github && config.github.publishToken && (await anyHeld(project) || !await historyApproved(project))) {
-    console.log(`[release] not pushing ${project.slug} to GitHub: ${await anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
-  } else if (project.github && config.github.publishToken) {
-    try {
-      const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
-      await ontologyStore.push(project, remote);
-      const githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
-      // Only the link is added, to the release as stored now.
-      Object.assign(r, await transaction(async () => await save({ ...await mustGet<Release>('releases', r.id), githubUrl })));
-    } catch (err) {
-      console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
-    }
-  }
+  await publishToGitHub(project, r);
   await logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return Object.assign(stale, r);
+}
+
+/**
+ * Public ontologies are persisted to GitHub on release, when configured.
+ * Publishing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
+ * approval, and an ontology from before approvals is never published: its history holds what nobody approved.
+ */
+async function publishToGitHub(project: OntologyProject, r: Release): Promise<void> {
+  const token = config.github.publishToken;
+  if (!project.github || !token) return;
+  if ((await anyHeld(project)) || !(await historyApproved(project))) {
+    console.log(`[release] not pushing ${project.slug} to GitHub: ${(await anyHeld(project)) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
+    return;
+  }
+  try {
+    await ontologyStore.publish(project, { repo: project.github.repo, token });
+    const githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
+    // Only the link is added, to the release as stored now.
+    Object.assign(r, await transaction(async () => await save({ ...(await mustGet<Release>('releases', r.id)), githubUrl })));
+  } catch (err) {
+    console.warn(`[release] GitHub push failed: ${(err as Error).message.replaceAll(token, '***')}`);
+  }
 }
 
 /** Periodic: close votes; auto-draft releases when the policy asks for it. */

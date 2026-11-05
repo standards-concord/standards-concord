@@ -15,6 +15,7 @@ import { triageBudget } from '../src/services/budget.js';
 import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
+import * as gitdb from '../src/services/gitdb.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo, step } from '../src/services/simulation.js';
 
@@ -63,10 +64,26 @@ const addClass = (localName: string, label: string, extra: Partial<Extract<Chang
   ...extra,
 });
 
-/** Where git has a fork: its branch, and the commits still pinned (not yet on the branch). */
-function forkRefs(slug: string) {
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: nodePath.join(config.dataDir, 'ontologies', 'volunteering'), encoding: 'utf8' }).trim();
-  return { branch: git('rev-parse', `refs/heads/forks/${slug}`), pins: git('for-each-ref', '--format=%(objectname)', `refs/concord/fork-pins/${slug}/`).split('\n').filter(Boolean) };
+/**
+ * The demo ontology's refs and history, from its git repository or (ONTOLOGY_STORE=db) the database. Only the git
+ * store has pins: the database store moves a fork's branch with its record, so none is ever needed.
+ */
+const onGit = config.ontologyStore === 'git';
+const git = (...args: string[]) => execFileSync('git', args, { cwd: nodePath.join(config.dataDir, 'ontologies', 'volunteering'), encoding: 'utf8' }).trim();
+const repoRefs = {
+  get: async (ref: string) => (onGit ? git('rev-parse', ref) : await gitdb.getRef('volunteering', ref)),
+  set: async (ref: string, sha: string) => (onGit ? void git('update-ref', ref, sha) : await gitdb.setRef('volunteering', ref, sha)),
+  names: async (prefix: string) => (onGit ? git('for-each-ref', '--format=%(refname)', prefix) : (await gitdb.listRefs('volunteering', prefix)).map((r) => r.name).join('\n')),
+  parent: async (sha: string) => (onGit ? git('rev-parse', `${sha}^`) : (await gitdb.readCommit(sha)).parents[0]),
+  firstParents: async (sha: string) => (onGit ? git('rev-list', '--first-parent', sha).split('\n') : (await gitdb.firstParentLog(sha)).map((c) => c.sha)),
+};
+
+/** Where the store has a fork: its branch, and the commits still pinned (not yet on the branch). */
+async function forkRefs(slug: string) {
+  return {
+    branch: await repoRefs.get(`refs/heads/forks/${slug}`),
+    pins: onGit ? git('for-each-ref', '--format=%(objectname)', `refs/concord/fork-pins/${slug}/`).split('\n').filter(Boolean) : [],
+  };
 }
 const racer = { name: 'Racer', email: 'r@example.org' } as User;
 
@@ -265,7 +282,7 @@ describe('second review', () => {
     const now = (await get<OntologyFork>('forks', stale.id))!;
     expect(now.revision).toBe(1);
     expect(now.ops).toHaveLength(1);
-    expect(now.head).toBe(forkRefs(now.slug).branch);
+    expect(now.head).toBe((await forkRefs(now.slug)).branch);
   });
 
   it('an edit prepared before the fork changed elsewhere is refused, in git and in the database', async () => {
@@ -279,7 +296,7 @@ describe('second review', () => {
     await expect(forTests.commitAndSave(p, structuredClone(stale), { seq: stale.seq }, g, 'Lost edit', racer)).rejects.toThrow(/changed/);
     expect((await get<OntologyFork>('forks', stale.id))!.head).toBe(fresh.head);
     // Git agrees: the branch has the other process's commit, and the refused commit isn't held.
-    expect(forkRefs(stale.slug)).toEqual({ branch: fresh.head, pins: [] });
+    expect(await forkRefs(stale.slug)).toEqual({ branch: fresh.head, pins: [] });
     // And a database record changed elsewhere (closed, here) is not overwritten.
     const path2 = await newFork('Closed elsewhere');
     const rec = (await get<OntologyFork>('forks', (await fork(path2)).id))!;
@@ -295,7 +312,7 @@ describe('second review', () => {
     expect((await dev.post(`${path}/close`)).status).toBe(200);
     const g = await ontologyStore.graphAt(p, stale.head);
     await expect(forTests.commitAndSave(p, stale, { seq: stale.seq }, g, 'Late edit', racer)).rejects.toThrow(/changed/);
-    expect(forkRefs(stale.slug).pins).toEqual([]);
+    expect((await forkRefs(stale.slug)).pins).toEqual([]);
     expect((await dev.post(`${path}/close`)).status).toBe(409);
     expect((await fork(path)).status).toBe('closed');
   });
@@ -427,7 +444,7 @@ describe('third review', () => {
     const graph = await ontologyStore.graphAt(p, f.head);
     await expect(forTests.commitAndSave(p, f, snapshot, graph, 'Racing edit', racer)).rejects.toThrow(/changed/);
     expect(f.head).toBe(before);
-    expect(forkRefs(f.slug)).toEqual({ branch: before, pins: [] });
+    expect(await forkRefs(f.slug)).toEqual({ branch: before, pins: [] });
     expect((await get<OntologyFork>('forks', f.id))!.head).toBe(before);
     expect((await get<OntologyFork>('forks', f.id))!.status).toBe('closed');
   });
@@ -983,7 +1000,6 @@ describe('saves that race a slow step', () => {
 describe('forks on the database-first store', () => {
   // Since #28 the database says which commit is the draft; forks work the same way: the fork's record names its
   // head, and git (the fork's branch, and pins for commits not yet on it) only holds the commits.
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: nodePath.join(config.dataDir, 'ontologies', 'volunteering'), encoding: 'utf8' }).trim();
   const record = async (path: string) => (await get<OntologyFork>('forks', (await reader.get(path)).body.id))!;
 
   it('a fork read while its branch lags behind its record shows the record, and the next edit catches the branch up', async () => {
@@ -991,21 +1007,22 @@ describe('forks on the database-first store', () => {
     await dev.post(`${path}/edits`).send({ ops: [addClass('BeforeLag', 'before lag')] });
     const f = await record(path);
     // A server that stopped after saving the record but before moving the branch: the branch is a commit behind, the pin holds the head.
-    const behind = git('rev-parse', `${f.head}^`);
-    git('update-ref', `refs/concord/fork-pins/${f.slug}/${f.head}`, f.head);
-    git('update-ref', `refs/heads/forks/${f.slug}`, behind, f.head);
+    // (The database store moves both together, but a fork imported from git may start out like this.)
+    const behind = (await repoRefs.parent(f.head))!;
+    if (onGit) git('update-ref', `refs/concord/fork-pins/${f.slug}/${f.head}`, f.head);
+    await repoRefs.set(`refs/heads/forks/${f.slug}`, behind);
     expect((await request(app).get(`/def/volunteering/forks/${f.slug}.ttl`)).text).toMatch(/BeforeLag/);
     expect((await reader.get(path)).body.terms.map((t: { curie: string }) => t.curie)).toContain('vol:BeforeLag');
     const res = await dev.post(`${path}/edits`).send({ ops: [addClass('AfterLag', 'after lag')] });
     expect(res.status).toBe(200);
     const now = await record(path);
-    expect(forkRefs(f.slug)).toEqual({ branch: now.head, pins: [] });
-    expect(git('rev-list', '--first-parent', now.head)).toContain(f.head);
+    expect(await forkRefs(f.slug)).toEqual({ branch: now.head, pins: [] });
+    expect(await repoRefs.firstParents(now.head)).toContain(f.head);
   });
 
   it('a name whose branch was left behind by a fork that was never saved is not reused', async () => {
     const taken = `left-behind-${Date.now()}`;
-    git('update-ref', `refs/heads/forks/${taken}`, git('rev-parse', 'HEAD'));
+    await repoRefs.set(`refs/heads/forks/${taken}`, await ontologyStore.head(vol));
     const res = await dev.post(API).send({ name: taken });
     expect(res.status).toBe(201);
     expect(res.body.slug).toBe(`${taken}-2`);
@@ -1013,13 +1030,14 @@ describe('forks on the database-first store', () => {
 
   it('a fork whose record cannot be saved leaves no branch behind', async () => {
     const p = (await findProject('volunteering'))!;
-    const before = git('for-each-ref', '--format=%(refname)', 'refs/heads/forks/');
+    const before = await repoRefs.names('refs/heads/forks/');
     await expect(
       ontologyStore.commitFork(p, 'never-saved', await ontologyStore.working(p), 'Fork that fails', racer, { parent: await ontologyStore.head(p), create: true }, async () => {
         throw new HttpError(409, 'refused');
       }),
     ).rejects.toThrow(/refused/);
-    expect(git('for-each-ref', '--format=%(refname)', 'refs/heads/forks/')).toBe(before);
-    expect(ontologyStore.hasForkBranch(p, 'never-saved')).toBe(false);
+    expect(await repoRefs.names('refs/heads/forks/')).toBe(before);
+    // (This used to compare the promise itself, which always passed: hasForkBranch became async with the database store.)
+    expect(await ontologyStore.hasForkBranch(p, 'never-saved')).toBe(false);
   });
 });
