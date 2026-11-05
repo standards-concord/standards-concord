@@ -28,6 +28,7 @@ export type Collection =
   | 'oauthGrants'
   | 'oauthTokens'
   | 'feedback'
+  | 'feedbackPublications'
   | 'activity'
   | 'kv';
 

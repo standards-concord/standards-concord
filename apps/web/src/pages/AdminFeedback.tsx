@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from 'react';
 import type { FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
 import { Download, Mic, ListChecks } from 'lucide-react';
-import { api } from '../api';
+import { api, type PublicationNeedingAdmin } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { download, formatDate } from '../lib/format';
 import { Page } from '../components/Shell';
@@ -11,6 +11,130 @@ import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Lo
 function answerText(v: FeedbackSubmission['answers'][string] | undefined) {
   if (v === undefined) return '';
   return Array.isArray(v) ? v.join('; ') : String(v);
+}
+
+/** The tester's opt-in public summary on its feedback row: its issue, or where it is in the queue. */
+function PublicationCell({ p }: { p: NonNullable<FeedbackSubmission['publication']> }) {
+  return (
+    <span className="block text-xs" title={p.summary}>
+      {p.issue ? (
+        <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+          Public: issue #{p.issue.number}
+        </a>
+      ) : (
+        <span className="text-muted">
+          Public summary: {p.state}
+          {p.adminNeeded || p.state === 'needs-admin' ? ' (see “Public summaries waiting for you”)' : ''}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** One summary waiting for a decision: say which issue is ours, or that none is. */
+const KIND_LABEL: Record<PublicationNeedingAdmin['kind'], string> = {
+  'post-unknown': 'Post with unknown outcome',
+  withdrawal: 'Withdrawal',
+  'comment-unknown': 'Triage comment with unknown outcome',
+  'triage-parked': 'Out of the triage queue',
+};
+
+/** A number typed by an administrator: an issue number or a comment id. */
+function NumberField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <label className="flex items-center gap-1 text-xs">
+      {label}
+      <input className="w-28 rounded border border-border bg-transparent px-1 py-0.5" inputMode="numeric" value={value} onChange={(e) => onChange(e.target.value.replace(/\D/g, ''))} />
+    </label>
+  );
+}
+
+/** One summary waiting for a decision, with the choices that apply to it. */
+function PublicationDecision({ p, onDone }: { p: PublicationNeedingAdmin; onDone: () => void }) {
+  const [num, setNum] = useState('');
+  const act = useAction(async (body: Parameters<typeof api.resolveFeedbackPublication>[2]) => {
+    await api.resolveFeedbackPublication(p.id, p.ref, body);
+    onDone();
+  });
+  const n = Number(num);
+  const btn = (label: string, body: Parameters<typeof api.resolveFeedbackPublication>[2], disabled = false) => (
+    <Button size="sm" variant="ghost" disabled={disabled} loading={act.pending} onClick={() => void act.run(body)}>
+      {label}
+    </Button>
+  );
+  return (
+    <li className="space-y-2 border-t border-border p-4 first:border-t-0" aria-label={`Public summary: ${p.summary}`}>
+      <p className="text-sm">
+        <Badge>{KIND_LABEL[p.kind]}</Badge> {p.feedbackDeleted && <Badge>Feedback deleted</Badge>}
+      </p>
+      <blockquote className="border-l-2 border-border pl-3 text-sm">{p.summary}</blockquote>
+      {p.reason && <p className="text-xs text-muted">{p.reason}</p>}
+      <p className="text-xs text-muted">
+        {p.issue ? (
+          <a className="text-accent underline" href={p.issue.url} target="_blank" rel="noreferrer">
+            Issue #{p.issue.number}
+          </a>
+        ) : (
+          <>
+            Its marker on GitHub is <code>{p.marker}</code> in {p.repo}.
+          </>
+        )}
+      </p>
+      {(p.kind === 'post-unknown' || p.kind === 'withdrawal') && !p.issue && (
+        <div className="flex flex-wrap items-center gap-2">
+          {p.candidates.map((c) => (
+            <span key={c.number} className="flex items-center gap-1">
+              <a className="text-sm text-accent underline" href={c.url} target="_blank" rel="noreferrer">
+                Issue #{c.number}
+              </a>
+              {btn(`This is it (#${c.number})`, { action: 'adopt', issue: c.number })}
+            </span>
+          ))}
+          {!p.candidates.length && <span className="text-xs text-muted">No likely issues were found.</span>}
+          <NumberField label="Issue number" value={num} onChange={setNum} />
+          {btn('Use this issue', { action: 'adopt', issue: n }, !(n > 0))}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {p.kind === 'post-unknown' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('None is ours: post again', { action: 'repost' })}
+          </>
+        )}
+        {p.kind === 'withdrawal' && (
+          <>
+            {btn('Check GitHub again', { action: 'check' })}
+            {btn('Confirm nothing is left on GitHub', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'comment-unknown' && (
+          <>
+            <NumberField label="Comment id" value={num} onChange={setNum} />
+            {btn('Record this comment', { action: 'comment', comment: n }, !(n > 0))}
+            {btn('Confirm there is no triage comment', { action: 'confirm' })}
+          </>
+        )}
+        {p.kind === 'triage-parked' && btn('Put back in the triage queue', { action: 'check' })}
+      </div>
+      <InlineError error={act.error} />
+    </li>
+  );
+}
+
+function PublicationsNeedingAdmin() {
+  const list = useAsync(() => api.publicationsNeedingAdmin(), []);
+  if (!list.data?.length) return null;
+  return (
+    <Card className="mb-6">
+      <CardHeader title="Public summaries waiting for you" />
+      <ul>
+        {list.data.map((p) => (
+          <PublicationDecision key={p.id} p={p} onDone={list.reload} />
+        ))}
+      </ul>
+    </Card>
+  );
 }
 
 /** Single-series horizontal bars: one hue, counts as direct labels, hover title per bar. */
@@ -104,6 +228,7 @@ export function AdminFeedbackPage() {
         }
       />
       <InlineError error={sum.error} />
+      <PublicationsNeedingAdmin />
       {summary && (
         <Card className="mb-6">
           <CardHeader icon={ListChecks} title="Summary" />
@@ -172,7 +297,10 @@ export function AdminFeedbackPage() {
                           {s.usedVoice && <Mic className="size-3.5 text-muted" aria-label="Used voice" />}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5">{Object.keys(s.answers).length}</td>
+                      <td className="px-4 py-2.5">
+                        {Object.keys(s.answers).length}
+                        {s.publication && <PublicationCell p={s.publication} />}
+                      </td>
                       <td className="px-4 py-2.5">
                         <div className="flex flex-wrap gap-1">
                           {(s.themes ?? []).map((t) => (
