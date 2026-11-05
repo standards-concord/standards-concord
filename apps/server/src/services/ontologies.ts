@@ -164,12 +164,16 @@ export async function workingValidation(p: OntologyProject) {
   return validateGraph(`${p.slug}@${ontologyStore.head(p)}:${cqs.length}`, graph, cqs);
 }
 
-export async function summary(p: OntologyProject, withHealth = true): Promise<OntologySummary> {
-  const graph = await ontologyStore.working(p);
-  const view = graph.view();
+/**
+ * An ontology with its counts and health. `withGraph: false` leaves out
+ * everything read from the working draft (its counts and health) without
+ * reading it: for callers who mustn't see a draft that waits for approval.
+ */
+export async function summary(p: OntologyProject, { withHealth = true, withGraph = true }: { withHealth?: boolean; withGraph?: boolean } = {}): Promise<OntologySummary> {
+  const view = withGraph ? (await ontologyStore.working(p)).view() : undefined;
   const crs = list<ChangeRequest>('changeRequests', p.id);
   let health: OntologySummary['health'];
-  if (withHealth) {
+  if (withGraph && withHealth) {
     try {
       const v = await workingValidation(p);
       health = {
@@ -189,9 +193,11 @@ export async function summary(p: OntologyProject, withHealth = true): Promise<On
   return {
     ...p,
     stats: {
-      classes: view.classes.length,
-      properties: view.objectProperties.length + view.datatypeProperties.length,
-      individuals: view.individuals.length,
+      ...(view && {
+        classes: view.classes.length,
+        properties: view.objectProperties.length + view.datatypeProperties.length,
+        individuals: view.individuals.length,
+      }),
       useCases: list<UseCase>('useCases', p.id).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: list<Release>('releases', p.id).filter((r) => r.status === 'published').length,

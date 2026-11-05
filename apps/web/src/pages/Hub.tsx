@@ -28,9 +28,10 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       governanceTemplate: form.governanceTemplate || undefined,
       creditCreator: form.creditCreator,
     });
-    await ontologies.reload();
     onClose();
     nav(`/o/${o.id}`);
+    // In the background: the list counts every ontology, and the new one's first validation can be slow.
+    void ontologies.reload();
   });
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>

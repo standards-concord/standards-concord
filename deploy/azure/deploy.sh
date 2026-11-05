@@ -13,7 +13,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 RESOURCE_GROUP=${RESOURCE_GROUP:-concord}
 LOCATION=${LOCATION:-uksouth}
 VM_SIZE=${VM_SIZE:-Standard_B2ats_v2}
-IMAGE=${IMAGE:-ghcr.io/jeswr/standards-concord:latest}
+IMAGE=${IMAGE:-ghcr.io/standards-concord/standards-concord:latest}
 ADMIN_EMAILS=${ADMIN_EMAILS:-}
 VM=concord
 
