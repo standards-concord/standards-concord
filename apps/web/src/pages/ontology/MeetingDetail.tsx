@@ -358,7 +358,7 @@ export function MeetingDetailPage() {
 function Section({ title, icon: Icon, children }: { title: string; icon?: typeof Bot; children: ReactNode }) {
   return (
     <div>
-      <h4 className="mb-2 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-muted uppercase">
+      <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
         {Icon && <Icon className="size-3.5" />}
         {title}
       </h4>

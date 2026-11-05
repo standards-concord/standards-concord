@@ -154,7 +154,7 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
-        <div id="class-tree-label" className="text-xs font-semibold tracking-wide text-muted uppercase">
+        <div id="class-tree-label" className="text-sm font-semibold">
           Classes ({model.classes.size})
         </div>
         <div className="flex">
