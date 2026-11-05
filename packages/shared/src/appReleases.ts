@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.16.0',
+    version: '0.17.0',
     date: '2026-11-05',
     title: 'A privacy policy',
     pr: 63,
@@ -67,6 +67,24 @@ export const APP_RELEASES: AppRelease[] = [
         roles: [],
         to: '/privacy',
         ask: 'Does the privacy policy tell you what you’d want to know before signing in?',
+      },
+    ],
+  },
+  {
+    version: '0.16.0',
+    date: '2026-11-05',
+    title: 'Share a public summary of your feedback',
+    pr: 44,
+    changes: [
+      {
+        id: 'feedback-public-summary',
+        type: 'feat',
+        title: 'Optionally post a short public summary of your feedback',
+        detail:
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+        roles: [],
+        to: '/feedback',
+        ask: 'Was it clear what would be made public, and would you tick the box?',
       },
     ],
   },
