@@ -5,6 +5,7 @@ import { loginHref, Page } from '../components/Shell';
 import { ConnectAgent } from '../components/ConnectAgent';
 import { ConnectedAgents, PersonalTokens } from '../components/AgentAccess';
 import { Card, PageHeader } from '../components/ui';
+import { scrollBehavior } from '../lib/motion';
 import { useSession } from '../lib/session';
 
 const SECTION_IDS = ['setup', 'agents', 'tokens'];
@@ -18,7 +19,7 @@ function useHashFocus(ready: boolean) {
     const t = setTimeout(() => {
       const el = document.getElementById(target);
       if (!el) return;
-      el.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      el.scrollIntoView({ behavior: scrollBehavior() });
       el.focus({ preventScroll: true });
     }, 100);
     return () => clearTimeout(t);

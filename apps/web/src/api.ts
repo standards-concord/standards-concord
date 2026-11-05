@@ -65,7 +65,7 @@ const OFFLINE_MESSAGE =
 
 type Json = Record<string, unknown> | unknown[] | undefined;
 
-async function request<T>(method: string, path: string, body?: Json | BodyInit, opts: { raw?: boolean; headers?: Record<string, string> } = {}): Promise<T> {
+async function request<T>(method: string, path: string, body?: Json | BodyInit, opts: { raw?: boolean; headers?: Record<string, string>; onHeaders?: (h: Headers) => void } = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: opts.raw ? '*/*' : 'application/json', ...opts.headers };
   let payload: BodyInit | undefined;
   if (body !== undefined) {
@@ -103,6 +103,7 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
     }
     throw new ApiError(res.status, message, parsed);
   }
+  opts.onHeaders?.(res.headers);
   if (opts.raw) return (await res.text()) as T;
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -222,6 +223,15 @@ export const api = {
     `/api/ontologies/${e(id)}/source${qs({ format, ref, download: download ? 1 : undefined })}`,
   source: (id: string, format: OutputFormat, ref = 'working') =>
     request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, { raw: true }),
+  /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
+  workingTurtle: async (id: string) => {
+    let revision: string | undefined;
+    const turtle = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format: 'turtle', ref: 'working' })}`, undefined, {
+      raw: true,
+      onHeaders: (h) => (revision = h.get('X-Concord-Revision') ?? undefined),
+    });
+    return { turtle, revision };
+  },
   validation: (id: string, ref = 'working') => get<ValidationReport>(`/api/ontologies/${e(id)}/validation${qs({ ref })}`),
   sparql: (id: string, query: string) => post<SparqlResult>(`/api/ontologies/${e(id)}/sparql`, { query }),
 

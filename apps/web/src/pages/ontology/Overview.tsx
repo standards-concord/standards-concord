@@ -245,6 +245,7 @@ export function OverviewTab() {
                 label={label}
                 headingLevel={3}
                 openLintKey={healthKey}
+                checkInBrowser={() => api.workingTurtle(id)}
                 lintNote={
                   <>
                     Lint runs again on every{' '}

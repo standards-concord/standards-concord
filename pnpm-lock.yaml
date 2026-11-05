@@ -169,8 +169,8 @@ importers:
         specifier: ^1.2.5
         version: 1.2.5
       '@sparq-org/sparq':
-        specifier: 0.1.5
-        version: 0.1.5
+        specifier: 0.1.8
+        version: 0.1.8
       cytoscape:
         specifier: ^3.34.3
         version: 3.34.3
@@ -221,8 +221,8 @@ importers:
         specifier: 0.34.0
         version: 0.34.0
       '@sparq-org/sparq':
-        specifier: 0.1.5
-        version: 0.1.5
+        specifier: 0.1.8
+        version: 0.1.8
       '@theodi/shacl-converter':
         specifier: 1.0.5
         version: 1.0.5
@@ -1848,8 +1848,8 @@ packages:
     resolution: {integrity: sha512-UW4OTIsOtJ5KSXo2Tchi4lhZqu+tlHrOAs4nNti7CrtB53kAZl3/hyrTi6HkMihxdbDM6m2Zc3swc/ZewEe1xw==}
     engines: {node: '>=v12.22.12'}
 
-  '@sparq-org/sparq@0.1.5':
-    resolution: {integrity: sha512-YJ3awKa3OuNHJ7p5SpKoDch9uVyKP64YHEP8Bq6mt712rpjV2Xq6SlK2smOyzw9HA+bVOOl/InxYy48x6JWu5w==}
+  '@sparq-org/sparq@0.1.8':
+    resolution: {integrity: sha512-Kts/lAqxAxX2s0CGpW6/L9asqmwpedyIvMZRtbDPdlEEdEYE7nl6U9+8ByHvOTpEx1HWX1Ecjw1Lhl5ypKnhLw==}
     engines: {node: '>=18'}
 
   '@stablelib/base64@1.0.1':
@@ -4946,7 +4946,7 @@ snapshots:
     dependencies:
       xmlchars: 2.2.0
 
-  '@sparq-org/sparq@0.1.5':
+  '@sparq-org/sparq@0.1.8':
     dependencies:
       fzstd: 0.1.1
 

@@ -21,7 +21,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
 | `/settings` (Profile) | Profile, ways to sign in, WebID and pod folded away; old `#agents`, `#tokens`, `#appearance` links redirect to /connect and /appearance | ✅ | account, app, connect |
 | `/admin/feedback` | Read and summarise tester feedback (platform admins only); an admin signed in with their WebID reads testers' feedback straight from their pods as that WebID (per browser session; ends on sign-out) | 🟡 | security (refusal for non-admins); solid-signin (the pod reader, with a real Community Solid Server, and a non-admin WebID refused). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests, including the list of public summaries waiting for a decision and its actions (pick the issue, check again, post again, confirm a withdrawal) in `apps/server/test/feedbackIssues.test.ts`. The triage routine's endpoints are API-only and covered there too |
-| `/o/:id` overview | Lifecycle bubble, health chip, lint, FAIR and competency questions, members, policy link, recent activity; `#health` focus while loading; popups on very short screens | ✅ | ia, disclosure, alignment, roles |
+| `/o/:id` overview | Lifecycle bubble, health chip, lint, reasoner (and its in-browser re-check), FAIR and competency questions, members, policy link, recent activity; `#health` focus while loading; popups on very short screens | ✅ | ia, disclosure, alignment, reasoner, roles |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
@@ -76,6 +76,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Flow | Status | Specs |
 | --- | --- | --- |
 | Plain-language request → drafted edits → submit → classified and validated | ✅ | change-requests |
+| OWL 2 DL reasoning with sparq: working-draft health (the health popover for no verdict, consistency only, unsatisfiable classes and inconsistency), a change that makes a class unsatisfiable, rerunning the check in the browser (in a Web Worker, compared only at the same revision), signed-out visitors refused | ✅ | reasoner |
 | Approvals from the right roles; author's own doesn't count; review period; auto-merge | ✅ | change-requests |
 | Request changes → needs work → AI revision → back in review (earlier approvals reset) | ✅ | change-requests |
 | Comments show once in the discussion | ✅ | change-requests |
@@ -109,8 +110,10 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #28 | Inline term editing in Browse | term-edit.spec.ts |
 | #34 | OAuth client-auth downgrade refusal, unverified app label | oauth.spec.ts, connect.spec.ts |
 | #35 | Privacy redaction in everything published | public-page.spec.ts |
+| #37 | One place for agents, Appearance page, role-based views | roles.spec.ts |
 | #38 | Chat-to-query beside the SPARQL editor | query.spec.ts |
 | #39 | App versions, tester record in the pod, what's changed | tester-versions.spec.ts |
+| #51 | OWL 2 DL reasoning with sparq (no HermiT), in-browser re-check | reasoner.spec.ts |
 
 ## Known gaps, in priority order
 

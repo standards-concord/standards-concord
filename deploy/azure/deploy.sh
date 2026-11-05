@@ -1,6 +1,6 @@
 #!/bin/bash
 # Launches the Concord backend on Azure: one small Ubuntu VM running the API, MCP endpoint,
-# governance clock, live meeting streams, HermiT and a Solid server behind Caddy (HTTPS).
+# governance clock, live meeting streams and a Solid server behind Caddy (HTTPS).
 # Run after `az login`. Safe to re-run: it reuses what already exists.
 #
 #   PUBLIC_URL=https://standards-concord.vercel.app ADMIN_EMAILS=you@example.org ./deploy/azure/deploy.sh

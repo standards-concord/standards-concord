@@ -229,7 +229,7 @@ test.describe('looks', () => {
       await expect.poll(() => page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls.length), { message: `${where} scrolled` }).toBeGreaterThan(0);
       expect(await page.evaluate(() => (window as unknown as { scrolls: string[] }).scrolls), where).not.toContain('smooth');
     };
-    for (const path of [`/o/${demo.id}#health`, `/o/${demo.id}/governance#roles`, '/settings#appearance']) {
+    for (const path of [`/o/${demo.id}#health`, `/o/${demo.id}/governance#roles`, '/connect#tokens']) {
       await page.goto(path);
       await settle(page);
       await expectInstantScroll(path);
