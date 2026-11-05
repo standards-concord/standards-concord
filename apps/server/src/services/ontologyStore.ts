@@ -686,6 +686,33 @@ export const ontologyStore = {
     lastPruned.clear();
   },
 
+  /**
+   * At start-up: finishes or undoes a wipe that a crash interrupted. If the
+   * repositories were moved aside but the database still has its ontologies
+   * (the crash came before the transaction committed), they are moved back;
+   * any other leftover (the wipe committed) is deleted.
+   */
+  recoverWipe(): void {
+    const repos = path.join(config.dataDir, 'ontologies');
+    let trash: string[];
+    try {
+      trash = fs
+        .readdirSync(config.dataDir)
+        .filter((name) => name.startsWith('.ontologies-deleted-'))
+        .map((name) => path.join(config.dataDir, name))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    } catch {
+      return;
+    }
+    for (const dir of trash) {
+      assertStoreHeld();
+      if (!fs.existsSync(repos) && list('ontologies').length) {
+        fs.renameSync(dir, repos);
+        console.warn(`[git] restored the repositories from an interrupted reset (${path.basename(dir)})`);
+      } else fs.rmSync(dir, { recursive: true, force: true });
+    }
+  },
+
   push(project: OntologyProject, remoteUrl: string) {
     const dir = repoDir(project);
     const remotes = git(dir, ['remote']);

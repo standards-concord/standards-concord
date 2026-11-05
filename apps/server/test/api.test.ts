@@ -1694,6 +1694,27 @@ describe('inline term edits', () => {
     }
   });
 
+  it('puts back the repositories a crash left moved aside mid-reset, and deletes what a finished reset left', async () => {
+    const { ontologyStore, project, raw } = await repo();
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { config } = await import('../src/config.js');
+    const repos = path.dirname(raw);
+    const text = ontologyStore.readWorkingText(project);
+    // The crash came after the move but before the transaction committed: the rows are back, the repositories aren't.
+    const stranded = path.join(config.dataDir, '.ontologies-deleted-crashed');
+    fs.renameSync(repos, stranded);
+    ontologyStore.recoverWipe();
+    expect(fs.existsSync(stranded)).toBe(false);
+    expect(ontologyStore.readWorkingText(project)).toBe(text);
+    // Left over from a reset that committed (the repositories are there): deleted.
+    const leftover = path.join(config.dataDir, '.ontologies-deleted-finished');
+    fs.mkdirSync(path.join(leftover, 'old'), { recursive: true });
+    ontologyStore.recoverWipe();
+    expect(fs.existsSync(leftover)).toBe(false);
+    expect(ontologyStore.readWorkingText(project)).toBe(text);
+  });
+
   it('keeps the server’s hold on the repositories through a demo reset', async () => {
     const { claimGitStore } = await import('../src/services/ontologyStore.js');
     const simulation = await import('../src/services/simulation.js');

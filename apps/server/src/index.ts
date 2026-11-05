@@ -16,6 +16,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const)
     store.release();
     process.exit(0);
   });
+// A demo reset that a crash interrupted is finished or undone.
+ontologyStore.recoverWipe();
 // Git is a projection of the database: repair anything a crash left half-done.
 for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 const secrets = migrateClientSecrets();
