@@ -32,6 +32,8 @@ test('the privacy policy covers sign-in data, storage, public posts and deletion
   await expect(signInSection).toContainText('GitHub:');
   await expect(signInSection).toContainText('profile picture');
   await expect(page.getByRole('region', { name: 'Where it is kept' })).toContainText('Solid pod');
+  // Concord doesn't run people's pods, so it can't promise to delete them: that's the pod provider's job.
+  await expect(page.getByRole('region', { name: 'Getting your data deleted' })).toContainText('yours to delete with your pod provider');
   await expect(page.getByRole('region', { name: 'Public reports and GitHub issues' })).toContainText('GitHub issue');
   // Deletion requests go to a real address, as a mail link.
   const contact = page.getByRole('region', { name: 'Getting your data deleted' }).getByRole('link');

@@ -77,9 +77,10 @@ export function PrivacyPage() {
               cloud servers that host Concord (Microsoft Azure today, moving to Vercel and Neon).
             </li>
             <li>
-              <strong>Your Solid pod.</strong> Concord gives you a WebID and a private Solid pod. The full transcripts of your interviews, and a copy of your feedback, are
-              written there rather than to the shared database. Your pod is private: only you and Concord can read it, and Concord’s administrators can read the
-              feedback copies in it.
+              <strong>Your own Solid pod.</strong> Your interview transcripts and a copy of your feedback go to a Solid pod rather than the shared database. Concord
+              doesn’t run pods for you: you bring your own, from a pod provider such as solidcommunity.net, which keeps it under its own privacy policy. You control your
+              pod and can delete what Concord wrote there yourself; Concord can’t do that for you. Concord gives its administrators read access to the feedback folder it
+              writes in your pod. If you haven’t connected a pod, Concord keeps these files on its own servers instead, and deletes them with your account.
             </li>
             <li>
               <strong>Your browser.</strong> Concord sets a sign-in cookie that lasts 30 days, short-lived cookies (10 minutes) while you sign in, and remembers your chosen
@@ -129,7 +130,7 @@ export function PrivacyPage() {
         <Section id="privacy-deletion" title="Getting your data deleted">
           <p>
             Write to {mail} from the email address on your account, or say which Google or GitHub account you signed in with. We will delete your account and what you added
-            from Concord’s database, and your Solid pod, within 30 days, and tell you when it is done. We will tell you if anything can’t be removed, such as text that is
+            from Concord’s servers within 30 days, and tell you when it is done. What Concord wrote to your own Solid pod is yours to delete with your pod provider. We will tell you if anything can’t be removed, such as text that is
             part of a version a working group has already published.
           </p>
           <p>You can also ask us for a copy of what Concord holds about you, or to correct it.</p>
