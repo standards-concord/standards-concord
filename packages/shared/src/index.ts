@@ -782,6 +782,11 @@ export interface Review {
   decision: 'approve' | 'request-changes' | 'object' | 'comment';
   comment?: string;
   at: string;
+  /** For change requests: the review round it was given in, and its place in the request's order of decisions. */
+  round?: number;
+  seq?: number;
+  /** In change request details: true when it no longer counts because a later round has started. */
+  stale?: boolean;
 }
 
 export interface Vote {
@@ -793,6 +798,12 @@ export interface Vote {
   choice: 'yes' | 'no' | 'abstain';
   comment?: string;
   at: string;
+  /** For change requests: the round and edits version it was cast on, and its place in the request's order of decisions. */
+  round?: number;
+  editsVersion?: number;
+  seq?: number;
+  /** In change request details: true when it no longer counts because the edits changed since. */
+  stale?: boolean;
 }
 
 export interface TimelineEvent {
@@ -881,6 +892,17 @@ export interface ChangeRequest {
   autoMergeBy?: string;
   /** Bumped on every write; a merge only lands if the revision it checked is still current. */
   rev?: number;
+  /**
+   * Review round, from 1. It moves on when the author resubmits or the edits change, and reviews only
+   * count in the round they were given in (like GitHub dismissing stale reviews). Objections are the
+   * exception: they stand until the objector changes their review. Decisions name the round they were
+   * made on, and one made on an older round is refused.
+   */
+  round?: number;
+  /** Version of the edits, from 1; moves on only when the edits really change. Votes count for the version they were cast on. */
+  editsVersion?: number;
+  /** Last sequence number given to a review or vote of this request; they are ordered by it, not by the clock. */
+  decisionSeq?: number;
   authorId: string;
   ops: ChangeOp[];
   status: ChangeRequestStatus;

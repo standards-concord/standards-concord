@@ -140,15 +140,22 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const voterRoles = cr.governance.rule.vote?.voterRoles ?? [];
   // The same check the server uses to accept and count a vote.
   const canVote = cr.status === 'voting' && canCastVote(myRoles, voterRoles);
-  const myVote = cr.votes.find((v) => v.userId === uid);
+  const myLatestVote = [...cr.votes].reverse().find((v) => v.userId === uid);
+  const myVote = myLatestVote?.stale ? undefined : myLatestVote;
+  // A "no" stands when the edits change; anything else is asked again.
+  const myVoteOnEarlierEdits = !!myLatestVote && (myLatestVote.editsVersion ?? 1) !== (cr.editsVersion ?? 1);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
-  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c), c);
-  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c), c);
+  // Decisions name the round on screen, so one made on a version that has since changed is refused.
+  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c, cr.round ?? 1), c);
+  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c, cr.round ?? 1), c);
+  // Whoever wrote the edits can't send them back or object to them; they edit or withdraw instead.
+  const wroteEdits = isAuthor || !!cr.revisedBy?.includes(uid ?? '');
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
   // Under final say the vote can open before the ODI approves, but cannot pass without it.
   const odiNeeded = needsOdiApproval(ontology.governance, cr);
-  const odiDone = odiNeeded && odiApproved(cr.reviews, ontology.members ?? [], cr.opsUpdatedAt ?? cr.createdAt);
+  // Reviews from an earlier round (before a resubmission or new edits) don't count, as on the server.
+  const odiDone = odiNeeded && odiApproved(cr.reviews.filter((r) => !r.stale), ontology.members ?? [], '');
 
   if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;
 
@@ -167,16 +174,17 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
           {cr.status === 'draft' ? 'Submit for review' : 'Resubmit'}
         </Button>
       )}
-      {(cr.status === 'review' || cr.status === 'triage') && (
+      {/* Reviewers can still act while it needs work, e.g. approve once their concern is answered. */}
+      {(cr.status === 'review' || cr.status === 'triage' || cr.status === 'needs-work') && (
         <>
           <div className="grid grid-cols-2 gap-2">
             <Button variant="primary" icon={Check} disabled={act.pending} onClick={() => void review('approve')}>
               Approve
             </Button>
-            <Button icon={Undo2} disabled={act.pending} onClick={() => void review('request-changes')}>
+            <Button icon={Undo2} disabled={act.pending || wroteEdits} onClick={() => void review('request-changes')}>
               Request changes
             </Button>
-            <Button variant="ghost" icon={CircleSlash} disabled={act.pending} onClick={() => void review('object')} className="text-danger">
+            <Button variant="ghost" icon={CircleSlash} disabled={act.pending || wroteEdits} onClick={() => void review('object')} className="text-danger">
               Object
             </Button>
             <Button variant="ghost" icon={MessageSquare} disabled={act.pending || !c} onClick={() => void review('comment')}>
@@ -184,7 +192,14 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </Button>
           </div>
           {!approverOk && <p className="text-xs text-muted">Your approval is recorded but only {cr.governance.rule.approverRoles.map(roleLabel).join(', ')} approvals count towards the threshold.</p>}
-          {myReview && <p className="text-xs text-muted">You previously chose “{myReview.decision.replace('-', ' ')}”.</p>}
+          {wroteEdits && <p className="text-xs text-muted">You wrote these edits, so instead of requesting changes or objecting, edit them or withdraw the request.</p>}
+          {myReview?.stale ? (
+            <p role="status" className="rounded-lg bg-warn-soft px-3 py-2 text-xs">
+              Your “{myReview.decision.replace('-', ' ')}” was for an earlier round, before this was resubmitted or its edits changed, so it no longer counts. Please review it again.
+            </p>
+          ) : (
+            myReview && <p className="text-xs text-muted">You previously chose “{myReview.decision.replace('-', ' ')}”.</p>
+          )}
         </>
       )}
       {cr.status === 'voting' && (
@@ -210,7 +225,13 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </div>
           )}
           {odiNeeded && odiDone && <p className="text-xs text-muted">The ODI has approved this change.</p>}
-          {myVote && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
+          {myVote && !myVoteOnEarlierEdits && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
+          {myVote && myVoteOnEarlierEdits && (
+            <p role="status" className="text-xs text-warn">You voted “no” on earlier edits. It still counts until you change it, so look at the new edits and vote again if your view has changed.</p>
+          )}
+          {!myVote && myLatestVote && (
+            <p role="status" className="text-xs text-warn">You voted “{myLatestVote.choice}” on earlier edits, which no longer counts. Please look at the new edits and vote again.</p>
+          )}
         </>
       )}
       {cr.status === 'approved' && (
@@ -574,7 +595,13 @@ export function ChangeRequestPage() {
                           <>
                             <div className="flex flex-wrap items-center gap-1.5">
                               <strong className="font-medium">{nameOf(item.r.userId)}</strong>
-                              <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
+                              {item.r.stale ? (
+                                <Badge tone="neutral" title="Given before this was resubmitted or its edits changed, so it no longer counts.">
+                                  {DECISION[item.r.decision].label} · earlier round
+                                </Badge>
+                              ) : (
+                                <Badge tone={DECISION[item.r.decision].tone}>{DECISION[item.r.decision].label}</Badge>
+                              )}
                               <RoleChips roles={item.r.roles} />
                               <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                             </div>
@@ -584,7 +611,13 @@ export function ChangeRequestPage() {
                         {item.kind === 'vote' && (
                           <div className="flex flex-wrap items-center gap-1.5">
                             <strong className="font-medium">{nameOf(item.v.userId)}</strong> voted
-                            <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
+                            {item.v.stale ? (
+                              <Badge tone="neutral" title="Cast before the edits changed, so it no longer counts.">{item.v.choice} · earlier edits</Badge>
+                            ) : (item.v.editsVersion ?? 1) !== (cr.editsVersion ?? 1) ? (
+                              <Badge tone="danger" title="Cast before the edits changed. A vote against stands until the voter changes it.">{item.v.choice} · earlier edits, still counts</Badge>
+                            ) : (
+                              <Badge tone={item.v.choice === 'yes' ? 'ok' : item.v.choice === 'no' ? 'danger' : 'neutral'}>{item.v.choice}</Badge>
+                            )}
                             <span className="text-xs text-subtle">{relativeTime(item.at, now())}</span>
                             {item.v.comment && <p className="w-full text-muted">{item.v.comment}</p>}
                           </div>

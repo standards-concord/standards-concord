@@ -185,8 +185,10 @@ describe('development forks', () => {
     expect(res.body.slug).toBe('volunteer-hours-2');
     const steward = await login('steward', 'Steward Sol');
     const reviewer = await login('reviewer', 'Reviewer Ren');
-    await reviewer.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
-    await steward.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+    // Each decision names the review round it is on (#47).
+    const { round } = (await steward.get(`/api/change-requests/${crId}`)).body;
+    await reviewer.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve', round });
+    await steward.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve', round });
     await steward.post('/api/simulation/clock').send({ advanceDays: 8 });
     const cr = await steward.get(`/api/change-requests/${crId}`);
     expect(cr.body.status).toBe('merged');

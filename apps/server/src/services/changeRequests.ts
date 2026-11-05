@@ -35,7 +35,7 @@ import { ontologyDigest, requestText } from '../llm/context.js';
 import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
-import { evaluate } from './governance.js';
+import { evaluate, reviewsInRound, votesOnEdits } from './governance.js';
 import { triageBudgetAvailable, withTriageBudget } from './budget.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { competencyTests, getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
@@ -219,6 +219,8 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
     warnings,
     baseCommit: await ontologyStore.head(project),
     rev: 0,
+    round: 1,
+    editsVersion: 1,
   };
   // Numbering and saving in one transaction, so two requests opened at once can't both take the same number.
   const store = async () => {
@@ -442,9 +444,48 @@ function fallbackAnalysis(cr: ChangeRequest, c: (iri: string) => string) {
 export const reviewsFor = async (crId: string) => await list<Review>('reviews', crId);
 export const votesFor = async (subjectId: string) => await list<Vote>('votes', subjectId);
 
+const roundOf = (cr: ChangeRequest) => cr.round ?? 1;
+const editsVersionOf = (cr: ChangeRequest) => cr.editsVersion ?? 1;
+/** Reviews and votes stored before rounds existed are placed by time: current if given since the edits last changed, otherwise earlier. */
+const legacy = (cr: ChangeRequest, at: string) => (at >= (cr.opsUpdatedAt ?? cr.createdAt) ? 1 : 0);
+const reviewRound = (cr: ChangeRequest, r: Review) => r.round ?? legacy(cr, r.at);
+const voteVersion = (cr: ChangeRequest, v: Vote) => v.editsVersion ?? legacy(cr, v.at);
+
+/** A change request's reviews and votes, with which of them count now. */
+export async function roundState(cr: ChangeRequest) {
+  const round = roundOf(cr);
+  const reviews = await reviewsFor(cr.id);
+  const { counted, stale } = reviewsInRound(reviews, round, (r) => reviewRound(cr, r));
+  const votes = await votesFor(cr.id);
+  // Votes are on the edits: a resubmission of the same edits keeps the ballot, new edits ask again, and a "no" stands.
+  const { counted: currentVotes, stale: staleVotes } = votesOnEdits(votes, editsVersionOf(cr), (v) => voteVersion(cr, v));
+  return { round, reviews, counted, stale, votes, currentVotes, staleVotes };
+}
+
+/** Whether this person's review or vote counts now; someone whose review is from an earlier round is asked again. */
+export const hasCurrentReview = async (cr: ChangeRequest, userId: string) => (await roundState(cr)).counted.some((r) => r.userId === userId);
+/** Whether this person has said anything in the current round, a comment included (so they aren't asked twice). */
+export const hasRespondedThisRound = async (cr: ChangeRequest, userId: string) =>
+  (await hasCurrentReview(cr, userId)) || (await reviewsFor(cr.id)).some((r) => r.userId === userId && reviewRound(cr, r) === roundOf(cr));
+/** Whether this person has voted on the current edits. A "no" on earlier edits still counts, but its voter is asked to look again. */
+export const hasVotedOnTheseEdits = async (cr: ChangeRequest, userId: string) =>
+  (await votesFor(cr.id)).some((v) => v.userId === userId && voteVersion(cr, v) === editsVersionOf(cr));
+
+/** Decisions name the round they were made on: one made on a version that has since changed is refused, so nobody approves edits they haven't seen. */
+function checkRound(cr: ChangeRequest, expectedRound: number | undefined) {
+  if (expectedRound !== undefined && expectedRound !== roundOf(cr))
+    throw new HttpError(409, `This request has changed since you opened it (it was resubmitted or its edits changed). Look at the latest version and decide again.`);
+}
+
+/** The next place in this request's order of decisions (call holding the lock: the request is saved with it). */
+function nextSeq(cr: ChangeRequest) {
+  cr.decisionSeq = (cr.decisionSeq ?? 0) + 1;
+  return cr.decisionSeq;
+}
+
 export async function governanceFor(cr: ChangeRequest) {
   const project = await getProject(cr.ontologyId);
-  const since = cr.opsUpdatedAt ?? cr.createdAt;
+  const { counted, currentVotes } = await roundState(cr);
   return evaluate({
     policy: project.governance,
     level: cr.classification?.level ?? 'minor',
@@ -453,8 +494,8 @@ export async function governanceFor(cr: ChangeRequest) {
     statusSince: cr.statusSince,
     reviewStartedAt: cr.reviewStartedAt ?? cr.statusSince,
     authorId: cr.authorId,
-    reviews: (await reviewsFor(cr.id)).filter((r) => r.at >= since),
-    votes: (await votesFor(cr.id)).filter((v) => v.at >= since),
+    reviews: counted,
+    votes: currentVotes,
     members: await members(cr.ontologyId),
     validationOk: validationPassed(cr.validation),
     now: clock.now(),
@@ -466,7 +507,16 @@ export async function governanceFor(cr: ChangeRequest) {
 }
 
 export async function detail(cr: ChangeRequest): Promise<ChangeRequestDetail> {
-  return { ...cr, reviews: await reviewsFor(cr.id), votes: await votesFor(cr.id), governance: await governanceFor(cr), author: publicUser(await getUser(cr.authorId)) };
+  const { round, reviews, stale, votes, staleVotes } = await roundState(cr);
+  return {
+    ...cr,
+    round,
+    editsVersion: editsVersionOf(cr),
+    reviews: reviews.map((r) => ({ ...r, round: reviewRound(cr, r), stale: stale.has(r.id) })),
+    votes: votes.map((v) => ({ ...v, editsVersion: voteVersion(cr, v), stale: staleVotes.has(v.id) })),
+    governance: await governanceFor(cr),
+    author: publicUser(await getUser(cr.authorId)),
+  };
 }
 
 export async function submit(cr: ChangeRequest, actor: User) {
@@ -482,7 +532,17 @@ export async function submit(cr: ChangeRequest, actor: User) {
     await triage(cr);
     return locked(cr, async (c) => {
       await check(c);
-      await setStatus(c, 'review', 'submitted for review', actor.id);
+      if (c.status === 'needs-work') {
+        // A new round: approvals and requests for changes on the version that was sent back stop
+        // counting and reviewers are asked again, so nothing merges on them. Objections stand, and
+        // votes stay with the edits they were cast on.
+        c.round = roundOf(c) + 1;
+        const objections = (await roundState(c)).counted.filter((r) => r.decision === 'object').length;
+        c.timeline.push(
+          ev('status', `resubmitted: earlier approvals and requests for changes no longer count, and reviewers are asked to review again${objections ? ` (${objections === 1 ? 'an objection stands' : `${objections} objections stand`} until withdrawn)` : ''}`, actor.id),
+        );
+        await setStatus(c, 'review', 'resubmitted for review', actor.id);
+      } else await setStatus(c, 'review', 'submitted for review', actor.id);
       await save(c);
       return advanceNow(c, actor);
     });
@@ -528,12 +588,20 @@ async function updateOpsNow(
     if ((patch.title && patch.title !== c.title) || patch.ops) c.privacyCleared = undefined;
     if (patch.title) c.title = patch.title;
     if (patch.description !== undefined) c.description = patch.description;
-    if (patch.ops) {
+    // Only a change to the edits starts a new round (the same edits again, say from an AI revision that changed
+    // nothing, don't). Any difference counts, even one with the same effect: telling those apart means applying
+    // both lists, which is slow on large lists and easy to get wrong. New edits cost the request its approvals,
+    // never its opposition (votes against and objections stand), so rewriting edits gains an author nothing.
+    if (patch.ops && JSON.stringify(patch.ops) !== JSON.stringify(c.ops)) {
       c.ops = patch.ops;
       c.opsUpdatedAt = clock.iso();
+      c.round = roundOf(c) + 1;
+      c.editsVersion = editsVersionOf(c) + 1;
+      // The new edits get a review period of their own.
+      c.reviewStartedAt = c.opsUpdatedAt;
       // Whoever writes the edits can't also be the independent reviewer of them.
       if (actor.id !== c.authorId && !(c.revisedBy ?? []).includes(actor.id)) c.revisedBy = [...(c.revisedBy ?? []), actor.id];
-      c.timeline.push(ev('ops-updated', 'updated the proposed edits (earlier approvals no longer count)', actor.id));
+      c.timeline.push(ev('ops-updated', 'updated the proposed edits (earlier approvals and votes for no longer count; votes against and objections stand)', actor.id));
       if (c.status === 'voting' || c.status === 'approved') await setStatus(c, 'review', 'returned to review after the edits changed', actor.id);
       c.approvedAs = undefined;
     }
@@ -543,12 +611,17 @@ async function updateOpsNow(
   return advance(cr, actor);
 }
 
-export function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string) {
+/** `expectedRound` is the round the decision was made on (see checkRound); the API requires it for anything but a comment. */
+export function addReview(cr: ChangeRequest, actor: User, decision: Review['decision'], comment?: string, expectedRound?: number) {
   return locked(cr, async (c) => {
     if (!OPEN.includes(c.status) && decision !== 'comment') throw new HttpError(409, `This request is ${c.status}`);
     const roles = await rolesFor(c.ontologyId, actor.id);
     if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
-    const review: Review = { id: newId('rev'), changeRequestId: c.id, userId: actor.id, roles, decision, comment, at: clock.iso() };
+    // Whoever wrote the edits can't send them back or object to them (which would let them reset others' reviews): they edit or withdraw instead.
+    if ((decision === 'request-changes' || decision === 'object') && [c.authorId, ...(c.revisedBy ?? [])].includes(actor.id))
+      throw new HttpError(403, 'You wrote these edits, so you can’t request changes to them or object to them. Edit them, or withdraw the request.');
+    if (decision !== 'comment') checkRound(c, expectedRound);
+    const review: Review = { id: newId('rev'), changeRequestId: c.id, userId: actor.id, roles, decision, comment, at: clock.iso(), round: roundOf(c), seq: nextSeq(c) };
     const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
     c.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
     // The review only counts if the request it was given on is still the stored one.
@@ -561,14 +634,15 @@ export function addReview(cr: ChangeRequest, actor: User, decision: Review['deci
   });
 }
 
-export function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string) {
+export function addVote(cr: ChangeRequest, actor: User, choice: Vote['choice'], comment?: string, expectedRound?: number) {
   return locked(cr, async (c) => {
     if (c.status !== 'voting') throw new HttpError(409, 'There is no open vote on this request');
+    checkRound(c, expectedRound);
     const g = await governanceFor(c);
     const roles = await rolesFor(c.ontologyId, actor.id);
     if (!g.rule.vote || !canCastVote(roles, g.rule.vote.voterRoles))
       throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
-    const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: c.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
+    const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: c.id, userId: actor.id, roles, choice, comment, at: clock.iso(), round: roundOf(c), editsVersion: editsVersionOf(c), seq: nextSeq(c) };
     c.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
     await transaction(async () => {
       await put('votes', vote, c.id);
@@ -810,7 +884,7 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
   await ontologyStore.commitWorking(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base, async (commit) => {
     const latest = await refresh(cr);
-    if (latest.rev !== checkedRev || latest.status !== 'approved')
+    if (latest.rev !== checkedRev || latest.status !== 'approved' || (await approvalLost(latest, (await governanceFor(latest)).outcome)))
       throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
     latest.kgcl = p.kgcl;
     latest.privacyFindings = undefined;
@@ -830,16 +904,24 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
 /** The draft moved on underneath this request: approvals given for the old draft no longer count, and it needs revising before it can be approved again. */
 async function draftMovedOn(cr: ChangeRequest, why: string) {
   cr.opsUpdatedAt = clock.iso();
+  // A new round, so the approvals really stop counting (votes stay with the edits, which haven't changed).
+  cr.round = roundOf(cr) + 1;
   cr.approvedAs = undefined;
   await setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${why}. Earlier approvals no longer count`);
   return await save(cr);
 }
 
-/** Whether governance's current outcome for an approved request takes the approval away. */
+/**
+ * Whether governance's current outcome for an approved request takes the approval away. A request
+ * for changes, a veto or failing validation always does. Otherwise an approval from a vote that
+ * passed stands (governance can't see a vote that already closed), and any other approval needs
+ * governance to still say exactly "approved": e.g. if the only approver switches to an objection,
+ * it goes back to review.
+ */
 async function approvalLost(cr: ChangeRequest, outcome: ChangeRequestStatus) {
   if (outcome === 'needs-work' || outcome === 'rejected') return true;
-  // Governance can't see a vote that already closed, so "voting" only counts if it never had one (e.g. a late objection under lazy consensus).
-  return outcome === 'voting' && !(cr.approvedAs?.voted ?? await passedVote(cr));
+  if (cr.approvedAs?.voted ?? (await passedVote(cr))) return false;
+  return outcome !== 'approved';
 }
 
 /**
@@ -860,7 +942,14 @@ async function mergeBlocker(cr: ChangeRequest): Promise<{ status: ChangeRequestS
   if (cr.approvedAs && await approvalLost(cr, g.outcome))
     return {
       status: g.outcome,
-      message: g.outcome === 'rejected' ? 'rejected (vetoed)' : g.outcome === 'voting' ? `vote opened: ${g.next}` : `needs work — ${g.unmet[0] ?? ''}`,
+      message:
+        g.outcome === 'rejected'
+          ? 'rejected (vetoed)'
+          : g.outcome === 'voting'
+            ? `vote opened: ${g.next}`
+            : g.outcome === 'review'
+              ? `back in review: ${g.next}`
+              : `needs work — ${g.unmet[0] ?? ''}`,
     };
   const level = cr.classification?.level ?? 'minor';
   const was = cr.approvedAs;

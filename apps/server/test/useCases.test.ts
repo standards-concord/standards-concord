@@ -305,8 +305,10 @@ describe('lifecycle and the requirements document', () => {
     expect((await author.get(`/api/use-cases/${useCaseId}`)).body.status).toBe('in-progress');
 
     await editor.post(`/api/change-requests/${id}/submit`);
-    await reviewer.post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
-    await steward.post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+    // Decisions name the review round of the version they were made on.
+    const round = (await steward.get(`/api/change-requests/${id}`)).body.round;
+    await reviewer.post(`/api/change-requests/${id}/reviews`).send({ round, decision: 'approve' });
+    await steward.post(`/api/change-requests/${id}/reviews`).send({ round, decision: 'approve' });
     await steward.post('/api/simulation/clock').send({ advanceDays: 8 });
     expect((await steward.get(`/api/change-requests/${id}`)).body.status).toBe('merged');
     const addressed = await author.get(`/api/use-cases/${useCaseId}`);
