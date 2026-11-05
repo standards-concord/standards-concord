@@ -250,7 +250,10 @@ export function Shell({ children }: { children: ReactNode }) {
         {children}
       </main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used.
+        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used. ·{' '}
+        <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
+          Privacy policy
+        </Link>
       </footer>
       <WalkthroughDock />
     </div>

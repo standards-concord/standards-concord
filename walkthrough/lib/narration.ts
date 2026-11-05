@@ -31,6 +31,12 @@ export interface Step {
   actions: Action[];
   /** Actions that run after the narration for this step has finished. */
   after: Action[];
+  /**
+   * Actions timed to a word: `{@action args}` inside the paragraph runs as the voice
+   * reaches the word after it (from the voice's own timestamps where it gives them).
+   * The mark is not spoken or captioned, so adding one never re-voices the paragraph.
+   */
+  marks: Mark[];
   /** Extra silent hold at the end of the step, in seconds. */
   pause: number;
   /** Features this step needs ("x") or must not have ("!x"). */
@@ -45,6 +51,12 @@ export interface Scene {
   /** Feature flags that must all be missing (fallback scenes). */
   unless: string[];
   steps: Step[];
+}
+
+export interface Mark {
+  /** Index of the word (in the paragraph's plain words) the action is timed to. */
+  word: number;
+  action: Action;
 }
 
 export interface Narration {
@@ -79,6 +91,40 @@ function parseAction(raw: string): Action {
   return { name, args };
 }
 
+const MARK = /\{@([^}]*)\}/g;
+
+/**
+ * Takes the `{@action}` marks out of a paragraph. The text left is exactly what it would
+ * be without them, so captions, speech and the voice cache are unaffected.
+ */
+export function extractMarks(raw: string): { text: string; marks: Mark[] } {
+  const marks: Mark[] = [];
+  let out = '';
+  let last = 0;
+  for (const m of raw.matchAll(MARK)) {
+    out += raw.slice(last, m.index);
+    last = m.index! + m[0].length;
+    const word = plain(out).split(/\s+/).filter(Boolean).length;
+    marks.push({ word, action: parseAction(m[1]) });
+  }
+  out += raw.slice(last);
+  const text = out.replace(/\s+/g, ' ').trim();
+  const words = plain(text).split(/\s+/).filter(Boolean).length;
+  for (const m of marks) if (m.word >= words) throw new Error(`A timing mark {@${m.action.name}} must come before a word: "${text.slice(0, 60)}"`);
+  return { text, marks };
+}
+
+/**
+ * When the voice reaches a word, in seconds from the clip's start: the voice's own
+ * character timestamps where it gave them, otherwise an estimate from text length.
+ */
+export function wordTime(text: string, lexicon: Record<string, string>, duration: number, word: number, charStarts?: number[]) {
+  const map = speechMap(text, lexicon);
+  if (word >= map.words.length) return duration;
+  const c = map.starts[word];
+  return charStarts?.[c] ?? (c / (map.speech.length || 1)) * duration;
+}
+
 export function parseNarration(source: string): Narration {
   const meta: Record<string, string> = {};
   let body = source.replace(/\r\n/g, '\n');
@@ -102,10 +148,10 @@ export function parseNarration(source: string): Narration {
       if (para.length) throw new Error(`Narration before the first "## Scene" heading: "${para.join(' ').slice(0, 60)}"`);
       return;
     }
-    const text = para.join(' ').replace(/\s+/g, ' ').trim();
+    const { text, marks } = extractMarks(para.join(' '));
     para = [];
     if (!text && !pending.actions.length && !pending.after.length) return;
-    scene.steps.push({ text, actions: pending.actions, after: pending.after, pause: 0, ...(pending.when ? { when: pending.when } : {}) });
+    scene.steps.push({ text, actions: pending.actions, after: pending.after, marks, pause: 0, ...(pending.when ? { when: pending.when } : {}) });
     pending = { actions: [], after: [] };
   };
 
@@ -132,7 +178,7 @@ export function parseNarration(source: string): Narration {
         if (pending.actions.length || pending.after.length) flushPara();
         const last = scene.steps.at(-1);
         if (last) last.pause += secs;
-        else scene.steps.push({ text: '', actions: [], after: [], pause: secs });
+        else scene.steps.push({ text: '', actions: [], after: [], marks: [], pause: secs });
       } else if (d[1] === 'if') {
         const when = d[2].split(',').map((x) => x.trim()).filter(Boolean);
         if (!when.length) throw new Error('Empty [if:] directive');
@@ -152,7 +198,7 @@ export function parseNarration(source: string): Narration {
   }
   flushPara();
   // A trailing [do:] block with no paragraph becomes a silent step.
-  if (scene && (pending.actions.length || pending.after.length)) scene.steps.push({ text: '', actions: pending.actions, after: pending.after, pause: 0 });
+  if (scene && (pending.actions.length || pending.after.length)) scene.steps.push({ text: '', actions: pending.actions, after: pending.after, marks: [], pause: 0 });
 
   return { meta, scenes };
 }
@@ -238,15 +284,8 @@ export function phrases(text: string, max = 84): { text: string; firstWord: numb
 
 /** Caption cues for one clip, in seconds from the clip's start. */
 export function cuesFor(text: string, lexicon: Record<string, string>, duration: number, charStarts?: number[]) {
-  const map = speechMap(text, lexicon);
   const ps = phrases(text);
-  const totalChars = map.speech.length || 1;
-  const at = (wordIndex: number) => {
-    if (wordIndex >= map.words.length) return duration;
-    const c = map.starts[wordIndex];
-    // Use the voice's own timing when it reported one; otherwise share time by length.
-    return charStarts?.[c] ?? (c / totalChars) * duration;
-  };
+  const at = (wordIndex: number) => wordTime(text, lexicon, duration, wordIndex, charStarts);
   return ps.map((p, i) => ({ start: at(p.firstWord), end: i + 1 < ps.length ? at(ps[i + 1].firstWord) : duration, text: p.text }));
 }
 

@@ -21,7 +21,7 @@ async function login(role: string, name = `Tester ${role}`): Promise<Agent> {
 let demoId: string;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
 });
@@ -219,6 +219,15 @@ describe('requirements', () => {
     expect(p.body.useCases.length).toBeGreaterThanOrEqual(1);
   });
 
+  // With the store async, each call's visibility check ran inside flatMap(), so the list came back as empty objects.
+  it('lists the calls a signed-in person can see', async () => {
+    const tester = await login('steward', 'Steward Lists');
+    const m = await tester.post(`/api/ontologies/${demoId}/meetings/upload`).send({ title: 'Listed call', transcript: 'Priya Shah: Hello.\nTom Okafor: Hi.' });
+    expect(m.status).toBe(201);
+    const listed = await tester.get(`/api/ontologies/${demoId}/meetings`);
+    expect(listed.body.find((x: { id?: string }) => x.id === m.body.id)).toMatchObject({ title: 'Listed call' });
+  });
+
   it('replays a simulated call with co-facilitator prompts', async () => {
     const tester = await login('steward', 'Steward Vic');
     const m = await tester.post(`/api/ontologies/${demoId}/meetings/simulate?delayMs=0`).send({ title: 'Sim' });
@@ -386,33 +395,33 @@ describe('release approval provenance', () => {
     ...over,
   });
 
-  it('labels every decided release, rejected as well as published', () => {
-    expect(releaseApproval(release({ status: 'voting' })).approvalSource).toBe('live');
-    expect(releaseApproval(release({ status: 'rejected' })).approvalSource).toBe('current-policy');
-    expect(releaseApproval(release({ status: 'published' })).approvalSource).toBe('current-policy');
-    expect(releaseApproval(release({ status: 'published', changeRequestIds: [] })).approvalSource).toBe('bootstrap');
-    const saved = { ...releaseGovernance(release({ status: 'voting' })), requiredApprovals: 42 };
+  it('labels every decided release, rejected as well as published', async () => {
+    expect((await releaseApproval(release({ status: 'voting' }))).approvalSource).toBe('live');
+    expect((await releaseApproval(release({ status: 'rejected' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published' }))).approvalSource).toBe('current-policy');
+    expect((await releaseApproval(release({ status: 'published', changeRequestIds: [] }))).approvalSource).toBe('bootstrap');
+    const saved = { ...(await releaseGovernance(release({ status: 'voting' }))), requiredApprovals: 42 };
     for (const status of ['published', 'rejected'] as const) {
-      const shown = releaseApproval(release({ status, approval: saved }));
+      const shown = await releaseApproval(release({ status, approval: saved }));
       expect(shown.approvalSource).toBe('recorded');
       expect(shown.governance.requiredApprovals).toBe(42);
     }
   });
 
-  it('re-evaluates an unrecorded decision with only the votes cast before it, each person’s last vote counting', () => {
+  it('re-evaluates an unrecorded decision with only the votes cast before it, each person’s last vote counting', async () => {
     const decidedAt = '2026-11-02T12:00:00Z';
-    const probe = releaseGovernance(release({ id: 'rel_votes', level: 'major', status: 'voting' }));
+    const probe = await releaseGovernance(release({ id: 'rel_votes', level: 'major', status: 'voting' }));
     const voterRoles = probe.rule.vote?.voterRoles ?? [];
     expect(voterRoles.length, 'the demo policy votes on major releases').toBeGreaterThan(0);
-    const voters = members(demoId).filter((m) => m.roles.some((r) => voterRoles.includes(r)));
+    const voters = (await members(demoId)).filter((m) => m.roles.some((r) => voterRoles.includes(r)));
     expect(voters.length).toBeGreaterThanOrEqual(2);
     const [a, b] = voters;
     const vote = (id: string, userId: string, choice: Vote['choice'], at: string): Vote => ({ id, subjectType: 'release', subjectId: 'rel_votes', userId, roles: ['member'], choice, at });
     // a changes their mind before the decision (no, then yes); b only votes after it.
     for (const v of [vote('v_a1', a.userId, 'no', '2026-11-01T09:00:00Z'), vote('v_a2', a.userId, 'yes', '2026-11-02T09:00:00Z'), vote('v_b', b.userId, 'no', '2026-11-03T09:00:00Z')])
-      put('votes', v, 'rel_votes');
+      await put('votes', v, 'rel_votes');
     for (const status of ['published', 'rejected'] as const) {
-      const { governance, approvalSource } = releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
+      const { governance, approvalSource } = await releaseApproval(release({ id: 'rel_votes', level: 'major', status, publishedAt: status === 'published' ? decidedAt : undefined, statusSince: decidedAt }));
       expect(approvalSource).toBe('current-policy');
       expect(governance.vote).toMatchObject({ cast: 1, yes: 1, no: 0 });
     }

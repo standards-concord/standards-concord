@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { ExternalLink, Package } from 'lucide-react';
 import { CHATGPT_PLUGINS_URL, claudeCodeCommand, claudeCodePluginCommands, claudeConnectorLink, codexCommand, codexLoginCommand, codexPluginCommand, cursorLink, mcpUrl, vscodeLink } from '../lib/install';
 import { useSession } from '../lib/session';
+import { ClaudeCodeLogo, ClaudeLogo, CodexLogo, CursorLogo, OpenAILogo, VSCodeLogo } from './AgentLogos';
 import { CopyButton, cx } from './ui';
 
 const origin = () => (typeof location !== 'undefined' ? location.origin : '');
@@ -18,30 +19,14 @@ function Command({ code, label }: { code: string; label: string }) {
 
 const linkButton = 'inline-flex h-9 items-center justify-center gap-2 rounded-lg px-3.5 text-sm font-medium whitespace-nowrap transition-colors';
 
-function ClaudeMark() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-6" aria-hidden>
-      <rect width="24" height="24" rx="6" fill="#d97757" />
-      <path d="M12 5v14M5 12h14M7.05 7.05l9.9 9.9M16.95 7.05l-9.9 9.9" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-    </svg>
-  );
-}
-function TerminalMark({ label, bg }: { label: string; bg: string }) {
-  return (
-    <span className="grid size-6 place-items-center rounded-md font-mono text-[0.65rem] font-bold text-white" style={{ background: bg }} aria-hidden>
-      {label}
-    </span>
-  );
-}
-
 type ClientId = 'claude' | 'chatgpt' | 'claude-code' | 'codex' | 'cursor' | 'vscode';
 const CLIENTS: { id: ClientId; name: string; logo: ReactNode }[] = [
-  { id: 'claude', name: 'Claude', logo: <ClaudeMark /> },
-  { id: 'chatgpt', name: 'ChatGPT', logo: <TerminalMark label="G" bg="#10a37f" /> },
-  { id: 'claude-code', name: 'Claude Code', logo: <TerminalMark label=">_" bg="#b4532a" /> },
-  { id: 'codex', name: 'Codex', logo: <TerminalMark label="cx" bg="#111" /> },
-  { id: 'cursor', name: 'Cursor', logo: <TerminalMark label="Cu" bg="#3b3b3b" /> },
-  { id: 'vscode', name: 'VS Code', logo: <TerminalMark label="VS" bg="#0e6fc4" /> },
+  { id: 'claude', name: 'Claude', logo: <ClaudeLogo /> },
+  { id: 'chatgpt', name: 'ChatGPT', logo: <OpenAILogo /> },
+  { id: 'claude-code', name: 'Claude Code', logo: <ClaudeCodeLogo /> },
+  { id: 'codex', name: 'Codex', logo: <CodexLogo /> },
+  { id: 'cursor', name: 'Cursor', logo: <CursorLogo /> },
+  { id: 'vscode', name: 'VS Code', logo: <VSCodeLogo /> },
 ];
 const STORE_KEY = 'concord.connect.client';
 const remembered = (): ClientId => {

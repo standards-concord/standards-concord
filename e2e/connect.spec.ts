@@ -1,5 +1,20 @@
 import { expect, signIn, test } from './fixtures';
 
+const APPS = ['Claude', 'ChatGPT', 'Claude Code', 'Codex', 'Cursor', 'VS Code'];
+
+/** WCAG contrast ratio between two rgb colours. */
+function contrast(a: number[], b: number[]) {
+  const lum = (rgb: number[]) => {
+    const [r, g, bl] = rgb.map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * bl!;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi! + 0.05) / (lo! + 0.05);
+}
+
 const TOOL_NAMES = ['list_ontologies', 'get_ontology', 'search_terms', 'sparql_query', 'validate_data', 'propose_change', 'get_change_request'];
 
 test.describe('Connect page', () => {
@@ -85,6 +100,55 @@ test.describe('Connect page', () => {
     expect(await radios.count()).toBeGreaterThan(2);
   });
 
+  // Only Claude used to have a mark: ChatGPT, Claude Code, Codex, Cursor and VS Code showed lettered
+  // placeholders ("G", ">_", "cx", "Cu", "VS"). Every app now shows its own logo, visible in both themes.
+  for (const scheme of ['light', 'dark'] as const) {
+    test(`every app in the picker shows its own logo (${scheme} mode)`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto('/connect');
+      const radios = page.getByRole('radiogroup', { name: 'Which app are you connecting?' }).getByRole('radio');
+      await expect(radios).toHaveCount(APPS.length);
+      const seen = new Set<string>();
+      for (const [i, name] of APPS.entries()) {
+        const radio = radios.nth(i);
+        // The button's text is just the app's name, with no lettered placeholder beside it.
+        await expect(radio).toHaveAccessibleName(name);
+        await expect(radio).toHaveText(name);
+        const logo = radio.locator('svg[data-logo]');
+        await expect(logo).toHaveCount(1);
+        await expect(logo).toBeVisible();
+        await expect(logo).toHaveAttribute('aria-hidden', 'true');
+        const box = (await logo.boundingBox())!;
+        expect([box.width, box.height], `${name} logo size`).toEqual([20, 20]);
+        // Each logo is its own drawing, not a shared placeholder.
+        const markup = (await logo.innerHTML()).replace(/id="[^"]*"|url\(#[^)]*\)/g, '');
+        expect(seen.has(markup), `${name} has a logo of its own`).toBe(false);
+        seen.add(markup);
+        // The logo as actually painted stands out from the button behind it: a black mark on a dark page, or a
+        // broken gradient or mask, would leave the box empty. Count the screenshot's pixels that contrast with it.
+        const background = await logo.evaluate((svg) => {
+          for (let el = svg.parentElement; el; el = el.parentElement) {
+            const bg = getComputedStyle(el).backgroundColor;
+            if (!/, 0\)$/.test(bg) && bg !== 'transparent') return bg;
+          }
+          return 'rgb(255, 255, 255)';
+        });
+        const png = (await logo.screenshot()).toString('base64');
+        const pixels = await page.evaluate(async (data) => {
+          const img = await createImageBitmap(await (await fetch(`data:image/png;base64,${data}`)).blob());
+          const canvas = new OffscreenCanvas(img.width, img.height);
+          const ctx = canvas.getContext('2d')!;
+          ctx.drawImage(img, 0, 0);
+          return Array.from(ctx.getImageData(0, 0, img.width, img.height).data);
+        }, png);
+        const bg = background.match(/[\d.]+/g)!.slice(0, 3).map(Number);
+        let inked = 0;
+        for (let p = 0; p < pixels.length; p += 4) if (contrast(pixels.slice(p, p + 3), bg) > 1.5) inked++;
+        expect(inked / (pixels.length / 4), `${name} logo stands out on ${background}`).toBeGreaterThan(0.15);
+      }
+    });
+  }
+
   test('copy buttons copy the command', async ({ page, context, baseURL }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.goto('/connect');
@@ -106,6 +170,8 @@ test.describe('Connect page', () => {
     await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
     await expect(page.getByRole('heading', { name: 'Connect an agent' })).toBeVisible();
     await expect(page.getByTestId('connect-agent')).toBeVisible();
+    // Signed-in members see the same logos on the ontology's own page.
+    for (const name of APPS) await expect(page.getByRole('radio', { name, exact: true }).locator('svg[data-logo]')).toBeVisible();
     await page.getByText('Advanced setup').click();
     await expect(page.getByTestId('mcp-url')).toHaveText(`${baseURL}/mcp`);
     await expect(page.getByText('MCP tools')).toHaveCount(0);

@@ -4,7 +4,7 @@ import { api } from '../api';
 import { useSession } from '../lib/session';
 import { formatDate, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
-import { GitHubIcon, GoogleIcon } from '../components/badges';
+import { GitHubIcon, GoogleIcon, SolidIcon } from '../components/badges';
 import { CollapsibleCard } from '../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, CopyButton, PageHeader } from '../components/ui';
 
@@ -14,6 +14,7 @@ export function SettingsPage() {
   const u = session?.user;
   if (!u) return null;
   const solidOn = session?.solid?.enabled ?? false;
+  const ownWebId = u.providers.some((p) => p.provider === 'solid' && p.subject === u.webId);
 
   return (
     <Page>
@@ -38,8 +39,8 @@ export function SettingsPage() {
           <ul className="divide-y divide-line">
             {u.providers.map((p) => (
               <li key={p.provider + p.subject} className="flex items-center gap-3 px-5 py-3 text-sm">
-                {p.provider === 'google' ? <GoogleIcon /> : p.provider === 'github' ? <GitHubIcon /> : <UserRound className="size-4 text-muted" />}
-                <span className="font-medium">{titleCase(p.provider)}</span>
+                {p.provider === 'google' ? <GoogleIcon /> : p.provider === 'github' ? <GitHubIcon /> : p.provider === 'solid' ? <SolidIcon /> : <UserRound className="size-4 text-muted" />}
+                <span className="font-medium">{p.provider === 'solid' ? 'Solid (your WebID)' : titleCase(p.provider)}</span>
                 <span className="truncate text-xs text-muted">{p.subject}</span>
               </li>
             ))}
@@ -70,7 +71,9 @@ export function SettingsPage() {
           level={2}
           title="Your WebID and Solid pod"
           subtitle={
-            solidOn
+            ownWebId
+              ? 'You signed in with your own WebID. What Concord saves for you, such as interview transcripts, goes in a private pod Concord keeps for you here, not in Concord’s database.'
+              : solidOn
               ? 'Private data, such as interview transcripts, is saved to your own Solid pod. If the pod can’t be reached, it’s kept in Concord’s private storage instead. Concord set this up for you.'
               : 'This server runs without a Solid server, so private data, such as interview transcripts, is kept in Concord’s private storage.'
           }

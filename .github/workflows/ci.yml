@@ -51,6 +51,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # A real Postgres server for the document store's tests (apps/server/test/store.test.ts): the only back end
+    # whose locking across separate connections matches Neon in production.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
@@ -131,6 +143,31 @@ jobs:
             test-results
           retention-days: 7
 
+  # Signing in with a WebID and admins reading testers' feedback in their pods, against a
+  # real Community Solid Server (the same major version and WAC setup the deployment runs).
+  e2e-solid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Playwright (with a Solid server)
+        run: pnpm test:e2e:solid
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-solid
+          path: |
+            playwright-report-solid
+            test-results/solid
+          retention-days: 14
+
   # The narrated walkthrough video: every step of its script must still work against
   # this commit's app, so a renamed button fails here rather than in the next recording.
   walkthrough:
@@ -155,14 +192,14 @@ jobs:
         if: always()
         with:
           name: walkthrough-check
-          path: walkthrough/out/report.json
+          path: walkthrough/out/*.report.json
           retention-days: 7
 
   # Builds the backend image the server runs. The server pulls a new image every five
   # minutes, so merging to main is the deploy. Only main builds an image (and a manual
   # run, which tags the image with its branch).
   image:
-    needs: [test, e2e]
+    needs: [test, e2e, e2e-solid]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20

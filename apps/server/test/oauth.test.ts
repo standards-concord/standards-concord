@@ -73,7 +73,7 @@ let base: string;
 let server: Server;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
   // One listening server, so every request sees the same origin (supertest would pick a new port each time).
   server = app.listen(0);
@@ -284,12 +284,12 @@ describe('MCP OAuth authorization code flow', () => {
     // Simulate another writer that read the same unconsumed token and consumed it first, between our read and our write:
     // the conditional consume in exchangeRefreshToken must then lose, not mint a second successor.
     const hash = createHash('sha256').update(t.body.refresh_token).digest('hex');
-    const before = get<{ id: string; grantId: string }>('oauthTokens', hash)!;
-    expect(claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeDefined();
-    expect(claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeUndefined();
+    const before = (await get<{ id: string; grantId: string }>('oauthTokens', hash))!;
+    expect(await claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeDefined();
+    expect(await claim('oauthTokens', hash, 'consumedAt', Math.floor(Date.now() / 1000))).toBeUndefined();
     const loser = await token({ grant_type: 'refresh_token', refresh_token: t.body.refresh_token, client_id: client.client_id });
     expect(loser.status).toBe(400);
-    expect(get('oauthGrants', before.grantId)).toBeUndefined();
+    expect(await get('oauthGrants', before.grantId)).toBeUndefined();
     expect((await tools(t.body.access_token)).status).toBe(401);
   });
 
@@ -565,9 +565,9 @@ describe('client metadata documents and redirect safety', () => {
     const redirect = 'https://chatgpt.com/connector/oauth/cached-old';
     docs.set(cid, cgptDoc(cid, redirect, { methods: ['private_key_jwt'], preferred: 'private_key_jwt' }));
     // As the earlier code stored it: rewritten to none, with no record of which checks admitted it.
-    put('oauthClients', { id: cid, info: { client_id: cid, client_name: 'ChatGPT', redirect_uris: [redirect], token_endpoint_auth_method: 'none' }, fetchedAt: Math.floor(Date.now() / 1000) });
+    await put('oauthClients', { id: cid, info: { client_id: cid, client_name: 'ChatGPT', redirect_uris: [redirect], token_endpoint_auth_method: 'none' }, fetchedAt: Math.floor(Date.now() / 1000) });
     expect((await request(base).get(authorizeUrl(cid, redirect))).status).toBe(400);
-    expect(get('oauthClients', cid)).toBeUndefined();
+    expect(await get('oauthClients', cid)).toBeUndefined();
   });
 
   it('refuses client assertions instead of ignoring them', async () => {
@@ -603,7 +603,7 @@ describe('client metadata documents and redirect safety', () => {
       expect(res.body.error).toBe('invalid_client');
     }
     // The secret is stored only as a hash.
-    const stored = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', conf.body.client_id)!;
+    const stored = (await get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', conf.body.client_id))!;
     expect(stored.info.client_secret).toBeUndefined();
     expect(stored.secretHash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(stored)).not.toContain(conf.body.client_secret);
@@ -644,7 +644,7 @@ describe('client metadata documents and redirect safety', () => {
     // Stored the way registration stores it (registering over HTTP here would hit its hourly limit).
     const client_id = newId('client');
     const client_secret = randomBytes(32).toString('hex');
-    put('oauthClients', {
+    await put('oauthClients', {
       id: client_id,
       info: { client_id, client_name: 'Confidential', redirect_uris: [REDIRECT], grant_types: ['authorization_code', 'refresh_token'], token_endpoint_auth_method: 'client_secret_post', client_secret_expires_at: 0 },
       secretHash: createHash('sha256').update(client_secret).digest('hex'),
@@ -680,8 +680,8 @@ describe('client metadata documents and redirect safety', () => {
 
   it('refuses an expired secret, and a malformed stored hash, without a server error', async () => {
     const c = await confidentialClient();
-    const doc = get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id)!;
-    put('oauthClients', { ...doc, info: { ...doc.info, client_secret_expires_at: Math.floor(Date.now() / 1000) - 60 } });
+    const doc = (await get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id))!;
+    await put('oauthClients', { ...doc, info: { ...doc.info, client_secret_expires_at: Math.floor(Date.now() / 1000) - 60 } });
     const exchange = await c.newCode();
     for (const body of [exchange, c.refresh]) {
       const res = await token({ ...body, client_secret: c.client_secret });
@@ -690,21 +690,21 @@ describe('client metadata documents and redirect safety', () => {
     }
     expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id, client_secret: c.client_secret })).status).toBe(401);
     for (const bad of ['ab', 'zz'.repeat(32), [doc.secretHash], { h: doc.secretHash }, 7]) {
-      put('oauthClients', { ...doc, secretHash: bad });
+      await put('oauthClients', { ...doc, secretHash: bad });
       const res = await token({ ...exchange, client_secret: c.client_secret });
       expect(res.status, JSON.stringify(bad)).toBe(401);
     }
-    put('oauthClients', doc);
+    await put('oauthClients', doc);
     expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
   });
 
   it('fails closed when a confidential client’s stored hash is missing or damaged', async () => {
     const c = await confidentialClient();
-    const doc = get<{ id: string; info: Record<string, unknown>; secretHash?: unknown }>('oauthClients', c.client_id)!;
+    const doc = (await get<{ id: string; info: Record<string, unknown>; secretHash?: unknown }>('oauthClients', c.client_id))!;
     const { secretHash: _drop, ...noHash } = doc;
     const exchange = await c.newCode();
     for (const damaged of [noHash, { ...doc, secretHash: '' }, { ...doc, secretHash: null }, { ...doc, secretHash: false }, { ...doc, secretHash: 0 }] as { id: string; secretHash?: unknown }[]) {
-      put('oauthClients', damaged);
+      await put('oauthClients', damaged);
       for (const body of [exchange, c.refresh]) {
         const res = await token(body);
         expect(res.status, `${JSON.stringify(damaged.secretHash)} ${body.grant_type}`).toBe(401);
@@ -713,18 +713,18 @@ describe('client metadata documents and redirect safety', () => {
       expect((await request(base).post('/revoke').type('form').send({ token: c.refresh.refresh_token, client_id: c.client_id })).status).toBe(401);
     }
     // A public client with a hash stored against it is just as inconsistent.
-    put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: 'none' } });
+    await put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: 'none' } });
     expect((await token(c.refresh)).status).toBe(401);
-    put('oauthClients', doc);
+    await put('oauthClients', doc);
     expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
   });
 
   it('refuses a stored auth method it does not support, and upgrades a confidential client that never recorded one', async () => {
     const c = await confidentialClient();
-    const doc = get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id)!;
+    const doc = (await get<{ id: string; info: Record<string, unknown>; secretHash: string }>('oauthClients', c.client_id))!;
     const exchange = await c.newCode();
     for (const method of [null, '', true, 1, [], {}, 'bogus', 'private_key_jwt', 'client_secret_basic', 'tls_client_auth']) {
-      put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: method } });
+      await put('oauthClients', { ...doc, info: { ...doc.info, token_endpoint_auth_method: method } });
       for (const body of [exchange, c.refresh]) {
         const res = await token({ ...body, client_secret: c.client_secret });
         expect(res.status, `${JSON.stringify(method)} ${body.grant_type}`).toBe(401);
@@ -734,9 +734,9 @@ describe('client metadata documents and redirect safety', () => {
     // Older versions stored a secret-holding client with no method (RFC 7591's default): it is upgraded to
     // the method Concord checks, client_secret_post, and the secret is still required.
     const { token_endpoint_auth_method: _m, ...noMethod } = doc.info;
-    put('oauthClients', { ...doc, info: noMethod });
+    await put('oauthClients', { ...doc, info: noMethod });
     expect((await token(exchange)).status).toBe(401);
-    expect(get<{ info: Record<string, unknown> }>('oauthClients', c.client_id)!.info.token_endpoint_auth_method).toBe('client_secret_post');
+    expect((await get<{ info: Record<string, unknown> }>('oauthClients', c.client_id))!.info.token_endpoint_auth_method).toBe('client_secret_post');
     expect((await token({ ...exchange, client_secret: c.client_secret })).status).toBe(200);
   });
 
@@ -754,25 +754,25 @@ describe('client metadata documents and redirect safety', () => {
     expect((await request(base).get('/api/ontologies')).status).toBe(200);
   });
 
-  it('hashes every plain-text secret at startup, including clients nobody has used since', () => {
+  it('hashes every plain-text secret at startup, including clients nobody has used since', async () => {
     const ids = [newId('client'), newId('client')];
-    for (const id of ids) put('oauthClients', { id, info: { client_id: id, client_name: 'Untouched', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: `plain-${id}` } });
-    expect(migrateClientSecrets()).toMatchObject({ hashed: 2, scrubbed: true });
+    for (const id of ids) await put('oauthClients', { id, info: { client_id: id, client_name: 'Untouched', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: `plain-${id}` } });
+    expect(await migrateClientSecrets()).toMatchObject({ hashed: 2, scrubbed: true });
     for (const id of ids) {
-      const d = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id)!;
+      const d = (await get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id))!;
       expect(d.info.client_secret).toBeUndefined();
       expect(d.secretHash).toBe(createHash('sha256').update(`plain-${id}`).digest('hex'));
     }
-    expect(migrateClientSecrets()).toEqual({ hashed: 0, scrubbed: true });
+    expect(await migrateClientSecrets()).toEqual({ hashed: 0, scrubbed: true });
   });
 
   it('moves a secret stored in plain text by older code into a hash, and still accepts it', async () => {
     const id = newId('client');
     const secret = randomBytes(32).toString('hex');
-    put('oauthClients', { id, info: { client_id: id, client_name: 'Old client', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: secret, client_secret_expires_at: 0 } });
+    await put('oauthClients', { id, info: { client_id: id, client_name: 'Old client', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'client_secret_post', client_secret: secret, client_secret_expires_at: 0 } });
     const { verifier, challenge } = pkce();
     const { code } = await authorize(await signedIn(), id, origin, { challenge, resource: `${origin}/mcp` });
-    const stored = get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id)!;
+    const stored = (await get<{ info: Record<string, unknown>; secretHash?: string }>('oauthClients', id))!;
     expect(stored.info.client_secret).toBeUndefined();
     expect(stored.secretHash).toBe(createHash('sha256').update(secret).digest('hex'));
     const exchange = { grant_type: 'authorization_code', code, code_verifier: verifier, client_id: id, redirect_uri: REDIRECT, resource: `${origin}/mcp` };
@@ -854,7 +854,7 @@ describe('client metadata documents and redirect safety', () => {
     const agent = await signedIn();
     for (const action of ['approve', 'deny']) {
       const id = newId('authz');
-      put('oauthRequests', { id, clientId: CID, redirectUri: 'javascript:alert(document.cookie)//', codeChallenge: 'x', scopes: [], resource: `${origin}/mcp`, issuer: `${origin}/`, expiresAt: Math.floor(Date.now() / 1000) + 600 });
+      await put('oauthRequests', { id, clientId: CID, redirectUri: 'javascript:alert(document.cookie)//', codeChallenge: 'x', scopes: [], resource: `${origin}/mcp`, issuer: `${origin}/`, expiresAt: Math.floor(Date.now() / 1000) + 600 });
       const res = await agent.post(`/api/oauth/requests/${id}/${action}`).send({});
       expect(res.status, action).toBe(400);
       expect(res.body.redirect).toBeUndefined();
@@ -865,16 +865,16 @@ describe('client metadata documents and redirect safety', () => {
     const id = 'https://client.example/cache.json';
     docs.set(id, meta({ client_id: id }));
     expect((await request(base).get(authorizeUrl(id, 'https://client.example/callback'))).status).toBe(302);
-    const age = (seconds: number) => {
-      const doc = get<{ id: string; fetchedAt: number }>('oauthClients', id)!;
-      put('oauthClients', { ...doc, fetchedAt: Math.floor(Date.now() / 1000) - seconds });
+    const age = async (seconds: number) => {
+      const doc = (await get<{ id: string; fetchedAt: number }>('oauthClients', id))!;
+      await put('oauthClients', { ...doc, fetchedAt: Math.floor(Date.now() / 1000) - seconds });
     };
     // Past a day old and the host is down: a short grace period, then no more.
     failWith = new FetchError('unavailable', 'timeout');
     try {
-      age(24 * 3600 + 60);
+      await age(24 * 3600 + 60);
       expect((await request(base).get(authorizeUrl(id, 'https://client.example/callback'))).status).toBe(302);
-      age(26 * 3600);
+      await age(26 * 3600);
       expect((await request(base).get(authorizeUrl(id, 'https://client.example/callback'))).status).toBe(400);
     } finally {
       failWith = undefined;
@@ -882,9 +882,9 @@ describe('client metadata documents and redirect safety', () => {
     // Refetched fine, then removed by its owner: forgotten at once.
     expect((await request(base).get(authorizeUrl(id, 'https://client.example/callback'))).status).toBe(302);
     docs.delete(id);
-    age(24 * 3600 + 60);
+    await age(24 * 3600 + 60);
     expect((await request(base).get(authorizeUrl(id, 'https://client.example/callback'))).status).toBe(400);
-    expect(get('oauthClients', id)).toBeUndefined();
+    expect(await get('oauthClients', id)).toBeUndefined();
   });
 });
 

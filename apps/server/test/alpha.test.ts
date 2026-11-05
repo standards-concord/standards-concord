@@ -12,7 +12,7 @@ import { solid } from '../src/services/solid.js';
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -101,7 +101,8 @@ describe('feedback about what changed', () => {
     expect(qs.map((q) => q.id)).toEqual(expect.arrayContaining(['new:other', 'overall', 'missing', 'comments']));
     // Nothing from the full questionnaire about the whole app (e.g. governance) is asked again.
     expect(qs.some((q) => q.id.startsWith('gov_'))).toBe(false);
-    expect(qs.find((q) => q.id === 'new:mcp-oauth')?.text).toMatch(/connect your coding agent/);
+    // A change's own question is used (pinned to 0.19.0, so later agent releases don't push this one past the first six).
+    expect(changeQuestions('0.6.0', 'agent', '0.19.0').find((q) => q.id === 'new:mcp-oauth')?.text).toMatch(/connect your coding agent/);
   });
 
   it('falls back to the full questionnaire when nothing has changed', () => {
@@ -239,7 +240,7 @@ describe('alpha tester records', () => {
     const existing = await upsertFederatedUser({ provider: 'github', subject: 'gh-existing-1', name: 'Existing' });
     await recordVersion(existing, { version: '0.6.0', feedbackId: 'fb_old' });
     const demo = await createUser({ name: 'Alpha tester', provider: 'demo', subject: 'tester_merge' });
-    put('feedback', { id: 'fb_new', pathway: 'general', answers: {}, transcript: [], createdAt: new Date().toISOString() });
+    await put('feedback', { id: 'fb_new', pathway: 'general', answers: {}, transcript: [], createdAt: new Date().toISOString() });
     await recordVersion(demo, { version: '0.8.0', role: 'agent', feedbackId: 'fb_new' });
     await mergeTesterRecords(demo, existing);
     const after = (await recordVersion(existing, { version: '0.6.0' })).versions;

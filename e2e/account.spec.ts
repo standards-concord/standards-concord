@@ -20,7 +20,9 @@ test.describe('account and hub', () => {
 
   test('the login page sends a signed-in person on, and the walkthrough link works', async ({ page }) => {
     await page.goto('/login');
-    await page.getByRole('button', { name: /walkthrough/i }).first().click();
+    await page.getByRole('button', { name: 'Alpha tester? Start here' }).click();
+    await expect(page).toHaveURL(/\/welcome$/);
+    await page.getByRole('link', { name: 'Start the guided walkthrough' }).first().click();
     await expect(page).toHaveURL(/\/alpha$/);
     await signIn(page, { name: `Returning ${uniq()}` });
     await page.goto('/login?next=%2Fsettings');
