@@ -53,6 +53,24 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.18.0',
+    date: '2026-11-05',
+    title: 'A welcome page for testers, with two short videos',
+    pr: 60,
+    changes: [
+      {
+        id: 'welcome-page',
+        type: 'feat',
+        title: 'A welcome page that explains Concord and how to take part',
+        detail:
+          'The page to start from: what Concord is for, a narrated tour of the platform, a short video on how to take part and give feedback, and the four steps of the alpha. “Alpha tester? Start here” on the sign-in page leads to it.',
+        roles: [],
+        to: '/welcome',
+        ask: 'Did the welcome page and its videos tell you what you needed before you started?',
+      },
+    ],
+  },
+  {
     version: '0.17.1',
     date: '2026-11-05',
     title: 'Every app on the Connect page has its logo',

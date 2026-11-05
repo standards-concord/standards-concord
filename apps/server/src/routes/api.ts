@@ -1,3 +1,4 @@
+import path from 'node:path';
 import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
@@ -31,6 +32,7 @@ import {
   type AdminAction,
 } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
+import { mediaFile, mediaIndex, MEDIA_TYPES } from '../services/media.js';
 import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -131,6 +133,17 @@ export function apiRouter(): Router {
 
   /* ------------------------------ auth ------------------------------ */
   r.get('/session', async (req, res) => res.json(await sessionInfo(req.user)));
+
+  // Walkthrough videos for the alpha landing page (public; see services/media.ts).
+  r.get('/media/index.json', async (_req, res) => {
+    const index = await mediaIndex().catch(() => ({ release: null, files: [], unavailable: true }));
+    res.set('cache-control', 'public, max-age=300').json(index);
+  });
+  r.get('/media/:file', async (req, res) => {
+    const file = await mediaFile(String(req.params.file));
+    if (!file) throw new HttpError(404, 'No such video for the current release');
+    res.sendFile(file, { headers: { 'content-type': MEDIA_TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'public, max-age=3600' } });
+  });
 
   r.get('/personas', async (_req, res) => {
     await seedDemo();
