@@ -1,4 +1,5 @@
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useId, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { Link, type LinkProps } from 'react-router';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
@@ -45,6 +46,28 @@ export function Button({
       {loading ? <LoaderCircle className="size-4 animate-spin" /> : Icon ? <Icon className={size === 'sm' ? 'size-3.5' : 'size-4'} /> : null}
       {children}
     </button>
+  );
+}
+
+type ButtonLook = { variant?: Variant; size?: 'sm' | 'md' | 'lg'; icon?: LucideIcon };
+
+/** A link that looks like a button: one interactive element, never a button inside a link. */
+export function LinkButton({ variant = 'secondary', size = 'md', icon: Icon, className, children, ...rest }: LinkProps & ButtonLook) {
+  return (
+    <Link {...rest} className={buttonClasses(variant, size, className)}>
+      {Icon && <Icon className={size === 'sm' ? 'size-3.5' : 'size-4'} aria-hidden />}
+      {children}
+    </Link>
+  );
+}
+
+/** An external or download link that looks like a button. */
+export function AnchorButton({ variant = 'secondary', size = 'md', icon: Icon, className, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElement> & ButtonLook) {
+  return (
+    <a {...rest} className={buttonClasses(variant, size, className)}>
+      {Icon && <Icon className={size === 'sm' ? 'size-3.5' : 'size-4'} aria-hidden />}
+      {children}
+    </a>
   );
 }
 

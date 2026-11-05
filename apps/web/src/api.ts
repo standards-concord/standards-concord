@@ -320,8 +320,9 @@ export const api = {
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
-  review: (id: string, decision: ReviewDecision, comment?: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/reviews`, { decision, comment }),
-  voteChangeRequest: (id: string, choice: VoteChoice, comment?: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/votes`, { choice, comment }),
+  /** `round` is the review round of the version on screen; the server refuses a decision on one that has since changed. */
+  review: (id: string, decision: ReviewDecision, comment: string | undefined, round: number) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/reviews`, { decision, comment, round }),
+  voteChangeRequest: (id: string, choice: VoteChoice, comment: string | undefined, round: number) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/votes`, { choice, comment, round }),
   merge: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/merge`),
   withdraw: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/withdraw`),
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),

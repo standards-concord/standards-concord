@@ -20,7 +20,7 @@ import type {
 import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put, remove, transaction } from '../db.js';
 import { newId } from '../ids.js';
-import { addReview, addVote, advance, changeCR, getCR, listCRs, reviewsFor, votesFor } from './changeRequests.js';
+import { addReview, addVote, advance, changeCR, getCR, listCRs, peopleWhoSpoke, reviewsFor, sayIsCurrent, votesFor } from './changeRequests.js';
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -753,14 +753,7 @@ interface Decision {
   apps: AppDoc[];
 }
 
-/** People who reviewed (not just commented) or voted on this version of the change themselves. */
-export async function peopleWhoSpoke(cr: ChangeRequest): Promise<Set<string>> {
-  const since = cr.opsUpdatedAt ?? cr.createdAt;
-  const ids = new Set<string>();
-  for (const r of await reviewsFor(cr.id)) if (!r.autopilot && r.decision !== 'comment' && r.at >= since) ids.add(r.userId);
-  for (const v of await votesFor(cr.id)) if (!v.autopilot && v.at >= since) ids.add(v.userId);
-  return ids;
-}
+export { peopleWhoSpoke };
 
 /**
  * What autopilot should be saying for this person on this change, at this stage, right now.
@@ -852,10 +845,10 @@ export async function applyAutopilot(crId: string, userId: string, depth = 0): P
   const user = await getUser(userId);
   if (!user) return none('Unknown person.');
 
-  const since = cr.opsUpdatedAt ?? cr.createdAt;
   const revision = await revisionOf(cr);
   const spoke = await peopleWhoSpoke(cr);
-  const mine = <T extends Say>(xs: T[]) => xs.filter((x) => x.userId === userId && x.at >= since && x.autopilot);
+  // Only says given on the request as it is now (this review round, these edits) can be in force.
+  const mine = <T extends Say>(xs: T[]) => xs.filter((x) => x.userId === userId && x.autopilot && sayIsCurrent(cr, x));
   const says = [...mine(await reviewsFor(cr.id)), ...mine(await votesFor(cr.id))];
   const d = await decide(cr, userId, stage, spoke);
   const why = d.why.charAt(0).toUpperCase() + d.why.slice(1);
@@ -908,11 +901,11 @@ export async function applyAutopilot(crId: string, userId: string, depth = 0): P
   };
   const again = () => (depth < 3 ? applyAutopilot(crId, userId, depth + 1) : Promise.resolve(none('The change kept changing; autopilot will look again.')));
   if (sayIn === 'vote') {
-    await addVote(cr, user, d.say === 'yes' ? 'yes' : 'no', `Autopilot: ${d.why}.`, mark, stillMeant);
+    await addVote(cr, user, d.say === 'yes' ? 'yes' : 'no', `Autopilot: ${d.why}.`, undefined, mark, stillMeant);
     if (changed) return again();
     return { action: d.say === 'yes' ? 'voted-yes' : 'voted-no', message: `Voted ${d.say}. ${why}.` };
   }
-  await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, mark, stillMeant);
+  await addReview(cr, user, 'approve', `Autopilot: ${d.why}.`, undefined, mark, stillMeant);
   if (changed) return again();
   return { action: 'approved', message: `Approved. ${why}.` };
 }

@@ -116,11 +116,54 @@ test.describe('change requests', () => {
     // A revision is re-classified, re-validated and goes straight back to review.
     await expect(status(page)).toContainText('In review');
     await page.getByRole('tab', { name: /^Discussion/ }).click();
-    await expect(page.getByText('Requested changes', { exact: true })).toBeVisible();
+    // The revision changed the edits, so the request for changes is from an earlier round.
+    await expect(page.getByText('Requested changes · earlier round', { exact: true })).toBeVisible();
     await expect(page.getByText(/AI revision requested by Tom Okafor/)).toBeVisible();
 
     // Reviewers' earlier approvals no longer count once the edits change.
-    await expect(page.getByText(/updated the proposed edits \(earlier approvals no longer count\)/)).toBeVisible();
+    await expect(page.getByText(/updated the proposed edits \(earlier approvals and votes for no longer count; votes against and objections stand\)/)).toBeVisible();
+  });
+
+  // Regression: Resubmit used to do nothing. The old "request changes" review still counted, so the
+  // request bounced straight back to Needs work, and reviewers had no buttons while it needed work.
+  // Resubmitting now starts a new review round: earlier reviews stop counting and reviewers are asked again.
+  test('resubmitting starts a new review round, and reviewers can approve from Needs work', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const name = `Slot${uniq()}`;
+    await signInAsPersona(page, 'Tom Okafor');
+    const url = await newChangeRequest(page, demo.id, { title: `Add slots ${name}`, ask: `Add a class ${name} as a subclass of Session.` });
+    await actions(page).getByRole('button', { name: 'Submit for review' }).click();
+    await expect(status(page)).toContainText('In review');
+
+    await signInAsPersona(page, 'Priya Shah');
+    await page.goto(url);
+    await actions(page).getByRole('textbox').fill('Is this the same as a Session?');
+    await actions(page).getByRole('button', { name: 'Request changes' }).click();
+    await expect(status(page)).toContainText('Needs work');
+
+    // The author answers in a comment and resubmits without changing the edits.
+    await signInAsPersona(page, 'Tom Okafor');
+    await page.goto(url);
+    await actions(page).getByRole('textbox').fill('No: a slot is one occurrence of a recurring session.');
+    await actions(page).getByRole('button', { name: 'Comment' }).click();
+    await actions(page).getByRole('button', { name: 'Resubmit' }).click();
+    await expect(status(page)).toContainText('In review');
+    await page.reload();
+    await expect(status(page)).toContainText('In review');
+    await page.getByRole('tab', { name: /^Discussion/ }).click();
+    await expect(page.getByText('Requested changes · earlier round')).toBeVisible();
+    await expect(page.getByText(/earlier approvals and requests for changes no longer count, and reviewers are asked to review again/)).toBeVisible();
+
+    // The reviewer is told their earlier review no longer counts, rather than "you previously chose".
+    await signInAsPersona(page, 'Priya Shah');
+    await page.goto(url);
+    await expect(actions(page).getByRole('status')).toContainText('was for an earlier round');
+    // Sent back again, the reviewer can approve straight from Needs work once satisfied.
+    await actions(page).getByRole('button', { name: 'Request changes' }).click();
+    await expect(status(page)).toContainText('Needs work');
+    await actions(page).getByRole('button', { name: 'Approve' }).click();
+    await expect(status(page)).toContainText('In review');
+    await expect(page.getByRole('button', { name: /^Approval details 1 of 2 approvals/ })).toBeVisible();
   });
 
   test('the author can withdraw a request, and nobody can act on it after', async ({ page, request }) => {

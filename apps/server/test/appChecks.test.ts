@@ -465,7 +465,7 @@ describe('autopilot', () => {
     const before = await detail(crId);
     expect(before.governance.approvals).toBe(1);
     const human = await login('reviewer', 'Reviewer Human');
-    await human.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+    await human.post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'approve' });
     expect((await detail(crId)).governance.approvals).toBe(2);
 
     const oldRun = await ciRun(a.token!);
@@ -989,7 +989,7 @@ describe('autopilot', () => {
     const ola = await login('reviewer', 'Reviewer Ola');
     const a = await connect(ola, 'Ola’s app', { enabled: true });
     expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
-    await ola.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'object', comment: 'I would rather model this as a class.' });
+    await ola.post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'object', comment: 'I would rather model this as a class.' });
     const res = await ci(a.token!, { [crId]: 'failed' });
     expect(res.autopilot!.message).toMatch(/themselves/);
     const d = await detail(crId);
@@ -1022,14 +1022,14 @@ describe('autopilot', () => {
   it('an automatic approval recorded after a person’s request for changes never hides it', async () => {
     const crId = await freshCR('Autopilot after its owner asked for changes');
     const quo = await login('reviewer', 'Reviewer Quo');
-    await quo.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'request-changes', comment: 'Not like this.' });
+    await quo.post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'request-changes', comment: 'Not like this.' });
     let d = await detail(crId);
     const quoId = d.reviews.find((r) => r.decision === 'request-changes')!.userId;
     // A later automatic approval for the same person, as the race used to leave it: withdrawn,
     // stale, or never valid, it must not take the person's own say with it.
     const later = new Date(Date.parse(clock.iso()) + 1000).toISOString();
     await put('reviews', { id: `rev_${randomUUID()}`, changeRequestId: crId, userId: quoId, roles: ['reviewer'], decision: 'approve', comment: 'Autopilot', at: later, autopilot: { revision: d.revision, apps: [] } }, crId);
-    await (await login('reviewer', 'Reviewer Rae')).post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+    await (await login('reviewer', 'Reviewer Rae')).post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'approve' });
     await (await login('steward', 'Steward Clock')).post('/api/simulation/clock').send({ advanceDays: 8 });
     d = await detail(crId);
     expect(d.governance.unmet.join(' ')).toMatch(/requested changes/);
@@ -1086,7 +1086,7 @@ describe('autopilot', () => {
   it('votes in a vote, only for allowed levels; never for someone who objected; takes a no back without reviving an older yes', async () => {
     // Before the vote opens, a member objects in review.
     const obi = await login('reviewer', 'Member Obi');
-    await obi.post(`/api/change-requests/${majorId}/reviews`).send({ decision: 'object', comment: 'Some sessions really are at several sites.' });
+    await obi.post(`/api/change-requests/${majorId}/reviews`).send({ round: (await detail(majorId)).round, decision: 'object', comment: 'Some sessions really are at several sites.' });
     const obiApp = await connect(obi, 'Obi’s app', { enabled: true, levels: ['patch', 'minor', 'major'] });
 
     // Open the vote on the breaking change: its review period ends.
@@ -1114,7 +1114,7 @@ describe('autopilot', () => {
     const unaApp = await connect(una, 'Una’s app', { enabled: true, levels: ['patch', 'minor', 'major'] });
     expect((await ci(unaApp.token!, { [majorId]: 'passed' })).autopilot!.action).toBe('voted-yes');
     const withUna = (await detail(majorId)).governance.vote!;
-    await una.post(`/api/change-requests/${majorId}/reviews`).send({ decision: 'object', comment: 'On reflection, no.' });
+    await una.post(`/api/change-requests/${majorId}/reviews`).send({ round: (await detail(majorId)).round, decision: 'object', comment: 'On reflection, no.' });
     d = await detail(majorId);
     expect(d.governance.vote!.cast).toBe(withUna.cast - 1);
     expect(d.governance.vote!.yes).toBe(withUna.yes - 1);
@@ -1161,7 +1161,7 @@ describe('autopilot', () => {
       const steward = await login('steward', 'Steward Clock');
       await steward.post('/api/simulation/clock').send({ advanceDays: 8 });
       const human = await login('reviewer', 'Reviewer Vic');
-      await human.post(`/api/change-requests/${crId}/reviews`).send({ decision: 'approve' });
+      await human.post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'approve' });
       pat = await login('reviewer', 'Reviewer Pat');
       token = (await connect(pat, 'Pat’s app', { enabled: true })).token!;
     });
@@ -1252,7 +1252,7 @@ describe('autopilot', () => {
       const approvedCR = async (title: string) => {
         const id = await freshCR(title);
         await (await login('steward', 'Steward Clock')).post('/api/simulation/clock').send({ advanceDays: 8 });
-        await (await login('reviewer', `Reviewer for ${title}`)).post(`/api/change-requests/${id}/reviews`).send({ decision: 'approve' });
+        await (await login('reviewer', `Reviewer for ${title}`)).post(`/api/change-requests/${id}/reviews`).send({ round: (await detail(id)).round, decision: 'approve' });
         expect((await ci(token, { [id]: 'passed' })).autopilot!.action).toBe('approved');
         expect((await detail(id)).status).toBe('approved');
         return id;
@@ -1456,6 +1456,34 @@ describe('autopilot', () => {
         expect(merged.status).toBe('merged');
       });
     });
+  });
+
+  // Review rounds (from main): resubmitting starts a new round, and an approval from an earlier
+  // round stops counting. Autopilot used to think its round-one approval was still in force, so
+  // it never approved again and the change waited on a say that didn't count.
+  it('approves again in a new review round, because an approval from an earlier round no longer counts', async () => {
+    const crId = await freshCR('Autopilot and a resubmitted change');
+    const ari = await login('reviewer', 'Reviewer Ari');
+    const a = await connect(ari, 'Ari’s app', { enabled: true });
+    expect((await ci(a.token!, { [crId]: 'passed' })).autopilot!.action).toBe('approved');
+    const counting = (d: ChangeRequestDetail) => d.reviews.filter((r) => r.userId === a.ownerId && r.autopilot && !r.withdrawnAt && !r.stale);
+    expect(counting(await detail(crId))).toHaveLength(1);
+    // Someone sends it back, and an editor resubmits the same edits: round two.
+    const vic = await login('reviewer', 'Reviewer Vic');
+    const sent = await vic.post(`/api/change-requests/${crId}/reviews`).send({ round: (await detail(crId)).round, decision: 'request-changes', comment: 'Not yet.' });
+    expect(sent.status, sent.text).toBe(200);
+    expect((await detail(crId)).status).toBe('needs-work');
+    const resubmitted = await (await login('editor', 'Editor Resubmits')).post(`/api/change-requests/${crId}/submit`);
+    expect(resubmitted.status, resubmitted.text).toBe(200);
+    const d = await detail(crId);
+    expect(d.status).toBe('review');
+    expect(d.round).toBe(2);
+    // Its round-one approval is stale; autopilot approved again in round two, and that one counts.
+    const mine = d.reviews.filter((r) => r.userId === a.ownerId && r.autopilot);
+    expect(mine.filter((r) => r.stale)).toHaveLength(1);
+    expect(counting(d)).toHaveLength(1);
+    expect(counting(d)[0].round).toBe(2);
+    expect(d.governance.approvals).toBeGreaterThanOrEqual(1);
   });
 
   it('asks again after the change is edited', async () => {

@@ -185,10 +185,50 @@ export function effectiveRule(policy: GovernancePolicy, level: ChangeLevel, kind
   return base;
 }
 
+/**
+ * Order of decisions: by the sequence number a change request gives each review and vote, which the
+ * clock can't disturb; older ones without it (and releases' votes) by time, before any that have one.
+ */
+export const decisionOrder = (a: { seq?: number; at: string }, b: { seq?: number; at: string }) => (a.seq ?? 0) - (b.seq ?? 0) || a.at.localeCompare(b.at);
+
+/**
+ * Which reviews of a change request count in its current round, and which are stale.
+ *
+ * Each person's latest decision counts if it was given in the current round. A round moves on when the
+ * author resubmits or the edits change, so approvals and requests for changes from an earlier round stop
+ * counting and the reviewer is asked again (as GitHub dismisses stale reviews). An objection is different:
+ * it is a formal position the author can't dismiss, so it stands until the objector changes their review.
+ */
+export function reviewsInRound<T extends Review>(reviews: T[], round: number, roundOf: (r: T) => number): { counted: T[]; stale: Set<string> } {
+  const ordered = reviews.map((r, i) => ({ r, i, n: roundOf(r) })).sort((a, b) => a.n - b.n || decisionOrder(a.r, b.r) || a.i - b.i);
+  const latest = new Map<string, { r: T; n: number }>();
+  for (const x of ordered) if (x.r.decision !== 'comment') latest.set(x.r.userId, x);
+  const counted = [...latest.values()].filter((x) => x.n === round || x.r.decision === 'object').map((x) => x.r);
+  const keep = new Set(counted.map((r) => r.id));
+  const stale = new Set(ordered.filter((x) => x.r.decision !== 'comment' && x.n !== round && !keep.has(x.r.id)).map((x) => x.r.id));
+  return { counted, stale };
+}
+
+/**
+ * Which votes count on a change request's current edits. A vote is on the edits it was cast on, so when
+ * the edits change, "yes" and "abstain" stop counting and the voter is asked again. A "no" stands until
+ * the voter changes it, like an objection: otherwise rewriting the edits, even to the same effect, would
+ * be a way for an author to erase opposition. Only each person's latest vote can count.
+ */
+export function votesOnEdits<T extends Vote>(votes: T[], editsVersion: number, versionOf: (v: T) => number): { counted: T[]; stale: Set<string> } {
+  const ordered = votes.map((v, i) => ({ v, i, n: versionOf(v) })).sort((a, b) => a.n - b.n || decisionOrder(a.v, b.v) || a.i - b.i);
+  const latest = new Map<string, { v: T; n: number }>();
+  for (const x of ordered) latest.set(x.v.userId, x);
+  const counted = [...latest.values()].filter((x) => x.n === editsVersion || x.v.choice === 'no').map((x) => x.v);
+  const keep = new Set(counted.map((v) => v.id));
+  const stale = new Set(ordered.filter((x) => x.n !== editsVersion && !keep.has(x.v.id)).map((x) => x.v.id));
+  return { counted, stale };
+}
+
 /** Latest review per person (a later approval supersedes an earlier request for changes). */
 function latestReviews(reviews: Review[]): Review[] {
   const byUser = new Map<string, Review>();
-  for (const r of [...reviews].sort((a, b) => a.at.localeCompare(b.at))) {
+  for (const r of [...reviews].sort(decisionOrder)) {
     if (r.decision === 'comment') continue;
     byUser.set(r.userId, r);
   }
@@ -219,24 +259,31 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     .map((rev) => rev.userId);
   const objections = latest.filter((rev) => rev.decision === 'object' && !vetoedBy.includes(rev.userId));
   const changesRequested = latest.filter((rev) => rev.decision === 'request-changes');
+  // A standing vote against is opposition too (it outlasts new edits, see votesOnEdits), so lazy consensus
+  // mustn't read it as silence: like an objection, it sends the change to a vote.
+  const lastVote = new Map<string, Vote>();
+  for (const v of [...input.votes].sort(decisionOrder)) lastVote.set(v.userId, v);
+  const votesAgainst = [...lastVote.values()].filter((v) => v.choice === 'no' && members.some((m) => m.userId === v.userId));
+  const opposed = objections.length > 0 || votesAgainst.length > 0;
+  const opposition = objections.length ? 'An objection was raised' : 'A vote against stands';
 
   const reviewPeriodEndsAt = addDays(input.reviewStartedAt, r.reviewPeriodDays);
   const reviewPeriodOver = now.getTime() >= new Date(reviewPeriodEndsAt).getTime();
-  const policyApprovals = r.lazyConsensus && objections.length === 0 ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
+  const policyApprovals = r.lazyConsensus && !opposed ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
   const requiredApprovals = input.independentConfirmation ? Math.max(policyApprovals, 1) : policyApprovals;
   const validationOk = !policy.requireValidation || input.validationOk;
 
   // Votes
   let voteState: GovernanceEvaluation['vote'];
   let voteNeeded = !!r.vote;
-  // Lazy consensus without objections skips the vote for non-major changes.
-  if (r.vote && r.lazyConsensus && objections.length === 0 && level !== 'major') voteNeeded = false;
+  // Lazy consensus without opposition skips the vote for non-major changes.
+  if (r.vote && r.lazyConsensus && !opposed && level !== 'major') voteNeeded = false;
   if (r.vote && voteNeeded) {
     const eligibleIds = members
       .filter((m) => canCastVote(m.roles, r.vote!.voterRoles))
       .map((m) => m.userId);
     const latestVotes = new Map<string, Vote>();
-    for (const v of [...input.votes].sort((a, b) => a.at.localeCompare(b.at))) if (eligibleIds.includes(v.userId)) latestVotes.set(v.userId, v);
+    for (const v of [...input.votes].sort(decisionOrder)) if (eligibleIds.includes(v.userId)) latestVotes.set(v.userId, v);
     const vs = [...latestVotes.values()];
     const yes = vs.filter((v) => v.choice === 'yes').length;
     const no = vs.filter((v) => v.choice === 'no').length;
@@ -308,14 +355,14 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     if (reviewDone) {
       if (voteNeeded) {
         outcome = 'voting';
-        next = r.lazyConsensus && objections.length ? 'An objection was raised, so this goes to a vote.' : 'Review is complete, so the vote opens now.';
+        next = r.lazyConsensus && opposed ? `${opposition}, so this goes to a vote.` : 'Review is complete, so the vote opens now.';
       } else {
         outcome = 'approved';
         next = r.lazyConsensus && approvals === 0 ? 'No objections were raised during the comment period (lazy consensus).' : 'Approved by reviewers.';
       }
     } else {
       outcome = 'review';
-      if (objections.length && r.lazyConsensus) next = 'An objection was raised; it will go to a vote when the comment period ends.';
+      if (opposed && r.lazyConsensus) next = `${opposition}; it will go to a vote when the comment period ends.`;
       else if (approvals < requiredApprovals) next = `Needs ${requiredApprovals - approvals} more approval(s) from ${roleList(approverRoles)}.`;
       else next = `Waiting for the review period to end (${reviewPeriodEndsAt}).`;
     }

@@ -6,7 +6,7 @@ import { formatDate, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { GitHubIcon, GoogleIcon, SolidIcon } from '../components/badges';
 import { CollapsibleCard } from '../components/Disclosure';
-import { Avatar, Badge, Button, Card, CardHeader, CopyButton, PageHeader } from '../components/ui';
+import { Avatar, Badge, Card, CardHeader, CopyButton, PageHeader, AnchorButton } from '../components/ui';
 
 /** The signed-in person's profile: who they are, how they sign in, and where their private data lives. */
 export function SettingsPage() {
@@ -48,18 +48,14 @@ export function SettingsPage() {
           {(session.providers.google || session.providers.github) && (
             <div className="flex flex-wrap gap-2 border-t border-line px-5 py-3">
               {session.providers.google && !u.providers.some((p) => p.provider === 'google') && (
-                <a href={api.oauthUrl('google', '/settings')}>
-                  <Button size="sm">
+                <AnchorButton href={api.oauthUrl('google', '/settings')} size="sm">
                     <GoogleIcon className="size-3.5" /> Link Google
-                  </Button>
-                </a>
+                  </AnchorButton>
               )}
               {session.providers.github && !u.providers.some((p) => p.provider === 'github') && (
-                <a href={api.oauthUrl('github', '/settings')}>
-                  <Button size="sm">
+                <AnchorButton href={api.oauthUrl('github', '/settings')} size="sm">
                     <GitHubIcon className="size-3.5" /> Link GitHub
-                  </Button>
-                </a>
+                  </AnchorButton>
               )}
             </div>
           )}

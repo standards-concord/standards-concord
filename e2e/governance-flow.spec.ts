@@ -288,6 +288,50 @@ test('when the policy asks for a vote, members vote after review and the result 
   await expect(page.getByText('voted', { exact: false }).first()).toBeVisible();
 });
 
+// Regression: rewriting a change's edits used to erase every vote, "no" included, so an author could
+// clear opposition by rewording the edits. Now a vote against stands until the voter changes it.
+test('a vote against stands when the edits change, until the voter changes it', async ({ page }) => {
+  await signInAsPersona(page, 'Tom Okafor');
+  const url = await draftAndSubmit(page, `Add a standing vote test ${uniq()}`, `Add a class Standing${uniq()}.`);
+  await asSteward(page);
+  await page.goto(url);
+  const actions = page.getByRole('group', { name: 'Your actions' });
+  await actions.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByRole('button', { name: /^Status: Voting/ })).toBeVisible();
+
+  await signInAsPersona(page, 'Gareth Lewis');
+  await page.goto(url);
+  await actions.getByRole('textbox').fill('Please add a definition.');
+  await actions.getByRole('button', { name: 'No' }).click();
+  await expect(actions.getByText('You voted “no”. You can change your vote while it’s open.')).toBeVisible();
+
+  // While the vote is open, the author rewrites the edits through the API (the page offers no editing
+  // during a vote, but agents and scripts can), which sends the request back to review.
+  await signInAsPersona(page, 'Tom Okafor');
+  const id = url.split('/changes/')[1];
+  const cr = await (await page.request.get(`/api/change-requests/${id}`)).json();
+  const rewritten = cr.ops.map((o: Record<string, unknown>) => ({ ...o, definition: 'A thing that stands, for testing votes.' }));
+  const patched = await page.request.patch(`/api/change-requests/${id}`, { data: { ops: rewritten } });
+  expect(patched.ok(), await patched.text()).toBeTruthy();
+  expect((await patched.json()).status).toBe('review');
+
+  await asSteward(page);
+  await page.goto(url);
+  await actions.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByRole('button', { name: /^Status: Voting/ })).toBeVisible();
+
+  // Gareth's "no" on the earlier edits still counts, and he is told so.
+  await signInAsPersona(page, 'Gareth Lewis');
+  await page.goto(url);
+  await expect(actions.getByRole('status')).toContainText('You voted “no” on earlier edits. It still counts until you change it');
+  await page.getByRole('tab', { name: /^Discussion/ }).click();
+  await expect(page.getByText('no · earlier edits, still counts', { exact: true })).toBeVisible();
+  await expect(page.getByText(/votes against and objections stand/)).toBeVisible();
+  // Changing it to "yes" on the new edits replaces it.
+  await actions.getByRole('button', { name: 'Yes' }).click();
+  await expect(actions.getByText('You voted “yes”. You can change your vote while it’s open.').or(page.getByRole('button', { name: /^Status: Approved/ }))).toBeVisible();
+});
+
 test('an objection from a veto role rejects a change outright', async ({ page }) => {
   await editMinorRule(page, async (table) => {
     // Turn the vote off again and give owners a veto.

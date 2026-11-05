@@ -754,18 +754,24 @@ export function apiRouter(): Router {
   });
 
   const cr = async (req: Request) => await crs.getCR(String(req.params.id));
+  /** The review round a decision was made on (`round` in the body): required, so a decision on a version that has since changed is refused. */
+  const decisionRound = (req: Request) => {
+    const round = req.body?.round;
+    if (!Number.isInteger(round) || round < 1) throw new HttpError(400, 'round is required: the review round of the version you are deciding on (from the change request)');
+    return round as number;
+  };
   r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
   r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {
     const decision = req.body?.decision;
     if (!['approve', 'request-changes', 'object', 'comment'].includes(decision)) throw new HttpError(400, 'decision must be approve, request-changes, object or comment');
-    res.json(await crOut(await crs.addReview(await cr(req), requireUser(req), decision, optStr(req.body?.comment)), req));
+    res.json(await crOut(await crs.addReview(await cr(req), requireUser(req), decision, optStr(req.body?.comment), decision === 'comment' ? undefined : decisionRound(req)), req));
   });
   r.post('/change-requests/:id/votes', async (req, res) => {
     const choice = req.body?.choice;
     if (!['yes', 'no', 'abstain'].includes(choice)) throw new HttpError(400, 'choice must be yes, no or abstain');
-    res.json(await crOut(await crs.addVote(await cr(req), requireUser(req), choice, optStr(req.body?.comment)), req));
+    res.json(await crOut(await crs.addVote(await cr(req), requireUser(req), choice, optStr(req.body?.comment), decisionRound(req)), req));
   });
   r.post('/change-requests/:id/merge', async (req, res) => res.json(await crOut(await crs.merge(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/withdraw', async (req, res) => res.json(await crOut(await crs.withdraw(await cr(req), requireUser(req)), req)));
