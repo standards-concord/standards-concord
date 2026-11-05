@@ -68,6 +68,26 @@ describe('the run budget', () => {
     expect(() => voice.checkBudget([{ text: 'x'.repeat(1500) }])).toThrow(/budget of 1,000/);
   });
 
+  it('checks the account has enough characters left before recording any video', async () => {
+    const recorded: string[] = [];
+    let asked = 0;
+    await expect(
+      recordVideos({
+        videos: ['tour', 'feedback'],
+        paid: true,
+        budget: 9000,
+        plan: async (_v, file) => writeFileSync(file, JSON.stringify({ cost: 4000 })),
+        quota: async (total) => {
+          asked = total;
+          throw new Error('not enough left');
+        },
+        record: async (v) => void recorded.push(v),
+      }),
+    ).rejects.toThrow(/not enough left/);
+    expect(asked).toBe(8000);
+    expect(recorded).toEqual([]);
+  });
+
   it('does not plan for free voices or an unlimited budget', async () => {
     const planned: string[] = [];
     const recorded: string[] = [];

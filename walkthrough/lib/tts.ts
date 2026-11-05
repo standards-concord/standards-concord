@@ -236,6 +236,37 @@ export class Voice {
     return reqs.filter((r) => this.needsVoicing(r)).reduce((a, r) => a + r.text.length, 0);
   }
 
+  /**
+   * The ElevenLabs account's characters used and allowed this billing period, or
+   * undefined when the key can't read them (a key restricted to text to speech).
+   * Reading it costs nothing.
+   */
+  async quota(): Promise<{ used: number; limit: number; resetsAt?: string } | undefined> {
+    if (this.opts.provider !== 'elevenlabs') return undefined;
+    try {
+      const res = await fetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': this.secret('ELEVENLABS_API_KEY') }, signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) return undefined;
+      const j = (await res.json()) as { character_count?: number; character_limit?: number; next_character_count_reset_unix?: number };
+      if (typeof j.character_count !== 'number' || typeof j.character_limit !== 'number') return undefined;
+      return { used: j.character_count, limit: j.character_limit, resetsAt: j.next_character_count_reset_unix ? new Date(j.next_character_count_reset_unix * 1000).toISOString() : undefined };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Refuses, before anything is sent, if the account hasn't `cost` characters left (with a
+   * margin for retries). Returns what it saw, for the log.
+   */
+  async checkQuota(cost: number, margin = 0.1) {
+    const q = cost > 0 ? await this.quota() : undefined;
+    if (q && q.limit - q.used < Math.ceil(cost * (1 + margin)))
+      throw new BudgetExceeded(
+        `ElevenLabs has ${(q.limit - q.used).toLocaleString('en')} characters left this period (${q.used.toLocaleString('en')} of ${q.limit.toLocaleString('en')} used), not enough for ${cost.toLocaleString('en')} plus a margin for retries. Nothing was sent.`,
+      );
+    return q;
+  }
+
   async synth(req: SynthRequest): Promise<Clip> {
     const ext = this.ext();
     const file = this.fileFor(req);

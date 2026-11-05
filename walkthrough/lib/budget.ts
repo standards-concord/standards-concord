@@ -27,6 +27,8 @@ export interface RunVideos {
   plan: (video: string, file: string) => Promise<void>;
   /** Records a video; every send it makes is added to the shared `ledger`. */
   record: (video: string, ledger: string) => Promise<void>;
+  /** Refuses if the voice account hasn't `total` characters left (checked before recording). */
+  quota?: (total: number) => Promise<void>;
   log?: (s: string) => void;
 }
 
@@ -53,6 +55,7 @@ export async function recordVideos(o: RunVideos) {
         `These videos need ${total.toLocaleString('en')} new characters of narration, over this run's budget of ${o.budget.toLocaleString('en')}. Nothing was sent. Raise VOICE_CHAR_BUDGET (or --voice-budget; 0 means no limit) if that is intended.`,
       );
     log(`\nNarration to voice: ${total.toLocaleString('en')} new characters of a ${o.budget.toLocaleString('en')} budget`);
+    await o.quota?.(total);
   }
   for (const v of o.videos) {
     log(`\n━━ ${v} ━━`);

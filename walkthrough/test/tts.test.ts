@@ -136,4 +136,23 @@ describe('voice cache and budget', () => {
     expect(() => second.checkBudget([req('f'.repeat(1000))])).toThrow(/on top of the 2,000 already sent/);
     expect(second.checkBudget([req('f'.repeat(500))])).toBe(500);
   });
+
+  it('reads the account’s characters left and refuses if a run would not fit', async () => {
+    let sends = 0;
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url.endsWith('/v1/user/subscription')) return new Response(JSON.stringify({ character_count: 26_000, character_limit: 30_000, next_character_count_reset_unix: 1_800_000_000 }));
+      sends++;
+      return new Response('', { status: 500 });
+    });
+    const v = elevenlabs(9000);
+    expect(await v.quota()).toMatchObject({ used: 26_000, limit: 30_000 });
+    await expect(v.checkQuota(3000)).resolves.toMatchObject({ used: 26_000 });
+    await expect(v.checkQuota(3700)).rejects.toThrow(/4,000 characters left.*not enough for 3,700.*Nothing was sent/); // 3,700 + 10% > 4,000
+    expect(sends).toBe(0);
+  });
+
+  it('goes on under the run budget when the key cannot read usage', async () => {
+    vi.stubGlobal('fetch', async () => new Response('{"detail":"missing_permissions"}', { status: 401 }));
+    await expect(elevenlabs(2500).checkQuota(2000)).resolves.toBeUndefined();
+  });
 });

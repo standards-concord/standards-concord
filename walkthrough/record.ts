@@ -156,6 +156,10 @@ async function recordEach(videos: string[]) {
     paid: ['elevenlabs', 'openai', 'google'].includes(provider),
     budget: VOICE_BUDGET,
     log,
+    quota: async (total) => {
+      const q = await new Voice({ provider }, path.join(HERE, '.cache', 'voice')).checkQuota(total);
+      if (q) log(`ElevenLabs usage: ${q.used.toLocaleString('en')} of ${q.limit.toLocaleString('en')} characters this period, enough for this run`);
+    },
     plan: async (v, file) => {
       if ((await child(v, ['--voice-plan', file], process.env)) !== 0) throw new Error(`Planning the ${v} video failed`);
     },
@@ -257,6 +261,10 @@ async function main() {
         return;
       }
       const cost = voice.checkBudget(reqs);
+      // And the account itself must have that many characters left.
+      const quota = await voice.checkQuota(cost);
+      if (quota) log(`ElevenLabs usage: ${quota.used.toLocaleString('en')} of ${quota.limit.toLocaleString('en')} characters this period${quota.resetsAt ? ` (resets ${quota.resetsAt.slice(0, 10)})` : ''}`);
+      else if (cost && provider === 'elevenlabs') log('ElevenLabs usage: not readable with this key; the run budget still applies');
       log(`Voicing ${spoken.length} paragraphs${voice.paid ? ` (${cost.toLocaleString('en')} new characters${voice.budget ? ` of a ${voice.budget.toLocaleString('en')} budget${voice.spent ? `, ${voice.spent.toLocaleString('en')} already sent` : ''}` : ''})` : ''}…`);
       let fresh = 0;
       await pool(spoken, 3, async (x, i) => {
@@ -266,6 +274,10 @@ async function main() {
       });
       const speech = [...clips.values()].reduce((a, c) => a + c.duration, 0);
       log(`  ${fresh} new, ${spoken.length - fresh} cached, ${fmt(speech)} of speech`);
+      if (fresh && provider === 'elevenlabs') {
+        const after = await voice.quota();
+        if (after) log(`  ElevenLabs usage now: ${after.used.toLocaleString('en')} of ${after.limit.toLocaleString('en')} characters`);
+      }
     }
     if (argv['voice-only']) return;
 
