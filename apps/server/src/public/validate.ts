@@ -148,26 +148,26 @@ function reportType(accept: string | undefined): Target['wants'] | undefined {
 }
 
 interface Target {
-  project: NonNullable<ReturnType<typeof findProject>>;
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
   version: string;
   wants: 'application/json' | 'text/turtle';
 }
 
 /** Checks the ontology, version and Accept before anything is read: a request that will fail costs nothing. */
-const target = (req: Request, res: Response, next: NextFunction) => {
+const target = async (req: Request, res: Response, next: NextFunction) => {
   cors(res);
   res.set('Cache-Control', 'no-store');
   res.vary('Accept');
   const fail = (status: number, error: string) => void res.status(status).set('Connection', 'close').json({ error });
-  const project = findProject(String(req.params.slug));
+  const project = await findProject(String(req.params.slug));
   if (!project) return fail(404, `There is no ontology called “${String(req.params.slug)}”.`);
   const requested = req.params.version === undefined ? 'latest' : String(req.params.version);
-  const latest = latestVersion(project);
+  const latest = await latestVersion(project);
   const version =
     requested === 'latest' ? (latest ?? 'draft') : requested === 'draft' || requested === 'working' ? 'draft' : ontologyStore.versions(project).includes(requested) ? requested : undefined;
   if (!version) return fail(404, `${project.title} has no version “${requested}”.`);
   // A version waiting for a steward to approve what it publishes (holds.ts): answers name its terms, so none are given.
-  if (isHeld(project, version)) return void res.status(503).set('Retry-After', '86400').set('Connection', 'close').json({ error: HELD_MESSAGE });
+  if (await isHeld(project, version)) return void res.status(503).set('Retry-After', '86400').set('Connection', 'close').json({ error: HELD_MESSAGE });
   const wants = reportType(req.get('Accept'));
   if (!wants) return fail(406, 'Reports are available as application/json or text/turtle (UTF-8).');
   if (!declaredFormat(req)) return void res.status(415).set('Connection', 'close').set('Accept-Post', ACCEPT_POST).json({ error: UNSUPPORTED });

@@ -42,7 +42,7 @@ const json = async (r: Response) => {
 };
 
 async function platformAccountToken(base: string): Promise<string> {
-  const saved = get<Kv<string>>('kv', 'solid-account-token');
+  const saved = await get<Kv<string>>('kv', 'solid-account-token');
   if (saved) {
     // Check it still works; CSS account tokens expire with the cookie lifetime.
     const r = await podFetch(`${base}/.account/`, { headers: { authorization: `CSS-Account-Token ${saved.value}` } });
@@ -50,7 +50,7 @@ async function platformAccountToken(base: string): Promise<string> {
     if (body?.controls?.account?.pod) return saved.value;
   }
   // Create a platform account with a password so we can log back in.
-  const creds = get<Kv<{ email: string; password: string }>>('kv', 'solid-account-login');
+  const creds = await get<Kv<{ email: string; password: string }>>('kv', 'solid-account-login');
   let { controls } = await json(await podFetch(`${base}/.account/`));
   let authorization: string;
   if (creds) {
@@ -72,9 +72,9 @@ async function platformAccountToken(base: string): Promise<string> {
         body: JSON.stringify(login),
       }),
     );
-    put('kv', { id: 'solid-account-login', value: login });
+    await put('kv', { id: 'solid-account-login', value: login });
   }
-  put('kv', { id: 'solid-account-token', value: authorization });
+  await put('kv', { id: 'solid-account-token', value: authorization });
   return authorization;
 }
 
@@ -183,7 +183,7 @@ export const solid = {
   /** Provision a pod + WebID for a user. Idempotent. Returns {webId, podUrl}. */
   async provision(user: Pick<User, 'id' | 'name'>): Promise<{ webId: string; podUrl?: string }> {
     if (!this.enabled) return { webId: this.localWebId(user.id), podUrl: `${config.publicUrl}/people/${user.id}/` };
-    const existing = get<PodRecord>('kv', `pod:${user.id}`);
+    const existing = await get<PodRecord>('kv', `pod:${user.id}`);
     if (existing) return { webId: existing.webId, podUrl: existing.podUrl };
     const base = config.solid.serverUrl!;
     const token = await platformAccountToken(base);
@@ -198,13 +198,13 @@ export const solid = {
       await podFetch(controls.account.clientCredentials, { method: 'POST', headers, body: JSON.stringify({ name: `concord-${user.id}`, webId }) }),
     );
     const rec: PodRecord = { id: `pod:${user.id}`, podUrl, webId, clientId: cc.id, clientSecret: cc.secret };
-    put('kv', rec);
+    await put('kv', rec);
     return { webId, podUrl };
   },
 
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
   async write(userId: string, relPath: string, body: string | Buffer, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const req = await ownerRequest({ ...rec, id: userId });
@@ -223,7 +223,7 @@ export const solid = {
   },
 
   async read(userId: string, relPath: string): Promise<string | undefined> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
         const req = await ownerRequest({ ...rec, id: userId });
@@ -238,15 +238,15 @@ export const solid = {
   },
 
   /** Pods this server provisioned (user id and pod URL; never the credentials). */
-  pods(): { userId: string; podUrl: string; webId: string }[] {
-    return list<PodRecord>('kv')
+  async pods(): Promise<{ userId: string; podUrl: string; webId: string }[]> {
+    return (await list<PodRecord>('kv'))
       .filter((r) => typeof r.id === 'string' && r.id.startsWith('pod:') && typeof r.podUrl === 'string')
       .map((r) => ({ userId: r.id.slice(4), podUrl: r.podUrl, webId: r.webId }));
   },
 
   /** URL of a folder (relative path ending in /) in a user's pod, when it lives on the Solid server. */
-  folderUrl(userId: string, relFolder: string): string | undefined {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+  async folderUrl(userId: string, relFolder: string): Promise<string | undefined> {
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     return this.enabled && rec ? `${rec.podUrl}concord/${relFolder}` : undefined;
   },
 
@@ -257,15 +257,15 @@ export const solid = {
    * work when the folder is already shared with exactly these readers.
    */
   async shareRead(userId: string, relFolder: string, readers: string[], opts: { create?: boolean; force?: boolean } = {}): Promise<'shared' | 'unchanged' | 'missing' | 'local'> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (!this.enabled || !rec) return 'local';
     const want = [...new Set(readers)].sort();
     const key = `share:${userId}:${relFolder}`;
-    const prev = get<Kv<string[]>>('kv', key);
+    const prev = await get<Kv<string[]>>('kv', key);
     if (!opts.force && prev && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
     const req = await ownerRequest({ ...rec, id: userId });
     const r = await shareFolder(req, `${rec.podUrl}concord/${relFolder}`, rec.podUrl, rec.webId, want, { create: opts.create });
-    if (r === 'shared') put('kv', { id: key, value: want });
+    if (r === 'shared') await put('kv', { id: key, value: want });
     return r;
   },
 
@@ -278,7 +278,7 @@ export const solid = {
    * pod can't say, so the caller writes nothing.
    */
   async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
     if (this.enabled && rec) {
       const req = await ownerRequest({ ...rec, id: userId });
@@ -333,7 +333,7 @@ export const solid = {
    * doesn't hold: the resource changed, or already exists).
    */
   async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
-    const rec = get<PodRecord>('kv', `pod:${userId}`);
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (!(this.enabled && rec)) {
       const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
       if (!when.ifMatch && !when.ifNoneMatch) return this.write(userId, relPath, bytes, contentType);

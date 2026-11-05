@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { MeetBotInfo, Meeting, OntologyProject, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put } from '../db.js';
+import { transaction, get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { withLock } from '../locks.js';
 import { parseCancellations, parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
@@ -42,15 +42,15 @@ const OVERRUN_MAX_MS = 3 * 60 * 60 * 1000;
 type SyncState = NonNullable<MeetBotInfo['lastSync']>;
 const SYNC_KEY = 'meet-bot:last-sync';
 
-export function meetBotInfo(): MeetBotInfo {
-  const last = get<SyncState & { id: string }>('kv', SYNC_KEY);
+export async function meetBotInfo(): Promise<MeetBotInfo> {
+  const last = await get<SyncState & { id: string }>('kv', SYNC_KEY);
   return {
     provider: recall.enabled() ? 'recall' : 'simulated',
     inviteEmail: config.meetBot.inviteEmail,
     calendarConnected: !!config.meetBot.calendarIcsUrl,
     postToChatDefault: config.meetBot.postToChatDefault,
     lastSync: last ? { at: last.at, ok: last.ok, events: last.events, error: last.error } : undefined,
-    cancelling: releasingCount() || undefined,
+    cancelling: await releasingCount() || undefined,
   };
 }
 
@@ -83,23 +83,23 @@ export function botAttendee(occ: Pick<CalendarOccurrence, 'attendees'>): string 
  * the one ontology whose title or slug the invite mentions, then the default.
  * These only choose the ontology; they never authorise the bot.
  */
-export function routeOccurrence(occ: Pick<CalendarOccurrence, 'title' | 'description' | 'attendees'>): OntologyProject | undefined {
-  const projects = list<OntologyProject>('ontologies');
-  const bySlug = (tag: string) => findProject(tag.toLowerCase());
+export async function routeOccurrence(occ: Pick<CalendarOccurrence, 'title' | 'description' | 'attendees'>): Promise<OntologyProject | undefined> {
+  const projects = await list<OntologyProject>('ontologies');
+  const bySlug = async (tag: string) => await findProject(tag.toLowerCase());
 
   const inv = splitInvite();
   if (inv) {
     for (const a of occ.attendees) {
       const [aLocal, aDomain] = a.split('@');
       if (aDomain !== inv.domain || !aLocal?.startsWith(`${inv.local}+`)) continue;
-      const p = bySlug(aLocal.slice(inv.local.length + 1));
+      const p = await bySlug(aLocal.slice(inv.local.length + 1));
       if (p) return p;
     }
   }
 
   const text = `${occ.title}\n${occ.description}`;
   for (const m of text.matchAll(/(?:concord:\s*|#)([a-z0-9][a-z0-9-]*)/gi)) {
-    const p = bySlug(m[1]);
+    const p = await bySlug(m[1]);
     if (p) return p;
   }
 
@@ -108,15 +108,15 @@ export function routeOccurrence(occ: Pick<CalendarOccurrence, 'title' | 'descrip
   if (mentioned.length === 1) return mentioned[0];
 
   if (config.meetBot.defaultOntology) {
-    const p = findProject(config.meetBot.defaultOntology);
+    const p = await findProject(config.meetBot.defaultOntology);
     if (p) return p;
   }
   return projects.find((p) => p.demo) ?? (projects.length === 1 ? projects[0] : undefined);
 }
 
 /** Whether this occurrence's series was already approved, with the same organiser and Meet link. */
-function preApproved(occ: CalendarOccurrence, project: OntologyProject) {
-  const series = seriesApproved(project.id, occ.uid, occ.organizer, occ.meetingUrl);
+async function preApproved(occ: CalendarOccurrence, project: OntologyProject) {
+  const series = await seriesApproved(project.id, occ.uid, occ.organizer, occ.meetingUrl);
   return series ? { by: series.approvedBy } : undefined;
 }
 
@@ -174,7 +174,7 @@ type Finish = () => Promise<'done' | 'retrying'>;
  * the requests to Recall.ai are what the returned step does.
  */
 async function withdrawCall(meetingId: string): Promise<Finish> {
-  const live = get<Meeting>('meetings', meetingId);
+  const live = await get<Meeting>('meetings', meetingId);
   if (!live) return async () => 'done';
   if (live.status !== 'scheduled') {
     if (!botActive(live) && !botOutstanding(live)) return async () => 'done';
@@ -184,8 +184,8 @@ async function withdrawCall(meetingId: string): Promise<Finish> {
         () => 'retrying' as const,
       );
   }
-  await meetingLock(meetingId, () => {
-    const m = get<Meeting>('meetings', meetingId);
+  await meetingLock(meetingId, async () => { return transaction(async () => {
+    const m = await get<Meeting>('meetings', meetingId);
     if (!m) return;
     normalise(m);
     const gen = m.bot?.gen;
@@ -193,20 +193,20 @@ async function withdrawCall(meetingId: string): Promise<Finish> {
     m.withdrawn = true;
     beginRelease(m, 'cancel', 'idle');
     // Nothing booked: it goes now. Otherwise it is kept (hidden) until the bot is confirmed gone.
-    if (!tracked(m) || droppable(m.bot)) dropMeeting(m.id);
-    else if (!was || m.bot.gen !== gen) emit(saveMeeting(m), { type: 'meeting', meeting: m });
-  });
+    if (!tracked(m) || droppable(m.bot)) await dropMeeting(m.id);
+    else if (!was || m.bot.gen !== gen) emit(await saveMeeting(m), { type: 'meeting', meeting: m });
+  }); });
   return async () => {
-    if (get('meetings', meetingId)) await drive(meetingId);
-    const m = get<Meeting>('meetings', meetingId);
+    if (await get('meetings', meetingId)) await drive(meetingId);
+    const m = await get<Meeting>('meetings', meetingId);
     return !m || !tracked(m) || settled(m.bot) ? 'done' : 'retrying';
   };
 }
 
 /** Calendar calls still on the books (withdrawn ones only wait for their bot to go). */
-const calendarMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite' && m.calendar && !m.withdrawn);
+const calendarMeetings = async () => (await list<Meeting>('meetings')).filter((m) => m.source === 'calendar-invite' && m.calendar && !m.withdrawn);
 /** Every calendar call Concord still holds, withdrawn ones included: each occurrence has one record until its bots are gone. */
-const heldMeetings = () => list<Meeting>('meetings').filter((m) => m.source === 'calendar-invite' && m.calendar);
+const heldMeetings = async () => (await list<Meeting>('meetings')).filter((m) => m.source === 'calendar-invite' && m.calendar);
 
 /**
  * Brings the scheduled meetings in line with a feed's occurrences. One meeting per
@@ -221,7 +221,7 @@ async function reconcile(
   later: Finish[],
 ) {
   // A withdrawn record still waiting for its bot to go keeps its occurrence: if the call comes back, it is that record again.
-  const byKey = new Map(heldMeetings().map((m) => [m.calendar!.key, m]));
+  const byKey = new Map((await heldMeetings()).map((m) => [m.calendar!.key, m]));
   const touched: Meeting[] = [];
   const seen = new Set<string>();
   /** Live calls whose invite changed under them: the bot is taken out once the loop is done. */
@@ -241,15 +241,15 @@ async function reconcile(
 
     if (!existing) {
       if (occ.end <= opts.now) continue;
-      const project = opts.project ?? routeOccurrence(occ);
+      const project = opts.project ?? await routeOccurrence(occ);
       if (!project) continue;
       // Importing a file is the importer's own approval (only facilitators can import).
-      const approval = feed === 'upload' && opts.actor ? { by: opts.actor.id } : preApproved(occ, project);
+      const approval = feed === 'upload' && opts.actor ? { by: opts.actor.id } : await preApproved(occ, project);
       const approved = !!approval;
-      if (feed === 'upload' && opts.actor) recordSeriesApproval(project.id, occ.uid, occ.organizer, occ.meetingUrl, opts.actor.id);
-      const by = opts.actor ?? (approval ? allUsers().find((u) => u.id === approval.by) : undefined);
+      if (feed === 'upload' && opts.actor) await recordSeriesApproval(project.id, occ.uid, occ.organizer, occ.meetingUrl, opts.actor.id);
+      const by = opts.actor ?? (approval ? (await allUsers()).find((u) => u.id === approval.by) : undefined);
       const postPromptsToChat = opts.postPromptsToChat ?? config.meetBot.postToChatDefault;
-      const m = saveMeeting({
+      const m = await saveMeeting({
         id: newId('mtg'),
         ontologyId: project.id,
         title: occ.title,
@@ -277,7 +277,7 @@ async function reconcile(
         // Who sent an invite is unproven, so a calendar call belongs to no one in particular.
         createdBy: feed === 'upload' && opts.actor ? opts.actor.id : 'calendar',
       });
-      logActivity({
+      await logActivity({
         ontologyId: project.id,
         actorId: by?.id,
         type: 'meeting.scheduled',
@@ -291,11 +291,11 @@ async function reconcile(
     }
 
     if (opts.project && existing.ontologyId !== opts.project.id) {
-      const other = findProject(existing.ontologyId);
+      const other = await findProject(existing.ontologyId);
       throw new HttpError(409, `“${existing.title}” is already scheduled under ${other?.title ?? 'another ontology'}.`);
     }
     const updated = await meetingLock(existing.id, async () => {
-      const m = get<Meeting>('meetings', existing.id);
+      const m = await get<Meeting>('meetings', existing.id);
       if (!m) return undefined;
       normalise(m);
       // Back on the calendar after being withdrawn: the same call, with the same bot record (still
@@ -308,7 +308,7 @@ async function reconcile(
       // A new organiser or Meet link needs approving again, unless its series was approved as it now stands (or a facilitator imports it).
       const detailsChanged = cal.organizer !== occ.organizer || m.meetingUrl !== occ.meetingUrl;
       const reapprove =
-        detailsChanged && cal.approval === 'approved' && !importer && !preApproved(occ, findProject(m.ontologyId)!)
+        detailsChanged && cal.approval === 'approved' && !importer && !await preApproved(occ, (await findProject(m.ontologyId))!)
           ? m.meetingUrl !== occ.meetingUrl
             ? 'The invite’s Meet link changed since it was approved.'
             : 'The invite’s organiser changed since it was approved.'
@@ -321,8 +321,8 @@ async function reconcile(
           m.calendar = { ...cal, organizer: occ.organizer, sentBy: occ.sentBy, approvalNote: `${reapprove} The bot left the call; calls with the new details need approving again.` };
           // Released here, under the lock, so anything it sends from now on is refused.
           beginRelease(m, 'leave', 'done');
-          saveMeeting(m);
-          logActivity({
+          await saveMeeting(m);
+          await logActivity({
             ontologyId: m.ontologyId,
             type: 'meeting.updated',
             message: 'The co-lead bot is leaving a call because its invite changed.',
@@ -334,7 +334,7 @@ async function reconcile(
       }
       // Importing the invite is the importer's approval, for a call waiting for one too.
       if (importer) {
-        recordSeriesApproval(m.ontologyId, occ.uid, occ.organizer, occ.meetingUrl, importer.id);
+        await recordSeriesApproval(m.ontologyId, occ.uid, occ.organizer, occ.meetingUrl, importer.id);
         if (cal.approval === 'pending') {
           cal.approval = 'approved';
           cal.approvedBy = importer.id;
@@ -342,10 +342,10 @@ async function reconcile(
         }
       }
       const moved = cal.start !== occ.start.toISOString() || m.meetingUrl !== occ.meetingUrl;
-      if (!moved && !detailsChanged && m.title === occ.title && cal.end === occ.end.toISOString()) return saveMeeting(m);
+      if (!moved && !detailsChanged && m.title === occ.title && cal.end === occ.end.toISOString()) return await saveMeeting(m);
       if (reapprove) {
         m.calendar = { ...cal, approval: 'pending', approvedBy: undefined, approvalNote: reapprove };
-        logActivity({ ontologyId: m.ontologyId, type: 'meeting.updated', message: 'A call needs approving again because its invite changed.', link: `/o/${m.ontologyId}/meetings/${m.id}` });
+        await logActivity({ ontologyId: m.ontologyId, type: 'meeting.updated', message: 'A call needs approving again because its invite changed.', link: `/o/${m.ontologyId}/meetings/${m.id}` });
       }
       // The booked bot is released (its record keeps the Meet link it was booked for); once
       // Recall.ai confirms it has gone, the call can book a fresh one for the new details.
@@ -353,7 +353,7 @@ async function reconcile(
       m.title = occ.title;
       m.meetingUrl = occ.meetingUrl;
       m.calendar = { ...m.calendar!, start: occ.start.toISOString(), end: occ.end.toISOString(), organizer: occ.organizer, sentBy: occ.sentBy, cancelPending: undefined };
-      return saveMeeting(m);
+      return await saveMeeting(m);
     });
     if (updated) {
       emit(updated, { type: 'meeting', meeting: updated });
@@ -374,7 +374,7 @@ async function reconcile(
   // Calls this feed no longer lists: cancelled before they start, or the bot taken out
   // if it's already in (past the scheduled end too, while the call overruns).
   const uids = new Set(occs.map((o) => o.uid));
-  for (const m of calendarMeetings()) {
+  for (const m of await calendarMeetings()) {
     const cal = m.calendar!;
     if (seen.has(cal.key) || cal.cancelPending) continue;
     if (m.status === 'scheduled' ? new Date(cal.end) <= opts.now : !botActive(m)) continue;
@@ -393,7 +393,7 @@ async function reconcile(
  */
 async function applyCancellations(project: OntologyProject, cancelled: { uids: string[]; keys: string[] }) {
   const steps: Finish[] = [];
-  for (const m of heldMeetings()) {
+  for (const m of await heldMeetings()) {
     const cal = m.calendar!;
     if (m.ontologyId !== project.id || (m.status !== 'scheduled' && !botActive(m) && !botOutstanding(m))) continue;
     if (!cancelled.keys.includes(cal.key) && !(cal.uid && cancelled.uids.includes(cal.uid))) continue;
@@ -417,7 +417,7 @@ export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastS
       state = { at: now.toISOString(), ok: false, events: 0, error: sanitise((err as Error).message) };
       console.warn(`[meet-bot] calendar sync failed: ${state.error}`);
     }
-    put('kv', { id: SYNC_KEY, ...state });
+    await put('kv', { id: SYNC_KEY, ...state });
     return state;
   });
   // Beside the bookings, never holding them (or the calendar) up.
@@ -452,7 +452,7 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
   const [outcomes] = await Promise.all([Promise.all(steps.map((step) => step())), Promise.all(later.map((step) => step()))]);
   const c = { cancelled: outcomes.filter((o) => o === 'done').length, retrying: outcomes.filter((o) => o === 'retrying').length };
   if (c.cancelled + c.retrying)
-    logActivity({
+    await logActivity({
       ontologyId: project.id,
       actorId: user.id,
       type: 'meeting.updated',
@@ -460,7 +460,7 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
       link: `/o/${project.id}/meetings`,
     });
   await dispatchDue(now);
-  return { meetings: touched.map((m) => get<Meeting>('meetings', m.id) ?? m), cancelled: c.cancelled, cancelRetrying: c.retrying };
+  return { meetings: (await Promise.all(touched.map(async (m) => await get<Meeting>('meetings', m.id) ?? m))), cancelled: c.cancelled, cancelRetrying: c.retrying };
 }
 
 /* ------------------------------------------------------------------------ */
@@ -474,8 +474,8 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
  * once it's past its slot and quiet. Requests happen afterwards, in the call's lane.
  */
 function planOne(meetingId: string, now: Date) {
-  return meetingLock(meetingId, () => {
-    const m = get<Meeting>('meetings', meetingId);
+  return meetingLock(meetingId, async () => { return transaction(async () => {
+    const m = await get<Meeting>('meetings', meetingId);
     if (!m?.calendar || m.withdrawn) return;
     const before = JSON.stringify(m);
     // A record from before the state machine is read as one first (and saved so), never replaced unread.
@@ -485,20 +485,20 @@ function planOne(meetingId: string, now: Date) {
     const start = new Date(cal.start).getTime();
     const end = new Date(cal.end).getTime();
     const blocked = !!cal.skip || cal.approval === 'pending';
-    const withdraw = () => {
+    const withdraw = async () => { return transaction(async () => {
       m.withdrawn = true;
       beginRelease(m, 'cancel', 'idle');
-      if (!tracked(m) || droppable(m.bot)) dropMeeting(m.id);
-      else emit(saveMeeting(m), { type: 'meeting', meeting: m });
-    };
+      if (!tracked(m) || droppable(m.bot)) await dropMeeting(m.id);
+      else emit(await saveMeeting(m), { type: 'meeting', meeting: m });
+    }); };
 
     // Left over from before the bot state machine: withdrawn like any cancelled call.
-    if (cal.cancelPending) return withdraw();
+    if (cal.cancelPending) return await withdraw();
     if (m.status === 'scheduled') {
       // A bot booked for a call that's now skipped or waiting for approval is let go.
       if (blocked) beginRelease(m, 'cancel', 'idle');
       if (t >= end) {
-        if (blocked) return withdraw();
+        if (blocked) return await withdraw();
         m.status = 'error';
         if (tracked(m)) {
           beginRelease(m, 'cancel', 'done');
@@ -525,8 +525,8 @@ function planOne(meetingId: string, now: Date) {
     }
     if (JSON.stringify(m) === before) return;
     if (tracked(m)) bump(m);
-    emit(saveMeeting(m), { type: 'meeting', meeting: m });
-  });
+    emit(await saveMeeting(m), { type: 'meeting', meeting: m });
+  }); });
 }
 
 /**
@@ -537,9 +537,9 @@ function planOne(meetingId: string, now: Date) {
  * another. wait: false (the clock) leaves the lanes running.
  */
 export async function dispatchDue(now = new Date(), opts: { wait?: boolean } = {}) {
-  for (const m of calendarMeetings()) await planOne(m.id, now);
-  pruneSecrets();
-  const runs = driveDue(now.getTime());
+  for (const m of await calendarMeetings()) await planOne(m.id, now);
+  await pruneSecrets();
+  const runs = await driveDue(now.getTime());
   if (opts.wait !== false) await Promise.all(runs);
 }
 

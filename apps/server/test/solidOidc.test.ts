@@ -13,7 +13,7 @@ import { feedbackMembers, readPodFeedback, shareFeedbackFolder } from '../src/se
 import { clientIdDocument, issuerListed, nameFromWebId, parseProfile, resolveIssuer, sameIssuer, SolidLoginError } from '../src/solidOidc.js';
 
 const app = createApp();
-beforeAll(() => openDb());
+beforeAll(async () => await openDb());
 
 const WEBID = 'https://alice.example/profile/card#me';
 const PROFILE = `@prefix solid: <http://www.w3.org/ns/solid/terms#> .
@@ -345,8 +345,8 @@ describe('the admin’s view of the pods', () => {
     config.solid.serverUrl = 'http://127.0.0.1:1';
     try {
       const id = 'u-podview1';
-      put('users', { id, name: 'Pod Viewer', email: '', createdAt: new Date().toISOString() } as unknown as User);
-      put('kv', { id: `pod:${id}`, podUrl: 'http://127.0.0.1:1/viewer/', webId: 'http://127.0.0.1:1/viewer/profile/card#me', clientId: 'c', clientSecret: 's' });
+      await put('users', { id, name: 'Pod Viewer', email: '', createdAt: new Date().toISOString() } as unknown as User);
+      await put('kv', { id: `pod:${id}`, podUrl: 'http://127.0.0.1:1/viewer/', webId: 'http://127.0.0.1:1/viewer/profile/card#me', clientId: 'c', clientSecret: 's' });
       expect(await shareFeedbackFolder(id)).toBe('error');
       const folder = 'http://127.0.0.1:1/viewer/concord/feedback/';
       const doc = (n: string) => JSON.stringify({ id: n, createdAt: `2026-11-0${n}T00:00:00Z`, answers: { general: n } });
@@ -369,6 +369,30 @@ describe('the admin’s view of the pods', () => {
       expect(big.items).toHaveLength(100);
       expect(big.status).toBe('partial');
       expect(big.unread).toBe(1);
+    } finally {
+      config.solid.serverUrl = saved;
+    }
+  });
+
+  // With the store async, the "is this a demo account?" lookup ran inside filter(), which took every lookup's promise
+  // as a yes, so demo accounts' pods were read too.
+  it('leaves out the pods of demo accounts', async () => {
+    const saved = config.solid.serverUrl;
+    config.solid.serverUrl = 'http://127.0.0.1:1';
+    try {
+      for (const [id, simulated] of [['u-podreal', false], ['u-poddemo', true]] as const) {
+        await put('users', { id, name: id, email: '', createdAt: new Date().toISOString(), simulated } as unknown as User);
+        await put('kv', { id: `pod:${id}`, podUrl: `http://127.0.0.1:1/${id}/`, webId: `http://127.0.0.1:1/${id}/profile/card#me`, clientId: 'c', clientSecret: 's' });
+      }
+      const asked: string[] = [];
+      const get = async (url: string) => {
+        asked.push(url);
+        return new Response('', { status: 200 });
+      };
+      const ids = (await readPodFeedback({ webId: 'https://jesse.example/#me', get })).folders.map((f) => f.testerId);
+      expect(ids).toContain('u-podreal');
+      expect(ids).not.toContain('u-poddemo');
+      expect(asked.some((u) => u.includes('u-poddemo'))).toBe(false);
     } finally {
       config.solid.serverUrl = saved;
     }

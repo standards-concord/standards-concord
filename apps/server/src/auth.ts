@@ -2,11 +2,11 @@ import * as arctic from 'arctic';
 import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
-import { HttpError } from './db.js';
+import { transaction, HttpError } from './db.js';
 import type { AuthProvider } from '@concord/shared';
-import { allUsers, createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
+import { allUsers, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
 import { clientIdDocument, finishLogin, resolveIssuer, sessionKey, SolidLoginError, startLogin, type SolidLogin } from './solidOidc.js';
-import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
+import { clearTesterCookie, mergeTesterRecords, mirrorToPod, moveTesterRecord, testerFor, testerRecordMovedTo } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -36,8 +36,8 @@ export function isAdmin(user: User, method: AuthProvider | undefined): boolean {
   return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
 }
 
-export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  const s = sessionOf(req.cookies?.[SESSION_COOKIE]);
+export async function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
+  const s = await sessionOf(req.cookies?.[SESSION_COOKIE]);
   req.user = s && isAdmin(s.user, s.method) ? { ...s.user, isPlatformAdmin: true } : s?.user;
   next();
 }
@@ -48,8 +48,8 @@ export function requireUser(req: Request): User {
 }
 
 /** Start a session for `userId` (signed in with `method`) and give the browser its cookie. Returns the session token. */
-export function setSessionCookie(res: Response, userId: string, method: AuthProvider): string {
-  const token = createSession(userId, method);
+export async function setSessionCookie(res: Response, userId: string, method: AuthProvider): Promise<string> { return transaction(async () => {
+  const token = await createSession(userId, method);
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
@@ -58,7 +58,7 @@ export function setSessionCookie(res: Response, userId: string, method: AuthProv
     path: '/',
   });
   return token;
-}
+}); }
 
 const google = () =>
   config.google.clientId && config.google.clientSecret ? new arctic.Google(config.google.clientId, config.google.clientSecret, `${config.publicUrl}/auth/google/callback`) : undefined;
@@ -89,9 +89,9 @@ export function endAdminLogin(sessionToken: unknown) {
  * WebIDs Concord provisioned (each person's pod here) or serves itself can't be
  * used to sign in with Solid: they belong to accounts that sign in another way.
  */
-function managedWebId(webId: string) {
+async function managedWebId(webId: string) {
   if (webId.startsWith(`${config.publicUrl}/people/`)) return true;
-  return allUsers().some((u) => u.webId === webId && !u.providers.some((p) => p.provider === 'solid' && p.subject === webId));
+  return (await allUsers()).some((u) => u.webId === webId && !u.providers.some((p) => p.provider === 'solid' && p.subject === webId));
 }
 
 const tmpCookie = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: config.publicUrl.startsWith('https://'), maxAge: 10 * 60 * 1000, path: '/' });
@@ -115,26 +115,52 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string, method: AuthProvider): string {
+async function signInAs(req: Request, res: Response, userId: string, method: AuthProvider): Promise<string> { return transaction(async () => {
   endAdminLogin(req.cookies?.[SESSION_COOKIE]);
-  destroySession(req.cookies?.[SESSION_COOKIE]);
-  return setSessionCookie(res, userId, method);
-}
+  await destroySession(req.cookies?.[SESSION_COOKIE]);
+  return await setSessionCookie(res, userId, method);
+}); }
 
 /**
  * Sign in with a provider identity. An alpha tester using a demo account in
  * this browser keeps their testing record: a new identity is attached to the
  * demo account, and an existing account takes over the demo account's record.
  */
-async function federatedSignIn(req: Request, res: Response, identity: Parameters<typeof upsertFederatedUser>[0]) {
-  const tester = testerFor(req);
+async function federatedSignIn(req: Request, res: Response, identity: FederatedIdentity) {
+  const tester = await testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
-  const user = await upsertFederatedUser(identity, demoTester);
-  // An existing account takes over the demo account's testing record, in one step on this server.
-  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
-  clearTesterCookie(req, res);
-  const sessionToken = signInAs(req, res, user.id, identity.provider);
+  const user = await accountForIdentity(identity, demoTester);
+  await clearTesterCookie(req, res);
+  const sessionToken = await signInAs(req, res, user.id, identity.provider);
   return { user, sessionToken };
+}
+/**
+ * The account an identity signs in to, given the demo account this browser was using (if any): the identity is
+ * attached to the demo account when new, and an existing account takes over the demo account's testing record.
+ */
+export async function accountForIdentity(identity: FederatedIdentity, demoTester?: User) {
+  // The checks, the attachment (or the existing account's update) and the record move commit together, so a sign-in
+  // refused part-way changes nothing.
+  const found = await transaction(async () => {
+    if (demoTester) {
+      // Another sign-in from this browser already moved the demo account's record into its account. Only a retry by
+      // that same identity goes on; attaching anyone else to the demo account would sign them in to a closed record.
+      const movedTo = await testerRecordMovedTo(demoTester.id);
+      if (movedTo && (await findByProvider(identity.provider, identity.subject))?.id !== movedTo)
+        throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
+    }
+    const user = await linkFederatedIdentity(identity, demoTester);
+    if (user && demoTester && user.id !== demoTester.id) await moveTesterRecord(demoTester, user);
+    return user;
+  });
+  if (found) {
+    if (demoTester && found.id !== demoTester.id) await mirrorToPod(found);
+    return found;
+  }
+  // A new account is made outside the transaction: making one provisions a pod over the network.
+  const user = await createUser({ ...identity });
+  if (demoTester) await mergeTesterRecords(demoTester, user);
+  return user;
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
 
@@ -232,7 +258,7 @@ export function mountAuth(router: Router) {
       if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] sign-in failed: ${(err as Error).message}`);
       return loginError(res, '/', err instanceof SolidLoginError ? err.message : 'Sign-in with Solid failed. Please try again.');
     }
-    if (managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
+    if (await managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
     if (isAdmin(user, 'solid')) {
