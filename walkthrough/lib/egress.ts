@@ -295,10 +295,13 @@ export async function startEgressProxy(allowedOrigins: string[], outside: Set<st
     client.on('error', () => upstream.destroy());
   };
 
-  // Requests Node's own parser rejects are refusals too.
+  // Requests Node's own parser rejects are refusals too. A browser hanging up (ECONNRESET
+  // when the proxy reads, EPIPE when it writes, as when a page navigates away mid-response)
+  // is not a request at all, and nothing is forwarded from here either way.
+  const HANG_UPS = new Set(['ECONNRESET', 'EPIPE']);
   const clientError = (err: NodeJS.ErrnoException, socket: net.Socket) => {
     const to = (socket as TunnelSocket)[TUNNEL];
-    if (err.code !== 'ECONNRESET') blocked(`unparseable request (${err.code ?? err.message})${to ? ` to ${to}` : ''}`);
+    if (!HANG_UPS.has(err.code ?? '')) blocked(`unparseable request (${err.code ?? err.message})${to ? ` to ${to}` : ''}`);
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     else socket.destroy();
   };
