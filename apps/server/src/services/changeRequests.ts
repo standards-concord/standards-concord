@@ -335,6 +335,8 @@ function validationPassed(v: ValidationReport | undefined) {
  * if the edits themselves changed meanwhile, its now-stale results are dropped.
  */
 export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}): Promise<ChangeRequest> {
+  // Triage works on stored requests only: one never stored (or since discarded) is never written back.
+  if (!(await get<ChangeRequest>('changeRequests', cr.id))) return cr;
   const project = await getProject(cr.ontologyId);
   const author = await getUser(cr.authorId);
   const opsKey = JSON.stringify(cr.ops);

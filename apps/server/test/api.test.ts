@@ -1045,7 +1045,6 @@ describe('inline term edits', () => {
   it('publishes a release from the draft as it is once nothing else is changing it, so a merge just before is kept', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const releases = await import('../src/services/releases.js');
-    const { withWorkingDraftLock } = await import('../src/services/repoLock.js');
     const { put, list } = await import('../src/db.js');
     const steward = await login('steward', 'Steward Release');
     const stewardUser = await userOf(steward);
@@ -1057,12 +1056,12 @@ describe('inline term edits', () => {
     // Treated as ready to publish (its vote, if it needs one, is beside the point here).
     const draft = (await put('releases', { ...pending, status: 'draft' }, demoId));
 
-    // A merge is under way (holding the lock) when the release is asked for.
+    // A merge is under way (holding the ontology's locks, consent then working draft, as a merge does) when the release is asked for.
     let finish!: () => void;
     const finishing = new Promise<void>((resolve) => (finish = resolve));
     let started!: () => void;
     const inside = new Promise<void>((resolve) => (started = resolve));
-    const merging = withWorkingDraftLock({ id: demoId }, async () => {
+    const merging = crsMod.withOntologyLocks(demoId, async () => {
       started();
       await finishing;
       return crsMod.merge(await crsMod.getCR(created.body.id), stewardUser);
@@ -1914,7 +1913,7 @@ describe('release approval provenance', () => {
   it('records the approval that allowed publishing, even if the policy changes while the release is written', async () => {
     // The snapshot used to be a second evaluation taken after the check that let the release through, so a policy
     // change in between was recorded as if it had applied (and might not even say "approved"). The last check runs
-    // just before the files are written; a change while they're written must not reach the record.
+    // in the transaction that publishes; a change made after it must not reach the record.
     const project = await getProject(demoId);
     const original = structuredClone(project.governance);
     const now = new Date().toISOString();
@@ -1936,11 +1935,13 @@ describe('release approval provenance', () => {
     });
     const write = ontologyStore.writeRelease.bind(ontologyStore);
     const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementationOnce(async (...args: Parameters<typeof write>) => {
+      const commit = await write(...args);
+      // Right after the publishing transaction (and its check) committed.
       const changed = await getProject(demoId);
       changed.governance.releases.patch.minApprovals = before.requiredApprovals + 5;
       changed.governance.releases.patch.reviewPeriodDays = 77;
       await updateProject(changed);
-      return write(...args);
+      return commit;
     });
     try {
       const published = await publishRelease(r, undefined);
