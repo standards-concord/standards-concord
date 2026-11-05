@@ -11,7 +11,8 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
-import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
+import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
+import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import {
   checkPublicSummary,
   issuesEnabled,
@@ -114,6 +115,7 @@ const PUBLIC_READS = [
   /^\/ontologies\/[^/]+\/terms\/.+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
+  /^\/alpha\/me$/,
   /^\/feedback\/publishing$/,
   // Checks the triage routine's own bearer token.
   /^\/feedback\/triage\/queue$/,
@@ -142,6 +144,7 @@ export function apiRouter(): Router {
   r.post('/auth/demo', async (req, res) => {
     demoOnly();
     const { userId, name, role } = req.body ?? {};
+    const testerBefore = testerFor(req);
     let user: User | undefined;
     if (userId) {
       user = getUser(String(userId));
@@ -154,11 +157,13 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
-    setSessionCookie(res, user.id);
+    setSessionCookie(res, user.id, 'demo');
+    rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
 
   r.post('/auth/logout', (req, res) => {
+    clearTesterCookie(req, res);
     destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
@@ -722,10 +727,23 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ feedback --------------------------- */
-  r.get('/feedback/questions', (_req, res) => res.json(FEEDBACK_QUESTIONS));
+  const pathwayOf = (p: unknown): Pathway => (p === 'general' || p === 'changes' ? p : 'structured');
+  r.get('/feedback/questions', (req, res) =>
+    res.json(questionsFor({ pathway: pathwayOf(req.query.pathway), since: optStr(req.query.since), role: optStr(req.query.role), version: optStr(req.query.version) })),
+  );
   r.post('/feedback/chat', async (req, res) => {
     const b = req.body ?? {};
-    res.json(await feedbackChat({ pathway: b.pathway === 'general' ? 'general' : 'structured', messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [], answers: b.answers ?? {}, currentQuestionId: optStr(b.currentQuestionId) }));
+    res.json(
+      await feedbackChat({
+        pathway: pathwayOf(b.pathway),
+        messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [],
+        answers: b.answers ?? {},
+        currentQuestionId: optStr(b.currentQuestionId),
+        since: optStr(b.since),
+        role: optStr(b.role),
+        version: optStr(b.version),
+      }),
+    );
   });
   r.get('/feedback/publishing', (_req, res) => res.json({ enabled: issuesEnabled(), noticeVersion: PUBLIC_NOTICE_VERSION }));
   r.post('/feedback', async (req, res) => {
@@ -733,8 +751,10 @@ export function apiRouter(): Router {
     // An opt-in public summary is checked before anything is stored, so the tester can fix it.
     const summary: string | undefined = b.publish && typeof b.publish === 'object' ? b.publish.summary : undefined;
     if (b.publish) checkPublicSummary(summary);
-    const sub = await submitFeedback(req.user, {
-        pathway: b.pathway === 'general' ? 'general' : 'structured',
+    const sub = await submitFeedback(
+      req.user,
+      {
+        pathway: pathwayOf(b.pathway),
         answers: b.answers ?? {},
         transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
         usedVoice: !!b.usedVoice,
@@ -742,7 +762,12 @@ export function apiRouter(): Router {
         email: optStr(b.email),
         role: optStr(b.role),
         themes: Array.isArray(b.themes) ? b.themes.filter((t: unknown) => typeof t === 'string').slice(0, 20) : undefined,
-      });
+        appVersion: optStr(b.appVersion),
+        appCommit: optStr(b.appCommit),
+        sinceVersion: optStr(b.sinceVersion),
+      },
+      testerForSaving(req, res),
+    );
     if (summary === undefined) return void res.status(201).json(sub);
     // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
     const { withdrawToken } = queuePublication(sub.id, summary);
@@ -787,8 +812,17 @@ export function apiRouter(): Router {
     if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'Not an issue number');
     res.json(await triagePublication(n, req.body ?? {}));
   });
+
+  /* ------------------------------ alpha testing ------------------------ */
+  r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
+  r.post('/alpha/visit', async (req, res) => {
+    const tester = testerForSaving(req, res);
+    if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
+    const b = req.body ?? {};
+    res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
+  });
   const feedbackAdmin = (req: Request) => {
-    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google or GitHub). Ontology roles
     // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');

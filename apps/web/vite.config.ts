@@ -4,8 +4,12 @@ import tailwindcss from '@tailwindcss/vite';
 
 const target = process.env.CONCORD_API ?? 'http://localhost:8787';
 
+// The commit being built, shown next to the app version on the alpha pages (Vercel and GitHub Actions set these).
+const commit = (process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.GITHUB_SHA ?? '').slice(0, 40);
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: { 'import.meta.env.VITE_APP_COMMIT': JSON.stringify(commit) },
   // sparq loads its WebAssembly from a URL relative to its own module. Vite's dev
   // prebundler moves the module into node_modules/.vite/deps, where that URL
   // falls through to index.html ("expected magic word 00 61 73 6d"). Serving

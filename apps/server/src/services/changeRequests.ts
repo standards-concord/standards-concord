@@ -258,36 +258,68 @@ function validationPassed(v: ValidationReport | undefined) {
 export async function triage(cr: ChangeRequest): Promise<ChangeRequest> {
   const project = getProject(cr.ontologyId);
   const author = getUser(cr.authorId);
+  // The edits being checked: the results are only saved onto a request that still has them.
+  const checked = JSON.stringify([cr.ops, cr.tests]);
+  let apply: (target: ChangeRequest) => void;
   try {
     const p = await preview(project, cr.ops, cr.tests, author);
-    cr.diff = trimDiff(p.diff);
-    cr.classification = p.classification;
-    cr.validation = p.validation;
-    cr.warnings = [...new Set([...(cr.warnings ?? []), ...p.warnings])];
-    cr.kgcl = toKGCL(cr.ops, p.after.prefixes);
-    cr.timeline.push(
-      ev(
-        'triaged',
-        `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
-          .filter((r) => r.level === p.classification.level)
-          .map((r) => r.rule)
-          .slice(0, 3)
-          .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
-      ),
+    const event = ev(
+      'triaged',
+      `Classified as ${p.classification.level.toUpperCase()} (${p.classification.reasons
+        .filter((r) => r.level === p.classification.level)
+        .map((r) => r.rule)
+        .slice(0, 3)
+        .join(', ')}). Validation ${p.validation.passed ? 'passed' : 'failed'}.`,
     );
-    if (project.governance.automation.autoTriage) cr.analysis = await analyse(project, cr, p.after);
+    const derived = { diff: trimDiff(p.diff), classification: p.classification, validation: p.validation, kgcl: toKGCL(cr.ops, p.after.prefixes) };
+    Object.assign(cr, derived);
+    const analysis = project.governance.automation.autoTriage ? await analyse(project, cr, p.after) : undefined;
+    apply = (target) => {
+      Object.assign(target, derived);
+      target.warnings = [...new Set([...(target.warnings ?? []), ...p.warnings])];
+      target.timeline.push(event);
+      if (analysis) target.analysis = analysis;
+    };
   } catch (err) {
     const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
-    cr.validation = {
+    const validation: ChangeRequest['validation'] = {
       lint: [{ severity: 'error', code: 'change-not-applicable', message }],
       fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
       reasoner: { engine: 'structural', available: false, consistent: true, unsatisfiable: [], inferredSubClassOf: [], durationMs: 0 },
       competencyQuestions: [],
       passed: false,
     };
-    cr.timeline.push(ev('validated', message));
+    const event = ev('validated', message);
+    apply = (target) => {
+      target.validation = validation;
+      target.timeline.push(event);
+    };
   }
-  return save(cr);
+  // Checking is slow, so the request may have been saved meanwhile (a review, a comment, a
+  // simulated member). Put the results on the latest copy rather than refusing them, unless
+  // its edits have changed too: then these results are out of date, and whoever changed the
+  // edits checks them again.
+  for (let attempt = 0; ; attempt++) {
+    const target = attempt === 0 ? cr : get<ChangeRequest>('changeRequests', cr.id);
+    if (!target) throw new HttpError(404, 'Change request not found');
+    if (attempt > 0) {
+      adopt(cr, target);
+      if (JSON.stringify([cr.ops, cr.tests]) !== checked) return cr;
+    }
+    const before = structuredClone(cr);
+    apply(cr);
+    try {
+      return save(cr);
+    } catch (err) {
+      const conflict = err instanceof HttpError && err.status === 409 && /changed by someone else/.test(err.message);
+      const stored = get<ChangeRequest>('changeRequests', cr.id);
+      // Being merged, or a stored copy that keeps changing: refuse as before.
+      if (!conflict || attempt >= 3 || !stored || stored.merging) {
+        adopt(cr, before);
+        throw err;
+      }
+    }
+  }
 }
 
 function trimDiff(d: ChangeRequest['diff']) {
@@ -397,10 +429,18 @@ export async function addReview(cr: ChangeRequest, actor: User, decision: Review
   const roles = rolesFor(cr.ontologyId, actor.id);
   if (decision !== 'comment' && !roles.length) throw new HttpError(403, 'Only members of this ontology can review it');
   const review: Review = { id: newId('rev'), changeRequestId: cr.id, userId: actor.id, roles, decision, comment, at: clock.iso() };
-  put('reviews', review, cr.id);
   const verb = { approve: 'approved', 'request-changes': 'requested changes', object: 'objected', comment: 'commented' }[decision];
-  cr.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
-  save(cr);
+  // The review only counts if the request records it: both are saved or neither is.
+  transaction(() => {
+    put('reviews', review, cr.id);
+    cr.timeline.push(ev(decision === 'comment' ? 'comment' : 'review', `${verb}${comment ? `: “${comment}”` : ''}`, actor.id));
+    try {
+      save(cr);
+    } catch (err) {
+      cr.timeline.pop();
+      throw err;
+    }
+  });
   logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: `cr.${decision}`, message: `${verb} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   return advance(cr);
 }
@@ -412,9 +452,16 @@ export async function addVote(cr: ChangeRequest, actor: User, choice: Vote['choi
   if (!g.rule.vote || !roles.some((r) => g.rule.vote!.voterRoles.includes(r)))
     throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ') ?? 'voters'} can vote on this`);
   const vote: Vote = { id: newId('vote'), subjectType: 'change-request', subjectId: cr.id, userId: actor.id, roles, choice, comment, at: clock.iso() };
-  put('votes', vote, cr.id);
-  cr.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
-  save(cr);
+  transaction(() => {
+    put('votes', vote, cr.id);
+    cr.timeline.push(ev('vote', `voted ${choice}${comment ? `: “${comment}”` : ''}`, actor.id));
+    try {
+      save(cr);
+    } catch (err) {
+      cr.timeline.pop();
+      throw err;
+    }
+  });
   logActivity({ ontologyId: cr.ontologyId, actorId: actor.id, type: 'cr.vote', message: `voted ${choice} on #${cr.number} ${cr.title}`, link: `/o/${cr.ontologyId}/changes/${cr.id}` });
   return advance(cr);
 }

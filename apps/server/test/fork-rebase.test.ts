@@ -1,6 +1,6 @@
 import { applyChangeOps } from '@concord/core';
 import type { ChangeOp } from '@concord/core/types';
-import type { OntologyFork } from '@concord/shared';
+import type { ChangeRequest, OntologyFork } from '@concord/shared';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,12 +11,13 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from '../src/services/changeRequests.js';
+import { addReview, createChangeRequest, getCR, merge, saveChangeRequest, updateOps } from '../src/services/changeRequests.js';
+import { llm } from '../src/llm/provider.js';
 import { getUser } from '../src/services/users.js';
 import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { checkoutTestHooks, ontologyStore } from '../src/services/ontologyStore.js';
-import { seedDemo } from '../src/services/simulation.js';
+import { seedDemo, step } from '../src/services/simulation.js';
 
 /**
  * How forks behave when upstream moves: concurrent edits, conflicts, syncs
@@ -861,33 +862,34 @@ describe('seventh review', () => {
   });
 });
 
+/** Runs `during` once, the first time the draft is read (by any route) while `when` holds. */
+async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
+  const originals = { working: ontologyStore.working, graphAt: ontologyStore.graphAt };
+  let done = false;
+  const hook = async () => {
+    if (!done && when()) {
+      done = true;
+      await during();
+    }
+  };
+  ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.working>) {
+    await hook();
+    return originals.working.apply(this, args);
+  };
+  ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.graphAt>) {
+    await hook();
+    return originals.graphAt.apply(this, args);
+  };
+  try {
+    return await fn();
+  } finally {
+    Object.assign(ontologyStore, originals);
+  }
+}
+
 describe('eighth review', () => {
   const p = () => findProject('volunteering')!;
   const has = async (localName: string) => !!(await ontologyStore.working(p())).term(`${VOL}${localName}`);
-  /** Runs `during` once, the first time the draft is read (by any route) while `when` holds. */
-  async function interleave<T>(when: () => boolean, during: () => Promise<void> | void, fn: () => Promise<T>): Promise<T> {
-    const originals = { working: ontologyStore.working, graphAt: ontologyStore.graphAt };
-    let done = false;
-    const hook = async () => {
-      if (!done && when()) {
-        done = true;
-        await during();
-      }
-    };
-    ontologyStore.working = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.working>) {
-      await hook();
-      return originals.working.apply(this, args);
-    };
-    ontologyStore.graphAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof originals.graphAt>) {
-      await hook();
-      return originals.graphAt.apply(this, args);
-    };
-    try {
-      return await fn();
-    } finally {
-      Object.assign(ontologyStore, originals);
-    }
-  }
   /** Replace a store method for the length of `fn`. */
   async function stubbed<K extends 'advanceWorking'>(key: K, impl: (original: (typeof ontologyStore)[K]) => (typeof ontologyStore)[K], fn: () => Promise<unknown>) {
     const original = ontologyStore[key];
@@ -1123,5 +1125,98 @@ describe('ninth review', () => {
       expect(current()).toBe(true);
       expect(fs.existsSync(lock())).toBe(false);
     });
+  });
+});
+
+describe('saves that race a slow step', () => {
+  const p = () => findProject('volunteering')!;
+  const proposeFork = async (name: string, localName: string) => {
+    const path = await newFork(name);
+    await dev.post(`${path}/edits`).send({ ops: [addClass(localName, localName.toLowerCase())] });
+    const res = await dev.post(`${path}/propose`).send({});
+    expect(res.status).toBe(200);
+    return { path, crId: res.body.changeRequest.id as string };
+  };
+  const commentOn = (crId: string, text: string) => {
+    const cr = getCR(crId);
+    return addReview(cr, getUser(cr.authorId)!, 'comment', text);
+  };
+
+  it('updating a proposal keeps a comment made while its edits were being re-checked', async () => {
+    // Used to: re-proposing a fork re-checks the request's edits (slow) and then saved the copy it
+    // started with, so a review or comment saved meanwhile (e.g. by a simulated member) made the
+    // update fail with "changed by someone else" (seen in the e2e forks spec).
+    const { path, crId } = await proposeFork('Commented while updating', 'CommentedWhileUpdating');
+    await dev.post(`${path}/edits`).send({ ops: [addClass('CommentedLater', 'commented later')] });
+    const res = await interleave(
+      () => getCR(crId).ops.length === 2,
+      async () => {
+        await commentOn(crId, 'A comment while the edits were re-checked');
+      },
+      () => dev.post(`${path}/propose`).send({}),
+    );
+    expect(res.status).toBe(200);
+    const cr = getCR(crId);
+    expect(cr.ops).toHaveLength(2);
+    expect(cr.timeline.some((e) => e.message.includes('A comment while the edits were re-checked'))).toBe(true);
+    // The re-check describes the new edits.
+    expect(cr.kgcl!.join('\n')).toContain('CommentedLater');
+  });
+
+  it('a re-check of edits that were replaced meanwhile does not put the old results back', async () => {
+    const { crId } = await proposeFork('Replaced while re-checked', 'ReplacedWhileRechecked');
+    const author = getUser(getCR(crId).authorId)!;
+    await interleave(
+      () => getCR(crId).ops.length === 2,
+      async () => {
+        await updateOps(getCR(crId), author, { ops: [addClass('ReplacementEdit', 'replacement edit')] });
+      },
+      () => updateOps(getCR(crId), author, { ops: [addClass('FirstEdit', 'first edit'), addClass('SecondEdit', 'second edit')] }),
+    );
+    const cr = getCR(crId);
+    expect(cr.ops).toEqual([addClass('ReplacementEdit', 'replacement edit')]);
+    expect(cr.kgcl!.join('\n')).toContain('ReplacementEdit');
+    expect(cr.kgcl!.join('\n')).not.toContain('SecondEdit');
+  });
+
+  it('a simulated member reacting while someone else comments still has their say, and keeps the comment', async () => {
+    // Used to: the member's reaction (an LLM call) took a while, and the review was then saved on the
+    // copy read before it, so a comment saved meanwhile made the whole simulation step fail with a 409.
+    await proposeFork('Commented during a reaction', 'CommentedDuringReaction');
+    const open = () => list<ChangeRequest>('changeRequests', p().id).filter((x) => ['review', 'voting'].includes(x.status));
+    const reactions = (ids: string[]) => ids.reduce((n, id) => n + list('reviews', id).length + list('votes', id).length, 0);
+    const ids = open().map((c) => c.id);
+    const before = reactions(ids);
+    const commented: string[] = [];
+    const original = llm.json;
+    llm.json = (async (...args: Parameters<typeof original>) => {
+      if (!commented.length && args[0].task === 'persona') {
+        for (const c of open()) {
+          commented.push(c.id);
+          await commentOn(c.id, `Commented on #${c.number} while a member was reacting`);
+        }
+      }
+      return original(...args);
+    }) as typeof original;
+    try {
+      await step(p().id, undefined, 50);
+    } finally {
+      llm.json = original;
+    }
+    expect(commented.length).toBeGreaterThan(0);
+    for (const id of commented) expect(getCR(id).timeline.some((e) => e.message.includes('while a member was reacting'))).toBe(true);
+    // Members still reacted, on top of the comments.
+    expect(reactions(ids)).toBeGreaterThan(before + commented.length);
+  });
+
+  it('a review that cannot be saved leaves nothing behind', async () => {
+    // Used to: the review was stored before the request's save was refused, so it counted towards
+    // approval although the request never recorded it.
+    const { crId } = await proposeFork('Stale review', 'StaleReview');
+    const stale = getCR(crId);
+    await commentOn(crId, 'Saved first');
+    const before = list('reviews', crId).length;
+    await expect(addReview(stale, getUser(stale.authorId)!, 'comment', 'Saved on an old copy')).rejects.toThrow(/changed by someone else/);
+    expect(list('reviews', crId)).toHaveLength(before);
   });
 });

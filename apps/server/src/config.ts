@@ -31,7 +31,12 @@ export const config = {
    * the toolkit); off by default elsewhere so the app runs with no setup.
    */
   requireFullReasoner: bool(process.env.CONCORD_REQUIRE_REASONER, process.env.NODE_ENV === 'production'),
-  /** Comma-separated emails of deployment administrators (reset the demo, read all feedback). */
+  /**
+   * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
+   * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
+   */
+  adminWebIds: (process.env.ADMIN_WEBIDS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
+  /** Older alternative to ADMIN_WEBIDS: the verified email of a Google or GitHub account. */
   adminEmails: (process.env.ADMIN_EMAILS ?? '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean),
 
   llm: {

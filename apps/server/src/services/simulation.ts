@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, list, put } from '../db.js';
+import { clearAll, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
 import { requestText } from '../llm/context.js';
@@ -299,17 +299,32 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       if (!p) continue;
       const g = governanceFor(cr);
       const roles = rolesFor(ontologyId, u.id);
-      if (cr.status === 'voting') {
-        if (!canVote(g.rule, roles) || list<{ userId: string; at: string }>('votes', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
-        const r = await personaReaction(p, cr, compact);
-        await addVote(cr, u, r.vote, r.comment);
-        actions++;
-      } else {
-        const reviewed = list<{ userId: string; at: string }>('reviews', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
-        if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
-        const r = await personaReaction(p, cr, compact);
-        await addReview(cr, u, r.decision, r.comment);
-        actions++;
+      // A reaction takes a while (an LLM call), so it is recorded on the request as it is by then,
+      // and only if it is still about the same edits at the same stage.
+      const latest = () => {
+        const now = getCR(cr.id);
+        return now.status === cr.status && now.opsUpdatedAt === cr.opsUpdatedAt ? now : undefined;
+      };
+      try {
+        if (cr.status === 'voting') {
+          if (!canVote(g.rule, roles) || list<{ userId: string; at: string }>('votes', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
+          const r = await personaReaction(p, cr, compact);
+          const now = latest();
+          if (!now) continue;
+          await addVote(now, u, r.vote, r.comment);
+          actions++;
+        } else {
+          const reviewed = list<{ userId: string; at: string }>('reviews', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
+          if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
+          const r = await personaReaction(p, cr, compact);
+          const now = latest();
+          if (!now) continue;
+          await addReview(now, u, r.decision, r.comment);
+          actions++;
+        }
+      } catch (err) {
+        // Changed by someone else just now (or being merged): this member reacts next time.
+        if (!(err instanceof HttpError && err.status === 409)) throw err;
       }
     }
   }
