@@ -1,0 +1,10 @@
+{
+  "name": "@jeswr/pod-auth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Only the Solid provider list (KNOWN_PROVIDERS) from jeswr/solid-sdk packages/pod-auth, pinned by scripts/vendor-solid-sdk.mjs. Replace with the npm package once it is published.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": { "./directory": "./src/directory.ts" }
+}

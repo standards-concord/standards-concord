@@ -170,10 +170,10 @@ function splitExtension(segment: string): { base: string; format?: PublicFormat 
 export { publishedReleases } from './published.js';
 
 /** The latest released version, if any, that exists in the repository. */
-export function latestVersion(project: OntologyProject): string | undefined {
-  const versions = ontologyStore.versions(project);
+export async function latestVersion(project: OntologyProject): Promise<string | undefined> {
+  const versions = await ontologyStore.versions(project);
   if (project.currentVersion !== '0.0.0' && versions.includes(project.currentVersion)) return project.currentVersion;
-  return publishedReleases(project.id).find((r) => versions.includes(r.version))?.version;
+  return (await publishedReleases(project.id)).find((r) => versions.includes(r.version))?.version;
 }
 
 /**
@@ -190,11 +190,11 @@ export async function pageInput(
   const isDraft = version === 'draft';
   const graph = opts.graph ?? (await ontologyStore.at(project, isDraft ? 'working' : version));
   const root = `${base}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}`;
-  const releases = publishedReleases(project.id);
+  const releases = await publishedReleases(project.id);
   // A release being published now is the newest, though it isn't stored yet.
   if (opts.release && !releases.some((r) => r.version === opts.release!.version)) releases.unshift({ ...opts.release, publishedAt: opts.release.publishedAt ?? clock.iso() });
   const release = opts.release ?? releases.find((r) => r.version === version);
-  const latest = opts.release ? opts.release.version : latestVersion(project);
+  const latest = opts.release ? opts.release.version : await latestVersion(project);
   const downloads = DOWNLOAD_ORDER.map((format) => {
     const info = FORMAT_INFO[format];
     return {
@@ -227,7 +227,7 @@ export async function pageInput(
     downloads,
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
-    requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? requirementsSnapshot(project, version)),
+    requirements: isDraft ? publishedRequirements(project) : requirementsFor(opts.requirements ?? await requirementsSnapshot(project, version)),
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
@@ -238,9 +238,9 @@ export const REQUIREMENTS_SNAPSHOT = 'requirements.json';
 type SnapshotRead = { state: 'ok'; data: PublishedRequirements } | { state: 'absent' } | { state: 'corrupt' };
 
 /** The public use cases and requirements stored with a release: present and valid, absent, or unreadable. */
-function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
+async function readSnapshot(project: OntologyProject, version: string): Promise<SnapshotRead> {
   // From git, at the working draft (the checked-out files are only a mirror of it).
-  const text = ontologyStore.readReleaseFile(project, version, REQUIREMENTS_SNAPSHOT);
+  const text = await ontologyStore.readReleaseFile(project, version, REQUIREMENTS_SNAPSHOT);
   if (text === undefined) return { state: 'absent' };
   try {
     const data = validSnapshot(JSON.parse(text));
@@ -250,8 +250,8 @@ function readSnapshot(project: OntologyProject, version: string): SnapshotRead {
   }
 }
 
-function requirementsSnapshot(project: OntologyProject, version: string): PublishedRequirements | undefined {
-  const read = readSnapshot(project, version);
+async function requirementsSnapshot(project: OntologyProject, version: string): Promise<PublishedRequirements | undefined> {
+  const read = await readSnapshot(project, version);
   return read.state === 'ok' ? read.data : undefined;
 }
 
@@ -301,16 +301,19 @@ function readPageState(): Record<string, string> {
  */
 export async function refreshReleasePages(): Promise<void> {
   const state = readPageState();
-  for (const project of list<OntologyProject>('ontologies')) {
+  for (const project of await list<OntologyProject>('ontologies')) {
     // What older versions published without anyone approving it is held until a steward does (holds.ts).
     try {
-      holdLegacy(project);
+      await holdLegacy(project);
     } catch (err) {
       console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
-    const versions = new Set(ontologyStore.versions(project));
-    const releases = publishedReleases(project.id).filter((r) => versions.has(r.version));
-    const pending = releases.filter((r) => state[project.slug] !== PAGE_GENERATOR || readSnapshot(project, r.version).state === 'absent' || ontologyStore.readReleaseFile(project, r.version, 'index.html') === undefined);
+    const versions = new Set(await ontologyStore.versions(project));
+    const releases = (await publishedReleases(project.id)).filter((r) => versions.has(r.version));
+    const pending: typeof releases = [];
+    for (const r of releases)
+      if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
+        pending.push(r);
     if (!pending.length) {
       state[project.slug] = PAGE_GENERATOR;
       continue;
@@ -319,7 +322,7 @@ export async function refreshReleasePages(): Promise<void> {
     let failed = 0;
     for (const release of pending) {
       try {
-        const snapshot = readSnapshot(project, release.version);
+        const snapshot = await readSnapshot(project, release.version);
         let requirements: PublishedRequirements;
         let writeSnapshot = false;
         if (snapshot.state === 'ok') requirements = snapshot.data;
@@ -338,7 +341,7 @@ export async function refreshReleasePages(): Promise<void> {
     }
     try {
       if (Object.keys(changed).length) {
-        ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
+        await ontologyStore.updateReleaseFiles(project, changed, `Regenerate public pages (${Object.keys(changed).join(', ')}) with ${PAGE_GENERATOR}`);
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
       if (!failed) state[project.slug] = PAGE_GENERATOR;
@@ -397,21 +400,21 @@ async function serve(req: Request, res: Response) {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Expose-Headers', 'Link, Content-Profile, Content-Disposition, Accept-Post');
 
-  const project = findProject(slug);
+  const project = await findProject(slug);
   if (!project) return notFound(res, `There is no ontology called “${slug}”.`);
   const base = origin(req);
   const root = `${base}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}`;
 
   let version: string;
-  const latest = latestVersion(project);
+  const latest = await latestVersion(project);
   if (requested === undefined || requested === 'latest') version = latest ?? 'draft';
   else if (requested === 'draft' || requested === 'working') version = 'draft';
-  else if (ontologyStore.versions(project).includes(requested)) version = requested;
+  else if ((await ontologyStore.versions(project)).includes(requested)) version = requested;
   else {
     // Slash namespaces put terms under the ontology IRI (…/volunteering/Volunteer):
     // send those to the term's anchor on the latest page.
     // Not from a version waiting for approval: even a redirect would say which names it has.
-    if (isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
+    if (await isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
     const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
     const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
@@ -437,7 +440,7 @@ async function serve(req: Request, res: Response) {
   format ??= negotiate(req, res);
   if (!format) return;
   // Published before anyone approved what goes public: nothing of it is served until a steward does.
-  if (isHeld(project, version)) return held(res, project, version, format);
+  if (await isHeld(project, version)) return held(res, project, version, format);
   const graph = await readOntology(project, version, undefined);
   if (format === 'html') {
     publicHeaders(res, `${root}/${version}`, version === 'draft');

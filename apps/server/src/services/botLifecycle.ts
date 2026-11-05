@@ -1,6 +1,6 @@
 import type { Meeting } from '@concord/shared';
 import { config } from '../config.js';
-import { get, list, put } from '../db.js';
+import { transaction, get, list, put } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { dropMeeting, emit, finishCall, meetingLock, saveMeeting } from './meetings.js';
 import { BookingError, IDEMPOTENCY_KEY_MS, recall } from './recall.js';
@@ -116,15 +116,15 @@ export function bump(m: Meeting) {
 /* Transitions (each applied to the latest copy, under the meeting's lock)   */
 /* ------------------------------------------------------------------------ */
 
-function commit(m: Meeting) {
+async function commit(m: Meeting) { return transaction(async () => {
   if (m.withdrawn && (!m.bot || droppable(m.bot))) {
-    dropMeeting(m.id);
+    await dropMeeting(m.id);
     return m;
   }
-  const saved = saveMeeting(m);
+  const saved = await saveMeeting(m);
   emit(saved, { type: 'meeting', meeting: saved });
   return saved;
-}
+}); }
 
 /**
  * One compare-and-set on a meeting's bot record: `when` is checked on the latest
@@ -132,15 +132,15 @@ function commit(m: Meeting) {
  * generation) only if it holds. Undefined when it didn't apply.
  */
 export function transition(id: string, when: (m: Tracked) => boolean, change: (m: Tracked) => void): Promise<Meeting | undefined> {
-  return meetingLock(id, () => {
-    const m = get<Meeting>('meetings', id);
+  return meetingLock(id, async () => { return transaction(async () => {
+    const m = await get<Meeting>('meetings', id);
     if (!m) return undefined;
     normalise(m);
     if (!tracked(m) || !when(m)) return undefined;
     change(m);
     bump(m);
-    return commit(m);
-  });
+    return await commit(m);
+  }); });
 }
 
 /* In-place changes, for code already holding the meeting's lock on its latest copy. Each bumps the generation. */
@@ -349,13 +349,13 @@ export function drive(id: string, now?: number): Promise<void> {
 }
 
 async function work(id: string, now?: number) {
-  const first = get<Meeting>('meetings', id);
+  const first = await get<Meeting>('meetings', id);
   if (!first) return;
   normalise(first);
   // From the clock, a record backing off only gets its dismissed bookings looked for (if their turn has come).
   const waiting = now !== undefined && first.bot?.nextAt !== undefined && first.bot.nextAt > now;
   for (let pass = 0; pass < 6 && !waiting; pass++) {
-    const m = get<Meeting>('meetings', id);
+    const m = await get<Meeting>('meetings', id);
     if (!m) return;
     normalise(m);
     if (!tracked(m)) return;
@@ -368,7 +368,7 @@ async function work(id: string, now?: number) {
   // Dismissed bookings (each bot found is cancelled as soon as it is found), then strays, each on
   // their own schedule: never held back by the current booking's backoff.
   await lookForDismissed(id, now);
-  const latest = get<Meeting>('meetings', id);
+  const latest = await get<Meeting>('meetings', id);
   if (tracked(latest) && latest.bot.strays?.length && strayDue(latest.bot, now)) await cancelStrays(id, now);
   // A withdrawn meeting goes once nothing is outstanding.
   await transition(
@@ -417,14 +417,14 @@ async function lookup(m: Tracked) {
   }
 }
 
-function webhookSecret(meetingId: string) {
-  let secret = get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`)?.secret;
+async function webhookSecret(meetingId: string) { return transaction(async () => {
+  let secret = (await get<{ id: string; secret: string }>('kv', `meeting-secret:${meetingId}`))?.secret;
   if (!secret) {
     secret = newToken();
-    put('kv', { id: `meeting-secret:${meetingId}`, secret });
+    await put('kv', { id: `meeting-secret:${meetingId}`, secret });
   }
   return secret;
-}
+}); }
 
 /** Sends the record's booking (again), exactly as first recorded, under its idempotency key. */
 async function send(m: Tracked): Promise<{ id: string } | { refused: boolean; error: string }> {
@@ -436,7 +436,7 @@ async function send(m: Tracked): Promise<{ id: string } | { refused: boolean; er
       meetingUrl: b.bookedUrl ?? m.meetingUrl!,
       joinAt: b.joinAt,
       postPromptsToChat: !!b.chat,
-      webhookUrl: `${config.publicUrl}/api/webhooks/recall?meeting=${m.id}&secret=${webhookSecret(m.id)}`,
+      webhookUrl: `${config.publicUrl}/api/webhooks/recall?meeting=${m.id}&secret=${await webhookSecret(m.id)}`,
     });
     return { id: bot.id };
   } catch (err) {
@@ -550,13 +550,13 @@ function strayFailed(id: string, tried: Set<string>, now?: number) {
 }
 
 async function cancelStrays(id: string, now?: number, skip?: Set<string>) {
-  const m = get<Meeting>('meetings', id);
+  const m = await get<Meeting>('meetings', id);
   if (!tracked(m) || !m.bot.strays?.length) return;
   let refused = false;
   // Every stray on the latest copy, including ones recorded while this run is under way, is tried once.
   const tried = new Set<string>(skip);
   for (;;) {
-    const latest = get<Meeting>('meetings', id);
+    const latest = await get<Meeting>('meetings', id);
     // Adopted meanwhile (Recall.ai said it is this booking's bot): no longer listed, so not tried.
     const stray = tracked(latest) ? latest.bot.strays?.find((x) => !tried.has(x)) : undefined;
     if (!stray) break;
@@ -590,7 +590,7 @@ async function cancelStrays(id: string, now?: number, skip?: Set<string>) {
  * next lookup. A booking whose bot turned up is no longer looked for.
  */
 async function lookForDismissed(id: string, now?: number) {
-  const m = get<Meeting>('meetings', id);
+  const m = await get<Meeting>('meetings', id);
   if (!tracked(m) || !m.bot.dismissed?.length) return;
   const t = now ?? Date.now();
   const dueNow = m.bot.dismissed.filter((d) => d.nextAt === undefined || d.nextAt <= t).sort((a, b) => (a.nextAt ?? 0) - (b.nextAt ?? 0));
@@ -644,14 +644,14 @@ export function due(m: Meeting, t: number) {
 }
 
 /** Starts the lanes of every record whose turn has come (lanes already running are left to finish). */
-export function driveDue(t: number) {
+export async function driveDue(t: number) {
   const runs: Promise<void>[] = [];
-  for (const m of list<Meeting>('meetings')) if (due(m, t) && !laneBusy(m.id)) runs.push(drive(m.id, t));
+  for (const m of await list<Meeting>('meetings')) if (due(m, t) && !laneBusy(m.id)) runs.push(drive(m.id, t));
   return runs;
 }
 
 /** How many meetings are still getting rid of a bot (or of bots that turned up uninvited). */
-export const releasingCount = () => list<Meeting>('meetings').filter((m) => tracked(m) && (m.bot.phase === 'releasing' || !!m.bot.strays?.length)).length;
+export const releasingCount = async () => (await list<Meeting>('meetings')).filter((m) => tracked(m) && (m.bot.phase === 'releasing' || !!m.bot.strays?.length)).length;
 
 /**
  * A facilitator's confirmation that an unconfirmed booking can be let go: only one

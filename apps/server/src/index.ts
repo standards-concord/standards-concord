@@ -10,20 +10,20 @@ import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 import { syncFeedbackSharing } from './services/feedback.js';
 
-openDb();
+await openDb();
 // One server at a time changes the repositories (upgrades are exclusive; see docs/deploy.md). It exits if it ever loses them.
 const store = await claimGitStore();
 setInterval(store.renew, 5_000).unref();
 for (const signal of ['SIGTERM', 'SIGINT'] as const)
-  process.once(signal, () => {
-    store.release();
+  process.once(signal, async () => {
+    await store.release();
     process.exit(0);
   });
 // A demo reset that a crash interrupted is finished or undone.
-ontologyStore.recoverWipe();
+await ontologyStore.recoverWipe();
 // Git is a projection of the database: repair anything a crash left half-done.
-for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
-const secrets = migrateClientSecrets();
+for (const p of await list<OntologyProject>('ontologies')) await ontologyStore.ensureSynced(p);
+const secrets = await migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {

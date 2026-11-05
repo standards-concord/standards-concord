@@ -12,6 +12,7 @@
     "@anthropic-ai/sdk": "^0.133.0",
     "@concord/core": "workspace:*",
     "@concord/shared": "workspace:*",
+    "@electric-sql/pglite": "0.5.10",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "arctic": "^3.7.0",
     "cookie-parser": "^1.4.7",
@@ -21,6 +22,7 @@
     "marked": "^18.1.1",
     "n3": "^2.13.12",
     "oauth4webapi": "3.8.8",
+    "pg": "8.23.1",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   },
@@ -29,6 +31,7 @@
     "@types/express": "^5.0.6",
     "@types/n3": "^1.26.4",
     "@types/node": "^26.6.5",
+    "@types/pg": "8.23.1",
     "@types/supertest": "^7.2.1",
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",

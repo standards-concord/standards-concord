@@ -17,15 +17,15 @@ import { seedDemo } from '../src/services/simulation.js';
 import { createUseCase, listUseCases, synthesise, updateUseCase } from '../src/services/useCases.js';
 import { redactText, revealing, secretsFor } from '../src/services/redact.js';
 import { approvePublication, getCR, merge, publicationPreview, revise, updateOps } from '../src/services/changeRequests.js';
-import { draftRelease, publishRelease } from '../src/services/releases.js';
+import { draftRelease, getRelease, publishRelease } from '../src/services/releases.js';
 import { put } from '../src/db.js';
 import { createUser, getUser } from '../src/services/users.js';
 import type { OntologyView } from '@concord/core/types';
 import type { ChangeRequest, OntologySummary, PublicHoldReview, Release } from '@concord/shared';
 
 /** Files stored beside the volunteering ontology's 1.0.0 release, as committed (null deletes). */
-const getReleaseFile = (name: string) => ontologyStore.readReleaseFile(findProject('volunteering')!, '1.0.0', name);
-const setReleaseFile = (name: string, content: string | null) => ontologyStore.updateReleaseFiles(findProject('volunteering')!, { '1.0.0': { [name]: content } }, `test: set ${name}`);
+const getReleaseFile = async (name: string) => await ontologyStore.readReleaseFile((await findProject('volunteering'))!, '1.0.0', name);
+const setReleaseFile = async (name: string, content: string | null) => await ontologyStore.updateReleaseFiles((await findProject('volunteering'))!, { '1.0.0': { [name]: content } }, `test: set ${name}`);
 
 // Marked approved by hand: merge re-checks governance unless it knows what the request was approved as.
 const APPROVED = { status: 'approved' as const, approvedAs: { level: 'major' as const, confirmation: true, voted: true } };
@@ -33,7 +33,7 @@ const APPROVED = { status: 'approved' as const, approvedAs: { level: 'major' as 
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 
@@ -53,7 +53,7 @@ describe('public ontology pages', () => {
   it('gives every term an anchor that matches its IRI fragment', async () => {
     const res = await request(app).get('/def/volunteering/1.0.0');
     expect(res.status).toBe(200);
-    const view = (await ontologyStore.at(findProject('volunteering')!, '1.0.0')).view();
+    const view = (await ontologyStore.at((await findProject('volunteering'))!, '1.0.0')).view();
     for (const c of view.classes) {
       const fragment = c.iri.split('#').pop()!;
       expect(res.text, fragment).toContain(`id="${fragment}"`);
@@ -134,8 +134,8 @@ describe('public ontology pages', () => {
     expect(res.text).toMatch(/<link rel="alternate" type="text\/turtle"/);
   });
 
-  it('writes the page into each release for the copy on GitHub', () => {
-    const file = path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0', 'index.html');
+  it('writes the page into each release for the copy on GitHub', async () => {
+    const file = path.join(await ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0', 'index.html');
     expect(fs.existsSync(file)).toBe(true);
     const html = fs.readFileSync(file, 'utf8');
     expect(html).toContain('href="ontology.jsonld"');
@@ -152,15 +152,15 @@ describe('use cases on the public page', () => {
   });
 
   it('never shows use cases written by real people on the public page', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const tester = await createUser({ name: 'Real Tester', provider: 'demo', subject: 'real-tester' });
-    createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'My confidential charity workflow' } });
+    await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'My confidential charity workflow' } });
     const res = await request(app).get('/def/volunteering');
     expect(res.text).not.toContain('My confidential charity workflow');
   });
 
   it('renders a requirements document with links to its use cases, and escapes contributed text', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.requirements = {
       document: {
@@ -189,7 +189,7 @@ describe('use cases on the public page', () => {
   });
 
   it('says plainly when there is nothing public yet', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.requirements = { useCases: [] };
     const html = renderOntologyPage(input);
@@ -227,7 +227,7 @@ describe('ontologies without a release', () => {
 
 describe('superseded versions', () => {
   it('says when a newer release exists and links to it', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const input = await pageInput(project, '1.0.0', 'https://example.org');
     input.latestVersion = '2.0.0';
     const html = renderOntologyPage(input);
@@ -255,7 +255,7 @@ describe('mapping the use case data onto the page', () => {
     expect(mapped.useCases[0].origin?.href).toBeUndefined();
     expect(mapped.useCases[0].addressedIn).toBe('1.0.0');
     expect(mapped.useCases[1].attribution).toBeUndefined();
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.requirements = mapped;
     const html = renderOntologyPage(input);
     expect(html).not.toContain('Should not show');
@@ -268,7 +268,7 @@ describe('mapping the use case data onto the page', () => {
 
 describe('review fixes', () => {
   it('escapes dates that are not dates (stored XSS)', async () => {
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.view = { ...input.view, metadata: { ...input.view.metadata, modified: '<img src=x onerror=alert(1)>', issued: '"><script>alert(2)</script>' } };
     input.release = undefined;
     const html = renderOntologyPage(input);
@@ -278,11 +278,11 @@ describe('review fixes', () => {
   });
 
   it('never publishes a demo use case that someone edited, even as a simulated persona', async () => {
-    const project = findProject('volunteering')!;
-    const seeded = listUseCases(project.id).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
-    const author = getUser(seeded.authorId)!;
+    const project = (await findProject('volunteering'))!;
+    const seeded = (await listUseCases(project.id)).find((u) => u.sections.name === 'Find weekly shifts that need volunteers')!;
+    const author = (await getUser(seeded.authorId))!;
     expect(author.simulated).toBe(true);
-    updateUseCase(seeded, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
+    await updateUseCase(seeded.id, author, { sections: { ...seeded.sections, goal: 'PRIVATE: call me on 07700 900123', name: 'Renamed by a tester' } });
     for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/1.0.0']) {
       const res = await request(app).get(url);
       expect(res.text, url).not.toContain('07700 900123');
@@ -342,7 +342,7 @@ describe('review fixes', () => {
     expect(new Set([...a.values()].map(fragment)).size, 'hrefs are distinct').toBe(a.size);
 
     // The page's own ids step aside: #main and #sec-classes are the terms.
-    const input = await pageInput(findProject('volunteering')!, '1.0.0', 'https://example.org');
+    const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
     input.project = { ...input.project, namespace: NS };
     input.view = view;
     const html = renderOntologyPage(input);
@@ -379,30 +379,30 @@ describe('review fixes', () => {
 
   it('renders a release from the snapshot stored with it, not from today\'s data', async () => {
     const file = 'requirements.json';
-    const original = getReleaseFile(file)!;
+    const original = (await getReleaseFile(file))!;
     expect(original).toBeTruthy();
     const snap = JSON.parse(original);
     expect(snap.useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
     try {
       snap.useCases[0].title = 'As it was at release time';
-      setReleaseFile(file, JSON.stringify(snap));
+      await setReleaseFile(file, JSON.stringify(snap));
       const res = await request(app).get('/def/volunteering/1.0.0');
       expect(res.text).toContain('As it was at release time');
       const draft = await request(app).get('/def/volunteering/draft');
       expect(draft.text).not.toContain('As it was at release time');
     } finally {
-      setReleaseFile(file, original);
+      await setReleaseFile(file, original);
     }
   });
 });
 
 describe('re-review fixes', () => {
   it('redacts titles and names however they are spaced, however short, and in labels too', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'short-name' });
     const morgan = await createUser({ name: 'Morgan  Secretname', provider: 'github', subject: 'spaced-name' });
-    const base = listUseCases(project.id)[0];
-    const secrets = secretsFor([
+    const base = (await listUseCases(project.id))[0];
+    const secrets = await secretsFor([
       { ...base, authorId: ann.id, sections: { name: 'NHS' } },
       { ...base, authorId: morgan.id, sections: { name: 'Secret  Pilot' } },
     ]);
@@ -414,7 +414,7 @@ describe('re-review fixes', () => {
     for (const name of ['SecretPilot', 'AnnRecord', 'NHS', 'SecretPilotRecord', 'secret pilot record']) expect(revealing(name, secrets), name).toBe(true);
     expect(revealing('HealthService', secrets)).toBe(false);
     // One-letter titles are redacted as written, not every letter of that kind.
-    const x = secretsFor([{ ...base, authorId: ann.id, sections: { name: 'X' } }]);
+    const x = await secretsFor([{ ...base, authorId: ann.id, sections: { name: 'X' } }]);
     expect(redactText('Project X, x-axis, X.', x)).toBe('Project a use case, x-axis, a use case.');
   });
 
@@ -429,66 +429,66 @@ describe('re-review fixes', () => {
 
   it('says so when a release has no use case snapshot, instead of showing current data', async () => {
     const file = 'requirements.json';
-    const original = getReleaseFile(file)!;
+    const original = (await getReleaseFile(file))!;
     try {
       for (const broken of [undefined, '{not json', '{"useCases": "nope"}']) {
-        setReleaseFile(file, broken === undefined ? null : broken);
+        await setReleaseFile(file, broken === undefined ? null : broken);
         const res = await request(app).get('/def/volunteering/1.0.0');
         expect(res.text).toContain('were not recorded when it was published');
         expect(res.text).not.toContain('Aggregate volunteering opportunities across platforms');
       }
     } finally {
-      setReleaseFile(file, original);
+      await setReleaseFile(file, original);
     }
   });
 
   it('regenerates release pages from trusted state, keeps unreadable snapshots, and backfills missing ones', async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     // Pages and snapshots as committed (git is where they are read from).
     const page = 'index.html';
     const snap = 'requirements.json';
     const stateFile = path.join(config.dataDir, 'public-pages.json');
-    const original = { page: getReleaseFile(page)!, snap: getReleaseFile(snap)! };
+    const original = { page: (await getReleaseFile(page))!, snap: (await getReleaseFile(snap))! };
     const forget = () => fs.rmSync(stateFile, { force: true });
     try {
       // A page from before the fixes that even carries the marker text: state, not content, decides.
       forget();
-      setReleaseFile(page, `<html><p>${PAGE_GENERATOR}</p><img src=x onerror=alert(1)></html>`);
-      setReleaseFile(snap, null);
+      await setReleaseFile(page, `<html><p>${PAGE_GENERATOR}</p><img src=x onerror=alert(1)></html>`);
+      await setReleaseFile(snap, null);
       await refreshReleasePages();
-      expect(getReleaseFile(page)!).not.toContain('onerror');
-      expect(getReleaseFile(page)!).toContain(`content="${PAGE_GENERATOR}"`);
+      expect((await getReleaseFile(page))!).not.toContain('onerror');
+      expect((await getReleaseFile(page))!).toContain(`content="${PAGE_GENERATOR}"`);
       // The demo's use cases are fixed content, so its missing snapshot is backfilled.
-      expect(JSON.parse(getReleaseFile(snap)!).useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
+      expect(JSON.parse((await getReleaseFile(snap))!).useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
       expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).volunteering).toBe(PAGE_GENERATOR);
-      const canonical = getReleaseFile(snap)!;
+      const canonical = (await getReleaseFile(snap))!;
 
       // Up to date: nothing is rewritten or committed, whatever the page says.
-      setReleaseFile(page, 'hand-edited');
-      const head = ontologyStore.head(project);
+      await setReleaseFile(page, 'hand-edited');
+      const head = await ontologyStore.head(project);
       await refreshReleasePages();
-      expect(getReleaseFile(page)).toBe('hand-edited');
-      expect(ontologyStore.head(project)).toBe(head);
+      expect(await getReleaseFile(page)).toBe('hand-edited');
+      expect(await ontologyStore.head(project)).toBe(head);
 
       // An unreadable snapshot is kept as it is, and the page says the use cases weren't recorded.
       for (const broken of ['{not json', '{"useCases":[null]}', '{"useCases":[{"id":"x"}]}']) {
         forget();
-        setReleaseFile(snap, broken);
+        await setReleaseFile(snap, broken);
         await refreshReleasePages();
-        expect(getReleaseFile(snap), broken).toBe(broken);
-        expect(getReleaseFile(page), broken).toContain('were not recorded when it was published');
+        expect(await getReleaseFile(snap), broken).toBe(broken);
+        expect(await getReleaseFile(page), broken).toContain('were not recorded when it was published');
         expect((await request(app).get('/def/volunteering/1.0.0')).text, broken).toContain('were not recorded when it was published');
       }
 
       // A snapshot holding exactly what may be published is history: kept, and the page re-rendered from it.
       forget();
-      setReleaseFile(snap, canonical);
+      await setReleaseFile(snap, canonical);
       await refreshReleasePages();
-      expect(getReleaseFile(snap)).toBe(canonical);
-      expect(ontologyStore.log(project, 1)[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
+      expect(await getReleaseFile(snap)).toBe(canonical);
+      expect((await ontologyStore.log(project, 1))[0].subject).toMatch(/Regenerate public pages \(1\.0\.0\)/);
     } finally {
-      setReleaseFile(page, original.page);
-      setReleaseFile(snap, original.snap);
+      await setReleaseFile(page, original.page);
+      await setReleaseFile(snap, original.snap);
       forget();
       await refreshReleasePages();
     }
@@ -498,13 +498,13 @@ describe('re-review fixes', () => {
 
 describe('fourth review fixes', () => {
   const NS = 'https://w3id.org/odi/volunteering#';
-  const base = () => listUseCases(findProject('volunteering')!.id)[0];
+  const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
 
   it('catches titles in identifiers and alternative labels however they are written', async () => {
     const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'ids-ann' });
-    const s = secretsFor([
-      { ...base(), authorId: ann.id, sections: { name: 'PENDING_SECRET_TITLE' } },
-      { ...base(), authorId: ann.id, sections: { name: 'Secret Pilot' } },
+    const s = await secretsFor([
+      { ...await base(), authorId: ann.id, sections: { name: 'PENDING_SECRET_TITLE' } },
+      { ...await base(), authorId: ann.id, sections: { name: 'Secret Pilot' } },
     ]);
     for (const name of ['PendingSecretTitleRecord', 'pending_secret_title', 'SecretPilotRecord', 'secret-pilot', 'AnnRecord', 'create class :SecretPilotRecord']) expect(revealing(name, s), name).toBe(true);
     for (const name of ['Safe', 'fine', 'neutral record']) expect(revealing(name, s), name).toBe(false);
@@ -513,13 +513,13 @@ describe('fourth review fixes', () => {
   it('leaves ordinary words alone when a title is short or common, and never redacts twice', async () => {
     const ann = await createUser({ name: 'Ann', provider: 'github', subject: 'common-ann' });
     for (const title of ['a', 'use', 'record', 'use case', 'The plan']) {
-      const s = secretsFor([{ ...base(), authorId: ann.id, sections: { name: title } }]);
+      const s = await secretsFor([{ ...await base(), authorId: ann.id, sections: { name: title } }]);
       expect(redactText('A record is a useful item for the plan.', s), title).toBe('A record is a useful item for the plan.');
       expect(revealing('Record', s), title).toBe(false);
     }
     // A title or name that shares words with the replacements: running again changes nothing.
     const p = await createUser({ name: 'Participant', provider: 'github', subject: 'common-participant' });
-    const s = secretsFor([{ ...base(), authorId: p.id, sections: { name: 'Secret Pilot' } }]);
+    const s = await secretsFor([{ ...await base(), authorId: p.id, sections: { name: 'Secret Pilot' } }]);
     const once = redactText('Secret Pilot, asked by Participant.', s);
     expect(once).toBe('a use case, asked by a participant.');
     expect(redactText(once, s)).toBe(once);
@@ -530,8 +530,8 @@ describe('fourth review fixes', () => {
 
 describe('fifth review fixes', () => {
   const NS = 'https://w3id.org/odi/volunteering#';
-  const base = () => listUseCases(findProject('volunteering')!.id)[0];
-  const releaseDir = () => path.join(ontologyStore.dir(findProject('volunteering')!), 'releases', '1.0.0');
+  const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
+  const releaseDir = async () => path.join(await ontologyStore.dir((await findProject('volunteering'))!), 'releases', '1.0.0');
   const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
   const rerun = async () => {
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
@@ -540,14 +540,14 @@ describe('fifth review fixes', () => {
 
   it('redacts people with short or common names, as written', async () => {
     const an = await createUser({ name: 'An', provider: 'github', subject: 'short-an' });
-    const s = secretsFor([{ ...base(), authorId: an.id, sections: { name: 'Secret Pilot' } }]);
+    const s = await secretsFor([{ ...await base(), authorId: an.id, sections: { name: 'Secret Pilot' } }]);
     expect(s.people.length).toBe(1);
     expect(redactText('Requested by An for Secret Pilot, an ordinary word.', s)).toBe('Requested by a participant for a use case, an ordinary word.');
   });
 
   it('catches one-letter titles inside identifiers and alternative labels', async () => {
     const ann = await createUser({ name: 'Ann One', provider: 'github', subject: 'one-letter' });
-    const s = secretsFor([{ ...base(), authorId: ann.id, sections: { name: 'X' } }]);
+    const s = await secretsFor([{ ...await base(), authorId: ann.id, sections: { name: 'X' } }]);
     expect(revealing('XRecord', s)).toBe(true);
     expect(revealing('x_record', s)).toBe(false);
     expect(revealing('Xylophone', s)).toBe(false);
@@ -562,7 +562,7 @@ describe('sixth review fixes', () => {
   const DEF = 'http://www.w3.org/2004/02/skos/core#definition';
   const CONTRIB = 'http://purl.org/dc/terms/contributor';
   const SRC = 'http://purl.org/dc/terms/source';
-  const base = () => listUseCases(findProject('volunteering')!.id)[0];
+  const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
   const rerun = async () => {
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     await refreshReleasePages();
@@ -574,21 +574,21 @@ describe('sixth review fixes', () => {
   it('catches cased, plural and run-together forms of titles and names, and holds back a merge that has them', async () => {
     const { findSecrets } = await import('../src/services/redact.js');
     const mac = await createUser({ name: 'MacDonald', provider: 'github', subject: 'six-mac' });
-    const s = secretsFor([{ ...base(), authorId: mac.id, sections: { name: 'SecretPilot' } }]);
+    const s = await secretsFor([{ ...await base(), authorId: mac.id, sections: { name: 'SecretPilot' } }]);
     for (const t of ['SecretPilotsRecord', 'SECRETPILOTRECORD', 'MACDONALDRECORD', 'Requested by MacDonalds for SecretPilots', 'secret-pilots', 'Secret  Pilots', 'macdonaldrecord'])
       expect(findSecrets(t, s).length, t).toBeGreaterThan(0);
     const an = await createUser({ name: 'An', provider: 'github', subject: 'six-an' });
-    const x = secretsFor([{ ...base(), authorId: an.id, sections: { name: 'X' } }]);
+    const x = await secretsFor([{ ...await base(), authorId: an.id, sections: { name: 'X' } }]);
     for (const t of ['Requested by AN', 'ANRECORD', 'XRECORD', 'XRecord', 'Requested by An']) expect(findSecrets(t, x).length, t).toBeGreaterThan(0);
     for (const t of ['an apple', 'Xylophone', 'TaxRecord', 'A plan for an index']) expect(findSecrets(t, x), t).toEqual([]);
     // Through synthesis and merge: nothing reaches the draft.
-    const project = findProject('volunteering')!;
-    const uc = createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilot' } });
+    const project = (await findProject('volunteering'))!;
+    const uc = await createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilot' } });
     const cr = await synthesise(project, mac, [uc.id]);
-    put(
+    await put(
       'changeRequests',
       {
-        ...getCR(cr.id),
+        ...await getCR(cr.id),
         title: 'Changes',
         ...APPROVED,
         ops: [
@@ -598,7 +598,7 @@ describe('sixth review fixes', () => {
       },
       project.id,
     );
-    expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
+    expect((await merge(await getCR(cr.id), undefined)).status).toBe('needs-work');
     expect(await everyFormat('draft')).not.toMatch(/SECRETPILOT|MacDonald|MACDONALD|SixSafe/i);
   });
 
@@ -606,9 +606,9 @@ describe('sixth review fixes', () => {
     const { findSecrets, redactText } = await import('../src/services/redact.js');
     const anna = await createUser({ name: 'Anna', provider: 'github', subject: 'six-anna' });
     const will = await createUser({ name: 'Will', provider: 'github', subject: 'six-will' });
-    const s = secretsFor([
-      { ...base(), authorId: anna.id, sections: { name: 'Secret Pilot' } },
-      { ...base(), authorId: will.id, sections: { name: 'Secret Pilot' } },
+    const s = await secretsFor([
+      { ...await base(), authorId: anna.id, sections: { name: 'Secret Pilot' } },
+      { ...await base(), authorId: will.id, sections: { name: 'Secret Pilot' } },
     ]);
     for (const t of ['An N/A value is allowed.', 'A record will remain valid.', 'A summary of the savannah.']) {
       expect(findSecrets(t, s), t).toEqual([]);
@@ -624,15 +624,15 @@ describe('seventh review: a person approves exactly what is published', () => {
   const editor = async (name: string) => {
     const agent = request.agent(app);
     const { body } = await agent.post('/api/auth/demo').send({ name, role: 'editor' });
-    return { agent, user: getUser(body.user.id)! };
+    return { agent, user: (await getUser(body.user.id))! };
   };
   const drafted = async (title: string, ops: unknown[]) => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     const tester = await createUser({ name: `Tester ${title}`, provider: 'github', subject: `seventh-${title}` });
-    const uc = createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: `Use case ${title}` } });
+    const uc = await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: `Use case ${title}` } });
     const cr = await synthesise(project, tester, [uc.id]);
-    put('changeRequests', { ...getCR(cr.id), title, ops, ...APPROVED }, project.id);
-    return { project, tester, cr: getCR(cr.id) };
+    await put('changeRequests', { ...await getCR(cr.id), title, ops, ...APPROVED }, project.id);
+    return { project, tester, cr: await getCR(cr.id) };
   };
 
   it('holds every request drafted from use cases until an editor approves what it publishes, however private-looking or not', async () => {
@@ -643,7 +643,7 @@ describe('seventh review: a person approves exactly what is published', () => {
     expect(held.heldForPublication).toBe(true);
     expect(await draftTtl()).not.toContain('SeventhPlain');
     // The editor sees each statement it adds, exactly.
-    const preview = await publicationPreview(getCR(cr.id));
+    const preview = await publicationPreview(await getCR(cr.id));
     expect(preview.title).toBe('Plainly safe');
     expect(preview.statements).toEqual(
       expect.arrayContaining([expect.objectContaining({ subject: expect.stringMatching(/[#/]SeventhPlain$/), predicate: expect.stringMatching(/^http.*definition$/), object: 'Requested for The Plan by Will.' })]),
@@ -656,61 +656,61 @@ describe('seventh review: a person approves exactly what is published', () => {
     expect(await draftTtl()).toContain('Requested for The Plan by Will.');
     // Nobody's name is added as a contributor, and the commit names no one.
     expect(await draftTtl()).not.toContain('Tester Plainly safe');
-    expect(ontologyStore.log(findProject('volunteering')!, 1)[0].author).toBe('Concord');
+    expect((await ontologyStore.log((await findProject('volunteering'))!, 1))[0].author).toBe('Concord');
   });
 
   it('approves only the version the editor saw: a change in between is refused, and nothing is published', async () => {
     const { cr, tester } = await drafted('Version check', [{ op: 'addClass', localName: 'SeventhSeen', label: 'seventh seen', definition: 'What the editor saw.' }]);
     const seen = await publicationPreview(cr);
     // The author changes it to something private after the editor looked.
-    await updateOps(getCR(cr.id), tester, { ops: [{ op: 'addClass', localName: 'SeventhSeen', label: 'seventh seen', definition: 'Private: Visitor Person at the Secret Pilot.' }] });
+    await updateOps(await getCR(cr.id), tester, { ops: [{ op: 'addClass', localName: 'SeventhSeen', label: 'seventh seen', definition: 'Private: Visitor Person at the Secret Pilot.' }] });
     const { agent, user } = await editor('Seventh checker');
     const stale = await agent.post(`/api/change-requests/${cr.id}/approve-publication`).send({ fingerprint: seen.fingerprint });
     expect(stale.status).toBe(409);
-    expect(getCR(cr.id).privacyCleared).toBeUndefined();
+    expect((await getCR(cr.id)).privacyCleared).toBeUndefined();
     expect(await draftTtl()).not.toContain('Visitor Person');
     // With no fingerprint at all, nothing is approved either; contributors can't approve.
     expect((await agent.post(`/api/change-requests/${cr.id}/approve-publication`).send({})).status).toBe(400);
     const contributor = request.agent(app);
     await contributor.post('/api/auth/demo').send({ name: 'Seventh contributor', role: 'contributor' });
-    expect((await contributor.post(`/api/change-requests/${cr.id}/approve-publication`).send({ fingerprint: (await publicationPreview(getCR(cr.id))).fingerprint })).status).toBe(403);
+    expect((await contributor.post(`/api/change-requests/${cr.id}/approve-publication`).send({ fingerprint: (await publicationPreview(await getCR(cr.id))).fingerprint })).status).toBe(403);
     // Approving it early, then editing it, needs approval again before it merges.
-    await approvePublication(getCR(cr.id), user, (await publicationPreview(getCR(cr.id))).fingerprint);
-    expect(getCR(cr.id).privacyCleared).toBeDefined();
-    await updateOps(getCR(cr.id), tester, { title: 'Version check, retitled' });
-    expect(getCR(cr.id).privacyCleared).toBeUndefined();
-    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
-    expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
+    await approvePublication(await getCR(cr.id), user, (await publicationPreview(await getCR(cr.id))).fingerprint);
+    expect((await getCR(cr.id)).privacyCleared).toBeDefined();
+    await updateOps(await getCR(cr.id), tester, { title: 'Version check, retitled' });
+    expect((await getCR(cr.id)).privacyCleared).toBeUndefined();
+    await put('changeRequests', { ...await getCR(cr.id), ...APPROVED }, cr.ontologyId);
+    expect((await merge(await getCR(cr.id), undefined)).status).toBe('needs-work');
   });
 
   it('publishes release notes only from what editors approved, and notes a steward wrote as written', async () => {
     const { project, cr } = await drafted('Notes check', [{ op: 'addClass', localName: 'SeventhNoted', label: 'seventh noted', definition: 'For the notes.' }]);
     const { user } = await editor('Seventh notes editor');
     await merge(cr, undefined);
-    const approved = await approvePublication(getCR(cr.id), user, (await publicationPreview(getCR(cr.id))).fingerprint);
+    const approved = await approvePublication(await getCR(cr.id), user, (await publicationPreview(await getCR(cr.id))).fingerprint);
     expect(approved.status).toBe('merged');
     // A request merged before approvals existed: no clearance, so neither its title nor its edits reach the notes.
     const legacy = await drafted('LEGACY_UNAPPROVED_TITLE', []);
-    put('changeRequests', { ...legacy.cr, status: 'merged', kgcl: ['create class :LegacyUnapproved'] }, project.id);
+    await put('changeRequests', { ...legacy.cr, status: 'merged', kgcl: ['create class :LegacyUnapproved'] }, project.id);
     const steward = await createUser({ name: 'Seventh steward', provider: 'github', subject: 'seventh-steward' });
-    (await import('../src/services/ontologies.js')).setRoles(project.id, steward.id, ['steward']);
+    await (await import('../src/services/ontologies.js')).setRoles(project.id, steward.id, ['steward']);
     const release = await draftRelease(project, steward);
     expect(release.notes).toContain('Notes check');
     expect(release.notes).not.toContain('LEGACY_UNAPPROVED_TITLE');
     expect(release.notes).not.toContain('LegacyUnapproved');
     // Stale text put into a drafted note is rebuilt when it's published.
-    put('releases', { ...release, notes: `${release.notes}\nLEGACY_UNAPPROVED_TITLE`, status: 'draft' }, project.id);
-    const published = await publishRelease((await import('../src/db.js')).get('releases', release.id)!, steward);
+    await put('releases', { ...release, notes: `${release.notes}\nLEGACY_UNAPPROVED_TITLE`, status: 'draft' }, project.id);
+    const published = await publishRelease((await (await import('../src/db.js')).get('releases', release.id))!, steward);
     expect(published.notes).not.toContain('LEGACY_UNAPPROVED_TITLE');
     expect((await request(app).get(`/def/volunteering/${published.version}`)).text).not.toContain('LEGACY_UNAPPROVED_TITLE');
   });
 
   it('rewrites nothing an AI drafts: revisions are held for approval like any draft from use cases', async () => {
     const { cr, tester } = await drafted('Revision check', [{ op: 'addClass', localName: 'SeventhRevised', label: 'seventh revised', definition: 'x' }]);
-    const revised = await revise(getCR(cr.id), tester, 'Add a class SeventhExtra for the Secret Pilot');
+    const revised = await revise(await getCR(cr.id), tester, 'Add a class SeventhExtra for the Secret Pilot');
     expect(revised.privacyCleared).toBeUndefined();
-    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
-    expect((await merge(getCR(cr.id), undefined)).status).toBe('needs-work');
+    await put('changeRequests', { ...await getCR(cr.id), ...APPROVED }, cr.ontologyId);
+    expect((await merge(await getCR(cr.id), undefined)).status).toBe('needs-work');
     expect(await draftTtl()).not.toContain('SeventhRevised');
   });
 
@@ -726,9 +726,9 @@ describe('seventh review: a person approves exactly what is published', () => {
     // Every statement carries its exact N-Triples form; what's approved is what's published.
     for (const x of preview.statements) expect(x.nt).toMatch(/ \.$/);
     const { user } = await editor('Eighth full editor');
-    await approvePublication(getCR(cr.id), user, preview.fingerprint);
-    put('changeRequests', { ...getCR(cr.id), ...APPROVED }, cr.ontologyId);
-    expect((await merge(getCR(cr.id), undefined)).status).toBe('merged');
+    await approvePublication(await getCR(cr.id), user, preview.fingerprint);
+    await put('changeRequests', { ...await getCR(cr.id), ...APPROVED }, cr.ontologyId);
+    expect((await merge(await getCR(cr.id), undefined)).status).toBe('merged');
     expect(await draftTtl()).toContain(hidden);
   });
 
@@ -737,21 +737,21 @@ describe('seventh review: a person approves exactly what is published', () => {
     const { cr, project } = await drafted('Dated', [{ op: 'addClass', localName: 'EighthDated', label: 'eighth dated', definition: 'Written on DATE.' }]);
     const first = (await publicationPreview(cr)).fingerprint;
     // A date someone wrote is part of what's approved.
-    put('changeRequests', { ...getCR(cr.id), ops: [{ op: 'addClass', localName: 'EighthDated', label: 'eighth dated', definition: `Written on ${today}.` }] }, project.id);
-    const dated = (await publicationPreview(getCR(cr.id))).fingerprint;
+    await put('changeRequests', { ...await getCR(cr.id), ops: [{ op: 'addClass', localName: 'EighthDated', label: 'eighth dated', definition: `Written on ${today}.` }] }, project.id);
+    const dated = (await publicationPreview(await getCR(cr.id))).fingerprint;
     expect(dated).not.toBe(first);
     // The draft it merges into changing (an unrelated statement) needs a new approval.
     const working = await ontologyStore.working(project);
     await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle(`${await working.toTurtle()}\n<https://w3id.org/odi/volunteering#EighthUnrelated> a <http://www.w3.org/2002/07/owl#Class> .\n`), 'Unrelated', { name: 'Concord' });
-    const rebased = (await publicationPreview(getCR(cr.id))).fingerprint;
+    const rebased = (await publicationPreview(await getCR(cr.id))).fingerprint;
     expect(rebased).not.toBe(dated);
     const { user } = await editor('Eighth date editor');
-    await expect(approvePublication(getCR(cr.id), user, dated)).rejects.toMatchObject({ status: 409 });
+    await expect(approvePublication(await getCR(cr.id), user, dated)).rejects.toMatchObject({ status: 409 });
     // Tomorrow, the same request on the same draft is the same approval: only generated dates moved.
     const { clock } = await import('../src/clock.js');
     clock.advance(24 * 60 * 60 * 1000);
     try {
-      expect((await publicationPreview(getCR(cr.id))).fingerprint).toBe(rebased);
+      expect((await publicationPreview(await getCR(cr.id))).fingerprint).toBe(rebased);
     } finally {
       clock.advance(-24 * 60 * 60 * 1000);
     }
@@ -769,8 +769,8 @@ describe('seventh review: a person approves exactly what is published', () => {
     try {
       const { cr, tester } = await drafted('SecretPilotEight', [{ op: 'addClass', localName: 'EighthRevised', label: 'eighth revised', definition: 'x' }]);
       // Its title names the use case it came from: the model is sent it as it is.
-      put('changeRequests', { ...getCR(cr.id), title: 'For Use case SecretPilotEight' }, cr.ontologyId);
-      await revise(getCR(cr.id), tester, 'Tidy it');
+      await put('changeRequests', { ...await getCR(cr.id), title: 'For Use case SecretPilotEight' }, cr.ontologyId);
+      await revise(await getCR(cr.id), tester, 'Tidy it');
       expect(seen).toHaveLength(1);
       expect(seen[0]).toContain('For Use case SecretPilotEight');
     } finally {
@@ -780,11 +780,11 @@ describe('seventh review: a person approves exactly what is published', () => {
 
   it('highlights what looks private for the editor, without deciding anything', async () => {
     const mac = await createUser({ name: 'MacDonald Seven', provider: 'github', subject: 'seventh-mac' });
-    const project = findProject('volunteering')!;
-    const uc = createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilotSeven' } });
+    const project = (await findProject('volunteering'))!;
+    const uc = await createUseCase(project, mac, { source: 'chat', status: 'ready', sections: { name: 'SecretPilotSeven' } });
     const cr = await synthesise(project, mac, [uc.id]);
-    put('changeRequests', { ...getCR(cr.id), title: 'For SecretPilotSeven', ops: [{ op: 'addClass', localName: 'SECRETPILOTSEVENRECORD', label: 'record', definition: 'Asked for by MacDonald Seven.' }] }, project.id);
-    const preview = await publicationPreview(getCR(cr.id));
+    await put('changeRequests', { ...await getCR(cr.id), title: 'For SecretPilotSeven', ops: [{ op: 'addClass', localName: 'SECRETPILOTSEVENRECORD', label: 'record', definition: 'Asked for by MacDonald Seven.' }] }, project.id);
+    const preview = await publicationPreview(await getCR(cr.id));
     expect(preview.hints).toEqual(expect.arrayContaining([{ where: 'the title', kind: 'use case title' }]));
     expect(preview.statements.filter((st) => st.hint).map((st) => st.hint)).toEqual(expect.arrayContaining(['use case title', 'name']));
     // Only signed-in users see what a request would publish.
@@ -800,17 +800,17 @@ describe('versions published before approval existed', () => {
     return { agent, id: body.user.id as string };
   };
   const legacy = async () => {
-    const project = findProject('volunteering')!;
+    const project = (await findProject('volunteering'))!;
     // As an older version left it: published without approvals, with model-written text naming a person.
     const working = await ontologyStore.working(project);
     const dirty = await OntologyGraph.fromTurtle(`${await working.toTurtle()}\n<${NS}LegacyRecord> a <http://www.w3.org/2002/07/owl#Class> ; <http://www.w3.org/2004/02/skos/core#definition> "Raised by Legacy Hold Person in the LEGACY_HOLD_PILOT." .\n`);
     await ontologyStore.commitWorking(project, dirty, 'Older merge', { name: 'Concord' });
     const tester = await createUser({ name: 'Legacy Hold Person', provider: 'github', subject: 'legacy-hold' });
-    createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'LEGACY_HOLD_PILOT' } });
+    await createUseCase(project, tester, { source: 'chat', status: 'ready', sections: { name: 'LEGACY_HOLD_PILOT' } });
     const { updateProject } = await import('../src/services/ontologies.js');
-    updateProject({ ...project, publishedWithApproval: undefined });
+    await updateProject({ ...project, publishedWithApproval: undefined });
     const { remove } = await import('../src/db.js');
-    remove('kv', `public-hold:${project.id}`);
+    await remove('kv', `public-hold:${project.id}`);
     fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     await refreshReleasePages();
     return project;
@@ -837,13 +837,13 @@ describe('versions published before approval existed', () => {
       updatedAt: new Date().toISOString(),
       statusSince: new Date().toISOString(),
     } as unknown as ChangeRequest;
-    put('changeRequests', cr, project.id);
+    await put('changeRequests', cr, project.id);
     return cr;
   };
 
   it('holds every version an ontology had, page and downloads alike, until a steward approves exactly what it publishes', async () => {
     const project = await legacy();
-    expect(holdOf(project)?.versions).toEqual(['draft', ...ontologyStore.versions(project)]);
+    expect((await holdOf(project))?.versions).toEqual(['draft', ...await ontologyStore.versions(project)]);
     for (const url of ['/def/volunteering', '/def/volunteering/draft', '/def/volunteering/draft.ttl', '/def/volunteering/1.0.0.jsonld', '/def/volunteering/draft.js', '/def/volunteering/1.0.0.tgz']) {
       const res = await request(app).get(url);
       expect(res.status, url).toBe(503);
@@ -862,7 +862,7 @@ describe('versions published before approval existed', () => {
     expect(draft.hints).toEqual(expect.arrayContaining([expect.objectContaining({ subject: `${NS}LegacyRecord`, kind: 'name' })]));
     expect(draft.turtle).toContain('Legacy Hold Person');
     // Nothing is edited automatically: it's all still there for the steward to judge.
-    expect(ontologyStore.readWorkingText(project)).toContain('Legacy Hold Person');
+    expect(await ontologyStore.readWorkingText(project)).toContain('Legacy Hold Person');
     // A release is approved as it is.
     const release = holds.find((h) => h.version === '1.0.0')!;
     expect((await agent.post(`/api/ontologies/${project.id}/public-holds/1.0.0/approve`).send({ fingerprint: release.fingerprint })).status).toBe(200);
@@ -890,33 +890,33 @@ describe('versions published before approval existed', () => {
 
   it('holds once, survives a restart part way, and leaves ontologies made under the approval rules alone', async () => {
     const project = await legacy();
-    const versions = holdOf(project)!.versions;
+    const versions = (await holdOf(project))!.versions;
     // Startup again: nothing changes, and a hold that was written before the ontology was marked is the same hold.
     await refreshReleasePages();
-    expect(holdOf(project)!.versions).toEqual(versions);
+    expect((await holdOf(project))!.versions).toEqual(versions);
     const { updateProject } = await import('../src/services/ontologies.js');
-    updateProject({ ...findProject('volunteering')!, publishedWithApproval: undefined });
+    await updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
     await refreshReleasePages();
-    expect(holdOf(project)!.versions).toEqual(versions);
+    expect((await holdOf(project))!.versions).toEqual(versions);
     // A new ontology is never held.
     const owner = await createUser({ name: 'New Owner', provider: 'github', subject: 'hold-new' });
     const fresh = await createProject({ title: 'Fresh vocab', description: '', prefix: 'fv' }, owner);
     await refreshReleasePages();
-    expect(holdOf(fresh)).toBeUndefined();
+    expect(await holdOf(fresh)).toBeUndefined();
     expect((await request(app).get(`/def/${fresh.slug}`)).status).toBe(200);
   });
 
   it('holds a release made from a draft that is still held', async () => {
     const project = await legacy();
     const { holdReleaseIfDraftHeld } = await import('../src/public/holds.js');
-    holdReleaseIfDraftHeld(project, '9.0.0');
-    expect(holdOf(project)!.versions).toContain('9.0.0');
+    await holdReleaseIfDraftHeld(project, '9.0.0');
+    expect((await holdOf(project))!.versions).toContain('9.0.0');
   });
 
   it('withholds what is held from every anonymous read, not just /def (eighth review)', async () => {
     const project = await legacy();
     const id = project.id;
-    const sha = ontologyStore.head(project);
+    const sha = await ontologyStore.head(project);
     const anon = [
       request(app).get(`/api/ontologies/${id}/view`),
       request(app).get(`/api/ontologies/${id}/view?ref=1.0.0`),
@@ -949,15 +949,15 @@ describe('versions published before approval existed', () => {
     const { updateProject } = await import('../src/services/ontologies.js');
     const { remove } = await import('../src/db.js');
     // As if writing the hold failed at startup: not marked, and no record.
-    remove('kv', `public-hold:${project.id}`);
-    updateProject({ ...findProject('volunteering')!, publishedWithApproval: undefined });
+    await remove('kv', `public-hold:${project.id}`);
+    await updateProject({ ...(await findProject('volunteering'))!, publishedWithApproval: undefined });
     expect((await request(app).get('/def/volunteering/draft.ttl')).status).toBe(503);
     expect((await request(app).get('/def/volunteering/1.0.0')).status).toBe(503);
     expect((await request(app).get(`/api/ontologies/${project.id}/source`)).status).toBe(503);
     // A steward can still review and approve each version, which writes the record.
     const { agent } = await steward('Eighth fail-closed steward');
     const holds = (await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[];
-    expect(holds.map((h) => h.version)).toEqual(['draft', ...ontologyStore.versions(project)]);
+    expect(holds.map((h) => h.version)).toEqual(['draft', ...await ontologyStore.versions(project)]);
     const rel = holds.find((h) => h.version === '1.0.0')!;
     expect((await agent.post(`/api/ontologies/${project.id}/public-holds/1.0.0/approve`).send({ fingerprint: rel.fingerprint })).status).toBe(200);
     expect((await request(app).get('/def/volunteering/1.0.0')).status).toBe(200);
@@ -967,10 +967,10 @@ describe('versions published before approval existed', () => {
   it('shows the steward everything the fingerprint covers: Turtle, release notes and the use case snapshot (eighth review)', async () => {
     const project = await legacy();
     const { list } = await import('../src/db.js');
-    const release = list<{ id: string; version: string; notes: string }>('releases', project.id).find((r) => r.version === '1.0.0')!;
-    put('releases', { ...release, notes: `${release.notes}\nThanks to NOTES_ONLY_NAME.` }, project.id);
-    const before = getReleaseFile('requirements.json');
-    setReleaseFile('requirements.json', before?.replace(/\}\s*$/, ', "note": "SNAPSHOT_ONLY_NAME" }') || '{ "note": "SNAPSHOT_ONLY_NAME" }');
+    const release = (await list<{ id: string; version: string; notes: string }>('releases', project.id)).find((r) => r.version === '1.0.0')!;
+    await put('releases', { ...release, notes: `${release.notes}\nThanks to NOTES_ONLY_NAME.` }, project.id);
+    const before = await getReleaseFile('requirements.json');
+    await setReleaseFile('requirements.json', before?.replace(/\}\s*$/, ', "note": "SNAPSHOT_ONLY_NAME" }') || '{ "note": "SNAPSHOT_ONLY_NAME" }');
     try {
       const { agent } = await steward('Eighth full-content steward');
       const rel = ((await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[]).find((h) => h.version === '1.0.0')!;
@@ -978,15 +978,15 @@ describe('versions published before approval existed', () => {
       expect(rel.snapshot).toContain('SNAPSHOT_ONLY_NAME');
       expect(rel.turtle).toContain('@prefix');
     } finally {
-      setReleaseFile('requirements.json', before ?? null);
-      put('releases', release, project.id);
+      await setReleaseFile('requirements.json', before ?? null);
+      await put('releases', release, project.id);
     }
   });
 
   it('still lists every other held version when one release can’t be read (eighth review)', async () => {
     const project = await legacy();
-    const good = getReleaseFile('ontology.ttl')!;
-    setReleaseFile('ontology.ttl', '@prefix broken <nope');
+    const good = (await getReleaseFile('ontology.ttl'))!;
+    await setReleaseFile('ontology.ttl', '@prefix broken <nope');
     try {
       const { agent } = await steward('Eighth malformed steward');
       const res = await agent.get(`/api/ontologies/${project.id}/public-holds`);
@@ -998,7 +998,7 @@ describe('versions published before approval existed', () => {
       expect(draft.error).toBeUndefined();
       expect(draft.statements).toBeGreaterThan(0);
     } finally {
-      setReleaseFile('ontology.ttl', good);
+      await setReleaseFile('ontology.ttl', good);
     }
   });
 
@@ -1007,10 +1007,10 @@ describe('versions published before approval existed', () => {
     const { vi } = await import('vitest');
     const { setRoles } = await import('../src/services/ontologies.js');
     const owner = await createUser({ name: 'Eighth race owner', provider: 'github', subject: 'eighth-race' });
-    setRoles(project.id, owner.id, ['owner', 'steward']);
+    await setRoles(project.id, owner.id, ['owner', 'steward']);
     const merged = await drafted8(project);
     void merged;
-    const release = await draftRelease(findProject('volunteering')!, owner);
+    const release = await draftRelease((await findProject('volunteering'))!, owner);
     // Hold the release at its write, after it captured draft A.
     const real = ontologyStore.writeRelease.bind(ontologyStore);
     let letGo!: () => void;
@@ -1020,7 +1020,7 @@ describe('versions published before approval existed', () => {
       return real(...args);
     });
     try {
-      const publishing = publishRelease((await import('../src/db.js')).get('releases', release.id)!, owner).then(
+      const publishing = publishRelease((await (await import('../src/db.js')).get('releases', release.id))!, owner).then(
         () => 'published',
         (e: { status?: number }) => e.status,
       );
@@ -1038,11 +1038,45 @@ describe('versions published before approval existed', () => {
       spy.mockRestore();
     }
     // Draft B stands, and nothing of A was released.
-    expect(ontologyStore.readWorkingText(project)).toContain('A fixed definition.');
-    expect(ontologyStore.versions(project)).not.toContain(release.version);
+    expect(await ontologyStore.readWorkingText(project)).toContain('A fixed definition.');
+    expect(await ontologyStore.versions(project)).not.toContain(release.version);
     const page = await request(app).get('/def/volunteering/draft.ttl');
     expect(page.status).toBe(200);
     expect(page.text).not.toContain('Legacy Hold Person');
+  });
+
+  // The hold added before writing used to be taken back on any failure, even one after the release's files were
+  // written, which the public pages served as that version: unapproved content went public. Now a release's files,
+  // its record and its hold are one step (the transaction that moves the draft): a publish that fails at that step
+  // leaves no files the public can see, no published record and no hold.
+  it('leaves nothing public, published or held when publishing fails as it commits (r9 review)', async () => {
+    const project = await legacy();
+    const { vi } = await import('vitest');
+    const { setRoles } = await import('../src/services/ontologies.js');
+    const owner = await createUser({ name: 'Ninth fail owner', provider: 'github', subject: 'ninth-fail' });
+    await setRoles(project.id, owner.id, ['owner', 'steward']);
+    await drafted8(project);
+    const release = await draftRelease((await findProject('volunteering'))!, owner);
+    const head = await ontologyStore.head(project);
+    // The release commit is built and pinned, then moving the draft to it fails.
+    const advance = ontologyStore.advanceTo.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'advanceTo').mockImplementation(async (p, base, commit, record) =>
+      advance(p, base, commit, async (c) => {
+        await record?.(c);
+        throw new Error('commit failed');
+      }),
+    );
+    try {
+      await expect(publishRelease((await (await import('../src/db.js')).get('releases', release.id))!, owner)).rejects.toThrow('commit failed');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await ontologyStore.head(project)).toBe(head);
+    expect(await ontologyStore.versions(project)).not.toContain(release.version);
+    expect(await ontologyStore.readReleaseFile(project, release.version, 'ontology.ttl')).toBeUndefined();
+    expect((await getRelease(release.id)).status).not.toBe('published');
+    expect((await holdOf(project))!.versions).not.toContain(release.version);
+    expect((await request(app).get(`/def/volunteering/${release.version}`)).status).toBe(404);
   });
 
   it('pushes nothing to GitHub while a version is held (eighth review)', async () => {
@@ -1050,23 +1084,23 @@ describe('versions published before approval existed', () => {
     const { vi } = await import('vitest');
     const { setRoles, updateProject } = await import('../src/services/ontologies.js');
     const owner = await createUser({ name: 'Eighth push owner', provider: 'github', subject: 'eighth-push' });
-    setRoles(project.id, owner.id, ['owner', 'steward']);
-    updateProject({ ...findProject('volunteering')!, github: { repo: 'example/volunteering' } as never });
+    await setRoles(project.id, owner.id, ['owner', 'steward']);
+    await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
     const saved = config.github.publishToken;
     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
-    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(() => undefined);
+    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(async () => undefined);
     try {
       await drafted8(project);
-      const release = await draftRelease(findProject('volunteering')!, owner);
-      const published = await publishRelease((await import('../src/db.js')).get('releases', release.id)!, owner);
+      const release = await draftRelease((await findProject('volunteering'))!, owner);
+      const published = await publishRelease((await (await import('../src/db.js')).get('releases', release.id))!, owner);
       expect(published.status).toBe('published');
-      expect(holdOf(findProject('volunteering')!)!.versions).toContain(published.version);
+      expect((await holdOf((await findProject('volunteering'))!))!.versions).toContain(published.version);
       expect(push).not.toHaveBeenCalled();
       expect(published.githubUrl).toBeUndefined();
     } finally {
       push.mockRestore();
       (config.github as { publishToken?: string }).publishToken = saved;
-      updateProject({ ...findProject('volunteering')!, github: undefined });
+      await updateProject({ ...(await findProject('volunteering'))!, github: undefined });
     }
   });
 
@@ -1074,10 +1108,10 @@ describe('versions published before approval existed', () => {
     // Used to: review and fingerprint the first record for 1.0.0, a rejected attempt, while the page showed the published one.
     const project = await legacy();
     const { list, remove } = await import('../src/db.js');
-    const published = list<Release>('releases', project.id).find((r) => r.version === '1.0.0' && r.status === 'published')!;
-    remove('releases', published.id);
-    put('releases', { ...published, id: 'rel_ninth_rejected', status: 'rejected', notes: 'Harmless notes from an attempt that was rejected.' }, project.id);
-    put('releases', { ...published, notes: `${published.notes}\nThanks to PUBLIC_NOTES_PRIVATE_NAME.` }, project.id);
+    const published = (await list<Release>('releases', project.id)).find((r) => r.version === '1.0.0' && r.status === 'published')!;
+    await remove('releases', published.id);
+    await put('releases', { ...published, id: 'rel_ninth_rejected', status: 'rejected', notes: 'Harmless notes from an attempt that was rejected.' }, project.id);
+    await put('releases', { ...published, notes: `${published.notes}\nThanks to PUBLIC_NOTES_PRIVATE_NAME.` }, project.id);
     try {
       const { agent } = await steward('Ninth notes steward');
       const review = () => agent.get(`/api/ontologies/${project.id}/public-holds`).then((r) => (r.body as PublicHoldReview[]).find((h) => h.version === '1.0.0')!);
@@ -1085,12 +1119,12 @@ describe('versions published before approval existed', () => {
       expect(seen.notes).toContain('PUBLIC_NOTES_PRIVATE_NAME');
       expect(seen.notes).not.toContain('Harmless notes');
       // Editing the published notes after the review changes what approval covers.
-      put('releases', { ...published, notes: 'Notes changed after the review.' }, project.id);
+      await put('releases', { ...published, notes: 'Notes changed after the review.' }, project.id);
       expect((await agent.post(`/api/ontologies/${project.id}/public-holds/1.0.0/approve`).send({ fingerprint: seen.fingerprint })).status).toBe(409);
       expect((await review()).notes).toBe('Notes changed after the review.');
     } finally {
-      remove('releases', 'rel_ninth_rejected');
-      put('releases', published, project.id);
+      await remove('releases', 'rel_ninth_rejected');
+      await put('releases', published, project.id);
     }
   });
 
@@ -1100,32 +1134,32 @@ describe('versions published before approval existed', () => {
     const { vi } = await import('vitest');
     const { setRoles, updateProject } = await import('../src/services/ontologies.js');
     const owner = await createUser({ name: 'Ninth push owner', provider: 'github', subject: 'ninth-push' });
-    setRoles(project.id, owner.id, ['owner', 'steward']);
+    await setRoles(project.id, owner.id, ['owner', 'steward']);
     // Repair the draft, then approve every held version.
     const working = await ontologyStore.working(project);
     await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle((await working.toTurtle()).replace(/"Raised by Legacy Hold Person in the LEGACY_HOLD_PILOT\."/, '"Repaired."')), 'Repair', { name: 'Concord' });
     const { agent } = await steward('Ninth push steward');
     for (const h of (await agent.get(`/api/ontologies/${project.id}/public-holds`)).body as PublicHoldReview[])
       expect((await agent.post(`/api/ontologies/${project.id}/public-holds/${h.version}/approve`).send({ fingerprint: h.fingerprint })).status).toBe(200);
-    updateProject({ ...findProject('volunteering')!, github: { repo: 'example/volunteering' } as never });
+    await updateProject({ ...(await findProject('volunteering'))!, github: { repo: 'example/volunteering' } as never });
     const saved = config.github.publishToken;
     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
-    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(() => undefined);
+    const push = vi.spyOn(ontologyStore, 'push').mockImplementation(async () => undefined);
     try {
       await drafted8(project);
-      const published = await publishRelease((await import('../src/db.js')).get('releases', (await draftRelease(findProject('volunteering')!, owner)).id)!, owner);
+      const published = await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject('volunteering'))!, owner)).id))!, owner);
       expect(published.status).toBe('published');
       expect(push).not.toHaveBeenCalled();
       // An ontology made under the approval rules is pushed as before.
       const fresh = await createProject({ title: 'Ninth pushed vocab', description: '', prefix: 'npv' }, owner);
-      updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
+      await updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
       await drafted8(fresh);
-      await publishRelease((await import('../src/db.js')).get('releases', (await draftRelease(findProject(fresh.slug)!, owner)).id)!, owner);
+      await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject(fresh.slug))!, owner)).id))!, owner);
       expect(push).toHaveBeenCalledTimes(1);
     } finally {
       push.mockRestore();
       (config.github as { publishToken?: string }).publishToken = saved;
-      updateProject({ ...findProject('volunteering')!, github: undefined });
+      await updateProject({ ...(await findProject('volunteering'))!, github: undefined });
     }
   });
 
@@ -1157,8 +1191,8 @@ describe('versions published before approval existed', () => {
     const project = await legacy();
     const { vi } = await import('vitest');
     // B: the draft with the private class taken out, so its counts differ from A's.
-    const a = await OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project));
-    const repaired = await OntologyGraph.fromTurtle(ontologyStore.readWorkingText(project));
+    const a = await OntologyGraph.fromTurtle(await ontologyStore.readWorkingText(project));
+    const repaired = await OntologyGraph.fromTurtle(await ontologyStore.readWorkingText(project));
     repaired.store.removeQuads(repaired.store.getQuads(null, null, null, null).filter((q) => q.subject.value.endsWith('#LegacyRecord')));
     const repairedTurtle = await repaired.toTurtle();
     const countB = repaired.view().classes.length;

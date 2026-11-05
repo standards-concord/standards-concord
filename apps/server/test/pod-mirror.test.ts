@@ -49,8 +49,8 @@ const { createUser } = await import('../src/services/users.js');
 const { recordVersion } = await import('../src/services/alpha.js');
 
 const saved = config.solid.serverUrl;
-beforeAll(() => {
-  openDb();
+beforeAll(async () => {
+  await openDb();
   config.solid.serverUrl = 'https://pods.example';
 });
 afterAll(() => {
@@ -60,7 +60,7 @@ afterAll(() => {
 async function testerWithPod(subject: string) {
   const u = await createUser({ name: `Pod tester ${subject}`, provider: 'demo', subject });
   const podUrl = `https://pods.example/${subject}/`;
-  put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
+  await put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
   return { u, record: `${podUrl}concord/alpha/testing.jsonld`, folder: `${podUrl}concord/alpha/` };
 }
 const asideOf = (folder: string) => [...store.keys()].filter((k) => k.startsWith(`${folder}testing.previous-`));

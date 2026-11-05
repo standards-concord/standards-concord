@@ -8,7 +8,7 @@ import { seedDemo } from '../src/services/simulation.js';
 const app = createApp();
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   await seedDemo();
 });
 

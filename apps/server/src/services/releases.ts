@@ -20,44 +20,44 @@ import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
 import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
-import { getUser, logActivity } from './users.js';
+import { logActivity } from './users.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
 const maxLevel = (levels: ChangeLevel[]) => levels.reduce<ChangeLevel>((m, l) => (LEVEL_ORDER.indexOf(l) > LEVEL_ORDER.indexOf(m) ? l : m), 'patch');
 
-export const getRelease = (id: string) => mustGet<Release>('releases', id);
-export const listReleases = (ontologyId: string) =>
-  list<Release>('releases', ontologyId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export const getRelease = async (id: string) => await mustGet<Release>('releases', id);
+export const listReleases = async (ontologyId: string) =>
+  (await list<Release>('releases', ontologyId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 /**
  * Writes a release if it is still at the revision it was read at, bumping the
  * revision: a compare-and-swap, so a writer holding a copy read before someone
  * else's write (a publication, a vote closing) can never write over it.
  */
-const save = (r: Release) =>
-  transaction(() => {
-    const stored = mustGet<Release>('releases', r.id);
+const save = async (r: Release) =>
+  await transaction(async () => {
+    const stored = await mustGet<Release>('releases', r.id);
     if ((stored.rev ?? 0) !== (r.rev ?? 0)) throw new HttpError(409, `Release ${r.version} was changed by someone else meanwhile. Reload it and try again.`);
     r.rev = (stored.rev ?? 0) + 1;
-    return put('releases', r, r.ontologyId);
+    return await put('releases', r, r.ontologyId);
   });
 /** Saves a new release (no stored copy to compare with yet). */
-const create = (r: Release) =>
-  transaction(() => {
-    if (list<Release>('releases', r.ontologyId).some((x) => x.id === r.id)) throw new HttpError(409, 'Release already exists');
+const create = async (r: Release) =>
+  await transaction(async () => {
+    if ((await list<Release>('releases', r.ontologyId)).some((x) => x.id === r.id)) throw new HttpError(409, 'Release already exists');
     r.rev = 1;
-    return put('releases', r, r.ontologyId);
+    return await put('releases', r, r.ontologyId);
   });
 
 const versionIRI = (p: OntologyProject, version: string) => `${p.ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 
-function pendingChanges(ontologyId: string) {
-  return list<ChangeRequest>('changeRequests', ontologyId)
+async function pendingChanges(ontologyId: string) {
+  return (await list<ChangeRequest>('changeRequests', ontologyId))
     .filter((c) => c.status === 'merged' && !c.releaseId)
     .sort((a, b) => a.number - b.number);
 }
 
-export function releaseGovernance(r: Release) {
-  const project = getProject(r.ontologyId);
+export async function releaseGovernance(r: Release) {
+  const project = await getProject(r.ontologyId);
   return evaluate({
     policy: project.governance,
     level: r.level,
@@ -67,19 +67,19 @@ export function releaseGovernance(r: Release) {
     reviewStartedAt: r.statusSince,
     authorId: r.createdBy,
     reviews: [],
-    votes: list<Vote>('votes', r.id),
-    members: members(r.ontologyId),
+    votes: await list<Vote>('votes', r.id),
+    members: await members(r.ontologyId),
     validationOk: true,
     now: clock.now(),
   });
 }
 
-export function releaseDetail(r: Release): ReleaseDetail {
-  const crs = r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id));
+export async function releaseDetail(r: Release): Promise<ReleaseDetail> {
+  const crs = (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
   return {
     ...r,
-    votes: list<Vote>('votes', r.id),
-    governance: releaseGovernance(r),
+    votes: await list<Vote>('votes', r.id),
+    governance: await releaseGovernance(r),
     changeRequests: crs.map((c) => ({ id: c.id, number: c.number, title: c.title, classification: c.classification })),
   };
 }
@@ -107,10 +107,11 @@ function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: Chang
     .join('\n');
 }
 
-export async function draftRelease(project: OntologyProject, actor: User | undefined, notes?: string): Promise<Release> {
-  if (actor) requireRole(project.id, actor, ['steward', 'owner'], 'draft a release');
-  const existing = listReleases(project.id).find((r) => r.status === 'draft' || r.status === 'voting');
-  const crs = pendingChanges(project.id);
+/** In one transaction, so two drafts started at once can't both find no draft and each create one. */
+export async function draftRelease(project: OntologyProject, actor: User | undefined, notes?: string): Promise<Release> { return transaction(async () => {
+  if (actor) await requireRole(project.id, actor, ['steward', 'owner'], 'draft a release');
+  const existing = (await listReleases(project.id)).find((r) => r.status === 'draft' || r.status === 'voting');
+  const crs = await pendingChanges(project.id);
   if (!crs.length && !existing) throw new HttpError(409, 'There are no merged changes waiting to be released');
   const level = maxLevel(crs.map((c) => c.classification?.level ?? 'minor'));
   const version = bumpVersion(project.currentVersion, level);
@@ -132,7 +133,7 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
     throw new HttpError(409, `Release ${existing.version} is being voted on; publish or reject it first`);
   // A draft always reflects everything merged so far.
   const all = [...new Set([...r.changeRequestIds, ...crs.map((c) => c.id)])];
-  const allCrs = all.map((id) => mustGet<ChangeRequest>('changeRequests', id));
+  const allCrs = (await Promise.all(all.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
   r.changeRequestIds = all;
   r.level = maxLevel(allCrs.map((c) => c.classification?.level ?? 'minor'));
   r.version = bumpVersion(project.currentVersion, r.level);
@@ -140,54 +141,54 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
   // Notes a steward wrote are theirs to publish; drafted ones are rebuilt as the release is published.
   r.notesBy = notes !== undefined && actor ? actor.id : undefined;
-  if (existing) save(r);
-  else create(r);
+  if (existing) await save(r);
+  else await create(r);
   if (!existing) {
-    logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
+    await logActivity({ ontologyId: project.id, actorId: actor?.id, type: 'release.drafted', message: `drafted release ${r.version} (${r.level})`, link: `/o/${project.id}/releases/${r.id}` });
   }
-  return openVoteIfNeeded(r);
-}
+  return await openVoteIfNeeded(r);
+}); }
 
 /** If the policy needs a vote for this level, open it; otherwise the release is ready to publish. */
-function openVoteIfNeeded(r: Release): Release {
-  const g = releaseGovernance(r);
+async function openVoteIfNeeded(r: Release): Promise<Release> { return transaction(async () => {
+  const g = await releaseGovernance(r);
   if (r.status === 'draft' && g.rule.vote) {
     r.status = 'voting';
     r.statusSince = clock.iso();
-    save(r);
-    logActivity({ ontologyId: r.ontologyId, type: 'release.vote', message: `vote opened on release ${r.version} (${g.rule.vote.durationDays} days, quorum ${Math.round(g.rule.vote.quorum * 100)}%)`, link: `/o/${r.ontologyId}/releases/${r.id}` });
+    await save(r);
+    await logActivity({ ontologyId: r.ontologyId, type: 'release.vote', message: `vote opened on release ${r.version} (${g.rule.vote.durationDays} days, quorum ${Math.round(g.rule.vote.quorum * 100)}%)`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   }
   return r;
-}
+}); }
 
 export async function voteOnRelease(stale: Release, actor: User, choice: Vote['choice'], comment?: string) {
-  const roles = rolesFor(stale.ontologyId, actor.id);
+  const roles = await rolesFor(stale.ontologyId, actor.id);
   // The vote only counts on the release as it is stored now, checked in the same transaction it is written in:
   // a vote begun before the release was published (or closed) is refused, not recorded against it.
-  const r = transaction(() => {
-    const now = mustGet<Release>('releases', stale.id);
+  const r = await transaction(async () => {
+    const now = await mustGet<Release>('releases', stale.id);
     if (now.status !== 'voting') throw new HttpError(409, 'There is no open vote on this release');
-    const g = releaseGovernance(now);
+    const g = await releaseGovernance(now);
     if (!roles.some((role) => g.rule.vote?.voterRoles.includes(role))) throw new HttpError(403, `Only ${g.rule.vote?.voterRoles.join(' / ')} can vote on releases`);
-    put('votes', { id: newId('vote'), subjectType: 'release', subjectId: now.id, userId: actor.id, roles, choice, comment, at: clock.iso() } satisfies Vote, now.id);
+    await put('votes', { id: newId('vote'), subjectType: 'release', subjectId: now.id, userId: actor.id, roles, choice, comment, at: clock.iso() } satisfies Vote, now.id);
     return now;
   });
-  logActivity({ ontologyId: r.ontologyId, actorId: actor.id, type: 'release.voted', message: `voted ${choice} on release ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
+  await logActivity({ ontologyId: r.ontologyId, actorId: actor.id, type: 'release.voted', message: `voted ${choice} on release ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return Object.assign(stale, await advanceRelease(r));
 }
 
 export async function advanceRelease(stale: Release): Promise<Release> {
   // Decided and written in one transaction, from the stored release and its votes as they are now.
-  const r = transaction(() => {
-    const now = mustGet<Release>('releases', stale.id);
-    if (now.status !== 'voting' || releaseGovernance(now).outcome !== 'rejected') return now;
+  const r = await transaction(async () => {
+    const now = await mustGet<Release>('releases', stale.id);
+    if (now.status !== 'voting' || (await releaseGovernance(now)).outcome !== 'rejected') return now;
     now.status = 'rejected';
     now.statusSince = clock.iso();
-    save(now);
-    logActivity({ ontologyId: now.ontologyId, type: 'release.rejected', message: `release ${now.version} was not approved`, link: `/o/${now.ontologyId}/releases/${now.id}` });
+    await save(now);
+    await logActivity({ ontologyId: now.ontologyId, type: 'release.rejected', message: `release ${now.version} was not approved`, link: `/o/${now.ontologyId}/releases/${now.id}` });
     return now;
   });
-  if (r.status === 'voting' && releaseGovernance(r).outcome === 'approved' && getProject(r.ontologyId).governance.releases[r.level].autoMerge) return publishRelease(r, undefined);
+  if (r.status === 'voting' && (await releaseGovernance(r)).outcome === 'approved' && (await getProject(r.ontologyId)).governance.releases[r.level].autoMerge) return publishRelease(r, undefined);
   return Object.assign(stale, r);
 }
 
@@ -195,27 +196,27 @@ export async function advanceRelease(stale: Release): Promise<Release> {
 const releaseSnapshot = (r: Release) => JSON.stringify([r.status, r.version, r.level, r.notes, r.versionIRI, r.changeRequestIds]);
 
 /** Can this release be published now? (approved vote, or no vote needed) */
-function publishable(r: Release) {
+async function publishable(r: Release) {
   if (r.status === 'draft') return { ok: true, why: '' };
   if (r.status !== 'voting') return { ok: false, why: `Release is ${r.status}` };
-  const g = releaseGovernance(r);
+  const g = await releaseGovernance(r);
   return g.outcome === 'approved' ? { ok: true, why: '' } : { ok: false, why: g.unmet.join('; ') || g.next };
 }
 
 export async function publishRelease(r: Release, actor: User | undefined): Promise<Release> {
-  if (actor) requireRole(r.ontologyId, actor, ['steward', 'owner'], 'publish releases');
+  if (actor) await requireRole(r.ontologyId, actor, ['steward', 'owner'], 'publish releases');
   // Holding the working-draft lock from reading the draft to committing the
   // release, so no merge can land in between (and be erased by the release).
-  return withWorkingDraftLock(getProject(r.ontologyId), () => publishNow(r, actor));
+  return withWorkingDraftLock(await getProject(r.ontologyId), () => publishNow(r, actor));
 }
 
 async function publishNow(stale: Release, actor: User | undefined): Promise<Release> {
   // A fresh read under the lock: another publisher may have published it while this one waited.
-  const r = mustGet<Release>('releases', stale.id);
-  const can = publishable(r);
+  const r = await mustGet<Release>('releases', stale.id);
+  const can = await publishable(r);
   if (!can.ok) throw new HttpError(409, `Not ready to publish: ${can.why}`);
   const snapshot = releaseSnapshot(r);
-  const project = getProject(r.ontologyId);
+  const project = await getProject(r.ontologyId);
   const { graph: working, head: base } = await ontologyStore.workingAt(project);
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
   const stamped = stampRelease(working, {
@@ -245,7 +246,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   }
   // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
   // never reaches the page); notes a steward wrote are published as they wrote them.
-  if (!r.notesBy) r.notes = draftNotes(project, r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id)), r.level, r.version);
+  if (!r.notesBy) r.notes = draftNotes(project, (await Promise.all(r.changeRequestIds.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id)))), r.level, r.version);
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
   // The use case snapshot always goes in, so the release never shows live data;
   // a rendering failure only costs the stored page (served pages render on request).
@@ -257,7 +258,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     console.warn(`[release] public page: ${(err as Error).message}`);
   }
 
-  assertStillHeld(project);
+  await assertStillHeld(project);
   const publishedAt = clock.iso();
   const publishedNotes = r.notes;
   // The release commit, the release's record, its requests' statuses and the
@@ -266,57 +267,57 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // overwritten) and the release is still unpublished (see
   // ontologyStore.advanceTo). The tag follows from the database. Published
   // commits carry no names.
-  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, base, (commit) => {
+  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, base, async (commit) => {
     // Still exactly the release these files were made from, and still approved (a vote may have changed meanwhile).
-    const latest = mustGet<Release>('releases', r.id);
+    const latest = await mustGet<Release>('releases', r.id);
     if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
     if (releaseSnapshot(latest) !== snapshot) throw new HttpError(409, 'The release changed while it was being published, so it was not published. Try again.');
-    const now = publishable(latest);
+    const now = await publishable(latest);
     if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
     // Made from a working draft still waiting for approval: it waits too. The draft is the one this
     // release was made from (advanceTo checks), so whether it's held now is whether this release is.
-    holdReleaseIfDraftHeld(project, r.version);
+    await holdReleaseIfDraftHeld(project, r.version);
     Object.assign(r, latest, { notes: publishedNotes, commit, status: 'published', publishedAt, statusSince: publishedAt });
-    save(r);
-    for (const id of r.changeRequestIds) markReleased(id, r.id, r.version, publishedAt);
-    const p = getProject(r.ontologyId);
+    await save(r);
+    for (const id of r.changeRequestIds) await markReleased(id, r.id, r.version, publishedAt);
+    const p = await getProject(r.ontologyId);
     p.currentVersion = r.version;
     p.stage = 'released';
-    updateProject(p);
+    await updateProject(p);
   });
-  Object.assign(project, getProject(r.ontologyId));
+  Object.assign(project, await getProject(r.ontologyId));
 
   // Public ontologies are persisted to GitHub on release, when configured.
   // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
   // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
-  if (project.github && config.github.publishToken && (anyHeld(project) || !historyApproved(project))) {
-    console.log(`[release] not pushing ${project.slug} to GitHub: ${anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
+  if (project.github && config.github.publishToken && (await anyHeld(project) || !await historyApproved(project))) {
+    console.log(`[release] not pushing ${project.slug} to GitHub: ${await anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
   } else if (project.github && config.github.publishToken) {
     try {
       const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
-      ontologyStore.push(project, remote);
+      await ontologyStore.push(project, remote);
       const githubUrl = `https://github.com/${project.github.repo}/releases/tag/v${r.version}`;
       // Only the link is added, to the release as stored now.
-      Object.assign(r, transaction(() => save({ ...mustGet<Release>('releases', r.id), githubUrl })));
+      Object.assign(r, await transaction(async () => await save({ ...await mustGet<Release>('releases', r.id), githubUrl })));
     } catch (err) {
       console.warn(`[release] GitHub push failed: ${(err as Error).message.replace(config.github.publishToken, '***')}`);
     }
   }
-  logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
+  await logActivity({ ontologyId: r.ontologyId, actorId: actor?.id, type: 'release.published', message: `published ${project.title} ${r.version}`, link: `/o/${r.ontologyId}/releases/${r.id}` });
   return Object.assign(stale, r);
 }
 
 /** Periodic: close votes; auto-draft releases when the policy asks for it. */
 export async function releaseTick(): Promise<number> {
   let changed = 0;
-  for (const r of list<Release>('releases').filter((x) => x.status === 'voting')) {
+  for (const r of (await list<Release>('releases')).filter((x) => x.status === 'voting')) {
     const before = r.status;
     if ((await advanceRelease(r)).status !== before) changed++;
   }
-  for (const p of list<OntologyProject>('ontologies')) {
+  for (const p of await list<OntologyProject>('ontologies')) {
     if (!p.governance.automation.autoDraftRelease) continue;
-    if (!pendingChanges(p.id).length) continue;
-    if (listReleases(p.id).some((r) => r.status === 'draft' || r.status === 'voting')) continue;
+    if (!(await pendingChanges(p.id)).length) continue;
+    if ((await listReleases(p.id)).some((r) => r.status === 'draft' || r.status === 'voting')) continue;
     await draftRelease(p, undefined);
     changed++;
   }
