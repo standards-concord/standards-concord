@@ -3,7 +3,7 @@ import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concor
 import type { OutputFormat, TermView } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
-import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
+import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, put } from '../db.js';
@@ -11,7 +11,8 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
-import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
+import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
+import { podReader } from '../solidOidc.js';
 import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import {
   checkPublicSummary,
@@ -73,6 +74,8 @@ function sessionInfo(user?: User): SessionInfo {
   return {
     user,
     providers: providers(),
+    feedbackReaders: config.adminWebIds,
+    serverTranscription: config.stt.provider === 'openai' && config.stt.openaiKey ? 'openai' : null,
     llm: { provider: llm.provider, model: llm.model },
     solid: { enabled: !!config.solid.serverUrl, serverUrl: config.solid.serverUrl },
     meetBot: meetBot.meetBotInfo(),
@@ -174,12 +177,14 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
+    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     setSessionCookie(res, user.id, 'demo');
     rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
 
-  r.post('/auth/logout', (req, res) => {
+  r.post('/auth/logout', async (req, res) => {
+    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     clearTesterCookie(req, res);
     destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
@@ -878,7 +883,7 @@ export function apiRouter(): Router {
     res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
   });
   const feedbackAdmin = (req: Request) => {
-    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google or GitHub). Ontology roles
+    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google, GitHub or Solid). Ontology roles
     // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');
@@ -895,6 +900,15 @@ export function apiRouter(): Router {
   r.get('/feedback/summary', async (req, res) => {
     feedbackAdmin(req);
     res.json(await summariseFeedback());
+  });
+  // Testers' feedback read straight from their pods, as the admin's own WebID (only if they signed in with Solid).
+  r.get('/feedback/pods', async (req, res) => {
+    feedbackAdmin(req);
+    const login = adminLoginFor(req);
+    const read = login ? await podReader(login) : undefined;
+    // Their Solid login is kept in memory, for the browser session that signed in: a restart, another browser or an expired token ends it.
+    if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
+    res.json(await readPodFeedback({ webId: login.webId, get: read }));
   });
   r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '25mb' }), async (req, res) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Send audio as the request body');
