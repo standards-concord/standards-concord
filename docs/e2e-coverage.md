@@ -111,6 +111,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #38 | Chat-to-query beside the SPARQL editor | query.spec.ts |
 | #39 | App versions, tester record in the pod, what's changed | tester-versions.spec.ts |
 | #51 | OWL 2 DL reasoning with sparq (no HermiT), in-browser re-check | reasoner.spec.ts |
+| #52 | Concord's logo (climbing two-halves plane) in every look's masthead, after the ODI logo in the ODI look; the plain plane as the tab icon | looks.spec.ts |
 
 ## Known gaps, in priority order
 
