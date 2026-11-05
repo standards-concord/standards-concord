@@ -40,3 +40,6 @@ export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, 
 
 // Helpers
 export { compactIRI, expandIRI, localName, isValidLocalName, XSD, NS } from './ns.js';
+export { toShaclc, deriveShapes } from './shacl.js';
+export { toWrapperClasses, withWrapperImport, npmPackage, WRAPPER_VERSION, WRAPPER_CDN } from './codegen.js';
+export type { GeneratedModule, GeneratedClass, CodegenOptions, PackageOptions } from './codegen.js';

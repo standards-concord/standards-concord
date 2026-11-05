@@ -18,15 +18,17 @@ jobs:
   live:
     if: github.event_name == 'workflow_dispatch' || (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One check of the live site at a time; a newer deployment supersedes an older check.
+    # (Set on the job, so the skipped runs for other deployment statuses don't cancel it.)
+    concurrency:
+      group: live-site
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
+          playwright: 'true'
       - name: Playwright (live)
         run: pnpm test:e2e:live
         env:
@@ -38,4 +40,4 @@ jobs:
           path: |
             playwright-report
             test-results
-          retention-days: 14
+          retention-days: 7
