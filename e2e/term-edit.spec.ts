@@ -17,6 +17,7 @@ async function openTerm(page: Page, localName: string) {
 }
 
 const editor = (page: Page) => page.getByRole('form', { name: /^Edit / });
+const classItem = (page: Page, name: string) => page.getByRole('tree', { name: /Classes/ }).getByRole('treeitem', { name: new RegExp(`^${name}\\b`) }).first();
 
 test.describe('editing a term inline', () => {
   test.beforeEach(async ({ page }) => {
@@ -155,7 +156,7 @@ test.describe('editing a term inline', () => {
       await held;
       await route.continue();
     });
-    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await classItem(page, 'time commitment').click();
     await expect(editor(page)).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
     release();
@@ -229,7 +230,7 @@ test.describe('editing a term inline', () => {
       saved();
     });
     await editor(page).getByRole('button', { name: 'Save as draft' }).click();
-    await page.getByRole('button', { name: 'time commitment', exact: true }).click();
+    await classItem(page, 'time commitment').click();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     const form = editor(page);
     await expect(form.getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();
