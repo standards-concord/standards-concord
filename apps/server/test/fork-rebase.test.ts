@@ -950,7 +950,7 @@ describe('eighth review', () => {
     expect(await has('CommittedFirst')).toBe(true);
     expect(await has('MergedOnTop')).toBe(true);
     // The merge brought the checkout up to the commit it made.
-    expect(fs.readFileSync(checkout, 'utf8').trim()).toBe(ontologyStore.readAt(p(), 'HEAD'));
+    expect(fs.readFileSync(checkout, 'utf8')).toBe(ontologyStore.readAt(p(), 'HEAD'));
   });
 
   it('a merge that stopped right after committing is recognised by the retry, not redone', async () => {
@@ -1028,7 +1028,7 @@ describe('ninth review', () => {
     expect(await has('SurvivesRefresh')).toBe(true);
     expect(ontologyStore.releaseFile(p(), version, 'refresh-note.txt')).toMatch(/^refreshed/);
     // ...and the refresh brought the checkout back up to HEAD.
-    expect(fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8').trim()).toBe(ontologyStore.readAt(p(), 'HEAD'));
+    expect(fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8')).toBe(ontologyStore.readAt(p(), 'HEAD'));
   });
 
   it('a release whose draft moved while it was being written publishes nothing and keeps the merge', async () => {
@@ -1042,7 +1042,7 @@ describe('ninth review', () => {
       await upstream([addClass('LandedDuringRelease', 'landed during release')]);
       return graph.toTurtle();
     };
-    await expect(ontologyStore.writeRelease(project, '99.0.0', slow, {}, 'Should not publish', { name: 'Steward' }, head)).rejects.toThrow(/changed while this release/);
+    await expect(ontologyStore.writeRelease(project, '99.0.0', slow, {}, 'Should not publish', { name: 'Steward' }, { expectedHead: head })).rejects.toThrow(/changed while this release/);
     expect(await has('LandedDuringRelease')).toBe(true);
     expect(ontologyStore.versions(project)).not.toContain('99.0.0');
     expect(git('tag', '--list', 'v99.0.0')).toBe('');
@@ -1067,7 +1067,7 @@ describe('ninth review', () => {
       await upstream([addClass(`Lock${Date.now()}`, 'lock check')]);
       git('read-tree', '-u', '--reset', before);
     };
-    const current = () => fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8').trim() === ontologyStore.readAt(p(), 'HEAD');
+    const current = () => fs.readFileSync(nodePath.join(dir(), 'ontology.ttl'), 'utf8') === ontologyStore.readAt(p(), 'HEAD');
 
     it.each([
       ['a live process on this host', () => `${os.hostname()}:${process.pid}:live`],

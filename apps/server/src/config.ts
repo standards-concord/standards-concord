@@ -64,6 +64,24 @@ export const config = {
     spawnPort: Number(process.env.SOLID_SPAWN_PORT ?? 3000),
   },
 
+  feedbackIssues: {
+    /**
+     * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers
+     * can choose to post a short summary of their feedback as an issue labelled "feedback".
+     */
+    token: process.env.FEEDBACK_GITHUB_TOKEN || undefined,
+    repo: process.env.FEEDBACK_GITHUB_REPO || 'standards-concord/standards-concord',
+    /** Overridable for tests. */
+    apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
+    /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
+    perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
+    /**
+     * Bearer token for the triage routine's endpoints (/api/feedback/triage/...). The routine
+     * comments and labels only through them, so each comment's id is recorded for withdrawal.
+     */
+    triageToken: process.env.FEEDBACK_TRIAGE_TOKEN || undefined,
+  },
+
   meetBot: {
     /** Recall.ai API key enables real Google Meet bots. */
     recallApiKey: process.env.RECALL_API_KEY,

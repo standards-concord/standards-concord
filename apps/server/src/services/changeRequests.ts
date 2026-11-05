@@ -18,8 +18,11 @@ import type {
   ChangeRequestOrigin,
   ChangeRequestStatus,
   OntologyProject,
+  Publication,
+  PublicationStatement,
   Review,
   TimelineEvent,
+  UseCase,
   User,
   Vote,
 } from '@concord/shared';
@@ -35,6 +38,8 @@ import { competencyTests, getProject, members, requireRole, rolesFor, updateProj
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps, toLocalName } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
+import { createHash } from 'node:crypto';
+import { findSecrets, secretsOf } from './redact.js';
 
 const OPEN: ChangeRequestStatus[] = ['triage', 'review', 'voting', 'approved', 'needs-work'];
 
@@ -363,6 +368,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
 export async function updateOps(cr: ChangeRequest, actor: User, patch: { title?: string; description?: string; ops?: ChangeOp[] }) {
   if (cr.authorId !== actor.id) requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'edit this change request');
   if (['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status)) throw new HttpError(409, `Cannot edit a ${cr.status} request`);
+  // An approval of what it publishes covers exactly what was approved: a new title or new edits need a new one.
+  if ((patch.title && patch.title !== cr.title) || patch.ops) cr.privacyCleared = undefined;
   if (patch.title) cr.title = patch.title;
   if (patch.description !== undefined) cr.description = patch.description;
   if (patch.ops) {
@@ -438,6 +445,92 @@ export async function advance(cr: ChangeRequest): Promise<ChangeRequest> {
   return cr;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Publication approval                                                     */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * The ontology is published, but use cases may be private, and nothing can
+ * reliably spot every name or title in text. So a request drafted from use
+ * cases publishes only what a person approved: an editor is shown exactly
+ * what merging it would publish (its title and edit list, which also go into
+ * the commit and the release notes, and every statement it adds) and approves
+ * those exact bytes. Any change afterwards needs a new approval. Name
+ * matching only highlights what looks private; it never decides.
+ */
+export const needsPublicationApproval = (cr: Pick<ChangeRequest, 'origin'>) => cr.origin.type === 'synthesis';
+
+const NT = /^(<[^>]*>|_:\S+) <([^>]*)> (.*) \.$/;
+/** A literal's text, for reading; IRIs and blank nodes stay exactly as they are. */
+function literalText(object: string): string | undefined {
+  const lit = /^"((?:[^"\\]|\\.)*)"/.exec(object);
+  return lit ? (JSON.parse(`"${lit[1]}"`) as string) : undefined;
+}
+/** Stands in for today's date when fingerprinting, so only the dates merging generates (dcterms:created and the like) are left out. */
+const DATE_STAND_IN = '0001-01-01';
+
+/** What merging this request now would publish, worked out exactly as merge() does it. */
+async function publicationOf(cr: ChangeRequest, project = getProject(cr.ontologyId), base = ontologyStore.head(project)) {
+  const working = await ontologyStore.graphAt(project, base);
+  // No author: dcterms:contributor would publish the requester's name on every new term. Where it came
+  // from is recorded as generated provenance (dcterms:provenance), apart from sources people state.
+  const ctx = (date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
+  const after = applyChangeOps(working, cr.ops, ctx(clock.iso().slice(0, 10))).graph;
+  const added = diffOntologies(working, after).addedNTriples;
+  const kgcl = toKGCL(cr.ops, after.prefixes);
+  // The same edits applied with a stand-in date: what's approved doesn't change from one day to the next, but
+  // any date someone wrote is part of it. The edits themselves and the draft they apply to are too.
+  const dated = diffOntologies(working, applyChangeOps(working, cr.ops, ctx(DATE_STAND_IN)).graph).addedNTriples.sort();
+  const fingerprint = createHash('sha256').update(JSON.stringify([cr.title, kgcl, dated, cr.ops, base])).digest('base64url');
+  return { fingerprint, title: cr.title, kgcl, added, after };
+}
+
+/** For the editor approving it: what would be published, every statement in full, with what looks private highlighted. */
+export async function publicationPreview(cr: ChangeRequest): Promise<Publication> {
+  const p = await publicationOf(cr);
+  const secrets = secretsOf(cr);
+  const hint = (text: string) => (secrets ? findSecrets(text, secrets)[0] : undefined);
+  const statements = p.added.map((t) => {
+    const m = NT.exec(t);
+    const st: PublicationStatement = m ? { subject: m[1].replace(/^<|>$/g, ''), predicate: m[2], object: literalText(m[3]) ?? m[3].replace(/^<|>$/g, ''), nt: t } : { subject: '', predicate: '', object: t, nt: t };
+    const h = hint(st.object) ?? hint(st.subject) ?? hint(t);
+    return h ? { ...st, hint: h } : st;
+  });
+  const hints: Publication['hints'] = [];
+  const t = hint(p.title);
+  if (t) hints.push({ where: 'the title', kind: t });
+  for (const line of p.kgcl) {
+    const k = hint(line);
+    if (k) hints.push({ where: `the edit list (${line.slice(0, 60)})`, kind: k });
+  }
+  return { fingerprint: p.fingerprint, title: p.title, kgcl: p.kgcl, statements, hints };
+}
+
+/**
+ * An editor approves exactly what they were shown. If the request changed
+ * since (its edits, its title, or the draft it merges into), the fingerprint
+ * they send no longer matches and nothing is approved.
+ */
+export async function approvePublication(cr: ChangeRequest, actor: User, fingerprint: unknown): Promise<ChangeRequest> {
+  requireRole(cr.ontologyId, actor, ['editor', 'steward', 'owner'], 'approve what a change request publishes');
+  if (!needsPublicationApproval(cr)) throw new HttpError(409, 'This request doesn’t need its publication approved');
+  if (cr.status !== 'draft' && !OPEN.includes(cr.status)) throw new HttpError(409, `This request is ${cr.status}`);
+  if (typeof fingerprint !== 'string' || !fingerprint) throw new HttpError(400, 'Say which version you reviewed (its fingerprint)');
+  const p = await publicationOf(cr);
+  if (p.fingerprint !== fingerprint) throw new HttpError(409, 'This request changed after you reviewed it. Review what it publishes again.');
+  cr.privacyCleared = { by: actor.id, at: clock.iso(), fingerprint, title: p.title, kgcl: p.kgcl };
+  cr.timeline.push(ev('comment', 'approved exactly what this request publishes', actor.id));
+  const held = cr.heldForPublication;
+  cr.heldForPublication = undefined;
+  cr.privacyFindings = undefined;
+  if (held && cr.status === 'needs-work') {
+    setStatus(cr, 'approved', 'approved again once its publication was approved', actor.id);
+    save(cr);
+    return merge(cr, actor);
+  }
+  return save(cr);
+}
+
 /** How long a merge may hold a request before deciding its commit; a merge whose process stopped stops blocking it after this. */
 const MERGE_LEASE_MS = 2 * 60_000;
 
@@ -482,20 +575,31 @@ export async function merge(cr: ChangeRequest, actor: User | undefined): Promise
     }
   };
   const project = getProject(cr.ontologyId);
-  const author = getUser(cr.authorId);
   try {
     const base = ontologyStore.head(project);
-    const working = await ontologyStore.graphAt(project, base);
-    let after: OntologyGraph;
+    let p: Awaited<ReturnType<typeof publicationOf>>;
     try {
-      after = applyChangeOps(working, cr.ops, { author: author?.name, date: clock.iso().slice(0, 10), provenance: `${project.slug}#${cr.number}` }).graph;
+      p = await publicationOf(cr, project, base);
     } catch (err) {
       delete cr.merging;
       setStatus(cr, 'needs-work', `could not be merged on the latest draft: ${(err as Error).message}`);
       return save(cr, { claimMerge: true });
     }
-    const commit = await ontologyStore.prepareWorkingCommit(project, after, `#${cr.number} ${cr.title}\n\n${cr.kgcl?.join('\n') ?? ''}`, { name: author?.name ?? 'Concord' }, base);
-    cr.merging = { ...cr.merging, commit, base };
+    // Drafted from use cases: published only as an editor approved it, byte for byte.
+    if (needsPublicationApproval(cr) && cr.privacyCleared?.fingerprint !== p.fingerprint) {
+      const pv = await publicationPreview(cr);
+      delete cr.merging;
+      cr.privacyFindings = [...pv.hints, ...pv.statements.filter((st) => st.hint).map((st) => ({ where: `${st.predicate} of ${st.subject}`, kind: st.hint! }))];
+      cr.heldForPublication = true;
+      cr.privacyCleared = undefined;
+      setStatus(cr, 'needs-work', 'held back before merging: it was drafted from use cases, so an editor must approve exactly what it publishes first.');
+      return save(cr, { claimMerge: true });
+    }
+    cr.privacyFindings = undefined;
+    cr.kgcl = p.kgcl;
+    // Commits are published with the ontology, so they carry no names: the change request records who asked.
+    const commit = await ontologyStore.prepareWorkingCommit(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base);
+    cr.merging = { ...cr.merging!, commit, base };
     save(cr, { claimMerge: true });
   } catch (err) {
     if (!cr.merging?.commit || !get<ChangeRequest>('changeRequests', cr.id)?.merging?.commit) giveBack();
@@ -595,6 +699,7 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
     },
   });
   const compiled = value.terms.length ? proposalToOps(working, value.terms, `change request #${cr.number}`) : { ops: cr.ops, warnings: ['The offline assistant could not revise these edits; please edit them directly.'] };
+  // Nothing is rewritten: a request drafted from use cases is published only once an editor approves exactly what it publishes.
   cr.timeline.push(ev('ai-analysis', `AI revision requested by ${actor.name}: “${instruction}”. ${value.rationale}`, actor.id));
   if (value.competencyQuestionTests.length) cr.tests = value.competencyQuestionTests;
   cr.warnings = compiled.warnings;
@@ -622,4 +727,17 @@ export async function tick(): Promise<number> {
     }
   }
   return changed;
+}
+
+/**
+ * Commits are authored by "Concord" (they're published), so for signed-in
+ * users the history names whoever opened the change request each commit merged.
+ */
+export function withRequesters<T extends { author: string; subject: string }>(ontologyId: string, log: T[]): T[] {
+  const crs = new Map(list<ChangeRequest>('changeRequests', ontologyId).map((c) => [c.number, c]));
+  return log.map((e) => {
+    const n = /^#(\d+)\b/.exec(e.subject)?.[1];
+    const name = n ? getUser(crs.get(Number(n))?.authorId ?? '')?.name : undefined;
+    return name ? { ...e, author: name } : e;
+  });
 }

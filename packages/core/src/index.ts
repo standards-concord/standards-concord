@@ -10,6 +10,7 @@ export { serialize, FORMAT_INFO } from './serialize.js';
 
 // Changes
 export { applyChangeOps, ChangeOpError, setMetadata } from './changes.js';
+export { generatedProvenanceTitles, rewriteLiterals, scrubGeneratedProvenance } from './remediate.js';
 export type { ChangeContext, ApplyResult } from './changes.js';
 export { canonicalTriples, diffOntologies, termDescription } from './diff.js';
 export { classifyChange, CLASSIFICATION_RULES } from './classify.js';

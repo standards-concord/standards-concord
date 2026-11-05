@@ -14,6 +14,7 @@ import { HttpError } from '../db.js';
  * normal git history that can be pushed to GitHub as-is.
  */
 const FILE = 'ontology.ttl';
+export const ONTOLOGY_FILE = FILE;
 
 function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
@@ -52,15 +53,19 @@ function show(dir: string, spec: string): string | undefined {
 
 /**
  * Write a commit whose tree is `parent`'s with `files` (path → content)
- * replaced, without touching the checkout, the index or any branch. Returns
+ * replaced (null removes one), without touching the checkout, the index or any branch. Returns
  * undefined when nothing would change, unless `allowEmpty`.
  */
-function commitFiles(dir: string, parent: string, files: Record<string, string>, message: string, author: CommitAuthor, allowEmpty = false): string | undefined {
+function commitFiles(dir: string, parent: string, files: Record<string, string | null>, message: string, author: CommitAuthor, allowEmpty = false): string | undefined {
   const index = path.join(dir, '.git', `concord-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.index`);
   try {
     const env = { GIT_INDEX_FILE: index };
     git(dir, ['read-tree', parent], env);
     for (const [file, content] of Object.entries(files)) {
+      if (content === null) {
+        git(dir, ['update-index', '--force-remove', '--', file], env);
+        continue;
+      }
       const blob = git(dir, ['hash-object', '-w', '--stdin'], env, content);
       git(dir, ['update-index', '--add', '--cacheinfo', `100644,${blob},${file}`], env);
     }
@@ -304,11 +309,18 @@ export const ontologyStore = {
     files: Record<string, string>,
     notes: string,
     author: CommitAuthor,
-    expectedHead?: string,
+    opts: {
+      /** The draft the release was made from (default: the current head). If main moved since, nothing is written. */
+      expectedHead?: string;
+      /** Runs after the last await, just before anything is written: throwing writes nothing. */
+      beforeWrite?: () => void;
+    } = {},
   ): Promise<string> {
     const dir = repoDir(project);
-    const parent = expectedHead ?? this.head(project);
+    const parent = opts.expectedHead ?? this.head(project);
     const turtle = await graph.toTurtle();
+    // From here to the branch update nothing awaits, so nothing else in this process runs in between.
+    opts.beforeWrite?.();
     const prev = (show(dir, `${parent}:CHANGELOG.md`) ?? '').replace(/^# Changelog\n+/, '');
     const entries: Record<string, string> = {
       // The released file and the working draft are identical at release time.
@@ -324,25 +336,45 @@ export const ontologyStore = {
     return commit;
   },
 
-  /** Rewrites files beside released versions (releases/<version>/<name>) in one commit on top of the latest draft; tags stay where they were. */
-  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string>>, message: string): string {
+  /**
+   * Commit `files` (path → content, null removes it) on top of the latest
+   * draft without touching the checkout. Built on the head it read, so a merge
+   * landing meanwhile makes it try again on top of that.
+   */
+  commitOnMain(project: Pick<OntologyProject, 'slug'>, files: Record<string, string | null>, message: string): string {
     const dir = repoDir(project);
-    const entries: Record<string, string> = {};
-    for (const [version, named] of Object.entries(files)) for (const [name, content] of Object.entries(named)) entries[`releases/${version}/${name}`] = content;
     for (let attempt = 0; attempt < 5; attempt++) {
       const parent = this.head(project);
-      const commit = commitFiles(dir, parent, entries, message, { name: 'Concord', email: 'steward@concord' });
+      const commit = commitFiles(dir, parent, files, message, { name: 'Concord', email: 'steward@concord' });
       if (!commit) return parent;
-      // Built on the head it read, so a merge landing meanwhile makes this try again on top of it.
       if (this.advanceWorking(project, commit, parent)) return commit;
     }
-    throw new HttpError(409, 'The ontology kept changing while its release pages were being updated. Try again.');
+    throw new HttpError(409, 'The ontology kept changing while this was being saved. Try again.');
+  },
+
+  /** Rewrites files beside released versions (releases/<version>/<name>; null removes one) in one commit; tags stay where they were. */
+  updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): string {
+    const entries: Record<string, string | null> = {};
+    for (const [version, named] of Object.entries(files)) for (const [name, content] of Object.entries(named)) entries[`releases/${version}/${name}`] = content;
+    return this.commitOnMain(project, entries, message);
+  },
+
+  /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): string {
+    return this.commitOnMain(project, { [name]: content }, message);
   },
 
   /** A file stored beside a released version (releases/<version>/<name>), as committed. */
   releaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): string | undefined {
     if (!/^[\w.+-]+$/.test(version) || !/^[\w.+-]+$/.test(name)) return undefined;
     return show(repoDir(project), `HEAD:releases/${version}/${name}`);
+  },
+
+
+
+  /** Drops cached released graphs, after their files were rewritten. */
+  forgetReleases(project: Pick<OntologyProject, 'slug'>) {
+    for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
@@ -392,8 +424,11 @@ export const ontologyStore = {
     return git(repoDir(project), ['rev-parse', `refs/heads/${forkBranch(forkSlug)}`]);
   },
 
+  /** ontology.ttl exactly as committed at `commit`. */
   readAt(project: Pick<OntologyProject, 'slug'>, commit: string): string {
-    return git(repoDir(project), ['show', `${commit}:${FILE}`]);
+    const text = show(repoDir(project), `${commit}:${FILE}`);
+    if (text === undefined) throw new HttpError(404, `No ontology at ${commit}`);
+    return text;
   },
 
   async forkGraph(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<OntologyGraph> {

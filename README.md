@@ -77,6 +77,7 @@ In the hub, forks are under *Changes → Forks*. Over MCP: `create_fork`, `edit_
 | Solid pods for private data | `SOLID_SERVER_URL` (Community Solid Server v7+) |
 | Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. |
 | Publish releases to GitHub | `GITHUB_PUBLISH_TOKEN`, and set the repository on the ontology |
+| Opt-in public feedback summaries as GitHub issues | `FEEDBACK_GITHUB_TOKEN` (Issues: read and write). See [docs/feedback-issues.md](docs/feedback-issues.md) |
 | Voice input on Firefox | `STT_PROVIDER=openai`, `OPENAI_API_KEY` |
 
 ## Layout
