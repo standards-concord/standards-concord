@@ -202,7 +202,7 @@ function ReleaseGroups({ releases, ontologyId }: { releases: Release[]; ontology
     <div className="space-y-6">
       {inProgress.length > 0 && (
         <section aria-label="In progress">
-          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">In progress</h3>
+          <h3 className="mb-2 text-sm font-semibold">In progress</h3>
           <div className="space-y-3">
             {inProgress.map((r) => (
               <ReleaseCard key={r.id} r={r} ontologyId={ontologyId} />
@@ -212,13 +212,13 @@ function ReleaseGroups({ releases, ontologyId }: { releases: Release[]; ontology
       )}
       {latest && (
         <section aria-label="Latest published">
-          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Latest published</h3>
+          <h3 className="mb-2 text-sm font-semibold">Latest published</h3>
           <ReleaseCard r={latest} ontologyId={ontologyId} />
         </section>
       )}
       {rejected.length > 0 && (
         <section aria-label="Rejected attempts">
-          <h3 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Rejected attempts</h3>
+          <h3 className="mb-2 text-sm font-semibold">Rejected attempts</h3>
           <Card className="px-5 py-1">
             <ul className="divide-y divide-line">
               {rejected.slice(0, 3).map((r) => (
