@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
-    "@dicebear/core": "9.4.2",
+    "@dicebear/core": "9.4.3",
     "@dicebear/notionists": "9.4.2",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@playwright/test": "1.63.0",
