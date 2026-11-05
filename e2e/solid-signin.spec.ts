@@ -10,12 +10,22 @@ import { SOLID } from './solid/accounts';
 
 type Account = (typeof SOLID)['admin'];
 
-/** Sign in at Concord's login page with a WebID (or a provider address), then at the Solid server. */
-async function solidSignIn(page: Page, account: Account, opts: { input?: string; next?: string } = {}) {
+/**
+ * Sign in at Concord's login page ("Sign in with Solid", then the suite's picker) with a
+ * WebID, or with the Solid server's address as "Other provider", then at the Solid server.
+ */
+async function solidSignIn(page: Page, account: Account, opts: { provider?: string; next?: string } = {}) {
   await page.goto(`/login${opts.next ? `?next=${encodeURIComponent(opts.next)}` : ''}`);
-  await page.getByRole('button', { name: /Sign in with your WebID/ }).click();
-  await page.getByRole('textbox', { name: 'Sign in with your WebID' }).fill(opts.input ?? account.webId);
-  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByRole('button', { name: 'Sign in with Solid' }).click();
+  const picker = page.getByRole('dialog', { name: 'Sign in with Solid' });
+  if (opts.provider) {
+    await picker.getByRole('button', { name: 'Other provider' }).click();
+    await picker.getByRole('textbox', { name: 'Provider address' }).fill(opts.provider);
+    await picker.getByRole('form', { name: 'Sign in with another provider' }).getByRole('button', { name: 'Continue' }).click();
+  } else {
+    await picker.getByRole('textbox', { name: 'WebID' }).fill(account.webId);
+    await picker.getByRole('form', { name: 'Sign in with your WebID' }).getByRole('button', { name: 'Continue' }).click();
+  }
   // The Solid server's own pages: log in, pick the WebID, authorize Concord.
   await expect(page).toHaveURL(new RegExp(`^${SOLID.css}/`));
   const pick = page.getByText('Choose your WebID to authorize');
@@ -105,7 +115,7 @@ test('the admin signs in with their WebID and reads testers’ feedback from the
 });
 
 test('someone else signs in with Solid (from their provider’s address) and can’t read feedback', async ({ page }) => {
-  await solidSignIn(page, SOLID.visitor, { input: `${SOLID.css}/` });
+  await solidSignIn(page, SOLID.visitor, { provider: `${SOLID.css}/` });
   const session = await (await page.request.get('/api/session')).json();
   expect(session.user.webId).toBe(SOLID.visitor.webId);
   expect(session.user.isPlatformAdmin).toBeFalsy();

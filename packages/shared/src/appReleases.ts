@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.17.0',
+    date: '2026-11-05',
+    title: 'Sign in with Solid',
+    changes: [
+      {
+        id: 'solid-provider-picker',
+        type: 'feat',
+        title: 'Sign in with Solid, choosing your provider',
+        detail:
+          'The login page now says “Sign in with Solid”, with the Solid logo. It opens the same sign-in window as the other Solid Suite apps: pick solidcommunity.net or another provider, enter your WebID, or type your provider’s address.',
+        roles: [],
+        to: '/login',
+        ask: 'Could you find your provider, and was it clear what to choose if you don’t have a pod yet?',
+      },
+    ],
+  },
+  {
     version: '0.16.0',
     date: '2026-11-05',
     title: 'Share a public summary of your feedback',
