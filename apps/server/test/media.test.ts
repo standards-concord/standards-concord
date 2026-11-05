@@ -174,3 +174,48 @@ describe('media from a local folder', () => {
     expect(await media.mediaFile('../secret.md')).toBeUndefined();
   });
 });
+
+describe('feature clips', () => {
+  it('serves the clips, their captions and the playlist from a local folder, and nothing else that looks like them', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'media-'));
+    for (const f of ['concord-clips.json', 'concord-clip-validate.mp4', 'concord-clip-validate.vtt', 'concord-clip-validate.transcript.md', 'concord-clip-vote-two.mp4', 'concord-clip-Bad.mp4', 'concord-clip-x.mov', 'concord-clips.json.bak', 'concord-clip-.mp4', 'notes.txt'])
+      fs.writeFileSync(path.join(dir, f), 'x');
+    process.env.MEDIA_DIR = dir;
+    const media = await fresh();
+    expect((await media.mediaIndex()).files.map((f) => f.name)).toEqual([
+      'concord-clip-validate.mp4',
+      'concord-clip-validate.transcript.md',
+      'concord-clip-validate.vtt',
+      'concord-clip-vote-two.mp4',
+      'concord-clips.json',
+    ]);
+    expect(await media.mediaFile('concord-clips.json')).toBe(fs.realpathSync(path.join(dir, 'concord-clips.json')));
+    for (const name of ['concord-clip-Bad.mp4', 'concord-clip-x.mov', 'concord-clips.json.bak', 'concord-clip-.mp4', 'concord-clip-../notes.txt', 'notes.txt']) expect(await media.mediaFile(name)).toBeUndefined();
+    expect(media.MEDIA_TYPES['.json']).toMatch(/^application\/json/);
+  });
+
+  it('lists a release’s clips with its videos, but a release without clips still counts', async () => {
+    const withClips = release(401, 'v2', 4001, 'https://dl.example/v2');
+    withClips.assets.push(
+      { id: 4100, name: 'concord-clips.json', size: 1, state: 'uploaded', browser_download_url: 'https://dl.example/v2/clips' },
+      { id: 4101, name: 'concord-clip-validate.mp4', size: 1, state: 'uploaded', browser_download_url: 'https://dl.example/v2/c.mp4' },
+      { id: 4102, name: 'concord-clip-vote.mp4', size: 1, state: 'open', browser_download_url: 'https://dl.example/v2/v.mp4' },
+      { id: 4103, name: 'unrelated.zip', size: 1, state: 'uploaded', browser_download_url: 'https://dl.example/v2/u.zip' },
+    );
+    stubGitHub(withClips, { 'https://dl.example/v2/clips': '{"clips":[]}' });
+    let media = await fresh();
+    const names = (await media.mediaIndex()).files.map((f) => f.name);
+    expect(names).toEqual(expect.arrayContaining(['concord-clips.json', 'concord-clip-validate.mp4']));
+    // Still uploading, or not ours: not listed.
+    expect(names).not.toContain('concord-clip-vote.mp4');
+    expect(names).not.toContain('unrelated.zip');
+    expect(fs.readFileSync((await media.mediaFile('concord-clips.json'))!, 'utf8')).toBe('{"clips":[]}');
+
+    // The newest release with both videos is used even when it has no clips.
+    stubGitHub([release(402, 'v3', 4201, 'https://dl.example/v3'), withClips], {});
+    media = await fresh();
+    const index = await media.mediaIndex();
+    expect(index.release?.tag).toBe('v3');
+    expect(index.files.some((f) => f.name.startsWith('concord-clip'))).toBe(false);
+  });
+});

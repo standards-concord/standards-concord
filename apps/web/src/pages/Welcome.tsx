@@ -1,14 +1,15 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ArrowRight, Clapperboard, Compass, FileText, MessageSquareHeart, Scale, ShieldCheck, Users } from 'lucide-react';
-import { api, type MediaIndex } from '../api';
+import { ArrowRight, Clapperboard, Compass, FileText, ListVideo, MessageSquareHeart, Scale, ShieldCheck, SkipForward, Users } from 'lucide-react';
+import { api, type ClipManifest, type MediaIndex } from '../api';
 import { useAsync } from '../lib/hooks';
-import { Card, cx } from '../components/ui';
+import { Button, Card, cx, Select } from '../components/ui';
 
 /**
  * The page to send alpha testers to: what Concord is and what it's for, two short
- * videos (a tour, and how to take part), then into the guided walkthrough. It works
- * without signing in and without the videos (they appear once a release has them).
+ * videos (a tour, and how to take part), a playlist of short clips of one feature each,
+ * then into the guided walkthrough. It works without signing in and without the videos
+ * (they appear once a release has them).
  */
 
 function LinkButton({ to, primary, icon: Icon, children }: { to: string; primary?: boolean; icon?: typeof ArrowRight; children: ReactNode }) {
@@ -70,6 +71,136 @@ function Video({ id, title, blurb, base, index, loading }: { id: string; title: 
         )}
       </div>
     </Card>
+  );
+}
+
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
+/** Where a clip is, for links: /welcome#clip-validate. */
+const clipHash = (id: string) => `#clip-${id}`;
+
+/**
+ * A playlist of short clips, one feature each: pick one from the list, and the next one
+ * plays when it ends. Only clips whose video the release really has are listed.
+ */
+function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean }) {
+  const has = (name: string) => index?.files.find((f) => f.name === name)?.url;
+  const manifestUrl = has('concord-clips.json');
+  const [manifest, setManifest] = useState<ClipManifest | null>();
+  useEffect(() => {
+    if (!manifestUrl) {
+      setManifest(loading ? undefined : null);
+      return;
+    }
+    let live = true;
+    api.mediaClips().then(
+      (m) => live && setManifest(m),
+      () => live && setManifest(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [manifestUrl, loading]);
+  const clips = useMemo(
+    () => (manifest?.clips ?? []).filter((c) => /^concord-clip-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(c.file) && typeof c.title === 'string' && index?.files.some((f) => f.name === `${c.file}.mp4`)),
+    [manifest, index],
+  );
+  const [autoplay, setAutoplay] = useState(false);
+  // Clip ids are plain lowercase words, so anything else in the hash is ignored.
+  const fromHash = () => /^#clip-([a-z0-9-]+)$/.exec(location.hash)?.[1] ?? '';
+  const [picked, setPicked] = useState(fromHash);
+  const linked = useRef(picked);
+  // Following a link to another clip on this page changes only the hash.
+  useEffect(() => {
+    const on = () => {
+      const id = fromHash();
+      if (!id) return;
+      setPicked(id);
+      setAutoplay(false);
+      linked.current = id;
+    };
+    addEventListener('hashchange', on);
+    return () => removeEventListener('hashchange', on);
+  }, []);
+  const section = useRef<HTMLElement>(null);
+  const current = clips.find((c) => c.id === picked) ?? clips[0];
+  const next = current && clips[clips.indexOf(current) + 1];
+  // A link to one clip (/welcome#clip-vote) scrolls to the playlist once it has loaded.
+  useEffect(() => {
+    if (linked.current && current?.id === linked.current) {
+      section.current?.scrollIntoView({ block: 'start' });
+      linked.current = '';
+    }
+  }, [current]);
+  const choose = (id: string, play: boolean) => {
+    setPicked(id);
+    setAutoplay(play);
+    history.replaceState(null, '', clipHash(id));
+  };
+
+  return (
+    <section ref={section} id="clips" aria-labelledby="clips-title" className="mt-14 scroll-mt-20">
+      <h2 id="clips-title" className="text-xl font-semibold tracking-tight">
+        More features, one at a time
+      </h2>
+      <p className="mt-2 max-w-2xl text-muted">Short clips of things the videos above don’t show. Pick one, or let them play in turn.</p>
+      {current ? (
+        <Card as="article" className="mt-6 overflow-hidden md:grid md:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="aspect-video bg-black">
+            <video
+              key={current.file}
+              className="size-full bg-black"
+              controls
+              autoPlay={autoplay}
+              preload="metadata"
+              playsInline
+              aria-labelledby="clip-title"
+              onEnded={() => next && choose(next.id, true)}
+              data-testid="clip-video"
+            >
+              <source src={has(`${current.file}.mp4`)} type="video/mp4" />
+              {has(`${current.file}.vtt`) && <track kind="captions" srcLang="en" label="English" src={has(`${current.file}.vtt`)} default />}
+            </video>
+          </div>
+          <div className="flex flex-col gap-3 p-5">
+            <label className="text-sm font-medium" htmlFor="clip-picker">
+              <ListVideo className="mr-1.5 inline size-4 align-[-3px] text-accent" aria-hidden />
+              Choose a feature
+            </label>
+            <Select id="clip-picker" value={current.id} onChange={(e) => choose(e.target.value, false)}>
+              {clips.map((c, i) => (
+                <option key={c.id} value={c.id}>
+                  {i + 1}. {c.title}
+                  {c.duration ? ` (${clock(c.duration)})` : ''}
+                </option>
+              ))}
+            </Select>
+            <h3 id="clip-title" className="mt-1 font-semibold">
+              {current.title}
+            </h3>
+            {current.summary && <p className="text-sm text-muted">{current.summary}</p>}
+            <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+              {has(`${current.file}.transcript.md`) && (
+                <a href={has(`${current.file}.transcript.md`)} className="inline-flex items-center gap-1.5 text-accent hover:underline">
+                  <FileText className="size-3.5" aria-hidden /> Read the transcript
+                </a>
+              )}
+              {next && (
+                <Button size="sm" variant="ghost" icon={SkipForward} onClick={() => choose(next.id, true)}>
+                  Next: {next.title}
+                </Button>
+              )}
+            </div>
+          </div>
+        </Card>
+      ) : (
+        <Card className="mt-6">
+          <div className="flex flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted" data-testid="clips-pending">
+            <Clapperboard className="size-6 text-subtle" aria-hidden />
+            {loading || manifest === undefined ? 'Checking for the clips…' : 'Short clips of single features are being recorded for the next release.'}
+          </div>
+        </Card>
+      )}
+    </section>
   );
 }
 
@@ -170,6 +301,8 @@ export function WelcomePage() {
           />
         </div>
       </section>
+
+      <FeatureClips index={media.data} loading={media.loading} />
 
       <section aria-labelledby="how-title" className="mt-14">
         <h2 id="how-title" className="text-xl font-semibold tracking-tight">

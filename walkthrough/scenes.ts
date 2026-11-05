@@ -38,6 +38,8 @@ export interface Ctx {
   dataDir?: string;
   /** Things the video must say on screen about how it was made. */
   notices: { classesStandIn: boolean; publishing?: boolean };
+  /** The scene being recorded (clips show its title on their opening card). */
+  scene?: { id: string; title: string };
   state: {
     token?: string;
     fork?: { id?: string; slug?: string; iri?: string; appUrl?: string; js?: string };

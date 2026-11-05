@@ -3,8 +3,13 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { lineDiff } from '../lib/terminal.ts';
 import { vtt } from '../lib/mux.ts';
-import { cuesFor, extractMarks, fillMinutes, forSpeech, parseNarration, phrases, selectScenes, sentences, speechMap, wordTime } from '../lib/narration.ts';
-import { actions } from '../scenes.ts';
+import { clipSummary, cuesFor, extractMarks, fillMinutes, forSpeech, parseNarration, phrases, plain, selectScenes, sentences, speechMap, wordTime } from '../lib/narration.ts';
+import { actions as tourActions } from '../scenes.ts';
+import { featureActions } from '../features.ts';
+import { clipActions } from '../clips.ts';
+
+// Every action a script can use, as record.ts assembles them.
+const actions = { ...tourActions, ...featureActions, ...clipActions };
 
 describe('narration parser', () => {
   const doc = `---
@@ -74,10 +79,10 @@ Second paragraph, cleared once spoken.
   });
 });
 
-describe.each(['narration.md', 'feedback.md'])('the real script %s', (file) => {
+describe.each(['narration.md', 'feedback.md', 'features.md', 'clips.md'])('the real script %s', (file) => {
   const n = parseNarration(readFileSync(path.join(import.meta.dirname, '..', file), 'utf8'));
 
-  it('only uses actions that scenes.ts defines', () => {
+  it('only uses actions that scenes.ts, features.ts or clips.ts define', () => {
     const used = n.scenes.flatMap((s) => s.steps.flatMap((st) => [...st.actions, ...st.after, ...st.marks.map((m) => m.action)].map((a) => a.name)));
     expect(used.filter((a) => !actions[a])).toEqual([]);
   });
@@ -225,5 +230,36 @@ describe('captions', () => {
       { start: 0, end: 5, text: 'Hello there.' },
       { start: 5, end: 6, text: 'Bye now.' },
     ]);
+  });
+});
+
+describe('the feature clips (clips.md)', () => {
+  const n = parseNarration(readFileSync(path.join(import.meta.dirname, '..', 'clips.md'), 'utf8'));
+
+  // Each scene is its own file, recorded from a blank page: it must open its own page.
+  it('opens every clip with its title card', () => {
+    for (const s of n.scenes) {
+      const first = s.steps.find((st) => st.text);
+      expect(first?.actions.map((a) => a.name), s.id).toContain('c-card');
+    }
+  });
+
+  it('names every clip so it can be a file name and a link', () => {
+    for (const s of n.scenes) expect(s.id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+  });
+
+  it('gives each clip a one-sentence summary for the playlist, from its first sentence', () => {
+    for (const s of n.scenes) {
+      const summary = clipSummary(s);
+      expect(summary, s.id).toMatch(/^[A-Z].*[.!?]$/);
+      expect(summary.length, s.id).toBeLessThan(120);
+    }
+    expect(clipSummary({ id: 'x', title: 'X', requires: [], unless: [], steps: [{ text: 'One thing. Then another.', actions: [], after: [], marks: [], pause: 0 }] })).toBe('One thing.');
+  });
+
+  // ElevenLabs characters are limited: the clips should stay short.
+  it('keeps the narration short', () => {
+    const chars = n.scenes.flatMap((s) => s.steps.map((st) => plain(st.text).length)).reduce((a, b) => a + b, 0);
+    expect(chars).toBeLessThan(2400);
   });
 });

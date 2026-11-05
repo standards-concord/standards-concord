@@ -53,6 +53,24 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.30.0',
+    date: '2026-11-05',
+    title: 'Feature clips on the welcome page',
+    pr: 81,
+    changes: [
+      {
+        id: 'welcome-feature-clips',
+        type: 'feat',
+        title: 'Short clips of single features on the welcome page',
+        detail:
+          'The welcome page has a playlist of short narrated clips, one feature each: validating data, the use-case interview, meetings, agent reports, voting, and setting the rules. Pick one from the list, or let them play in turn.',
+        roles: [],
+        to: '/welcome#clips',
+        ask: 'Did the clips help you understand features you hadn’t tried yet? Which feature would you most like a clip of next?',
+      },
+    ],
+  },
+  {
     version: '0.29.0',
     date: '2026-11-05',
     title: 'App checks and autopilot',

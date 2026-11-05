@@ -21,7 +21,7 @@ const TERM = { localName: 'Skill', label: 'skill', definition: 'A learned capabi
 const REAL_TERMINAL = 'Real commands, run as shown on the recorded hub’s own git repository';
 const REAL_CURL = 'Real request, run as shown, to the hub this video was recorded on (it serves the same paths as the live hub)';
 /** Data about one food bank shift, with one mistake: the minimum age is written as text. */
-const SAMPLE = `@prefix vol: <https://w3id.org/odi/volunteering#> .
+export const SAMPLE = `@prefix vol: <https://w3id.org/odi/volunteering#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix ex: <https://example.org/data/> .
@@ -46,7 +46,7 @@ const o = (c: Ctx, p = '') => `${c.hub}/o/${c.ontology.id}${p}`;
 const story: { crId?: string; crNumber?: number; release?: string; sha?: string } = {};
 
 /** Signs the browser in as one of the demo personas (a simulated working-group member). */
-async function signInAs(c: Ctx, name: string) {
+export async function signInAs(c: Ctx, name: string) {
   const personas = ((await apiJson(c, '/api/personas')) ?? []) as { id: string; name: string }[];
   const p = personas.find((x) => x.name === name || x.name.startsWith(`${name} `));
   if (!p) return c.d.warn(`No demo persona called ${name}`);
