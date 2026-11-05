@@ -142,7 +142,7 @@ export async function mediaFile(name: string): Promise<string | undefined> {
     job = (async () => {
       // A link (or file) where the asset's folder belongs is removed, never written through.
       const st = fs.lstatSync(folder, { throwIfNoEntry: false });
-      if (st && !st.isDirectory()) fs.rmSync(folder, { force: true });
+      if (st && !st.isDirectory()) fs.unlinkSync(folder);
       fs.mkdirSync(folder, { recursive: true });
       const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
       if (!res.ok || !res.body) throw new Error(`Downloading ${name}: HTTP ${res.status}`);

@@ -62,6 +62,12 @@ describe('the run budget', () => {
     ]);
   });
 
+  it('puts each video’s voice under the run’s budget', () => {
+    const voice = applyRunBudget(new Voice({ provider: 'elevenlabs' }, mkdtempSync(path.join(os.tmpdir(), 'voice-'))), {}, 1000);
+    expect(voice.budget).toBe(1000);
+    expect(() => voice.checkBudget([{ text: 'x'.repeat(1500) }])).toThrow(/budget of 1,000/);
+  });
+
   it('does not plan for free voices or an unlimited budget', async () => {
     const planned: string[] = [];
     const recorded: string[] = [];
