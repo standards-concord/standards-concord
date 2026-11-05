@@ -476,7 +476,7 @@ async function uniqueForkSlug(p: OntologyProject, base: string) {
   const taken = new Set((await listForks(p.id)).map((f) => f.slug));
   let s = base;
   // A branch left by a fork whose record was never saved (its server stopped in between) also takes the name.
-  for (let i = 2; taken.has(s) || ontologyStore.hasForkBranch(p, s); i++) s = `${base}-${i}`;
+  for (let i = 2; taken.has(s) || (await ontologyStore.hasForkBranch(p, s)); i++) s = `${base}-${i}`;
   return s;
 }
 

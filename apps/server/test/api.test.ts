@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { config as storeConfig } from '../src/config.js';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -1578,8 +1579,12 @@ describe('inline term edits', () => {
   });
 
   /* Git is a projection of the database: kill points between the two, and repair through ordinary reads. */
+  // With ONTOLOGY_STORE=db there is no repository to fall out of line: the tests of the git-backed store's own
+  // machinery (pins, syncs, the claim on the repositories) run only on it, and the others skip their git checks.
+  const onGit = storeConfig.ontologyStore === 'git';
+  const gitOnly = it.runIf(onGit);
   const repo = async () => {
-    const { ontologyStore } = await import('../src/services/ontologyStore.js');
+    const { gitStore: ontologyStore, ontologyStore: store } = await import('../src/services/ontologyStore.js');
     const { getProject } = await import('../src/services/ontologies.js');
     const { execFileSync } = await import('node:child_process');
     const path = await import('node:path');
@@ -1592,7 +1597,8 @@ describe('inline term edits', () => {
     const identity = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@localhost', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@localhost' };
     const rawGit = (...args: string[]) => execFileSync('git', args, { cwd: raw, encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
     const rawFile = (name: string) => fs.readFileSync(path.join(raw, name), 'utf8');
-    return { ontologyStore, project, rawGit, rawFile, raw };
+    // `ontologyStore` is the git-backed store (for the tests of its machinery); `store` is the one in use.
+    return { ontologyStore, store, project, rawGit, rawFile, raw };
   };
   const approvedEdit = async (who: string, iri: string, set: object) => {
     const crsMod = await import('../src/services/changeRequests.js');
@@ -1717,29 +1723,33 @@ describe('inline term edits', () => {
 
   it('keeps a committed merge if the process dies before git is updated, and repairs git on the next read', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
-    const { ontologyStore, project, rawGit, rawFile } = await repo();
+    const { store, project, rawGit, rawFile } = await repo();
     const id = await approvedEdit('Contributor Crash', `${VOL}Cause`, { comment: 'Survives a crash.' });
-    const before = await ontologyStore.head(project);
+    const before = await store.head(project);
     await killedAfterCommit('merge', id, (await userOf(await login('steward', 'Steward Crash'))).id);
     // The merge and its bookkeeping landed together in the database...
-    const merged = await ontologyStore.head(project);
+    const merged = await store.head(project);
     expect(merged).not.toBe(before);
     expect(await crsMod.getCR(id)).toMatchObject({ status: 'merged', mergedCommit: merged });
-    // ...while git was never touched.
-    expect(rawGit('rev-parse', 'HEAD')).toBe(before);
-    // The commit only the database names survives garbage collection.
-    rawGit('reflog', 'expire', '--expire=now', '--all');
-    rawGit('gc', '-q', '--prune=now');
-    expect(rawGit('cat-file', '-t', merged)).toBe('commit');
-    // An ordinary read puts git right: branch, index and files.
+    if (onGit) {
+      // ...while git was never touched.
+      expect(rawGit('rev-parse', 'HEAD')).toBe(before);
+      // The commit only the database names survives garbage collection.
+      rawGit('reflog', 'expire', '--expire=now', '--all');
+      rawGit('gc', '-q', '--prune=now');
+      expect(rawGit('cat-file', '-t', merged)).toBe('commit');
+    }
+    // An ordinary read shows it (and, on git, puts git right: branch, index and files).
     expect((await (await login('member', 'Reader Crash')).get(termPath(`${VOL}Cause`))).body.comment).toBe('Survives a crash.');
-    expect(rawGit('rev-parse', 'HEAD')).toBe(merged);
-    expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
-    expect(rawFile('ontology.ttl')).toContain('Survives a crash.');
-    onlyDraftPins(rawGit, merged);
+    if (onGit) {
+      expect(rawGit('rev-parse', 'HEAD')).toBe(merged);
+      expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
+      expect(rawFile('ontology.ttl')).toContain('Survives a crash.');
+      onlyDraftPins(rawGit, merged);
+    }
   });
 
-  it('repairs checked-out files that failed to update, and files an older sync put back', async () => {
+  gitOnly('repairs checked-out files that failed to update, and files an older sync put back', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { ontologyStore, project, rawGit, rawFile, raw } = await repo();
     const fs = await import('node:fs');
@@ -1771,7 +1781,7 @@ describe('inline term edits', () => {
     expect(rawGit('rev-parse', 'HEAD')).toBe(head);
   });
 
-  it('restores release tags from the published releases, including ones from before', async () => {
+  gitOnly('restores release tags from the published releases, including ones from before', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { list } = await import('../src/db.js');
     const published = (await list<{ version: string; status: string; commit?: string }>('releases', demoId)).filter((r) => r.status === 'published' && r.commit);
@@ -1781,7 +1791,7 @@ describe('inline term edits', () => {
     for (const r of published) expect(rawGit('rev-parse', `v${r.version}^{commit}`)).toBe(r.commit);
   });
 
-  it('drops the pin of an advance that was refused', async () => {
+  gitOnly('drops the pin of an advance that was refused', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const graph = await ontologyStore.working(project);
     const stale = rawGit('rev-parse', `${await ontologyStore.head(project)}~1`);
@@ -1792,7 +1802,7 @@ describe('inline term edits', () => {
   it('records a release atomically, survives dying before its tag, and refuses a second publisher', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const releases = await import('../src/services/releases.js');
-    const { ontologyStore, project, rawGit } = await repo();
+    const { store: ontologyStore, project, rawGit } = await repo();
     const { put, list } = await import('../src/db.js');
     const { getProject } = await import('../src/services/ontologies.js');
     const steward = await login('steward', 'Steward Atomic');
@@ -1813,9 +1823,9 @@ describe('inline term edits', () => {
     expect((await getProject(demoId)).currentVersion).toBe(draft.version);
     for (const crId of draft.changeRequestIds) expect((await crsMod.getCR(crId)).status).toBe('released');
     // The tag follows from the database on the next ordinary read.
-    expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
+    if (onGit) expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/${tag}`)).toThrow();
     expect((await steward.get(`/api/ontologies/${demoId}/source?format=turtle&ref=${draft.version}`)).status).toBe(200);
-    expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
+    if (onGit) expect(rawGit('rev-parse', `${tag}^{commit}`)).toBe(stored.commit);
     // Publishing again (from a copy read before) is refused rather than rewriting the version.
     const released = await ontologyStore.readReleaseFile(project, draft.version, 'ontology.ttl');
     await expect(releases.publishRelease({ ...draft } as never, stewardUser)).rejects.toMatchObject({ status: 409 });
@@ -1825,7 +1835,7 @@ describe('inline term edits', () => {
   it('does not publish a release that was rejected or redrafted while it was being published', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const releases = await import('../src/services/releases.js');
-    const { ontologyStore, project, rawGit } = await repo();
+    const { store: ontologyStore, project, rawGit } = await repo();
     const { put, list } = await import('../src/db.js');
     const steward = await login('steward', 'Steward Rejected');
     const stewardUser = await userOf(steward);
@@ -1851,7 +1861,7 @@ describe('inline term edits', () => {
       }
       expect(await ontologyStore.head(project), what).toBe(head);
       expect((await list<{ id: string; status: string }>('releases', demoId)).find((r) => r.id === draft.id)!.status, what).not.toBe('published');
-      expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/v${draft.version}`), what).toThrow();
+      if (onGit) expect(() => rawGit('rev-parse', '-q', '--verify', `refs/tags/v${draft.version}`), what).toThrow();
       // Leave nothing pending for the next round.
       await put('releases', { ...(await list<typeof draft>('releases', demoId)).find((r) => r.id === draft.id)!, status: 'rejected' }, demoId);
     }
@@ -1959,7 +1969,7 @@ describe('inline term edits', () => {
     }
   });
 
-  it('never lets a sync that read an older draft drop what holds the newer one', async () => {
+  gitOnly('never lets a sync that read an older draft drop what holds the newer one', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const gc = () => {
       rawGit('reflog', 'expire', '--expire=now', '--all');
@@ -2008,7 +2018,7 @@ describe('inline term edits', () => {
     expect(rawGit('rev-parse', 'HEAD')).toBe(newer);
   });
 
-  it('stops a sync that was overtaken from undoing its successor, and repairs files it put back anyway', async () => {
+  gitOnly('stops a sync that was overtaken from undoing its successor, and repairs files it put back anyway', async () => {
     const { ontologyStore, project, rawGit, rawFile, raw } = await repo();
     const fs = await import('node:fs');
     const path = await import('node:path');
@@ -2046,7 +2056,7 @@ describe('inline term edits', () => {
     expect((await get('kv', lease))).toBeUndefined();
   });
 
-  it('keeps a slow writer’s pin, and reclaims a stalled one’s only by refusing its commit', async () => {
+  gitOnly('keeps a slow writer’s pin, and reclaims a stalled one’s only by refusing its commit', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
     // Slow: paused right after pinning; meanwhile another process syncs and collects garbage, within the grace period.
@@ -2089,7 +2099,7 @@ describe('inline term edits', () => {
     }
   });
 
-  it('reclaims the pins of writers that died through ordinary reads, and makes no pins for a draft that did not change', async () => {
+  gitOnly('reclaims the pins of writers that died through ordinary reads, and makes no pins for a draft that did not change', async () => {
     const crsMod = await import('../src/services/changeRequests.js');
     const { ontologyStore, project, rawGit } = await repo();
     const { PIN_GRACE_MS } = await import('../src/services/ontologyStore.js');
@@ -2141,7 +2151,7 @@ describe('inline term edits', () => {
     onlyDraftPins(rawGit, await ontologyStore.head(project));
   });
 
-  it('never reclaims pins named by an earlier version, whose writers do not check for reclaims, until the draft holds them', async () => {
+  gitOnly('never reclaims pins named by an earlier version, whose writers do not check for reclaims, until the draft holds them', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const head = await ontologyStore.head(project);
     // Commits only pins hold, named as earlier versions named them (<time>-<sha> and <sha>-<writer>).
@@ -2165,8 +2175,8 @@ describe('inline term edits', () => {
     for (const ref of rawGit('for-each-ref', '--format=%(refname)', 'refs/concord/commits/').split('\n')) rawGit('update-ref', '-d', ref);
   });
 
-  it('lets one server at a time change the repositories, and stops one that lost its hold from changing anything', async () => {
-    const { ontologyStore, project, rawGit, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+  gitOnly('lets one server at a time change the repositories, and stops one that lost its hold from changing anything', async () => {
+    const { ontologyStore, project, rawGit, raw, claimGitStore, STORE_VERSION } = { ...(await import('../src/services/ontologyStore.js')), ...(await repo()) };
     const { get, put, remove } = await import('../src/db.js');
     const { OntologyGraph } = await import('@concord/core');
     const fs = await import('node:fs');
@@ -2233,7 +2243,7 @@ describe('inline term edits', () => {
     expect(rawGit('status', '--porcelain', '--untracked-files=no')).toBe('');
   });
 
-  it('never moves the draft ref back when two cleanups race', async () => {
+  gitOnly('never moves the draft ref back when two cleanups race', async () => {
     const { ontologyStore, project, rawGit } = await repo();
     const { OntologyGraph } = await import('@concord/core');
     const text = await ontologyStore.readWorkingText(project);
@@ -2265,8 +2275,8 @@ describe('inline term edits', () => {
     }
   });
 
-  it('refuses a write when another server takes over just before the hold is renewed', async () => {
-    const { ontologyStore, project, raw, claimGitStore, STORE_VERSION } = { ...(await repo()), ...(await import('../src/services/ontologyStore.js')) };
+  gitOnly('refuses a write when another server takes over just before the hold is renewed', async () => {
+    const { ontologyStore, project, raw, claimGitStore, STORE_VERSION } = { ...(await import('../src/services/ontologyStore.js')), ...(await repo()) };
     const { get, put, remove } = await import('../src/db.js');
     const fs = await import('node:fs');
     const path = await import('node:path');
@@ -2296,7 +2306,7 @@ describe('inline term edits', () => {
     }
   });
 
-  it('puts back the repositories a crash left moved aside mid-reset, and never deletes or guesses otherwise', async () => {
+  gitOnly('puts back the repositories a crash left moved aside mid-reset, and never deletes or guesses otherwise', async () => {
     const { ontologyStore, project, raw } = await repo();
     const { list, put, remove } = await import('../src/db.js');
     const fs = await import('node:fs');
@@ -2336,7 +2346,7 @@ describe('inline term edits', () => {
     fs.rmSync(aside('older'), { recursive: true, force: true });
   });
 
-  it('keeps the server’s hold on the repositories through a demo reset', async () => {
+  gitOnly('keeps the server’s hold on the repositories through a demo reset', async () => {
     const { claimGitStore } = await import('../src/services/ontologyStore.js');
     const simulation = await import('../src/services/simulation.js');
     const { get, remove } = await import('../src/db.js');
