@@ -132,6 +132,7 @@ export function InterviewPage() {
             pending={pending}
             onSend={(t) => send(t)}
             userName={auth?.user?.name}
+            userAvatarUrl={auth?.user?.avatarUrl}
             disabled={s.done}
             error={sendError}
             placeholder={s.done ? 'This interview is finished.' : 'Type your answer, or tap the mic and talk…'}

@@ -18,13 +18,13 @@ export function TypingIndicator() {
   );
 }
 
-function Bubble({ m, userName, plainText, children }: { m: ChatMessage; userName?: string; plainText?: boolean; children?: ReactNode }) {
+function Bubble({ m, userName, userAvatarUrl, plainText, children }: { m: ChatMessage; userName?: string; userAvatarUrl?: string; plainText?: boolean; children?: ReactNode }) {
   const mine = m.role === 'user';
   if (m.role === 'system') return <p className="py-1 text-center text-xs text-muted">{m.content}</p>;
   return (
     <div className={cx('flex gap-2.5', mine && 'flex-row-reverse')} data-testid={`chat-message-${m.role}`}>
       {mine ? (
-        <Avatar name={userName ?? 'You'} size={28} />
+        <Avatar name={userName ?? 'You'} src={userAvatarUrl} size={28} />
       ) : (
         <Logo className="size-7 shrink-0" />
       )}
@@ -47,6 +47,8 @@ export interface ChatViewProps {
   disabled?: boolean;
   placeholder?: string;
   userName?: string;
+  /** The signed-in person's picture, shown beside their messages. */
+  userAvatarUrl?: string;
   voice?: boolean;
   bigMic?: boolean;
   error?: unknown;
@@ -58,7 +60,7 @@ export interface ChatViewProps {
   className?: string;
 }
 
-export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, voice = true, bigMic, error, notice, footer, className, plainText }: ChatViewProps) {
+export function ChatView({ messages, pending, onSend, quickReplies, disabled, placeholder = 'Type your answer…', userName, userAvatarUrl, voice = true, bigMic, error, notice, footer, className, plainText }: ChatViewProps) {
   const [text, setText] = useState('');
   const [voiceUsed, setVoiceUsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -97,7 +99,7 @@ export function ChatView({ messages, pending, onSend, quickReplies, disabled, pl
     <div className={cx('flex min-h-0 flex-col', className)}>
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-1 py-4">
         {messages.map((m) => (
-          <Bubble key={m.id} m={m} userName={userName} plainText={plainText}>
+          <Bubble key={m.id} m={m} userName={userName} userAvatarUrl={userAvatarUrl} plainText={plainText}>
             {m === lastAssistant && !pending && quickReplies}
           </Bubble>
         ))}

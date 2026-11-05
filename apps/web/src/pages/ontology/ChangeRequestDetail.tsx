@@ -393,6 +393,7 @@ export function ChangeRequestPage() {
   const cr = state.data;
   const author = cr.author ?? userById(cr.authorId);
   const nameOf = (uid: string) => userById(uid)?.name ?? (uid === cr.authorId ? author?.name : undefined) ?? 'Someone';
+  const avatarOf = (uid: string) => userById(uid)?.avatarUrl ?? (uid === cr.authorId ? author?.avatarUrl : undefined);
 
   return (
     <div>
@@ -591,7 +592,7 @@ export function ChangeRequestPage() {
                       {item.kind === 'event' ? (
                         <span className="mt-1.5 ml-2 size-2 shrink-0 rounded-full bg-line-strong" />
                       ) : (
-                        <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
+                        <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} src={avatarOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
                       )}
                       <div className="min-w-0 flex-1 text-sm">
                         {item.kind === 'review' && (

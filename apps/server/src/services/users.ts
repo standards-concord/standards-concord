@@ -3,6 +3,7 @@ import type { ActivityItem, AgentToken, AuthProvider, User } from '@concord/shar
 import { clock } from '../clock.js';
 import { transaction, get, HttpError, list, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
+import { demoAvatarFor } from './avatars.js';
 import { solid } from './solid.js';
 
 export async function createUser(input: {
@@ -20,13 +21,15 @@ export async function createUser(input: {
   webId?: string;
 }): Promise<User> {
   const id = input.id ?? newId('usr');
+  const providers = [{ provider: input.provider, subject: input.subject }];
   const base: User = {
     id,
     name: input.name,
     email: input.email,
-    avatarUrl: input.avatarUrl,
+    // Demo accounts (simulated people and alpha testers) get a bundled picture.
+    avatarUrl: input.avatarUrl ?? demoAvatarFor({ id, providers }),
     webId: input.webId ?? solid.localWebId(id),
-    providers: [{ provider: input.provider, subject: input.subject }],
+    providers,
     simulated: input.simulated,
     persona: input.persona,
     organisation: input.organisation,
@@ -81,12 +84,14 @@ export async function linkFederatedIdentity(p: FederatedIdentity, linkTo?: User)
       if (taken && existing?.id !== linkTo.id)
         throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
       if (!existing && linked && !linked.simulated) {
+        const demoPicture = demoAvatarFor(linked);
         linked.providers.push({ provider: p.provider, subject: p.subject });
         linked.name = p.name;
         // Signing in with their own WebID makes it the account's WebID.
         if (p.webId) linked.webId = p.webId;
         linked.email ??= p.email;
-        linked.avatarUrl ??= p.avatarUrl;
+        // Their own picture replaces the demo account's bundled one.
+        if (p.avatarUrl && (!linked.avatarUrl || linked.avatarUrl === demoPicture)) linked.avatarUrl = p.avatarUrl;
         // Sessions issued while it was a demo account (in any browser) end here.
         await destroyUserSessions(linked.id);
         return await put('users', linked);
@@ -99,6 +104,25 @@ export async function linkFederatedIdentity(p: FederatedIdentity, linkTo?: User)
     }
     return undefined;
   });
+}
+
+/** Gives demo accounts made before profile pictures existed their picture. Returns how many changed. */
+export async function backfillDemoAvatars(): Promise<number> {
+  let changed = 0;
+  for (const u of await list<User>('users')) {
+    if (u.avatarUrl) continue;
+    if (!demoAvatarFor(u)) continue;
+    // Re-read in the write's own transaction, so a sign-in that changed the account meanwhile isn't undone.
+    const done = await transaction(async () => {
+      const fresh = await get<User>('users', u.id);
+      const avatarUrl = fresh && !fresh.avatarUrl ? demoAvatarFor(fresh) : undefined;
+      if (!fresh || !avatarUrl) return false;
+      await put('users', { ...fresh, avatarUrl });
+      return true;
+    });
+    if (done) changed++;
+  }
+  return changed;
 }
 
 export const getUser = async (id: string) => await get<User>('users', id);
@@ -192,7 +216,14 @@ export async function logActivity(a: Omit<ActivityItem, 'id' | 'at' | 'actorName
 
 export async function listActivity(ontologyId?: string, limit = 50): Promise<ActivityItem[]> {
   const items = ontologyId ? await list<ActivityItem>('activity', ontologyId) : await list<ActivityItem>('activity');
-  return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  // The picture is looked up when read, so older entries and changed pictures show too.
+  const latest = items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
+  const pictures = new Map<string, Promise<string | undefined>>();
+  const pictureOf = (id: string) => {
+    if (!pictures.has(id)) pictures.set(id, getUser(id).then((u) => u?.avatarUrl));
+    return pictures.get(id)!;
+  };
+  return await Promise.all(latest.map(async (a) => ({ ...a, actorAvatarUrl: a.actorId ? await pictureOf(a.actorId) : undefined })));
 }
 
 /** The author of reports sent from the public page by people without an account. */

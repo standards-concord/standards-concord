@@ -15,7 +15,7 @@ export function ActivityList({ items, compact }: { items: ActivityItem[]; compac
       {items.map((a) => {
         const body = (
           <div className={cx('flex gap-3 rounded-lg px-2 py-2', a.link && 'hover:bg-surface-2')}>
-            {a.actorName ? <Avatar name={a.actorName} size={compact ? 22 : 26} simulated={a.simulated} /> : <span className="mt-0.5 rounded-full bg-surface-2 p-1"><Bot className="size-3.5 text-muted" /></span>}
+            {a.actorName ? <Avatar name={a.actorName} src={a.actorAvatarUrl} size={compact ? 22 : 26} simulated={a.simulated} /> : <span className="mt-0.5 rounded-full bg-surface-2 p-1"><Bot className="size-3.5 text-muted" /></span>}
             <div className="min-w-0 flex-1 text-sm">
               <p className="leading-snug">
                 {a.actorName && <span className="font-medium">{a.actorName} </span>}

@@ -53,6 +53,21 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.31.0',
+    date: '2026-11-05',
+    title: 'Profile pictures in the demo',
+    pr: 82,
+    changes: [
+      {
+        id: 'demo-avatars',
+        type: 'feat',
+        title: 'Profile pictures for everyone in the demo',
+        detail: 'The simulated working group and your demo account now have profile pictures instead of initials.',
+        roles: [],
+      },
+    ],
+  },
+  {
     version: '0.30.0',
     date: '2026-11-05',
     title: 'Feature clips on the welcome page',
