@@ -174,3 +174,12 @@ export function listActivity(ontologyId?: string, limit = 50): ActivityItem[] {
   const items = ontologyId ? list<ActivityItem>('activity', ontologyId) : list<ActivityItem>('activity');
   return items.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
 }
+
+/** The author of reports sent from the public page by people without an account. */
+export async function publicReporter(): Promise<User> {
+  const id = 'usr_public';
+  return (
+    getUser(id) ??
+    put('users', { id, name: 'Member of the public', webId: solid.localWebId(id), providers: [], simulated: true, createdAt: clock.iso() } satisfies User)
+  );
+}

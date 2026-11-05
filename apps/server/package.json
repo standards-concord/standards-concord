@@ -17,6 +17,7 @@
     "cookie-parser": "^1.4.7",
     "express": "5",
     "express-rate-limit": "^8.7.1",
+    "ical.js": "2",
     "marked": "^18.1.1",
     "n3": "^2.13.12",
     "oauth4webapi": "3.8.8",

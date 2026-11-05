@@ -10,25 +10,26 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | What a person does there | Status | Specs |
 | --- | --- | --- | --- |
-| `/login` | Try the demo; deep link `?next=` returns to the page; signed-in people are sent on; walkthrough link | ✅ | app, account |
+| `/login` | Try the demo; deep link `?next=` returns to the page; signed-in people are sent on; walkthrough link. Sign in with your WebID (Solid-OIDC): a refused private address explains itself; against a real Community Solid Server, sign in by WebID or by the provider's address, and signing in again finds the same account | ✅ | app, account, webid-signin; solid-signin (`pnpm test:e2e:solid`, CI job `e2e-solid`) |
 | `/alpha` | Guided walkthrough: welcome, pick a role, tasks per role, simulate the others, feedback; floating panel | ✅ | alpha |
-| `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out | ✅ | feedback |
+| `/feedback` | Open and guided pathways, captured answers, voice, submit, start again; works signed out. Opt-in public summary posted as a GitHub issue exactly as previewed, then withdrawn. Who can read your feedback (the admins, their WebIDs, Anthropic when Claude runs the interview, OpenAI when the server transcribes); a signed-in tester's copy lands in their pod, shared read-only with the admin WebIDs and closed to everyone else | ✅ | feedback, feedback-issues (against a GitHub stand-in), webid-signin; solid-signin |
 | `/connect` | Pick an app, install links and commands, copy buttons | ✅ | connect |
 | `/oauth/authorize` | Consent: sign in, allow, decline; refuses script and plain-http redirects, background approval, stale links | ✅ | oauth |
 | `/` (hub) | List ontologies, open one, activity feed links, create an ontology | ✅ | account, governance-flow, public-page |
 | `/settings` | Profile and WebID, pod, sign-in providers, connected agents (disconnect), personal tokens (create, revoke), appearance | ✅ | account, agents, oauth, looks |
-| `/admin/feedback` | Read and summarise tester feedback (platform admins only) | 🟡 | security (refusal for non-admins). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests |
+| `/admin/feedback` | Read and summarise tester feedback (platform admins only); an admin signed in with their WebID reads testers' feedback straight from their pods as that WebID (per browser session; ends on sign-out) | 🟡 | security (refusal for non-admins); solid-signin (the pod reader, with a real Community Solid Server, and a non-admin WebID refused). Reading it needs an admin email sign-in, which demo mode can't do: covered by the API tests, including the list of public summaries waiting for a decision and its actions (pick the issue, check again, post again, confirm a withdrawal) in `apps/server/test/feedbackIssues.test.ts`. The triage routine's endpoints are API-only and covered there too |
 | `/o/:id` overview | Lifecycle bubble, health chip, lint, FAIR and competency questions, members, recent activity | ✅ | ia, disclosure, alignment |
 | `/o/:id/browse` | Tree, open a term, deep link, search, report a problem with a term | ✅ | browse-basics; 🔜 #9 (class diagram, accessible tree), #28 (inline term editing) |
 | `/o/:id/source` | Every serialisation, highlighted; search, folding, copy, download; a release's source | ✅ | formats; 🔜 #18 (SHACL compact syntax, JS classes) |
 | `/o/:id/query` | Visual builder, SPARQL editor, examples, every query form, sample data and SHACL check, pagination, drafts | ✅ | query; 🔜 #38 (chat-to-query replaces the builder) |
+| `/o/:id/query?view=check` | Check data: problems as sentences in the data's own prefixes, underlined in the editor with hover popups, click to jump; live syntax and misspelt-term underlines; Format; any member can check, signed out goes to sign in | ✅ | check-data, query |
 | `/o/:id/connect` | Connect an agent to this ontology | ✅ | connect |
 | `/o/:id/use-cases` | List, describe a use case (starts an interview), draft changes from a selection | ✅ | requirements, ia; 🔜 #15 (sharing modes, anonymised versions) |
 | `/o/:id/use-cases/:id` | Read the document, continue, mark ready, draft changes, archive | ✅ | requirements, ia |
 | `/o/:id/interview/:id` | Chat (typed, Enter/Shift+Enter, spoken), progress, layouts, finish | ✅ | requirements, ia |
 | `/o/:id/meetings` | Upload or paste a transcript, choose a file, invite the bot, run a simulated call | ✅ | meeting-transcripts; 🔜 #11 (invite by email, prompts in Meet chat) |
 | `/o/:id/meetings/:id` | Transcript, live stream, bot prompts, analysis, turn into use cases and a change request | ✅ | meeting-transcripts |
-| `/o/:id/changes` | Filter by scope and status, new change request, report a bug | ✅ | change-requests, ia |
+| `/o/:id/changes` | Filter by scope and status, new change request, report a bug, reports from the public page (editors and up) | ✅ | change-requests, ia, public-page |
 | `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure; 🔜 #17 (app checks, autopilot) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
 | `/o/:id/releases/:id` | Notes, included changes, publish; approval details | ✅ | governance-flow, ia, public-page |
@@ -40,7 +41,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 
 | Route | Status | Specs |
 | --- | --- | --- |
-| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI), #35 (privacy redaction) |
+| Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone | ✅ | public-page, live; 🔜 #32 (POST validation at the IRI) |
+| Publishing only approved content: a change drafted from use cases approved byte for byte (`/o/:id/changes/:cr`), versions published before approvals held until a steward approves them (Governance), held content kept out of every signed-out read and summary | ✅ | privacy-review (screens; held versions stubbed, since this server's API can't make a pre-approval ontology), plus `apps/server/test/public.test.ts` for the server side |
 | `/mcp` with OAuth (discovery, registration, consent, tools) | ✅ | oauth |
 | `/mcp` with a personal token: every tool, refusal without a token, revoked token | ✅ | agents |
 | WebID profile (`/people/:id`) | ✅ | account |
@@ -53,7 +55,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Role | Allowed (tested) | Refused or hidden (tested) | Specs |
 | --- | --- | --- | --- |
 | Signed out | Login, walkthrough, feedback, connect, public pages | Every `/o/...` page and settings redirect to login; MCP without a token is 401 | app, account, agents, public-page |
-| Contributor (Aisha) | Describe use cases, comment, approve (doesn't count) | Submit or withdraw someone else's request; edit the policy; manage members | change-requests, requirements, governance-flow |
+| Contributor (Aisha) | Describe use cases, comment, approve (doesn't count), check data | Submit or withdraw someone else's request; edit the policy; manage members | change-requests, requirements, governance-flow |
 | Editor (Tom) | Draft, submit, revise, withdraw own requests | Own approval doesn't count; drafting a release is 403 | change-requests, governance-flow |
 | Reviewer (Mei, Gareth) | Approve, report bugs, report problems with terms | | change-requests, browse-basics |
 | Steward / owner (Priya, or a new creator) | Create ontology, edit and save the policy, add and remove members, change roles, merge, draft and publish releases, transfer ownership | | governance-flow, change-requests |
@@ -73,6 +75,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Auto-merge off → approved → manual merge | ✅ | governance-flow |
 | Withdraw | ✅ | change-requests |
 | Bug report (from Changes and from a term) | ✅ | change-requests, browse-basics |
+| Report a problem from the public page (anonymously, or by signing in as a member), held for editors to open as a bug report or dismiss | ✅ | public-page; server side (tokens, limits, claims, versions) in `apps/server/test/report.test.ts` |
 | Changes from agents (`propose_change`, `report_gap`) | ✅ | agents |
 | Changes from use cases and meetings | ✅ | requirements, meeting-transcripts |
 | Draft release → publish → current version, change requests released | ✅ | governance-flow |
@@ -91,7 +94,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | PR | Adds | Spec |
 | --- | --- | --- |
 | #9 | Class diagram, better graph, accessible tree, richer class pages | browse.spec.ts |
-| #11 | Meet bot by invite email, prompts in Meet chat | meetings.spec.ts |
+| #11 | Meet bot by invite email, prompts in Meet chat; calls still getting rid of a bot, and letting go of a booking Recall.ai never confirmed (stood-in server answers: no Recall.ai key in e2e; the bot state machine is in apps/server/test/meetBot.test.ts) | meetings.spec.ts |
 | #15 | Use case sharing modes, anonymised versions, per-release requirements | use-cases.spec.ts |
 | #17 | App checks against proposed changes, autopilot votes | app-checks.spec.ts |
 | #18 | SHACL compact syntax and JavaScript classes at the ontology URI | classes.spec.ts |
@@ -127,4 +130,14 @@ Each fix has a test that fails without it.
 | Section tabs could open the wrong page after a quick click (stale remembered page; the ia.spec flake) | The target is looked up at click time | ia: "each section remembers the page you were last on" |
 | Resubmit did nothing after "request changes" | Next PR: earlier requests for changes become stale on resubmit; reviewers can approve from Needs work | Next PR (change-requests) |
 | Buttons nested in links (Hub, Shell, Feedback, Walkthrough, OAuth consent, Overview) | Routed to the IA thread, after #37 | |
+| Check data problems showed full `<https://…>` IRIs: sparq wraps IRIs in angle brackets, which the prefix lookup never matched, and only the ontology's prefixes were tried | Problems are written with the data's own prefixes first | check-data: "problems use the prefixes the data declares" |
+| Check data: an out-of-range `\U` escape threw while rendering and crashed the page | Invalid escapes are positioned syntax errors | check-data: "an invalid character escape is a syntax error, not a crash" |
+| Check data: after an edit, an old report's underline moved onto the record's name | Out-of-date reports underline nothing and can't be jumped to until checked again | check-data: "problems read as sentences…" |
+| Check data: fixing a value in place left its old underline on the new text until typing paused | An edit drops the underlines it touches at once; the rest move with the text | check-data: "an edit clears the underline it touches at once, and leaves the others" |
+| Check data: problems about anonymous `[ … ]` records said "Not in your data", as if they weren't real | They say "Location unavailable" and why; written `_:labels` and a record's only anonymous value are pointed to | check-data: "a problem with no place in the text says why"; unit: shaclFindings "finds _:labels…", "explains why…" |
+| Check data: "Show all" rendered every problem at once (10,000 rows froze the page) and stayed expanded | Long problem lists are paged, 50 at a time | check-data: "a long list of problems is shown a page at a time" |
+| Check data: node-level results (no path, the record as its own value) lost their underline and jump; a written `_:__ttl_anon_…` label was treated as anonymous; "has more than one" with a single value; an `sh:or` member with two kinds of requirement was described by one | Located, located, accurate wording, general wording | unit: shaclFindings "a node-level finding points at the record", "a written _:label is found…", "only says there are several…", "an alternative with two kinds…" (needs custom shapes the demo ontology doesn't have) |
+| Check data: after Next, focus stayed on the button and nothing said what changed; an edited live list reopened on an old page | Focus moves to the new page, whose label carries "51–100 of N"; a list of a different length starts at page 1 | check-data: "a long list of problems is shown a page at a time", "a changed list of Turtle problems starts again at the first page" |
+| Check data: a node-level result for a record only used as a value (`sh:targetObjectsOf`) couldn't be located | It points to where the record is used | unit: shaclFindings "a node-level finding for a record only used as a value…" |
+| Check data: 4,000 nested `[ … ]` overflowed the stack and crashed the page | Nesting deeper than 200 is a positioned error | unit: shaclFindings "deeply nested brackets are a positioned error, not a crash" |
 | Browse tree leaves expose disabled, unnamed Collapse/Expand buttons | Routed to PR #9, which replaces the tree | |

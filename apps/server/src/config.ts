@@ -74,12 +74,48 @@ export const config = {
      */
     trustedIssuers: (process.env.SOLID_TRUSTED_ISSUERS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
   },
+  feedbackIssues: {
+    /**
+     * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers
+     * can choose to post a short summary of their feedback as an issue labelled "feedback".
+     */
+    token: process.env.FEEDBACK_GITHUB_TOKEN || undefined,
+    repo: process.env.FEEDBACK_GITHUB_REPO || 'standards-concord/standards-concord',
+    /** Overridable for tests. */
+    apiUrl: (process.env.FEEDBACK_GITHUB_API || 'https://api.github.com').replace(/\/$/, ''),
+    /** Cap on new issues in any rolling hour, across all server processes (the triage routine handles 10 an hour); the rest are posted later. */
+    perHour: Number(process.env.FEEDBACK_ISSUES_PER_HOUR || 10),
+    /**
+     * Bearer token for the triage routine's endpoints (/api/feedback/triage/...). The routine
+     * comments and labels only through them, so each comment's id is recorded for withdrawal.
+     */
+    triageToken: process.env.FEEDBACK_TRIAGE_TOKEN || undefined,
+  },
 
   meetBot: {
     /** Recall.ai API key enables real Google Meet bots. */
     recallApiKey: process.env.RECALL_API_KEY,
     recallRegion: process.env.RECALL_REGION ?? 'us-west-2',
+    /** Override the Recall.ai API base URL (tests point this at a stub). */
+    recallApiBase: process.env.RECALL_API_BASE?.replace(/\/$/, ''),
     botName: process.env.MEET_BOT_NAME ?? 'Concord co-facilitator',
+    /**
+     * The bot's own address, e.g. concord.odi@gmail.com. Adding it to a calendar
+     * invite (one call or a recurring series) brings the bot into those calls.
+     */
+    inviteEmail: process.env.MEET_BOT_EMAIL?.trim() || undefined,
+    /**
+     * The bot account's calendar as an iCal feed. For a Google account this is
+     * Calendar settings > the calendar > "Secret address in iCal format".
+     * file:// URLs work too, for local testing.
+     */
+    calendarIcsUrl: process.env.MEET_BOT_ICS_URL?.trim() || undefined,
+    /** How often to re-read the calendar feed. */
+    calendarPollMs: Number(process.env.MEET_BOT_POLL_SECONDS ?? 60) * 1000,
+    /** Ontology (slug or id) for invites that don't say which ontology they're about. */
+    defaultOntology: process.env.MEET_BOT_DEFAULT_ONTOLOGY?.trim() || undefined,
+    /** Whether calls that arrive by invite post the bot's prompts into the Meet chat. */
+    postToChatDefault: bool(process.env.MEET_BOT_POST_TO_CHAT, false),
   },
 
   stt: {

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
@@ -342,6 +342,58 @@ export function Chip({ active, onClick, children, className, disabled }: { activ
       {active && <Check className="size-3" />}
       {children}
     </button>
+  );
+}
+
+/** A labelled choice of one option, shown as chips (a radio group to assistive technology). */
+/**
+ * A row of chips that behaves as a radio group: one tab stop (the chosen option),
+ * arrow keys move the choice, Home and End jump to the ends.
+ */
+export function Segmented<T extends string>({ label, value, onChange, options, className }: { label: string; value: T; onChange: (v: T) => void; options: { value: T; label: ReactNode; icon?: LucideIcon }[]; className?: string }) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const current = Math.max(0, options.findIndex((o) => o.value === value));
+  const choose = (i: number) => {
+    const n = (i + options.length) % options.length;
+    onChange(options[n].value);
+    refs.current[n]?.focus();
+  };
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (step) choose(current + step);
+    else if (e.key === 'Home') choose(0);
+    else if (e.key === 'End') choose(options.length - 1);
+    else return;
+    e.preventDefault();
+  };
+  return (
+    <div role="radiogroup" aria-label={label} className={cx('flex flex-wrap gap-2', className)}>
+      {options.map((o, i) => {
+        const active = i === current;
+        const Icon = o.icon;
+        return (
+          <button
+            key={o.value}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={o.value === value}
+            tabIndex={active ? 0 : -1}
+            onKeyDown={onKeyDown}
+            onClick={() => onChange(o.value)}
+            className={cx(
+              'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors',
+              o.value === value ? 'border-accent bg-accent-soft text-accent' : 'border-line-strong bg-surface text-muted hover:text-fg',
+            )}
+          >
+            {Icon && <Icon className="size-3" aria-hidden />}
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

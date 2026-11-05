@@ -352,7 +352,8 @@ export const solid = {
   },
 
   /** A minimal WebID profile document for locally-hosted WebIDs. */
-  profileDocument(user: User): string {
+  /** The WebID profile. The name and organisation are left out unless `named` (the server only names people to signed-in users). */
+  profileDocument(user: User, { named = true }: { named?: boolean } = {}): string {
     const me = this.localWebId(user.id);
     const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     return `@prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -360,9 +361,8 @@ export const solid = {
 @prefix schema: <http://schema.org/> .
 
 <> a foaf:PersonalProfileDocument ; foaf:primaryTopic <${me}> .
-<${me}> a foaf:Person, schema:Person ;
-  foaf:name "${esc(user.name)}" ;
-  solid:oidcIssuer <${config.publicUrl}/> ${user.organisation ? `;\n  schema:affiliation [ a schema:Organization ; schema:name "${esc(user.organisation)}" ]` : ''} .
+<${me}> a foaf:Person, schema:Person ;${named ? `\n  foaf:name "${esc(user.name)}" ;` : ''}
+  solid:oidcIssuer <${config.publicUrl}/> ${named && user.organisation ? `;\n  schema:affiliation [ a schema:Organization ; schema:name "${esc(user.organisation)}" ]` : ''} .
 `;
   },
 };

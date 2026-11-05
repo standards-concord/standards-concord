@@ -4,8 +4,10 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  Publication,
   ActivityItem,
   AlphaMe,
+  FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
   OAuthConnection,
@@ -23,11 +25,14 @@ import type {
   GovernancePolicy,
   GovernanceTemplateId,
   InterviewSession,
+  MeetBotInfo,
   Meeting,
   Membership,
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicReport,
+  PublicHoldReview,
   Release,
   ReleaseDetail,
   Role,
@@ -143,7 +148,7 @@ export type NewOntologyInput = {
   namespace?: string;
   domain?: string;
   governanceTemplate?: GovernanceTemplateId;
-  /** List me as the ontology's creator (public). Defaults to true. */
+  /** List me as the ontology's creator (public). Off unless set. */
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
@@ -157,6 +162,24 @@ export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment
 export type VoteChoice = 'yes' | 'no' | 'abstain';
 
 /* ---------------------------------------------------------------- routes */
+
+/** A public feedback summary waiting for an administrator's decision. */
+export interface PublicationNeedingAdmin {
+  id: string;
+  /** Why it's waiting: a post whose outcome is unknown, a withdrawal, a triage comment whose outcome is unknown, or a summary out of the triage queue. */
+  kind: 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+  /** Sent back with a decision, so a decision about an older state is refused. */
+  ref: string;
+  state: 'needs-admin' | 'withdrawing' | 'filed';
+  summary: string;
+  repo: string;
+  marker: string;
+  issue?: { number: number; url: string };
+  candidates: { number: number; url: string }[];
+  reason?: string;
+  feedbackDeleted: boolean;
+  createdAt: string;
+}
 
 export const api = {
   // Auth
@@ -205,9 +228,16 @@ export const api = {
   // Meetings
   meetings: (id: string) => get<Meeting[]>(`/api/ontologies/${e(id)}/meetings`),
   uploadMeeting: (id: string, title: string, transcript: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/upload`, { title, transcript }),
-  inviteBot: (id: string, title: string, meetingUrl: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/bot`, { title, meetingUrl }),
-  simulateMeeting: (id: string, title: string) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title }),
+  inviteBot: (id: string, title: string, meetingUrl: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/bot`, { title, meetingUrl, postPromptsToChat }),
+  scheduleFromInvite: (id: string, ics: string, postPromptsToChat = false) => post<{ meetings: Meeting[]; cancelled: number; cancelRetrying: number }>(`/api/ontologies/${e(id)}/meetings/calendar`, { ics, postPromptsToChat }),
+  simulateMeeting: (id: string, title: string, postPromptsToChat = false) => post<Meeting>(`/api/ontologies/${e(id)}/meetings/simulate`, { title, postPromptsToChat }),
+  meetBot: () => get<MeetBotInfo>('/api/meet-bot'),
+  syncMeetBot: () => post<MeetBotInfo>('/api/meet-bot/sync'),
   meeting: (id: string) => get<Meeting>(`/api/meetings/${e(id)}`),
+  updateMeeting: (id: string, changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => patch<Meeting>(`/api/meetings/${e(id)}`, changes),
+  postPrompt: (id: string, index: number) => post<Meeting>(`/api/meetings/${e(id)}/prompts/${index}/post`),
+  endMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/end`),
+  dismissBooking: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/bot/dismiss`),
   analyseMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/analyse`),
   proposeFromMeeting: (id: string) => post<{ useCases: UseCase[]; changeRequest?: ChangeRequest }>(`/api/meetings/${e(id)}/propose`),
 
@@ -217,6 +247,13 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
+  acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
+  dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
+  publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
+  approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
+  publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
+  approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
@@ -260,6 +297,14 @@ export const api = {
     post<FeedbackChatResponse>('/api/feedback/chat', body),
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) =>
     post<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>('/api/feedback', body as unknown as Json),
+  feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
+  withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
+  resolveFeedbackPublication: (
+    feedbackId: string,
+    ref: string,
+    body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number },
+  ) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { ...body, ref }),
+  publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
   podFeedback: () => get<PodFeedbackReport>('/api/feedback/pods'),

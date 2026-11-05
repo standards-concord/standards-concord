@@ -45,7 +45,7 @@ export interface AppRelease {
   /** Release date (YYYY-MM-DD). */
   date: string;
   title: string;
-  /** Pull request in jeswr/standards-concord, if there was one. */
+  /** Pull request in standards-concord/standards-concord, if there was one. */
   pr?: number;
   changes: AppChange[];
 }
