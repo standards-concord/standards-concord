@@ -193,6 +193,33 @@ test.describe('Query tab', () => {
     await expect(chat(page).getByTestId('chat-message-user')).toContainText(question);
   });
 
+  test('a new message sent after one that wasn’t sends both in turn, and both change the query', async ({ page, consoleGuard }) => {
+    // Sending a message while an earlier one was unsent used to send them together as one request, and only the
+    // last was acted on: the earlier one's change was skipped though it showed as sent.
+    consoleGuard.allow(/status of 503/);
+    await ask(page, 'List every volunteering opportunity');
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const unsent = page.getByTestId('query-unsent');
+    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    await box.fill('Also show the minimum age and who offers it');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(unsent).toContainText('wasn’t sent');
+    await page.unroute(/\/api\/session$/);
+    const before = await replies.count();
+    await box.fill('Only those with a minimum age under 15');
+    await chat(page).getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(replies).toHaveCount(before + 2);
+    await expect(unsent).toHaveCount(0);
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(3);
+    const q = await editorText(page);
+    expect(q).toContain('vol:offeredBy');
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    await runWritten(page);
+    await expect(results(page)).toContainText('1 row');
+    await expect(results(page)).toContainText('Northvale Food Bank');
+  });
+
   test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {
     const start = await editorText(page);
     await ask(page, 'List every volunteering opportunity');

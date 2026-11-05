@@ -339,62 +339,71 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     }
   };
 
-  /** Asks the assistant: sends any unsent messages, then text if given. */
+  /**
+   * Asks the assistant: sends any unsent messages, then text if given. Each is its own turn, in order, building on
+   * the query the one before it wrote (sent together, only the last would have been acted on).
+   */
   const ask = async (text?: string) => {
-    const asked = [...unsent, ...(text ? [{ id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() } satisfies ChatMessage] : [])];
-    if (!asked.length) return;
-    const history = [...chat, ...asked];
-    // Whose conversation this is, as of now: nothing is saved unless it still is, now and when the answer arrives.
+    const queue = [...unsent, ...(text ? [{ id: `m${Date.now()}`, role: 'user', content: text, at: new Date().toISOString() } satisfies ChatMessage] : [])];
+    if (!queue.length) return;
+    // Whose conversation this is, as of now: nothing is saved unless it still is, now and when each answer arrives.
     const token = accountToken();
     if (!stillCurrent(token, account)) return;
-    // Shown at once, but saved only after the server confirms the account.
-    setPending(asked);
     setUnsent([]);
     setAsking(true);
     setChatError(undefined);
-    let kept = false;
+    let history = chat;
+    let current = { query, target, offlineState };
+    // How many of the queue have been saved, and whether the account changed (then nothing more is kept).
+    let kept = 0;
     let otherAccount = false;
     try {
-      // This conversation belongs to one account: never send it on under another one signed in from another tab.
-      // The server refuses it too if the session changes after this check.
-      const now = await api.session();
-      if ((now.user?.id ?? 'guest') !== account || !stillCurrent(token, account)) {
-        setPending([]);
-        otherAccount = true;
-        if (stillCurrent(token, account)) setSession(now);
-        throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
-      }
-      setChat(history);
-      setPending([]);
-      kept = true;
-      const r = await api.queryChat(id, {
-        messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-        query,
-        target,
-        dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
-        offlineState: offlineState ?? undefined,
-        account,
-      });
-      // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
-      if (!stillCurrent(token, account)) return;
-      setChat((c) => [...c, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }]);
-      // The editor is read-only while the assistant works, so its answer never replaces newer edits.
-      // It isn't run until the person has looked at it and pressed Run.
-      if (!r.unchanged) {
-        setOfflineState(r.offlineState ?? null);
-        setQuery(r.query);
-        setTarget(r.target);
-        setColumns(r.columns);
-        setWroteKey(keyFor(r.query, r.target));
+      for (const mine of queue) {
+        // Shown at once, but saved only after the server confirms the account.
+        setPending(queue.slice(kept));
+        // This conversation belongs to one account: never send it on under another one signed in from another tab.
+        // The server refuses it too if the session changes after this check.
+        const now = await api.session();
+        if ((now.user?.id ?? 'guest') !== account || !stillCurrent(token, account)) {
+          otherAccount = true;
+          if (stillCurrent(token, account)) setSession(now);
+          throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
+        }
+        history = [...history, mine];
+        kept++;
+        setChat(history);
+        setPending(queue.slice(kept));
+        const r = await api.queryChat(id, {
+          messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+          query: current.query,
+          target: current.target,
+          dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
+          offlineState: current.offlineState ?? undefined,
+          account,
+        });
+        // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
+        if (!stillCurrent(token, account)) return;
+        history = [...history, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }];
+        setChat(history);
+        // The editor is read-only while the assistant works, so its answer never replaces newer edits.
+        // It isn't run until the person has looked at it and pressed Run.
+        if (!r.unchanged) {
+          current = { query: r.query, target: r.target, offlineState: r.offlineState ?? null };
+          setOfflineState(r.offlineState ?? null);
+          setQuery(r.query);
+          setTarget(r.target);
+          setColumns(r.columns);
+          setWroteKey(keyFor(r.query, r.target));
+        }
       }
     } catch (e) {
-      setPending([]);
       if (!stillCurrent(token, account)) return;
       setChatError(e);
-      // Failed before the messages were kept (the account check couldn't be made): keep them to send again, rather
-      // than lose them. Not when the account has changed: they belong to someone else.
-      if (!kept && !otherAccount) setUnsent(asked);
+      // Messages not yet saved (the account check couldn't be made, or an earlier one failed) are kept to send
+      // again, rather than lost. Not when the account has changed: they belong to someone else.
+      if (!otherAccount) setUnsent(queue.slice(kept));
     } finally {
+      setPending([]);
       setAsking(false);
     }
   };
