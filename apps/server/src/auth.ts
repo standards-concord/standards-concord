@@ -3,7 +3,9 @@ import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { HttpError } from './db.js';
-import { createSession, destroySession, sessionUser, upsertFederatedUser } from './services/users.js';
+import type { AuthProvider } from '@concord/shared';
+import { createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
+import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -16,11 +18,23 @@ declare global {
   }
 }
 
+const FEDERATED: AuthProvider[] = ['google', 'github'];
+
+/**
+ * Deployment administrators: an account whose WebID is in ADMIN_WEBIDS (or, the
+ * older way, whose verified email is in ADMIN_EMAILS). This session must itself
+ * have been signed in with Google or GitHub: demo accounts, simulated personas,
+ * and sessions a demo account had before it was linked to a provider never count.
+ */
+export function isAdmin(user: User, method: AuthProvider | undefined): boolean {
+  if (!method || !FEDERATED.includes(method) || !user.providers.some((p) => p.provider === method) || user.simulated) return false;
+  if (user.webId && config.adminWebIds.includes(user.webId)) return true;
+  return !!user.email && config.adminEmails.includes(user.email.toLowerCase());
+}
+
 export function sessionMiddleware(req: Request, _res: Response, next: NextFunction) {
-  const user = sessionUser(req.cookies?.[SESSION_COOKIE]);
-  // ADMIN_EMAILS makes people who sign in with Google or GitHub administrators of the deployment.
-  const federated = user?.providers.some((p) => p.provider === 'google' || p.provider === 'github');
-  req.user = user && federated && !user.simulated && user.email && config.adminEmails.includes(user.email.toLowerCase()) ? { ...user, isPlatformAdmin: true } : user;
+  const s = sessionOf(req.cookies?.[SESSION_COOKIE]);
+  req.user = s && isAdmin(s.user, s.method) ? { ...s.user, isPlatformAdmin: true } : s?.user;
   next();
 }
 
@@ -29,8 +43,8 @@ export function requireUser(req: Request): User {
   return req.user;
 }
 
-export function setSessionCookie(res: Response, userId: string) {
-  res.cookie(SESSION_COOKIE, createSession(userId), {
+export function setSessionCookie(res: Response, userId: string, method: AuthProvider) {
+  res.cookie(SESSION_COOKIE, createSession(userId, method), {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.publicUrl.startsWith('https://'),
@@ -66,9 +80,25 @@ function checkState(req: Request, res: Response) {
 }
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
-function signInAs(req: Request, res: Response, userId: string) {
+function signInAs(req: Request, res: Response, userId: string, method: AuthProvider) {
   destroySession(req.cookies?.[SESSION_COOKIE]);
-  setSessionCookie(res, userId);
+  setSessionCookie(res, userId, method);
+}
+
+/**
+ * Sign in with a provider identity. An alpha tester using a demo account in
+ * this browser keeps their testing record: a new identity is attached to the
+ * demo account, and an existing account takes over the demo account's record.
+ */
+async function federatedSignIn(req: Request, res: Response, identity: Parameters<typeof upsertFederatedUser>[0]) {
+  const tester = testerFor(req);
+  const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
+  const user = await upsertFederatedUser(identity, demoTester);
+  // An existing account takes over the demo account's testing record, in one step on this server.
+  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
+  clearTesterCookie(req, res);
+  signInAs(req, res, user.id, identity.provider);
+  return user;
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') ? r : '/');
 
@@ -96,8 +126,7 @@ export function mountAuth(router: Router) {
     const claims = arctic.decodeIdToken(tokens.idToken()) as { sub: string; name?: string; email?: string; email_verified?: boolean; picture?: string };
     // Only a verified address counts (ADMIN_EMAILS matches on it).
     const email = claims.email_verified === true ? claims.email : undefined;
-    const user = await upsertFederatedUser({ provider: 'google', subject: claims.sub, name: claims.name ?? email ?? 'Google user', email, avatarUrl: claims.picture });
-    signInAs(req, res, user.id);
+    await federatedSignIn(req, res, { provider: 'google', subject: claims.sub, name: claims.name ?? email ?? 'Google user', email, avatarUrl: claims.picture });
     res.redirect(`${config.webUrl}${returnTo}`);
   });
 
@@ -120,8 +149,7 @@ export function mountAuth(router: Router) {
     // The primary, verified address (the public profile email is not checked here).
     const emails = (await (await fetch('https://api.github.com/user/emails', { headers })).json().catch(() => [])) as { email: string; primary: boolean; verified: boolean }[];
     const email = Array.isArray(emails) ? emails.find((e) => e.primary && e.verified)?.email : undefined;
-    const user = await upsertFederatedUser({ provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
-    signInAs(req, res, user.id);
+    await federatedSignIn(req, res, { provider: 'github', subject: String(gh.id), name: gh.name ?? gh.login, email, avatarUrl: gh.avatar_url });
     res.redirect(`${config.webUrl}${returnTo}`);
   });
 }

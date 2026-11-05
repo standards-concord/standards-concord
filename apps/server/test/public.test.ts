@@ -375,7 +375,7 @@ describe('review fixes', () => {
     expect(html).toMatch(/<article class="term" id="%41" /);
     expect(html).toContain('<main id="main-page" class="wrap">');
     expect(html).toContain('<a class="skip" href="#main-page">');
-    expect(html).toContain('<section id="sec-classes-page" class="block">');
+    expect(html).toContain('<section id="sec-classes-page" class="term-group"');
     // Hrefs keep % as written (the browser tries the raw fragment first) and encode what a URL can't hold.
     expect(html).toContain('href="#%41"');
     expect(html).toContain('href="#Caf%C3%A9-2"');

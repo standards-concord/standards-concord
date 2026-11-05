@@ -27,10 +27,10 @@ import type {
   Vote,
 } from '@concord/shared';
 import { clock } from '../clock.js';
-import { get, HttpError, list, mustGet, put } from '../db.js';
+import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
-import { ontologyDigest } from '../llm/context.js';
-import { CHANGE_DRAFTER, REVISER, TRIAGE } from '../llm/prompts.js';
+import { ontologyDigest, requestText } from '../llm/context.js';
+import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { evaluate } from './governance.js';
@@ -84,6 +84,12 @@ export interface CreateInput {
    * (and refuse by throwing, in which case nothing is ever stored) and add to it after.
    */
   commit?: (cr: ChangeRequest, store: () => void) => Promise<void>;
+  /**
+   * Runs in the same transaction that saves the change request, just before
+   * it: throwing saves nothing. For steps that must happen exactly once with
+   * the save, such as taking a public report off the queue.
+   */
+  atSave?: () => void;
 }
 
 export async function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
@@ -127,7 +133,10 @@ export async function createChangeRequest(project: OntologyProject, author: User
     baseCommit: ontologyStore.head(project),
   };
   const store = () => {
-    save(cr);
+    transaction(() => {
+      input.atSave?.();
+      save(cr);
+    });
     logActivity({ ontologyId: project.id, actorId: author.id, type: 'cr.created', message: `opened #${cr.number} ${cr.title}`, link: `/o/${project.id}/changes/${cr.id}` });
   };
   if (input.commit) await input.commit(cr, store);
@@ -283,13 +292,13 @@ async function analyse(project: OntologyProject, cr: ChangeRequest, after: Ontol
   const lintErrors = v.lint.filter((i) => i.severity === 'error');
   const { value } = await llm.json({
     task: 'triage',
-    system: TRIAGE,
+    system: `${TRIAGE}\n\n${UNTRUSTED_TEXT}`,
     schema: AnalysisSchema,
     effort: 'medium',
     messages: [
       {
         role: 'user',
-        content: `Change request #${cr.number}: ${cr.title}\n${cr.description}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nRule-based classification: ${cr.classification?.level}\n${cr.classification?.reasons.map((r) => `- [${r.level}] ${r.rule}: ${r.message}`).join('\n')}\n\nValidation: ${v.passed ? 'passed' : 'FAILED'}; reasoner consistent=${v.reasoner.consistent}, unsatisfiable=${v.reasoner.unsatisfiable.map(c).join(', ') || 'none'}; lint errors: ${lintErrors.map((i) => i.message).join('; ') || 'none'}; FAIR ${Math.round(v.fair.score * 100)}%.\n\nOntology after the change:\n${ontologyDigest(after, 250)}`,
+        content: `${requestText(cr)}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nRule-based classification: ${cr.classification?.level}\n${cr.classification?.reasons.map((r) => `- [${r.level}] ${r.rule}: ${r.message}`).join('\n')}\n\nValidation: ${v.passed ? 'passed' : 'FAILED'}; reasoner consistent=${v.reasoner.consistent}, unsatisfiable=${v.reasoner.unsatisfiable.map(c).join(', ') || 'none'}; lint errors: ${lintErrors.map((i) => i.message).join('; ') || 'none'}; FAIR ${Math.round(v.fair.score * 100)}%.\n\nOntology after the change:\n${ontologyDigest(after, 250)}`,
       },
     ],
     fallback: () => fallbackAnalysis(cr, c),
@@ -611,12 +620,12 @@ export async function revise(cr: ChangeRequest, actor: User, instruction: string
   const issues = cr.validation?.lint.filter((i) => i.severity !== 'info').map((i) => `- ${i.severity}: ${i.message}`).join('\n');
   const { value } = await llm.json<Proposal>({
     task: 'revise',
-    system: REVISER,
+    system: `${REVISER}\n\n${UNTRUSTED_TEXT}`,
     schema: ProposalSchema,
     messages: [
       {
         role: 'user',
-        content: `Ontology:\n${ontologyDigest(working)}\n\nChange request #${cr.number}: ${cr.title}\n${cr.description}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
+        content: `Ontology:\n${ontologyDigest(working)}\n\n${requestText(cr)}\n\nCurrent edits:\n${cr.ops.map((o) => `- ${describeOp(o, c)}`).join('\n')}\n\nReviewer feedback:\n${feedback || '(none)'}\n\nValidation issues:\n${issues || '(none)'}\n\nInstruction from ${actor.name}: ${instruction}\n\nReturn the complete revised set of edits (not just the differences).`,
       },
     ],
     fallback: () => {

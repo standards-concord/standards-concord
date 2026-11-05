@@ -18,6 +18,18 @@ const VARIANTS: Record<Variant, string> = {
   danger: 'bg-danger text-danger-fg hover:brightness-110 border border-transparent',
 };
 
+const BUTTON_SIZES = { sm: 'h-8 px-2.5 text-xs gap-1.5', md: 'h-9 px-3.5 text-sm gap-2', lg: 'h-11 px-5 text-sm gap-2' };
+
+/** Button styling for something that isn't a <button>, e.g. a link that navigates. */
+export function buttonClasses(variant: Variant = 'secondary', size: 'sm' | 'md' | 'lg' = 'md', className?: string) {
+  return cx(
+    'inline-flex shrink-0 items-center justify-center rounded-lg font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+    VARIANTS[variant],
+    BUTTON_SIZES[size],
+    className,
+  );
+}
+
 export function Button({
   variant = 'secondary',
   size = 'md',
@@ -28,18 +40,8 @@ export function Button({
   disabled,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: 'sm' | 'md' | 'lg'; icon?: LucideIcon; loading?: boolean }) {
-  const sizes = { sm: 'h-8 px-2.5 text-xs gap-1.5', md: 'h-9 px-3.5 text-sm gap-2', lg: 'h-11 px-5 text-sm gap-2' };
   return (
-    <button
-      {...rest}
-      disabled={disabled || loading}
-      className={cx(
-        'inline-flex shrink-0 items-center justify-center rounded-lg font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-        VARIANTS[variant],
-        sizes[size],
-        className,
-      )}
-    >
+    <button {...rest} disabled={disabled || loading} className={buttonClasses(variant, size, className)}>
       {loading ? <LoaderCircle className="size-4 animate-spin" /> : Icon ? <Icon className={size === 'sm' ? 'size-3.5' : 'size-4'} /> : null}
       {children}
     </button>

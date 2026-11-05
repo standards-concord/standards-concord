@@ -11,7 +11,8 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
-import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
+import { feedbackChat, listFeedback, questionsFor, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
+import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import {
   checkPublicSummary,
   issuesEnabled,
@@ -54,8 +55,9 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
+import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
+import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
-import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -123,6 +125,7 @@ const PUBLIC_READS = [
   /^\/use-cases\/[^/]+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
+  /^\/alpha\/me$/,
   /^\/feedback\/publishing$/,
   // Checks the triage routine's own bearer token.
   /^\/feedback\/triage\/queue$/,
@@ -158,6 +161,7 @@ export function apiRouter(): Router {
   r.post('/auth/demo', async (req, res) => {
     demoOnly();
     const { userId, name, role } = req.body ?? {};
+    const testerBefore = testerFor(req);
     let user: User | undefined;
     if (userId) {
       user = getUser(String(userId));
@@ -170,11 +174,13 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) setRoles(demo.id, user.id, [...new Set(roles)]);
     }
-    setSessionCookie(res, user.id);
+    setSessionCookie(res, user.id, 'demo');
+    rememberTester(req, res, testerBefore, user);
     res.json(sessionInfo(user));
   });
 
   r.post('/auth/logout', (req, res) => {
+    clearTesterCookie(req, res);
     destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
   });
@@ -531,6 +537,53 @@ export function apiRouter(): Router {
     res.json({ ok: true });
   });
 
+  /* ------------------- reports from the public page ------------------ */
+  // Held for review: only editors, stewards and owners see them, and nothing happens until one of them acts.
+  const moderator = (req: Request) => {
+    const p = project(req);
+    const user = requireUser(req);
+    requireRole(p.id, user, ['editor', 'steward', 'owner'], 'review reports from the public page');
+    return { p, user };
+  };
+  r.get('/ontologies/:id/public-reports', (req, res) => {
+    res.json(listPublicReports(moderator(req).p.id));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/accept', async (req, res) => {
+    const { p, user } = moderator(req);
+    const reportId = String(req.params.reportId);
+    const opened = () => crs.listCRs(p.id).find((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
+    const already = opened();
+    if (already) {
+      removePublicReport(reportId);
+      return void res.json(crs.detail(already));
+    }
+    if (!getPublicReport(p.id, reportId)) throw new HttpError(404, 'That report has already been reviewed');
+    const mine = claimPublicReport(p.id, reportId);
+    if (!mine) throw new HttpError(409, 'Someone is opening this report right now');
+    const report = mine.report;
+    let cr;
+    try {
+      cr = await crs.createChangeRequest(p, await publicReporter(), {
+        title: report.title || `Problem with ${report.termName}`,
+        description: `${report.description}\n\nTerm: <${report.termIri}>\n\nReported by a member of the public from the public page (${report.version === 'draft' ? 'working draft' : `version ${report.version}`}) and opened for discussion by ${user.name}. No edits were drafted from it.`,
+        kind: 'bug',
+        origin: { type: 'public-report', termIri: report.termIri, version: report.version, reportId },
+        ops: [],
+        // Saved only if this claim still holds the report, and the report leaves the queue in the same step.
+        atSave: () => convertPublicReport(mine),
+      });
+    } catch (err) {
+      releasePublicReport(mine);
+      throw err;
+    }
+    res.status(201).json(crs.detail(cr));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/dismiss', (req, res) => {
+    const { p } = moderator(req);
+    dismissPublicReport(p.id, String(req.params.reportId));
+    res.json({ ok: true });
+  });
+
   /* --------------- versions waiting for publication approval ------------- */
   // Published before anyone approved what goes public: owners and stewards review each and approve exactly what it publishes.
   const steward = (req: Request) => {
@@ -730,10 +783,23 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ feedback --------------------------- */
-  r.get('/feedback/questions', (_req, res) => res.json(FEEDBACK_QUESTIONS));
+  const pathwayOf = (p: unknown): Pathway => (p === 'general' || p === 'changes' ? p : 'structured');
+  r.get('/feedback/questions', (req, res) =>
+    res.json(questionsFor({ pathway: pathwayOf(req.query.pathway), since: optStr(req.query.since), role: optStr(req.query.role), version: optStr(req.query.version) })),
+  );
   r.post('/feedback/chat', async (req, res) => {
     const b = req.body ?? {};
-    res.json(await feedbackChat({ pathway: b.pathway === 'general' ? 'general' : 'structured', messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [], answers: b.answers ?? {}, currentQuestionId: optStr(b.currentQuestionId) }));
+    res.json(
+      await feedbackChat({
+        pathway: pathwayOf(b.pathway),
+        messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [],
+        answers: b.answers ?? {},
+        currentQuestionId: optStr(b.currentQuestionId),
+        since: optStr(b.since),
+        role: optStr(b.role),
+        version: optStr(b.version),
+      }),
+    );
   });
   r.get('/feedback/publishing', (_req, res) => res.json({ enabled: issuesEnabled(), noticeVersion: PUBLIC_NOTICE_VERSION }));
   r.post('/feedback', async (req, res) => {
@@ -741,8 +807,10 @@ export function apiRouter(): Router {
     // An opt-in public summary is checked before anything is stored, so the tester can fix it.
     const summary: string | undefined = b.publish && typeof b.publish === 'object' ? b.publish.summary : undefined;
     if (b.publish) checkPublicSummary(summary);
-    const sub = await submitFeedback(req.user, {
-        pathway: b.pathway === 'general' ? 'general' : 'structured',
+    const sub = await submitFeedback(
+      req.user,
+      {
+        pathway: pathwayOf(b.pathway),
         answers: b.answers ?? {},
         transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
         usedVoice: !!b.usedVoice,
@@ -750,7 +818,12 @@ export function apiRouter(): Router {
         email: optStr(b.email),
         role: optStr(b.role),
         themes: Array.isArray(b.themes) ? b.themes.filter((t: unknown) => typeof t === 'string').slice(0, 20) : undefined,
-      });
+        appVersion: optStr(b.appVersion),
+        appCommit: optStr(b.appCommit),
+        sinceVersion: optStr(b.sinceVersion),
+      },
+      testerForSaving(req, res),
+    );
     if (summary === undefined) return void res.status(201).json(sub);
     // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
     const { withdrawToken } = queuePublication(sub.id, summary);
@@ -795,8 +868,17 @@ export function apiRouter(): Router {
     if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'Not an issue number');
     res.json(await triagePublication(n, req.body ?? {}));
   });
+
+  /* ------------------------------ alpha testing ------------------------ */
+  r.get('/alpha/me', async (req, res) => res.json(await alphaMe(req)));
+  r.post('/alpha/visit', async (req, res) => {
+    const tester = testerForSaving(req, res);
+    if (!tester) throw new HttpError(401, 'Sign in to save the version you tested');
+    const b = req.body ?? {};
+    res.json(await recordVersion(tester, { version: b.version, commit: b.commit, role: b.role }));
+  });
   const feedbackAdmin = (req: Request) => {
-    // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
+    // Only deployment administrators (ADMIN_WEBIDS or ADMIN_EMAILS, in a session signed in with Google or GitHub). Ontology roles
     // don't count: in demo mode anyone can give themselves one, or play a persona who has one.
     const user = requireUser(req);
     if (!user.isPlatformAdmin || user.simulated) throw new HttpError(403, 'Only administrators of this deployment can read feedback');

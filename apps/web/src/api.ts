@@ -6,6 +6,7 @@
 import type {
   Publication,
   ActivityItem,
+  AlphaMe,
   FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
@@ -29,6 +30,7 @@ import type {
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicReport,
   PublicHoldReview,
   Release,
   ReleaseDetail,
@@ -143,6 +145,8 @@ export type RequirementsSummary = Pick<RequirementsDocument, 'id' | 'version' | 
 export type NewUseCaseLink = Pick<UseCaseLink, 'type' | 'relation'> & { id?: string; url?: string; label?: string };
 export type SparqlResult = { head: { vars: string[] }; rows: Record<string, string>[] };
 export type FeedbackAnswers = Record<string, string | number | string[]>;
+/** Which questionnaire: `pathway: 'changes'` asks about what changed since `since`, for a tester in `role`. */
+export type FeedbackScope = { pathway?: FeedbackSubmission['pathway']; since?: string; role?: string; version?: string };
 export type FeedbackChatResponse = { reply: string; answers: FeedbackAnswers; done: boolean; nextQuestionId?: string };
 export type FeedbackSummary = { summary: string; themes: { theme: string; count: number }[] };
 export type NewOntologyInput = {
@@ -266,6 +270,9 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
+  acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
+  dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
   publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
   approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
   publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
@@ -308,10 +315,11 @@ export const api = {
   activity: (ontologyId?: string) => get<ActivityItem[]>(`/api/activity${qs({ ontologyId })}`),
 
   // Feedback
-  feedbackQuestions: () => get<FeedbackQuestion[]>('/api/feedback/questions'),
-  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
+  feedbackQuestions: (scope: FeedbackScope = {}) => get<FeedbackQuestion[]>(`/api/feedback/questions${qs({ pathway: scope.pathway, since: scope.since, role: scope.role, version: scope.version })}`),
+  feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers; currentQuestionId?: string } & FeedbackScope) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
-  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) =>
+    post<FeedbackSubmission & { savedTo?: { kind: 'solid' | 'local'; url: string } }>('/api/feedback', body as unknown as Json),
   feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
   withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
   resolveFeedbackPublication: (
@@ -322,6 +330,9 @@ export const api = {
   publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
+  // Alpha testing: the tester's own account and the app versions they've tested
+  alphaMe: () => get<AlphaMe>('/api/alpha/me'),
+  alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),
 };
 

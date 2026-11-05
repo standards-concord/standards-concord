@@ -13,6 +13,8 @@ import type {
   ValidationReport,
 } from '@concord/core/types';
 
+export * from './appReleases.js';
+
 export type {
   ChangeClassification,
   ChangeLevel,
@@ -628,7 +630,31 @@ export type ChangeRequestOrigin =
   | { type: 'agent'; agentName?: string; reportId?: string }
   | { type: 'bug-report' }
   | { type: 'direct' }
-  | { type: 'synthesis'; useCaseIds: string[] };
+  | { type: 'synthesis'; useCaseIds: string[] }
+  /** Reported anonymously from the public ontology page. */
+  | { type: 'public-report'; termIri: string; version: string; /** The queued report it was opened from: approving twice finds this request. */ reportId?: string };
+
+/**
+ * A problem reported from the public ontology page by someone without an
+ * account. Held for review: only editors, stewards and owners see it, and
+ * nothing is done with it (no change request, activity or AI triage) until
+ * one of them opens it as a bug report.
+ */
+export interface PublicReport {
+  id: string;
+  ontologyId: string;
+  termIri: string;
+  termName: string;
+  /** The version of the page it was sent from ("draft" for the working draft). */
+  version: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  /** Set while a moderator is opening it as a change request (ms since the epoch). */
+  claimedAt?: number;
+  /** Server only: which request holds the claim. Never sent to the browser. */
+  claimToken?: string;
+}
 
 /**
  * Versions of an ontology published before a person approved what goes
@@ -1042,7 +1068,16 @@ export interface FeedbackSubmission {
   name?: string;
   email?: string;
   role?: Role | string;
-  pathway: 'structured' | 'general';
+  /** structured: the full questionnaire; changes: questions about what changed since `sinceVersion`; general: free-form. */
+  pathway: 'structured' | 'changes' | 'general';
+  /** App version the tester was using (APP_VERSION of the web build). */
+  appVersion?: string;
+  /** Web build commit, when known. */
+  appCommit?: string;
+  /** The version the tester last tested before this one, if they said or we knew. */
+  sinceVersion?: string;
+  /** The tester's own account, when they were playing a persona at the time. */
+  testerId?: string;
   answers: Record<string, string | number | string[]>;
   /** Chat transcript of the feedback conversation. */
   transcript: ChatMessage[];
@@ -1258,11 +1293,15 @@ export interface SessionInfo {
  *  GET  /api/activity?ontologyId=                    -> ActivityItem[]
  *
  * Feedback
- *  GET  /api/feedback/questions                      -> FeedbackQuestion[]
- *  POST /api/feedback/chat {pathway, messages: ChatMessage[], answers} -> { reply: string; answers: Record<string, ...>; done: boolean; nextQuestionId?: string }
+ *  GET  /api/feedback/questions?pathway=&since=&role= -> FeedbackQuestion[] (pathway=changes asks about what changed since `since`)
+ *  POST /api/feedback/chat {pathway, messages: ChatMessage[], answers, since?, role?} -> { reply: string; answers: Record<string, ...>; done: boolean; nextQuestionId?: string }
  *  POST /api/feedback {FeedbackSubmission minus id/createdAt} -> FeedbackSubmission
  *  GET  /api/feedback                                -> FeedbackSubmission[] (admin)
  *  GET  /api/feedback/summary                        -> { summary: string; themes: {theme:string; count:number}[] } (admin)
+ *
+ * Alpha testing (the tester's own account, even while playing a persona)
+ *  GET  /api/alpha/me                                -> AlphaMe (versions tested, read from the tester's pod)
+ *  POST /api/alpha/visit {version, commit?, role?}   -> AlphaMe (records a version in the tester's pod)
  *  POST /api/transcribe (audio/webm body)            -> { text: string } (server-side STT fallback; 501 if not configured)
  */
 export const API_PREFIX = '/api';

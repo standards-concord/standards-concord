@@ -29,7 +29,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/interview/:id` | Chat (typed, Enter/Shift+Enter, spoken), progress, layouts, finish | ✅ | requirements, ia |
 | `/o/:id/meetings` | Upload or paste a transcript, choose a file, invite the bot, run a simulated call | ✅ | meeting-transcripts; 🔜 #11 (invite by email, prompts in Meet chat) |
 | `/o/:id/meetings/:id` | Transcript, live stream, bot prompts, analysis, turn into use cases and a change request | ✅ | meeting-transcripts |
-| `/o/:id/changes` | Filter by scope and status, new change request, report a bug | ✅ | change-requests, ia |
+| `/o/:id/changes` | Filter by scope and status, new change request, report a bug, reports from the public page (editors and up) | ✅ | change-requests, ia, public-page |
 | `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure; 🔜 #17 (app checks, autopilot) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
 | `/o/:id/releases/:id` | Notes, included changes, publish; approval details | ✅ | governance-flow, ia, public-page |
@@ -75,6 +75,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Auto-merge off → approved → manual merge | ✅ | governance-flow |
 | Withdraw | ✅ | change-requests |
 | Bug report (from Changes and from a term) | ✅ | change-requests, browse-basics |
+| Report a problem from the public page (anonymously, or by signing in as a member), held for editors to open as a bug report or dismiss | ✅ | public-page; server side (tokens, limits, claims, versions) in `apps/server/test/report.test.ts` |
 | Changes from agents (`propose_change`, `report_gap`) | ✅ | agents |
 | Changes from use cases and meetings | ✅ | requirements, meeting-transcripts |
 | Draft release → publish → current version, change requests released | ✅ | governance-flow |
