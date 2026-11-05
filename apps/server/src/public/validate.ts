@@ -4,6 +4,7 @@ import { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, dataFormatForMediaType, snif
 import { config } from '../config.js';
 import { clientIp } from '../oauth.js';
 import { findProject } from '../services/ontologies.js';
+import { HELD_MESSAGE, isHeld } from './holds.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { VALIDATION_LIMITS, validateDataAgainst } from '../services/dataValidation.js';
 import { admit } from '../services/validationPool.js';
@@ -165,6 +166,8 @@ const target = (req: Request, res: Response, next: NextFunction) => {
   const version =
     requested === 'latest' ? (latest ?? 'draft') : requested === 'draft' || requested === 'working' ? 'draft' : ontologyStore.versions(project).includes(requested) ? requested : undefined;
   if (!version) return fail(404, `${project.title} has no version “${requested}”.`);
+  // A version waiting for a steward to approve what it publishes (holds.ts): answers name its terms, so none are given.
+  if (isHeld(project, version)) return void res.status(503).set('Retry-After', '86400').set('Connection', 'close').json({ error: HELD_MESSAGE });
   const wants = reportType(req.get('Accept'));
   if (!wants) return fail(406, 'Reports are available as application/json or text/turtle (UTF-8).');
   if (!declaredFormat(req)) return void res.status(415).set('Connection', 'close').set('Accept-Post', ACCEPT_POST).json({ error: UNSUPPORTED });

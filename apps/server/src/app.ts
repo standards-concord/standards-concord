@@ -28,7 +28,8 @@ export function createApp(): express.Express {
   app.get('/people/:id', (req, res) => {
     const user = getUser(String(req.params.id));
     if (!user) throw new HttpError(404, 'No such person');
-    res.type('text/turtle').send(solid.profileDocument(user));
+    // Anyone can resolve a WebID (sign-in needs that), but names are for signed-in users.
+    res.set('Vary', 'Cookie').type('text/turtle').send(solid.profileDocument(user, { named: !!req.user }));
   });
 
   const auth = express.Router();

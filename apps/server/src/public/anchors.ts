@@ -17,8 +17,11 @@ const UI_ID = /^(main|(tab|sec|uc|req)-.*)$/;
 export function termAnchors(view: OntologyView, namespace: string): Map<string, string> {
   const all: TermView[] = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals];
   const own = (t: TermView) => namespace.length > 0 && t.iri.startsWith(namespace) && t.iri.length > namespace.length;
-  // Own terms first, so they win their exact fragment; then a stable order.
-  const ordered = [...all].sort((a, b) => Number(own(b)) - Number(own(a)) || a.iri.localeCompare(b.iri));
+  // Own terms first, so they win their exact fragment. Among them, a name
+  // already holding "%" goes last: browsers rewrite #Café as #Caf%C3%A9, so
+  // that href must stay with Café rather than a term literally named Caf%C3%A9.
+  const pct = (t: TermView) => Number(t.iri.includes('%'));
+  const ordered = [...all].sort((a, b) => Number(own(b)) - Number(own(a)) || pct(a) - pct(b) || a.iri.localeCompare(b.iri));
   const out = new Map<string, string>();
   const used = new Set<string>();
   for (const t of ordered) {
@@ -29,9 +32,11 @@ export function termAnchors(view: OntologyView, namespace: string): Map<string, 
       const name = (localName(t.iri) || 'term').replace(/\s/g, '_');
       base = UI_ID.test(name) ? `term-${name}` : name;
     }
+    // Compared as they appear in a link, so #Café and a literal #Caf%C3%A9
+    // (the same URI once encoded) can't end up with the same href.
     let anchor = base;
-    for (let n = 2; used.has(anchor); n++) anchor = `${base}-${n}`;
-    used.add(anchor);
+    for (let n = 2; used.has(fragment(anchor)); n++) anchor = `${base}-${n}`;
+    used.add(fragment(anchor));
     out.set(t.iri, anchor);
   }
   return out;
@@ -43,7 +48,7 @@ export function termAnchors(view: OntologyView, namespace: string): Map<string, 
  * same name always gets the same id within one page.
  */
 export function pageIds(taken: Iterable<string>): (name: string) => string {
-  const used = new Set(taken);
+  const used = new Set([...taken].flatMap((id) => [id, fragment(id)]));
   const ids = new Map<string, string>();
   return (name: string) => {
     let id = ids.get(name);

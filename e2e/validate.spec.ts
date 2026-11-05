@@ -193,6 +193,13 @@ test.describe('Validate data', () => {
     await expect(report(page)).toHaveCount(0);
   });
 
+  test('Check data points to the validator for files, releases and full reports', async ({ page }) => {
+    await page.goto('/o/volunteering/query?view=check');
+    await page.getByTestId('validate-link').getByRole('link', { name: 'Validate data' }).click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
+    await expect(page.getByLabel('Version to validate against')).toBeVisible();
+  });
+
   test('shows how to call the API at the ontology address', async ({ page, baseURL }) => {
     await page.goto('/o/volunteering/validate');
     await page.getByRole('button', { name: /Validate from your own code/ }).click();

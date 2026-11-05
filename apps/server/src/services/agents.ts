@@ -10,6 +10,7 @@ import { GapAnalysisSchema } from '../llm/schemas.js';
 import { createChangeRequest } from './changeRequests.js';
 import { rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { readOntology } from '../public/holds.js';
 import { proposalToOps } from './proposals.js';
 import { logActivity } from './users.js';
 
@@ -98,11 +99,12 @@ export async function reportGap(
   return report;
 }
 
-export async function sparql(project: OntologyProject, query: string, ref?: string) {
+/** Anyone may query; someone not signed in reads only what's published (see readOntology). */
+export async function sparql(project: OntologyProject, query: string, ref: string | undefined, viewer: User | undefined) {
   if (!/^\s*(PREFIX[^\n]*\n\s*)*(SELECT|ASK|CONSTRUCT|DESCRIBE)\b/i.test(query.replace(/#[^\n]*/g, ''))) {
     return { head: { vars: [] as string[] }, rows: [] as Record<string, string>[], error: 'Only read-only queries (SELECT, ASK, CONSTRUCT, DESCRIBE) are allowed' };
   }
-  const graph = await ontologyStore.at(project, ref);
+  const graph = await readOntology(project, ref, viewer);
   const [res] = await runCompetencyQuestions(graph, [{ question: 'query', sparql: query }]);
   const vars = res.rows.length ? Object.keys(res.rows[0]) : [];
   return { head: { vars }, rows: res.rows, error: res.error };

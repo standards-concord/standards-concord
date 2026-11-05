@@ -241,10 +241,12 @@ test.describe('Public ontology page', () => {
     await page.getByRole('button', { name: 'New ontology' }).first().click();
     const dialog = page.getByRole('dialog');
     const credit = dialog.getByTestId('credit-creator');
-    await expect(credit).toBeChecked();
+    // Off unless the owner asks for it.
+    await expect(credit).not.toBeChecked();
+    await expect(dialog).toContainText('No creator is listed');
+    await credit.check();
     await expect(dialog).toContainText(`“${user.name}” is shown publicly`);
     await credit.uncheck();
-    await expect(dialog).toContainText('No creator is listed');
     await dialog.getByLabel('Title').fill(`Uncredited ${Date.now()}`);
     await dialog.getByRole('button', { name: 'Create ontology' }).click();
     await expect(page).toHaveURL(/\/o\/[^/]+/);

@@ -119,7 +119,7 @@ const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
  * pages already written to disk: refreshReleasePages regenerates any page
  * that doesn't carry the current value.
  */
-export const PAGE_GENERATOR = 'Concord public page 2';
+export const PAGE_GENERATOR = 'Concord public page 3';
 
 export function renderOntologyPage(input: OntologyPageInput): string {
   const { view, project } = input;

@@ -145,6 +145,27 @@ describe('POST to the ontology IRI validates data', () => {
     expect(res.body.shapes).toMatch(/\/def\/volunteering\/draft\.shacl\.ttl$/);
   });
 
+  // Validation answers name the ontology's terms ("Did you mean vol:title?"), so a version waiting
+  // for a steward to approve what it publishes (#35) used to leak through POST while GET said 503.
+  it('validates nothing against a version held for approval, like every other public read', async () => {
+    const { put, remove } = await import('../src/db.js');
+    const { findProject } = await import('../src/services/ontologies.js');
+    const project = findProject('volunteering')!;
+    const key = `public-hold:${project.id}`;
+    put('kv', { id: key, ontologyId: project.id, versions: ['draft'], since: new Date().toISOString() });
+    try {
+      const held = await post('/def/volunteering/draft', `${VALID}ex:opp vol:titl "typo" .\n`);
+      expect(held.status).toBe(503);
+      expect(held.headers['retry-after']).toBe('86400');
+      expect(held.text).not.toMatch(/vol:title|Did you mean/);
+      // A version that isn't held still validates.
+      expect((await post('/def/volunteering/1.0.0', VALID)).status).toBe(200);
+    } finally {
+      remove('kv', key);
+    }
+    expect((await post('/def/volunteering/draft', VALID)).status).toBe(200);
+  });
+
   it('explains bad requests', async () => {
     const parse = await post('/def/volunteering', '@prefix vol: <https://w3id.org/odi/volunteering#> . vol:x vol:y');
     expect(parse.status).toBe(400);

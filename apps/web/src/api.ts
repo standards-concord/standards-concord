@@ -4,7 +4,9 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  Publication,
   ActivityItem,
+  FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
   OAuthConnection,
@@ -26,6 +28,7 @@ import type {
   OntologySummary,
   OntologyView,
   OutputFormat,
+  PublicHoldReview,
   Release,
   ReleaseDetail,
   Role,
@@ -152,7 +155,7 @@ export type NewOntologyInput = {
   namespace?: string;
   domain?: string;
   governanceTemplate?: GovernanceTemplateId;
-  /** List me as the ontology's creator (public). Defaults to true. */
+  /** List me as the ontology's creator (public). Off unless set. */
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
@@ -166,6 +169,24 @@ export type ReviewDecision = 'approve' | 'request-changes' | 'object' | 'comment
 export type VoteChoice = 'yes' | 'no' | 'abstain';
 
 /* ---------------------------------------------------------------- routes */
+
+/** A public feedback summary waiting for an administrator's decision. */
+export interface PublicationNeedingAdmin {
+  id: string;
+  /** Why it's waiting: a post whose outcome is unknown, a withdrawal, a triage comment whose outcome is unknown, or a summary out of the triage queue. */
+  kind: 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+  /** Sent back with a decision, so a decision about an older state is refused. */
+  ref: string;
+  state: 'needs-admin' | 'withdrawing' | 'filed';
+  summary: string;
+  repo: string;
+  marker: string;
+  issue?: { number: number; url: string };
+  candidates: { number: number; url: string }[];
+  reason?: string;
+  feedbackDeleted: boolean;
+  createdAt: string;
+}
 
 export const api = {
   // Auth
@@ -224,6 +245,10 @@ export const api = {
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  publication: (id: string) => get<Publication>(`/api/change-requests/${e(id)}/publication`),
+  approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
+  publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
+  approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
   updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
@@ -271,6 +296,14 @@ export const api = {
   feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
+  withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
+  resolveFeedbackPublication: (
+    feedbackId: string,
+    ref: string,
+    body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number },
+  ) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { ...body, ref }),
+  publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),

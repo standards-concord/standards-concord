@@ -197,6 +197,37 @@ export function publishedRequirements(project: OntologyProject, _version?: strin
  * as its history.
  */
 export function requirementsFor(snapshot: PublishedRequirements | undefined): PublishedRequirements {
-  if (!snapshot || !Array.isArray(snapshot.useCases)) return { useCases: [], snapshotMissing: true };
-  return { document: snapshot.document, useCases: snapshot.useCases };
+  const valid = validSnapshot(snapshot);
+  if (!valid || valid.snapshotMissing) return { useCases: [], snapshotMissing: true };
+  return { document: valid.document, useCases: valid.useCases };
+}
+
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const optStr = (v: unknown) => v === undefined || isStr(v);
+const strList = (v: unknown) => v === undefined || (Array.isArray(v) && v.every(isStr));
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** The snapshot if every part of it has the shape the page renders, otherwise undefined (treated as unreadable). */
+export function validSnapshot(x: unknown): PublishedRequirements | undefined {
+  if (!isObj(x) || !Array.isArray(x.useCases)) return undefined;
+  const useCaseOk = (u: unknown) =>
+    isObj(u) &&
+    isStr(u.id) &&
+    isStr(u.ref) &&
+    isStr(u.title) &&
+    isStr(u.status) &&
+    ['summary', 'goal', 'description', 'actors', 'addressedIn', 'attribution'].every((k) => optStr(u[k])) &&
+    (u.anonymised === undefined || typeof u.anonymised === 'boolean') &&
+    strList(u.scenarios) &&
+    (u.competencyQuestions === undefined || (Array.isArray(u.competencyQuestions) && u.competencyQuestions.every((q) => isStr(q) || (isObj(q) && isStr(q.question) && optStr(q.exampleAnswer))))) &&
+    (u.origin === undefined || (isObj(u.origin) && isStr(u.origin.kind) && ['label', 'date', 'href'].every((k) => optStr((u.origin as Record<string, unknown>)[k]))));
+  if (!x.useCases.every(useCaseOk)) return undefined;
+  const d = x.document;
+  if (d !== undefined) {
+    if (!isObj(d) || !isStr(d.title) || !isStr(d.version) || !['generatedAt', 'intro', 'markdown'].every((k) => optStr(d[k]))) return undefined;
+    if (d.sections !== undefined && !(Array.isArray(d.sections) && d.sections.every((sec) => isObj(sec) && isStr(sec.id) && isStr(sec.heading) && isStr(sec.markdown)))) return undefined;
+    if (d.requirements !== undefined && !(Array.isArray(d.requirements) && d.requirements.every((r) => isObj(r) && isStr(r.id) && isStr(r.text) && isStr(r.status) && Array.isArray(r.useCaseIds) && r.useCaseIds.every(isStr) && strList(r.termIris)))) return undefined;
+    if (d.unpublished !== undefined && !(isObj(d.unpublished) && typeof d.unpublished.group === 'number' && typeof d.unpublished.private === 'number')) return undefined;
+  }
+  return x as unknown as PublishedRequirements;
 }
