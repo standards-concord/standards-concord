@@ -4,9 +4,9 @@ import type { User } from '@concord/shared';
 import { config } from './config.js';
 import { transaction, HttpError } from './db.js';
 import type { AuthProvider } from '@concord/shared';
-import { allUsers, createSession, destroySession, sessionOf, upsertFederatedUser } from './services/users.js';
+import { allUsers, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
 import { clientIdDocument, finishLogin, resolveIssuer, sessionKey, SolidLoginError, startLogin, type SolidLogin } from './solidOidc.js';
-import { clearTesterCookie, mergeTesterRecords, testerFor } from './services/alpha.js';
+import { clearTesterCookie, mergeTesterRecords, mirrorToPod, moveTesterRecord, testerFor, testerRecordMovedTo } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
 
@@ -126,7 +126,7 @@ async function signInAs(req: Request, res: Response, userId: string, method: Aut
  * this browser keeps their testing record: a new identity is attached to the
  * demo account, and an existing account takes over the demo account's record.
  */
-async function federatedSignIn(req: Request, res: Response, identity: Parameters<typeof upsertFederatedUser>[0]) {
+async function federatedSignIn(req: Request, res: Response, identity: FederatedIdentity) {
   const tester = await testerFor(req);
   const demoTester = tester && tester.providers.every((p) => p.provider === 'demo') ? tester : undefined;
   const user = await accountForIdentity(identity, demoTester);
@@ -138,10 +138,28 @@ async function federatedSignIn(req: Request, res: Response, identity: Parameters
  * The account an identity signs in to, given the demo account this browser was using (if any): the identity is
  * attached to the demo account when new, and an existing account takes over the demo account's testing record.
  */
-export async function accountForIdentity(identity: Parameters<typeof upsertFederatedUser>[0], demoTester?: User) {
-  const user = await upsertFederatedUser(identity, demoTester);
-  // An existing account takes over the demo account's testing record, in one step on this server.
-  if (demoTester && demoTester.id !== user.id) await mergeTesterRecords(demoTester, user);
+export async function accountForIdentity(identity: FederatedIdentity, demoTester?: User) {
+  // The checks, the attachment (or the existing account's update) and the record move commit together, so a sign-in
+  // refused part-way changes nothing.
+  const found = await transaction(async () => {
+    if (demoTester) {
+      // Another sign-in from this browser already moved the demo account's record into its account. Only a retry by
+      // that same identity goes on; attaching anyone else to the demo account would sign them in to a closed record.
+      const movedTo = await testerRecordMovedTo(demoTester.id);
+      if (movedTo && (await findByProvider(identity.provider, identity.subject))?.id !== movedTo)
+        throw new HttpError(409, 'This browser’s demo account was just linked to another sign-in. Please sign in again.');
+    }
+    const user = await linkFederatedIdentity(identity, demoTester);
+    if (user && demoTester && user.id !== demoTester.id) await moveTesterRecord(demoTester, user);
+    return user;
+  });
+  if (found) {
+    if (demoTester && found.id !== demoTester.id) await mirrorToPod(found);
+    return found;
+  }
+  // A new account is made outside the transaction: making one provisions a pod over the network.
+  const user = await createUser({ ...identity });
+  if (demoTester) await mergeTesterRecords(demoTester, user);
   return user;
 }
 const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');

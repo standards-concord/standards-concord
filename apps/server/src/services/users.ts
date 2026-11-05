@@ -57,10 +57,18 @@ export async function findByProvider(provider: AuthProvider, subject: string): P
  * checked the OAuth state, so the browser started this sign-in). When the
  * identity is new it is attached to that account, so what they saved stays theirs.
  */
-export async function upsertFederatedUser(p: { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string; webId?: string }, linkTo?: User) {
+export async function upsertFederatedUser(p: FederatedIdentity, linkTo?: User) {
+  // A new account is made outside the transaction: making one provisions a pod over the network.
+  return (await linkFederatedIdentity(p, linkTo)) ?? createUser({ ...p });
+}
+
+export type FederatedIdentity = { provider: AuthProvider; subject: string; name: string; email?: string; avatarUrl?: string; webId?: string };
+
+/** The account an identity already has, or the demo account it is attached to; undefined when it needs a new one. */
+export async function linkFederatedIdentity(p: FederatedIdentity, linkTo?: User): Promise<User | undefined> {
   // Looked up and attached in one transaction, so two sign-ins at once can't both find the identity unattached
   // (and attach it to two accounts), nor both attach to one account from copies read before the other saved.
-  const found = await transaction(async () => {
+  return await transaction(async () => {
     const existing = await findByProvider(p.provider, p.subject);
     if (linkTo) {
       // Re-read: whether it is still a demo-only account is decided on the stored copy, not the caller's.
@@ -91,8 +99,6 @@ export async function upsertFederatedUser(p: { provider: AuthProvider; subject: 
     }
     return undefined;
   });
-  // A new account is made outside it: making one provisions a pod over the network.
-  return found ?? createUser({ ...p });
 }
 
 export const getUser = async (id: string) => await get<User>('users', id);

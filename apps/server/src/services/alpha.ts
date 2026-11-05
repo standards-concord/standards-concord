@@ -345,6 +345,15 @@ export async function recordFeedback(
  * into the account's pod with the record. Running it again finishes the job.
  */
 export async function mergeTesterRecords(from: User, into: User) {
+  await moveTesterRecord(from, into);
+  await mirrorToPod(into);
+}
+
+/** Where a demo account's testing record moved to, if it has. */
+export const testerRecordMovedTo = async (userId: string) => (await history(userId)).movedTo;
+
+/** The stored part of mergeTesterRecords, in one transaction (or the caller's, so it commits with the caller's writes). */
+export async function moveTesterRecord(from: User, into: User) {
   await transaction(async () => {
     // Only a demo account's record moves. If an identity was attached to it after the caller read it, the record
     // belongs to that identity now, and moving it would close it and end that identity's sessions.
@@ -364,5 +373,4 @@ export async function mergeTesterRecords(from: User, into: User) {
     }
     await destroyUserSessions(from.id);
   });
-  await mirrorToPod(into);
 }

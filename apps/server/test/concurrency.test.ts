@@ -202,4 +202,51 @@ describe('requests made at the same time', () => {
     expect((await allUsers()).length).toBe(before.users);
     expect((await sessionUser(aSession))?.id).toBe(d.id);
   });
+
+  it('refuses to attach an identity to a demo account whose record has already moved into another account', async () => {
+    // B (with account E) signs in from the browser first and takes over demo account D's record. A's sign-in, started
+    // from the same browser with the copy of D read before, used to attach A to D and sign it in, although D's record
+    // was closed, so every later visit or feedback was refused (r12 review).
+    const d = await createUser({ name: 'Demo moved', provider: 'demo', subject: 'race-demo-moved' });
+    await recordVersion(d, { version: '0.8.0' });
+    const bId = { provider: 'google' as const, subject: 'race-go-moved', name: 'Existing E2' };
+    const e = await upsertFederatedUser(bId);
+    expect((await accountForIdentity(bId, d)).id).toBe(e.id);
+    const before = { users: (await allUsers()).length, d: await getUser(d.id), e: await getUser(e.id) };
+
+    await expect(accountForIdentity({ provider: 'github', subject: 'race-gh-moved', name: 'Racer A2' }, d)).rejects.toMatchObject({ status: 409 });
+    expect((await allUsers()).length).toBe(before.users);
+    expect(await getUser(d.id)).toEqual(before.d);
+    expect(await findByProvider('github', 'race-gh-moved')).toBeUndefined();
+    // B signing in again with the same copy is a retry into the account the record moved to.
+    expect((await accountForIdentity(bId, d)).id).toBe(e.id);
+    expect(await getUser(e.id)).toEqual(before.e);
+  });
+
+  it('changes nothing on an existing account whose sign-in is refused because another identity took the demo account first', async () => {
+    // Both sign-ins start from one browser's demo account D. B's account E used to be updated (its missing avatar
+    // filled in) before the record move was refused, so a refused sign-in still changed E (r12 review).
+    const d = await createUser({ name: 'Demo both', provider: 'demo', subject: 'race-demo-both' });
+    await recordVersion(d, { version: '0.8.0' });
+    const bId = { provider: 'google' as const, subject: 'race-go-both', name: 'Existing E3' };
+    const e = await upsertFederatedUser(bId);
+    const before = { users: (await allUsers()).length, d: await getUser(d.id), e: await getUser(e.id) };
+    const historyOf = async (id: string) => await get<{ movedTo?: string }>('kv', `alpha-history:${id}`);
+    const results = await Promise.allSettled([
+      accountForIdentity({ ...bId, avatarUrl: 'https://example.org/b.png' }, d),
+      accountForIdentity({ provider: 'github', subject: 'race-gh-both', name: 'Racer A3' }, d),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected').map((r) => ((r as PromiseRejectedResult).reason as { status?: number }).status)).toEqual([409]);
+    expect((await allUsers()).length).toBe(before.users);
+    if (results[0].status === 'rejected') {
+      // A was attached to D: E is exactly as it was, and D's record stays with D.
+      expect(await getUser(e.id)).toEqual(before.e);
+      expect((await historyOf(d.id))?.movedTo).toBeUndefined();
+    } else {
+      // B took over D's record: D is still a demo account, with no identity attached.
+      expect(await getUser(d.id)).toEqual(before.d);
+      expect((await historyOf(d.id))?.movedTo).toBe(e.id);
+    }
+  });
 });
