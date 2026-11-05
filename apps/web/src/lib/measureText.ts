@@ -14,6 +14,8 @@ function element() {
   svg.setAttribute('aria-hidden', 'true');
   svg.setAttribute('width', '0');
   svg.setAttribute('height', '0');
+  // Measured as the diagram draws it: unhinted, so the width is the same at every zoom level.
+  svg.setAttribute('text-rendering', 'geometricPrecision');
   svg.style.cssText = 'position:absolute;left:-10000px;top:0;visibility:hidden;overflow:hidden';
   host = document.createElementNS('http://www.w3.org/2000/svg', 'text');
   // Spaces count (an indent can end in one); collapsing would only ever make text narrower.

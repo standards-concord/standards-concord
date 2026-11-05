@@ -37,6 +37,10 @@ export default defineConfig({
     video: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1400, height: 950 },
+    // Hint fonts fully, as GitHub's Linux runners do, wherever the tests run. Hinted glyph widths
+    // round to whole pixels at each zoom level, which once made zoomed and saved diagrams draw
+    // text wider or narrower than its box; with this, a local run catches that too.
+    launchOptions: { args: ['--font-render-hinting=full'] },
   },
   projects: [
     {

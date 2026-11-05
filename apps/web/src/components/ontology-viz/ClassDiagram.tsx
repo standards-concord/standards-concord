@@ -416,7 +416,9 @@ export function ClassDiagram({
             {exportError}
           </p>
         )}
-        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
+        {/* Unhinted text: with hinting, glyph widths round to whole pixels at each zoom level, so text
+            drawn zoomed (or in the saved file) would not fit boxes measured at 100%. */}
+        <svg ref={svg} className="size-full cursor-grab active:cursor-grabbing" textRendering="geometricPrecision" data-width={Math.ceil(layout.width)} data-height={Math.ceil(layout.height)}>
           <defs>
             <marker id={`${uid}-tri`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
               <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.muted} strokeWidth="1.3" />
