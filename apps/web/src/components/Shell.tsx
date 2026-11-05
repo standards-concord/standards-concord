@@ -114,7 +114,7 @@ function UserMenu() {
         <ChevronDown className="app-header-muted hidden size-3.5 text-muted lg:inline" />
       </button>
       {open && (
-        <nav id="account-menu" ref={panelRef} aria-label="Account" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
+        <nav id="account-menu" ref={panelRef} aria-label="Account" className="app-dropdown absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 text-fg shadow-xl" onClick={() => setOpen(false)}>
           <div className="border-b border-line px-4 py-3">
             <div className="truncate text-sm font-medium">{user.name}</div>
             {testerRole && <div className="truncate text-xs text-muted">Trying Concord as: {testerRole}</div>}
