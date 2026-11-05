@@ -140,7 +140,7 @@ test.describe('Query tab', () => {
     await expect(results(page).locator('th')).toContainText(['minimum age']);
   });
 
-  test('if the assistant fails, the conversation keeps the question and shows the error', async ({ page, consoleGuard }) => {
+  test('if the assistant fails, the question stays, unsent, with the error', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 500/);
     await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
     const start = await editorText(page);
@@ -148,6 +148,7 @@ test.describe('Query tab', () => {
     await chat(page).getByRole('button', { name: 'Send' }).click();
     await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(1);
+    await expect(page.getByTestId('query-unsent')).toContainText('wasn’t sent');
     expect(await editorText(page)).toBe(start);
   });
 
@@ -218,6 +219,44 @@ test.describe('Query tab', () => {
     await runWritten(page);
     await expect(results(page)).toContainText('1 row');
     await expect(results(page)).toContainText('Northvale Food Bank');
+  });
+
+  test('if the assistant fails after the account check passes, every message waiting stays unsent', async ({ page, consoleGuard }) => {
+    // A message was counted as kept once its account check passed, before the assistant answered: when the
+    // assistant then failed, that message was dropped and only the ones after it stayed unsent.
+    consoleGuard.allow(/status of 503/, /status of 500/);
+    await ask(page, 'List every volunteering opportunity');
+    const box = chat(page).getByLabel('Describe what you want to find…');
+    const replies = chat(page).getByTestId('chat-message-assistant');
+    const users = chat(page).getByTestId('chat-message-user');
+    const unsent = page.getByTestId('query-unsent');
+    // A is left unsent by a failed account check.
+    await page.route(/\/api\/session$/, (r) => r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Service unavailable' }) }));
+    await box.fill('Also show the minimum age and who offers it');
+    await chat(page).getByRole('button', { name: 'Send' }).click();
+    await expect(unsent).toContainText('wasn’t sent');
+    await page.unroute(/\/api\/session$/);
+    // Sending B: A's account check passes, then the assistant fails on A.
+    const before = await replies.count();
+    await page.route(/\/query-chat$/, (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is unavailable' }) }));
+    await box.fill('Only those with a minimum age under 15');
+    await chat(page).getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(chat(page).getByRole('alert')).toContainText('The assistant is unavailable');
+    await expect(unsent).toContainText('Your last 2 messages weren’t sent');
+    await expect(users).toHaveCount(3);
+    await expect(replies).toHaveCount(before);
+    // Send again applies both, in order.
+    await page.unroute(/\/query-chat$/);
+    await unsent.getByRole('button', { name: 'Send again' }).click();
+    await expect(replies).toHaveCount(before + 2);
+    await expect(unsent).toHaveCount(0);
+    await expect(users).toHaveCount(3);
+    const q = await editorText(page);
+    expect(q).toContain('vol:offeredBy');
+    expect(q).toContain('FILTER(?minimumAge < 15)');
+    // Saved: they survive a reload.
+    await page.reload();
+    await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(3);
   });
 
   test('another account on the same browser starts with its own conversation and draft', async ({ page }) => {

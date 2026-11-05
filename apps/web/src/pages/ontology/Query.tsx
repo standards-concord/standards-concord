@@ -354,7 +354,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     setChatError(undefined);
     let history = chat;
     let current = { query, target, offlineState };
-    // How many of the queue have been saved, and whether the account changed (then nothing more is kept).
+    // How many of the queue have been answered and saved, and whether the account changed (then nothing more is kept).
     let kept = 0;
     let otherAccount = false;
     try {
@@ -369,12 +369,9 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
           if (stillCurrent(token, account)) setSession(now);
           throw new Error('You’re signed in as someone else now (perhaps in another tab), so this conversation wasn’t sent.');
         }
-        history = [...history, mine];
-        kept++;
-        setChat(history);
-        setPending(queue.slice(kept));
+        const asked = [...history, mine];
         const r = await api.queryChat(id, {
-          messages: history.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+          messages: asked.filter((m) => m.role !== 'system').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
           query: current.query,
           target: current.target,
           dataSummary: recordCounts ? [...recordCounts.byClass].map(([classIri, count]) => ({ classIri, count })) : undefined,
@@ -383,7 +380,9 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         });
         // Signed out (in this tab or another), or into another account, while waiting: this answer belongs to nobody here now.
         if (!stillCurrent(token, account)) return;
-        history = [...history, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }];
+        // Saved with its answer, so one that fails stays unsent, to send again.
+        kept++;
+        history = [...asked, { id: `m${Date.now()}a`, role: 'assistant', content: r.reply, at: new Date().toISOString(), simulated: r.simulated, offlineReason: r.offlineReason }];
         setChat(history);
         // The editor is read-only while the assistant works, so its answer never replaces newer edits.
         // It isn't run until the person has looked at it and pressed Run.
@@ -399,7 +398,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     } catch (e) {
       if (!stillCurrent(token, account)) return;
       setChatError(e);
-      // Messages not yet saved (the account check couldn't be made, or an earlier one failed) are kept to send
+      // Messages not yet answered (the account check couldn't be made, or the assistant failed) are kept to send
       // again, rather than lost. Not when the account has changed: they belong to someone else.
       if (!otherAccount) setUnsent(queue.slice(kept));
     } finally {
