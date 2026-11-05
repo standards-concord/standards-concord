@@ -60,6 +60,7 @@ This repo is also a plugin marketplace for Claude Code (`/plugin marketplace add
 | Solid pods for private data | `SOLID_SERVER_URL` (Community Solid Server v7+) |
 | Live Google Meet bot | `RECALL_API_KEY` (Recall.ai). The Google Meet Media API is still a closed preview. Add `MEET_BOT_EMAIL` and `MEET_BOT_ICS_URL` so inviting the bot's address to a call (or a recurring series) brings it in: [docs/meet-bot.md](docs/meet-bot.md). |
 | Publish releases to GitHub | `GITHUB_PUBLISH_TOKEN`, and set the repository on the ontology |
+| Opt-in public feedback summaries as GitHub issues | `FEEDBACK_GITHUB_TOKEN` (Issues: read and write). See [docs/feedback-issues.md](docs/feedback-issues.md) |
 | Voice input on Firefox | `STT_PROVIDER=openai`, `OPENAI_API_KEY` |
 
 ## Layout

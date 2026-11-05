@@ -583,7 +583,9 @@ export function isXsdDateOrDateTime(v: string): boolean {
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
   if (day > days) return false;
-  if (h !== undefined && (Number(h) > 23 || Number(mi) > 59 || Number(sec) > 59)) return false;
+  // 24:00:00 is XSD's end-of-day notation (the first instant of the next day).
+  const midnight = h === '24' && mi === '00' && sec === '00' && !/\.\d*[1-9]/.test(v);
+  if (h !== undefined && !midnight && (Number(h) > 23 || Number(mi) > 59 || Number(sec) > 59)) return false;
   if (tz && tz !== 'Z' && (Number(tm) > 59 || Number(th) * 60 + Number(tm) > 14 * 60)) return false;
   return true;
 }

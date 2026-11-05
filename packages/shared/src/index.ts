@@ -171,17 +171,20 @@ export interface OntologyProject {
   domain?: string;
   /** Example demo project for alpha testers. */
   demo?: boolean;
+  /** Everything this ontology publishes was approved as it was merged (older ones are checked once: see PublicHold). */
+  publishedWithApproval?: boolean;
 }
 
 export interface OntologySummary extends OntologyProject {
+  /** Counts a caller may not see are left out: activity for signed-out callers, and the graph's while its working draft waits for approval. */
   stats: {
-    classes: number;
-    properties: number;
-    individuals: number;
-    useCases: number;
-    openChangeRequests: number;
+    classes?: number;
+    properties?: number;
+    individuals?: number;
+    useCases?: number;
+    openChangeRequests?: number;
     releases: number;
-    members: number;
+    members?: number;
   };
   health?: {
     passed: boolean;
@@ -289,6 +292,8 @@ export interface UseCase {
   completeness: number;
   /** Where the private interview transcript lives (Solid pod resource URL). */
   transcriptUrl?: string;
+  /** Titles it had before, still kept out of anything published. */
+  formerTitles?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -491,6 +496,63 @@ export type ChangeRequestOrigin =
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] };
 
+/**
+ * Versions of an ontology published before a person approved what goes
+ * public, held (their pages and downloads say they're being reviewed) until
+ * an owner or steward approves exactly what each publishes.
+ */
+export interface PublicHold {
+  id: string;
+  ontologyId: string;
+  /** 'draft' or a released version. */
+  versions: string[];
+  since: string;
+  approved?: { version: string; by: string; at: string; fingerprint: string }[];
+}
+/** What a steward reviews before approving a held version. */
+export interface PublicHoldReview {
+  version: string;
+  /** Approving sends this back: it changes whenever what the version publishes does. */
+  fingerprint: string;
+  statements: number;
+  /** Statements and lines that look like they name a use case or a person (hints, not verdicts). Full IRIs. */
+  hints: { subject: string; predicate: string; object: string; kind: 'use case title' | 'name' }[];
+  /** Everything the fingerprint covers, in full: what approving publishes. */
+  turtle: string;
+  notes: string;
+  snapshot: string;
+  /** Set when the version couldn't be read: nothing is highlighted, but it can still be read and approved. */
+  error?: string;
+}
+
+export interface PublicationStatement {
+  /** Full IRIs (or a blank node), never shortened: a private name can sit anywhere in one. */
+  subject: string;
+  predicate: string;
+  /** A literal's text, or the full IRI. */
+  object: string;
+  /** The statement exactly as it is published (N-Triples), with any language or datatype. */
+  nt: string;
+  /** Looks like it names a private use case or a person (a hint, not a verdict). */
+  hint?: 'use case title' | 'name';
+}
+/** Exactly what merging a request drafted from use cases would publish, for an editor to approve. */
+export interface Publication {
+  /** Approving sends this back: it changes whenever what would be published does. */
+  fingerprint: string;
+  title: string;
+  kgcl: string[];
+  statements: PublicationStatement[];
+  /** The title or edit list looks like it names something private. */
+  hints: { where: string; kind: 'use case title' | 'name' }[];
+}
+
+export interface PrivacyFinding {
+  /** e.g. "definition of :PilotRecord", "title". */
+  where: string;
+  kind: 'use case title' | 'name';
+}
+
 export type ChangeRequestStatus =
   | 'draft' // being drafted by its author
   | 'triage' // automated classification + validation running/needs triage
@@ -603,6 +665,16 @@ export interface ChangeRequest {
   /** The working draft version this was based on (git commit). */
   baseCommit?: string;
   mergedCommit?: string;
+  /**
+   * Where what a merge would publish looks like it names a private use case
+   * or a person (where, and what kind: never the text itself). A hint for
+   * the editor approving it, set when a merge is held back.
+   */
+  privacyFindings?: PrivacyFinding[];
+  /** An editor approved exactly what merging this request publishes (see needsPublicationApproval). */
+  privacyCleared?: { by: string; at: string; fingerprint: string; title: string; kgcl: string[] };
+  /** Merging stopped until an editor approves what it publishes. */
+  heldForPublication?: boolean;
   releaseId?: string;
   timeline: TimelineEvent[];
   createdAt: string;
@@ -636,6 +708,8 @@ export interface Release {
   status: 'draft' | 'voting' | 'published' | 'rejected';
   changeRequestIds: string[];
   notes: string;
+  /** Who wrote the notes, when a steward did; drafted notes have none. */
+  notesBy?: string;
   versionIRI: string;
   commit?: string;
   githubUrl?: string;
@@ -740,7 +814,72 @@ export interface FeedbackSubmission {
   usedVoice: boolean;
   /** AI-extracted themes for the general pathway */
   themes?: string[];
+  /**
+   * Opt-in public summary, filed as a GitHub issue. Sent by the tester on submit
+   * (`summary`, already passed through publicSummary, so it is exactly what they saw);
+   * returned by the server as `publication`.
+   */
+  publish?: { summary: string };
+  publication?: FeedbackPublicationStatus;
   createdAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Public feedback summaries (GitHub issues)                                 */
+/* ------------------------------------------------------------------------ */
+
+/** Bumped whenever the wording testers agree to changes, and stored with each consent. */
+export const PUBLIC_NOTICE_VERSION = 1;
+export const PUBLIC_NOTICE =
+  'Only the summary below is posted, exactly as shown, as a GitHub issue on the Concord repository, which may be public. Your answers, name, email, role and the conversation are not posted. Don’t include names, organisations or other details that identify anyone. Links and email addresses are removed.';
+export const PUBLIC_SUMMARY_MAX = 500;
+
+/**
+ * queued → sending → filed; a send whose outcome is unknown → unknown (searched for, never re-posted
+ * automatically) → filed or needs-admin. Withdrawal: → withdrawing (if it may be posted) → withdrawn,
+ * which is terminal.
+ */
+export type FeedbackPublicationState = 'queued' | 'sending' | 'unknown' | 'filed' | 'needs-admin' | 'withdrawing' | 'withdrawn';
+
+export interface FeedbackPublicationStatus {
+  state: FeedbackPublicationState;
+  issue?: { number: number; url: string };
+  /** Only in the response to the submission: lets the tester withdraw the summary later. */
+  withdrawToken?: string;
+  /** A withdrawal that can't find its issue and needs an administrator to confirm. Administrators only. */
+  adminNeeded?: boolean;
+  /** Administrators only. */
+  id?: string;
+  summary?: string;
+  lastError?: string;
+  /** The hidden marker to look for on GitHub before posting again (needs-admin only). */
+  marker?: string;
+}
+
+/**
+ * The text of a public summary, as posted. The tester's preview and the server
+ * both use this, so what they see is what is posted. It removes links (with or
+ * without a scheme), email addresses and @handles, and normalises Unicode so
+ * look-alike characters can't slip past. It can't recognise names: the tester
+ * writes the summary and is asked not to include any.
+ */
+export function publicSummary(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, ' ')
+    .replace(/[^\s@]+@[^\s@]+/g, '[email removed]')
+    .replace(/\S+\s*[[(]\s*at\s*[\])]\s*\S+/gi, '[email removed]')
+    .replace(/@[\p{L}\p{N}_-]+/gu, '[handle removed]')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, '[link removed]')
+    .replace(/(^|[\s(\[<"'])\/\/\S+/g, '$1[link removed]')
+    .replace(/\b(?:www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}\/)\S*/gu, '[link removed]')
+    .replace(/(?:^|\s)\/(?:people|pods?|webid|u|profile)\/\S*/gi, ' [link removed]')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+    .slice(0, PUBLIC_SUMMARY_MAX)
+    .trim();
 }
 
 /* ------------------------------------------------------------------------ */

@@ -4,6 +4,7 @@ import { openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
+import { processOutstanding } from './services/feedbackIssues.js';
 import { runTick, seedDemo } from './services/simulation.js';
 
 openDb();
@@ -32,3 +33,9 @@ setInterval(() => {
   meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
 }, 60_000).unref();
 void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+
+// Public feedback summaries that couldn't be posted straight away (GitHub down, hourly cap, rate limit) are retried.
+setInterval(() => {
+  processOutstanding().catch((err) => console.warn('[feedback]', (err as Error).message));
+}, 60_000).unref();
+void processOutstanding().catch(() => undefined);
