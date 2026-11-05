@@ -8,6 +8,7 @@
  */
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { request, type APIRequestContext } from '@playwright/test';
 import { sleep, unreadableCards, type Director } from './lib/director.ts';
 import type { McpClient } from './lib/mcp.ts';
@@ -187,6 +188,24 @@ async function editApp(c: Ctx, next: string, summary?: string) {
   const rows = lineDiff(before, next);
   await c.term.diff('app.js', summary ?? countChanges(rows), rows.map((r) => ({ ...r, s: c.shown(r.s) })));
   await writeFile(file, next);
+}
+
+/** Colours the JavaScript the browser shows as plain text, as a code view would. The text itself is unchanged. */
+async function highlightModule(c: Ctx) {
+  await c.d.page.addScriptTag({ path: fileURLToPath(new URL('./stage/highlight.js', import.meta.url)) }).catch(() => {});
+  const done = await c.d.page
+    .evaluate(() => {
+      const code = (window as any).__wtCode;
+      const pre = document.querySelector('body > pre');
+      if (!code || !pre) return false;
+      const style = document.createElement('style');
+      style.textContent = code.CSS;
+      document.head.append(style);
+      pre.innerHTML = code.highlightLines((pre.textContent ?? '').split('\n')).join('\n');
+      return true;
+    })
+    .catch(() => false);
+  if (!done) c.d.warn('Could not colour the generated module');
 }
 
 function forkJsUrl(c: Ctx) {
@@ -421,6 +440,7 @@ export const actions: Record<string, Action> = {
     await c.d.goto(url, { settle: false });
     await sleep(500);
     c.d.claim(/class VolunteeringActivity\b/.test((await c.d.page.textContent('body').catch(() => '')) ?? ''), 'the fork module has a VolunteeringActivity class');
+    await highlightModule(c);
     await c.d.page.evaluate(() => (window as any).find?.('class VolunteeringActivity')).catch(() => {});
   },
   async 'claude-switches-import'(c) {

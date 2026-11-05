@@ -61,6 +61,78 @@ describe('unreadable app text', () => {
       expect(one(undefined), f).toBeUndefined();
     }
   });
+
+  describe('JavaScript highlighting', () => {
+    const win: any = {};
+    new Function('window', stage('highlight.js'))(win);
+    const tokenize = (src: string) => win.__wtCode.tokenize(src) as [string, string][];
+    /** The class of the first token with this text. */
+    const cls = (src: string, text: string) => tokenize(src).find(([, t]) => t === text)?.[0];
+
+    it('gives back exactly the text it was given, for every file the walkthrough shows', () => {
+      for (const f of ['base/app.js', 'feature/app.js', 'fallback/volunteering.js']) {
+        const src = readFileSync(path.resolve(import.meta.dirname, '../sample-app', f), 'utf8');
+        expect(tokenize(src).map(([, t]) => t).join(''), f).toBe(src);
+        // No keyword is swallowed by a string or comment that ran on too far.
+        for (const [c, t] of tokenize(src)) if (c === 'tk-s' || c === 'tk-c') expect(t, f).not.toMatch(/\n\s*(function|const|export class) /);
+      }
+    });
+
+    it('reads regex literals whole, and tells them from division', () => {
+      // These used to be split up, and a quote inside a regex swallowed the code after it (review r1).
+      expect(cls('const re = /[A-Z]+/g;', '/[A-Z]+/g')).toBe('tk-r');
+      expect(cls('/["]/.test(x); const n = 1;', '/["]/')).toBe('tk-r');
+      expect(cls('/["]/.test(x); const n = 1;', 'const')).toBe('tk-k');
+      expect(cls('return /a\\/b/.test(s)', '/a\\/b/')).toBe('tk-r');
+      expect(cls('if (/[/]/.test(s)) x = 1;', '/[/]/')).toBe('tk-r');
+      expect(tokenize('const half = total / 2 / count;').some(([c]) => c === 'tk-r')).toBe(false);
+    });
+
+    it('ends strings at the right quote, inside template holes too', () => {
+      // An escaped quote in a ${…} hole used to end the string early and swallow the next line (review r1).
+      expect(cls('const s = `${"\\""}`; const n = 1;', 'const')).toBe('tk-k');
+      expect(tokenize('const s = `${"\\""}`; const n = 1;').filter(([c, t]) => c === 'tk-k' && t === 'const')).toHaveLength(2);
+      // A comment or regex in a hole doesn't end the template.
+      expect(cls('const t = `a${ /* ` } */ x }b`; const z = 1;', 'z')).toBe('');
+      expect(cls('const t = `a${ s.replace(/[`}]/g, "") }b`; let z;', 'let')).toBe('tk-k');
+      // Nested templates, with the holes coloured as code.
+      const nested = tokenize('`<p>${age ? `<b>${age}</b>` : ""}</p>`; done();');
+      expect(nested.find(([, t]) => t === 'done')?.[0]).toBe('tk-f');
+      expect(nested.find(([, t]) => t === 'age')?.[0]).toBe('');
+    });
+
+    it('keeps a string going across a backslash-newline', () => {
+      // The continuation used to be read as code (review r1).
+      const src = 'const s = "first \\\nsecond"; const t = 2;';
+      expect(tokenize(src).find(([c]) => c === 'tk-s')?.[1]).toBe('"first \\\nsecond"');
+      expect(cls(src, 'second')).toBeUndefined();
+    });
+
+    it('handles postfix operators, export default, CRLF continuations and calls split across lines', () => {
+      // Each was found in review r2.
+      expect(tokenize('i++ / 2; const s = "/";').some(([c]) => c === 'tk-r')).toBe(false);
+      expect(cls('i++ / 2; const s = "/";', 'const')).toBe('tk-k');
+      expect(cls('x = ++i; y = /a/.test(s);', '/a/')).toBe('tk-r');
+      // A line break before ++ makes it the next statement's prefix operator (review r3).
+      expect(cls('a\n++/re/.lastIndex', '/re/')).toBe('tk-r');
+      expect(cls('export default /["]/;\nconst n = 1;', '/["]/')).toBe('tk-r');
+      expect(cls('export default /["]/;\nconst n = 1;', 'const')).toBe('tk-k');
+      const crlf = 'const s = "first \\\r\nsecond";\r\nconst t = 2;';
+      expect(tokenize(crlf).find(([c]) => c === 'tk-s')?.[1]).toBe('"first \\\r\nsecond"');
+      expect(tokenize(crlf).filter(([c, t]) => c === 'tk-k' && t === 'const')).toHaveLength(2);
+      expect(cls('render\n  ();', 'render')).toBe('tk-f');
+    });
+
+    it('names keywords, classes, calls and properties', () => {
+      const src = 'const a = new VolunteeringActivity(id); a.hoursVolunteered = 2.5; render(); a.save();';
+      expect(cls(src, 'new')).toBe('tk-k');
+      expect(cls(src, 'VolunteeringActivity')).toBe('tk-t');
+      expect(cls(src, 'hoursVolunteered')).toBe('tk-p');
+      expect(cls(src, '2.5')).toBe('tk-n');
+      expect(cls(src, 'render')).toBe('tk-f');
+      expect(cls(src, 'save')).toBe('tk-f');
+    });
+  });
 });
 
 describe.runIf(run)('in a browser', () => {
@@ -285,6 +357,35 @@ describe.runIf(run)('in a browser', () => {
     expect(await page.locator('#msgs').innerText()).not.toContain('log volunteering hours');
     expect(await page.locator('#chip').innerText()).toContain('Concord');
     expect(await page.locator('#url').innerText()).toBe('claude.ai/code/helping-hands');
+  });
+
+  it('colours JavaScript in code and edit cards, without changing the text', async () => {
+    // Jesse (2026-11-05): the JavaScript in the Claude Code scenes had no syntax highlighting.
+    await page.setContent(stage('claude-web.html'));
+    await page.addScriptTag({ content: stage('highlight.js') });
+    const term = (fn: string, ...args: unknown[]) => page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
+    await term('startAgent', { cwdPath: '~/code/helping-hands' });
+    const lines = ['// Logs time', 'const activity = new VolunteeringActivity(id, store, DataFactory);', 'activity.hoursVolunteered = 2;', 'li.innerHTML = `', '  ${age ? `<span class="pill">${age}+</span>` : ""}', '  <p>${one(o.summary)}</p>`;'];
+    await term('diff', 'app.js', 'Added 6 lines', [{ t: 'del', n: 1, s: 'const old = "x";' }, ...lines.map((s, i) => ({ t: 'add', n: i + 1, s }))]);
+    const rows = page.locator('.diff > div');
+    expect(await rows.allInnerTexts()).toEqual(['1- const old = "x";', ...lines.map((s, i) => `${i + 1}+ ${s}`)]);
+    const cls = (row: number, text: string) => rows.nth(row).locator('span[class^="tk-"]', { hasText: text }).first().getAttribute('class');
+    expect(await cls(1, 'Logs time')).toBe('tk-c');
+    expect(await cls(2, 'const')).toBe('tk-k');
+    expect(await cls(2, 'VolunteeringActivity')).toBe('tk-t');
+    expect(await cls(3, 'hoursVolunteered')).toBe('tk-p');
+    expect(await cls(3, '2')).toBe('tk-n');
+    // A template literal that spans lines stays a string on every line; its ${…} holes (and the templates nested in them) are coloured as code.
+    expect(await rows.nth(5).locator('span[class^="tk-"]').first().getAttribute('class')).toBe('tk-s');
+    expect(await cls(5, '<span class="pill">')).toBe('tk-s');
+    expect(await rows.nth(6).locator('span[class^="tk-"]').first().getAttribute('class')).toBe('tk-s');
+    expect(await cls(6, 'one')).toBe('tk-f');
+    // Removed lines stay plain.
+    expect(await rows.nth(0).locator('span[class^="tk-"]').count()).toBe(0);
+    await term('file', 'app.js', 'import { VolunteeringDataset } from "https://hub/def/volunteering.js";');
+    expect(await page.locator('.card pre').last().locator('.tk-k').first().innerText()).toBe('import');
+    await term('file', 'data/activities.ttl', 'ex:a a vol:VolunteeringActivity .');
+    expect(await page.locator('.card pre').last().locator('span').count()).toBe(0);
   });
 
   it('draws Claude Code on the web from the calls the scenes make', async () => {
