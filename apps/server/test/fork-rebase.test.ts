@@ -365,6 +365,13 @@ describe('second review', () => {
       expect(fallback.status).toBe(200);
       expect(fallback.body.validation.reasoner).toBe('structural');
       expect(fallback.body.validation.warnings[0]).toMatch(/structural reasoner only.*took longer than/);
+      // r15: a no-verdict result says "consistent, nothing unsatisfiable", and was taken at its word, so an inconsistent
+      // change went through with only a warning. The structural check has to run on it instead.
+      const revision = (await fork(path)).revision;
+      const bad = await dev.post(`${path}/edits`).send({ ops: [{ op: 'setSuperClasses', iri: `${VOL}Skill`, superClasses: [`${VOL}Cause`] }] });
+      expect(bad.status, JSON.stringify(bad.body)).toBe(422);
+      expect(bad.body.error).toMatch(/inconsistent/);
+      expect((await fork(path)).revision).toBe(revision);
     } finally {
       reasoner.down = false;
     }

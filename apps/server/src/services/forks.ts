@@ -1,4 +1,4 @@
-import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, setMetadata, termDescription, validate, type OntologyGraph } from '@concord/core';
+import { applyChangeOps, canonicalTriples, ChangeOpError, compactIRI, FORMAT_INFO, setMetadata, structuralReasoner, termDescription, validate, type OntologyGraph } from '@concord/core';
 import type { ChangeOp, OutputFormat, ValidationReport } from '@concord/core/types';
 import type {
   ChangeRequest,
@@ -547,7 +547,12 @@ async function requireConsistent(p: OntologyProject, graph: OntologyGraph, what:
     // The fallback structural check misses whole classes of inconsistency (cardinalities, for one).
     if (config.requireFullReasoner)
       throw new HttpError(503, `The OWL reasoner gave no verdict (${report.reasoner.error ?? 'unknown error'}), so ${what.toLowerCase()} can't be checked for consistency. Nothing was changed. If it was busy or timed out, try again shortly.`);
-    brief.warnings.unshift(`Checked with the structural reasoner only: the full OWL reasoner gave no verdict (${report.reasoner.error ?? 'unknown error'}).`);
+    // A no-verdict result claims nothing about consistency (the worker's says "consistent", vacuously), so the
+    // structural check runs here instead and decides.
+    const error = report.reasoner.error;
+    report.reasoner = { ...structuralReasoner(graph), available: false, error };
+    brief.consistent = report.reasoner.consistent && report.reasoner.unsatisfiable.length === 0;
+    brief.warnings.unshift(`Checked with the structural reasoner only: the full OWL reasoner gave no verdict (${error ?? 'unknown error'}).`);
   }
   if (!brief.consistent) {
     const unsat = report.reasoner.unsatisfiable.map((i) => compactIRI(i, graph.prefixes));
