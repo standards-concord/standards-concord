@@ -76,6 +76,8 @@ export default defineConfig({
             CONCORD_DATA_DIR: dataDir,
             WEB_URL: `http://localhost:${WEB_PORT}`,
             DEMO_MODE: 'true',
+            // Public reporting needs its own secret; this one is only for the test server.
+            REPORT_SECRET: 'e2e-only-public-report-secret-0123456789abcdef',
             // Keep the tests deterministic and offline: no real LLM, pods or GitHub.
             LLM_PROVIDER: 'simulated',
             ANTHROPIC_API_KEY: '',

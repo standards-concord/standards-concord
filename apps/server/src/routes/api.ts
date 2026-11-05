@@ -51,8 +51,9 @@ import { fairContext } from '../services/fairResolution.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
+import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
+import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
-import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas } from '../services/users.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -386,6 +387,53 @@ export function apiRouter(): Router {
   });
   r.post('/webhooks/recall', async (req, res) => {
     await meetings.recallWebhook(String(req.query.meeting), String(req.query.secret), req.body);
+    res.json({ ok: true });
+  });
+
+  /* ------------------- reports from the public page ------------------ */
+  // Held for review: only editors, stewards and owners see them, and nothing happens until one of them acts.
+  const moderator = (req: Request) => {
+    const p = project(req);
+    const user = requireUser(req);
+    requireRole(p.id, user, ['editor', 'steward', 'owner'], 'review reports from the public page');
+    return { p, user };
+  };
+  r.get('/ontologies/:id/public-reports', (req, res) => {
+    res.json(listPublicReports(moderator(req).p.id));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/accept', async (req, res) => {
+    const { p, user } = moderator(req);
+    const reportId = String(req.params.reportId);
+    const opened = () => crs.listCRs(p.id).find((c) => c.origin.type === 'public-report' && c.origin.reportId === reportId);
+    const already = opened();
+    if (already) {
+      removePublicReport(reportId);
+      return void res.json(crs.detail(already));
+    }
+    if (!getPublicReport(p.id, reportId)) throw new HttpError(404, 'That report has already been reviewed');
+    const mine = claimPublicReport(p.id, reportId);
+    if (!mine) throw new HttpError(409, 'Someone is opening this report right now');
+    const report = mine.report;
+    let cr;
+    try {
+      cr = await crs.createChangeRequest(p, await publicReporter(), {
+        title: report.title || `Problem with ${report.termName}`,
+        description: `${report.description}\n\nTerm: <${report.termIri}>\n\nReported by a member of the public from the public page (${report.version === 'draft' ? 'working draft' : `version ${report.version}`}) and opened for discussion by ${user.name}. No edits were drafted from it.`,
+        kind: 'bug',
+        origin: { type: 'public-report', termIri: report.termIri, version: report.version, reportId },
+        ops: [],
+        // Saved only if this claim still holds the report, and the report leaves the queue in the same step.
+        atSave: () => convertPublicReport(mine),
+      });
+    } catch (err) {
+      releasePublicReport(mine);
+      throw err;
+    }
+    res.status(201).json(crs.detail(cr));
+  });
+  r.post('/ontologies/:id/public-reports/:reportId/dismiss', (req, res) => {
+    const { p } = moderator(req);
+    dismissPublicReport(p.id, String(req.params.reportId));
     res.json({ ok: true });
   });
 
