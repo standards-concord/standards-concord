@@ -1,4 +1,4 @@
-import { test, expect, expectNoCrash, settle, signIn, demoOntology } from './fixtures';
+import { test, expect, expectNoCrash, settle, signIn, signInAsPersona, demoOntology, uniq } from './fixtures';
 import type { APIRequestContext } from '@playwright/test';
 
 /**
@@ -41,6 +41,36 @@ test.describe('app checks', () => {
     await expect(failed).toContainText('Failed');
     await expect(failed).toContainText('expected 3 locations, got 1');
     await expectNoCrash(page);
+  });
+
+  test('owners and stewards can disconnect anyone’s app; other members can’t', async ({ page }) => {
+    // A reviewer connects an app.
+    await signIn(page, { name: `App owner ${uniq()}`, role: 'reviewer' });
+    const name = `Disconnect me ${uniq()}`;
+    const res = await page.request.post(`/api/ontologies/${demo.id}/apps`, { data: { name } });
+    expect(res.status(), await res.text()).toBe(201);
+    const { token } = (await res.json()) as { token: string };
+
+    // Another member sees it, with no way to disconnect it.
+    await signIn(page, { name: `Another member ${uniq()}`, role: 'reviewer' });
+    await page.goto(`/o/${demo.id}/apps`);
+    await settle(page);
+    await expect(page.getByText(name)).toBeVisible();
+    await expect(page.getByRole('button', { name: `Disconnect ${name}` })).toHaveCount(0);
+
+    // The steward disconnects it, after confirming.
+    await signInAsPersona(page, 'Priya Shah');
+    await page.goto(`/o/${demo.id}/apps`);
+    await settle(page);
+    page.once('dialog', (d) => void d.accept());
+    await page.getByRole('button', { name: `Disconnect ${name}` }).click();
+    await expect(page.getByText(name)).toHaveCount(0);
+    // Its token stops working, and it stays gone.
+    expect((await page.request.get('/api/app-checks/pending', { headers: { Authorization: `Bearer ${token}` } })).status()).toBe(401);
+    await page.reload();
+    await settle(page);
+    await expect(page.getByRole('heading', { name: 'App checks', level: 2 })).toBeVisible();
+    await expect(page.getByText(name)).toHaveCount(0);
   });
 
   test('connect an app, turn on autopilot, and see it approve when CI passes', async ({ page, request }) => {

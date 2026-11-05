@@ -8,11 +8,11 @@ import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 
 openDb();
+// Git is a projection of the database: repair anything a crash left half-done.
+for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 const secrets = migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
-// Git is a projection of the database: repair anything a crash left half-done.
-for (const p of list<OntologyProject>('ontologies')) ontologyStore.ensureSynced(p);
 if (config.demoMode) {
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }

@@ -29,10 +29,11 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/meetings` | Upload or paste a transcript, choose a file, invite the bot, run a simulated call | ✅ | meeting-transcripts; 🔜 #11 (invite by email, prompts in Meet chat) |
 | `/o/:id/meetings/:id` | Transcript, live stream, bot prompts, analysis, turn into use cases and a change request | ✅ | meeting-transcripts |
 | `/o/:id/changes` | Filter by scope and status, new change request, report a bug | ✅ | change-requests, ia |
-| `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure; 🔜 #17 (app checks, autopilot) |
+| `/o/:id/changes/:id` | Changes/Checks/Discussion tabs, triples view, approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, governance-flow, ia, disclosure, app-checks (Checks tab results, autopilot's say in Discussion) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
 | `/o/:id/releases/:id` | Notes, included changes, publish; approval details | ✅ | governance-flow, ia, public-page |
-| `/o/:id/governance` | Summary, edit and save the policy, templates, members and roles, transfer ownership | ✅ | governance-flow, ia |
+| `/o/:id/apps` | Connect an app (name, repo), copy its token and workflow, turn on autopilot, refresh results, disconnect (owners and stewards); empty state; phone layout | ✅ | app-checks |
+| `/o/:id/governance` | Summary, edit and save the policy, templates, members and roles, transfer ownership, the autopilot switch | ✅ | governance-flow, ia, app-checks |
 | `/o/:id/agents` | Agent reports, analysis collapsed | ✅ | agents, connect |
 | `*` | Not found | ✅ | app |
 
@@ -93,7 +94,6 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #9 | Class diagram, better graph, accessible tree, richer class pages | browse.spec.ts |
 | #11 | Meet bot by invite email, prompts in Meet chat | meetings.spec.ts |
 | #15 | Use case sharing modes, anonymised versions, per-release requirements | use-cases.spec.ts |
-| #17 | App checks against proposed changes, autopilot votes | app-checks.spec.ts |
 | #18 | SHACL compact syntax and JavaScript classes at the ontology URI | classes.spec.ts |
 | #19 | Development forks | forks.spec.ts |
 | #28 | Inline term editing in Browse | term-edit.spec.ts |
