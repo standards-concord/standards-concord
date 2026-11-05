@@ -28,7 +28,7 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
   const infos = report.lint.filter((i) => i.severity === 'info').length;
   const r = report.reasoner;
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" role="group" aria-label="Health summary">
       <SummaryTile ok={report.passed} warn={report.passed && !r.available} title={validationVerdict(report)} sub="Overall validation" />
       <SummaryTile
         ok={checkedOf(r) === 'complete' && r.consistent && !r.unsatisfiable.length}

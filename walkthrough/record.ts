@@ -1,9 +1,10 @@
 /**
- * Records the narrated Concord videos: the platform tour (narration.md) and, for alpha
- * testers, how to take part and give feedback (feedback.md).
+ * Records the narrated Concord videos: the platform tour (narration.md), for alpha
+ * testers how to take part and give feedback (feedback.md), and a closer look at the
+ * features the tour skips (features.md).
  *
- *   pnpm walkthrough                       voice from the environment, records both videos
- *   pnpm walkthrough --video feedback      just one of them (tour or feedback)
+ *   pnpm walkthrough                       voice from the environment, records all three videos
+ *   pnpm walkthrough --video feedback      just some of them (tour, feedback, features; comma-separated)
  *   pnpm walkthrough --voice elevenlabs    pick a voice provider (asks for the key if unset)
  *   pnpm walkthrough --draft               silent narration (captions only), fast
  *   pnpm walkthrough --only intro,goals    just some scenes
@@ -13,7 +14,7 @@
  *                                          requests, and it fails rather than produce a flawed video
  *   pnpm walkthrough --help
  *
- * Output goes to walkthrough/out/, per video (concord-walkthrough, concord-feedback):
+ * Output goes to walkthrough/out/, per video (concord-walkthrough, concord-feedback, concord-features):
  * <name>.mp4 (1080p, AAC, soft captions), .vtt captions, .transcript.md, .chapters.txt
  * (YouTube-style) and .report.json.
  */
@@ -32,7 +33,11 @@ import { cuesFor, fillMinutes, parseNarration, plain, selectScenes, speechMap, w
 import { fill, startConcord, startStatic } from './lib/servers.ts';
 import { Terminal } from './lib/terminal.ts';
 import { askHidden, autoProvider, DEFAULTS, needsKey, Voice, type ProviderName } from './lib/tts.ts';
+import { featureActions } from './features.ts';
 import { actions, type Ctx } from './scenes.ts';
+
+// The features video's actions (features.ts) sit beside the tour's and the feedback video's.
+Object.assign(actions, featureActions);
 import { vendorModule } from './lib/vendor.ts';
 import { serveFonts } from './lib/fonts.ts';
 import { startEgressProxy, type Egress } from './lib/egress.ts';
@@ -105,14 +110,18 @@ const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).p
 const VIDEOS: Record<string, { script: string; name: string }> = {
   tour: { script: 'narration.md', name: 'concord-walkthrough' },
   feedback: { script: 'feedback.md', name: 'concord-feedback' },
+  features: { script: 'features.md', name: 'concord-features' },
 };
 
 /** Which video(s) to make: --narration names a script directly; --only picks the video that has those scenes. */
 async function pickVideos(): Promise<string[]> {
   if (argv.narration) return ['custom'];
   if (argv.video !== 'all') {
-    if (!VIDEOS[argv.video!]) throw new Error(`Unknown video "${argv.video}". Use ${Object.keys(VIDEOS).join(', ')} or all.`);
-    return [argv.video!];
+    const asked = argv.video!.split(',').map((v) => v.trim()).filter(Boolean);
+    const unknown = asked.filter((v) => !VIDEOS[v]);
+    if (unknown.length || !asked.length) throw new Error(`Unknown video "${unknown.join(', ') || argv.video}". Use ${Object.keys(VIDEOS).join(', ')} (comma-separated) or all.`);
+    // Always in the recording order, so the feedback video can show the tour just recorded.
+    return Object.keys(VIDEOS).filter((v) => asked.includes(v));
   }
   if (!argv.only) return Object.keys(VIDEOS);
   const ids = argv.only.split(',');
@@ -231,6 +240,9 @@ async function main() {
     await mcp.connect();
 
     const features = await detectFeatures(hub, mcp, ontology.id);
+    // A hub we started ourselves has its git repositories on this machine, so the video can show them.
+    const asked = (argv.features ?? 'auto').split(',');
+    if (concord && asked.includes('auto') && !asked.includes('-gitRepo')) features.add('gitRepo');
     log(`Platform features: ${[...features].join(', ') || 'none of the optional ones'}`);
     // For drafts only: let the app scenes run on a stand-in for the generated classes,
     // clearly labelled on screen. Published videos (--no-shims) skip those scenes instead.
@@ -316,6 +328,7 @@ async function main() {
       features,
       app: { url: `${stat.url}/`, dir: appDir, sampleDir: path.join(HERE, 'sample-app'), classes: mainClasses },
       shown,
+      dataDir: concord?.dataDir,
       state: { token },
       notices: { classesStandIn, publishing: !!argv.publish },
     };
@@ -457,6 +470,8 @@ function presentation({ local, shown }: { local: string[]; shown: string }) {
     view.dispatch({ changes: { from: 0, to: doc.length, insert: swap(doc) } });
   };
   const fix = (root: Node) => {
+    // A page showing real command output (features.ts) opts out: it must show the address it really asked.
+    if ((window as any).__wtRealOutput) return;
     const el = root instanceof Element ? root : root.parentElement;
     const inEditor = el?.closest('.cm-content');
     if (inEditor) return editor(inEditor);

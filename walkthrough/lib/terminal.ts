@@ -30,8 +30,11 @@ export class Terminal {
     await this.d.page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
   }
 
-  /** Opens the terminal page and redraws the session so far. */
-  async open() {
+  /**
+   * Opens the terminal page and redraws the session so far. `disclosure` is the caption
+   * that says how what's on screen was made (the scripted agent session by default).
+   */
+  async open(disclosure = SCRIPTED) {
     await this.d.goto(this.url, { settle: false });
     await this.d.page.waitForFunction(() => !!(window as any).term);
     for (const op of this.history) {
@@ -43,7 +46,7 @@ export class Terminal {
     // Keyboard only in the terminal: hide the pointer.
     await this.d.page.evaluate(() => (window as any).__wt?.cursorVisible(false));
     // Viewers of the video alone never see the README, so say it on screen.
-    await this.d.label(SCRIPTED);
+    await this.d.label(disclosure);
   }
 
   title(t: string) {
