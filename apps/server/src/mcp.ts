@@ -17,6 +17,7 @@ import { findProject } from './services/ontologies.js';
 import { ontologyStore } from './services/ontologyStore.js';
 import { crForViewer } from './services/useCases.js';
 import { authenticateMcp, publicOrigin, refuseUnknownOrigin, resourceMetadataUrlFor } from './oauth.js';
+import { FORK_INSTRUCTIONS, registerForkTools } from './mcpForks.js';
 
 /**
  * MCP connector for coding agents (Claude Code, Codex, Cursor…).
@@ -47,7 +48,8 @@ function buildServer(user: User, agentName: string) {
     { name: 'concord', version: '0.1.0' },
     {
       instructions:
-        'Concord hosts the Open Data Institute ontologies (strict OWL 2). Use list_ontologies and search_terms before inventing your own terms. When the ontology lacks something you need, or a term does not fit your data, call report_gap: you get an answer straight away (use these existing terms / define a local extension / a change request was opened), and the community decides on any change.',
+        'Concord hosts the Open Data Institute ontologies (strict OWL 2). Use list_ontologies and search_terms before inventing your own terms. When the ontology lacks something you need, or a term does not fit your data, call report_gap: you get an answer straight away (use these existing terms / define a local extension / a change request was opened), and the community decides on any change. ' +
+        FORK_INSTRUCTIONS,
     },
   );
   const ontologyArg = z.string().describe('Ontology slug, prefix or IRI, from list_ontologies');
@@ -214,6 +216,8 @@ function buildServer(user: User, agentName: string) {
       }
     },
   );
+
+  registerForkTools(server, user, resolve);
 
   return server;
 }

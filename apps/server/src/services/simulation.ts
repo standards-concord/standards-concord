@@ -17,6 +17,7 @@ import { baselineRevision, createApp as createConnectedApp, finishFollowUps, rep
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasRespondedThisRound, hasVotedOnTheseEdits, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
+import { createFork, editFork } from './forks.js';
 import { ontologyStore } from './ontologyStore.js';
 import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
@@ -188,6 +189,22 @@ async function seedHistory() {
     summary: 'No way to express that a session recurs weekly',
     details: 'Building the CharityBase export, shifts are stored as recurring sessions with an iCalendar RRULE (e.g. FREQ=WEEKLY;BYDAY=SA). The ontology has startDateTime and endDateTime on Session but nothing for recurrence, so the export would have to emit every occurrence.',
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
+  });
+  // That gap doesn't block the CharityBase export: Gareth forks the standard and carries on building.
+  const fork = await createFork(project, gareth, { name: 'CharityBase recurring shifts', purpose: 'Exporting recurring shifts from CharityBase without listing every occurrence.' });
+  await editFork(fork, gareth, {
+    message: 'Add a recurrence rule for sessions',
+    ops: [
+      {
+        op: 'addDatatypeProperty',
+        localName: 'recurrenceRule',
+        label: 'recurrence rule',
+        definition: 'An iCalendar (RFC 5545) recurrence rule giving the pattern on which a session repeats, such as every Saturday morning.',
+        domain: [`${VOL}Session`],
+        range: [XSD.string],
+        examples: ['FREQ=WEEKLY;BYDAY=SA'],
+      },
+    ],
   });
 
   await seedTraceability(project, { priya, aisha, mei, gareth }, shifts.id);

@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.28.0',
+    version: '0.29.0',
     date: '2026-11-05',
     title: 'App checks and autopilot',
     pr: 17,
@@ -77,6 +77,24 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'member', 'steward'],
         to: '{o}/apps',
         ask: 'Would you trust autopilot to approve or vote for you when your app passes? What would you want to see first?',
+      },
+    ],
+  },
+  {
+    version: '0.28.0',
+    date: '2026-11-05',
+    title: 'Forks you can build against today',
+    pr: 19,
+    changes: [
+      {
+        id: 'development-forks',
+        type: 'feat',
+        title: 'Fork an ontology and use your new terms straight away',
+        detail:
+          'Make a personal fork, add the terms your application needs and import it from its own URL in any format (Turtle, JSON-LD, JavaScript classes, an npm package and more) while the terms go through review. Propose the fork upstream in one step; Concord tells you when everything has landed and which URL to switch to. Coding agents can do all of this over MCP.',
+        roles: ['contributor', 'agent'],
+        to: '{o}/forks',
+        ask: 'Would a fork like this let you keep building while a term is reviewed? What would stop you using it?',
       },
     ],
   },

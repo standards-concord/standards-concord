@@ -18,7 +18,7 @@ const data = new VolunteeringDataset(store, DataFactory);
 const me = namedNode("https://helping-hands.example/sam");
 
 // A property may hold one value or a set of them, depending on the standard.
-const one = (v) => (v instanceof Set ? [...v][0] : v);
+const one = (v) => (v && typeof v === "object" && typeof v[Symbol.iterator] === "function" ? [...v][0] : v);
 const sameAs = (a, b) => a && b && a.value === b.value;
 
 /** Hours given to an opportunity, optionally by one volunteer. */

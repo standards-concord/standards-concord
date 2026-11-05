@@ -34,7 +34,7 @@ export default defineConfig({
       // MCP and its OAuth endpoints keep the dev server's Host, so the URLs they advertise point back here.
       '/mcp': { target },
       '^/(\\.well-known/|authorize|token|register|revoke)': { target },
-      // Public ontology pages; the regex keeps app routes such as /definitions out.
+      // Public ontology pages and fork documents; the regex keeps app routes such as /definitions out.
       '^/def/': { target, changeOrigin: false },
     },
   },

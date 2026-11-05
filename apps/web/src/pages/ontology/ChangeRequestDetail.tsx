@@ -419,6 +419,11 @@ export function ChangeRequestPage() {
               view meeting
             </Link>
           )}
+          {cr.origin.type === 'fork' && (
+            <Link className="text-accent hover:underline" to={`/o/${id}/forks/${cr.origin.forkSlug}`}>
+              view fork
+            </Link>
+          )}
           {cr.origin.type === 'term-edit' && (
             <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.termIri)}`}>
               view term

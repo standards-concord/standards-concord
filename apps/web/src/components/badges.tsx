@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
-import { Bot, Bug, CircleCheck, CircleAlert, Combine, FileText, GitMerge, Globe, IdCard, MessageSquareText, Pencil, Users, type LucideIcon } from 'lucide-react';
+import { Bot, Bug, CircleCheck, CircleAlert, Combine, FileText, GitFork, GitMerge, Globe, IdCard, MessageSquareText, Pencil, Users, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
 import { pct, roleLabel } from '../lib/format';
 import { PenLine } from 'lucide-react';
@@ -66,6 +66,8 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
       return { icon: Globe, label: 'Reported from the public page' };
     case 'synthesis':
       return { icon: Combine, label: 'Synthesised from use cases' };
+    case 'fork':
+      return { icon: GitFork, label: `From the fork ${origin.forkSlug}` };
     default:
       return { icon: Pencil, label: 'Proposed directly' };
   }

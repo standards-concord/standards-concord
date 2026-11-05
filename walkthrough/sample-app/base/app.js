@@ -11,7 +11,7 @@ store.addQuads(new Parser().parse(await (await fetch("data/opportunities.ttl")).
 const data = new VolunteeringDataset(store, DataFactory);
 
 // A property may hold one value or a set of them, depending on the standard.
-const one = (v) => (v instanceof Set ? [...v][0] : v);
+const one = (v) => (v && typeof v === "object" && typeof v[Symbol.iterator] === "function" ? [...v][0] : v);
 
 function card(opportunity) {
   const li = document.createElement("li");

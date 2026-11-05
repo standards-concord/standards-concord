@@ -59,7 +59,7 @@ const EXTRA_INFO: Record<'dts' | 'npm', { label: string; mediaType: string; exte
  * package are by extension only). HTML is first, so a bare Accept or *\/* gets
  * the page.
  */
-const NEGOTIABLE: Record<string, PublicFormat> = {
+export const NEGOTIABLE: Record<string, PublicFormat> = {
   'text/html': 'html',
   'text/turtle': 'turtle',
   'application/ld+json': 'jsonld',
@@ -163,7 +163,7 @@ export function acceptMatch(header: string | undefined, type: string, params: Re
   return best ? { q: best.q, position: best.position } : { q: 0, position: Infinity };
 }
 
-function splitExtension(segment: string): { base: string; format?: PublicFormat } {
+export function splitExtension(segment: string): { base: string; format?: PublicFormat } {
   for (const [ext, format] of EXTENSIONS) if (segment.endsWith(`.${ext}`) && segment.length > ext.length + 1) return { base: segment.slice(0, -ext.length - 1), format };
   return { base: segment };
 }
