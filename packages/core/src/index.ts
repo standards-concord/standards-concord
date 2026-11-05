@@ -10,6 +10,7 @@ export { serialize, FORMAT_INFO } from './serialize.js';
 
 // Changes
 export { applyChangeOps, ChangeOpError, sameAnnotationValue } from './changes.js';
+export { generatedProvenanceTitles, rewriteLiterals, scrubGeneratedProvenance } from './remediate.js';
 export type { ChangeContext, ApplyResult } from './changes.js';
 export { diffOntologies } from './diff.js';
 export { classifyChange, CLASSIFICATION_RULES, withDeclaredLevel } from './classify.js';
@@ -33,6 +34,10 @@ export type { CompetencyQuestion, ValidateOptions } from './cq.js';
 export { toLinkML, fromLinkML } from './linkml.js';
 export { toManchester } from './manchester.js';
 export { toShacl } from './shacl.js';
+
+// Validating instance data
+export { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, MAX_DATA_CHARS, MAX_IRI_LENGTH, ShapesValidator, checkTerms, classHierarchy, dataFormatForFile, dataFormatForMediaType, parseData, sniffDataFormat } from './validation.js';
+export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, TermIssue, ValidatedReport } from './validation.js';
 
 // Helpers
 export { compactIRI, expandIRI, localName, isValidLocalName, XSD, NS } from './ns.js';

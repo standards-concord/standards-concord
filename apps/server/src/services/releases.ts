@@ -1,3 +1,4 @@
+import { needsPublicationApproval } from './changeRequests.js';
 import {
   bumpVersion,
   diffOntologies,
@@ -10,8 +11,9 @@ import type { ChangeLevel, OutputFormat } from '@concord/core/types';
 import type { ChangeRequest, OntologyProject, Release, ReleaseDetail, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { HttpError, list, mustGet, put, transaction } from '../db.js';
+import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
+import { anyHeld, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { markReleased } from './changeRequests.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
@@ -82,11 +84,20 @@ export function releaseDetail(r: Release): ReleaseDetail {
   };
 }
 
+/**
+ * Release notes are published. A request drafted from use cases appears in
+ * them only as an editor approved it (the title and edit list they approved,
+ * byte for byte); one merged without that approval, before it existed,
+ * appears without its title or edits. Nothing is rewritten.
+ */
+const published = (c: ChangeRequest, text: string) => (!needsPublicationApproval(c) ? text : (c.privacyCleared?.title ?? 'Changes from use cases'));
+const publishedEdits = (c: ChangeRequest) => (!needsPublicationApproval(c) ? (c.kgcl ?? []) : (c.privacyCleared?.kgcl ?? []));
+
 /** Release notes grouped by level, from the merged change requests. */
 function draftNotes(project: OntologyProject, crs: ChangeRequest[], level: ChangeLevel, version: string) {
   const by = (l: ChangeLevel) => crs.filter((c) => (c.classification?.level ?? 'minor') === l);
   const section = (title: string, items: ChangeRequest[]) =>
-    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${c.title}${c.kgcl?.length ? `\n${c.kgcl.slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
+    items.length ? `### ${title}\n\n${items.map((c) => `- #${c.number} ${published(c, c.title)}${publishedEdits(c).length ? `\n${publishedEdits(c).slice(0, 6).map((k) => `  - \`${k}\``).join('\n')}` : ''}`).join('\n')}\n` : '';
   const header =
     level === 'major'
       ? `**Breaking release.** ${version} is not backward compatible with ${project.currentVersion}. Existing data may need migrating; a SPARQL migration script is included as \`migration.rq\`.`
@@ -127,6 +138,8 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   r.version = bumpVersion(project.currentVersion, r.level);
   r.versionIRI = versionIRI(project, r.version);
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
+  // Notes a steward wrote are theirs to publish; drafted ones are rebuilt as the release is published.
+  r.notesBy = notes !== undefined && actor ? actor.id : undefined;
   if (existing) save(r);
   else create(r);
   if (!existing) {
@@ -230,6 +243,9 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
       console.warn(`[release] migration script: ${(err as Error).message}`);
     }
   }
+  // Drafted notes are rebuilt now, from what editors approved (a draft made before approval existed
+  // never reaches the page); notes a steward wrote are published as they wrote them.
+  if (!r.notesBy) r.notes = draftNotes(project, r.changeRequestIds.map((id) => mustGet<ChangeRequest>('changeRequests', id)), r.level, r.version);
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${r.notes}\n`;
   // The use case snapshot always goes in, so the release never shows live data;
   // a rendering failure only costs the stored page (served pages render on request).
@@ -241,21 +257,26 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     console.warn(`[release] public page: ${(err as Error).message}`);
   }
 
-  const author = actor ?? getUser(r.createdBy);
   assertStillHeld(project);
   const publishedAt = clock.iso();
+  const publishedNotes = r.notes;
   // The release commit, the release's record, its requests' statuses and the
   // ontology's current version are written in one transaction, only if the
-  // draft is still the one released and the release is still unpublished
-  // (see ontologyStore.advanceTo). The tag follows from the database.
-  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: author?.name ?? 'Concord' }, base, (commit) => {
+  // draft is still the one released (so nothing merged meanwhile is
+  // overwritten) and the release is still unpublished (see
+  // ontologyStore.advanceTo). The tag follows from the database. Published
+  // commits carry no names.
+  await ontologyStore.writeRelease(project, r.version, stamped, files, r.notes, { name: 'Concord' }, base, (commit) => {
     // Still exactly the release these files were made from, and still approved (a vote may have changed meanwhile).
     const latest = mustGet<Release>('releases', r.id);
     if (latest.status === 'published') throw new HttpError(409, `${r.version} has already been published`);
     if (releaseSnapshot(latest) !== snapshot) throw new HttpError(409, 'The release changed while it was being published, so it was not published. Try again.');
     const now = publishable(latest);
     if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
-    Object.assign(r, latest, { commit, status: 'published', publishedAt, statusSince: publishedAt });
+    // Made from a working draft still waiting for approval: it waits too. The draft is the one this
+    // release was made from (advanceTo checks), so whether it's held now is whether this release is.
+    holdReleaseIfDraftHeld(project, r.version);
+    Object.assign(r, latest, { notes: publishedNotes, commit, status: 'published', publishedAt, statusSince: publishedAt });
     save(r);
     for (const id of r.changeRequestIds) markReleased(id, r.id, r.version, publishedAt);
     const p = getProject(r.ontologyId);
@@ -266,7 +287,11 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   Object.assign(project, getProject(r.ontologyId));
 
   // Public ontologies are persisted to GitHub on release, when configured.
-  if (project.github && config.github.publishToken) {
+  // Pushing sends main and every tag, so its whole history. Nothing leaves Concord while a version is waiting for
+  // approval, and an ontology from before approvals is never pushed: its history holds what nobody approved.
+  if (project.github && config.github.publishToken && (anyHeld(project) || !historyApproved(project))) {
+    console.log(`[release] not pushing ${project.slug} to GitHub: ${anyHeld(project) ? 'a version is waiting for a steward’s approval' : 'its history predates publication approval'}`);
+  } else if (project.github && config.github.publishToken) {
     try {
       const remote = `https://x-access-token:${config.github.publishToken}@github.com/${project.github.repo}.git`;
       ontologyStore.push(project, remote);

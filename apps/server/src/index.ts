@@ -2,8 +2,10 @@ import { createApp } from './app.js';
 import { config } from './config.js';
 import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
+import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
 import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
+import { processOutstanding } from './services/feedbackIssues.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 
@@ -39,3 +41,15 @@ setInterval(() => {
   runTick().catch((err) => console.warn('[tick]', (err as Error).message));
 }, 60_000).unref();
 void runTick();
+
+// The co-lead bot's calendar: pick up invites to its address, book bots before calls start.
+setInterval(() => {
+  meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+}, 60_000).unref();
+void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+
+// Public feedback summaries that couldn't be posted straight away (GitHub down, hourly cap, rate limit) are retried.
+setInterval(() => {
+  processOutstanding().catch((err) => console.warn('[feedback]', (err as Error).message));
+}, 60_000).unref();
+void processOutstanding().catch(() => undefined);

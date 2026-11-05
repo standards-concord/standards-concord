@@ -15,6 +15,7 @@ LOCATION=${LOCATION:-uksouth}
 VM_SIZE=${VM_SIZE:-Standard_B2ats_v2}
 IMAGE=${IMAGE:-ghcr.io/standards-concord/standards-concord:latest}
 ADMIN_EMAILS=${ADMIN_EMAILS:-}
+ADMIN_WEBIDS=${ADMIN_WEBIDS:-}
 VM=concord
 
 echo "Subscription: $(az account show --query name -o tsv)"
@@ -32,7 +33,7 @@ az network nsg rule create -g "$RESOURCE_GROUP" --nsg-name concord-nsg -n web --
 if ! az vm show -g "$RESOURCE_GROUP" -n "$VM" -o none 2>/dev/null; then
   custom=$(mktemp)
   sed -e "s|__HOST__|$host|" -e "s|__IMAGE__|$IMAGE|" -e "s|__PUBLIC_URL__|$PUBLIC_URL|" \
-    -e "s|__ADMIN_EMAILS__|$ADMIN_EMAILS|" "$here/cloud-init.sh" > "$custom"
+    -e "s|__ADMIN_EMAILS__|$ADMIN_EMAILS|" -e "s|__ADMIN_WEBIDS__|$ADMIN_WEBIDS|" "$here/cloud-init.sh" > "$custom"
   # No SSH port is opened; use `az vm run-command` (see docs/deploy.md) for shell access.
   az vm create -g "$RESOURCE_GROUP" -n "$VM" --size "$VM_SIZE" \
     --image Canonical:ubuntu-24_04-lts:server:latest \

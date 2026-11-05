@@ -5,6 +5,7 @@ import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_CSS, PAGE_SCRIPT } from './assets.js';
 import { fragment, pageIds, termAnchors } from './anchors.js';
+import { memberReportUrl, reportChoices } from './reportForm.js';
 
 /**
  * The public page for one version of an ontology: what people see when they
@@ -66,7 +67,8 @@ export interface OntologyPageInput {
   };
   /** Absolute URL of this page. */
   pageUrl: string;
-  links: { latest: string; draft: string; app?: string; versionBase: string };
+  /** report: the public report form for this ontology; site: the app's origin (for member sign-in). */
+  links: { latest: string; draft: string; app?: string; versionBase: string; report?: string; site?: string };
   requirements: PublishedRequirements;
   persistentId?: { service: string; file: string; rules: string };
   generatedAt: string;
@@ -119,7 +121,10 @@ const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
  * pages already written to disk: refreshReleasePages regenerates any page
  * that doesn't carry the current value.
  */
-export const PAGE_GENERATOR = 'Concord public page 2';
+export const PAGE_GENERATOR = 'Concord public page 4';
+
+const BUG_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
+const COPY_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 
 export function renderOntologyPage(input: OntologyPageInput): string {
   const { view, project } = input;
@@ -179,7 +184,6 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     const mappings = Object.entries(t.mappings ?? {}).map(([p, iris]) => row(MAPPING_LABEL[localName(p)] ?? compact(p), refs(iris)));
     return [
       row('Also known as', t.altLabels?.length ? t.altLabels.map(esc).join(', ') : ''),
-      row('Comment', t.comment && t.comment !== t.definition ? esc(t.comment) : ''),
       row('Example', list((t.examples ?? []).map((e) => `<span class="example">${esc(e)}</span>`))),
       ...mappings,
       row('Source', list((t.source ?? []).map((s) => (isIri(s) && safeHref(s) ? `<a href="${esc(s)}" rel="noreferrer">${esc(s)}</a>` : esc(s))))),
@@ -189,7 +193,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
 
   const classRows = (c: ClassView) =>
     [
-      row('Subclass of', list([...c.superClasses.map(ref), ...(c.superClassExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)])),
+      row('Subclass of', list([...c.superClasses.map(ref), ...(c.superClassExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">owl:Thing (top level)</span>'),
       row('Equivalent to', list([...c.equivalentClasses.map(ref), ...(c.equivalentExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)])),
       row('Restrictions', list(c.restrictions.map(restriction))),
       row('Disjoint with', refs(c.disjointWith)),
@@ -201,8 +205,8 @@ export function renderOntologyPage(input: OntologyPageInput): string {
 
   const propertyRows = (p: PropertyView) =>
     [
-      row('Domain', list([...p.domain.map(ref), ...(p.domainExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)])),
-      row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)])),
+      row('Domain', list([...p.domain.map(ref), ...(p.domainExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
+      row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
       row('Subproperty of', refs(p.superProperties)),
       row('Superproperty of', refs(byName(subProperties.get(p.iri)))),
       row('Inverse of', p.inverseOf ? ref(p.inverseOf) : ''),
@@ -210,20 +214,27 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     ].join('');
 
   const individualRows = (i: IndividualView) =>
-    [row('Type', refs(i.types)), ...Object.entries(i.facts).map(([p, vals]) => row(index.get(p)?.name ?? compact(p), vals.map(value).join(', ')))].join('');
+    [row('Instance of', refs(i.types)), ...Object.entries(i.facts).map(([p, vals]) => row(index.get(p)?.name ?? compact(p), vals.map(value).join(', ')))].join('');
 
+  const reportHref = (t: TermView) =>
+    input.links.report ? `${input.links.report}?term=${encodeURIComponent(t.iri)}&version=${encodeURIComponent(input.kind === 'draft' ? 'draft' : input.version)}` : undefined;
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
     const rows =
       t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : propertyRows(t as PropertyView);
+    const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
-    <h4><a class="permalink" href="#${esc(fragment(anchor))}" aria-label="Link to ${esc(name)}">#</a>${esc(name)}</h4>
-    <span class="kind kind-${t.kind}">${KIND_LABEL[t.kind]}</span>${t.deprecated ? '<span class="kind kind-deprecated">Deprecated</span>' : ''}
+    <div class="term-title">
+      <h3><a class="permalink" href="#${esc(fragment(anchor))}" aria-label="Link to ${esc(name)}">#</a>${esc(name)}</h3>
+      <span class="kind kind-${t.kind}">${KIND_LABEL[t.kind]}</span>${t.deprecated ? '<span class="kind kind-deprecated">Deprecated</span>' : ''}
+    </div>
+    ${report ? `<a class="btn btn-ghost report-link" href="${esc(report)}" data-report data-term-iri="${esc(t.iri)}" data-term-name="${esc(name)}" data-member-href="${esc(memberReportUrl(input.links.site ?? '', project.slug, t.iri))}" rel="nofollow">${BUG_ICON}Report a problem with this term</a>` : ''}
   </header>
-  <p class="iri"><code>${esc(t.iri)}</code></p>
+  <p class="iri"><code title="${esc(t.iri)}">${esc(compact(t.iri))}</code><button class="btn btn-ghost btn-icon copy" type="button" data-copy="${esc(t.iri)}" aria-label="Copy IRI" title="Copy IRI">${COPY_ICON}</button></p>
   ${t.deprecated ? `<p class="notice warn">This term is deprecated${t.replacedBy ? `. Use ${ref(t.replacedBy)} instead` : ''}.</p>` : ''}
-  ${t.definition ? `<p class="definition">${esc(t.definition)}</p>` : t.comment ? `<p class="definition">${esc(t.comment)}</p>` : '<p class="definition muted">No definition yet.</p>'}
+  ${t.definition ? `<p class="definition">${esc(t.definition)}</p>` : '<p class="definition warn-text">No definition yet. Strict OWL practice expects a genus–differentia definition.</p>'}
+  ${t.comment && t.comment !== t.definition ? `<p class="comment muted">${esc(t.comment)}</p>` : ''}
   ${rows || annotationRows(t) ? `<dl class="facts">${rows}${annotationRows(t)}</dl>` : ''}
 </article>`;
   };
@@ -231,13 +242,30 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   /* ------------------------- class hierarchy ------------------------- */
   const localClass = (iri: string) => index.get(iri)?.term.kind === 'class';
   const roots = view.classes.filter((c) => !c.superClasses.some(localClass));
-  const tree = (iris: string[], seen: Set<string>): string =>
+  // Classes the tree can't reach (a cycle with no root, say) are listed on their own, so every class can be found.
+  const reached = new Set<string>();
+  const reach = (iri: string) => {
+    if (reached.has(iri)) return;
+    reached.add(iri);
+    for (const k of (subClasses.get(iri) ?? []).filter(localClass)) reach(k);
+  };
+  roots.forEach((r) => reach(r.iri));
+  const unreached = view.classes.filter((c) => !reached.has(c.iri));
+  const searchText = (t: TermView) => `${nameOf(t)} ${localName(t.iri)} ${(t.altLabels ?? []).join(' ')} ${t.definition ?? ''}`.toLowerCase();
+  const navLink = (iri: string) => {
+    const { term, anchor, name } = index.get(iri)!;
+    return `<a class="nav-item${term.deprecated ? ' deprecated' : ''}" href="#${esc(fragment(anchor))}">${esc(name)}</a>`;
+  };
+  // The class tree, as in Browse: open two levels deep, the rest a click away.
+  const tree = (iris: string[], seen: Set<string>, depth: number): string =>
     iris.length
       ? `<ul>${byName(iris)
           .map((iri) => {
             if (seen.has(iri)) return '';
-            const kids = (subClasses.get(iri) ?? []).filter(localClass);
-            return `<li>${ref(iri)}${tree(kids, new Set([...seen, iri]))}</li>`;
+            const kids = seen.has(iri) ? [] : (subClasses.get(iri) ?? []).filter(localClass);
+            const data = ` data-term="${esc(searchText(index.get(iri)!.term))}"`;
+            if (!kids.length) return `<li${data}><span class="node leaf">${navLink(iri)}</span></li>`;
+            return `<li${data}><details${depth < 2 ? ' open' : ''}><summary class="node">${navLink(iri)}<span class="n">${kids.length}</span></summary>${tree(kids, new Set([...seen, iri]), depth + 1)}</details></li>`;
           })
           .join('')}</ul>`
       : '';
@@ -306,56 +334,49 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   ];
 
   const nonEmpty = groups.filter((g) => g.terms.length);
+  const navGroups = nonEmpty
+    .filter((g) => g.title !== 'Classes')
+    .map(
+      (g) =>
+        `<details class="nav-group" open><summary>${esc(g.title)} <span class="count">${g.terms.length}</span></summary><ul>${g.terms.map((t) => `<li data-term="${esc(searchText(t))}">${navLink(t.iri)}</li>`).join('')}</ul></details>`,
+    )
+    .join('');
+  const reportDialog = input.links.report
+    ? `<dialog class="report-dialog" id="${id('report-dialog')}" aria-labelledby="${id('report-dialog-title')}">
+  <div class="dialog-head"><h2 id="${id('report-dialog-title')}">Report a problem with “<span data-report-name></span>”</h2><button class="btn btn-ghost btn-icon" type="button" data-close aria-label="Close">×</button></div>
+  <div data-report-body>${reportChoices({ action: input.links.report, iri: '', version: input.kind === 'draft' ? 'draft' : input.version, memberUrl: input.links.app ?? '#', id })}</div>
+  <div data-report-done hidden><h3 tabindex="-1" data-report-done-title>Thanks for your report</h3><p>Someone from the working group will review it.</p><p class="muted">Reference: <code data-report-ref></code></p><p><button class="btn" type="button" data-close>Close</button></p></div>
+</dialog>`
+    : '';
   const spec = `
-<div class="spec">
-  <nav class="toc" aria-label="Contents">
-    <p class="toc-title">Contents</p>
-    <ol>
-      <li><a href="#${id('sec-abstract')}">Abstract</a></li>
-      <li><a href="#${id('sec-overview')}">At a glance</a></li>
-      <li><a href="#${id('sec-index')}">Term index</a></li>
-      ${nonEmpty.map((g) => `<li><a href="#${g.id}">${esc(g.title)}</a> <span class="count">${g.terms.length}</span></li>`).join('')}
-      <li><a href="#${id('sec-namespaces')}">Namespaces</a></li>
-    </ol>
-  </nav>
-  <div class="spec-body">
-    <section id="${id('sec-abstract')}" class="block">
-      <h2>Abstract</h2>
+<div class="browse">
+  <aside class="browse-nav card" aria-label="Terms">
+    <label class="search" hidden><span class="sr-only">Search terms</span><input class="term-filter" type="search" placeholder="Search terms, definitions…" autocomplete="off"></label>
+    <p class="sr-only" role="status" aria-live="polite" data-search-status></p>
+    <a class="nav-item nav-overview" href="#${id('sec-overview')}">Overview</a>
+    ${view.classes.length ? `<p class="nav-title">Classes <span class="count">${view.classes.length}</span></p><div class="ctree">${tree(roots.map((r) => r.iri), new Set(), 0)}${unreached.length ? `<ul class="unrooted">${byName(unreached.map((c) => c.iri)).map((iri) => `<li data-term="${esc(searchText(index.get(iri)!.term))}"><span class="node leaf">${navLink(iri)}</span></li>`).join('')}</ul>` : ''}</div>` : ''}
+    ${navGroups}
+    <p class="muted filter-empty" hidden>No terms match.</p>
+  </aside>
+  <div class="browse-main">
+    <section id="${id('sec-overview')}" class="card overview">
+      <h2 id="${id('sec-abstract')}">Overview</h2>
       ${renderMarkdown(meta.description || project.description) || '<p class="muted">No description yet.</p>'}
-    </section>
-    <section id="${id('sec-overview')}" class="block">
-      <h2>At a glance</h2>
       <div class="stats">${counts.filter((c) => c.n > 0).map((c) => `<a class="stat" href="${c.href}"><strong>${c.n}</strong><span>${c.label}</span></a>`).join('')}</div>
-      ${roots.length ? `<h3>Class hierarchy</h3><div class="tree">${tree(roots.map((r) => r.iri), new Set())}</div>` : ''}
-    </section>
-    <section id="${id('sec-index')}" class="block">
-      <h2>Term index</h2>
-      <label class="filter"><span class="sr-only">Filter terms</span><input class="term-filter" type="search" placeholder="Filter terms" autocomplete="off"></label>
-      ${nonEmpty
-        .map(
-          (g) => `<div class="index-group"><h3>${esc(g.title)}</h3><p class="chips">${g.terms
-            .map((t) => {
-              const { anchor, name } = index.get(t.iri)!;
-              return `<a class="chip${t.deprecated ? ' deprecated' : ''}" data-term="${esc(`${name} ${localName(t.iri)}`.toLowerCase())}" href="#${esc(fragment(anchor))}">${esc(name)}</a>`;
-            })
-            .join('')}</p></div>`,
-        )
-        .join('')}
-      <p class="muted filter-empty" hidden>No terms match.</p>
-    </section>
-    ${nonEmpty.map((g) => `<section id="${g.id}" class="block"><h2>${esc(g.title)}</h2>${g.terms.map(card).join('')}</section>`).join('')}
-    <section id="${id('sec-namespaces')}" class="block">
-      <h2>Namespaces</h2>
+      <p class="muted pick">Pick a term on the left to see its definition, axioms and where it’s used.</p>
+      <details class="namespaces" id="${id('sec-namespaces')}"><summary>Namespaces</summary>
       <table class="table"><thead><tr><th>Prefix</th><th>Namespace</th></tr></thead><tbody>
       ${Object.entries(prefixes)
         .filter(([, ns]) => ns)
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([p, ns]) => `<tr><td><code>${esc(p)}:</code></td><td><code>${esc(ns)}</code></td></tr>`)
         .join('')}
-      </tbody></table>
+      </tbody></table></details>
     </section>
+    ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map(card).join('')}</section>`).join('')}
   </div>
-</div>`;
+</div>
+${reportDialog}`;
 
   const useCasesPanel = renderUseCases(input, reqs, ref, id);
 
@@ -400,8 +421,17 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   <p>The ontology IRI and every version IRI serve this page to browsers and RDF to anything that asks for it.</p>
   <pre class="code"><code>curl -L -H 'Accept: text/turtle' ${esc(exampleTarget)}
 curl -L -H 'Accept: application/ld+json' ${esc(exampleTarget)}
-curl -L -H 'Accept: application/rdf+xml' ${esc(exampleTarget)}</code></pre>
+curl -L -H 'Accept: application/rdf+xml' ${esc(exampleTarget)}
+curl -L -H 'Accept-Profile: &lt;http://www.w3.org/ns/shacl#&gt;' ${esc(exampleTarget)}</code></pre>
   ${turtle ? `<p>Or add an extension to this page’s address, for example <a href="${esc(turtle.href)}"><code>${esc(turtle.href)}</code></a>.</p>` : ''}
+  <p>The last one returns the SHACL shapes derived from the ontology (the SHACL profile; <code>?_profile=shacl</code> works too).</p>
+</section>
+<section class="block" id="validate">
+  <h2>Validate data</h2>
+  <p>POST RDF data (Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML) to this address to check it against the ${input.kind === 'release' ? 'version’s' : 'draft’s'} SHACL shapes and terms. The answer is a JSON report, or a SHACL validation report with <code>Accept: text/turtle</code>. Nothing is stored.</p>
+  <pre class="code"><code>curl -X POST ${esc(input.pageUrl)} \
+  -H 'Content-Type: text/turtle' --data-binary @data.ttl</code></pre>
+  ${input.links.app ? `<p>Or <a href="${esc(input.links.app)}/validate?version=${esc(encodeURIComponent(input.kind === 'release' ? input.version : 'draft'))}">upload a file in the validator</a>.</p>` : ''}
 </section>
 ${input.code ? codeSection(input.code) : ''}
 <section class="block">

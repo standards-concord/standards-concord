@@ -34,6 +34,7 @@ import { clearAll, get, HttpError, list, put, remove, transaction } from '../db.
  * objects, never to the checked-out files.
  */
 const FILE = 'ontology.ttl';
+export const ONTOLOGY_FILE = FILE;
 
 function repoDir(project: Pick<OntologyProject, 'slug'>) {
   return path.join(config.dataDir, 'ontologies', project.slug);
@@ -646,6 +647,20 @@ export const ontologyStore = {
     const commit = buildCommit(repoDir(project), parent, all, message, { name: 'Concord', email: 'steward@concord' });
     if (commit !== parent) this.advanceTo(project, parent, commit);
     return commit;
+  },
+
+  /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): string {
+    if (!/^[\w.-]+$/.test(name) || name === FILE) throw new Error(`Not a repository file Concord rewrites: ${name}`);
+    const parent = this.head(project);
+    const commit = buildCommit(repoDir(project), parent, { [name]: content }, message, { name: 'Concord', email: 'steward@concord' });
+    if (commit !== parent) this.advanceTo(project, parent, commit);
+    return commit;
+  },
+
+  /** Drops cached released graphs, after their files were rewritten. */
+  forgetReleases(project: Pick<OntologyProject, 'slug'>) {
+    for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
   versions(project: Pick<OntologyProject, 'slug'>): string[] {
