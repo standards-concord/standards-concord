@@ -84,7 +84,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
     const min = q.min ?? 1;
     const max = q.max ?? 5;
     return (
-      <Select value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} className="h-8 text-xs">
+      <Select aria-label={q.text} value={value === undefined ? '' : String(value)} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} className="h-8 text-xs">
         <option value="">—</option>
         {Array.from({ length: max - min + 1 }, (_, i) => min + i).map((n) => (
           <option key={n} value={n}>
@@ -96,7 +96,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   }
   if (q.type === 'choice')
     return (
-      <Select value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs">
+      <Select aria-label={q.text} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs">
         <option value="">—</option>
         {(q.options ?? []).map((o) => (
           <option key={o}>{o}</option>
@@ -106,7 +106,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
   if (q.type === 'multi') {
     const arr = Array.isArray(value) ? value : value ? [String(value)] : [];
     return (
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap gap-1" role="group" aria-label={q.text}>
         {(q.options ?? []).map((o) => (
           <Chip key={o} active={arr.includes(o)} onClick={() => onChange(arr.includes(o) ? arr.filter((x) => x !== o) : [...arr, o])} className="py-0.5 text-[0.7rem]">
             {o}
@@ -115,7 +115,7 @@ function AnswerEditor({ q, value, onChange }: { q: FeedbackQuestion; value: Feed
       </div>
     );
   }
-  return <Textarea rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
+  return <Textarea aria-label={q.text} rows={2} value={formatAnswer(value)} onChange={(e) => onChange(e.target.value)} className="min-h-0 text-xs" />;
 }
 
 export function FeedbackPage() {
