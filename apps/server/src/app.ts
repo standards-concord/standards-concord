@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { HttpError } from './db.js';
 import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
+import { reportRouter } from './public/report.js';
 import { publicRouter } from './public/routes.js';
 import { apiRouter } from './routes/api.js';
 import { solid } from './services/solid.js';
@@ -45,6 +46,7 @@ export function createApp(): express.Express {
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
   app.use('/api', apiRouter());
   // Public, dereferenceable ontology and version IRIs (HTML or RDF by content negotiation).
+  app.use(reportRouter());
   app.use(publicRouter());
 
   // The built web app, with client-side routing fallback.

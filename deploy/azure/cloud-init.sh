@@ -27,6 +27,7 @@ chmod 600 /opt/concord/session.secret
 # API keys and settings. set-key.sh edits this file; refresh.sh reads it every five minutes.
 if [ ! -f /opt/concord/keys.env ]; then
   cat > /opt/concord/keys.env <<EOT
+ADMIN_WEBIDS=__ADMIN_WEBIDS__
 ADMIN_EMAILS=__ADMIN_EMAILS__
 DEMO_MODE=1
 ALLOW_PUBLIC_RESET=0
