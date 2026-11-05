@@ -184,10 +184,10 @@ export class SqliteStore implements DocStore {
         try {
           out = await this.als.run({ store: this, tx, noWait: c.noWait }, fn);
         } finally {
-          tx.state.status = 'finishing';
+          // Statements here run to completion when called, so there is nothing to wait for: straight to ending.
+          tx.state.status = 'ending';
         }
         if (tx.state.failed !== undefined) throw new TransactionAbortedError(tx.state.failed);
-        tx.state.status = 'committing';
         this.db.exec('COMMIT');
       } catch (e) {
         if (this.db.isTransaction) this.db.exec('ROLLBACK');
@@ -202,7 +202,8 @@ export class SqliteStore implements DocStore {
   }
 
   detached<T>(fn: () => Promise<T>): Promise<T> {
-    return this.als.run({ store: this, noWait: false }, fn);
+    const c = this.als.getStore();
+    return this.als.run({ store: this, noWait: c?.store === this && c.noWait }, fn);
   }
 
   withoutWaiting<T>(fn: () => Promise<T>): Promise<T> {

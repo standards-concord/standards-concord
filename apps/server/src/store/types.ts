@@ -52,7 +52,11 @@ export interface DocStore {
    * when fn returns ends up outside it (see above).
    */
   transaction<T>(fn: () => Promise<T>): Promise<T>;
-  /** Run fn outside any transaction the caller is in: for background work started from inside one. */
+  /**
+   * Run fn now, outside any transaction the caller is in (keeping a surrounding `withoutWaiting`): for background
+   * work started from inside one. Its writes are its own, so they stay if that transaction rolls back. It is not
+   * an after-commit hook.
+   */
   detached<T>(fn: () => Promise<T>): Promise<T>;
   /**
    * Run fn without waiting on locks another connection holds: anything blocked throws at once instead of
@@ -81,7 +85,7 @@ export class TransactionAbortedError extends Error {
   }
 }
 
-/** Work started inside a transaction tried to use it while it was committing, or after it rolled back. */
+/** Work started inside a transaction tried to use it while it was ending (COMMIT or ROLLBACK in flight), or after it rolled back. */
 export class TransactionEndedError extends Error {
   constructor() {
     super('This work belongs to a transaction that has ended: await it inside the transaction, or start it with detached()');
@@ -92,9 +96,10 @@ export class TransactionEndedError extends Error {
 export interface TxState {
   /**
    * `finishing`: fn has returned or thrown, and statements it started are being waited for (they still run in
-   * the transaction). `committing`: COMMIT has been sent and its outcome isn't known yet.
+   * the transaction). `ending`: COMMIT or ROLLBACK is on its way and the outcome isn't known yet; nothing more
+   * may use the connection.
    */
-  status: 'open' | 'finishing' | 'committing' | 'committed' | 'rolledBack';
+  status: 'open' | 'finishing' | 'ending' | 'committed' | 'rolledBack';
   /** The first statement failure inside the transaction, if any: it can then only roll back. */
   failed?: unknown;
 }
@@ -102,7 +107,7 @@ export interface TxState {
 /**
  * The transaction a store call should use, from the context it inherited: that one while it is open or
  * finishing; none once it has committed (the call is leftover work and runs on its own); an error while it is
- * committing or after it rolled back.
+ * ending or after it rolled back.
  */
 export function liveTransaction<T extends { state: TxState }>(tx: T | undefined): T | undefined {
   if (!tx || tx.state.status === 'committed') return undefined;
@@ -119,7 +124,7 @@ export class Pending {
 
   constructor(private readonly state: TxState) {}
 
-  /** Start a statement in the transaction: refused once it is committing or over; a failure dooms it. */
+  /** Start a statement in the transaction: refused once it is ending or over; a failure dooms it. */
   start<T>(statement: () => Promise<T>): Promise<T> {
     const { status } = this.state;
     if (status !== 'open' && status !== 'finishing') return Promise.reject(new TransactionEndedError());

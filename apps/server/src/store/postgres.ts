@@ -100,10 +100,12 @@ export class PostgresStore implements DocStore {
     await driver
       .transaction(
       async (q) => {
-        await q.query('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]).catch((e) => {
-          throw asBusy(e);
-        });
-        for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) await q.query(stmt);
+        const run = (sql: string, params?: unknown[]) =>
+          q.query(sql, params).catch((e) => {
+            throw asBusy(e);
+          });
+        await run('SELECT pg_advisory_xact_lock($1)', [WRITER_LOCK]);
+        for (const stmt of SCHEMA.split(';').map((s) => s.trim()).filter(Boolean)) await run(stmt);
       },
       { noWait: false },
     )
@@ -229,9 +231,10 @@ export class PostgresStore implements DocStore {
           } finally {
             state.status = 'finishing';
             await pending.settle();
+            // From here the driver sends COMMIT or ROLLBACK, and nothing more may use the connection.
+            state.status = 'ending';
           }
           if (state.failed !== undefined) throw new TransactionAbortedError(state.failed);
-          state.status = 'committing';
           return out;
         },
         { noWait },
@@ -250,7 +253,8 @@ export class PostgresStore implements DocStore {
   }
 
   detached<T>(fn: () => Promise<T>): Promise<T> {
-    return this.als.run({ store: this, noWait: false }, fn);
+    const c = this.als.getStore();
+    return this.als.run({ store: this, noWait: c?.store === this && c.noWait }, fn);
   }
 
   /**
