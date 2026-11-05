@@ -205,6 +205,17 @@ describe('ontologies without a release', () => {
     const missing = await request(app).get(`/def/${slug}/NotATerm`);
     expect(missing.status).toBe(404);
   });
+
+  it('answers creating an ontology without waiting for its first validation', async () => {
+    // public-page.spec's creation test timed out with this POST still pending: it ran the new ontology's
+    // validation (the reasoner's first run) before answering, though nothing waits on that.
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'Quick creator', role: 'owner' });
+    const created = await agent.post('/api/ontologies').send({ title: 'Quick vocab', prefix: 'qv' });
+    expect(created.status).toBe(201);
+    expect(created.body.health).toBeUndefined();
+    expect(created.body.stats.classes).toBeGreaterThanOrEqual(0);
+  });
 });
 
 describe('superseded versions', () => {

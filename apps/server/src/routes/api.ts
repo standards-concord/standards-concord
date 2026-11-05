@@ -187,7 +187,9 @@ export function apiRouter(): Router {
       { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
       user,
     );
-    res.status(201).json(await summary(p));
+    // Without its health: validating a new ontology (the OWL reasoner's first run) can take a while, and nothing
+    // waits on it here; the ontology's own page asks for it.
+    res.status(201).json(await summary(p, { withHealth: false }));
   });
 
   r.get('/ontologies/:id', async (req, res) => {
