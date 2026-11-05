@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import type { ChangeOp, ChangeRequestDetail } from '@concord/shared';
+import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
 import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
@@ -17,6 +17,7 @@ import { Disclosure, Popover } from '../../components/Disclosure';
 import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError, Loading, Textarea, cx } from '../../components/ui';
 import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
+import { needsOdiApproval, odiApproved } from '../../lib/asks';
 
 /**
  * A request drafted from use cases (which may be private) is published only
@@ -114,7 +115,7 @@ function PublicationApproval({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpda
 }
 
 function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: ChangeRequestDetail) => void }) {
-  const { hasRole, myRoles } = useOntology();
+  const { hasRole, myRoles, ontology } = useOntology();
   const { session } = useSession();
   const uid = session?.user?.id;
   const [comment, setComment] = useState('');
@@ -136,13 +137,17 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const canEdit = isAuthor || hasRole('editor', 'steward', 'owner');
   const open = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status);
   const voterRoles = cr.governance.rule.vote?.voterRoles ?? [];
-  const canVote = cr.status === 'voting' && (voterRoles.some((r) => myRoles.includes(r)) || hasRole());
+  // The same check the server uses to accept and count a vote.
+  const canVote = cr.status === 'voting' && canCastVote(myRoles, voterRoles);
   const myVote = cr.votes.find((v) => v.userId === uid);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
   const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c), c);
   const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c), c);
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
+  // Under final say the vote can open before the ODI approves, but cannot pass without it.
+  const odiNeeded = needsOdiApproval(ontology.governance, cr);
+  const odiDone = odiNeeded && odiApproved(cr.reviews, ontology.members ?? [], cr.opsUpdatedAt ?? cr.createdAt);
 
   if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;
 
@@ -195,6 +200,15 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
             </Button>
           </div>
           {!canVote && <p className="text-xs text-muted">Only {voterRoles.map(roleLabel).join(', ')} can vote on this.</p>}
+          {odiNeeded && !odiDone && myRoles.includes('odi') && (
+            <div className="space-y-1.5 border-t border-line pt-3" data-testid="odi-approval">
+              <p className="text-xs text-muted">This major change cannot pass the vote until the ODI approves it.</p>
+              <Button variant="primary" icon={ShieldCheck} className="w-full" disabled={act.pending} onClick={() => void review('approve')}>
+                Approve for the ODI
+              </Button>
+            </div>
+          )}
+          {odiNeeded && odiDone && <p className="text-xs text-muted">The ODI has approved this change.</p>}
           {myVote && <p className="text-xs text-muted">You voted “{myVote.choice}”. You can change your vote while it’s open.</p>}
         </>
       )}
@@ -274,7 +288,7 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
   if (!c) return <LevelBadge level={undefined} />;
   return (
     <Popover label={`Level: ${c.level}. Why it’s ${c.level}`} className="rounded-pill focus-visible:outline-offset-2" trigger={<LevelBadge level={c.level} />}>
-      <h4 className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Why it’s {c.level}</h4>
+      <h4 className="mb-1 text-sm font-semibold">Why it’s {c.level}</h4>
       <p className="mb-3 text-xs text-muted">Rule-based semantic versioning classification. The level decides which governance rules apply.</p>
       <ul className="space-y-2 text-sm">
         {c.reasons.map((r, i) => (
@@ -477,12 +491,12 @@ export function ChangeRequestPage() {
                   <Disclosure tone="muted" title="Rationale and risks" summary={cr.analysis.risks?.length ? `${cr.analysis.risks.length} ${cr.analysis.risks.length === 1 ? 'risk' : 'risks'}` : undefined}>
                     <div className="space-y-3">
                       <div>
-                        <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Rationale</div>
+                        <div className="mb-1 text-sm font-semibold">Rationale</div>
                         <Markdown text={cr.analysis.rationale} className="text-muted" />
                       </div>
                       {cr.analysis.risks?.length ? (
                         <div>
-                          <div className="mb-1 text-xs font-semibold tracking-wide text-muted uppercase">Risks</div>
+                          <div className="mb-1 text-sm font-semibold">Risks</div>
                           <ul className="list-disc space-y-0.5 pl-5">
                             {cr.analysis.risks.map((r, i) => (
                               <li key={i}>{r}</li>
