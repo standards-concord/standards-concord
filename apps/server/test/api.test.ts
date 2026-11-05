@@ -18,7 +18,7 @@ async function login(role: string, name = `Tester ${role}`): Promise<Agent> {
 let demoId: string;
 
 beforeAll(async () => {
-  openDb();
+  await openDb();
   const demo = await seedDemo();
   demoId = demo!.id;
 });
@@ -194,6 +194,15 @@ describe('requirements', () => {
     const p = await tester.post(`/api/meetings/${m.body.id}/propose`);
     expect(p.status).toBe(200);
     expect(p.body.useCases.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // With the store async, each call's visibility check ran inside flatMap(), so the list came back as empty objects.
+  it('lists the calls a signed-in person can see', async () => {
+    const tester = await login('steward', 'Steward Lists');
+    const m = await tester.post(`/api/ontologies/${demoId}/meetings/upload`).send({ title: 'Listed call', transcript: 'Priya Shah: Hello.\nTom Okafor: Hi.' });
+    expect(m.status).toBe(201);
+    const listed = await tester.get(`/api/ontologies/${demoId}/meetings`);
+    expect(listed.body.find((x: { id?: string }) => x.id === m.body.id)).toMatchObject({ title: 'Listed call' });
   });
 
   it('replays a simulated call with co-facilitator prompts', async () => {

@@ -9,6 +9,13 @@ function bool(v: string | undefined, dflt: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 }
 
+/** A non-negative dollar amount from the environment; anything else (unset, blank, "abc", -1) gives the default. */
+function usd(v: string | undefined, dflt: number): number {
+  if (v === undefined || v.trim() === '') return dflt;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+}
+
 /** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly). */
 const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
@@ -28,6 +35,8 @@ export const config = {
   /**
    * WebIDs of deployment administrators (reset the demo, read all feedback), comma- or space-separated.
    * An account's WebID is shown under Settings. Google and GitHub sign-ins are separate accounts with their own WebIDs, so list the WebID of the account you actually sign in with.
+   * Someone who signs in with their own WebID (Solid) has that WebID. Listed WebIDs are also given
+   * read access to each tester's feedback folder in their pod, and are shown to testers.
    */
   adminWebIds: (process.env.ADMIN_WEBIDS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
   /** Older alternative to ADMIN_WEBIDS: the verified email of a Google or GitHub account. */
@@ -40,6 +49,13 @@ export const config = {
       | 'simulated',
     model: process.env.LLM_MODEL ?? 'claude-opus-5-5',
     effort: (process.env.LLM_EFFORT ?? 'high') as 'low' | 'medium' | 'high' | 'xhigh' | 'max',
+    /**
+     * Most this deployment may spend on Claude per UTC day and per UTC month, in US dollars, estimated from each
+     * response's token usage (llm/budget.ts). Once a limit is reached, AI features use their offline fallbacks
+     * until the next day or month. 0 turns real AI calls off.
+     */
+    dailyBudgetUsd: usd(process.env.LLM_DAILY_BUDGET_USD, 5),
+    monthlyBudgetUsd: usd(process.env.LLM_MONTHLY_BUDGET_USD, 40),
   },
 
   google: {
@@ -63,6 +79,15 @@ export const config = {
     spawnPort: Number(process.env.SOLID_SPAWN_PORT ?? 3000),
   },
 
+  solidOidc: {
+    /** Let people sign in with their own WebID (Solid-OIDC). On unless SOLID_OIDC=off. */
+    enabled: bool(process.env.SOLID_OIDC, true),
+    /**
+     * Solid providers the operator trusts enough to reach on a private address or over plain http
+     * (a local Community Solid Server in development and tests). Everything else must be public https.
+     */
+    trustedIssuers: (process.env.SOLID_TRUSTED_ISSUERS ?? '').split(/[\s,]+/).map((w) => w.trim()).filter(Boolean),
+  },
   feedbackIssues: {
     /**
      * Fine-grained GitHub token with Issues: read and write on `repo`. When set, testers

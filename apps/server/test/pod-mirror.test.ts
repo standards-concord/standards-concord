@@ -18,28 +18,29 @@ const pod = {
   beforeNextPut: undefined as undefined | (() => void),
 };
 
-vi.mock('@inrupt/solid-client-authn-node', () => ({
-  Session: class {
-    info = { isLoggedIn: true };
-    async login() {}
-    async fetch(url: string, init: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array | ArrayBuffer } = {}) {
-      const have = store.get(url);
-      if ((init.method ?? 'GET') === 'GET') {
-        if (!have) return new Response(null, { status: 404 });
-        return new Response(have.bytes as unknown as BodyInit, { status: 200, headers: { 'content-type': have.type, etag: have.etag } });
-      }
-      const hook = pod.beforeNextPut;
-      pod.beforeNextPut = undefined;
-      hook?.();
-      const now = store.get(url);
-      const h = init.headers ?? {};
-      if (h['if-none-match'] === '*' && now) return new Response(null, { status: 412 });
-      if (h['if-match'] && h['if-match'] !== now?.etag) return new Response(null, { status: 412 });
-      const body = init.body;
-      pod.set(url, typeof body === 'string' ? body : new Uint8Array(body as ArrayBuffer), h['content-type'] ?? 'application/octet-stream');
-      return new Response(null, { status: 201 });
-    }
-  },
+/** The fake pod, as the owner's requests reach it (solidOidc's podRequester; the guarded transport itself is tested in solidOidcFlow). */
+async function podRequest(method: string, url: string, init: { headers?: Record<string, string>; body?: string | Uint8Array | ArrayBuffer } = {}) {
+  const have = store.get(url);
+  if (method === 'GET') {
+    if (!have) return new Response(null, { status: 404 });
+    return new Response(have.bytes as unknown as BodyInit, { status: 200, headers: { 'content-type': have.type, etag: have.etag } });
+  }
+  const hook = pod.beforeNextPut;
+  pod.beforeNextPut = undefined;
+  hook?.();
+  const now = store.get(url);
+  const h = init.headers ?? {};
+  if (h['if-none-match'] === '*' && now) return new Response(null, { status: 412 });
+  if (h['if-match'] && h['if-match'] !== now?.etag) return new Response(null, { status: 412 });
+  const body = init.body;
+  pod.set(url, typeof body === 'string' ? body : new Uint8Array(body as ArrayBuffer), h['content-type'] ?? 'application/octet-stream');
+  return new Response(null, { status: 201 });
+}
+
+vi.mock('../src/solidOidc.js', async (original) => ({
+  ...(await original<typeof import('../src/solidOidc.js')>()),
+  clientCredentialsLogin: async () => ({}),
+  podRequester: async () => podRequest,
 }));
 
 const { config } = await import('../src/config.js');
@@ -48,8 +49,8 @@ const { createUser } = await import('../src/services/users.js');
 const { recordVersion } = await import('../src/services/alpha.js');
 
 const saved = config.solid.serverUrl;
-beforeAll(() => {
-  openDb();
+beforeAll(async () => {
+  await openDb();
   config.solid.serverUrl = 'https://pods.example';
 });
 afterAll(() => {
@@ -59,7 +60,7 @@ afterAll(() => {
 async function testerWithPod(subject: string) {
   const u = await createUser({ name: `Pod tester ${subject}`, provider: 'demo', subject });
   const podUrl = `https://pods.example/${subject}/`;
-  put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
+  await put('kv', { id: `pod:${u.id}`, podUrl, webId: `${podUrl}profile/card#me`, clientId: 'c', clientSecret: 's' });
   return { u, record: `${podUrl}concord/alpha/testing.jsonld`, folder: `${podUrl}concord/alpha/` };
 }
 const asideOf = (folder: string) => [...store.keys()].filter((k) => k.startsWith(`${folder}testing.previous-`));

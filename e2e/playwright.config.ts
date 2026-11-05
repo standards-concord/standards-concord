@@ -53,7 +53,7 @@ export default defineConfig({
   projects: [
     {
       name: 'local',
-      testIgnore: /live\.spec\.ts/,
+      testIgnore: [/live\.spec\.ts/, /solid-.*\.spec\.ts/],
       use: { baseURL: `http://localhost:${WEB_PORT}` },
     },
     {
@@ -107,6 +107,8 @@ export default defineConfig({
             FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
             FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
             FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
+            // The welcome page's videos come from this folder, not a GitHub release.
+            MEDIA_DIR: path.join(root, 'e2e', 'fixtures', 'media'),
           },
           stdout: 'ignore',
           stderr: 'pipe',

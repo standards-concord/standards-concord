@@ -5,7 +5,8 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, OntologyProject, Release, User } from '@concord/shared';
 import { clock, DAY_MS } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, list, put } from '../db.js';
+import { clearAll, list, put, transaction } from '../db.js';
+import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
 import { requestText } from '../llm/context.js';
@@ -30,7 +31,7 @@ export const DEMO_SLUG = 'volunteering';
 
 async function ensurePersonas(): Promise<Map<string, User>> {
   const byKey = new Map<string, User>();
-  const existing = personas();
+  const existing = await personas();
   for (const p of PERSONAS) {
     let u = existing.find((x) => x.name === p.name);
     u ??= await createUser({ name: p.name, organisation: p.organisation, persona: p.persona, simulated: true, provider: 'demo', subject: `persona:${p.key}` });
@@ -43,7 +44,7 @@ export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name =
 
 /** The demo ontology every alpha tester lands in: the volunteering standard, mid-flight. */
 export async function seedDemo(): Promise<OntologyProject | undefined> {
-  const existing = list<OntologyProject>('ontologies').find((o) => o.slug === DEMO_SLUG);
+  const existing = (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
   if (existing) return existing;
   if (!fs.existsSync(FIXTURE)) {
     console.warn('[seed] volunteering fixture not found; skipping demo seed');
@@ -75,7 +76,7 @@ async function seedHistory() {
     },
     priya,
   );
-  for (const p of PERSONAS) setRoles(project.id, people.get(p.key)!.id, p.roles);
+  for (const p of PERSONAS) await setRoles(project.id, people.get(p.key)!.id, p.roles);
 
   // Version 1.0.0 is already out: that makes the semver story concrete.
   await bootstrapRelease(project, priya, '1.0.0', 'First release of the volunteering standard, agreed by the working group.');
@@ -89,7 +90,7 @@ async function seedHistory() {
   const cqs = aggregationCompetencyQuestions();
   if (cqs.length) {
     const exampleData = aggregationExampleData();
-    createUseCase(project, tom, {
+    await createUseCase(project, tom, {
       source: 'form',
       status: 'synthesised',
       sections: structuredClone(AGGREGATION_USE_CASE),
@@ -97,7 +98,7 @@ async function seedHistory() {
     });
   }
 
-  createUseCase(project, aisha, {
+  await createUseCase(project, aisha, {
     source: 'chat',
     status: 'ready',
     sections: structuredClone(WEEKLY_SHIFTS_USE_CASE),
@@ -120,10 +121,10 @@ async function seedHistory() {
     ],
   });
   await submit(patch, mei);
-  await addReview(getCR(patch.id), tom, 'approve', 'Clearer, thanks. Annotation-only, so a patch.');
+  await addReview(await getCR(patch.id), tom, 'approve', 'Clearer, thanks. Annotation-only, so a patch.');
   clock.advance(2 * DAY_MS);
   await crTick();
-  const patchNow = getCR(patch.id);
+  const patchNow = await getCR(patch.id);
   if (patchNow.status === 'approved') await merge(patchNow, priya);
   clock.advance(8 * DAY_MS);
 
@@ -146,7 +147,7 @@ async function seedHistory() {
     ],
   });
   await submit(minor, aisha);
-  await addReview(getCR(minor.id), mei, 'comment', 'Would we also want the kinds of expense covered (travel, meals, childcare)? Could be a follow-up.');
+  await addReview(await getCR(minor.id), mei, 'comment', 'Would we also want the kinds of expense covered (travel, meals, childcare)? Could be a follow-up.');
 
   // A major change being voted on: shows a breaking change and a real disagreement.
   const major = await createChangeRequest(project, tom, {
@@ -158,8 +159,8 @@ async function seedHistory() {
   });
   await submit(major, tom);
   clock.advance(2 * DAY_MS);
-  await addReview(getCR(major.id), gareth, 'comment', 'This breaks our data: multi-site opportunities have several locations. Could we make it functional only on Session, via a restriction, instead?');
-  await addReview(getCR(major.id), priya, 'approve', 'Happy in principle; it needs a vote as it is breaking.');
+  await addReview(await getCR(major.id), gareth, 'comment', 'This breaks our data: multi-site opportunities have several locations. Could we make it functional only on Session, via a restriction, instead?');
+  await addReview(await getCR(major.id), priya, 'approve', 'Happy in principle; it needs a vote as it is breaking.');
 
   clock.advance(5 * DAY_MS);
   // An agent report that needs discussion.
@@ -171,8 +172,8 @@ async function seedHistory() {
     context: 'shift: { start: "2026-10-17T09:00", end: "2026-10-17T13:00", rrule: "FREQ=WEEKLY;BYDAY=SA", places: 4 }',
   });
 
-  updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
-  return list<OntologyProject>('ontologies').find((o) => o.slug === DEMO_SLUG);
+  await updateProject({ ...project, stage: 'maintenance', currentVersion: '1.0.0' });
+  return (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
 }
 
 async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string) {
@@ -204,9 +205,9 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
   };
   Object.assign(files, await releasePageFiles(project, r, stamped));
   r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
-  put('releases', r, project.id);
+  await put('releases', r, project.id);
   project.currentVersion = version;
-  updateProject(project);
+  await updateProject(project);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -250,7 +251,7 @@ async function personaReaction(p: PersonaSpec, cr: ChangeRequest, compact: (iri:
     messages: [
       {
         role: 'user',
-        content: `${requestText(cr)}\nLevel: ${cr.classification?.level ?? 'unclassified'}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, compact)}`).join('\n')}\n\nValidation: ${cr.validation?.passed ? 'passed' : 'failed'}\nComments so far:\n${cr.timeline.filter((e) => e.type === 'review' || e.type === 'comment').map((e) => `- ${getUser(e.actorId ?? '')?.name ?? 'someone'}: ${e.message}`).join('\n') || '(none)'}\n\nHow do you respond? Also say how you would vote if it goes to a vote.`,
+        content: `${requestText(cr)}\nLevel: ${cr.classification?.level ?? 'unclassified'}\n\nEdits:\n${cr.ops.map((o) => `- ${describeOp(o, compact)}`).join('\n')}\n\nValidation: ${cr.validation?.passed ? 'passed' : 'failed'}\nComments so far:\n${(await Promise.all(cr.timeline.filter((e) => e.type === 'review' || e.type === 'comment').map(async (e) => `- ${(await getUser(e.actorId ?? ''))?.name ?? 'someone'}: ${e.message}`))).join('\n') || '(none)'}\n\nHow do you respond? Also say how you would vote if it goes to a vote.`,
       },
     ],
     fallback: () => scriptedReaction(p, cr),
@@ -267,27 +268,27 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
   const people = await ensurePersonas();
   const actors = [...people.values()].filter((u) => u.id !== testerId);
   let actions = 0;
-  const open = list<ChangeRequest>('changeRequests', ontologyId).filter((c) => ['review', 'voting'].includes(c.status)).sort((a, b) => a.number - b.number);
-  const project = list<OntologyProject>('ontologies').find((o) => o.id === ontologyId);
+  const open = (await list<ChangeRequest>('changeRequests', ontologyId)).filter((c) => ['review', 'voting'].includes(c.status)).sort((a, b) => a.number - b.number);
+  const project = (await list<OntologyProject>('ontologies')).find((o) => o.id === ontologyId);
   const graph = project ? await ontologyStore.working(project) : undefined;
   const compact = (iri: string) => (graph ? (iri.startsWith(graph.namespace) ? `${project!.prefix}:${iri.slice(graph.namespace.length)}` : iri) : iri);
 
   for (const cr0 of open) {
     for (const u of actors) {
       if (actions >= maxActions) break;
-      const cr = getCR(cr0.id);
+      const cr = await getCR(cr0.id);
       if (!['review', 'voting'].includes(cr.status) || cr.authorId === u.id) continue;
       const p = personaFor(u);
       if (!p) continue;
-      const g = governanceFor(cr);
-      const roles = rolesFor(ontologyId, u.id);
+      const g = await governanceFor(cr);
+      const roles = await rolesFor(ontologyId, u.id);
       if (cr.status === 'voting') {
-        if (!canVote(g.rule, roles) || list<{ userId: string; at: string }>('votes', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
+        if (!canVote(g.rule, roles) || (await list<{ userId: string; at: string }>('votes', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''))) continue;
         const r = await personaReaction(p, cr, compact);
         await addVote(cr, u, r.vote, r.comment);
         actions++;
       } else {
-        const reviewed = list<{ userId: string; at: string }>('reviews', cr.id).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
+        const reviewed = (await list<{ userId: string; at: string }>('reviews', cr.id)).some((v) => v.userId === u.id && v.at >= (cr.opsUpdatedAt ?? ''));
         if (reviewed || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
         const r = await personaReaction(p, cr, compact);
         await addReview(cr, u, r.decision, r.comment);
@@ -295,11 +296,11 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       }
     }
   }
-  for (const r of list<Release>('releases', ontologyId).filter((x) => x.status === 'voting')) {
+  for (const r of (await list<Release>('releases', ontologyId)).filter((x) => x.status === 'voting')) {
     for (const u of actors) {
       if (actions >= maxActions) break;
-      if (list<{ userId: string }>('votes', r.id).some((v) => v.userId === u.id)) continue;
-      if (!canVote(releaseGovernance(r).rule, rolesFor(ontologyId, u.id))) continue;
+      if ((await list<{ userId: string }>('votes', r.id)).some((v) => v.userId === u.id)) continue;
+      if (!canVote((await releaseGovernance(r)).rule, await rolesFor(ontologyId, u.id))) continue;
       try {
         await voteOnRelease(r, u, personaFor(u)?.key === 'gareth' && r.level === 'major' ? 'no' : 'yes');
         actions++;
@@ -308,7 +309,7 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       }
     }
   }
-  return listActivity(ontologyId, 50).filter((a) => a.at >= since);
+  return (await listActivity(ontologyId, 50)).filter((a) => a.at >= since);
 }
 
 /** Fast-forward the governance clock (review periods, voting windows) and run the lifecycle sweep. */
@@ -322,9 +323,13 @@ export async function runTick() {
   return changed;
 }
 
-/** Wipe everything and re-seed. Demo mode only. */
+/** Wipe everything and re-seed. Demo mode only. The AI spending totals survive, or a reset would refill the budget. */
 export async function resetAll() {
-  clearAll();
+  await transaction(async () => {
+    const spend = await snapshotSpending();
+    await clearAll();
+    await restoreSpending(spend);
+  });
   clock.reset();
   fs.rmSync(path.join(config.dataDir, 'ontologies'), { recursive: true, force: true });
   return seedDemo();

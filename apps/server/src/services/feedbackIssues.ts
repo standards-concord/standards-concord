@@ -141,7 +141,7 @@ export function checkPublicSummary(summary: unknown): asserts summary is string 
 }
 
 /** Record the tester's consent and queue their summary. Returns the token that lets them withdraw it. */
-export function queuePublication(feedbackId: string, summary: string): FeedbackPublicationStatus {
+export async function queuePublication(feedbackId: string, summary: string): Promise<FeedbackPublicationStatus> {
   checkPublicSummary(summary);
   const token = randomBytes(24).toString('base64url');
   const pub: Publication = {
@@ -156,14 +156,14 @@ export function queuePublication(feedbackId: string, summary: string): FeedbackP
     nextAttemptAt: now(),
     createdAt: new Date(now()).toISOString(),
   };
-  transaction(() => {
-    if (get('feedbackPublications', feedbackId)) throw new HttpError(409, 'This feedback already has a public summary');
-    put('feedbackPublications', pub);
+  await transaction(async () => {
+    if (await get('feedbackPublications', feedbackId)) throw new HttpError(409, 'This feedback already has a public summary');
+    await put('feedbackPublications', pub);
   });
   return { ...status(pub), withdrawToken: token };
 }
 
-export const publicationFor = (feedbackId: string) => get<Publication>('feedbackPublications', feedbackId);
+export const publicationFor = async (feedbackId: string) => await get<Publication>('feedbackPublications', feedbackId);
 
 export function status(pub: Publication): FeedbackPublicationStatus {
   return { state: pub.state, issue: pub.state === 'filed' ? pub.issue : undefined };
@@ -269,7 +269,7 @@ interface Pause {
 }
 const pauseId = (repo: string) => `feedback-issues:pause:${repo.toLowerCase()}`;
 const rateId = (repo: string) => `feedback-issues:rate:${repo.toLowerCase()}`;
-const pauseOf = (repo: string) => get<Kv<Pause>>('kv', pauseId(repo))?.value ?? { until: 0, streak: 0 };
+const pauseOf = async (repo: string) => (await get<Kv<Pause>>('kv', pauseId(repo)))?.value ?? { until: 0, streak: 0 };
 
 class Paused extends Error {
   constructor(readonly until: number) {
@@ -279,71 +279,71 @@ class Paused extends Error {
 
 /** Before every request: stop if GitHub has asked the whole queue to wait. */
 async function waitForPause(repo: string) {
-  const p = pauseOf(repo);
+  const p = await pauseOf(repo);
   if (p.until > now()) throw new Paused(p.until);
 }
 
-function rateLimited(repo: string, retryAt: number | undefined): number {
-  return transaction(() => {
-    const p = pauseOf(repo);
+async function rateLimited(repo: string, retryAt: number | undefined): Promise<number> {
+  return await transaction(async () => {
+    const p = await pauseOf(repo);
     const streak = p.streak + 1;
     const until = Math.max(p.until, retryAt ?? now() + Math.min(60_000 * 2 ** (streak - 1), HOUR_MS));
-    put('kv', { id: pauseId(repo), value: { until, streak } });
+    await put('kv', { id: pauseId(repo), value: { until, streak } });
     return until;
   });
 }
 
-function rateOk(repo: string) {
-  const p = pauseOf(repo);
-  if (p.streak) put('kv', { id: pauseId(repo), value: { until: p.until, streak: 0 } });
-}
+async function rateOk(repo: string) { return transaction(async () => {
+  const p = await pauseOf(repo);
+  if (p.streak) await put('kv', { id: pauseId(repo), value: { until: p.until, streak: 0 } });
+}); }
 
 /** Take one slot in the rolling hour, inside the caller's transaction. Returns when one frees up if full. */
-function takeSlot(repo: string): number | undefined {
+async function takeSlot(repo: string): Promise<number | undefined> { return transaction(async () => {
   const t = now();
-  const recent = (get<Kv<number[]>>('kv', rateId(repo))?.value ?? []).filter((x) => x > t - HOUR_MS);
+  const recent = ((await get<Kv<number[]>>('kv', rateId(repo)))?.value ?? []).filter((x) => x > t - HOUR_MS);
   if (recent.length >= config.feedbackIssues.perHour) return Math.min(...recent) + HOUR_MS;
-  put('kv', { id: rateId(repo), value: [...recent, t] });
+  await put('kv', { id: rateId(repo), value: [...recent, t] });
   return undefined;
-}
+}); }
 
 /* --------------------------- fenced transitions ------------------------- */
 
 /** Change a record only while `claim` still holds it and it isn't withdrawn. */
-function fenced(id: string, claim: string, change: (p: Publication) => Partial<Publication> | undefined): Publication | undefined {
-  return transaction(() => {
-    const p = get<Publication>('feedbackPublications', id);
+async function fenced(id: string, claim: string, change: (p: Publication) => Partial<Publication> | undefined | Promise<Partial<Publication> | undefined>): Promise<Publication | undefined> {
+  return await transaction(async () => {
+    const p = await get<Publication>('feedbackPublications', id);
     if (!p || p.claim !== claim || p.state === 'withdrawn') return undefined;
-    const c = change(p);
+    const c = await change(p);
     if (!c) return undefined;
     const next = { ...p, ...c };
-    put('feedbackPublications', next);
+    await put('feedbackPublications', next);
     return next;
   });
 }
 
 const release = { claim: undefined, claimUntil: undefined };
 
-function acquire(id: string): { pub: Publication; claim: string } | undefined {
-  return transaction(() => {
-    const p = get<Publication>('feedbackPublications', id);
+async function acquire(id: string): Promise<{ pub: Publication; claim: string } | undefined> {
+  return await transaction(async () => {
+    const p = await get<Publication>('feedbackPublications', id);
     const t = now();
     if (!p || !ACTIVE.includes(p.state) || p.adminNeeded || p.nextAttemptAt > t) return undefined;
     if (p.claim && (p.claimUntil ?? 0) > t) return undefined;
-    if (pauseOf(p.repo).until > t) return undefined;
+    if ((await pauseOf(p.repo)).until > t) return undefined;
     const claim = randomBytes(12).toString('hex');
     // A send whose worker vanished: the issue may exist.
     const state: FeedbackPublicationState = p.state === 'sending' ? 'unknown' : p.state;
     const next: Publication = { ...p, state, claim, claimUntil: t + LEASE_MS };
     // Deleted feedback: never post; take back anything that may have been posted.
-    if (!get('feedback', p.id) && state !== 'withdrawing') {
+    if (!await get('feedback', p.id) && state !== 'withdrawing') {
       if (state === 'queued') {
-        put('feedbackPublications', { ...p, ...release, state: 'withdrawn', lastError: 'feedback deleted' });
+        await put('feedbackPublications', { ...p, ...release, state: 'withdrawn', lastError: 'feedback deleted' });
         return undefined;
       }
       next.state = 'withdrawing';
     }
-    put('feedbackPublications', next);
+    await put('feedbackPublications', next);
     return { pub: next, claim };
   });
 }
@@ -376,7 +376,7 @@ export function processPublication(id: string): Promise<void> {
 
 /** One claimed step. Returns true if there may be more to do straight away. */
 async function step(id: string): Promise<boolean> {
-  const got = acquire(id);
+  const got = await acquire(id);
   if (!got) return false;
   const { claim } = got;
   let pub = got.pub;
@@ -385,38 +385,38 @@ async function step(id: string): Promise<boolean> {
     if (pub.state === 'unknown') {
       // Never adopt or repost on our own: list what might be ours and ask an administrator.
       const found = await findCandidates(pub);
-      rateOk(pub.repo);
-      fenced(id, claim, (p) => askAdmin(p, found.candidates, `GitHub’s answer to the post was lost. Say which issue is this summary’s, or that none is.${found.note ? ` ${found.note}` : ''}`));
+      await rateOk(pub.repo);
+      await fenced(id, claim, (p) => askAdmin(p, found.candidates, `GitHub’s answer to the post was lost. Say which issue is this summary’s, or that none is.${found.note ? ` ${found.note}` : ''}`));
       return false;
     }
     // queued: authorise the POST in one transaction, re-checking everything that could have changed.
     let wait: number | undefined;
-    const authorised = fenced(id, claim, (p) => {
-      if (p.state !== 'queued' || !get('feedback', p.id)) return undefined;
+    const authorised = await fenced(id, claim, async (p) => { return transaction(async () => {
+      if (p.state !== 'queued' || !await get('feedback', p.id)) return undefined;
       const t = now();
-      if (pauseOf(p.repo).until > t) {
-        wait = pauseOf(p.repo).until;
+      if ((await pauseOf(p.repo)).until > t) {
+        wait = (await pauseOf(p.repo)).until;
         return undefined;
       }
-      wait = takeSlot(p.repo);
+      wait = await takeSlot(p.repo);
       if (wait) return undefined;
       return { state: 'sending', sentAt: t, attempts: p.attempts + 1, claimUntil: t + LEASE_MS };
-    });
+    }); });
     if (!authorised) {
-      fenced(id, claim, (p) => (p.state === 'queued' ? { ...release, nextAttemptAt: wait ?? now() } : { ...release, nextAttemptAt: now() }));
+      await fenced(id, claim, (p) => (p.state === 'queued' ? { ...release, nextAttemptAt: wait ?? now() } : { ...release, nextAttemptAt: now() }));
       return !wait;
     }
     pub = authorised;
     const created = (await github('POST', `/repos/${pub.repo}/issues`, { title: issueTitle(pub.summary), body: issueBody(pub), labels: FEEDBACK_LABELS })) as { number?: unknown; html_url?: unknown } | null;
     if (!validId(created?.number) || typeof created?.html_url !== 'string') throw new GitHubError('GitHub’s answer had no issue number', true);
     const issue = { number: created.number, url: created.html_url };
-    rateOk(pub.repo);
-    const after = fenced(id, claim, (p) => (p.state === 'withdrawing' ? { issue, ...release, nextAttemptAt: now() } : { state: 'filed', issue, lastError: undefined, ...release }));
+    await rateOk(pub.repo);
+    const after = await fenced(id, claim, (p) => (p.state === 'withdrawing' ? { issue, ...release, nextAttemptAt: now() } : { state: 'filed', issue, lastError: undefined, ...release }));
     return after?.state === 'withdrawing';
   } catch (err) {
-    onError(id, claim, pub.repo, err);
+    await onError(id, claim, pub.repo, err);
     // A lost answer: go straight on to listing candidates for an administrator.
-    const after = publicationFor(id);
+    const after = await publicationFor(id);
     return after?.state === 'unknown' && !after.claim && after.nextAttemptAt <= now();
   }
 }
@@ -436,41 +436,41 @@ async function retractStep(pub: Publication, claim: string): Promise<boolean> {
   const issue = pub.issue;
   if (!issue) {
     if (!pub.sentAt) {
-      fenced(pub.id, claim, () => ({ state: 'withdrawn', ...release }));
+      await fenced(pub.id, claim, () => ({ state: 'withdrawn', ...release }));
       return false;
     }
     // Posted, but GitHub's answer was lost: an administrator says which issue it is.
     const found = await findCandidates(pub);
-    rateOk(pub.repo);
-    fenced(pub.id, claim, (p) => askAdmin(p, found.candidates, `The tester withdrew a summary whose issue number was never recorded. Say which issue it is, or confirm none exists.${found.note ? ` ${found.note}` : ''}`));
+    await rateOk(pub.repo);
+    await fenced(pub.id, claim, (p) => askAdmin(p, found.candidates, `The tester withdrew a summary whose issue number was never recorded. Say which issue it is, or confirm none exists.${found.note ? ` ${found.note}` : ''}`));
     return false;
   }
   if (!pub.patched) {
     await waitForPause(pub.repo);
     await github('PATCH', `/repos/${pub.repo}/issues/${issue.number}`, { title: 'Withdrawn feedback', body: 'The tester withdrew this feedback.', state: 'closed', state_reason: 'not_planned' });
-    if (!fenced(pub.id, claim, () => ({ patched: true }))) return false;
+    if (!await fenced(pub.id, claim, () => ({ patched: true }))) return false;
   }
   // Triage in progress: wait for it to stop (it sees the withdrawal before its next write).
   // A comment whose worker vanished mid-POST may exist: that stays unknown.
-  const cur = publicationFor(pub.id)!;
+  const cur = (await publicationFor(pub.id))!;
   if (cur.triage) {
     if (cur.triage.until > now()) {
-      fenced(pub.id, claim, () => ({ ...release, nextAttemptAt: cur.triage!.until }));
+      await fenced(pub.id, claim, () => ({ ...release, nextAttemptAt: cur.triage!.until }));
       return false;
     }
-    fenced(pub.id, claim, (p) => ({ triage: undefined, commentUnknown: p.commentUnknown || (p.triage?.phase === 'commenting' ? uncertainty() : undefined) }));
+    await fenced(pub.id, claim, (p) => ({ triage: undefined, commentUnknown: p.commentUnknown || (p.triage?.phase === 'commenting' ? uncertainty() : undefined) }));
   }
-  for (const cid of publicationFor(pub.id)?.comments ?? []) {
+  for (const cid of (await publicationFor(pub.id))?.comments ?? []) {
     await deleteComment(pub.repo, cid);
-    fenced(pub.id, claim, (p) => ({ comments: (p.comments ?? []).filter((x) => x !== cid) }));
+    await fenced(pub.id, claim, (p) => ({ comments: (p.comments ?? []).filter((x) => x !== cid) }));
   }
-  rateOk(pub.repo);
-  const after = publicationFor(pub.id)!;
+  await rateOk(pub.repo);
+  const after = (await publicationFor(pub.id))!;
   if (after.commentUnknown) {
-    fenced(pub.id, claim, (p) => askAdmin(p, undefined, `A triage comment may have been posted on issue #${issue.number} without its id being recorded. Delete it by hand if it is there, then confirm.`));
+    await fenced(pub.id, claim, (p) => askAdmin(p, undefined, `A triage comment may have been posted on issue #${issue.number} without its id being recorded. Delete it by hand if it is there, then confirm.`));
     return false;
   }
-  fenced(pub.id, claim, () => ({ state: 'withdrawn', adminNeeded: undefined, candidates: undefined, lastError: undefined, ...release }));
+  await fenced(pub.id, claim, () => ({ state: 'withdrawn', adminNeeded: undefined, candidates: undefined, lastError: undefined, ...release }));
   return false;
 }
 
@@ -483,14 +483,14 @@ async function deleteComment(repo: string, id: number) {
   }
 }
 
-function onError(id: string, claim: string, repo: string, err: unknown) {
+async function onError(id: string, claim: string, repo: string, err: unknown) {
   if (err instanceof Paused) {
-    fenced(id, claim, (p) => ({ ...release, state: p.state === 'sending' ? 'unknown' : p.state, nextAttemptAt: err.until }));
+    await fenced(id, claim, (p) => ({ ...release, state: p.state === 'sending' ? 'unknown' : p.state, nextAttemptAt: err.until }));
     return;
   }
   const e = err instanceof GitHubError ? err : new GitHubError((err as Error).message, true);
-  const pausedUntil = e.rateLimited ? rateLimited(repo, e.retryAt) : undefined;
-  const p = fenced(id, claim, (p) => {
+  const pausedUntil = e.rateLimited ? await rateLimited(repo, e.retryAt) : undefined;
+  const p = await fenced(id, claim, (p) => {
     const lastError = safeError(e.message);
     // A withdrawal keeps going until it's done; it never falls back to posting.
     if (p.state === 'withdrawing') return { ...release, nextAttemptAt: pausedUntil ?? now() + backoff(p.attempts + 1), attempts: p.attempts + 1, lastError };
@@ -513,16 +513,16 @@ export async function processWithin(id: string, ms = 4000): Promise<Publication 
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([processPublication(id), new Promise<void>((r) => (timer = setTimeout(r, ms)))]);
   clearTimeout(timer);
-  return publicationFor(id);
+  return await publicationFor(id);
 }
 
 /** Work every record that is due, and take back summaries whose feedback was deleted. Run on a timer. */
 export async function processOutstanding(): Promise<void> {
   if (!issuesEnabled()) return;
-  for (const p of list<Publication>('feedbackPublications')) {
+  for (const p of await list<Publication>('feedbackPublications')) {
     // Deleted feedback: withdraw from whatever state it's in (needs-admin included).
-    if (p.state !== 'withdrawn' && p.state !== 'withdrawing' && !get('feedback', p.id)) requestWithdrawal(p.id);
-    const latest = publicationFor(p.id);
+    if (p.state !== 'withdrawn' && p.state !== 'withdrawing' && !await get('feedback', p.id)) await requestWithdrawal(p.id);
+    const latest = await publicationFor(p.id);
     if (latest && ACTIVE.includes(latest.state)) await processPublication(p.id);
   }
 }
@@ -537,24 +537,24 @@ const tokenMatches = (pub: Publication, token: unknown) => {
 };
 
 /** Never posted yet → withdrawn now. Possibly posted → withdrawing, which the worker finishes. */
-function requestWithdrawal(id: string) {
-  transaction(() => {
-    const p = get<Publication>('feedbackPublications', id);
+async function requestWithdrawal(id: string) {
+  await transaction(async () => {
+    const p = await get<Publication>('feedbackPublications', id);
     if (!p || p.state === 'withdrawn' || p.state === 'withdrawing') return;
     const maybePosted = !!p.issue || !!p.sentAt;
     // An in-flight worker keeps its claim; its fenced success or error handler sees "withdrawing".
-    put('feedbackPublications', maybePosted ? { ...p, state: 'withdrawing', adminNeeded: undefined, nextAttemptAt: now() } : { ...p, ...release, state: 'withdrawn' });
+    await put('feedbackPublications', maybePosted ? { ...p, state: 'withdrawing', adminNeeded: undefined, nextAttemptAt: now() } : { ...p, ...release, state: 'withdrawn' });
   });
 }
 
 /** The tester takes their public summary back. */
 export async function withdrawPublication(feedbackId: string, token: unknown): Promise<FeedbackPublicationStatus> {
-  const pub = publicationFor(feedbackId);
+  const pub = await publicationFor(feedbackId);
   if (!pub || !tokenMatches(pub, token)) throw new HttpError(403, 'That withdrawal link is not valid');
-  requestWithdrawal(feedbackId);
-  const after = publicationFor(feedbackId)!;
+  await requestWithdrawal(feedbackId);
+  const after = (await publicationFor(feedbackId))!;
   if (after.state === 'withdrawing') await processWithin(feedbackId);
-  return status(publicationFor(feedbackId)!);
+  return status((await publicationFor(feedbackId))!);
 }
 
 export type AdminAction = { action: 'check' } | { action: 'adopt'; issue: number } | { action: 'repost' } | { action: 'confirm' } | { action: 'comment'; comment: number };
@@ -588,13 +588,13 @@ function attentionKind(p: Publication): AttentionKind | undefined {
  * - A summary taken out of the triage queue: "check" puts it back.
  */
 export async function resolvePublication(id: string, a: AdminAction, ref: string): Promise<FeedbackPublicationStatus> {
-  const before = get<Publication>('feedbackPublications', id);
+  const before = await get<Publication>('feedbackPublications', id);
   if (!before || !attentionKind(before)) throw new HttpError(409, 'That public summary isn’t waiting for an administrator');
   if (attentionRef(before) !== ref) throw new HttpError(409, 'That public summary changed since you looked at it; reload and decide again');
   // A recorded comment must really be this server's triage comment on this issue.
   if (a.action === 'comment') await verifyTriageComment(before, a.comment);
-  const p = transaction(() => {
-    const p = get<Publication>('feedbackPublications', id);
+  const p = await transaction(async () => {
+    const p = await get<Publication>('feedbackPublications', id);
     if (!p) return undefined;
     const k = attentionKind(p);
     if (!k || attentionRef(p) !== ref) return undefined;
@@ -619,7 +619,7 @@ export async function resolvePublication(id: string, a: AdminAction, ref: string
       next = { ...p, ...reset, issue, candidates: undefined, state: p.state === 'needs-admin' ? 'filed' : p.state };
     } else if (a.action === 'repost' && p.state === 'needs-admin') next = { ...p, ...reset, state: 'queued', sentAt: undefined, issue: undefined, candidates: undefined, attempts: 0 };
     else if (a.action === 'confirm' && p.state === 'withdrawing') next = { ...p, ...reset, state: 'withdrawn', candidates: undefined, commentUnknown: undefined };
-    if (next) put('feedbackPublications', next);
+    if (next) await put('feedbackPublications', next);
     return next;
   });
   if (!p) throw new HttpError(409, 'That public summary changed since you looked at it, or that choice doesn’t apply to it');
@@ -643,7 +643,7 @@ async function verifyTriageComment(p: Publication, id: number) {
     if (err instanceof Paused) throw new HttpError(503, 'GitHub asked us to wait; try again later');
     // A rate limit here pauses the whole queue, like any other request.
     if (err instanceof GitHubError && err.rateLimited) {
-      rateLimited(p.repo, err.retryAt);
+      await rateLimited(p.repo, err.retryAt);
       throw new HttpError(503, 'GitHub asked us to wait; try again later');
     }
     throw new HttpError(502, safeError((err as Error).message));
@@ -653,11 +653,11 @@ async function verifyTriageComment(p: Publication, id: number) {
 }
 
 /** Public summaries waiting for an administrator, whether or not their feedback still exists. */
-export function publicationsNeedingAdmin() {
-  return list<Publication>('feedbackPublications')
+export async function publicationsNeedingAdmin() {
+  return (await Promise.all((await list<Publication>('feedbackPublications'))
     .filter((p) => attentionKind(p))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .map((p) => ({
+    .map(async (p) => ({
       id: p.id,
       kind: attentionKind(p)!,
       ref: attentionRef(p),
@@ -673,9 +673,9 @@ export function publicationsNeedingAdmin() {
           : attentionKind(p) === 'triage-parked'
             ? `Taken out of the triage queue: ${p.triageParked!.reason}. Put it back once that's fixed, or triage it by hand.`
             : p.lastError,
-      feedbackDeleted: !get('feedback', p.id),
+      feedbackDeleted: !await get('feedback', p.id),
       createdAt: p.createdAt,
-    }));
+    }))));
 }
 
 /* ------------------------------- triage --------------------------------- */
@@ -707,13 +707,14 @@ export function triageTokenMatches(header: string | undefined) {
   return timingSafeEqual(Buffer.from(sha(got)), Buffer.from(sha(want)));
 }
 
-const triageable = (p: Publication) => p.state === 'filed' && !!p.issue && p.repo === config.feedbackIssues.repo && !!get('feedback', p.id);
+const triageable = async (p: Publication) => p.state === 'filed' && !!p.issue && p.repo === config.feedbackIssues.repo && !!await get('feedback', p.id);
 
 /** What the routine may triage: the ten oldest filed summaries not yet triaged, and the triaged ones for spotting duplicates. */
-export function triageQueue() {
-  const filed = list<Publication>('feedbackPublications')
-    .filter(triageable)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+export async function triageQueue() {
+  // Checked first, then filtered: filter() itself would take each async check's promise as true.
+  const all = await list<Publication>('feedbackPublications');
+  const ok = await Promise.all(all.map(triageable));
+  const filed = all.filter((_, i) => ok[i]).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const row = (p: Publication) => ({ issue: p.issue!.number, url: p.issue!.url, summary: p.summary, createdAt: p.createdAt, ...(p.decision && !p.triagedAt ? { savedDecision: p.decision } : {}) });
   return {
     pending: filed.filter((p) => !p.triagedAt && !p.commentUnknown && !p.triageParked).slice(0, 10).map(row),
@@ -759,13 +760,13 @@ export async function triagePublication(issueNumber: number, body: Record<string
   const input = body.resume === true ? undefined : parseTriage(body, issueNumber);
   const repo = config.feedbackIssues.repo;
   const claim = randomBytes(12).toString('hex');
-  const pub = transaction(() => {
-    const p = list<Publication>('feedbackPublications').find((x) => x.repo === repo && x.issue?.number === issueNumber);
-    if (!p || !triageable(p)) throw new HttpError(409, 'That issue is not a filed feedback summary');
+  const pub = await transaction(async () => {
+    const p = (await list<Publication>('feedbackPublications')).find((x) => x.repo === repo && x.issue?.number === issueNumber);
+    if (!p || !await triageable(p)) throw new HttpError(409, 'That issue is not a filed feedback summary');
     if (p.triagedAt) throw new HttpError(409, 'That issue has already been triaged');
     if (p.triage?.phase === 'commenting' && p.triage.until <= now()) {
       // A worker vanished while posting the comment: it may exist, so it is never posted again.
-      put('feedbackPublications', { ...p, triage: undefined, commentUnknown: uncertainty() });
+      await put('feedbackPublications', { ...p, triage: undefined, commentUnknown: uncertainty() });
       return undefined;
     }
     if (p.commentUnknown) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
@@ -774,14 +775,14 @@ export async function triagePublication(issueNumber: number, body: Record<string
     if (!input && !p.decision) throw new HttpError(409, 'No decision is saved for that issue; send one');
     if (p.decision && input && !sameDecision(p.decision, input)) throw new HttpError(409, 'A different decision is already recorded for that issue; send {"resume": true} to carry it out');
     if (!p.decision) {
-      if (!triageQueue().pending.some((x) => x.issue === issueNumber)) throw new HttpError(409, 'Triage the oldest summaries first, as listed in the queue');
+      if (!(await triageQueue()).pending.some((x) => x.issue === issueNumber)) throw new HttpError(409, 'Triage the oldest summaries first, as listed in the queue');
       // Checked for a new decision only: a saved one is carried out even if its target was withdrawn since.
-      if (input!.possibleDuplicateOf && !triageQueue().triaged.some((t) => t.issue === input!.possibleDuplicateOf)) throw new HttpError(400, 'possibleDuplicateOf must be a triaged feedback summary from the queue');
-      if (triageSlotsUsed(repo) >= TRIAGE_PER_HOUR) throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
+      if (input!.possibleDuplicateOf && !(await triageQueue()).triaged.some((t) => t.issue === input!.possibleDuplicateOf)) throw new HttpError(400, 'possibleDuplicateOf must be a triaged feedback summary from the queue');
+      if (await triageSlotsUsed(repo) >= TRIAGE_PER_HOUR) throw new HttpError(429, `At most ${TRIAGE_PER_HOUR} decisions an hour`);
     }
-    if (pauseOf(repo).until > now()) throw new HttpError(503, 'GitHub asked us to wait; try again later');
+    if ((await pauseOf(repo)).until > now()) throw new HttpError(503, 'GitHub asked us to wait; try again later');
     const next: Publication = { ...p, triage: { claim, until: now() + TRIAGE_LEASE_MS, phase: p.comments?.length ? 'labelling' : 'commenting' } };
-    put('feedbackPublications', next);
+    await put('feedbackPublications', next);
     return next;
   });
   if (!pub) throw new HttpError(409, 'A comment on that issue may have been posted without being recorded; triage it by hand');
@@ -789,15 +790,15 @@ export async function triagePublication(issueNumber: number, body: Record<string
   const decision = pub.decision ?? input!;
   /** Before every request: still ours, still filed, feedback still there, not paused. */
   const check = async () => {
-    const p = get<Publication>('feedbackPublications', pub.id);
+    const p = await get<Publication>('feedbackPublications', pub.id);
     if (!p || p.triage?.claim !== claim) throw new HttpError(409, 'The triage lease ran out');
-    if (!triageable(p)) throw new HttpError(409, 'The tester withdrew this summary');
+    if (!await triageable(p)) throw new HttpError(409, 'The tester withdrew this summary');
     await waitForPause(repo);
   };
-  const release = (change: (p: Publication) => Partial<Publication> = () => ({})) =>
-    transaction(() => {
-      const p = get<Publication>('feedbackPublications', pub.id);
-      if (p?.triage?.claim === claim) put('feedbackPublications', { ...p, triage: undefined, ...change(p) });
+  const release = async (change: (p: Publication) => Partial<Publication> = () => ({})) =>
+    await transaction(async () => {
+      const p = await get<Publication>('feedbackPublications', pub.id);
+      if (p?.triage?.claim === claim) await put('feedbackPublications', { ...p, triage: undefined, ...change(p) });
     });
   let commenting = false;
   try {
@@ -806,19 +807,19 @@ export async function triagePublication(issueNumber: number, body: Record<string
     const why = !names ? 'the issue is closed' : !names.includes('feedback') ? 'the issue is no longer labelled feedback' : !resuming && !names.includes('needs-triage') ? 'the issue is no longer labelled needs-triage' : undefined;
     if (why) {
       // Out of the queue, so it can't hold a place among the oldest ten; an administrator can put it back.
-      release(() => ({ triageParked: { reason: why, at: new Date(now()).toISOString() } }));
+      await release(() => ({ triageParked: { reason: why, at: new Date(now()).toISOString() } }));
       throw new HttpError(409, `Not triaged: ${why}`);
     }
     if (!resuming) {
       // The decision is saved, and counted, before anything is written.
-      const saved = transaction(() => {
-        const p = get<Publication>('feedbackPublications', pub.id);
+      const saved = await transaction(async () => {
+        const p = await get<Publication>('feedbackPublications', pub.id);
         if (!p || p.triage?.claim !== claim) return 'lease';
         const t = now();
-        const recent = (get<Kv<number[]>>('kv', triageRateId(repo))?.value ?? []).filter((x) => x > t - HOUR_MS);
+        const recent = ((await get<Kv<number[]>>('kv', triageRateId(repo)))?.value ?? []).filter((x) => x > t - HOUR_MS);
         if (recent.length >= TRIAGE_PER_HOUR) return 'full';
-        put('kv', { id: triageRateId(repo), value: [...recent, t] });
-        put('feedbackPublications', { ...p, decision });
+        await put('kv', { id: triageRateId(repo), value: [...recent, t] });
+        await put('feedbackPublications', { ...p, decision });
         return 'ok';
       });
       if (saved === 'lease') throw new HttpError(409, 'The triage lease ran out');
@@ -832,11 +833,11 @@ export async function triagePublication(issueNumber: number, body: Record<string
       commenting = false;
       const id = created.id;
       // Recorded even if the lease is gone, so a withdrawal can delete it.
-      const ours = transaction(() => {
-        const p = get<Publication>('feedbackPublications', pub.id);
+      const ours = await transaction(async () => {
+        const p = await get<Publication>('feedbackPublications', pub.id);
         if (!p) return false;
         const mine = p.triage?.claim === claim;
-        put('feedbackPublications', { ...p, comments: [...(p.comments ?? []), id], ...(mine ? { triage: { ...p.triage!, phase: 'labelling' as const } } : {}) });
+        await put('feedbackPublications', { ...p, comments: [...(p.comments ?? []), id], ...(mine ? { triage: { ...p.triage!, phase: 'labelling' as const } } : {}) });
         return mine;
       });
       if (!ours) throw new HttpError(409, 'The triage lease ran out');
@@ -861,31 +862,31 @@ export async function triagePublication(issueNumber: number, body: Record<string
         await github('POST', `/repos/${repo}/issues/${issueNumber}/labels`, { labels: missing });
       }
     }
-    rateOk(repo);
+    await rateOk(repo);
     // Recorded only if the summary is still filed: a withdrawal during the last read wins.
-    const done = transaction(() => {
-      const p = get<Publication>('feedbackPublications', pub.id);
+    const done = await transaction(async () => {
+      const p = await get<Publication>('feedbackPublications', pub.id);
       if (!p || p.triage?.claim !== claim) return false;
-      put('feedbackPublications', { ...p, triage: undefined, ...(triageable(p) ? { triagedAt: new Date(now()).toISOString() } : {}) });
-      return triageable(p);
+      await put('feedbackPublications', { ...p, triage: undefined, ...(await triageable(p) ? { triagedAt: new Date(now()).toISOString() } : {}) });
+      return await triageable(p);
     });
     if (!done) throw new HttpError(409, 'The tester withdrew this summary');
-    return { issue: issueNumber, labels: wanted, comments: publicationFor(pub.id)?.comments ?? [] };
+    return { issue: issueNumber, labels: wanted, comments: (await publicationFor(pub.id))?.comments ?? [] };
   } catch (err) {
     if (err instanceof GitHubError) {
-      if (err.rateLimited) rateLimited(repo, err.retryAt);
+      if (err.rateLimited) await rateLimited(repo, err.retryAt);
       // A comment that may have been posted without its id: never posted again; withdrawal asks an administrator.
-      release((p) => ({ commentUnknown: p.commentUnknown || (commenting && err.ambiguous ? uncertainty() : undefined) }));
+      await release((p) => ({ commentUnknown: p.commentUnknown || (commenting && err.ambiguous ? uncertainty() : undefined) }));
       throw new HttpError(err.rateLimited ? 503 : 502, safeError(err.message));
     }
-    release();
+    await release();
     if (err instanceof Paused) throw new HttpError(503, 'GitHub asked us to wait; try again later');
     throw err;
   }
 }
 
 const triageRateId = (repo: string) => `feedback-issues:triage-rate:${repo.toLowerCase()}`;
-const triageSlotsUsed = (repo: string) => (get<Kv<number[]>>('kv', triageRateId(repo))?.value ?? []).filter((x) => x > now() - HOUR_MS).length;
+const triageSlotsUsed = async (repo: string) => ((await get<Kv<number[]>>('kv', triageRateId(repo)))?.value ?? []).filter((x) => x > now() - HOUR_MS).length;
 /** One kind and one size: any other kind or size label is removed. Other labels are left alone. */
 const CHOSEN_LABELS: string[] = [...TRIAGE_KINDS, ...TRIAGE_SIZES];
 

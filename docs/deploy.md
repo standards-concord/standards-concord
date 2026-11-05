@@ -42,11 +42,14 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | Key | What it turns on |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Claude for the interviewer, triage, meeting analysis, persona simulation and feedback chat. Without it these use an offline stand-in. |
+| `LLM_DAILY_BUDGET_USD`, `LLM_MONTHLY_BUDGET_USD` | The most Concord spends on Claude per UTC day and month, in dollars (default 5 and 40). Past either, AI features use the offline stand-in until the limit resets. Totals survive restarts and demo resets. |
 | `CONCORD_PROXY_SECRET` | Must equal the Vercel variable of the same name (step 5). Lets the backend trust the domain and visitor IP the Vercel middleware forwards. |
 | `PUBLIC_ORIGINS` | Comma-separated extra origins, such as a domain pointed straight at the backend, that may appear in OAuth metadata and MCP URLs when reached directly. Vercel domains don't need listing when `CONCORD_PROXY_SECRET` is set. |
 | `TRUST_PROXY` | Which proxies' `X-Forwarded-*` headers to believe, in [Express's syntax](https://expressjs.com/en/guide/behind-proxies.html). The default, `loopback, linklocal, uniquelocal`, covers Caddy on the same Docker network. OAuth URLs never come from these headers. |
 | `OPENAI_APPS_CHALLENGE` | The domain verification token from OpenAI's plugin submission, served at `/.well-known/openai-apps-challenge`. |
-| `ADMIN_WEBIDS` | WebIDs of the deployment's administrators, who can reset the demo and read every tester's feedback. Sign in with Google or GitHub, copy your WebID from Settings, then `./deploy/azure/set-key.sh ADMIN_WEBIDS`. Demo accounts and personas never count. |
+| `ADMIN_WEBIDS` | WebIDs of the deployment's administrators, who can reset the demo and read every tester's feedback. Use your own WebID and sign in with it ("Sign in with Solid"), or sign in with Google or GitHub and copy the WebID from Settings; then `./deploy/azure/set-key.sh ADMIN_WEBIDS`. Demo accounts and personas never count. Each tester's `concord/feedback/` folder in their pod is shared read-only with these WebIDs (re-applied at every start, so removing one takes its access away), testers are shown them on the feedback page, and an admin signed in with their WebID can read the folders straight from the pods under Admin → Feedback. |
+| `SOLID_OIDC` | Signing in with your own WebID (Solid-OIDC with DPoP). On by default; `off` hides it. Providers fetch the Client ID Document at `<vercel-url>/auth/solid/client.jsonld`; the redirect URI is `<vercel-url>/auth/solid/callback`. |
+| `SOLID_TRUSTED_ISSUERS` | Only for development and tests: Solid providers that may be on a private address or plain http (such as a local Community Solid Server). Everyone else's provider must be public https. |
 | `ADMIN_EMAILS` | The older alternative: verified emails of Google or GitHub accounts. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google. Create an OAuth client (Web application) in Google Cloud with redirect URI `<vercel-url>/auth/google/callback`. |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | Sign in with GitHub. Create an OAuth app with callback URL `<vercel-url>/auth/github/callback`. |
@@ -66,6 +69,10 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 - **Your own domain:** point DNS A records for the hostname and `pods.` under it at the static IP, change `HOST` in `/opt/concord/stack.env`, restart the stack, and change `BACKEND_URL` in Vercel.
 - **Moving Concord's public address** (the domain people and agents use): add the domain in Vercel, set `PUBLIC_URL` to it with `set-key.sh`, run `node scripts/public-url.mjs https://<new-origin>` and merge so the plugins and MCP Registry entry follow. Keep the old domain serving Concord for a few weeks: installed plugins only move when they update, and every agent has to sign in again at the new address, because OAuth tokens are tied to the address they were issued for.
 - **Removing it:** `az group delete -n concord` deletes the VM, its IP address, disk and snapshots.
+
+## Before the backend runs on more than one instance
+
+The backend assumes one process. Changes to one meeting (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) are serialised by locks held in that process ([locks.ts](../apps/server/src/locks.ts)), and the Meet bot's clock runs in it. That is correct on the single server above. Serverless functions (Vercel) run several instances at once, so before the backend moves there, the meeting and calendar locks must also take the database's writer lock (a transaction) around each read and write, and the bot's per-minute tick needs its own trigger. Until then, run one backend instance.
 
 ## Alternative: AWS
 

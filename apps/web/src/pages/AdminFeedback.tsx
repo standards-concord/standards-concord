@@ -1,9 +1,12 @@
 import { Fragment, useMemo, useState } from 'react';
-import type { FeedbackQuestion, FeedbackSubmission } from '@concord/shared';
-import { Download, Mic, ListChecks } from 'lucide-react';
+import type { FeedbackQuestion, FeedbackSubmission, PodFeedbackFolder, PodFeedbackReport } from '@concord/shared';
+import { Database, Download, Mic, ListChecks } from 'lucide-react';
+import { Link } from 'react-router';
 import { api, type PublicationNeedingAdmin } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { download, formatDate } from '../lib/format';
+import { useSession } from '../lib/session';
+import { WebIdIcon } from '../components/badges';
 import { Page } from '../components/Shell';
 import { Markdown } from '../components/Markdown';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, PageHeader, cx } from '../components/ui';
@@ -193,6 +196,96 @@ function toCsv(subs: FeedbackSubmission[], qs: FeedbackQuestion[]) {
   return [head.join(','), ...rows].join('\n');
 }
 
+const FOLDER_STATUS: Record<PodFeedbackFolder['status'], { label: string; tone: 'ok' | 'danger' | 'neutral' | 'warn' }> = {
+  ok: { label: 'Readable', tone: 'ok' },
+  partial: { label: 'Partly read', tone: 'warn' },
+  forbidden: { label: 'Not shared with you', tone: 'danger' },
+  missing: { label: 'No feedback', tone: 'neutral' },
+  error: { label: 'Couldn’t read', tone: 'warn' },
+};
+
+/**
+ * Testers' feedback read straight from their pods, as the admin's own WebID.
+ * Only works when the admin signed in with Solid: the pods then check their
+ * access control against that WebID, not against anything Concord says.
+ */
+function PodFeedback() {
+  const { session } = useSession();
+  const [report, setReport] = useState<PodFeedbackReport>();
+  const read = useAction(async () => setReport(await api.podFeedback()));
+  const u = session?.user;
+  const viaSolid = !!u?.providers.some((p) => p.provider === 'solid' && p.subject === u.webId);
+  const readers = session?.feedbackReaders ?? [];
+  if (!session?.solid.enabled) return null;
+  return (
+    <div className="mb-6" data-testid="pod-feedback">
+    <Card>
+      <CardHeader
+        icon={Database}
+        title="Read from testers’ pods"
+        subtitle={
+          readers.length
+            ? `Each tester’s concord/feedback/ folder is shared read-only with ${readers.length === 1 ? 'the admin WebID' : `${readers.length} admin WebIDs`} (ADMIN_WEBIDS).`
+            : 'No admin WebIDs are set (ADMIN_WEBIDS), so testers’ feedback folders aren’t shared with anyone.'
+        }
+        actions={
+          viaSolid ? (
+            <Button icon={Database} loading={read.pending} onClick={() => void read.run()}>
+              Read as my WebID
+            </Button>
+          ) : undefined
+        }
+      />
+      <div className="space-y-3 px-5 pb-5">
+        {!viaSolid && (
+          <p className="text-sm text-muted">
+            To read feedback straight from the pods, <Link to="/login?next=/admin/feedback" className="text-accent hover:underline">sign in with Solid</Link>. The pods check their sharing against your WebID themselves.
+          </p>
+        )}
+        <InlineError error={read.error} />
+        {report && (
+          <>
+            <p className="flex items-center gap-1.5 text-xs text-muted">
+              <WebIdIcon className="size-3.5" /> Read as <code className="font-mono">{report.readAs}</code>
+            </p>
+            {!report.folders.length ? (
+              <p className="text-sm text-muted">No tester has saved feedback to a pod yet.</p>
+            ) : (
+              <ul className="divide-y divide-line rounded-lg border border-line" data-testid="pod-folders">
+                {report.folders.map((f) => (
+                  <li key={f.url} className="space-y-1 px-4 py-3 text-sm" data-testid="pod-folder">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{f.testerName}</span>
+                      <Badge tone={FOLDER_STATUS[f.status].tone}>{FOLDER_STATUS[f.status].label}</Badge>
+                      {(f.status === 'ok' || f.status === 'partial') && <span className="text-xs text-muted">{f.items.length} submission{f.items.length === 1 ? '' : 's'}</span>}
+                      {!!f.unread && <span className="text-xs text-warn">{f.unread} not read</span>}
+                      <a href={f.url} target="_blank" rel="noreferrer" className="ml-auto truncate font-mono text-xs text-accent hover:underline">
+                        {f.url}
+                      </a>
+                    </div>
+                    {f.sharingError && (
+                      <p className="text-xs text-danger" data-testid="pod-sharing-error">
+                        Couldn’t share this folder with the admins: {f.sharingError}
+                      </p>
+                    )}
+                    {f.items.slice(0, 5).map((s) => (
+                      <div key={s.id} className="text-xs text-muted">
+                        {formatDate(s.createdAt)} · {s.pathway}
+                        {s.appVersion ? ` · v${s.appVersion}` : ''} · {Object.keys(s.answers).length} answer{Object.keys(s.answers).length === 1 ? '' : 's'}
+                      </div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    </Card>
+    </div>
+  );
+}
+
 export function AdminFeedbackPage() {
   const subs = useAsync(() => api.feedback(), []);
   const qs = useAsync(() => api.feedbackQuestions(), []);
@@ -229,6 +322,7 @@ export function AdminFeedbackPage() {
       />
       <InlineError error={sum.error} />
       <PublicationsNeedingAdmin />
+      <PodFeedback />
       {summary && (
         <Card className="mb-6">
           <CardHeader icon={ListChecks} title="Summary" />

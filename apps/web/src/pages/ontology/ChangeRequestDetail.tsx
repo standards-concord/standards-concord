@@ -120,10 +120,11 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const [comment, setComment] = useState('');
   const [reviseOpen, setReviseOpen] = useState(false);
   const [instruction, setInstruction] = useState('');
-  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>) => {
+  const act = useAction(async (fn: () => Promise<ChangeRequestDetail>, sent?: string) => {
     const d = await fn();
     onUpdate(d);
-    setComment('');
+    // Clear only what was sent with it: text typed while the request was on its way is kept, not wiped.
+    setComment((now) => (sent !== undefined && now.trim() === sent ? '' : now));
   });
   const revise = useAction(async () => {
     onUpdate(await api.revise(cr.id, instruction.trim()));
@@ -140,8 +141,8 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   const myVote = cr.votes.find((v) => v.userId === uid);
   const myReview = [...cr.reviews].reverse().find((r) => r.userId === uid && r.decision !== 'comment');
   const c = comment.trim() || undefined;
-  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c));
-  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c));
+  const review = (d: ReviewDecision) => act.run(() => api.review(cr.id, d, c), c);
+  const vote = (ch: VoteChoice) => act.run(() => api.voteChangeRequest(cr.id, ch, c), c);
   const approverOk = cr.governance.rule.approverRoles.some((r) => myRoles.includes(r));
   // Under final say the vote can open before the ODI approves, but cannot pass without it.
   const odiNeeded = needsOdiApproval(ontology.governance, cr);
