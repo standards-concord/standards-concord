@@ -33,9 +33,9 @@ export const config = {
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',
   demoMode: bool(process.env.DEMO_MODE, true),
   /**
-   * Refuse to publish fork edits when the full OWL reasoner (HermiT via toolkit/) can't run,
-   * instead of falling back to the structural check. On in production (the Docker image ships
-   * the toolkit); off by default elsewhere so the app runs with no setup.
+   * Refuse to publish fork edits when the full OWL reasoner (sparq) gives no verdict (it timed
+   * out, crashed, or can't decide the ontology), instead of falling back to the structural check.
+   * On in production; off by default elsewhere.
    */
   requireFullReasoner: bool(process.env.CONCORD_REQUIRE_REASONER, process.env.NODE_ENV === 'production'),
   /**

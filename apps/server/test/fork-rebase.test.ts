@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import nodePath from 'node:path';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
@@ -18,6 +18,19 @@ import { forkDetail, forkSummary, forTests } from '../src/services/forks.js';
 import { findProject } from '../src/services/ontologies.js';
 import { checkoutTestHooks, ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo, step } from '../src/services/simulation.js';
+
+// The OWL reasoner (sparq, in its worker) giving no verdict, as when it times out or crashes: only while `down` is set.
+const reasoner = vi.hoisted(() => ({ down: false }));
+vi.mock('../src/reasoner/pool.js', async (real) => {
+  const pool = await real<typeof import('../src/reasoner/pool.js')>();
+  return {
+    ...pool,
+    reasonInWorker: (...args: Parameters<typeof pool.reasonInWorker>) =>
+      reasoner.down
+        ? Promise.resolve({ engine: 'structural' as const, available: false, checked: 'none' as const, consistent: true, unsatisfiable: [], inferredSubClassOf: [], error: 'the OWL reasoner took longer than 60 s and was stopped', durationMs: 0 })
+        : pool.reasonInWorker(...args),
+  };
+});
 
 /**
  * How forks behave when upstream moves: concurrent edits, conflicts, syncs
@@ -329,23 +342,32 @@ describe('second review', () => {
 
   it('refuses fork changes when the full OWL reasoner is required but cannot run', async () => {
     const path = await newFork('No reasoner');
-    const prev = { require: config.requireFullReasoner, python: process.env.CONCORD_PYTHON };
+    const prev = config.requireFullReasoner;
     config.requireFullReasoner = true;
-    process.env.CONCORD_PYTHON = '/nonexistent/python';
+    reasoner.down = true;
     try {
       const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('Unchecked', 'unchecked')] });
       expect(edit.status).toBe(503);
       expect(edit.body.error).toMatch(/reasoner/);
       expect((await fork(path)).revision).toBe(0);
     } finally {
-      config.requireFullReasoner = prev.require;
-      if (prev.python === undefined) delete process.env.CONCORD_PYTHON;
-      else process.env.CONCORD_PYTHON = prev.python;
+      config.requireFullReasoner = prev;
+      reasoner.down = false;
     }
-    // Where the reasoner is optional, the edit goes through and says how it was checked.
+    // With the reasoner answering, the edit is checked by it.
     const edit = await dev.post(`${path}/edits`).send({ ops: [addClass('Checked', 'checked')] });
     expect(edit.status).toBe(200);
-    expect(['owl', 'structural']).toContain(edit.body.validation.reasoner);
+    expect(edit.body.validation.reasoner).toBe('owl');
+    // Where the reasoner is optional and gives no verdict, the edit goes through and says how it was checked.
+    reasoner.down = true;
+    try {
+      const fallback = await dev.post(`${path}/edits`).send({ ops: [addClass('Fallback', 'fallback')] });
+      expect(fallback.status).toBe(200);
+      expect(fallback.body.validation.reasoner).toBe('structural');
+      expect(fallback.body.validation.warnings[0]).toMatch(/structural reasoner only.*took longer than/);
+    } finally {
+      reasoner.down = false;
+    }
   });
 
   it('discards only the named header field, and asks before discarding other terms changed in the same edit', async () => {
@@ -424,16 +446,15 @@ describe('third review', () => {
     const path = await newFork('Sync without reasoner');
     await dev.post(`${path}/edits`).send({ ops: [addClass('SyncNeedsReasoner', 'sync needs reasoner')] });
     await upstream([addClass('MeanwhileUpstream', 'meanwhile upstream')]);
-    const prev = { require: config.requireFullReasoner, python: process.env.CONCORD_PYTHON };
+    const prev = config.requireFullReasoner;
     config.requireFullReasoner = true;
-    process.env.CONCORD_PYTHON = '/nonexistent/python';
+    reasoner.down = true;
     try {
       const sync = await dev.post(`${path}/sync`);
       expect(sync.status).toBe(503);
     } finally {
-      config.requireFullReasoner = prev.require;
-      if (prev.python === undefined) delete process.env.CONCORD_PYTHON;
-      else process.env.CONCORD_PYTHON = prev.python;
+      config.requireFullReasoner = prev;
+      reasoner.down = false;
     }
   });
 

@@ -111,7 +111,7 @@ function AddTerms({ onDone }: { onDone: () => void }) {
   const [result, setResult] = useState<string>();
   const add = useAction(async () => {
     const r = await api.editFork(id, forkSlug, { description: text.trim() });
-    const check = r.validation.reasoner === 'owl' ? 'The OWL reasoner confirms the ontology is still logically consistent.' : 'Checked with the structural reasoner only (the full OWL reasoner is not installed on this server).';
+    const check = r.validation.reasoner === 'owl' ? 'The OWL reasoner confirms the ontology is still logically consistent.' : 'Checked with the structural reasoner only (the full OWL reasoner gave no verdict this time).';
     setResult(`Added ${r.terms.map((t) => t.curie).join(', ') || 'the edits'}. ${r.validation.consistent ? check : ''}`);
     setText('');
     onDone();

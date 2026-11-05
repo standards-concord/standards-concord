@@ -20,6 +20,7 @@ import { get, HttpError, list, mustGet, put, putIf, withFence } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import type { ProposedTerm } from '../llm/schemas.js';
 import { createChangeRequest, draftFromNaturalLanguage, getCR, submit, updateOps } from './changeRequests.js';
+import { reasonInWorker } from '../reasoner/pool.js';
 import { fairContext } from './fairResolution.js';
 import { competencyTests, findProject, getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -540,13 +541,13 @@ function validationBrief(v: ValidationReport) {
 
 /** Strict OWL: a fork may never serve an inconsistent ontology or an unsatisfiable class. */
 async function requireConsistent(p: OntologyProject, graph: OntologyGraph, what: string) {
-  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) });
+  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) });
   const brief = validationBrief(report);
   if (!report.reasoner.available) {
     // The fallback structural check misses whole classes of inconsistency (cardinalities, for one).
     if (config.requireFullReasoner)
-      throw new HttpError(503, `The OWL reasoner isn't available right now (${report.reasoner.error ?? 'unknown error'}), so ${what.toLowerCase()} can't be checked for consistency. Nothing was changed; try again shortly.`);
-    brief.warnings.unshift('Checked with the structural reasoner only: the full OWL reasoner (HermiT) is not installed on this server. Run toolkit/setup.sh for full checks.');
+      throw new HttpError(503, `The OWL reasoner gave no verdict (${report.reasoner.error ?? 'unknown error'}), so ${what.toLowerCase()} can't be checked for consistency. Nothing was changed. If it was busy or timed out, try again shortly.`);
+    brief.warnings.unshift(`Checked with the structural reasoner only: the full OWL reasoner gave no verdict (${report.reasoner.error ?? 'unknown error'}).`);
   }
   if (!brief.consistent) {
     const unsat = report.reasoner.unsatisfiable.map((i) => compactIRI(i, graph.prefixes));
