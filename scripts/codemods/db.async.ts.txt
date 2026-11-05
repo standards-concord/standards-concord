@@ -1,0 +1,111 @@
+import { type DocStore, openStore, type StoreOptions } from './store/index.js';
+
+/**
+ * Platform metadata (users, roles, change requests, votes) as JSON documents. Ontologies themselves live in
+ * git, and people's private data (interview transcripts) in their Solid pods.
+ *
+ * Every call is async and goes to the store the environment picks (store/index.ts): Postgres when
+ * DATABASE_URL is set (Neon on Vercel), PGlite with CONCORD_STORE=pglite, SQLite otherwise. Calls made inside
+ * transaction(fn), however deep, join that transaction.
+ */
+/*COLLECTION*/
+
+let store: Promise<DocStore> | undefined;
+
+/** Open the store (once; later calls return the same one). */
+export function openDb(opts?: StoreOptions): Promise<DocStore> {
+  if (!store) {
+    store = openStore(opts);
+    store.catch(() => (store = undefined)); // A failed open (database unreachable) is retried on the next call.
+  }
+  return store;
+}
+
+export async function closeDb() {
+  const s = store;
+  store = undefined;
+  if (s) await (await s).close();
+}
+
+const conn = () => openDb();
+
+/** `parent` is the indexed foreign key used for listing (usually an ontology id). */
+export async function put<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<T> {
+  return (await conn()).put(collection, doc, parent);
+}
+
+export async function get<T>(collection: Collection, id: string): Promise<T | undefined> {
+  return (await conn()).get<T>(collection, id);
+}
+
+export async function mustGet<T>(collection: Collection, id: string): Promise<T> {
+  const doc = await get<T>(collection, id);
+  if (!doc) throw new HttpError(404, `${collection.replace(/s$/, '')} ${id} not found`);
+  return doc;
+}
+
+export async function list<T>(collection: Collection, parent?: string): Promise<T[]> {
+  return (await conn()).list<T>(collection, parent);
+}
+
+export async function remove(collection: Collection, id: string): Promise<void> {
+  await (await conn()).remove(collection, id);
+}
+
+/** Delete a document and return it, atomically: of several callers racing for it, only one gets it. */
+export async function take<T>(collection: Collection, id: string): Promise<T | undefined> {
+  return (await conn()).take<T>(collection, id);
+}
+
+/**
+ * Set `field` to `value` on a document only if it is not set yet, atomically, and return the document as it
+ * was. Undefined means it doesn't exist or someone else set the field first.
+ */
+export async function claim<T>(collection: Collection, id: string, field: string, value: string | number): Promise<T | undefined> {
+  return (await conn()).claim<T>(collection, id, field, value);
+}
+
+export async function clearAll(): Promise<void> {
+  await (await conn()).clearAll();
+}
+
+/**
+ * Run fn in one transaction: writers take turns, so read-then-write steps inside can't interleave with another
+ * writer, in this process or any other. A nested call joins the outer transaction. Keep fn short: no network
+ * calls (LLM, GitHub, pods) inside, because every other writer waits for it. Await every store call that
+ * belongs to it: the transaction waits for statements already running when fn returns, but a call made later
+ * (after a timer, say) runs outside it.
+ */
+export async function transaction<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).transaction(async () => fn());
+}
+
+/**
+ * Run fn without waiting on other connections' locks: anything blocked throws at once instead of stalling.
+ * For background work that can simply be retried later.
+ */
+export async function withoutWaiting<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).withoutWaiting(async () => fn());
+}
+
+/**
+ * Run fn outside any transaction the caller is in: for background work (timers, notifications) started from
+ * inside one, which would otherwise inherit it and be refused once it rolls back or while it commits.
+ */
+export async function detached<T>(fn: () => T | Promise<T>): Promise<T> {
+  return (await conn()).detached(async () => fn());
+}
+
+/** Rewrite storage so old copies of rewritten or deleted rows are gone. False if blocked: retry later. */
+export async function scrubFreeSpace(): Promise<boolean> {
+  return (await conn()).scrubFreeSpace();
+}
+
+export class HttpError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}

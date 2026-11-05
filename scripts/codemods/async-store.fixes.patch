@@ -1,0 +1,234 @@
+diff --git a/apps/server/src/oauth.ts b/apps/server/src/oauth.ts
+index fb707f6..4672747 100644
+--- a/apps/server/src/oauth.ts
++++ b/apps/server/src/oauth.ts
+@@ -10,7 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
+ import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
+ import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
+ import { config } from './config.js';
+-import { claim, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
++import { claim, detached, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
+ import { newId } from './ids.js';
+ import { FetchError, safeFetchText } from './safeFetch.js';
+ import { getUser, userForAgentToken } from './services/users.js';
+@@ -320,7 +320,7 @@ const SCRUB = 'oauth-secret-scrub-v2';
+ const scrubState = async (): Promise<ScrubState> => await get<ScrubState>('kv', SCRUB) ?? { id: SCRUB, owed: 1, scrubbed: 0 };
+ 
+ /** Scrub old copies of secrets from the database files if that is owed. True once nothing is owed. */
+-export async function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): Promise<boolean> {
++export async function scrubIfOwed(scrub: () => boolean | Promise<boolean> = scrubFreeSpace): Promise<boolean> {
+   // All of it, the bookkeeping included, gives up at once if another connection holds a lock: the work
+   // stays owed and the scheduler tries again later, so it never stalls requests or throws out of a timer.
+   try {
+@@ -328,7 +328,7 @@ export async function scrubIfOwed(scrub: () => boolean = scrubFreeSpace): Promis
+       const before = await scrubState();
+       if (before.scrubbed >= before.owed) return true;
+       const generation = before.owed;
+-      if (!scrub()) return false;
++      if (!(await scrub())) return false;
+       await transaction(async () => {
+         const now = await scrubState();
+         await put<ScrubState>('kv', { ...now, scrubbed: Math.max(now.scrubbed, generation) });
+@@ -349,17 +349,19 @@ let scrubTimer: NodeJS.Timeout | undefined;
+ let scrubBackoff = 0;
+ export function scheduleScrub(delayMs = 0) {
+   if (scrubTimer) return;
+-  scrubTimer = setTimeout(async () => {
+-    scrubTimer = undefined;
+-    if (await scrubIfOwed()) {
+-      scrubBackoff = 0;
+-      return;
+-    }
+-    scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
+-    scheduleScrub(scrubBackoff);
+-  }, delayMs);
++  // Detached: the timer inherits the caller's context, which may be a transaction long over by the time it fires.
++  scrubTimer = setTimeout(() => void detached(scrubAttempt).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`)), delayMs);
+   scrubTimer.unref();
+ }
++async function scrubAttempt() {
++  scrubTimer = undefined;
++  if (await scrubIfOwed()) {
++    scrubBackoff = 0;
++    return;
++  }
++  scrubBackoff = Math.min(scrubBackoff ? scrubBackoff * 2 : 30_000, 60 * 60 * 1000);
++  scheduleScrub(scrubBackoff);
++}
+ /** Tests only: whether a scrub attempt is waiting, and cancel it. */
+ export const scrubRetryPending = () => scrubTimer !== undefined;
+ export function cancelScrubRetry() {
+diff --git a/apps/server/src/routes/api.ts b/apps/server/src/routes/api.ts
+index 2965c45..287b0d3 100644
+--- a/apps/server/src/routes/api.ts
++++ b/apps/server/src/routes/api.ts
+@@ -6,7 +6,7 @@ import { ROLE_INFO } from '@concord/shared';
+ import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
+ import { clock } from '../clock.js';
+ import { config } from '../config.js';
+-import { HttpError, list, put } from '../db.js';
++import { detached, HttpError, list, put } from '../db.js';
+ import { newId } from '../ids.js';
+ import { llm } from '../llm/provider.js';
+ import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
+@@ -339,9 +339,16 @@ export function apiRouter(): Router {
+     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+     const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+     send('meeting', { type: 'meeting', meeting: m });
+-    const onEvent = async (e: { type: string } & Record<string, unknown>) => {
++    // An EventEmitter listener: nothing awaits it, so the database read can't be allowed to reject. It runs in
++    // the context of whoever emitted, possibly inside their transaction, so it reads detached from it: what it
++    // sends is committed, and it isn't refused once that transaction has ended.
++    const onEvent = (e: { type: string } & Record<string, unknown>) => {
+       if (e.type === 'prompt') send('prompt', { type: 'prompt', prompt: { at: clock.iso(), t: e.t, text: e.text, posted: false } });
+-      else if (e.type === 'status') send('status', { type: 'status', status: e.status, meeting: await meetings.getMeeting(m.id) as Meeting });
++      else if (e.type === 'status')
++        void detached(() => meetings.getMeeting(m.id)).then(
++          (meeting) => send('status', { type: 'status', status: e.status, meeting }),
++          () => send('status', { type: 'status', status: e.status }),
++        );
+       else send(e.type, e);
+     };
+     meetings.meetingEvents.on(m.id, onEvent);
+diff --git a/apps/server/src/services/meetings.ts b/apps/server/src/services/meetings.ts
+index 4a22ac8..871fea5 100644
+--- a/apps/server/src/services/meetings.ts
++++ b/apps/server/src/services/meetings.ts
+@@ -167,7 +167,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
+   const project = await getProject(m.ontologyId);
+   const ucs: UseCase[] = [];
+   const groups = a.useCases.length ? a.useCases : [{ title: m.title, sections: { name: m.title, description: a.summary } }];
+-  groups.forEach(async (g, i) => { return transaction(async () => {
++  for (const [i, g] of groups.entries()) {
+     ucs.push(
+       await createUseCase(project, actor, {
+         source: 'meeting',
+@@ -180,7 +180,7 @@ export async function proposeFromMeeting(m: Meeting, actor: User): Promise<{ use
+         terms: i === 0 ? a.terms : [],
+       }),
+     );
+-  }); });
++  }
+   let changeRequest: ChangeRequest | undefined;
+   try {
+     changeRequest = await synthesise(project, actor, ucs.map((u) => u.id));
+diff --git a/apps/server/test/auth.test.ts b/apps/server/test/auth.test.ts
+index c902ecb..070733d 100644
+--- a/apps/server/test/auth.test.ts
++++ b/apps/server/test/auth.test.ts
+@@ -64,9 +64,9 @@ describe('reading feedback', () => {
+       // A demo account with the same address is not an administrator.
+       const demo = await createUser({ name: 'Pretend admin', email: 'admin@example.org', provider: 'demo', subject: 'demo-admin' });
+       const { createSession } = await import('../src/services/users.js');
+-      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(admin.id)}`);
++      const asAdmin = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(admin.id)}`);
+       expect(asAdmin.status).toBe(200);
+-      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${createSession(demo.id)}`);
++      const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demo.id)}`);
+       expect(asDemo.status).toBe(403);
+     } finally {
+       config.adminEmails.splice(0, config.adminEmails.length, ...saved);
+diff --git a/apps/server/test/safeFetch.test.ts b/apps/server/test/safeFetch.test.ts
+index 3ef6bc6..a9cb0d8 100644
+--- a/apps/server/test/safeFetch.test.ts
++++ b/apps/server/test/safeFetch.test.ts
+@@ -127,7 +127,7 @@ describe('single-use writes with more than one database connection', () => {
+   let other: DatabaseSync;
+   beforeAll(async () => {
+     await closeDb();
+-    await openDb(file);
++    await openDb({ kind: 'sqlite', file });
+     // A second connection to the same file stands in for another server process.
+     other = new DatabaseSync(file);
+     other.exec('PRAGMA busy_timeout = 5000');
+diff --git a/apps/server/test/secretScrub.test.ts b/apps/server/test/secretScrub.test.ts
+index 6592f95..65ec5de 100644
+--- a/apps/server/test/secretScrub.test.ts
++++ b/apps/server/test/secretScrub.test.ts
+@@ -3,10 +3,10 @@ import fs from 'node:fs';
+ import path from 'node:path';
+ import { DatabaseSync } from 'node:sqlite';
+ import request from 'supertest';
+-import { afterEach, describe, expect, it } from 'vitest';
++import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+ import { createApp } from '../src/app.js';
+ import { config } from '../src/config.js';
+-import { get, openDb, put, remove, scrubFreeSpace } from '../src/db.js';
++import { get, openDb, put, scrubFreeSpace } from '../src/db.js';
+ import { cancelScrubRetry, migrateClientSecrets, scrubIfOwed, scrubRetryPending } from '../src/oauth.js';
+ 
+ /** Plain-text client secrets written by older versions must not survive anywhere in the database files. */
+@@ -18,14 +18,26 @@ describe('scrubbing old client secrets from the database files', () => {
+     const s = await state();
+     return !s || s.scrubbed < s.owed;
+   };
+-  /** A client as older versions stored it, written the way they wrote the file (no secure_delete). */
++  /**
++   * A client as older versions stored it, written the way they wrote the file (no secure_delete), on a
++   * connection of its own as an older process would have.
++   */
++  const legacyFile = (fn: (raw: DatabaseSync) => void) => {
++    const raw = new DatabaseSync(file);
++    try {
++      raw.exec('PRAGMA busy_timeout = 5000; PRAGMA secure_delete = OFF');
++      fn(raw);
++    } finally {
++      raw.close();
++    }
++  };
+   const legacyClient = async () => {
+-    const db = await openDb();
+-    db.exec('PRAGMA secure_delete = OFF');
+     const id = `client_${randomBytes(6).toString('hex')}`;
+     const secret = randomBytes(32).toString('hex');
+-    await put('oauthClients', { id, info: { client_id: id, client_name: 'Legacy', redirect_uris: ['http://localhost:1/cb'], token_endpoint_auth_method: 'client_secret_post', client_secret: secret } });
+-    db.exec('PRAGMA secure_delete = ON');
++    const doc = { id, info: { client_id: id, client_name: 'Legacy', redirect_uris: ['http://localhost:1/cb'], token_endpoint_auth_method: 'client_secret_post', client_secret: secret } };
++    legacyFile((raw) =>
++      raw.prepare('INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, NULL, ?, ?)').run('oauthClients', id, JSON.stringify(doc), new Date().toISOString()),
++    );
+     return { id, secret };
+   };
+   /** Another connection holding an old snapshot: checkpoints can't finish while it's open. */
+@@ -42,15 +54,18 @@ describe('scrubbing old client secrets from the database files', () => {
+     request(createApp()).post('/token').type('form').send({ grant_type: 'refresh_token', refresh_token: 'cnr_nope', client_id: c.id, client_secret: c.secret });
+   const tick = () => new Promise((r) => setTimeout(r, 20));
+ 
++  beforeAll(() => openDb()); // Creates the file and its table before the legacy writer touches them.
+   afterEach(() => cancelScrubRetry());
+ 
+   it('leaves no copy of a migrated or long-deleted secret, and keeps a blocked scrub owed', async () => {
+-    const clients = Array.from({ length: 20 }, legacyClient);
++    const clients: { id: string; secret: string }[] = [];
++    for (let i = 0; i < 20; i++) clients.push(await legacyClient());
+     // One deleted long ago: its row content sits in free pages.
+     const gone = await legacyClient();
+-    (await openDb()).exec('PRAGMA secure_delete = OFF');
+-    await remove('oauthClients', gone.id);
+-    (await openDb()).exec('PRAGMA secure_delete = ON; PRAGMA wal_checkpoint(TRUNCATE)');
++    legacyFile((raw) => {
++      raw.prepare("DELETE FROM docs WHERE collection = 'oauthClients' AND id = ?").run(gone.id);
++      raw.exec('PRAGMA wal_checkpoint(TRUNCATE)');
++    });
+     expect(bytes().includes(clients[0].secret)).toBe(true);
+ 
+     const release = holdReader();
+@@ -138,8 +153,16 @@ describe('scrubbing old client secrets from the database files', () => {
+     writer.exec('ROLLBACK');
+     writer.close();
+     expect(await owed()).toBe(true);
+-    // Ordinary requests still wait for locks as usual afterwards.
+-    expect(((await openDb()).prepare('PRAGMA busy_timeout').get() as { timeout: number }).timeout).toBe(5000);
++    // Ordinary requests still wait for locks as usual afterwards, rather than giving up.
++    const blocker = new DatabaseSync(file);
++    blocker.exec('BEGIN IMMEDIATE');
++    const waiting = put('kv', { id: 'written-after-a-wait' });
++    setTimeout(() => {
++      blocker.exec('ROLLBACK');
++      blocker.close();
++    }, 200);
++    await waiting;
++    expect(await get('kv', 'written-after-a-wait')).toBeDefined();
+     expect(await scrubIfOwed()).toBe(true);
+     expect(bytes().includes(late.secret)).toBe(false);
+   });
