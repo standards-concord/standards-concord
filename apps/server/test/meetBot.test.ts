@@ -28,7 +28,7 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[] };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0 };
 /** Bots the stand-in has created, for listing and status. */
 const idempotent = new Map<string, string>();
 const bots = new Map<string, { id: string; meeting_url: string; metadata?: Record<string, string>; status_changes: { code: string }[] }>();
@@ -84,9 +84,9 @@ beforeAll(async () => {
       }
       const own = req.url?.match(/^\/bot\/(bot-\d+)\/$/);
       if (req.method === 'GET' && own) return reply(bots.has(own[1]) ? 200 : 404, JSON.stringify(bots.get(own[1]) ?? {}));
-      // failCancel: every bot refuses to be removed; refuseIds: just these ones.
+      // failCancel: every bot refuses to be removed; refuseIds: just these ones (after refuseDelayMs).
       const refuses = stubMode.failCancel || stubMode.refuseIds.some((id) => req.url?.startsWith(`/bot/${id}/`));
-      if (refuses && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}');
+      if (refuses && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}', stubMode.refuseDelayMs);
       if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : reply(200, '{}', stubMode.chatDelayMs);
       const done = req.url?.match(/^\/bot\/(bot-\d+)\/(?:leave_call\/)?$/);
       if (done && (req.method === 'DELETE' || req.method === 'POST')) bots.get(done[1])?.status_changes.push({ code: 'done' });
@@ -109,7 +109,7 @@ afterAll(() => {
 
 beforeEach(() => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0 });
   for (const m of list<Meeting>('meetings')) if (m.source === 'calendar-invite') remove('meetings', m.id);
   for (const k of list<{ id: string }>('kv')) if (/^meet-bot:(approval|retire|retired):/.test(k.id)) remove('kv', k.id);
 });
@@ -2345,6 +2345,36 @@ describe('invite-by-email', () => {
     expect(calls.filter((c) => c.method === 'GET' && c.url.startsWith('/bot/?'))).toHaveLength(0);
     expect(calls.filter((c) => c.method === 'POST' && c.url === '/bot/')).toHaveLength(0);
     expect(getMeeting(m.id).bot).toMatchObject({ phase: 'booking', attempts: 8, nextAt: wait });
+  });
+
+  /* ----- Fixes from the thirteenth review ----- */
+
+  it('13.1: a stray that turns up while another stray’s removal is under way is removed in that run, not after the other’s backoff', async () => {
+    // Used to drop the new stray's removal because the lane was busy; the older stray's refusal then pushed both to 30 minutes.
+    const m = await liveCall();
+    bots.set('bot-786', { id: 'bot-786', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    bots.set('bot-787', { id: 'bot-787', meeting_url: m.meetingUrl!, status_changes: [{ code: 'in_call_recording' }] });
+    const { mutateMeeting } = await import('../src/services/meetings.js');
+    await mutateMeeting(m.id, (x) => {
+      x.bot = { ...x.bot!, strays: ['bot-786'], strayAttempts: 6, strayNextAt: undefined };
+    });
+    // The older stray refuses removal, slowly.
+    stubMode.refuseIds = ['bot-786'];
+    stubMode.refuseDelayMs = 300;
+    calls.length = 0;
+    const t = at('2026-11-10T15:00:00Z').getTime();
+    const sweep = dispatchDue(new Date(t));
+    const deleting = (bot: string) => calls.some((c) => c.method === 'DELETE' && c.url === `/bot/${bot}/`);
+    while (!deleting('bot-786')) await new Promise((r) => setTimeout(r, 5));
+    // A new stray speaks while that removal is still waiting for an answer.
+    await line(m.id, 'Another uninvited bot.', 'bot-787');
+    await sweep;
+    await meetBotIdle();
+    expect(deleting('bot-787')).toBe(true);
+    const b = getMeeting(m.id).bot!;
+    expect(b.strays).toEqual(['bot-786']);
+    // Only the older stray, which has had its try, waits out the backoff.
+    expect(b.strayNextAt).toBe(t + 30 * 60_000);
   });
 
   it('the calendar reader agrees with the cancellation reader', () => {

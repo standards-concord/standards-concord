@@ -284,8 +284,8 @@ export function background<T>(p: Promise<T>) {
 
 /** Resolves once every lane and background task has finished. For tests and shutdown. */
 export async function lanesIdle() {
-  while (lanes.size || queued.size || extra.size) {
-    await Promise.allSettled([...lanes.values(), ...queued.values(), ...extra]);
+  while (lanes.size || queued.size || strayQueued.size || extra.size) {
+    await Promise.allSettled([...lanes.values(), ...queued.values(), ...strayQueued.values(), ...extra]);
     await new Promise((r) => setTimeout(r, 5));
   }
 }
@@ -297,9 +297,26 @@ export const laneBusy = (id: string) => lanes.has(id) || queued.has(id);
  * booking's own lookups, so its backoff is left alone. If the lane is busy, the run
  * under way handles strays whose turn has come.
  */
-export function driveStrays(id: string): Promise<void> {
-  if (laneBusy(id)) return Promise.resolve();
-  const run = cancelStrays(id)
+const strayQueued = new Map<string, Promise<void>>();
+/** Strays a run has just tried, while a stray-only follow-up waits: the follow-up leaves them to their backoff. */
+const triedBefore = new Map<string, Set<string>>();
+export function driveStrays(id: string, skip?: Set<string>): Promise<void> {
+  if (laneBusy(id)) {
+    // A run is under way: one stray-only follow-up is queued after it (shared by everyone asking meanwhile),
+    // for strays recorded too late for that run.
+    const q = strayQueued.get(id);
+    if (q) return q;
+    const after = queued.get(id) ?? lanes.get(id)!;
+    const next = after.then(() => {
+      strayQueued.delete(id);
+      const tried = triedBefore.get(id);
+      triedBefore.delete(id);
+      return driveStrays(id, tried);
+    });
+    strayQueued.set(id, next);
+    return next;
+  }
+  const run = cancelStrays(id, undefined, skip)
     .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
     .finally(() => lanes.delete(id));
   lanes.set(id, run);
@@ -518,26 +535,32 @@ const strayDue = (b: Bot, now?: number) => now === undefined || b.strayNextAt ==
  * and then backing off to every 30 minutes at most. It never touches the booking's
  * own attempts or retry time.
  */
-function strayFailed(id: string, now?: number) {
+function strayFailed(id: string, tried: Set<string>, now?: number) {
   return transition(
     id,
     (m) => !!m.bot.strays?.length,
     (m) => {
       const b = m.bot;
       b.strayAttempts = (b.strayAttempts ?? 0) + 1;
-      b.strayNextAt = now !== undefined && b.strayAttempts > 1 ? now + Math.min(30, 2 ** (b.strayAttempts - 2)) * MINUTE : undefined;
+      // A stray recorded since this run began hasn't had its first attempt: it isn't held back by the others' backoff.
+      const untried = b.strays!.some((s) => !tried.has(s));
+      b.strayNextAt = !untried && now !== undefined && b.strayAttempts > 1 ? now + Math.min(30, 2 ** (b.strayAttempts - 2)) * MINUTE : undefined;
     },
   );
 }
 
-async function cancelStrays(id: string, now?: number) {
+async function cancelStrays(id: string, now?: number, skip?: Set<string>) {
   const m = get<Meeting>('meetings', id);
   if (!tracked(m) || !m.bot.strays?.length) return;
   let refused = false;
-  for (const stray of m.bot.strays) {
+  // Every stray on the latest copy, including ones recorded while this run is under way, is tried once.
+  const tried = new Set<string>(skip);
+  for (;;) {
     const latest = get<Meeting>('meetings', id);
-    // Adopted meanwhile (Recall.ai said it is this booking's bot): not a stray any more.
-    if (!tracked(latest) || !latest.bot.strays?.includes(stray)) continue;
+    // Adopted meanwhile (Recall.ai said it is this booking's bot): no longer listed, so not tried.
+    const stray = tracked(latest) ? latest.bot.strays?.find((x) => !tried.has(x)) : undefined;
+    if (!stray) break;
+    tried.add(stray);
     const r = await recall.release(stray, 'cancel');
     if (r.ok)
       whenFinished(
@@ -555,7 +578,8 @@ async function cancelStrays(id: string, now?: number) {
       );
     else refused = true;
   }
-  if (refused) await strayFailed(id, now);
+  if (strayQueued.has(id)) triedBefore.set(id, new Set([...(triedBefore.get(id) ?? []), ...tried]));
+  if (refused) await strayFailed(id, tried, now);
 }
 
 /**
