@@ -81,7 +81,7 @@ export const APP_RELEASES: AppRelease[] = [
         type: 'feat',
         title: 'Optionally post a short public summary of your feedback',
         detail:
-          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers, and you can withdraw it later.',
+          'When you send feedback you can tick “Also post a short public summary as a GitHub issue” and write one. Only that summary is posted, exactly as previewed, with no name or answers. You can withdraw it from the thank-you screen right after sending, or email the alpha team later.',
         roles: [],
         to: '/feedback',
         ask: 'Was it clear what would be made public, and would you tick the box?',
