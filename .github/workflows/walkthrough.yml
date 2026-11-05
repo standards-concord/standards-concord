@@ -2,8 +2,8 @@ name: Walkthrough video
 
 # Records the two narrated videos (walkthrough/README.md) for every published release, or
 # on demand, and attaches them to the release: the tour (concord-walkthrough.*) and how
-# alpha testers take part (concord-feedback.*). The /welcome page plays the latest
-# release's copies.
+# alpha testers take part (concord-feedback.*). The /welcome page plays the copies from
+# the newest release that has them.
 #
 # Release videos use `--publish`: every scene must run cleanly, with no stand-ins, no
 # warnings and no requests to outside hosts, or nothing is attached. Set the
@@ -37,7 +37,7 @@ on:
         type: string
         default: ''
       release:
-        description: Release tag to attach the videos to (publish mode only; empty attaches nothing)
+        description: Release tag to attach the videos to, such as v0.17.0 (publish mode only; created from this commit if it doesn't exist; empty attaches nothing)
         type: string
         default: ''
 
@@ -198,7 +198,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || inputs.release }}
+          SHA: ${{ github.sha }}
         run: |
+          # A tag named by hand that has no release yet gets one, from the commit recorded.
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::'$TAG' isn't a version tag like v0.17.0"; exit 1; }
+            gh release create "$TAG" --repo "$REPO" --target "$SHA" --title "Concord ${TAG#v}" --generate-notes
+          fi
           files=()
           for v in concord-walkthrough concord-feedback; do
             for ext in mp4 vtt transcript.md chapters.txt; do

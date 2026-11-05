@@ -22,9 +22,9 @@ const release = (id: number | undefined, tag: string, assetId: number | undefine
 
 const cacheDir = async () => path.join((await import('../src/config.js')).config.dataDir, 'media');
 
-function stubGitHub(latest: object, files: Record<string, string>) {
+function stubGitHub(latest: object | object[], files: Record<string, string>) {
   vi.stubGlobal('fetch', async (url: string) => {
-    if (url.startsWith('https://api.github.com/')) return new Response(JSON.stringify(latest), { status: 200 });
+    if (url.startsWith('https://api.github.com/')) return new Response(JSON.stringify(Array.isArray(latest) ? latest : [latest]), { status: 200 });
     if (url in files) return new Response(files[url], { status: 200 });
     return new Response('', { status: 404 });
   });
@@ -103,6 +103,27 @@ describe('media release cache, continued', () => {
     // The same release keys to the same folder next time.
     stubGitHub(release(undefined, 'release_9', undefined, 'https://dl.example/g'), {});
     expect(await (await fresh()).mediaFile('concord-walkthrough.vtt')).toBe(second);
+  });
+});
+
+describe('which release', () => {
+  it('uses the newest release that has the videos, skipping drafts and releases without them', async () => {
+    stubGitHub(
+      [
+        { ...release(203, 'v3', 2003, 'https://dl.example/draft'), draft: true },
+        { id: 202, tag_name: 'v2', html_url: 'https://github.com/x/y/releases/tag/v2', assets: [] }, // recording failed
+        release(201, 'v1', 2001, 'https://dl.example/v1'),
+      ],
+      { 'https://dl.example/v1': 'WEBVTT v1' },
+    );
+    const media = await fresh();
+    expect((await media.mediaIndex()).release?.tag).toBe('v1');
+    expect(fs.readFileSync((await media.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT v1');
+  });
+
+  it('has no videos when no release has them', async () => {
+    stubGitHub([{ id: 301, tag_name: 'v9', html_url: 'https://github.com/x/y/releases/tag/v9', assets: [] }], {});
+    expect(await (await fresh()).mediaIndex()).toEqual({ release: null, files: [] });
   });
 });
 

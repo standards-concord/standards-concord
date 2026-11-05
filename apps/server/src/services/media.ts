@@ -4,7 +4,7 @@
  * latest release's copies from our own origin, so the page can embed them with captions
  * (cross-origin caption tracks need CORS, which GitHub doesn't send) and seek within them.
  *
- *   MEDIA_REPO  owner/name of the repository whose latest release holds the videos
+ *   MEDIA_REPO  owner/name of the repository whose releases hold the videos (the newest release that has them is used)
  *   MEDIA_DIR   serve files from this local folder instead (tests, or a recording you just made)
  *
  * Downloads are cached in the data directory per release tag, so a file is fetched from
@@ -48,15 +48,31 @@ let cached: { at: number; index: Promise<MediaIndex>; assets: Map<string, Asset>
 
 const isMediaFile = (name: string): name is (typeof MEDIA_FILES)[number] => (MEDIA_FILES as readonly string[]).includes(name);
 
+/** A GitHub release, as the releases API lists it. */
+interface GitHubRelease {
+  id?: number;
+  tag_name: string;
+  name?: string;
+  published_at?: string;
+  html_url: string;
+  draft?: boolean;
+  assets?: { id?: number; name: string; size: number; browser_download_url: string }[];
+}
+
+/**
+ * The newest published release that has the videos. A release whose recording failed or
+ * hasn't finished yet has none, and shouldn't hide the previous release's videos.
+ */
 async function fromGitHub(): Promise<{ index: MediaIndex; assets: Map<string, Asset> }> {
-  const res = await fetch(`https://api.github.com/repos/${repo()}/releases/latest`, {
+  const res = await fetch(`https://api.github.com/repos/${repo()}/releases?per_page=20`, {
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'concord-media' },
     signal: AbortSignal.timeout(8000),
   });
-  // 404: the repository has no published release yet.
   if (res.status === 404) return { index: { release: null, files: [] }, assets: new Map() };
   if (!res.ok) throw new Error(`GitHub releases: HTTP ${res.status}`);
-  const r = (await res.json()) as { id?: number; tag_name: string; name?: string; published_at?: string; html_url: string; assets: { id?: number; name: string; size: number; browser_download_url: string }[] };
+  const releases = (await res.json()) as GitHubRelease[];
+  const r = releases.find((x) => !x.draft && (x.assets ?? []).some((a) => isMediaFile(a.name)));
+  if (!r) return { index: { release: null, files: [] }, assets: new Map() };
   const assets = new Map<string, Asset>();
   const files: MediaIndex['files'] = [];
   for (const a of r.assets ?? []) {
