@@ -422,6 +422,30 @@ describe('query assistant (offline helper)', () => {
     }
   });
 
+  it('a call the spending limit refuses gives the chat allowance back', async () => {
+    // The allowance was marked spent before the model call, but the deployment's dollar budget can refuse a call
+    // before anything is sent to Claude: all three counters stayed taken though no request was made.
+    const { config } = await import('../src/config.js');
+    const { get } = await import('../src/db.js');
+    const agent = await login('contributor', 'Budget refusal');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const day = new Date().toISOString().slice(0, 10);
+    const used = async () => (await get<{ count: number }>('kv', `query-assistant:${day}:user:${me}`))?.count ?? 0;
+    const provider = config.llm.provider;
+    const budget = config.llm.dailyBudgetUsd;
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = 0;
+      const r = await agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content: 'List every organisation' }], query: '', target: 'data', account: me });
+      expect(r.status).toBe(200);
+      expect(r.body.simulated).toBe(true);
+      expect(await used()).toBe(0);
+    } finally {
+      (config.llm as { provider: string }).provider = provider;
+      (config.llm as { dailyBudgetUsd: number }).dailyBudgetUsd = budget;
+    }
+  });
+
   it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
     const { admitQueryChat } = await import('../src/services/queryChat.js');
     const { config } = await import('../src/config.js');

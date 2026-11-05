@@ -333,10 +333,10 @@ test.describe('Query tab', () => {
   test('queries run in the background: Cancel stops one, and one that runs too long is stopped', async ({ page }) => {
     // The worker reads the time limit when it is first used.
     await page.evaluate(() => ((window as unknown as { __concordQueryTimeLimitMs: number }).__concordQueryTimeLimitMs = 1500));
-    // A three-way join of everything: slow, and big enough that it would reach the memory cap first, so this test
-    // raises the cap (the next test covers it).
-    await page.evaluate(() => ((window as unknown as { __concordQueryMemoryMiB: number }).__concordQueryMemoryMiB = 2048));
-    const slow = 'SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c . ?d ?e ?f . ?g ?h ?i FILTER(STR(?c) = CONCAT(STR(?f), STR(?i), "x")) }';
+    // Nested NOT EXISTS over every triple: slow, but checked row by row in a few MB, so the time limit is what stops
+    // it. (A three-way join used to be used here: on CI it reached the memory cap before the time limit, even with
+    // the cap raised to 2048 MB, so the test depended on which limit the machine hit first.)
+    const slow = 'SELECT (COUNT(*) AS ?n) WHERE { ?a ?b ?c FILTER NOT EXISTS { ?d ?e ?f FILTER NOT EXISTS { ?g ?h ?i FILTER(STR(?i) = CONCAT(STR(?c), STR(?f))) } } }';
     await setEditor(page, 'sparql-editor', slow);
     await run(page);
     await expect(page.getByTestId('query-running')).toBeVisible();

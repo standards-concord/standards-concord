@@ -167,7 +167,7 @@ export function boundedQueryChatRequest(body: unknown): QueryChatRequest {
 export interface QueryChatOptions {
   /** Whether Claude may answer (membership and budget allowing); otherwise the offline helper does. */
   useClaude: boolean;
-  /** Called just before the first request to Claude. */
+  /** Called when a request really goes to Claude: after the spending limit admits it, so a refused call costs no allowance. */
   onClaude?: () => void;
 }
 
@@ -184,10 +184,10 @@ export async function queryChat(graph: OntologyGraph, req: QueryChatRequest, opt
     `<conversation>\n${fenceForPrompt(conversation(req))}\n</conversation>`,
   ].join('\n\n');
   const call = (messages: { role: 'user' | 'assistant'; content: string }[], task: string) =>
-    llm.json({ task, system: QUERY_ASSISTANT, schema: QueryChatSchema, effort: 'medium', maxTokens: 2500, messages, fallback: () => offlineQuery(view, req) });
+    // The allowance counts as spent only once a request really goes to Claude (not when the spending limit refuses it).
+    llm.json({ task, system: QUERY_ASSISTANT, schema: QueryChatSchema, effort: 'medium', maxTokens: 2500, messages, fallback: () => offlineQuery(view, req), onDispatch: opts.onClaude });
 
   const ask = [{ role: 'user' as const, content: `${context}\n\nWrite the next turn for the person's latest message.` }];
-  opts.onClaude?.();
   const first = await call(ask, 'query-chat');
   if (first.simulated) return offline();
   let draft: Draft = first.value;
