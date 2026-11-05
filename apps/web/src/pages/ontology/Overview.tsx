@@ -45,13 +45,13 @@ export function OverviewTab() {
             className="mt-4 border-t border-line pt-3"
             tone="muted"
             title="Ontology details"
-            summary={`${plural(o.stats.classes, 'class', 'classes')}, ${plural(o.stats.properties, 'property', 'properties')}, ${plural(o.stats.useCases, 'use case')}`}
+            summary={[o.stats.classes !== undefined && plural(o.stats.classes, 'class', 'classes'), o.stats.properties !== undefined && plural(o.stats.properties, 'property', 'properties'), o.stats.useCases !== undefined && plural(o.stats.useCases, 'use case')].filter(Boolean).join(', ') || 'Being reviewed before it is published'}
           >
             <div className="grid grid-cols-3 gap-4 sm:grid-cols-5">
-              <Stat label="Classes" value={o.stats.classes} />
-              <Stat label="Properties" value={o.stats.properties} />
-              <Stat label="Individuals" value={o.stats.individuals} />
-              <Stat label="Use cases" value={o.stats.useCases} />
+              <Stat label="Classes" value={o.stats.classes ?? '—'} />
+              <Stat label="Properties" value={o.stats.properties ?? '—'} />
+              <Stat label="Individuals" value={o.stats.individuals ?? '—'} />
+              <Stat label="Use cases" value={o.stats.useCases ?? '—'} />
               <Stat label="Releases" value={o.stats.releases} />
             </div>
             <dl className="mt-4 grid gap-x-4 gap-y-1.5 text-xs sm:grid-cols-[8rem_1fr]">

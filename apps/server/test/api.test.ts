@@ -152,6 +152,25 @@ describe('change request lifecycle', () => {
     expect(res.body.governance.validationOk).toBe(false);
   });
 
+  // A preferred prefix of "@import" used to be stored and then written into the
+  // JSON-LD context, which made the server fetch the namespace URL whenever it
+  // wrote JSON-LD. The browser has no control for this field, so it is tested here.
+  it('refuses a change request that sets a JSON-LD keyword as the preferred prefix', async () => {
+    const editor = await login('editor', 'Editor Ike');
+    const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Change the prefix',
+      description: 'Sets a keyword prefix.',
+      kind: 'feature',
+      ops: [{ op: 'setMetadata', set: { preferredPrefix: '@import', preferredNamespace: 'http://127.0.0.1:9/context' } }],
+    });
+    // Like any edit that can't be applied, it is kept as a draft that fails validation, so it can never merge.
+    expect(res.status).toBe(201);
+    expect(res.body.validation.passed).toBe(false);
+    expect(res.body.validation.lint.map((l: { message: string }) => l.message).join('\n')).toMatch(/preferredPrefix must be a prefix name/);
+    const jsonld = await editor.get(`/api/ontologies/${demoId}/source?format=jsonld`);
+    expect(Object.keys(JSON.parse(jsonld.text)['@context'])).not.toContain('@import');
+  });
+
   it('drafts edits from plain language offline', async () => {
     const editor = await login('editor', 'Editor Nat');
     const res = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: '', description: '', kind: 'feature', naturalLanguage: 'Add a class called Badge as a subclass of vol:Skill' });

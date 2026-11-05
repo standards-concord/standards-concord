@@ -224,7 +224,7 @@ export function OntologyLayout() {
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {o.stats.openChangeRequests > 0 && (
+              {(o.stats.openChangeRequests ?? 0) > 0 && (
                 <Link to={`/o/${id}/changes`} className="text-xs font-medium text-accent hover:underline">
                   {o.stats.openChangeRequests} open {o.stats.openChangeRequests === 1 ? 'change' : 'changes'}
                 </Link>

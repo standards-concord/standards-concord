@@ -16,6 +16,7 @@ import { CodeView, HighlightedCode } from '../../components/code/CodeView';
 import { QueryBuilder } from '../../components/query/QueryBuilder';
 import { QueryDiagram } from '../../components/query/QueryDiagram';
 import { propertyOptions, type PropertyOption } from '../../components/query/schema';
+import { CheckData, type CheckResult } from '../../components/check/CheckData';
 import { useOntology } from './Layout';
 
 /**
@@ -90,7 +91,6 @@ function Segmented<T extends string>({ value, onChange, options, label }: { valu
 }
 
 const ROWS_PER_PAGE = 50;
-const FINDINGS_PER_PAGE = 20;
 
 /** Previous / next paging for long results, so a big answer doesn't flood the page. */
 function Pager({ page, pageSize, total, onPage, label }: { page: number; pageSize: number; total: number; onPage: (p: number) => void; label: string }) {
@@ -161,7 +161,7 @@ function QueryWorkspace() {
   const workspace: Workspace = params.get('view') === 'check' ? 'check' : 'query';
   const setWorkspace = (w: Workspace) => setParam('view', w);
   const [rowPage, setRowPage] = useState(0);
-  const [findingPage, setFindingPage] = useState(0);
+  const [checkResult, setCheckResult] = useState<CheckResult>({ report: null });
 
   const turtle = useAsync(() => api.source(id, 'turtle'), [id]);
   const shapes = useAsync(() => api.source(id, 'shacl'), [id]);
@@ -180,19 +180,13 @@ function QueryWorkspace() {
   const [queryError, setQueryError] = useState<unknown>();
   const [queryMs, setQueryMs] = useState<number>();
   const [data, setData] = useLocalStorage(`concord.query.${id}.data`, (ontology.demo ? DEMO_DATA : EMPTY_DATA)(ontology.namespace, ontology.prefix));
-  const [report, setReportState] = useState<{ conforms: boolean; results: { focusNode?: string; path?: string; severity?: string; message?: string }[] } | null>(null);
-  const [checkError, setCheckError] = useState<unknown>();
 
   const setResult = (r: Result | null) => {
     setResultState(r);
     setRowPage(0);
   };
-  const setReport = (r: typeof report) => {
-    setReportState(r);
-    setFindingPage(0);
-  };
   const label = useMemo(() => makeLabeler(view.data), [view.data]);
-  const prefixes = view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace };
+  const prefixes = useMemo(() => view.data?.prefixes ?? { [ontology.prefix]: ontology.namespace }, [view.data, ontology.prefix, ontology.namespace]);
 
   // How many records of each class the sample data has, for the dataset summary and the starting class.
   const [recordCounts, setRecordCounts] = useState<{ byClass: Map<string, number>; total: number }>();
@@ -303,9 +297,7 @@ function QueryWorkspace() {
   // Each answer remembers the question and data it came from, so a changed question never sits above an old answer.
   const questionKey = `${mode}|${effectiveTarget}|${activeQuery}|${effectiveTarget === 'data' ? data : ''}`;
   const [ranKey, setRanKey] = useState<string>();
-  const [checkedData, setCheckedData] = useState<string>();
   const resultStale = !!result && ranKey !== questionKey;
-  const reportStale = !!report && checkedData !== data;
 
   const run = async () => {
     if (!storeRef.current) return;
@@ -336,29 +328,6 @@ function QueryWorkspace() {
       setResult(null);
     }
     setQueryMs(Math.round(performance.now() - t0));
-  };
-
-  const check = () => {
-    const s = storeRef.current;
-    if (!s || !shapes.data) return;
-    setCheckError(undefined);
-    setCheckedData(data);
-    try {
-      // The ontology goes in the data graph too, so sh:class sees subclass relationships.
-      const r = s.validate(`${turtle.data ?? ''}\n${data}`, shapes.data, 'turtle');
-      setReport({
-        conforms: r.conforms,
-        results: r.results.map((x) => ({
-          focusNode: x.focusNode as string | undefined,
-          path: x.path as string | undefined,
-          severity: x.severity as string | undefined,
-          message: x.message as string | undefined,
-        })),
-      });
-    } catch (e) {
-      setCheckError(e);
-      setReport(null);
-    }
   };
 
   if (turtle.error) return <ErrorCard error={turtle.error} onRetry={turtle.reload} />;
@@ -585,54 +554,19 @@ function QueryWorkspace() {
           </div>
         </Card>
       ) : (
-        <Card>
-          <CardHeader
-            title="Check your data"
-            subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. The visual builder queries this data too."
-            icon={ShieldCheck}
-            actions={
-              <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes.data}>
-                Check
-              </Button>
-            }
-          />
-          <div className="space-y-3 p-4">
-            <CodeEditor value={data} onChange={setData} language="turtle" completions={turtleCompletions} ariaLabel="Instance data (Turtle)" minHeight={220} maxHeight={420} testId="data-editor" />
-            <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</p>
-            {checkError ? <InlineError error={checkError} /> : null}
-            {reportStale && (
-              <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="report-stale">
-                The data changed since this check.
-                <Button size="sm" icon={ShieldCheck} onClick={check}>
-                  Check again
-                </Button>
-              </p>
-            )}
-            {report && (
-              <div className={cx('space-y-2', reportStale && 'opacity-50')} data-testid="shacl-report">
-                <p className="text-sm">
-                  {report.conforms ? (
-                    <Badge tone="ok">Conforms</Badge>
-                  ) : (
-                    <Badge tone="danger">
-                      {report.results.length} problem{report.results.length === 1 ? '' : 's'}
-                    </Badge>
-                  )}
-                </p>
-                <ul className="space-y-1 text-sm">
-                  {report.results.slice(findingPage * FINDINGS_PER_PAGE, (findingPage + 1) * FINDINGS_PER_PAGE).map((r, i) => (
-                    <li key={i} className="rounded-md border border-line px-3 py-2">
-                      <span className="font-mono text-xs">{r.focusNode ? short(r.focusNode, prefixes) : ''}</span>
-                      {r.path ? <span className="font-mono text-xs text-muted"> · {short(r.path, prefixes)}</span> : null}
-                      <div>{r.message}</div>
-                    </li>
-                  ))}
-                </ul>
-                <Pager page={findingPage} pageSize={FINDINGS_PER_PAGE} total={report.results.length} onPage={setFindingPage} label="Finding pages" />
-              </div>
-            )}
-          </div>
-        </Card>
+        <CheckData
+          result={checkResult}
+          onResult={setCheckResult}
+          data={data}
+          onDataChange={setData}
+          completions={turtleCompletions}
+          ontologyTurtle={turtle.data}
+          shapes={shapes.data}
+          store={() => storeRef.current}
+          ready={!!ready}
+          ontologyPrefixes={prefixes}
+          namespace={ontology.namespace}
+        />
       )}
     </div>
   );
