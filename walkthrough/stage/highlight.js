@@ -6,14 +6,19 @@
 // A small single-pass scanner, enough for the sample app and the generated classes: comments,
 // strings (escapes and backslash-newline continuations), template literals whose ${…} holes are
 // scanned as code (so they can hold strings, comments, regexes and further templates), and regex
-// literals, told apart from division by the token before them. It does not parse JavaScript, so
-// a regex after `)` or `}` (as in `if (x) /re/.test(y)`) is read as division; the walkthrough's code
-// has none.
+// literals, told apart from division by the token before them.
+//
+// Accepted limits. It does not parse JavaScript, and it only ever shows the walkthrough's own code,
+// which has none of these:
+// - a regex right after `)` or `}` (as in `if (x) /re/.test(y)`) is read as division;
+// - a `/` after a variable named like a keyword (`of / 2 / n`) can be read as starting a regex;
+// - JSX, Flow and TypeScript type syntax are not understood;
+// - HTML inside strings and templates is coloured as string text.
 (() => {
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
 const KEYWORDS = new Set('import from export default const let var function return for of in if else new await async class extends this typeof instanceof null undefined true false throw try catch finally while do break continue switch case delete void yield static get set super'.split(' '));
 /** After these words an expression starts, so a `/` begins a regex rather than dividing. */
-const BEFORE_EXPRESSION = new Set('return typeof instanceof in of new delete void throw case do else yield await'.split(' '));
+const BEFORE_EXPRESSION = new Set('return typeof instanceof in of new delete void throw case do else yield await default extends'.split(' '));
 const isIdStart = (c) => /[A-Za-z_$]/.test(c);
 const isId = (c) => /[\w$]/.test(c);
 
@@ -33,7 +38,7 @@ function tokenize(text) {
     let j = start + 1;
     while (j < n) {
       const c = text[j];
-      if (c === '\\') j += 2;
+      if (c === '\\') j += text[j + 1] === '\r' && text[j + 2] === '\n' ? 3 : 2; // CRLF continuations too
       else if (c === q) return j + 1;
       else if (c === '\n') return j; // unterminated: stop at the line's end
       else j++;
@@ -123,7 +128,7 @@ function tokenize(text) {
         while (j < n && isId(text[j])) j++;
         const word = text.slice(i, j);
         let k = j;
-        while (k < n && (text[k] === ' ' || text[k] === '\t')) k++;
+        while (k < n && /\s/.test(text[k])) k++; // a call's ( may be on the next line
         const cls = last === '.' ? (text[k] === '(' ? 'tk-f' : 'tk-p')
           : KEYWORDS.has(word) ? 'tk-k'
           : /^[A-Z]/.test(word) ? 'tk-t'
@@ -136,6 +141,10 @@ function tokenize(text) {
         while (j < n && /\s/.test(text[j])) j++;
         push('', text.slice(i, j));
         i = j;
+      } else if ((c === '+' || c === '-') && d === c && last === 'value') {
+        // Postfix ++ or --: what follows comes after a value, so a / there divides.
+        push('', c + d);
+        i += 2;
       } else {
         if (inHole) {
           if (c === '{') depth++;

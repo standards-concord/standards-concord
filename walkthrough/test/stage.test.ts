@@ -108,6 +108,19 @@ describe('unreadable app text', () => {
       expect(cls(src, 'second')).toBeUndefined();
     });
 
+    it('handles postfix operators, export default, CRLF continuations and calls split across lines', () => {
+      // Each was found in review r2.
+      expect(tokenize('i++ / 2; const s = "/";').some(([c]) => c === 'tk-r')).toBe(false);
+      expect(cls('i++ / 2; const s = "/";', 'const')).toBe('tk-k');
+      expect(cls('x = ++i; y = /a/.test(s);', '/a/')).toBe('tk-r');
+      expect(cls('export default /["]/;\nconst n = 1;', '/["]/')).toBe('tk-r');
+      expect(cls('export default /["]/;\nconst n = 1;', 'const')).toBe('tk-k');
+      const crlf = 'const s = "first \\\r\nsecond";\r\nconst t = 2;';
+      expect(tokenize(crlf).find(([c]) => c === 'tk-s')?.[1]).toBe('"first \\\r\nsecond"');
+      expect(tokenize(crlf).filter(([c, t]) => c === 'tk-k' && t === 'const')).toHaveLength(2);
+      expect(cls('render\n  ();', 'render')).toBe('tk-f');
+    });
+
     it('names keywords, classes, calls and properties', () => {
       const src = 'const a = new VolunteeringActivity(id); a.hoursVolunteered = 2.5; render(); a.save();';
       expect(cls(src, 'new')).toBe('tk-k');
