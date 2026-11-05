@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Review, Vote } from '@concord/shared';
-import { reviewsInRound, votesOnEdits } from '../src/services/governance.js';
+import { GOVERNANCE_TEMPLATES, evaluate, reviewsInRound, votesOnEdits } from '../src/services/governance.js';
 
 /**
  * Which reviews count in a change request's current round. Regression: resubmitting used to leave
@@ -84,5 +84,38 @@ describe('votes on the edits', () => {
 
   it('a vote on the new edits replaces a standing "no"', () => {
     expect(tally([vote('a', 'no', 1, 1), vote('a', 'yes', 2, 2)], 2).counted).toEqual(['a:yes']);
+  });
+});
+
+// Regression: lazy consensus only looked for objections, so a "no" vote standing from earlier edits was
+// read as silence and the change was approved with nobody's support.
+describe('lazy consensus and votes against', () => {
+  const input = (votes: Vote[]) => ({
+    policy: GOVERNANCE_TEMPLATES['lazy-consensus'],
+    level: 'minor' as const,
+    kind: 'change' as const,
+    status: 'review' as const,
+    statusSince: '2026-03-01T00:00:00Z',
+    reviewStartedAt: '2026-03-01T00:00:00Z',
+    authorId: 'author',
+    reviews: [],
+    votes,
+    members: [{ userId: 'a', roles: ['member'] }, { userId: 'author', roles: ['editor'] }] as never,
+    validationOk: true,
+    now: new Date('2026-03-10T00:00:00Z'),
+  });
+
+  it('with no opposition, the comment period ending approves the change', () => {
+    expect(evaluate(input([])).outcome).toBe('approved');
+  });
+
+  it('a standing "no" sends it to a vote instead', () => {
+    const r = evaluate(input([vote('a', 'no', 1, 1)]));
+    expect(r.outcome).toBe('voting');
+    expect(r.next).toMatch(/vote against stands/);
+  });
+
+  it('a "no" since changed to "yes" is no longer opposition', () => {
+    expect(evaluate(input([vote('a', 'no', 1, 1), vote('a', 'yes', 1, 2)])).outcome).toBe('approved');
   });
 });

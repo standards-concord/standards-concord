@@ -4,6 +4,9 @@ import type { GovernancePolicy } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
+import { addVote, getCR, votesFor as getCRVotes } from '../src/services/changeRequests.js';
+import { step } from '../src/services/simulation.js';
+import { personas } from '../src/services/users.js';
 
 /**
  * Review rounds: what counts after a request is resubmitted or edited, which decisions are refused,
@@ -155,6 +158,48 @@ describe('review rounds', () => {
     expect(after.status).toBe('voting');
     // The voter can still change their mind on the new edits.
     expect((await vote(a, crId, 'yes')).body.governance.vote.no).toBe(0);
+  });
+
+  // A "no" stands across new edits, but lazy consensus only looked for objections, so it read the standing
+  // "no" as silence: a change whose rule had become lazy consensus (in the Astra repro, a major change
+  // rewritten as a minor one) auto-merged with no approvals, saying "No objections were raised".
+  it('lazy consensus doesn’t read a standing "no" as silence: the change goes to a vote', async () => {
+    const { owner, author, a, b, crId, ops } = await setUp({ vote: { voterRoles: ['member'], threshold: 0.5, quorum: 0.5, durationDays: 5 } });
+    expect((await review(b, crId, 'approve')).body.status).toBe('voting');
+    expect((await vote(a, crId, 'no')).status).toBe(200);
+    // The rule in force becomes lazy consensus with no approvals needed and no comment period.
+    const ontologyId = (await get(owner, crId)).ontologyId;
+    const policy = structuredClone((await owner.agent.get(`/api/ontologies/${ontologyId}`)).body.governance) as GovernancePolicy;
+    policy.changes.minor = { ...policy.changes.minor, lazyConsensus: true, minApprovals: 0, reviewPeriodDays: 0 };
+    expect((await owner.agent.put(`/api/ontologies/${ontologyId}/governance`).send({ policy })).status).toBe(200);
+    const changed = (await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...ops[0], definition: 'A scheduled block of volunteering time.' }] })).body;
+    expect(changed.editsVersion).toBe(2);
+    expect(changed.governance.vote.no).toBe(1);
+    expect(changed.status).toBe('voting');
+    expect(mentions(changed, /A vote against stands, so this goes to a vote/)).toBe(true);
+    expect(mentions(changed, /No objections were raised/)).toBe(false);
+  });
+
+  // The simulation treated a "no" carried over from earlier edits as an answer to the new edits, so a
+  // simulated voter who opposed the old edits was never asked about the new ones.
+  it('a simulated voter whose "no" was on earlier edits is asked once about the new edits', async () => {
+    const { owner, author, b, crId, ops } = await setUp({ vote: { voterRoles: ['member'], threshold: 0.5, quorum: 0.5, durationDays: 5 } });
+    const ontologyId = (await get(owner, crId)).ontologyId;
+    await step(ontologyId, undefined, 0); // makes sure the personas exist
+    const gareth = personas().find((u) => u.name === 'Gareth Lewis')!;
+    expect((await owner.agent.put(`/api/ontologies/${ontologyId}/members/${gareth.id}`).send({ roles: ['member'] })).status).toBe(200);
+    expect((await review(b, crId, 'approve')).body.status).toBe('voting');
+    await addVote(getCR(crId), gareth, 'no', 'Not yet.', getCR(crId).round ?? 1);
+    await author.agent.patch(`/api/change-requests/${crId}`).send({ ops: [{ ...ops[0], definition: 'A scheduled block of volunteering time.' }] });
+    expect((await review(b, crId, 'approve')).body.status).toBe('voting');
+    expect((await get(b, crId)).governance.vote.no).toBe(1);
+    await step(ontologyId, undefined, 10);
+    const garethsVotes = () => getCRVotes(crId).filter((v) => v.userId === gareth.id);
+    const onNewEdits = garethsVotes().filter((v) => v.editsVersion === 2);
+    expect(onNewEdits).toHaveLength(1);
+    // Asked once: another beat doesn't ask again.
+    await step(ontologyId, undefined, 10);
+    expect(garethsVotes().filter((v) => v.editsVersion === 2)).toHaveLength(1);
   });
 
   // A resubmission of the same edits used to erase the ballot, "no" votes included.

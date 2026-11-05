@@ -409,7 +409,8 @@ export const hasCurrentReview = (cr: ChangeRequest, userId: string) => roundStat
 /** Whether this person has said anything in the current round, a comment included (so they aren't asked twice). */
 export const hasRespondedThisRound = (cr: ChangeRequest, userId: string) =>
   hasCurrentReview(cr, userId) || reviewsFor(cr.id).some((r) => r.userId === userId && reviewRound(cr, r) === roundOf(cr));
-export const hasCurrentVote = (cr: ChangeRequest, userId: string) => roundState(cr).currentVotes.some((v) => v.userId === userId);
+/** Whether this person has voted on the current edits. A "no" on earlier edits still counts, but its voter is asked to look again. */
+export const hasVotedOnTheseEdits = (cr: ChangeRequest, userId: string) => votesFor(cr.id).some((v) => v.userId === userId && voteVersion(cr, v) === editsVersionOf(cr));
 
 /** Decisions name the round they were made on: one made on a version that has since changed is refused, so nobody approves edits they haven't seen. */
 function checkRound(cr: ChangeRequest, expectedRound: number | undefined) {

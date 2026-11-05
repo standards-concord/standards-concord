@@ -11,7 +11,7 @@ import { PERSONA_ACTOR } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
 import { PersonaActionSchema } from '../llm/schemas.js';
 import { reportGap } from './agents.js';
-import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasCurrentVote, hasRespondedThisRound, merge, submit, tick as crTick } from './changeRequests.js';
+import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasRespondedThisRound, hasVotedOnTheseEdits, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -292,7 +292,8 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
       const g = governanceFor(cr);
       const roles = rolesFor(ontologyId, u.id);
       if (cr.status === 'voting') {
-        if (!canVote(g.rule, roles) || hasCurrentVote(cr, u.id)) continue;
+        // A "no" on earlier edits still counts, but its voter is asked once about the new edits.
+        if (!canVote(g.rule, roles) || hasVotedOnTheseEdits(cr, u.id)) continue;
         const r = await personaReaction(p, cr, compact);
         // The reaction is to the version read above: if it changed while the persona thought, skip it.
         if (await decided(() => addVote(cr, u, r.vote, r.comment, cr.round ?? 1))) actions++;

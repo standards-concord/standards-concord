@@ -256,18 +256,25 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     .map((rev) => rev.userId);
   const objections = latest.filter((rev) => rev.decision === 'object' && !vetoedBy.includes(rev.userId));
   const changesRequested = latest.filter((rev) => rev.decision === 'request-changes');
+  // A standing vote against is opposition too (it outlasts new edits, see votesOnEdits), so lazy consensus
+  // mustn't read it as silence: like an objection, it sends the change to a vote.
+  const lastVote = new Map<string, Vote>();
+  for (const v of [...input.votes].sort(decisionOrder)) lastVote.set(v.userId, v);
+  const votesAgainst = [...lastVote.values()].filter((v) => v.choice === 'no' && members.some((m) => m.userId === v.userId));
+  const opposed = objections.length > 0 || votesAgainst.length > 0;
+  const opposition = objections.length ? 'An objection was raised' : 'A vote against stands';
 
   const reviewPeriodEndsAt = addDays(input.reviewStartedAt, r.reviewPeriodDays);
   const reviewPeriodOver = now.getTime() >= new Date(reviewPeriodEndsAt).getTime();
-  const policyApprovals = r.lazyConsensus && objections.length === 0 ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
+  const policyApprovals = r.lazyConsensus && !opposed ? Math.min(r.minApprovals, level === 'major' ? r.minApprovals : 0) : r.minApprovals;
   const requiredApprovals = input.independentConfirmation ? Math.max(policyApprovals, 1) : policyApprovals;
   const validationOk = !policy.requireValidation || input.validationOk;
 
   // Votes
   let voteState: GovernanceEvaluation['vote'];
   let voteNeeded = !!r.vote;
-  // Lazy consensus without objections skips the vote for non-major changes.
-  if (r.vote && r.lazyConsensus && objections.length === 0 && level !== 'major') voteNeeded = false;
+  // Lazy consensus without opposition skips the vote for non-major changes.
+  if (r.vote && r.lazyConsensus && !opposed && level !== 'major') voteNeeded = false;
   if (r.vote && voteNeeded) {
     const eligibleIds = members
       .filter((m) => m.roles.some((role) => r.vote!.voterRoles.includes(role)) && !m.roles.every((x) => x === 'agent'))
@@ -345,14 +352,14 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     if (reviewDone) {
       if (voteNeeded) {
         outcome = 'voting';
-        next = r.lazyConsensus && objections.length ? 'An objection was raised, so this goes to a vote.' : 'Review is complete, so the vote opens now.';
+        next = r.lazyConsensus && opposed ? `${opposition}, so this goes to a vote.` : 'Review is complete, so the vote opens now.';
       } else {
         outcome = 'approved';
         next = r.lazyConsensus && approvals === 0 ? 'No objections were raised during the comment period (lazy consensus).' : 'Approved by reviewers.';
       }
     } else {
       outcome = 'review';
-      if (objections.length && r.lazyConsensus) next = 'An objection was raised; it will go to a vote when the comment period ends.';
+      if (opposed && r.lazyConsensus) next = `${opposition}; it will go to a vote when the comment period ends.`;
       else if (approvals < requiredApprovals) next = `Needs ${requiredApprovals - approvals} more approval(s) from ${roleList(approverRoles)}.`;
       else next = `Waiting for the review period to end (${reviewPeriodEndsAt}).`;
     }
