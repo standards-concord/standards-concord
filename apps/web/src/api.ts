@@ -5,6 +5,7 @@
  */
 import type {
   ActivityItem,
+  FeedbackPublicationStatus,
   AgentReport,
   AgentToken,
   OAuthConnection,
@@ -154,6 +155,24 @@ export type VoteChoice = 'yes' | 'no' | 'abstain';
 
 /* ---------------------------------------------------------------- routes */
 
+/** A public feedback summary waiting for an administrator's decision. */
+export interface PublicationNeedingAdmin {
+  id: string;
+  /** Why it's waiting: a post whose outcome is unknown, a withdrawal, a triage comment whose outcome is unknown, or a summary out of the triage queue. */
+  kind: 'post-unknown' | 'withdrawal' | 'comment-unknown' | 'triage-parked';
+  /** Sent back with a decision, so a decision about an older state is refused. */
+  ref: string;
+  state: 'needs-admin' | 'withdrawing' | 'filed';
+  summary: string;
+  repo: string;
+  marker: string;
+  issue?: { number: number; url: string };
+  candidates: { number: number; url: string }[];
+  reason?: string;
+  feedbackDeleted: boolean;
+  createdAt: string;
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
@@ -253,6 +272,14 @@ export const api = {
   feedbackChat: (body: { pathway: FeedbackSubmission['pathway']; messages: ChatMessage[]; answers: FeedbackAnswers }) =>
     post<FeedbackChatResponse>('/api/feedback/chat', body),
   submitFeedback: (body: Omit<FeedbackSubmission, 'id' | 'createdAt'>) => post<FeedbackSubmission>('/api/feedback', body as unknown as Json),
+  feedbackPublishing: () => get<{ enabled: boolean; noticeVersion: number }>('/api/feedback/publishing'),
+  withdrawFeedbackPublication: (feedbackId: string, token: string) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/withdraw`, { token }),
+  resolveFeedbackPublication: (
+    feedbackId: string,
+    ref: string,
+    body: { action: 'check' | 'repost' | 'confirm' } | { action: 'adopt'; issue: number } | { action: 'comment'; comment: number },
+  ) => post<FeedbackPublicationStatus>(`/api/feedback/${encodeURIComponent(feedbackId)}/publication/resolve`, { ...body, ref }),
+  publicationsNeedingAdmin: () => get<PublicationNeedingAdmin[]>('/api/feedback/publications/attention'),
   feedback: () => get<FeedbackSubmission[]>('/api/feedback'),
   feedbackSummary: () => get<FeedbackSummary>('/api/feedback/summary'),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),

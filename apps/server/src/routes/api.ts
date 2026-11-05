@@ -2,7 +2,7 @@ import express, { Router, type Request } from 'express';
 import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
 import type { OutputFormat, TermView } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, User } from '@concord/shared';
-import { ROLE_INFO } from '@concord/shared';
+import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
@@ -12,6 +12,22 @@ import { llm } from '../llm/provider.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import * as crs from '../services/changeRequests.js';
 import { feedbackChat, FEEDBACK_QUESTIONS, listFeedback, submitFeedback, summariseFeedback, transcribe } from '../services/feedback.js';
+import {
+  checkPublicSummary,
+  issuesEnabled,
+  processWithin,
+  publicationFor,
+  publicationsNeedingAdmin,
+  queuePublication,
+  resolvePublication,
+  status,
+  triageEnabled,
+  triagePublication,
+  triageQueue,
+  triageTokenMatches,
+  withdrawPublication,
+  type AdminAction,
+} from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -94,6 +110,9 @@ const PUBLIC_READS = [
   /^\/ontologies\/[^/]+\/terms\/.+$/,
   /^\/governance\/templates$/,
   /^\/feedback\/questions$/,
+  /^\/feedback\/publishing$/,
+  // Checks the triage routine's own bearer token.
+  /^\/feedback\/triage\/queue$/,
   /^\/oauth\/requests\/[^/]+$/,
 ];
 
@@ -501,10 +520,13 @@ export function apiRouter(): Router {
     const b = req.body ?? {};
     res.json(await feedbackChat({ pathway: b.pathway === 'general' ? 'general' : 'structured', messages: Array.isArray(b.messages) ? b.messages.slice(-60) : [], answers: b.answers ?? {}, currentQuestionId: optStr(b.currentQuestionId) }));
   });
+  r.get('/feedback/publishing', (_req, res) => res.json({ enabled: issuesEnabled(), noticeVersion: PUBLIC_NOTICE_VERSION }));
   r.post('/feedback', async (req, res) => {
     const b = req.body ?? {};
-    res.status(201).json(
-      await submitFeedback(req.user, {
+    // An opt-in public summary is checked before anything is stored, so the tester can fix it.
+    const summary: string | undefined = b.publish && typeof b.publish === 'object' ? b.publish.summary : undefined;
+    if (b.publish) checkPublicSummary(summary);
+    const sub = await submitFeedback(req.user, {
         pathway: b.pathway === 'general' ? 'general' : 'structured',
         answers: b.answers ?? {},
         transcript: Array.isArray(b.transcript) ? b.transcript.slice(-200) : [],
@@ -512,9 +534,51 @@ export function apiRouter(): Router {
         name: optStr(b.name),
         email: optStr(b.email),
         role: optStr(b.role),
-        themes: Array.isArray(b.themes) ? b.themes : undefined,
-      }),
-    );
+        themes: Array.isArray(b.themes) ? b.themes.filter((t: unknown) => typeof t === 'string').slice(0, 20) : undefined,
+      });
+    if (summary === undefined) return void res.status(201).json(sub);
+    // Posted as a GitHub issue; the tester is told the number if GitHub answers quickly.
+    const { withdrawToken } = queuePublication(sub.id, summary);
+    await processWithin(sub.id);
+    res.status(201).json({ ...sub, publication: { ...status(publicationFor(sub.id)!), withdrawToken } });
+  });
+  r.post('/feedback/:id/publication/withdraw', async (req, res) => {
+    res.json(await withdrawPublication(String(req.params.id), req.body?.token));
+  });
+  r.post('/feedback/:id/publication/resolve', async (req, res) => {
+    feedbackAdmin(req);
+    const { action, issue, comment, ref } = req.body ?? {};
+    if (typeof ref !== 'string' || !ref) throw new HttpError(400, 'ref (from the list of summaries waiting for you) is required');
+    let a: AdminAction;
+    if (action === 'adopt') {
+      if (!Number.isSafeInteger(issue) || issue <= 0) throw new HttpError(400, 'issue must be an issue number');
+      a = { action, issue };
+    } else if (action === 'comment') {
+      if (!Number.isSafeInteger(comment) || comment <= 0) throw new HttpError(400, 'comment must be a comment id');
+      a = { action, comment };
+    } else if (action === 'check' || action === 'repost' || action === 'confirm') a = { action };
+    else throw new HttpError(400, 'action must be check, adopt, repost, confirm or comment');
+    res.json(await resolvePublication(String(req.params.id), a, ref));
+  });
+  // Public summaries waiting for an administrator, listed apart from feedback (whose row may be deleted).
+  r.get('/feedback/publications/attention', (req, res) => {
+    feedbackAdmin(req);
+    res.json(publicationsNeedingAdmin());
+  });
+  // The hourly triage routine: reads its queue and writes only through these, with its own token.
+  const triageAuth = (req: Request) => {
+    if (!triageEnabled()) throw new HttpError(404, 'Triage is not switched on');
+    if (!triageTokenMatches(req.header('authorization'))) throw new HttpError(401, 'Triage token required');
+  };
+  r.get('/feedback/triage/queue', (req, res) => {
+    triageAuth(req);
+    res.json(triageQueue());
+  });
+  r.post('/feedback/triage/:issue', async (req, res) => {
+    triageAuth(req);
+    const n = Number(req.params.issue);
+    if (!Number.isInteger(n) || n <= 0) throw new HttpError(400, 'Not an issue number');
+    res.json(await triagePublication(n, req.body ?? {}));
   });
   const feedbackAdmin = (req: Request) => {
     // Only deployment administrators (ADMIN_EMAILS, signed in with Google or GitHub). Ontology roles
@@ -524,7 +588,12 @@ export function apiRouter(): Router {
   };
   r.get('/feedback', (req, res) => {
     feedbackAdmin(req);
-    res.json(listFeedback());
+    res.json(
+      listFeedback().map((s) => {
+        const pub = publicationFor(s.id);
+        return pub ? { ...s, publication: { ...status(pub), id: pub.id, summary: pub.summary, adminNeeded: pub.adminNeeded } } : s;
+      }),
+    );
   });
   r.get('/feedback/summary', async (req, res) => {
     feedbackAdmin(req);

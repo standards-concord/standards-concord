@@ -620,7 +620,72 @@ export interface FeedbackSubmission {
   usedVoice: boolean;
   /** AI-extracted themes for the general pathway */
   themes?: string[];
+  /**
+   * Opt-in public summary, filed as a GitHub issue. Sent by the tester on submit
+   * (`summary`, already passed through publicSummary, so it is exactly what they saw);
+   * returned by the server as `publication`.
+   */
+  publish?: { summary: string };
+  publication?: FeedbackPublicationStatus;
   createdAt: string;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Public feedback summaries (GitHub issues)                                 */
+/* ------------------------------------------------------------------------ */
+
+/** Bumped whenever the wording testers agree to changes, and stored with each consent. */
+export const PUBLIC_NOTICE_VERSION = 1;
+export const PUBLIC_NOTICE =
+  'Only the summary below is posted, exactly as shown, as a GitHub issue on the Concord repository, which may be public. Your answers, name, email, role and the conversation are not posted. Don’t include names, organisations or other details that identify anyone. Links and email addresses are removed.';
+export const PUBLIC_SUMMARY_MAX = 500;
+
+/**
+ * queued → sending → filed; a send whose outcome is unknown → unknown (searched for, never re-posted
+ * automatically) → filed or needs-admin. Withdrawal: → withdrawing (if it may be posted) → withdrawn,
+ * which is terminal.
+ */
+export type FeedbackPublicationState = 'queued' | 'sending' | 'unknown' | 'filed' | 'needs-admin' | 'withdrawing' | 'withdrawn';
+
+export interface FeedbackPublicationStatus {
+  state: FeedbackPublicationState;
+  issue?: { number: number; url: string };
+  /** Only in the response to the submission: lets the tester withdraw the summary later. */
+  withdrawToken?: string;
+  /** A withdrawal that can't find its issue and needs an administrator to confirm. Administrators only. */
+  adminNeeded?: boolean;
+  /** Administrators only. */
+  id?: string;
+  summary?: string;
+  lastError?: string;
+  /** The hidden marker to look for on GitHub before posting again (needs-admin only). */
+  marker?: string;
+}
+
+/**
+ * The text of a public summary, as posted. The tester's preview and the server
+ * both use this, so what they see is what is posted. It removes links (with or
+ * without a scheme), email addresses and @handles, and normalises Unicode so
+ * look-alike characters can't slip past. It can't recognise names: the tester
+ * writes the summary and is asked not to include any.
+ */
+export function publicSummary(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, ' ')
+    .replace(/[^\s@]+@[^\s@]+/g, '[email removed]')
+    .replace(/\S+\s*[[(]\s*at\s*[\])]\s*\S+/gi, '[email removed]')
+    .replace(/@[\p{L}\p{N}_-]+/gu, '[handle removed]')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S*/gi, '[link removed]')
+    .replace(/(^|[\s(\[<"'])\/\/\S+/g, '$1[link removed]')
+    .replace(/\b(?:www\.|(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}\/)\S*/gu, '[link removed]')
+    .replace(/(?:^|\s)\/(?:people|pods?|webid|u|profile)\/\S*/gi, ' [link removed]')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+    .slice(0, PUBLIC_SUMMARY_MAX)
+    .trim();
 }
 
 /* ------------------------------------------------------------------------ */
