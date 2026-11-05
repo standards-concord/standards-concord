@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.32.0',
     date: '2026-11-05',
     title: 'Less to read on every page',
+    pr: 86,
     changes: [
       {
         id: 'simpler-wording',
