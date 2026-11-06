@@ -1,0 +1,40 @@
+import { describe, expect, it } from 'vitest';
+import { DATATYPE_NAMES, datatypeName } from './format';
+import { makeLabeler } from './ontology';
+
+const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+describe('datatypeName', () => {
+  it('gives well-known XSD types plain names, without the xsd: prefix', () => {
+    expect(datatypeName(`${XSD}boolean`)).toBe('Boolean');
+    expect(datatypeName(`${XSD}string`)).toBe('String');
+    expect(datatypeName(`${XSD}nonNegativeInteger`)).toBe('Non-negative integer');
+    expect(datatypeName(`${XSD}dateTime`)).toBe('Date and time');
+    expect(datatypeName('http://www.w3.org/2000/01/rdf-schema#Literal')).toBe('Any literal');
+    expect(datatypeName(`${XSD}anyURI`)).toBe('URI reference');
+  });
+
+  it('never gives two types the same name, so the diagram keeps every constraint', () => {
+    const local = ['string', 'boolean', 'integer', 'int', 'long', 'short', 'byte', 'nonNegativeInteger', 'nonPositiveInteger', 'positiveInteger', 'negativeInteger', 'unsignedInt', 'unsignedLong', 'unsignedShort', 'unsignedByte', 'decimal', 'double', 'float', 'date', 'dateTime', 'dateTimeStamp', 'time', 'duration', 'dayTimeDuration', 'yearMonthDuration', 'gYear', 'gYearMonth', 'gMonth', 'gMonthDay', 'gDay', 'anyURI', 'language', 'normalizedString', 'token', 'base64Binary', 'hexBinary', 'NCName', 'Name', 'NMTOKEN'];
+    // Every mapped IRI (XSD, rdf: and rdfs: alike) plus XSD types that are spelled out from their local name.
+    const iris = [...new Set([...Object.keys(DATATYPE_NAMES), ...local.map((l) => `${XSD}${l}`)])];
+    const names = iris.map((iri) => datatypeName(iri));
+    expect(names.every(Boolean)).toBe(true);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('spells out other XSD types from their local name', () => {
+    expect(datatypeName(`${XSD}unsignedByte`)).toBe('Unsigned byte');
+    expect(datatypeName(`${XSD}NCName`)).toBe('NCName');
+  });
+
+  it('leaves anything that is not a datatype alone', () => {
+    expect(datatypeName('https://w3id.org/odi/volunteering#Volunteer')).toBeUndefined();
+    expect(datatypeName('http://www.w3.org/1999/02/22-rdf-syntax-ns#type')).toBeUndefined();
+  });
+
+  it('is what the labeler shows for a datatype', () => {
+    expect(makeLabeler()(`${XSD}boolean`)).toBe('Boolean');
+    expect(makeLabeler()('http://www.w3.org/2002/07/owl#Thing')).toBe('owl:Thing');
+  });
+});

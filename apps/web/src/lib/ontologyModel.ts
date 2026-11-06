@@ -1,5 +1,6 @@
 import type { OntologyView } from '@concord/shared';
 import type { ClassView, PropertyView, Restriction } from '@concord/core/types';
+import { datatypeName } from './format';
 
 /**
  * A derived, navigable model of an ontology for the visual views: the class hierarchy
@@ -634,7 +635,7 @@ export function buildModel(view: OntologyView): OntologyModel {
 
 /** Plain-language summary of a qualified constraint, e.g. "at least 1 Dog". */
 export function qualifiedText(q: Qualified, label: (iri: string) => string) {
-  const what = q.expression ?? (q.filler ? (isDatatype(q.filler) ? q.filler.replace(/^.*[#/]/, '') : label(q.filler)) : q.literal !== undefined ? JSON.stringify(q.literal) : 'anything');
+  const what = q.expression ?? (q.filler ? (datatypeName(q.filler) ?? label(q.filler)) : q.literal !== undefined ? JSON.stringify(q.literal) : 'anything');
   switch (q.kind) {
     case 'some':
       return `at least one ${what}`;

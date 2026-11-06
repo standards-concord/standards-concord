@@ -39,7 +39,7 @@ export function RuleList({ rules, policy, label, kind = 'change' }: { rules: Rec
     <ul className="space-y-1.5 text-sm" aria-label={label}>
       {LEVELS.map((l) => (
         <li key={l} className="flex items-start gap-2">
-          <LevelBadge level={l} className="mt-0.5 w-14 justify-center" />
+          <LevelBadge level={l} className="mt-0.5 w-14 shrink-0 justify-center" />
           <span>{ruleSummary(rules[l], l, policy, kind)}</span>
         </li>
       ))}
