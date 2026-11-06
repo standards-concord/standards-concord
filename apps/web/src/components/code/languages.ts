@@ -208,25 +208,60 @@ interface ShellState {
   continued: boolean;
   /** The next word is a command name. */
   command: boolean;
+  /** Inside a quoted string that carries on past the end of a line: its quote. */
+  quote: "'" | '"' | null;
+  /** A new shell word can begin here (after a space, an operator or a line start), so # starts a comment. */
+  wordStart: boolean;
 }
 
-/** Enough shell for one-line commands such as curl examples: commands, flags, strings, URLs and @files. */
+/** Reads a quoted string's body up to and including its closing quote. True when it closed on this line. */
+function readShellString(stream: StringStream, quote: "'" | '"'): boolean {
+  while (!stream.eol()) {
+    const ch = stream.next();
+    if (ch === quote) return true;
+    // Double quotes keep backslash escapes (a backslash at the line's end carries the string on); single quotes have none.
+    if (ch === '\\' && quote === '"') stream.next();
+  }
+  return false;
+}
+
+/** Characters that end an unquoted shell word fragment. */
+const SHELL_STOP = `\\s'"|;&\\\\`;
+const SHELL_URL = new RegExp(`^[a-z][a-z0-9+.-]*://[^${SHELL_STOP}]+`, 'i');
+const SHELL_FILE = new RegExp(`^@[^${SHELL_STOP}]+`);
+const SHELL_WORD = new RegExp(`^[^${SHELL_STOP}$]+`);
+
+/** Enough shell for commands such as the curl examples: commands, flags, strings, URLs, variables and @files. */
 const shellParser: StreamParser<ShellState> = {
   name: 'shell',
-  startState: () => ({ continued: false, command: true }),
+  startState: () => ({ continued: false, command: true, quote: null, wordStart: true }),
   copyState: (s) => ({ ...s }),
   languageData: { commentTokens: { line: '#' } },
   tokenTable,
   token(stream, state) {
+    if (state.quote) {
+      if (readShellString(stream, state.quote)) {
+        state.quote = null;
+        state.wordStart = false;
+      }
+      return 'string';
+    }
     if (stream.sol()) {
       state.command = !state.continued;
       state.continued = false;
+      state.wordStart = true;
     }
-    if (stream.eatSpace()) return null;
-    const command = state.command;
+    if (stream.eatSpace()) {
+      state.wordStart = true;
+      return null;
+    }
+    const wordStart = state.wordStart;
+    const command = state.command && wordStart;
     state.command = false;
+    state.wordStart = false;
     const ch = stream.peek();
-    if (ch === '#') {
+    // Only where a word can begin: in a#b or $HOME#x the # belongs to the word.
+    if (ch === '#' && wordStart) {
       stream.skipToEnd();
       return 'comment';
     }
@@ -234,34 +269,31 @@ const shellParser: StreamParser<ShellState> = {
       stream.next();
       if (stream.eol()) {
         state.continued = true;
+        state.wordStart = true;
         return 'punct';
       }
       stream.next();
       return null;
     }
-    if (ch === "'") {
-      // No escapes inside single quotes.
+    if (ch === "'" || ch === '"') {
       stream.next();
-      if (stream.skipTo("'")) stream.next();
-      else stream.skipToEnd();
-      return 'string';
-    }
-    if (ch === '"') {
-      stream.next();
-      readString(stream, ch);
+      if (!readShellString(stream, ch)) state.quote = ch;
       return 'string';
     }
     if (stream.match(/^[|;&]+/)) {
       state.command = true;
+      state.wordStart = true;
       return 'operator';
     }
     if (stream.match(/^\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) return 'variable';
-    if (stream.match(/^[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/i)) return 'iri';
-    if (stream.match(/^--?[A-Za-z0-9][\w-]*/)) return 'flag';
-    if (stream.match(/^@[^\s'"]+/)) return 'variable';
-    if (stream.match(/^[^\s'"|;&\\]+/)) {
+    if (wordStart) {
+      if (stream.match(SHELL_URL)) return 'iri';
+      if (stream.match(/^--?[A-Za-z0-9][\w-]*(?=[\s=|;&]|$)/)) return 'flag';
+      if (stream.match(SHELL_FILE)) return 'variable';
+    }
+    if (stream.match(SHELL_WORD)) {
       if (command) return 'func';
-      return /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(stream.current()) ? 'keyword' : null;
+      return wordStart && /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(stream.current()) ? 'keyword' : null;
     }
     stream.next();
     return null;

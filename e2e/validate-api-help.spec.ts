@@ -48,8 +48,17 @@ async function expectHighlightedAndAligned(page: Page, baseURL: string) {
     await expect(example.locator('.tok-attr', { hasText: /^-H$/ }).first()).toBeVisible();
     await expect(example.locator('.tok-iri', { hasText: `${baseURL}/def/volunteering/1.0.0` })).toBeVisible();
     await expect(example.locator('.tok-string').first()).toBeVisible();
-    // One box per example, not a box inside a box.
-    await expect(example.locator('pre')).toHaveCount(0);
+    // One box per example, not a box inside a box: between the code and its example's section, only one element has a border.
+    const bordered = await example.evaluate((el) => {
+      const out: string[] = [];
+      for (let n: Element | null = el; n; n = n.parentElement) {
+        const css = getComputedStyle(n);
+        if (parseFloat(css.borderTopWidth) > 0 || parseFloat(css.borderLeftWidth) > 0) out.push(n.tagName);
+        if (n.tagName === 'SECTION') break;
+      }
+      return out;
+    });
+    expect(bordered, `bordered boxes around "${name}"`).toEqual(['DIV']);
   }
   await expect(card.getByRole('region', { name: EXAMPLES[0] }).locator('.tok-keyword', { hasText: /^POST$/ })).toBeVisible();
   await expect(card.getByRole('region', { name: EXAMPLES[0] }).locator('.tok-variable', { hasText: /^@data\.ttl$/ })).toBeVisible();
@@ -76,8 +85,15 @@ test.describe('Validate from your own code', () => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await signIn(page, { name: 'API help contributor', role: 'contributor' });
     await expectHighlightedAndAligned(page, baseURL!);
-    const example = page.getByRole('region', { name: EXAMPLES[0] });
-    await example.locator('xpath=..').getByRole('button', { name: 'Copy' }).click();
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`curl -X POST ${baseURL}/def/volunteering/1.0.0 -H 'Content-Type: text/turtle' --data-binary @data.ttl`);
+    const iri = `${baseURL}/def/volunteering/1.0.0`;
+    const oneLine = [
+      `curl -X POST ${iri} -H 'Content-Type: text/turtle' --data-binary @data.ttl`,
+      `curl -X POST ${iri} -H 'Content-Type: application/ld+json' -H 'Accept: text/turtle' --data-binary @data.jsonld`,
+      `curl ${iri} -H 'Accept-Profile: <http://www.w3.org/ns/shacl#>'`,
+    ];
+    for (const [i, name] of EXAMPLES.entries()) {
+      await page.getByRole('region', { name }).locator('xpath=..').getByRole('button', { name: 'Copy' }).click();
+      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { message: name }).toBe(oneLine[i]);
+    }
   });
 });
