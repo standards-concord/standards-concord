@@ -313,8 +313,9 @@ test.describe('Connect page', () => {
     await expect(tokens.getByRole('button', { name: 'Revoke First' })).toBeVisible();
   });
 
-  // Connected agents used to be listed by name only. Each now shows its app's logo, matched from the name it
-  // registered with, and an app Concord has no logo for gets a generic agent mark rather than someone else's.
+  // Connected agents used to be listed by name only. Each now shows its app's logo, matched from the whole name it
+  // registered with (ignoring case and spacing), and any other name, including one that merely contains an app's
+  // name, gets a generic agent mark rather than someone else's.
   test('each connected agent shows its app’s logo', async ({ page, baseURL }) => {
     test.slow();
     await signIn(page, { name: 'Logo tester' });
@@ -325,7 +326,10 @@ test.describe('Connect page', () => {
       ['Codex', 'codex'],
       ['Cursor', 'cursor'],
       ['Visual Studio Code', 'vscode'],
+      ['claude  CODE (Concord)', 'claude-code'],
       ['Homemade research bot', 'agent'],
+      ['Not Claude', 'agent'],
+      ['Cursor-malware', 'agent'],
     ];
     for (const [name] of expected) await connectAgent(page, baseURL!, name);
     await page.goto('/connect#agents');

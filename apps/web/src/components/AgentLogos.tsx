@@ -138,24 +138,37 @@ const LOGOS: Record<AgentApp, () => React.JSX.Element> = {
   vscode: VSCodeLogo,
 };
 
-/** Checked in order, so "Claude Code (concord)" is Claude Code, not Claude. */
-const NAME_PATTERNS: [RegExp, AgentApp][] = [
-  [/\bclaude code\b/i, 'claude-code'],
-  [/\bclaude\b/i, 'claude'],
-  [/\bchatgpt\b/i, 'chatgpt'],
-  [/\bcodex\b/i, 'codex'],
-  [/\bcursor\b/i, 'cursor'],
-  [/\b(visual studio code|vs ?code)\b/i, 'vscode'],
-];
+/** The names each app registers with, compared after normalizeAgentName. Exact matches only. */
+const ALIASES: Record<string, AgentApp> = {
+  claude: 'claude',
+  'claude code': 'claude-code',
+  chatgpt: 'chatgpt',
+  codex: 'codex',
+  cursor: 'cursor',
+  'visual studio code': 'vscode',
+  'vs code': 'vscode',
+  vscode: 'vscode',
+};
+
+/** Lower case, with runs of whitespace (spaces, tabs, non-breaking spaces) collapsed to one space and trimmed. */
+export function normalizeAgentName(name: string) {
+  return name.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
 
 /**
- * Which app a connected agent is, from the name it registered with (for
- * example "Claude Code (concord)" or "Visual Studio Code"). That name is the
- * app's own claim, the same one the list already shows as text, so the logo
- * says nothing more about who made it than the name does.
+ * Which app a connected agent is, from the name it registered with. The whole
+ * name must be one of the app's names, optionally followed by one bracketed
+ * label: Claude Code registers as "Claude Code (<server name>)". So "Not
+ * Claude" or "Cursor-malware" get the generic mark, not an official one.
+ *
+ * Accepted limit: the name is the app's own claim, and nothing stops another
+ * app registering as exactly "Claude". The row already shows that same name as
+ * text, so the logo claims no more than the name does. Whether Concord could
+ * confirm who made an app is said on the consent page, before it connects.
  */
 export function agentAppFor(clientName: string): AgentApp | undefined {
-  return NAME_PATTERNS.find(([re]) => re.test(clientName))?.[1];
+  const name = normalizeAgentName(clientName);
+  return ALIASES[name] ?? ALIASES[name.replace(/ ?\([^()]*\)$/, '')];
 }
 
 /** The logo for an app, decorative and the same size as in the Connect picker. */

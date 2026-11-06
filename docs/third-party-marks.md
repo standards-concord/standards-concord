@@ -21,3 +21,5 @@ The licences above cover the SVG files. The marks themselves stay their owners' 
 - Keep every mark in the picker the same size (20px). The Playwright test in `e2e/connect.spec.ts` checks the size and that each mark is visible in light and dark mode.
 
 Check the owner's brand page before adding a new mark or changing one.
+
+**Connected agents** (`AgentAccess.tsx`) reuse these marks. An agent gets one only when its whole registered name, ignoring case and spacing, is one of the app's names, optionally followed by a bracketed label (Claude Code registers as "Claude Code (<server name>)"). A name that merely contains an app's name, such as "Not Claude", gets the generic agent mark. The name is the app's own claim, so another app could register as exactly "Claude"; that is an accepted limit, since the row shows the same name as text and the consent page says whether Concord could confirm who made the app.
