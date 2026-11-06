@@ -53,6 +53,22 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.40.0',
+    date: '2026-11-06',
+    title: 'Logos for your connected agents',
+    changes: [
+      {
+        id: 'connected-agent-logos',
+        type: 'feat',
+        title: 'Each connected agent shows its app’s logo',
+        detail:
+          'Under Connected agents, Claude, Claude Code, ChatGPT, Codex, Cursor and VS Code now show their logos beside their names, so you can see at a glance what you’ve connected. Other apps get a plain agent icon.',
+        roles: ['agent'],
+        to: '/connect#agents',
+      },
+    ],
+  },
+  {
     version: '0.39.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',

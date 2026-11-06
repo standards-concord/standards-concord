@@ -125,3 +125,41 @@ export function VSCodeLogo() {
     </svg>
   );
 }
+
+/** The apps Concord has a logo for. */
+export type AgentApp = 'claude' | 'chatgpt' | 'claude-code' | 'codex' | 'cursor' | 'vscode';
+
+const LOGOS: Record<AgentApp, () => React.JSX.Element> = {
+  claude: ClaudeLogo,
+  chatgpt: OpenAILogo,
+  'claude-code': ClaudeCodeLogo,
+  codex: CodexLogo,
+  cursor: CursorLogo,
+  vscode: VSCodeLogo,
+};
+
+/** Checked in order, so "Claude Code (concord)" is Claude Code, not Claude. */
+const NAME_PATTERNS: [RegExp, AgentApp][] = [
+  [/\bclaude code\b/i, 'claude-code'],
+  [/\bclaude\b/i, 'claude'],
+  [/\bchatgpt\b/i, 'chatgpt'],
+  [/\bcodex\b/i, 'codex'],
+  [/\bcursor\b/i, 'cursor'],
+  [/\b(visual studio code|vs ?code)\b/i, 'vscode'],
+];
+
+/**
+ * Which app a connected agent is, from the name it registered with (for
+ * example "Claude Code (concord)" or "Visual Studio Code"). That name is the
+ * app's own claim, the same one the list already shows as text, so the logo
+ * says nothing more about who made it than the name does.
+ */
+export function agentAppFor(clientName: string): AgentApp | undefined {
+  return NAME_PATTERNS.find(([re]) => re.test(clientName))?.[1];
+}
+
+/** The logo for an app, decorative and the same size as in the Connect picker. */
+export function AgentLogo({ app }: { app: AgentApp }) {
+  const Logo = LOGOS[app];
+  return <Logo />;
+}
