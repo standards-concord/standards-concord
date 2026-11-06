@@ -217,7 +217,7 @@ function RequirementsCard({ r, canWrite, onChange }: { r: ReleaseDetail; canWrit
         title="Use cases and requirements"
         subtitle={
           r.status === 'published'
-            ? 'Published with this release, and committed as USE_CASES.md.'
+            ? 'Published with this release.'
             : 'Drafted with the release. It is frozen and committed when the release is published.'
         }
         actions={

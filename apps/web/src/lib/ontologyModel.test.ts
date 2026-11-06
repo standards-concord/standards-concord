@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ClassView, OntologyView, PropertyView, Restriction } from '@concord/core/types';
 import { OntologyGraph } from '@concord/core';
 import volunteering from '../../../../packages/core/fixtures/volunteering.ttl?raw';
-import { buildModel, slotCard, type OntologyModel } from './ontologyModel';
+import { buildModel, cardWords, slotCard, type OntologyModel } from './ontologyModel';
 
 const NS = 'https://example.org/t#';
 const I = (l: string) => NS + l;
@@ -391,4 +391,18 @@ describe('ontology model: the volunteering demo ontology', async () => {
   it('has no contradictions', () => {
     for (const c of m.classes.keys()) for (const g of m.allSlots(c)) for (const s of g.slots) expect(s.conflict, `${c} ${s.property.iri}`).toBeUndefined();
   });
+});
+
+describe('cardWords', () => {
+  it.each<[number, number | '*', string]>([
+    [0, 1, 'Optional'],
+    [1, 1, 'Exactly one'],
+    [0, '*', 'Any number'],
+    [1, '*', 'At least one'],
+    [5, 10, '5 to 10'],
+    [0, 5, 'Up to 5'],
+    [3, '*', 'At least 3'],
+    [2, 2, 'Exactly 2'],
+    [0, 0, 'None'],
+  ])('%s..%s is "%s"', (min, max, words) => expect(cardWords(min, max)).toBe(words));
 });

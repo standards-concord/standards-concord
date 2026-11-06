@@ -22,7 +22,7 @@ const RELATION_LABEL: Record<UseCaseLink['relation'], { out: string; in: string 
 
 export function UseCaseDetailPage() {
   const { useCaseId = '' } = useParams();
-  const { id, userById } = useOntology();
+  const { id, userById, hasRole } = useOntology();
   const nav = useNavigate();
   const uc = useAsync(() => api.useCase(useCaseId), [useCaseId]);
   const start = useStartInterview(id);
@@ -67,7 +67,7 @@ export function UseCaseDetailPage() {
                 <AnonymisedVersion uc={u} onChange={set} ontologyId={id} />
               </div>
             )}
-            <UseCaseDocument uc={u} collapsible />
+            <UseCaseDocument uc={u} collapsible showQueries={hasRole('editor', 'steward', 'owner')} />
           </Card>
           <TraceCard uc={u} onChange={set} />
         </div>

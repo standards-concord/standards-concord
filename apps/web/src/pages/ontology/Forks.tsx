@@ -138,7 +138,7 @@ export function ForksTab() {
         <Loading />
       ) : !list.data.length ? (
         <EmptyState icon={GitFork} title="No forks yet" action={session?.user ? <Button icon={Plus} onClick={() => setOpen(true)}>New fork</Button> : undefined}>
-          Coding agents can create forks too, over MCP (create_fork).
+          Coding agents can create forks too.
         </EmptyState>
       ) : (
         <div className="space-y-6">

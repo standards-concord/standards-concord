@@ -184,7 +184,6 @@ export function OntologyLayout() {
                 {o.demo && <Badge tone="warn">Demo</Badge>}
               </div>
               <p className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-subtle">
-                <span className="truncate font-mono">{o.ontologyIRI}</span>
                 <span>Version {o.currentVersion}</span>
                 <a href={publicPageUrl(o.slug)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="public-page-link">
                   Public page <ExternalLink className="size-3" aria-hidden />
