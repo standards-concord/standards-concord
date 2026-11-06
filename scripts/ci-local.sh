@@ -34,7 +34,9 @@ if $report; then
     echo "--report needs a clean working tree, so the status describes exactly $sha." >&2
     exit 2
   fi
-  repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || { echo "gh is not signed in" >&2; exit 2; }
+  # owner/name from origin (REST only: gh repo view needs GraphQL, which Claude sandboxes lack).
+  repo=$(git remote get-url origin | sed -E 's#^(git@[^:]+:|[a-z]+://([^@/]*@)?[^/]+/)##; s#\.git$##')
+  gh api "repos/$repo" --jq .full_name >/dev/null || { echo "gh can't reach $repo: sign in with gh auth login" >&2; exit 2; }
 fi
 
 logdir="$root/ci-local-logs/${sha:0:12}"
