@@ -75,7 +75,8 @@ if (!token && !appId) fail('Set the app token (it starts with cna_), or, for an 
 if (!command.trim()) fail('Set test-command to the command that tests your app, e.g. "npm test".');
 if (env.GITHUB_ACTIONS && token) console.log(`::add-mask::${token}`);
 
-async function api(method, p, body) {
+/** Call Concord, trying again (up to `tries` times) when it can't be reached or has a server error. */
+async function api(method, p, body, { tries = 3 } = {}) {
   const url = new URL(p, `${base}/`);
   for (let attempt = 1; ; attempt++) {
     let res;
@@ -86,13 +87,15 @@ async function api(method, p, body) {
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
-      if (attempt < 3) {
+      if (attempt < tries) {
         await new Promise((r) => setTimeout(r, attempt * 2000));
         continue;
       }
-      throw new Error(`Can't reach Concord at ${base}: ${err.message}`);
+      const e = new Error(`Can't reach Concord at ${base}: ${err.message}`);
+      e.transient = true;
+      throw e;
     }
-    if (res.status >= 500 && attempt < 3) {
+    if (res.status >= 500 && attempt < tries) {
       await new Promise((r) => setTimeout(r, attempt * 2000));
       continue;
     }
@@ -104,6 +107,7 @@ async function api(method, p, body) {
       } catch {}
       const e = new Error(`${method} ${url.pathname}: ${res.status} ${msg}`);
       e.status = res.status;
+      e.transient = res.status >= 500;
       throw e;
     }
     return { text, json: () => JSON.parse(text), headers: res.headers };
@@ -242,13 +246,17 @@ const rows = [];
 let pending;
 if (!token) {
   // Connected through the Concord GitHub App: trade GitHub's proof that this run is in the app's
-  // repository for a token that lasts the run.
-  const proof = await runIdentity(appId);
-  if (!proof) fail('Without an app token, the run signs in with GitHub’s proof that it runs in the app’s repository. Run it on GitHub Actions with `permissions: id-token: write`.');
-  try {
-    token = (await api('POST', '/api/app-checks/session', { app: appId, oidc: proof })).json().token;
-  } catch (err) {
-    fail(`Concord didn’t accept this run for app ${appId}: ${err.message}`);
+  // repository for a token that lasts the run. Each proof can be used once, so every try asks
+  // GitHub for a fresh one (Concord may have used up the last one before its reply was lost).
+  for (let attempt = 1; !token; attempt++) {
+    const proof = await runIdentity(appId);
+    if (!proof) fail('Without an app token, the run signs in with GitHub’s proof that it runs in the app’s repository. Run it on GitHub Actions with `permissions: id-token: write`.');
+    try {
+      token = (await api('POST', '/api/app-checks/session', { app: appId, oidc: proof }, { tries: 1 })).json().token;
+    } catch (err) {
+      if (!err.transient || attempt >= 3) fail(`Concord didn’t accept this run for app ${appId}: ${err.message}`);
+      await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
   }
   if (env.GITHUB_ACTIONS) console.log(`::add-mask::${token}`);
 }

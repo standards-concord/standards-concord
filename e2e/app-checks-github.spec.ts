@@ -22,7 +22,7 @@ interface StubApp {
   repos: { id: string; full_name: string; files: Record<string, Record<string, string>>; pulls: { number: number; head: string; state: string }[] }[];
 }
 const stub = async (request: APIRequestContext) => (await (await request.get(`${STUB}/__app`)).json()) as StubApp;
-const nextInstall = async (request: APIRequestContext, repos: string[]) => (await (await request.post(`${STUB}/__app/next-install`, { data: { repos } })).json()) as { repos: { full_name: string; id: string }[] };
+const nextInstall = async (request: APIRequestContext, repos: string[], readOnly: string[] = []) => (await (await request.post(`${STUB}/__app/next-install`, { data: { repos, readOnly } })).json()) as { repos: { full_name: string; id: string }[] };
 const oidcFor = async (request: APIRequestContext, claims: Record<string, string>) => ((await (await request.get(`${STUB}/__oidc/token?${new URLSearchParams(claims)}`)).json()) as { value: string }).value;
 
 /** Deliver a webhook as GitHub would, signed with the App's webhook secret. */
@@ -94,7 +94,7 @@ test.describe('app checks through the Concord GitHub App', () => {
     // The pull request is merged: GitHub tells Concord, and Concord starts a run straight away.
     await page.request.post(`${STUB}/__app/merge`, { data: { repo, number: pr.number } });
     const installationId = gh.installations.find((i) => i.repos.includes(repo))!.id;
-    const merged = await webhook(page.request, 'pull_request', { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { merged: true, head: { ref: 'concord/app-checks' } } });
+    const merged = await webhook(page.request, 'pull_request', { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { number: pr.number, merged: true, merge_commit_sha: `merge-${uniq()}`, head: { ref: 'concord/app-checks' } } });
     expect(merged.status(), await merged.text()).toBe(200);
     await expect.poll(async () => (await stub(page.request)).dispatches.filter((d) => d.repo === repo).length).toBeGreaterThan(0);
     gh = await stub(page.request);
@@ -158,6 +158,19 @@ test.describe('app checks through the Concord GitHub App', () => {
     await expect(card(page, name)).not.toContainText('connected through GitHub');
     await page.getByRole('button', { name: 'Dismiss' }).click();
     await expect(page.getByRole('status')).toHaveCount(0);
+    await expectNoCrash(page);
+  });
+
+  test('someone who can only read the repository on GitHub can’t connect it', async ({ page }) => {
+    const repo = `example/read-only-${uniq()}`;
+    await nextInstall(page.request, [repo], [repo]);
+    await signIn(page, { name: `Reader ${uniq()}`, role: 'reviewer' });
+    const name = `Read only ${uniq()}`;
+    await connectApp(page, demo.id, name, repo);
+    await card(page, name).getByRole('button', { name: 'Connect with GitHub' }).click();
+    await expect(page.getByRole('status')).toContainText(`You can see ${repo} on GitHub but can’t push to it`);
+    await expect(card(page, name)).not.toContainText('connected through GitHub');
+    await expect(card(page, name).getByRole('button', { name: 'Open a pull request that adds it' })).toHaveCount(0);
     await expectNoCrash(page);
   });
 

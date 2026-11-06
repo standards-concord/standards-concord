@@ -1,4 +1,10 @@
+import { spawn } from 'node:child_process';
 import { createHmac, generateKeyPairSync } from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConnectedApp } from '@concord/shared';
@@ -29,7 +35,7 @@ interface StubState {
   repos: { id: string; full_name: string; files: Record<string, Record<string, string>>; pulls: { number: number; head: string }[] }[];
 }
 const state = async () => (await (await fetch(`${base}/__app`)).json()) as StubState;
-const nextInstall = async (repos: string[]) => ((await (await fetch(`${base}/__app/next-install`, { method: 'POST', body: JSON.stringify({ repos }) })).json()) as { repos: { id: string }[] }).repos;
+const nextInstall = async (repos: string[], readOnly: string[] = []) => ((await (await fetch(`${base}/__app/next-install`, { method: 'POST', body: JSON.stringify({ repos, readOnly }) })).json()) as { repos: { id: string }[] }).repos;
 const oidc = async (claims: Record<string, string>) => ((await (await fetch(`${base}/__oidc/token?${new URLSearchParams(claims)}`)).json()) as { value: string }).value;
 
 async function login(name: string, role = 'reviewer'): Promise<Agent> {
@@ -57,6 +63,20 @@ async function install(agent: Agent, appId: string, tweak?: (q: URLSearchParams)
 }
 
 const doc = (id: string) => getDoc<AppDoc>('apps', id);
+const runsIn = async (repo: string) => (await state()).dispatches.filter((d) => d.repo === repo).length;
+const session = async (appId: string, repository: string) => request(app).post('/api/app-checks/session').send({ app: appId, oidc: await oidc({ audience: `concord-app-check:${appId}`, repository }) });
+const asRun = (token: string) => request(app).get('/api/app-checks/pending').set('Authorization', `Bearer ${token}`);
+
+/** A linked app whose repository has the workflow on main, and whose last run was long enough ago. */
+async function readyToRun(agent: Agent, repo: string) {
+  const l = await linked(agent, repo);
+  const pr = await agent.post(`/api/apps/${l.app.id}/github/workflow-pr`);
+  expect(pr.status, pr.text).toBe(200);
+  await fetch(`${base}/__app/merge`, { method: 'POST', body: JSON.stringify({ repo, number: pr.body.app.github.workflowPr.number }) });
+  const d = (await doc(l.app.id))!;
+  await put('apps', { ...d, github: { ...d.github!, fingerprint: 'old', dispatchAt: Date.now() - 10 * 60 * 1000, retryAt: undefined } }, d.ontologyId);
+  return l;
+}
 
 async function linked(agent: Agent, repo: string) {
   const [{ id: repoId }] = await nextInstall([repo]);
@@ -164,6 +184,52 @@ describe('the Concord GitHub App', () => {
     expect(back.searchParams.get('github_error')).toMatch(/doesn’t include example\/this-one/);
   });
 
+  // Seeing a repository isn't controlling it: an installation (say, on an organisation) can
+  // cover repositories the person connecting may only read. Linking used to need only that they
+  // could see it, which let a read-only collaborator start workflows and push a branch there.
+  it('won’t link a repository the installer can see but can’t push to', async () => {
+    const owner = await login('Read-only collaborator');
+    await nextInstall(['example/read-only'], ['example/read-only']);
+    const a = await newApp(owner, 'example/read-only');
+    const back = await install(owner, a.id);
+    expect(back.searchParams.get('github_error')).toMatch(/can’t push to it/);
+    expect((await doc(a.id))!.github).toBeUndefined();
+    expect((await owner.post(`/api/apps/${a.id}/github/workflow-pr`)).status).toBe(409);
+  });
+
+  // Reconnecting an app to another repository used to keep the old repository's run tokens
+  // working, so runs there could still read proposed changes and report results.
+  it('reconnecting to another repository stops the old repository’s run tokens working', async () => {
+    const owner = await login('Mover');
+    const { app: a } = await linked(owner, 'example/move-from');
+    const old = await session(a.id, 'example/move-from');
+    expect(old.status, old.text).toBe(200);
+    expect((await asRun(old.body.token)).status).toBe(200);
+    expect((await owner.patch(`/api/apps/${a.id}`).send({ repo: 'example/move-to' })).status).toBe(200);
+    await nextInstall(['example/move-to']);
+    expect((await install(owner, a.id)).searchParams.get('github')).toBe('connected');
+    expect((await doc(a.id))!.github!.repo).toBe('example/move-to');
+    expect((await asRun(old.body.token)).status).toBe(401);
+    // Runs in the new repository sign in as before.
+    const fresh = await session(a.id, 'example/move-to');
+    expect(fresh.status, fresh.text).toBe(200);
+    expect((await asRun(fresh.body.token)).status).toBe(200);
+  });
+
+  // Only the last ten run tokens used to be kept, so with a run every two minutes a job still
+  // running lost its sign-in after about twenty minutes, long before its six hours were up.
+  it('keeps every run token that hasn’t run out, however many runs sign in', async () => {
+    const owner = await login('Busy app');
+    const { app: a } = await linked(owner, 'example/busy');
+    const tokens: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await session(a.id, 'example/busy');
+      expect(res.status, res.text).toBe(200);
+      tokens.push(res.body.token);
+    }
+    for (const t of [tokens[0], tokens[11]]) expect((await asRun(t)).status).toBe(200);
+  });
+
   it('a run in the linked repository trades GitHub’s proof for a run token, once', async () => {
     const owner = await login('Runner');
     const { app: a } = await linked(owner, 'example/runner');
@@ -208,10 +274,19 @@ describe('the Concord GitHub App', () => {
     // Merged: there's nothing left to add.
     expect((await owner.post(`/api/apps/${a.id}/github/workflow-pr`)).body.alreadyThere).toBe(true);
     const installationId = (await doc(a.id))!.github!.installationId;
-    const merged = await signed('pull_request', { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { merged: true, head: { ref: 'concord/app-checks' } } });
+    const mergedEvent = { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { number: pr.body.app.github.workflowPr.number, merged: true, merge_commit_sha: 'abc123', head: { ref: 'concord/app-checks' } } };
+    const merged = await signed('pull_request', mergedEvent);
     expect(merged.status, merged.text).toBe(200);
-    const runs = async () => (await state()).dispatches.filter((d) => d.repo === 'example/dispatch').length;
+    const runs = () => runsIn('example/dispatch');
     expect(await runs()).toBe(1);
+    // GitHub redelivers the same merge (or sends it twice), with something new to test meanwhile.
+    // Each delivery used to reset the wait and start another run straight away.
+    const now = (await doc(a.id))!;
+    await put('apps', { ...now, github: { ...now.github!, fingerprint: 'changed since' } }, now.ontologyId);
+    expect((await signed('pull_request', mergedEvent)).body).toEqual({ handled: true, apps: 0 });
+    await Promise.all([signed('pull_request', mergedEvent), signed('pull_request', mergedEvent)]);
+    expect(await runs()).toBe(1);
+    await put('apps', { ...(await doc(a.id))!, github: { ...(await doc(a.id))!.github!, fingerprint: now.github!.fingerprint } }, now.ontologyId);
     expect((await state()).tokenRequests.filter((t) => t.repoIds[0] === repoId).map((t) => t.permissions)).toContainEqual({ actions: 'write' });
 
     // Nothing new to test: no new run. Something new, but within two minutes of the last: wait.
@@ -224,6 +299,41 @@ describe('the Concord GitHub App', () => {
     const both = await Promise.all([dispatchIfNeeded(a.id, later), dispatchIfNeeded(a.id, later)]);
     expect(both.sort()).toEqual(['skipped', 'started']);
     expect(await runs()).toBe(2);
+  });
+
+  // The decision to start a run used to be saved as done before GitHub was asked, so a process
+  // that stopped in between left it looking done, and no run was ever started for it.
+  it('a claim to start a run that was never finished runs out, and the run starts after all', async () => {
+    const owner = await login('Interrupted');
+    const { app: a } = await readyToRun(owner, 'example/interrupted');
+    const d = (await doc(a.id))!;
+    const t = Date.now();
+    // A process claimed the run, then stopped before asking GitHub.
+    await put('apps', { ...d, github: { ...d.github!, pending: { fingerprint: 'whatever it saw', until: t + 5 * 60 * 1000 }, dispatchAt: t - 10 * 60 * 1000 } }, d.ontologyId);
+    expect(await dispatchIfNeeded(a.id, t)).toBe('skipped');
+    expect(await runsIn('example/interrupted')).toBe(0);
+    expect(await dispatchIfNeeded(a.id, t + 6 * 60 * 1000)).toBe('started');
+    expect(await runsIn('example/interrupted')).toBe(1);
+    const after = (await doc(a.id))!.github!;
+    expect(after.pending).toBeUndefined();
+    expect(after.fingerprint).not.toBe('old');
+    // Done now: nothing new, so no more runs.
+    expect(await dispatchIfNeeded(a.id, t + 20 * 60 * 1000)).toBe('skipped');
+  });
+
+  // Runs used to keep being started after the app's owner left the ontology, using up the
+  // repository's Actions minutes on runs that could no longer sign in.
+  it('starts no runs once the app’s owner has left the ontology', async () => {
+    const owner = await login('Leaver');
+    const { app: a } = await readyToRun(owner, 'example/leaver');
+    const personas = (await request(app).get('/api/personas')).body as { id: string; name: string }[];
+    const priya = request.agent(app);
+    await priya.post('/api/auth/demo').send({ userId: personas.find((p) => p.name === 'Priya Shah')!.id });
+    const removed = await priya.delete(`/api/ontologies/${demoId}/members/${(await doc(a.id))!.ownerId}`);
+    expect(removed.status, removed.text).toBe(204);
+    expect(await dispatchIfNeeded(a.id)).toBe('skipped');
+    await nudgeRuns(demoId);
+    expect(await runsIn('example/leaver')).toBe(0);
   });
 
   it('proposing a change starts runs for apps connected through GitHub', async () => {
@@ -296,5 +406,85 @@ describe('the Concord GitHub App', () => {
       process.env.GITHUB_APP_ID = id;
     }
     expect((await request(app).get('/api/github-app')).body).toEqual({ enabled: true, url: `${base}/apps/concord-unit` });
+  });
+});
+
+describe('the GitHub Action, for an app connected through the Concord GitHub App', () => {
+  let concord: http.Server;
+  let proxy: http.Server;
+  let viaProxy = '';
+  /** Session replies the proxy has thrown away (after Concord handled them), and how many to throw away. */
+  let lost = 0;
+  let toLose = 0;
+  beforeAll(async () => {
+    concord = app.listen(0);
+    await new Promise((r) => concord.once('listening', r));
+    const target = `http://127.0.0.1:${(concord.address() as AddressInfo).port}`;
+    // Between the action and Concord: passes everything on, but can lose a reply on the way back.
+    proxy = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const headers: Record<string, string> = {};
+      for (const h of ['authorization', 'content-type', 'accept']) if (req.headers[h]) headers[h] = String(req.headers[h]);
+      const r = await fetch(`${target}${req.url}`, { method: req.method, headers, body: chunks.length ? Buffer.concat(chunks) : undefined });
+      const body = Buffer.from(await r.arrayBuffer());
+      if (req.url?.startsWith('/api/app-checks/session') && lost < toLose) {
+        lost++;
+        res.writeHead(502).end('Bad gateway');
+        return;
+      }
+      res.writeHead(r.status, { 'content-type': r.headers.get('content-type') ?? 'text/plain' }).end(body);
+    });
+    proxy.listen(0);
+    await new Promise((r) => proxy.once('listening', r));
+    viaProxy = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`;
+  });
+  afterAll(() => {
+    proxy.close();
+    concord.close();
+  });
+
+  const runAction = (env: Record<string, string>) =>
+    new Promise<{ code: number | null; out: string }>((resolve) => {
+      const script = path.resolve(import.meta.dirname, '../../../actions/app-check/run.mjs');
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-gh-app-'));
+      const child = spawn(process.execPath, [script], { cwd, env: { PATH: process.env.PATH!, CONCORD_URL: viaProxy, ...env } });
+      let out = '';
+      child.stdout.on('data', (c) => (out += c));
+      child.stderr.on('data', (c) => (out += c));
+      child.on('close', (code) => resolve({ code, out }));
+    });
+
+  // Every try at signing in used to send the same proof from GitHub. If Concord used it up but its
+  // reply was lost, the retry was refused as "already used" and the whole run failed.
+  it('signs in with GitHub’s proof and no token, asking GitHub for a fresh proof when a reply is lost', async () => {
+    const owner = await login('Action runner');
+    const repo = 'example/action-run';
+    const { app: a } = await linked(owner, repo);
+    lost = 0;
+    toLose = 1;
+    const res = await runAction({
+      CONCORD_APP: a.id,
+      CONCORD_TEST_COMMAND: 'node -e ""',
+      CONCORD_MAX_CHANGES: '100',
+      CONCORD_COMMIT: 'f00dfeed',
+      // GitHub Actions' OIDC endpoint (the stand-in), as a job with `id-token: write` gets it.
+      ACTIONS_ID_TOKEN_REQUEST_URL: `${base}/__oidc/token?repository=${repo}`,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'job-request-token',
+    });
+    expect(res.code, res.out).toBe(0);
+    expect(lost).toBe(1);
+    // Concord issued a run token for the lost reply and another for the retry.
+    expect((await doc(a.id))!.runTokens).toHaveLength(2);
+    expect(res.out).toMatch(/GitHub vouched for this run/);
+    expect((await doc(a.id))!.baseline).toMatchObject({ outcome: 'passed', verified: true });
+  }, 60_000);
+
+  it('without a proof from GitHub, says how to give the job one', async () => {
+    const owner = await login('No id-token');
+    const { app: a } = await linked(owner, 'example/no-id-token');
+    const res = await runAction({ CONCORD_APP: a.id, CONCORD_TEST_COMMAND: 'node -e ""' });
+    expect(res.code).not.toBe(0);
+    expect(res.out).toMatch(/id-token: write/);
   });
 });

@@ -180,13 +180,16 @@ export const installUrl = (s: GithubAppSettings, state: string) => `${s.webUrl}/
 export interface InstalledRepo {
   id: string;
   fullName: string;
+  /** Can the installer push to it (write, maintain or admin)? Seeing a repository isn't controlling it. */
+  canWrite: boolean;
 }
 
 /**
- * The repositories in an installation that the person who just installed can see, proven with
- * their one-time sign-in code: an installation id in the redirect is just a number anyone could
- * type, so this is what stops someone linking a repository they don't control. The person's
- * token is used for this one question and revoked straight after.
+ * The repositories in an installation that the person who just installed can see, and whether
+ * they can push to each, proven with their one-time sign-in code: an installation id in the
+ * redirect is just a number anyone could type, and an installation can cover repositories the
+ * person may only read, so this is what stops someone linking a repository they don't control.
+ * The person's token is used for this one question and revoked straight after.
  */
 export async function reposTheInstallerCanSee(s: GithubAppSettings, code: string, installationId: string): Promise<InstalledRepo[]> {
   let res: Response;
@@ -206,7 +209,7 @@ export async function reposTheInstallerCanSee(s: GithubAppSettings, code: string
   try {
     const repos: InstalledRepo[] = [];
     for (let page = 1; page <= 10; page++) {
-      let got: { repositories?: { id: number; full_name: string }[] };
+      let got: { repositories?: { id: number; full_name: string; permissions?: { admin?: boolean; maintain?: boolean; push?: boolean } }[] };
       try {
         got = await gh(s, `/user/installations/${encodeURIComponent(installationId)}/repositories?per_page=100&page=${page}`, { token: userToken });
       } catch (err) {
@@ -215,7 +218,7 @@ export async function reposTheInstallerCanSee(s: GithubAppSettings, code: string
         throw err;
       }
       const list = got.repositories ?? [];
-      repos.push(...list.map((r) => ({ id: String(r.id), fullName: r.full_name })));
+      repos.push(...list.map((r) => ({ id: String(r.id), fullName: r.full_name, canWrite: !!(r.permissions?.admin || r.permissions?.maintain || r.permissions?.push) })));
       if (list.length < 100) break;
     }
     return repos;

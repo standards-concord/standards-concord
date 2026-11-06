@@ -4,7 +4,7 @@ import type { ConnectedApp, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, transaction } from '../db.js';
-import { baselineRevision, getAppDoc, openForChecks, ownApp, publicAppById, revisionOf, saveApp, type AppDoc, type GithubLink } from './appChecks.js';
+import { baselineRevision, getAppDoc, openForChecks, ownApp, publicAppById, revisionOf, saveApp, stillConnected, type AppDoc, type GithubLink } from './appChecks.js';
 import { listCRs } from './changeRequests.js';
 import { gh, GithubError, githubAppSettings, installationToken, installUrl, mustSettings, readState, reposTheInstallerCanSee, signState, type GithubAppSettings } from './githubApp.js';
 import { getProject } from './ontologies.js';
@@ -26,6 +26,8 @@ const BRANCH = 'concord/app-checks';
 const DISPATCH_GAP_MS = 2 * 60 * 1000;
 /** After GitHub refuses a run (no workflow yet, App removed), wait this long before asking again. */
 const RETRY_MS = 15 * 60 * 1000;
+/** How long a claim to start a run holds if the process that made it never finishes asking GitHub. */
+const CLAIM_MS = 5 * 60 * 1000;
 
 export const githubAppStatus = () => {
   const s = githubAppSettings();
@@ -79,9 +81,15 @@ export async function finishInstall(query: Record<string, unknown>, actor: User 
             : 'The installation doesn’t include any repository you can see.',
       );
     }
+    // Linking lets Concord start workflows and open pull requests there with the App's access,
+    // so it takes someone who could do that themselves.
+    if (!repo.canWrite) return fail(`You can see ${repo.fullName} on GitHub but can’t push to it, so you can’t connect it. Ask someone with write access to the repository to connect the app.`);
     const linked = await transaction(async () => {
       const doc = await ownApp(state.a, actor);
-      const link: GithubLink = { ...doc.github, installationId, repoId: repo.id, repo: repo.fullName, linkedAt: clock.iso(), suspended: undefined, fingerprint: undefined, retryAt: undefined };
+      const same = doc.github?.installationId === installationId && doc.github.repoId === repo.id;
+      // Linked somewhere else now: what was known about the old link, and the old runs' tokens, go.
+      if (!same) doc.runTokens = undefined;
+      const link: GithubLink = { ...(same ? doc.github : {}), installationId, repoId: repo.id, repo: repo.fullName, linkedAt: clock.iso(), suspended: undefined, fingerprint: undefined, retryAt: undefined };
       if (doc.repoId !== repo.id) doc.repoId = undefined;
       doc.github = link;
       doc.repo = repo.fullName;
@@ -148,11 +156,14 @@ export async function onWebhook(event: string, payload: Record<string, unknown>)
       if (!suspended) d.github!.retryAt = undefined;
     });
   } else if (event === 'pull_request' && payload.action === 'closed') {
-    // Concord's workflow pull request was merged: the workflow is there now, so start a run straight away.
-    const pr = payload.pull_request as { merged?: boolean; head?: { ref?: string } } | undefined;
+    // Concord's workflow pull request was merged: the workflow is there now, so start a run straight
+    // away. Once per merge: a redelivered (or duplicated) webhook finds it already recorded.
+    const pr = payload.pull_request as { merged?: boolean; number?: unknown; merge_commit_sha?: unknown; merged_at?: unknown; head?: { ref?: string } } | undefined;
     const repoId = String((payload.repository as { id?: unknown } | undefined)?.id ?? '');
     if (!pr?.merged || pr.head?.ref !== BRANCH) return { handled: false, apps: 0 };
-    changed = await changeLinked((l) => sameInstallation(l) && l.repoId === repoId, (d) => {
+    const merge = `${String(pr.number ?? '')}@${String(pr.merge_commit_sha ?? pr.merged_at ?? '')}`;
+    changed = await changeLinked((l) => sameInstallation(l) && l.repoId === repoId && l.workflowMerged !== merge, (d) => {
+      d.github!.workflowMerged = merge;
       d.github!.fingerprint = d.github!.retryAt = d.github!.dispatchAt = undefined;
     });
     for (const doc of changed) await dispatchIfNeeded(doc.id).catch((err) => console.warn(`[github-app] ${doc.id}:`, (err as Error).message));
@@ -185,23 +196,33 @@ interface RepoInfo {
 const repoInfo = (s: GithubAppSettings, link: GithubLink, token: string) => gh<RepoInfo>(s, `/repositories/${encodeURIComponent(link.repoId)}`, { token });
 const repoPath = (fullName: string) => fullName.split('/').map(encodeURIComponent).join('/');
 
+/** Is the app's owner still a member? Its runs couldn't sign in otherwise, so none are started. */
+const ownerStillHere = (doc: AppDoc) =>
+  stillConnected(doc).then(
+    () => true,
+    () => false,
+  );
+
 /**
- * Start the app's workflow if there is something it hasn't been started for yet. The decision is
+ * Start the app's workflow if there is something it hasn't been started for yet. A claim is
  * recorded before GitHub is asked, so two server processes (or a sweep and a request) can't both
- * start a run for the same thing; a refusal clears it again, to be retried after a pause.
+ * start a run for the same thing. Only a run GitHub accepted counts as done; a refusal is retried
+ * after a pause, and a claim whose process never finished runs out after a few minutes.
  */
 export async function dispatchIfNeeded(appId: string, now = Date.now()): Promise<'started' | 'skipped' | 'failed'> {
   const s = githubAppSettings();
   if (!s) return 'skipped';
   const first = await get<AppDoc>('apps', appId);
-  if (!first?.github || first.github.suspended) return 'skipped';
+  if (!first?.github || first.github.suspended || !(await ownerStillHere(first))) return 'skipped';
   const fp = await fingerprint(first.ontologyId);
   const link = await transaction(async () => {
     const doc = await get<AppDoc>('apps', appId);
     const l = doc?.github;
     if (!doc || !l || l.suspended || l.fingerprint === fp) return undefined;
+    if (l.pending && now < l.pending.until) return undefined;
     if ((l.dispatchAt && now - l.dispatchAt < DISPATCH_GAP_MS) || (l.retryAt && now < l.retryAt)) return undefined;
-    l.fingerprint = fp;
+    if (!(await ownerStillHere(doc))) return undefined;
+    l.pending = { fingerprint: fp, until: now + CLAIM_MS };
     l.dispatchAt = now;
     await saveApp(doc);
     return { ...l };
@@ -228,10 +249,12 @@ export async function dispatchIfNeeded(appId: string, now = Date.now()): Promise
     const doc = await get<AppDoc>('apps', appId);
     if (!doc?.github || doc.github.installationId !== link.installationId || doc.github.repoId !== link.repoId) return;
     doc.github.lastDispatch = { at: clock.iso(), ok, ...(message && { message }) };
-    if (!ok) {
-      doc.github.fingerprint = undefined;
-      doc.github.retryAt = now + RETRY_MS;
-    } else doc.github.retryAt = undefined;
+    if (doc.github.pending?.fingerprint === fp) doc.github.pending = undefined;
+    if (ok) {
+      doc.github.fingerprint = fp;
+      doc.github.retryAt = undefined;
+    } else if (doc.github.workflowMerged === link.workflowMerged) doc.github.retryAt = now + RETRY_MS;
+    // (Refused, but the workflow pull request was merged meanwhile: the next sweep tries again at once.)
     if (renamed) doc.github.repo = doc.repo = renamed;
     await saveApp(doc);
   });

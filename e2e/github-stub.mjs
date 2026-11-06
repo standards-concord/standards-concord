@@ -32,9 +32,9 @@ export function createGithubStub(opts = {}) {
       nextRepoId: 9000,
       nextInstallation: 4200,
       nextPr: 1,
-      /** What the next install covers: repositories by full name. */
-      nextInstall: { repos: ['example/family-finder'] },
-      /** id -> { repos: repo ids } */
+      /** What the next install covers: repositories by full name, and those the installer may only read. */
+      nextInstall: { repos: ['example/family-finder'], readOnly: [] },
+      /** id -> { repos: repo ids, readOnly: repo ids the installer can't push to } */
       installations: new Map(),
       /** full name -> { id, full_name, default_branch, branches: Map<branch, Map<path, text>>, pulls: [] } */
       repos: new Map(),
@@ -145,7 +145,8 @@ export function createGithubStub(opts = {}) {
           repos: [...app.repos.values()].map((r) => ({ id: r.id, full_name: r.full_name, files: Object.fromEntries([...r.branches].map(([b, f]) => [b, Object.fromEntries(f)])), pulls: r.pulls })),
         });
       if (req.method === 'POST' && p === '/__app/next-install') {
-        app.nextInstall = { repos: json().repos ?? ['example/family-finder'] };
+        const b = json();
+        app.nextInstall = { repos: b.repos ?? ['example/family-finder'], readOnly: b.readOnly ?? [] };
         for (const name of app.nextInstall.repos) repoNamed(name);
         return send(200, { repos: app.nextInstall.repos.map((n) => ({ full_name: n, id: repoNamed(n).id })) });
       }
@@ -168,7 +169,7 @@ export function createGithubStub(opts = {}) {
       // The install page: install on what /__app/next-install set up, and send the browser back to Concord.
       if (req.method === 'GET' && (mm = m(/^\/apps\/[^/]+\/installations\/new$/))) {
         const id = String(++app.nextInstallation);
-        app.installations.set(id, { repos: app.nextInstall.repos.map((n) => repoNamed(n).id) });
+        app.installations.set(id, { repos: app.nextInstall.repos.map((n) => repoNamed(n).id), readOnly: app.nextInstall.readOnly.map((n) => repoNamed(n).id) });
         const code = `stub-code-${randomUUID()}`;
         app.codes.set(code, id);
         const back = new URL(opts.callbackUrl ?? 'http://localhost/api/github-app/setup');
@@ -190,7 +191,9 @@ export function createGithubStub(opts = {}) {
         const token = auth?.replace(/^Bearer /, '');
         if (app.userTokens.get(token) !== mm[1]) return send(404, { message: 'Not Found' });
         const inst = app.installations.get(mm[1]);
-        return send(200, { total_count: inst.repos.length, repositories: inst.repos.map((id) => repoById(id)).map((r) => ({ id: Number(r.id), full_name: r.full_name })) });
+        // As GitHub does, each repository says what the signed-in person may do with it.
+        const permissions = (id) => (inst.readOnly?.includes(id) ? { admin: false, maintain: false, push: false, triage: false, pull: true } : { admin: false, maintain: false, push: true, triage: true, pull: true });
+        return send(200, { total_count: inst.repos.length, repositories: inst.repos.map((id) => repoById(id)).map((r) => ({ id: Number(r.id), full_name: r.full_name, permissions: permissions(r.id) })) });
       }
       if (req.method === 'DELETE' && m(/^\/applications\/[^/]+\/token$/)) {
         const token = json().access_token;

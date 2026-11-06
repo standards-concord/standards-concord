@@ -75,9 +75,10 @@ export interface AppDoc extends ConnectedApp {
   github?: GithubLink;
   /**
    * Short-lived tokens (their hashes) that runs of an app connected through GitHub got in exchange
-   * for GitHub's proof that they run in its repository. They work like the app token until `until` (ms).
+   * for GitHub's proof that they run in its repository. They work like the app token until `until`
+   * (ms), and only while the app is still linked to the repository (`repoId`) they were issued for.
    */
-  runTokens?: { hash: string; until: number }[];
+  runTokens?: { hash: string; until: number; repoId: string }[];
 }
 
 export interface GithubLink extends ConnectedAppGithub {
@@ -85,6 +86,14 @@ export interface GithubLink extends ConnectedAppGithub {
   repoId: string;
   /** What the last run Concord started was for (the draft and every open change's revision). */
   fingerprint?: string;
+  /**
+   * A run being started now, for this fingerprint: claimed before GitHub is asked, so two
+   * processes don't both start one, and expiring so a process that stopped halfway doesn't
+   * block the next try.
+   */
+  pending?: { fingerprint: string; until: number };
+  /** The merge of Concord's workflow pull request that last started a run, so a redelivered webhook doesn't start another. */
+  workflowMerged?: string;
   /** When Concord last asked GitHub to start a run, and the earliest it tries again after a failure (ms). */
   dispatchAt?: number;
   retryAt?: number;
@@ -116,7 +125,8 @@ async function publicApp(doc: AppDoc): Promise<ConnectedApp> {
   return { ...rest, baseline, owner: publicUser(await getUser(doc.ownerId)), ...(github && { github: publicGithub(github) }) };
 }
 
-const publicGithub = ({ installationId: _i, repoId: _r, fingerprint: _f, dispatchAt: _d, retryAt: _a, ...rest }: GithubLink): ConnectedAppGithub => rest;
+/** What the page sees of the link: named fields only, so new bookkeeping never leaks by default. */
+const publicGithub = ({ repo, linkedAt, suspended, lastDispatch, workflowPr }: GithubLink): ConnectedAppGithub => ({ repo, linkedAt, ...(suspended && { suspended }), ...(lastDispatch && { lastDispatch }), ...(workflowPr && { workflowPr }) });
 
 export const listApps = async (ontologyId: string) => Promise.all((await list<AppDoc>('apps', ontologyId)).map(publicApp));
 export const getAppDoc = (id: string) => mustGet<AppDoc>('apps', id);
@@ -234,8 +244,8 @@ export function bearerHash(authorization: string | undefined): string {
   return hash(token);
 }
 
-/** Is `h` the app's token, or a run token of its that hasn't run out? */
-const tokenFits = (app: AppDoc, h: string) => app.tokenHash === h || !!app.runTokens?.some((t) => t.hash === h && t.until > Date.now());
+/** Is `h` the app's token, or a run token of its that hasn't run out, from the repository it is linked to now? */
+const tokenFits = (app: AppDoc, h: string) => app.tokenHash === h || !!app.runTokens?.some((t) => t.hash === h && t.until > Date.now() && !!app.github && t.repoId === app.github.repoId);
 
 /** The app a CI request is for, from its `Authorization: Bearer cna_…` (or run token `cnr_…`) header. */
 export async function appForToken(authorization: string | undefined): Promise<AppDoc> {
@@ -769,6 +779,12 @@ export const byToken = (authorization: string | undefined): ReportedBy => ({ tok
 
 /** How long a run token from GitHub's proof works: GitHub-hosted jobs stop after six hours. */
 const RUN_TOKEN_MS = RUN_KEY_HOURS * 60 * 60 * 1000;
+/**
+ * Run tokens an app can have working at once. Live tokens are never dropped to make room (a run
+ * would lose its sign-in halfway); past this, new runs are told to wait. Concord starts at most
+ * one run every two minutes, so this is well above what six hours of runs need.
+ */
+const MAX_RUN_TOKENS = 500;
 
 /**
  * A run of an app connected through the GitHub App signs in with GitHub's proof that it runs in
@@ -786,10 +802,12 @@ export async function exchangeRunProof(appId: unknown, oidc: unknown): Promise<{
     if (!app?.github) throw new HttpError(401, 'This app isn’t connected through GitHub any more; use its app token');
     if (proof.repositoryId !== app.github.repoId) throw new HttpError(403, `This run is in ${proof.repository}, not the repository this app was connected through (${app.github.repo})`);
     await stillConnected(app);
+    const live = (app.runTokens ?? []).filter((t) => t.until > Date.now() && t.repoId === app.github!.repoId);
+    if (live.length >= MAX_RUN_TOKENS) throw new HttpError(429, 'Too many runs of this app are signed in at once. Let some finish, then try again.');
     await consumeRunProof(proof, false);
     const token = `cnr_${randomBytes(24).toString('base64url')}`;
     const until = Date.now() + RUN_TOKEN_MS;
-    app.runTokens = [...(app.runTokens ?? []).filter((t) => t.until > Date.now()), { hash: hash(token), until }].slice(-10);
+    app.runTokens = [...live, { hash: hash(token), until, repoId: app.github.repoId }];
     await saveApp(app);
     return { token, expiresAt: new Date(until).toISOString() };
   });
