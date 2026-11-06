@@ -236,6 +236,13 @@ const shellParser: StreamParser<ShellState> = {
   name: 'shell',
   startState: () => ({ continued: false, command: true, quote: null, wordStart: true }),
   copyState: (s) => ({ ...s }),
+  // token() never runs on an empty line, which ends a continued command (a quoted string carries on through it).
+  blankLine(state) {
+    if (state.quote) return;
+    state.continued = false;
+    state.command = true;
+    state.wordStart = true;
+  },
   languageData: { commentTokens: { line: '#' } },
   tokenTable,
   token(stream, state) {

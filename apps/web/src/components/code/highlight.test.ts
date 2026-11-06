@@ -143,6 +143,11 @@ describe('RDF highlighting', () => {
     expect(comments('echo foo\\\n#bar')).toEqual([]);
     expect(comments('echo foo \\\n#bar')).toEqual(['#bar']);
     expect(comments('echo foo\\\n  #bar')).toEqual(['#bar']);
+    // An empty line ends the continued command, so the line after it starts afresh.
+    expect(comments('echo foo\\\n\n#bar')).toEqual(['#bar']);
+    expect(highlightSegments('echo foo\\\n\ncat', 'shell').find((s) => s.text === 'cat')?.cls).toBe('tok-func');
+    // But a quoted string carries on through an empty line.
+    expect(comments("echo 'a\n\n#b'")).toEqual([]);
   });
 
   it('shell: a flag stays a flag with its value quoted straight after it', () => {
