@@ -29,9 +29,6 @@ In about {minutes} minutes, we'll follow one small change from a term's page all
 [do: f-open-health]
 Every change is checked against the whole standard: strict OWL lint, a reasoner, FAIR checks, and the competency questions the ontology must answer.
 
-[do: f-recheck-browser]
-The reasoner is sparq, compiled to WebAssembly, so you can run it again right here in your browser. Every class is satisfiable, and it agrees with the server.
-
 [do: f-show-fair]
 The FAIR checks follow published tests, so you can see which ones pass, and which couldn't be run here.
 
@@ -56,8 +53,8 @@ Propose change. The term itself doesn't change yet. My edit becomes a change req
 [do: f-open-change]
 Concord has already classified it as a patch, because it only changes wording, and Tom has confirmed the meaning stays the same.
 
-[do: f-show-triples]
-The triples view shows exactly which statement is removed and which is added.
+[do: f-show-diff]
+The diff shows exactly which line of the file is removed and which is added.
 
 [do: f-show-checks]
 And the checks have passed: lint, the reasoner and the competency questions all ran with the change applied.

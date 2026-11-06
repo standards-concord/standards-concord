@@ -64,16 +64,11 @@ export function ReleaseDetailPage() {
                 </>
               )}
             </p>
-            <Disclosure className="mt-2" tone="muted" title="Technical details" summary="version IRI, commit">
+            <Disclosure className="mt-2" tone="muted" title="Technical details" summary="version IRI">
               <div className="space-y-1 text-xs text-muted">
                 <div className="flex items-center gap-1.5">
                   Version IRI: <code className="font-mono">{r.versionIRI}</code> <CopyButton text={r.versionIRI} variant="ghost" />
                 </div>
-                {r.commit && (
-                  <div>
-                    Commit: <code className="font-mono">{r.commit.slice(0, 10)}</code>
-                  </div>
-                )}
               </div>
             </Disclosure>
           </Card>
