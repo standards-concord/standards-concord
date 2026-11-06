@@ -5,6 +5,7 @@ export * from './types.js';
 
 // Graph handling
 export { OntologyGraph } from './graph.js';
+export { allTerms, findTerm, searchTerms, termDetail, usedBy, type TermDetail, type UsedBy } from './termIndex.js';
 export type { EmptyOntologyOptions } from './graph.js';
 export { serialize, FORMAT_INFO } from './serialize.js';
 
@@ -53,6 +54,8 @@ export { toShacl } from './shacl.js';
 
 // Validating instance data
 export { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, MAX_DATA_CHARS, MAX_IRI_LENGTH, ShapesValidator, checkTerms, classHierarchy, dataFormatForFile, dataFormatForMediaType, parseData, sniffDataFormat } from './validation.js';
+export { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE, MAX_LISTED, checkData, prepareOntology } from './dataCheck.js';
+export type { DataCheckOptions, DataCheckOutcome, PreparedOntology } from './dataCheck.js';
 export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, TermIssue, ValidatedReport } from './validation.js';
 
 // Helpers

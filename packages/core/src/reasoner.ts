@@ -18,15 +18,30 @@ import { NS, OWL2_DATATYPES, RDF_TYPE, compactIRI, isBuiltinDatatype } from './n
 import { P, T } from './graph.js';
 import type { OntologyGraph } from './graph.js';
 import { cloneStore, literal, nn, objects, readList } from './rdf.js';
-import type { Store, Term } from 'n3';
+import type { Literal, Quad, Store, Term } from 'n3';
 import { writeNTriples } from './turtle.js';
+import { storeRevision } from './storeRevision.js';
 
-export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
-  const t0 = Date.now();
+/** The ontology-only half of the structural reasoner: its classes, hierarchy, disjointness and unsatisfiable classes. */
+interface TBoxAnalysis {
+  c: (iri: string) => string;
+  classIris: string[];
+  classSet: Set<string>;
+  domains: Map<string, string[]>;
+  ranges: Map<string, string[]>;
+  functionalDatatype: string[];
+  ancestors: (x: string) => Set<string>;
+  clash: (set: Set<string>) => [string, string] | undefined;
+  unsat: Map<string, string>;
+  /** Notes about the hierarchy (cycles, then why each class is unsatisfiable), in the order the report lists them. */
+  tboxNotes: string[];
+  inferred: [string, string][];
+}
+
+function analyseTBox(graph: OntologyGraph): TBoxAnalysis {
   const s = graph.store;
   const c = (iri: string) => compactIRI(iri, graph.prefixes);
   const v = graph.view();
-  const notes: string[] = [];
 
   // Told hierarchy (named superclasses + named equivalences + named conjuncts of definitions).
   const parents = new Map<string, Set<string>>();
@@ -63,11 +78,15 @@ export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
     }
   }
 
+  const ancestorCache = new Map<string, Set<string>>();
   const ancestors = (x: string): Set<string> => {
+    const hit = ancestorCache.get(x);
+    if (hit) return new Set(hit);
     const out = new Set<string>([x]);
     const stack = [x];
     while (stack.length) for (const p of parents.get(stack.pop()!) ?? []) if (!out.has(p)) { out.add(p); stack.push(p); }
-    return out;
+    ancestorCache.set(x, out);
+    return new Set(out);
   };
   const toldAncestors = (x: string): Set<string> => {
     const out = new Set<string>([x]);
@@ -83,7 +102,8 @@ export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
   const isDisjoint = (a: string, b: string) => a !== b && disjoint.has(pair(a, b));
   const clash = (set: Set<string>): [string, string] | undefined => {
     if (set.has(T.Nothing)) return [T.Nothing, T.Nothing];
-    const xs = [...set];
+    // Sorted, so the pair named doesn't depend on the order the triples were read in.
+    const xs = [...set].sort();
     for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) if (isDisjoint(xs[i], xs[j])) return [xs[i], xs[j]];
     return undefined;
   };
@@ -119,48 +139,14 @@ export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
     }
   }
 
-  // Individuals: told types + domain/range typing; check for disjoint or unsatisfiable types.
-  let consistent = true;
-  const indTypes = new Map<string, Set<string>>();
-  const addType = (i: string, t: string) => {
-    if (!indTypes.has(i)) indTypes.set(i, new Set());
-    indTypes.get(i)!.add(t);
-  };
   const classSet = new Set(v.classes.map((k) => k.iri));
-  for (const q of s.getQuads(null, null, null, null)) {
-    if (q.subject.termType !== 'NamedNode') continue;
-    if (q.predicate.value === RDF_TYPE && classSet.has(q.object.value)) addType(q.subject.value, q.object.value);
-    for (const d of domains.get(q.predicate.value) ?? []) addType(q.subject.value, d);
-    if (q.object.termType === 'NamedNode') for (const r of ranges.get(q.predicate.value) ?? []) if (classSet.has(r)) addType(q.object.value, r);
-  }
-  for (const [ind, types] of [...indTypes].sort(([a], [b]) => a.localeCompare(b))) {
-    const all = new Set([...types].flatMap((t) => [...ancestors(t)]));
-    const hit = clash(all);
-    const badType = [...all].find((t) => unsat.has(t));
-    if (hit) { consistent = false; notes.push(`individual ${c(ind)} is an instance of disjoint classes ${c(hit[0])} and ${c(hit[1])}`); }
-    else if (badType) { consistent = false; notes.push(`individual ${c(ind)} is an instance of unsatisfiable class ${c(badType)}`); }
-  }
-  // Functional datatype properties with two distinct literal values.
-  for (const p of v.datatypeProperties.filter((x) => x.characteristics.includes('functional'))) {
-    const bySubject = new Map<string, Set<string>>();
-    for (const q of s.getQuads(null, null, null, null)) {
-      if (q.predicate.value !== p.iri || q.object.termType !== 'Literal') continue;
-      const key = q.subject.value;
-      if (!bySubject.has(key)) bySubject.set(key, new Set());
-      bySubject.get(key)!.add(`${q.object.value}^^${(q.object as any).datatype?.value}`);
-    }
-    for (const [subj, vals] of bySubject) {
-      if (vals.size > 1) { consistent = false; notes.push(`${c(subj)} has ${vals.size} values for functional property ${c(p.iri)}`); }
-    }
-  }
-
+  const tboxNotes: string[] = [];
   // Cycles in the told hierarchy imply equivalence (reported, not inconsistent).
   for (const k of v.classes) {
     for (const sc of k.superClasses) {
-      if (sc !== k.iri && toldAncestors(sc).has(k.iri) && k.iri < sc) notes.push(`subClassOf cycle: ${c(k.iri)} and ${c(sc)} are inferred equivalent`);
+      if (sc !== k.iri && toldAncestors(sc).has(k.iri) && k.iri < sc) tboxNotes.push(`subClassOf cycle: ${c(k.iri)} and ${c(sc)} are inferred equivalent`);
     }
   }
-
   // Inferred subsumptions that are not told (from domains of existential restrictions).
   const inferred: [string, string][] = [];
   for (const k of v.classes) {
@@ -168,18 +154,113 @@ export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
     const told = toldAncestors(k.iri);
     for (const a of ancestors(k.iri)) if (!told.has(a) && a !== T.Thing && classSet.has(a)) inferred.push([k.iri, a]);
   }
-  for (const why of unsat.values()) notes.push(why);
+  for (const why of unsat.values()) tboxNotes.push(why);
 
+  return {
+    c,
+    classIris: v.classes.map((k) => k.iri),
+    classSet,
+    domains,
+    ranges,
+    functionalDatatype: v.datatypeProperties.filter((x) => x.characteristics.includes('functional')).map((x) => x.iri),
+    ancestors,
+    clash,
+    unsat,
+    tboxNotes,
+    inferred: inferred.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1])),
+  };
+}
+
+/** Individuals: told types + domain/range typing, checked for disjoint or unsatisfiable types; functional datatype properties with two values. */
+function checkIndividuals(t: TBoxAnalysis, quads: Iterable<Quad>): { consistent: boolean; notes: string[] } {
+  const { c, classSet, domains, ranges, ancestors, clash, unsat } = t;
+  let consistent = true;
+  const notes: string[] = [];
+  const indTypes = new Map<string, Set<string>>();
+  const addType = (i: string, ty: string) => {
+    if (!indTypes.has(i)) indTypes.set(i, new Set());
+    indTypes.get(i)!.add(ty);
+  };
+  const functional = new Set(t.functionalDatatype);
+  const fnValues = new Map<string, Map<string, Set<string>>>();
+  for (const q of quads) {
+    if (functional.has(q.predicate.value) && q.object.termType === 'Literal') {
+      let bySubject = fnValues.get(q.predicate.value);
+      if (!bySubject) fnValues.set(q.predicate.value, (bySubject = new Map()));
+      const key = q.subject.value;
+      if (!bySubject.has(key)) bySubject.set(key, new Set());
+      bySubject.get(key)!.add(`${q.object.value}^^${(q.object as Literal).datatype?.value}`);
+    }
+    if (q.subject.termType !== 'NamedNode') continue;
+    if (q.predicate.value === RDF_TYPE && classSet.has(q.object.value)) addType(q.subject.value, q.object.value);
+    for (const d of domains.get(q.predicate.value) ?? []) addType(q.subject.value, d);
+    if (q.object.termType === 'NamedNode') for (const r of ranges.get(q.predicate.value) ?? []) if (classSet.has(r)) addType(q.object.value, r);
+  }
+  for (const [ind, types] of [...indTypes].sort(([a], [b]) => a.localeCompare(b))) {
+    const all = new Set([...types].flatMap((ty) => [...ancestors(ty)]));
+    const hit = clash(all);
+    const badType = [...all].find((ty) => unsat.has(ty));
+    if (hit) { consistent = false; notes.push(`individual ${c(ind)} is an instance of disjoint classes ${c(hit[0])} and ${c(hit[1])}`); }
+    else if (badType) { consistent = false; notes.push(`individual ${c(ind)} is an instance of unsatisfiable class ${c(badType)}`); }
+  }
+  for (const p of t.functionalDatatype) {
+    for (const [subj, vals] of fnValues.get(p) ?? []) {
+      if (vals.size > 1) { consistent = false; notes.push(`${c(subj)} has ${vals.size} values for functional property ${c(p)}`); }
+    }
+  }
+  return { consistent, notes };
+}
+
+export function structuralReasoner(graph: OntologyGraph): ReasonerResult {
+  const t0 = Date.now();
+  const t = analyseTBox(graph);
+  const { consistent, notes } = checkIndividuals(t, graph.store.getQuads(null, null, null, null));
+  notes.push(...t.tboxNotes);
   return {
     engine: 'structural',
     available: true,
     consistent,
-    unsatisfiable: [...unsat.keys()].sort(),
-    inferredSubClassOf: inferred.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1])),
+    unsatisfiable: [...t.unsat.keys()].sort(),
+    inferredSubClassOf: t.inferred,
     explanation: notes.length ? notes.join('\n') : undefined,
     durationMs: Date.now() - t0,
   };
 }
+
+/** Namespaces whose terms in data can change what the ontology says (classes, hierarchy, domains, characteristics, lists). */
+const SCHEMA_NAMESPACES = [NS.rdf, NS.rdfs, NS.owl];
+/** RDF and RDFS properties that only annotate (labels, comments, links), which data uses all the time. */
+const ANNOTATIONS = new Set([NS.rdfs + 'label', NS.rdfs + 'comment', NS.rdfs + 'seeAlso', NS.rdfs + 'isDefinedBy', NS.rdf + 'value']);
+
+/**
+ * structuralReasoner over the ontology together with instance data, giving the same verdict as running it
+ * on a merged copy. Data that only states facts about individuals can't change the ontology's hierarchy,
+ * so that half is worked out once per ontology and kept; data that uses RDF, RDFS or OWL vocabulary
+ * (beyond rdf:type to the ontology's own classes) is merged and reasoned over in full.
+ */
+export function dataConsistency(graph: OntologyGraph, data: Quad[]): Pick<ReasonerResult, 'consistent' | 'explanation'> {
+  const schemaLike = data.some(
+    (q) =>
+      (q.predicate.value !== RDF_TYPE && !ANNOTATIONS.has(q.predicate.value) && SCHEMA_NAMESPACES.some((ns) => q.predicate.value.startsWith(ns))) ||
+      (q.predicate.value === RDF_TYPE && SCHEMA_NAMESPACES.some((ns) => q.object.value.startsWith(ns))),
+  );
+  if (schemaLike) {
+    const merged = graph.clone();
+    merged.store.addQuads(data);
+    return structuralReasoner(merged);
+  }
+  // Worked out again whenever the ontology changes at all (a replaced triple keeps the size the same).
+  const revision = storeRevision(graph.store);
+  let hit = tboxes.get(graph);
+  if (!hit || hit.revision !== revision) tboxes.set(graph, (hit = { revision, analysis: analyseTBox(graph) }));
+  const t = hit.analysis;
+  // A triple in both counts as one either way: types and functional values are collected into sets.
+  const all = [...graph.store.getQuads(null, null, null, null), ...data];
+  const { consistent, notes } = checkIndividuals(t, all);
+  notes.push(...t.tboxNotes);
+  return { consistent, explanation: notes.length ? notes.join('\n') : undefined };
+}
+const tboxes = new WeakMap<OntologyGraph, { revision: number; analysis: TBoxAnalysis }>();
 
 /* ------------------------------------------------------------------------ */
 /* OWL 2 DL reasoner: sparq (WebAssembly)                                     */

@@ -403,4 +403,14 @@ describe('checking terms', () => {
     expect(issues.some((i) => /contradicts the ontology/.test(i.message))).toBe(true);
     expect(issues.some((i) => i.term?.startsWith('https://example.org/'))).toBe(false);
   });
+
+  // Used to go wrong: only prefixes and subsequences of a name were suggested, so swapped letters ("titel")
+  // got no suggestion, where the old in-editor typo check (now replaced by this one) said "Did you mean vol:title?".
+  it('suggests the closest spelling for swapped or wrong letters', async () => {
+    const graph = await loadFixture();
+    const data = await parseData(`${P}ex:x vol:titel "x" ; vol:zzzzzzzz "y" .`, 'turtle');
+    const issues = checkTerms(graph, data);
+    expect(issues.find((i) => i.term === `${VOL}titel`)?.message).toMatch(/Did you mean vol:title\b/);
+    expect(issues.find((i) => i.term === `${VOL}zzzzzzzz`)?.message).not.toMatch(/Did you mean/);
+  });
 });
