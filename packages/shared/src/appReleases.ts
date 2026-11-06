@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.39.1',
     date: '2026-11-06',
     title: 'Concord’s own icon on the connector and in the tab',
+    pr: 106,
     changes: [
       {
         id: 'concord-app-icon',
