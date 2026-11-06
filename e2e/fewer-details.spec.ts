@@ -42,7 +42,9 @@ test.describe('fewer under-the-hood details', () => {
     await expect(about.getByText('Current version', { exact: true })).toHaveCount(0);
   });
 
-  test('only editors can open a competency question to its SPARQL test', async ({ page, request }) => {
+  // Hiding the SPARQL keeps a reviewer's view short; it is not an access rule (group members still
+  // receive it from the API, see apps/server/test/privacy.test.ts). So these check what is shown.
+  test('only editors are shown a competency question’s SPARQL test and results on the overview', async ({ page, request }) => {
     const demo = await demoOntology(request);
     const open = async () => {
       await page.goto(`/o/${demo.id}`);
@@ -51,18 +53,50 @@ test.describe('fewer under-the-hood details', () => {
       if ((await cqs.getAttribute('aria-expanded')) !== 'true') await cqs.click();
       return page.locator('#health');
     };
-    // A reviewer sees whether each question can be answered, and nothing to open.
+    await signInAsPersona(page, 'Tom Okafor');
+    const v = (await (await page.request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json()) as { competencyQuestions: { question: string; sparql?: string }[] };
+    // The demo ships use cases with tested questions; without them this test would prove nothing.
+    expect(v.competencyQuestions.length).toBeGreaterThan(0);
+    const first = v.competencyQuestions[0].question;
+
+    // A reviewer sees each question and whether it can be answered, and nothing to open.
     await signInAsPersona(page, 'Mei Chen');
     let health = await open();
-    const question = health.getByRole('img', { name: /^(Answerable|Not answerable)$/ }).first();
-    test.skip(!(await question.count()), 'no competency questions in the demo');
-    await expect(health.locator('li button').filter({ hasText: /\?/ })).toHaveCount(0);
+    await expect(health.getByRole('img', { name: /^(Answerable|Not answerable)$/ })).toHaveCount(v.competencyQuestions.length);
+    await expect(health.getByText(first, { exact: true })).toBeVisible();
+    await expect(health.getByRole('button', { name: first })).toHaveCount(0);
     await expect(health.locator('pre, code').filter({ hasText: /SELECT|ASK/i })).toHaveCount(0);
-    // An editor can open one.
+
+    // An editor can open one to its test.
     await signInAsPersona(page, 'Tom Okafor');
     health = await open();
-    await health.locator('li button').filter({ hasText: /\?/ }).first().click();
+    await health.getByRole('button', { name: first }).click();
     await expect(health.locator('pre, code').filter({ hasText: /SELECT|ASK/i }).first()).toBeVisible();
+  });
+
+  test('a use case shows its questions’ SPARQL tests to editors only', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    const ucs = (await (await page.request.get(`/api/ontologies/${demo.id}/use-cases`)).json()) as { id: string; competencyQuestions: { question: string; sparql?: string }[] }[];
+    const uc = ucs.find((u) => u.competencyQuestions.some((q) => q.sparql));
+    expect(uc, 'a demo use case with a drafted SPARQL test').toBeTruthy();
+    const q = uc!.competencyQuestions.find((x) => x.sparql)!;
+    const toggle = (title: RegExp) => page.getByRole('button', { name: new RegExp(`^${title.source} for “${q.question.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}”`) });
+
+    await page.goto(`/o/${demo.id}/use-cases/${uc!.id}`);
+    await settle(page);
+    await toggle(/Example answer, terms and test/).click();
+    await expect(page.getByText('SPARQL test', { exact: true }).first()).toBeVisible();
+
+    // A reviewer gets the question, its example and terms, without the test.
+    await signInAsPersona(page, 'Mei Chen');
+    await page.goto(`/o/${demo.id}/use-cases/${uc!.id}`);
+    await settle(page);
+    await expect(page.getByText(q.question, { exact: true })).toBeVisible();
+    await expect(toggle(/Example answer, terms and test/)).toHaveCount(0);
+    const detail = toggle(/Example answer and terms/);
+    if (await detail.count()) await detail.click();
+    await expect(page.getByText('SPARQL test', { exact: true })).toHaveCount(0);
   });
 
   test('a change request says where it came from and what kind it is only when that is not the default, and its AI analysis doesn’t restate the edits', async ({ page, request }) => {

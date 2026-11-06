@@ -138,7 +138,21 @@ export function SectionValue({ k, s }: { k: Key; s: UseCaseSections }) {
   }
 }
 
-export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc: UseCase; live?: boolean; highlight?: string[]; /** Open the first group only; the rest show counts. */ collapsible?: boolean }) {
+export function UseCaseDocument({
+  uc,
+  live,
+  highlight = [],
+  collapsible,
+  showQueries = true,
+}: {
+  uc: UseCase;
+  live?: boolean;
+  highlight?: string[];
+  /** Open the first group only; the rest show counts. */
+  collapsible?: boolean;
+  /** Show each question's SPARQL test. Off for people who only review: they need the question and whether it's answered. */
+  showQueries?: boolean;
+}) {
   const s = uc.sections ?? {};
   const firstShown = SECTION_GROUPS.findIndex((g) => g.keys.some((k) => isFilled(s[k])));
   return (
@@ -174,7 +188,7 @@ export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc:
         );
       })}
       <GroupSection title={`Competency questions (${uc.competencyQuestions.length})`} collapsible={collapsible} defaultOpen>
-        <CompetencyQuestions uc={uc} highlight={highlight.includes('competencyQuestions')} compact={collapsible} bare />
+        <CompetencyQuestions uc={uc} highlight={highlight.includes('competencyQuestions')} compact={collapsible} bare showQueries={showQueries} />
       </GroupSection>
       <GroupSection title={`Terms mentioned (${uc.terms.length})`} collapsible={collapsible}>
         <ElicitedTerms uc={uc} highlight={highlight.includes('terms')} bare />
@@ -183,7 +197,20 @@ export function UseCaseDocument({ uc, live, highlight = [], collapsible }: { uc:
   );
 }
 
-export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseCase; highlight?: boolean; /** Question and status first; example, terms and test on request. */ compact?: boolean; bare?: boolean }) {
+export function CompetencyQuestions({
+  uc,
+  highlight,
+  compact,
+  bare,
+  showQueries = true,
+}: {
+  uc: UseCase;
+  highlight?: boolean;
+  /** Question and status first; example, terms and test on request. */
+  compact?: boolean;
+  bare?: boolean;
+  showQueries?: boolean;
+}) {
   return (
     <section>
       {!bare && <h3 className="mb-2 text-sm font-semibold">Competency questions ({uc.competencyQuestions.length})</h3>}
@@ -196,19 +223,22 @@ export function CompetencyQuestions({ uc, highlight, compact, bare }: { uc: UseC
                 <CqStatusChip status={q.status} />
               </div>
               {compact ? (
-                <Disclosure
-                  className="mt-1"
-                  tone="muted"
-                  title={
-                    <span className="text-xs">
-                      Example answer, terms and test<span className="sr-only"> for “{q.question}”</span>
-                    </span>
-                  }
-                >
-                  <CqDetail q={q} showTest />
-                </Disclosure>
+                hasDetail(q, showQueries) && (
+                  <Disclosure
+                    className="mt-1"
+                    tone="muted"
+                    title={
+                      <span className="text-xs">
+                        {showQueries && q.sparql ? 'Example answer, terms and test' : 'Example answer and terms'}
+                        <span className="sr-only"> for “{q.question}”</span>
+                      </span>
+                    }
+                  >
+                    <CqDetail q={q} showTest={showQueries} />
+                  </Disclosure>
+                )
               ) : (
-                <CqDetail q={q} />
+                <CqDetail q={q} showTest={showQueries ? undefined : false} />
               )}
             </li>
           ))}
@@ -259,7 +289,14 @@ export function CompletenessMeter({ value }: { value: number }) {
   );
 }
 
-/** `showTest` shows the SPARQL test directly, for when the detail is already behind a disclosure. */
+function hasDetail(q: UseCase['competencyQuestions'][number], showQueries: boolean) {
+  return !!(q.exampleAnswer || q.terms?.length || (showQueries && q.sparql));
+}
+
+/**
+ * `showTest` true shows the SPARQL test directly, for when the detail is already behind a disclosure;
+ * left out, the test is behind its own toggle; false leaves it out.
+ */
 function CqDetail({ q, showTest }: { q: UseCase['competencyQuestions'][number]; showTest?: boolean }) {
   return (
     <>
@@ -279,7 +316,7 @@ function CqDetail({ q, showTest }: { q: UseCase['competencyQuestions'][number]; 
           <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />
         </div>
       )}
-      {q.sparql && !showTest && (
+      {q.sparql && showTest === undefined && (
         <details className="mt-1.5">
           <summary className="cursor-pointer text-xs text-accent">SPARQL test</summary>
           <HighlightedCode code={q.sparql} language="sparql" className="mt-1" />

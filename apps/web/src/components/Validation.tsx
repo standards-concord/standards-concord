@@ -192,7 +192,12 @@ export function FairChecks({ report }: { report: ValidationReport }) {
   );
 }
 
-/** Whether each question can be answered. Editors can open one to see its SPARQL test and results. */
+/**
+ * Whether each question can be answered. Editors can open one to see its SPARQL test and results.
+ * Hiding them from everyone else only keeps the list short (reviewers need "answerable or not"); it is
+ * not an access rule. Who may receive the SPARQL at all is decided on the server (useCases.ts: group
+ * members, since a group's use cases are shared working material).
+ */
 export function CqResults({ report, showQueries = false }: { report: ValidationReport; showQueries?: boolean }) {
   const [openIdx, setOpenIdx] = useState<number>();
   if (!report.competencyQuestions.length) return <p className="text-sm text-muted">No competency questions with tests yet. They come from use cases.</p>;
