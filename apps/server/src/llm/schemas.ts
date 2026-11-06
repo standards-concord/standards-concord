@@ -160,7 +160,7 @@ export const PersonaActionSchema = z.object({
 export const QueryChatSchema = z.object({
   reply: str.describe('One to three plain sentences for a non-technical reader: what the query finds and any choice you made. No SPARQL here.'),
   query: str.describe('The complete SPARQL 1.1 query, with every PREFIX it uses declared at the top'),
-  target: z.enum(['ontology', 'data']).describe('"data" when it asks about records (instances), "ontology" when it asks about the model itself'),
+  target: z.enum(['ontology', 'data']).describe('The dataset the page runs the query over, as given on <current_query>: return it unchanged'),
   columns: z.array(z.object({ variable: str.describe('A projected variable, without "?"'), label: str.describe('A short readable column heading') })),
 });
 

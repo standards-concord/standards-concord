@@ -180,9 +180,6 @@ importers:
       '@sparq-org/sparq':
         specifier: 0.1.8
         version: 0.1.8
-      cytoscape:
-        specifier: ^3.34.3
-        version: 3.34.3
       lucide-react:
         specifier: ^1.57.0
         version: 1.57.0(@types/react@19.3.0)(react@19.3.0)
@@ -2412,10 +2409,6 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
-
-  cytoscape@3.34.3:
-    resolution: {integrity: sha512-yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ==}
-    engines: {node: '>=0.10'}
 
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
@@ -5484,8 +5477,6 @@ snapshots:
       which: 2.0.2
 
   csstype@3.2.3: {}
-
-  cytoscape@3.34.3: {}
 
   debug@4.4.3:
     dependencies:

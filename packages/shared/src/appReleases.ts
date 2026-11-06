@@ -53,6 +53,50 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.41.0',
+    date: '2026-11-06',
+    title: 'Logos for your connected agents',
+    pr: 105,
+    changes: [
+      {
+        id: 'connected-agent-logos',
+        type: 'feat',
+        title: 'Each connected agent shows its app’s logo',
+        detail:
+          'Under Connected agents, Claude, Claude Code, ChatGPT, Codex, Cursor and VS Code now show their logos beside their names, so you can see at a glance what you’ve connected. Other apps get a plain agent icon.',
+        roles: ['agent'],
+        to: '/connect#agents',
+      },
+    ],
+  },
+  {
+    version: '0.40.0',
+    date: '2026-11-06',
+    title: 'One picture of the ontology, and a simpler Query',
+    changes: [
+      {
+        id: 'diagram-only',
+        type: 'feat',
+        title: 'Browse has List and Diagram; the Graph view is gone',
+        detail:
+          'The Graph view drew the same classes as the Diagram, in a layout that was harder to read. Browse now has two views: List, to find a term, and Diagram, to see what data each class has and how the classes connect. Old links to the Graph open the Diagram.',
+        roles: [],
+        to: '{o}/browse?view=diagram',
+        ask: 'Did you use the Graph view for anything the Diagram doesn’t do?',
+      },
+      {
+        id: 'query-no-dataset-choice',
+        type: 'feat',
+        title: 'Query runs over your sample data without asking',
+        detail:
+          'There is no “Run against” choice any more: when your sample data has records, queries run over the ontology plus those records, and the results say so. The keyboard hints moved into a Keyboard shortcuts pop-up beside the editor; “Tab moves to the next control” stays in view.',
+        roles: [],
+        to: '{o}/query',
+        ask: 'Did you ever need to run a query over the ontology alone while you had sample data?',
+      },
+    ],
+  },
+  {
     version: '0.39.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
