@@ -53,9 +53,10 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.33.0',
+    version: '0.34.0',
     date: '2026-11-06',
     title: 'Tidier Browse pages and plain type names',
+    pr: 93,
     changes: [
       {
         id: 'browse-list-view',
@@ -81,6 +82,23 @@ export const APP_RELEASES: AppRelease[] = [
           'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'Coloured workflow file for app checks',
+    pr: 90,
+    changes: [
+      {
+        id: 'app-checks-yaml-highlight',
+        type: 'feat',
+        title: 'The app checks workflow file is colour-coded',
+        detail:
+          'When you connect an app, the workflow file to add to its repository is now syntax-highlighted like the rest of Concord’s code, so its settings, values and comments are easier to tell apart.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
       },
     ],
   },
