@@ -768,8 +768,13 @@ export function apiRouter(): Router {
     if (await useCases.crWithheld(c, req.user)) throw new HttpError(404, 'No such change request');
     const diff = await turtleDiff(c);
     // Building the diff takes a while: a source use case may have been withdrawn or made private meanwhile.
-    if (await useCases.crWithheld(await cr(req), req.user)) throw new HttpError(404, 'No such change request');
-    res.json(diff);
+    // So check again, and send, under the consent lock, which every withdrawal and visibility change waits
+    // for. Accepted limit: the lock is per server process (as for merges and releases), and a meeting's own
+    // visibility doesn't take it, so a meeting hidden in the instant between this check and the send isn't caught.
+    await useCases.withConsentLock(c.ontologyId, async () => {
+      if (await useCases.crWithheld(await cr(req), req.user)) throw new HttpError(404, 'No such change request');
+      res.json(diff);
+    });
   });
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
   r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
