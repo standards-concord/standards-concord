@@ -191,6 +191,23 @@ test.describe('looks', () => {
     expect(await look(page)).toBe('odi');
   });
 
+  test('the old saved look is cleared whichever look wins: a current choice or ?look=', async ({ page }) => {
+    await page.addInitScript(() => {
+      if (!sessionStorage.getItem('seeded')) {
+        localStorage.setItem('concord-look', 'civic');
+        localStorage.setItem('concord-style', 'workbench');
+        sessionStorage.setItem('seeded', '1');
+      }
+    });
+    await page.goto('/login');
+    expect(await look(page)).toBe('workbench');
+    expect(await page.evaluate(() => localStorage.getItem('concord-look'))).toBeNull();
+    await page.evaluate(() => localStorage.setItem('concord-look', 'civic'));
+    await page.goto('/login?look=spec');
+    expect(await look(page)).toBe('spec');
+    expect(await page.evaluate(() => localStorage.getItem('concord-look'))).toBeNull();
+  });
+
   test('a look saved under the interim key is carried over, before paint and in the app', async ({ page }) => {
     await page.addInitScript(() => {
       if (!sessionStorage.getItem('seeded')) {

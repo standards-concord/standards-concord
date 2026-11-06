@@ -53,9 +53,10 @@ const OLD_KEY = 'concord-look';
 // carry them over (index.html does the same).
 const INTERIM_KEY = 'concord-look-2';
 
-function forget(key: string) {
+/** Best effort, and never reads the old value, so it can't change which look is chosen. */
+function forgetOldLook() {
   try {
-    localStorage.removeItem(key);
+    localStorage.removeItem(OLD_KEY);
   } catch {
     /* storage is read-only here: the old value is ignored anyway */
   }
@@ -65,7 +66,6 @@ export function storedLook(): LookId {
   try {
     const v = localStorage.getItem(KEY);
     if (isLook(v)) return v;
-    if (localStorage.getItem(OLD_KEY) !== null) forget(OLD_KEY);
     const interim = localStorage.getItem(INTERIM_KEY);
     if (!isLook(interim)) return DEFAULT_LOOK;
     try {
@@ -112,6 +112,7 @@ export function applyLook(id: LookId, persist = true) {
 export function initLook() {
   const param = new URLSearchParams(window.location.search).get('look');
   applyLook(isLook(param) ? param : storedLook(), isLook(param));
+  forgetOldLook();
 }
 
 /** A choice made in the app replaces any ?look= in the address, so a reload keeps it. */
